@@ -152,7 +152,39 @@ impl LatticeResult<'_> {
     }
 }
 
-type Facts = HashMap<ValueId, Arc<Constant>>;
+type Facts = HashMap<ValueId, Fact>;
+
+#[derive(Clone, Debug, PartialEq)]
+struct Fact {
+    constant: Arc<Constant>,
+    source: FactSource,
+}
+
+impl Fact {
+    fn new(constant: Arc<Constant>, source: FactSource) -> Self {
+        Self { constant, source }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FactSource(u8);
+
+impl FactSource {
+    const BRANCH: Self = Self(1 << 0);
+    const ASSERT: Self = Self(1 << 1);
+
+    fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    fn contains_branch(self) -> bool {
+        self.0 & Self::BRANCH.0 != 0
+    }
+}
 
 fn lookup_value(
     consts: &HLSSAConstantsSnapshot,
@@ -163,8 +195,8 @@ fn lookup_value(
     if let Some(c) = consts.get(&v) {
         return LatticeElement::Const(c.clone());
     }
-    if let Some(c) = facts.and_then(|facts| facts.get(&v)) {
-        return LatticeElement::Const(c.clone());
+    if let Some(fact) = facts.and_then(|facts| facts.get(&v)) {
+        return LatticeElement::Const(fact.constant.clone());
     }
     lattice.get(&v).cloned().unwrap_or(LatticeElement::Top)
 }
@@ -185,6 +217,29 @@ fn set_facts<K: Eq + std::hash::Hash>(map: &mut HashMap<K, Facts>, key: K, facts
         map.insert(key, facts);
     }
     true
+}
+
+fn insert_fact(facts: &mut Facts, value: ValueId, constant: Arc<Constant>, source: FactSource) {
+    match facts.get_mut(&value) {
+        Some(fact) if fact.constant == constant => {
+            fact.source = fact.source.union(source);
+        }
+        _ => {
+            facts.insert(value, Fact::new(constant, source));
+        }
+    }
+}
+
+fn branch_propagated_facts(facts: Option<&Facts>) -> Facts {
+    facts
+        .into_iter()
+        .flat_map(|facts| facts.iter())
+        .filter_map(|(value, fact)| {
+            fact.source
+                .contains_branch()
+                .then(|| (*value, Fact::new(fact.constant.clone(), FactSource::BRANCH)))
+        })
+        .collect()
 }
 
 // ANALYSIS
@@ -272,6 +327,13 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
 
     fn add_fact_dependency_uses(&mut self) {
         for (bid, block) in self.function.get_blocks() {
+            for (idx, instr) in block.get_instructions().enumerate() {
+                if let OpCode::Assert { value } = instr {
+                    for dep in self.bool_fact_dependencies(*value) {
+                        self.uses.entry(dep).or_default().push((*bid, Some(idx)));
+                    }
+                }
+            }
             if let Some(Terminator::JmpIf(cond, _, _)) = block.get_terminator() {
                 for dep in self.bool_fact_dependencies(*cond) {
                     self.uses.entry(dep).or_default().push((*bid, None));
@@ -545,13 +607,17 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
         }
         let params: Vec<ValueId> = block.get_parameter_values().copied().collect();
         let preds = self.exec_preds.get(&b).cloned().unwrap_or_default();
+        let pred_edge_facts: Vec<_> = preds
+            .iter()
+            .map(|pred| (*pred, self.edge_facts(*pred, b)))
+            .collect();
         let mut updates = Vec::with_capacity(indices.len());
         for &i in indices {
             let mut acc = LatticeElement::Top;
-            for pred in &preds {
+            for (pred, facts) in &pred_edge_facts {
                 match self.function.get_block(*pred).get_terminator() {
                     Some(Terminator::Jmp(t, args)) if *t == b => {
-                        acc = join(acc, self.lattice_at_block_exit(*pred, args[i]));
+                        acc = join(acc, self.lookup_with_facts(Some(facts), args[i]));
                     }
                     // A parameterized block is only ever entered via `Jmp`; treat anything else
                     // as unknown rather than trusting the invariant.
@@ -569,6 +635,10 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
         matches!(
             self.function.get_block(bid).get_instruction(idx),
             OpCode::Assert { .. }
+                | OpCode::AssertCmp {
+                    kind: CmpKind::Eq,
+                    ..
+                }
         )
     }
 
@@ -629,7 +699,16 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
                 let mut facts = self.edge_facts(*first_pred, b);
                 for pred in rest {
                     let next = self.edge_facts(*pred, b);
-                    facts.retain(|value, known| next.get(value) == Some(known));
+                    facts.retain(|value, known| {
+                        let Some(next) = next.get(value) else {
+                            return false;
+                        };
+                        if next.constant != known.constant {
+                            return false;
+                        }
+                        known.source = known.source.intersection(next.source);
+                        true
+                    });
                     if facts.is_empty() {
                         break;
                     }
@@ -642,19 +721,24 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
     }
 
     fn add_instruction_facts(&self, facts: &mut Facts, instr: &OpCode) {
-        if let OpCode::Assert { value } = instr {
-            if self.consts.get(value).is_none() {
-                facts.insert(*value, bool_constant(true));
+        match instr {
+            OpCode::Assert { value } => {
+                self.add_bool_value_facts(facts, *value, true, FactSource::ASSERT);
             }
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs,
+                rhs,
+            } => self.add_equality_operand_facts(facts, *lhs, *rhs, FactSource::ASSERT),
+            OpCode::AssertCmp {
+                kind: CmpKind::Lt, ..
+            } => {}
+            _ => {}
         }
     }
 
     fn edge_facts(&self, pred: BlockId, target: BlockId) -> Facts {
-        let mut facts = self
-            .block_exit_facts
-            .get(&pred)
-            .cloned()
-            .unwrap_or_default();
+        let mut facts = branch_propagated_facts(self.block_exit_facts.get(&pred));
         self.add_branch_facts_for_edge(pred, target, &mut facts);
         facts
     }
@@ -678,12 +762,18 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
             return;
         };
 
-        self.add_bool_value_facts(facts, *cond, taken);
+        self.add_bool_value_facts(facts, *cond, taken, FactSource::BRANCH);
     }
 
-    fn add_bool_value_facts(&self, facts: &mut Facts, value: ValueId, truth: bool) {
+    fn add_bool_value_facts(
+        &self,
+        facts: &mut Facts,
+        value: ValueId,
+        truth: bool,
+        source: FactSource,
+    ) {
         let mut seen = HashSet::default();
-        self.add_bool_value_facts_inner(facts, value, truth, &mut seen);
+        self.add_bool_value_facts_inner(facts, value, truth, source, &mut seen);
     }
 
     fn add_bool_value_facts_inner(
@@ -691,13 +781,14 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
         facts: &mut Facts,
         value: ValueId,
         truth: bool,
+        source: FactSource,
         seen: &mut HashSet<ValueId>,
     ) {
         if !seen.insert(value) {
             return;
         }
         if self.consts.get(&value).is_none() {
-            facts.insert(value, bool_constant(truth));
+            insert_fact(facts, value, bool_constant(truth), source);
         }
 
         let Some(&(def_bid, idx)) = self.defs.get(&value) else {
@@ -705,7 +796,7 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
         };
         match self.function.get_block(def_bid).get_instruction(idx) {
             OpCode::Not { value, .. } => {
-                self.add_bool_value_facts_inner(facts, *value, !truth, seen);
+                self.add_bool_value_facts_inner(facts, *value, !truth, source, seen);
             }
             OpCode::Cmp {
                 kind: CmpKind::Eq,
@@ -713,18 +804,24 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
                 rhs,
                 ..
             } if truth => {
-                self.add_equality_operand_facts(facts, *lhs, *rhs);
+                self.add_equality_operand_facts(facts, *lhs, *rhs, source);
             }
             _ => {}
         }
     }
 
-    fn add_equality_operand_facts(&self, facts: &mut Facts, lhs: ValueId, rhs: ValueId) {
+    fn add_equality_operand_facts(
+        &self,
+        facts: &mut Facts,
+        lhs: ValueId,
+        rhs: ValueId,
+        source: FactSource,
+    ) {
         if let Some((value, known)) = self
             .constant_side_refinement(facts, lhs, rhs)
             .or_else(|| self.constant_side_refinement(facts, rhs, lhs))
         {
-            facts.insert(value, known);
+            insert_fact(facts, value, known, source);
         }
     }
 
@@ -1231,7 +1328,8 @@ fn rewrite(function: &mut HLFunction, ssa: &HLSSA, res: &LatticeResult) {
         let instructions = block.take_instructions();
         let mut kept = Vec::with_capacity(instructions.len());
         for (idx, instr) in instructions.into_iter().enumerate() {
-            let local_replacements = fact_replacements(ssa, res.instruction_facts.get(&(bid, idx)));
+            let local_replacements =
+                fact_replacements(ssa, res.instruction_facts.get(&(bid, idx)), FactUse::All);
             // A single-result instruction whose result the lattice proved constant is one of the
             // pure scalar folds (see `transfer`): its uses are aliased, so drop it.
             {
@@ -1281,14 +1379,21 @@ fn rewrite(function: &mut HLFunction, ssa: &HLSSA, res: &LatticeResult) {
             }
         }
 
-        let terminator_replacements = fact_replacements(ssa, res.block_exit_facts.get(&bid));
+        let terminator_replacements =
+            fact_replacements(ssa, res.block_exit_facts.get(&bid), FactUse::BranchOnly);
         terminator_replacements.replace_terminator(block.get_terminator_mut());
     }
 
     apply_replacements(function, &replacements, &assertion_dependencies);
 }
 
-fn fact_replacements(ssa: &HLSSA, facts: Option<&Facts>) -> ValueReplacements {
+#[derive(Clone, Copy)]
+enum FactUse {
+    All,
+    BranchOnly,
+}
+
+fn fact_replacements(ssa: &HLSSA, facts: Option<&Facts>, fact_use: FactUse) -> ValueReplacements {
     let mut replacements = ValueReplacements::new();
     let Some(facts) = facts else {
         return replacements;
@@ -1296,8 +1401,11 @@ fn fact_replacements(ssa: &HLSSA, facts: Option<&Facts>) -> ValueReplacements {
 
     let mut facts: Vec<_> = facts.iter().collect();
     facts.sort_by_key(|(value, _)| value.0);
-    for (value, known) in facts {
-        replacements.insert(*value, ssa.add_const((**known).clone()));
+    for (value, fact) in facts {
+        if matches!(fact_use, FactUse::BranchOnly) && !fact.source.contains_branch() {
+            continue;
+        }
+        replacements.insert(*value, ssa.add_const((*fact.constant).clone()));
     }
     replacements
 }
@@ -1723,12 +1831,13 @@ mod tests {
         ));
     }
 
-    /// `assert x == K` must not turn later checked operand uses into compile-time constants.
+    /// `assert x == K` proves `x = K` for ordinary following instructions in the same block.
     #[test]
-    fn assert_cmp_equality_keeps_operand_uses_runtime() {
+    fn assert_cmp_equality_fact_folds_following_instruction_uses() {
         let mut ssa = HLSSA::with_main("main".to_string());
         let c1 = ssa.add_const(Constant::U(32, 1));
         let c7 = ssa.add_const(Constant::U(32, 7));
+        let c8 = ssa.add_const(Constant::U(32, 8));
         let (x, sum) = (ssa.fresh_value(), ssa.fresh_value());
 
         let f = ssa.get_main_mut();
@@ -1750,10 +1859,82 @@ mod tests {
         SCCP::new().do_run(&mut ssa);
 
         let f = ssa.get_main();
-        assert_eq!(f.get_entry().get_instructions().count(), 2);
+        assert_eq!(f.get_entry().get_instructions().count(), 1);
         assert!(matches!(
             f.get_entry().get_terminator(),
-            Some(Terminator::Return(vals)) if *vals == vec![x, sum]
+            Some(Terminator::Return(vals)) if *vals == vec![x, c8]
+        ));
+    }
+
+    /// Assertion-derived facts must not fold a later assertion predicate into a compile-time
+    /// failing assert.
+    #[test]
+    fn assert_cmp_equality_keeps_later_assertion_predicate_runtime() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let c_true = ssa.add_const(Constant::U(1, 1));
+        let c_false = ssa.add_const(Constant::U(1, 0));
+        let (x, is_false) = (ssa.fresh_value(), ssa.fresh_value());
+
+        let f = ssa.get_main_mut();
+        let entry = f.get_entry_mut();
+        entry.push_parameter(x, Type::u(1));
+        entry.push_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: c_true,
+        });
+        entry.push_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: is_false,
+            lhs: x,
+            rhs: c_false,
+        });
+        entry.push_instruction(OpCode::Assert { value: is_false });
+        entry.set_terminator(Terminator::Return(vec![]));
+
+        SCCP::new().do_run(&mut ssa);
+
+        let f = ssa.get_main();
+        assert_eq!(f.get_entry().get_instructions().count(), 3);
+        let mut instructions = f.get_entry().get_instructions();
+        assert!(matches!(
+            instructions.next(),
+            Some(OpCode::AssertCmp { .. })
+        ));
+        assert!(matches!(
+            instructions.next(),
+            Some(OpCode::Cmp { lhs, rhs, .. }) if *lhs == x && *rhs == c_false
+        ));
+        assert!(matches!(
+            instructions.next(),
+            Some(OpCode::Assert { value }) if *value == is_false
+        ));
+    }
+
+    /// Assertion-derived facts stay local to the block and do not replace terminator values.
+    #[test]
+    fn assert_cmp_equality_does_not_replace_return_operand() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let c7 = ssa.add_const(Constant::U(32, 7));
+        let x = ssa.fresh_value();
+
+        let f = ssa.get_main_mut();
+        let entry = f.get_entry_mut();
+        entry.push_parameter(x, Type::u(32));
+        entry.push_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: c7,
+        });
+        entry.set_terminator(Terminator::Return(vec![x]));
+
+        SCCP::new().do_run(&mut ssa);
+
+        let f = ssa.get_main();
+        assert_eq!(f.get_entry().get_instructions().count(), 1);
+        assert!(matches!(
+            f.get_entry().get_terminator(),
+            Some(Terminator::Return(vals)) if *vals == vec![x]
         ));
     }
 
