@@ -46,7 +46,7 @@ use crate::{
     compiler::{
         Field,
         pass_manager::{AnalysisStore, Pass},
-        passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
+        passes::fix_double_jumps::ValueReplacements,
         ssa::{
             BlockId, Instruction, Terminator, ValueId,
             hlssa::{
@@ -272,13 +272,6 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
 
     fn add_fact_dependency_uses(&mut self) {
         for (bid, block) in self.function.get_blocks() {
-            for (idx, instr) in block.get_instructions().enumerate() {
-                if let OpCode::Assert { value } = instr {
-                    for dep in self.bool_fact_dependencies(*value) {
-                        self.uses.entry(dep).or_default().push((*bid, Some(idx)));
-                    }
-                }
-            }
             if let Some(Terminator::JmpIf(cond, _, _)) = block.get_terminator() {
                 for dep in self.bool_fact_dependencies(*cond) {
                     self.uses.entry(dep).or_default().push((*bid, None));
@@ -576,10 +569,6 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
         matches!(
             self.function.get_block(bid).get_instruction(idx),
             OpCode::Assert { .. }
-                | OpCode::AssertCmp {
-                    kind: CmpKind::Eq,
-                    ..
-                }
         )
     }
 
@@ -653,17 +642,10 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
     }
 
     fn add_instruction_facts(&self, facts: &mut Facts, instr: &OpCode) {
-        match instr {
-            OpCode::Assert { value } => self.add_bool_value_facts(facts, *value, true),
-            OpCode::AssertCmp {
-                kind: CmpKind::Eq,
-                lhs,
-                rhs,
-            } => self.add_equality_operand_facts(facts, *lhs, *rhs),
-            OpCode::AssertCmp {
-                kind: CmpKind::Lt, ..
-            } => {}
-            _ => {}
+        if let OpCode::Assert { value } = instr {
+            if self.consts.get(value).is_none() {
+                facts.insert(*value, bool_constant(true));
+            }
         }
     }
 
@@ -1223,6 +1205,7 @@ fn rewrite(function: &mut HLFunction, ssa: &HLSSA, res: &LatticeResult) {
             let _ = function.take_block(*bid);
         }
     }
+    let assertion_dependencies = assertion_dependencies(function);
 
     // Alias every constant-valued value (instruction results and block parameters) to the
     // interned constant. Interning a missing constant allocates a fresh value id, so the entries
@@ -1254,7 +1237,9 @@ fn rewrite(function: &mut HLFunction, ssa: &HLSSA, res: &LatticeResult) {
             {
                 let mut results = instr.get_results();
                 if let (Some(r), None) = (results.next(), results.next()) {
-                    if matches!(res.lattice.get(r), Some(LatticeElement::Const(_))) {
+                    if !assertion_dependencies.contains(r)
+                        && matches!(res.lattice.get(r), Some(LatticeElement::Const(_)))
+                    {
                         continue;
                     }
                 }
@@ -1267,6 +1252,7 @@ fn rewrite(function: &mut HLFunction, ssa: &HLSSA, res: &LatticeResult) {
                 if_t,
                 if_f,
             } = &instr
+                && !assertion_dependencies.contains(result)
             {
                 if let LatticeElement::Const(c) = res.lookup_at_instruction(bid, idx, *cond) {
                     if let Some(b) = const_bool(&c) {
@@ -1276,7 +1262,11 @@ fn rewrite(function: &mut HLFunction, ssa: &HLSSA, res: &LatticeResult) {
                 }
             }
             let mut instr = instr;
-            local_replacements.replace_inputs(&mut instr);
+            if instruction_accepts_fact_replacements(&instr)
+                && !instruction_defines_assertion_dependency(&instr, &assertion_dependencies)
+            {
+                local_replacements.replace_inputs(&mut instr);
+            }
             kept.push(instr);
         }
         block.put_instructions(kept);
@@ -1295,7 +1285,7 @@ fn rewrite(function: &mut HLFunction, ssa: &HLSSA, res: &LatticeResult) {
         terminator_replacements.replace_terminator(block.get_terminator_mut());
     }
 
-    replacements.apply_to_function(function, ReplaceScope::Inputs);
+    apply_replacements(function, &replacements, &assertion_dependencies);
 }
 
 fn fact_replacements(ssa: &HLSSA, facts: Option<&Facts>) -> ValueReplacements {
@@ -1310,6 +1300,73 @@ fn fact_replacements(ssa: &HLSSA, facts: Option<&Facts>) -> ValueReplacements {
         replacements.insert(*value, ssa.add_const((**known).clone()));
     }
     replacements
+}
+
+fn instruction_accepts_fact_replacements(instr: &OpCode) -> bool {
+    !matches!(instr, OpCode::Assert { .. } | OpCode::AssertCmp { .. })
+}
+
+fn instruction_defines_assertion_dependency(
+    instr: &OpCode,
+    assertion_dependencies: &HashSet<ValueId>,
+) -> bool {
+    instr
+        .get_results()
+        .any(|result| assertion_dependencies.contains(result))
+}
+
+fn assertion_dependencies(function: &HLFunction) -> HashSet<ValueId> {
+    let mut defs: HashMap<ValueId, Vec<ValueId>> = HashMap::default();
+    let mut values = HashSet::default();
+    for (_, block) in function.get_blocks() {
+        for instr in block.get_instructions() {
+            let inputs: Vec<ValueId> = instr.get_inputs().copied().collect();
+            for result in instr.get_results() {
+                defs.insert(*result, inputs.clone());
+            }
+            match instr {
+                OpCode::Assert { value } => {
+                    values.insert(*value);
+                }
+                OpCode::AssertCmp { lhs, rhs, .. } => {
+                    values.insert(*lhs);
+                    values.insert(*rhs);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut stack: Vec<ValueId> = values.iter().copied().collect();
+    while let Some(value) = stack.pop() {
+        let Some(inputs) = defs.get(&value) else {
+            continue;
+        };
+        for input in inputs {
+            if values.insert(*input) {
+                stack.push(*input);
+            }
+        }
+    }
+
+    values
+}
+
+fn apply_replacements(
+    function: &mut HLFunction,
+    replacements: &ValueReplacements,
+    assertion_dependencies: &HashSet<ValueId>,
+) {
+    for (_, block) in function.get_blocks_mut() {
+        for instr in block.get_instructions_mut() {
+            if instruction_accepts_fact_replacements(instr)
+                && !instruction_defines_assertion_dependency(instr, assertion_dependencies)
+            {
+                replacements.replace_inputs(instr);
+            }
+        }
+        replacements.replace_terminator(block.get_terminator_mut());
+    }
 }
 
 #[cfg(test)]
@@ -1666,13 +1723,12 @@ mod tests {
         ));
     }
 
-    /// `assert x == K` proves `x = K` for following instructions in the same block.
+    /// `assert x == K` must not turn later checked operand uses into compile-time constants.
     #[test]
-    fn assert_cmp_equality_fact_folds_following_uses() {
+    fn assert_cmp_equality_keeps_operand_uses_runtime() {
         let mut ssa = HLSSA::with_main("main".to_string());
         let c1 = ssa.add_const(Constant::U(32, 1));
         let c7 = ssa.add_const(Constant::U(32, 7));
-        let c8 = ssa.add_const(Constant::U(32, 8));
         let (x, sum) = (ssa.fresh_value(), ssa.fresh_value());
 
         let f = ssa.get_main_mut();
@@ -1694,47 +1750,45 @@ mod tests {
         SCCP::new().do_run(&mut ssa);
 
         let f = ssa.get_main();
-        assert_eq!(f.get_entry().get_instructions().count(), 1);
+        assert_eq!(f.get_entry().get_instructions().count(), 2);
         assert!(matches!(
             f.get_entry().get_terminator(),
-            Some(Terminator::Return(vals)) if *vals == vec![c7, c8]
+            Some(Terminator::Return(vals)) if *vals == vec![x, sum]
         ));
     }
 
-    /// `assert (x == K)` carries the comparison fact through the asserted condition.
+    /// `assert c` proves the condition itself for following condition uses.
     #[test]
-    fn assert_condition_equality_fact_folds_following_uses() {
+    fn assert_condition_fact_folds_following_condition_use() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let c1 = ssa.add_const(Constant::U(32, 1));
-        let c7 = ssa.add_const(Constant::U(32, 7));
-        let c8 = ssa.add_const(Constant::U(32, 8));
-        let (x, is_seven, sum) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        let (cond, arm_t, arm_f, selected) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
 
         let f = ssa.get_main_mut();
         let entry = f.get_entry_mut();
-        entry.push_parameter(x, Type::u(32));
-        entry.push_instruction(OpCode::Cmp {
-            kind: CmpKind::Eq,
-            result: is_seven,
-            lhs: x,
-            rhs: c7,
+        entry.push_parameter(cond, Type::u(1));
+        entry.push_parameter(arm_t, Type::field());
+        entry.push_parameter(arm_f, Type::field());
+        entry.push_instruction(OpCode::Assert { value: cond });
+        entry.push_instruction(OpCode::Select {
+            result: selected,
+            cond,
+            if_t: arm_t,
+            if_f: arm_f,
         });
-        entry.push_instruction(OpCode::Assert { value: is_seven });
-        entry.push_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: sum,
-            lhs: x,
-            rhs: c1,
-        });
-        entry.set_terminator(Terminator::Return(vec![x, sum]));
+        entry.set_terminator(Terminator::Return(vec![selected]));
 
         SCCP::new().do_run(&mut ssa);
 
         let f = ssa.get_main();
-        assert_eq!(f.get_entry().get_instructions().count(), 2);
+        assert_eq!(f.get_entry().get_instructions().count(), 1);
         assert!(matches!(
             f.get_entry().get_terminator(),
-            Some(Terminator::Return(vals)) if *vals == vec![c7, c8]
+            Some(Terminator::Return(vals)) if *vals == vec![arm_t]
         ));
     }
 
