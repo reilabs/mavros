@@ -22,6 +22,7 @@ use crate::{
             witness_taint_inference::WitnessTaintInference,
         },
         codegen::{
+            CodeGenOptions,
             bytecode::CodeGen,
             hlssa_to_r1cs::{R1CGen, R1CS},
             llssa_to_llvm::WasmCompileOpts,
@@ -116,7 +117,13 @@ impl Driver {
     }
 
     pub fn get_debug_output_dir(&self) -> PathBuf {
-        self.project.get_only_crate().root_dir.join("mavros_debug")
+        self.project.package_root().join("mavros_debug")
+    }
+
+    /// Root directory of the package being compiled (the workspace member's
+    /// directory, not the workspace root). `Prover.toml` is read from here.
+    pub fn package_root(&self) -> &std::path::Path {
+        self.project.package_root()
     }
 
     #[tracing::instrument(skip_all)]
@@ -374,14 +381,14 @@ impl Driver {
     }
 
     /// Compiles the program (both the witgen and AD entry points) into a single VM binary.
-    pub fn compile_bytecode(&mut self) -> Result<Vec<u64>, Error> {
+    pub fn compile_bytecode(&mut self, options: CodeGenOptions) -> Result<Vec<u64>, Error> {
         self.prepare_program_ssa();
         let ssa = self.program_ssa.as_ref().unwrap();
 
         let flow_analysis = FlowAnalysis::run(ssa);
         let type_info = Types::new().run(ssa, &flow_analysis);
 
-        let codegen = CodeGen::new();
+        let codegen = CodeGen::new(options);
         let program = codegen.run(ssa, &flow_analysis, &type_info);
         fs::write(
             self.get_debug_output_dir().join("program_bytecode.txt"),
@@ -491,6 +498,7 @@ impl Driver {
         emit_llvm: bool,
         r1cs: &R1CS,
         wasm_config: Option<(std::path::PathBuf, WasmCompileOpts)>,
+        options: CodeGenOptions,
     ) -> Result<Option<String>, Error> {
         use crate::compiler::codegen::llssa_to_llvm::LLVMCodeGen;
         use crate::compiler::ssa::hlssa_to_llssa;
@@ -517,6 +525,7 @@ impl Driver {
             &type_info,
             r1cs.witness_layout,
             r1cs.constraints_layout,
+            options,
         );
 
         // Dump LLSSA after lowering
