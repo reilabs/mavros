@@ -53,7 +53,10 @@ use crate::{
             witness_write_to_fresh::WitnessWriteToFresh,
             witness_write_to_void::WitnessWriteToVoid,
         },
-        ssa::{DefaultSSAAnnotator, hlssa::HLSSA},
+        ssa::{
+            DefaultSSAAnnotator,
+            hlssa::{Constant, HLSSA},
+        },
         untaint_control_flow::UntaintControlFlow,
     },
 };
@@ -65,7 +68,10 @@ pub struct Driver {
     monomorphized_ssa: Option<HLSSA>,
     witness_spilled_ssa: Option<HLSSA>,
     r1cs_ssa: Option<HLSSA>,
-    base_witgen_ssa: Option<HLSSA>,
+    /// The final multi-entry-point SSA: the witgen program with the AD program merged in as a
+    /// second entry point. All executable artifacts (bytecode, LLVM, WASM) are compiled from
+    /// this single SSA.
+    program_ssa: Option<HLSSA>,
     abi: Option<noirc_abi::Abi>,
     draw_cfg: bool,
     main_is_unconstrained: bool,
@@ -102,7 +108,7 @@ impl Driver {
             monomorphized_ssa: None,
             witness_spilled_ssa: None,
             r1cs_ssa: None,
-            base_witgen_ssa: None,
+            program_ssa: None,
             abi: None,
             draw_cfg,
             main_is_unconstrained: false,
@@ -374,9 +380,10 @@ impl Driver {
         Ok(r1cs)
     }
 
-    pub fn compile_witgen(&mut self, options: CodeGenOptions) -> Result<Vec<u64>, Error> {
-        self.prepare_base_witgen_ssa();
-        let ssa = self.base_witgen_ssa.as_ref().unwrap();
+    /// Compiles the program (both the witgen and AD entry points) into a single VM binary.
+    pub fn compile_bytecode(&mut self, options: CodeGenOptions) -> Result<Vec<u64>, Error> {
+        self.prepare_program_ssa();
+        let ssa = self.program_ssa.as_ref().unwrap();
 
         let flow_analysis = FlowAnalysis::run(ssa);
         let type_info = Types::new().run(ssa, &flow_analysis);
@@ -384,22 +391,53 @@ impl Driver {
         let codegen = CodeGen::new(options);
         let program = codegen.run(ssa, &flow_analysis, &type_info);
         fs::write(
-            self.get_debug_output_dir().join("witgen_bytecode.txt"),
+            self.get_debug_output_dir().join("program_bytecode.txt"),
             format!("{}", program),
         )
         .unwrap();
 
         let binary = program.to_binary();
 
-        info!(message = %"Witgen binary generated", binary_size = binary.len() * 8);
+        info!(message = %"Program binary generated", binary_size = binary.len() * 8);
 
         Ok(binary)
     }
 
-    pub fn compile_ad(&self) -> Result<Vec<u64>, Error> {
-        let mut ssa = self.r1cs_ssa.clone().unwrap();
+    pub fn abi(&self) -> &noirc_abi::Abi {
+        self.abi.as_ref().unwrap()
+    }
+
+    /// Builds the final multi-entry-point SSA.
+    ///
+    /// The witgen and AD halves need different lowerings of the same witness-spilled program
+    /// (witnesses as plain values vs. witness-tape references), so each half is lowered on its
+    /// own clone. The AD half is then merged into the witgen program as a second entry point and
+    /// everything downstream (refcounting, codegen, every artifact) compiles the whole program
+    /// together.
+    #[tracing::instrument(skip_all)]
+    fn prepare_program_ssa(&mut self) {
+        if self.program_ssa.is_some() {
+            return;
+        }
+
+        let mut ssa = self.witness_spilled_ssa.clone().unwrap();
+
+        let mut witgen_pm = PassManager::new(
+            "witgen_lowering".to_string(),
+            self.draw_cfg,
+            vec![
+                Box::new(LowerGuards::new()),
+                Box::new(WitnessWriteToVoid::new()),
+                Box::new(StripWitnessOf::new()),
+                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
+            ],
+        );
+        witgen_pm.set_debug_output_dir(self.get_debug_output_dir().clone());
+        witgen_pm.run(&mut ssa);
+
+        let mut ad_ssa = self.r1cs_ssa.clone().unwrap();
         let mut ad_pm = PassManager::new(
-            "ad".to_string(),
+            "ad_lowering".to_string(),
             self.draw_cfg,
             vec![
                 Box::new(WitnessLowering::new()),
@@ -412,57 +450,46 @@ impl Driver {
                 Box::new(LowerMapCasts::new()),
                 Box::new(CSE::post_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
-                Box::new(RCInsertion::new()),
-                Box::new(FixDoubleJumps::new()),
             ],
         );
         ad_pm.set_debug_output_dir(self.get_debug_output_dir().clone());
-        ad_pm.run(&mut ssa);
-        let flow_analysis = FlowAnalysis::run(&ssa);
-        let type_info = Types::new().run(&ssa, &flow_analysis);
+        ad_pm.run(&mut ad_ssa);
 
-        let codegen = CodeGen::new(CodeGenOptions::default());
-        let program = codegen.run(&ssa, &flow_analysis, &type_info);
-        fs::write(
-            self.get_debug_output_dir().join("ad_bytecode.txt"),
-            format!("{}", program),
-        )
-        .unwrap();
-        let binary = program.to_binary();
+        // `SSA::merge` re-interns constants by value, which would silently conflate function
+        // pointers across the two halves; by this point defunctionalization must have removed
+        // them all.
+        ad_ssa.for_each_const(|_, cv| {
+            assert!(
+                !const_contains_fn_ptr(cv),
+                "ICE: FnPtr constant survived until program merge"
+            );
+        });
 
-        info!(message = %"AD binary generated", binary_size = binary.len() * 8);
+        let ad_main_id = ad_ssa.get_unique_entrypoint_id();
+        let fn_remap = ssa.merge(ad_ssa);
+        let ad_entry = fn_remap[&ad_main_id];
+        ssa.get_function_mut(ad_entry)
+            .set_name("ad_main".to_string());
+        ssa.add_entry_point(ad_entry);
 
-        Ok(binary)
-    }
-
-    pub fn abi(&self) -> &noirc_abi::Abi {
-        self.abi.as_ref().unwrap()
-    }
-
-    #[tracing::instrument(skip_all)]
-    fn prepare_base_witgen_ssa(&mut self) {
-        if self.base_witgen_ssa.is_some() {
-            return;
-        }
-
-        let mut ssa = self.witness_spilled_ssa.clone().unwrap();
-
-        let mut pass_manager = PassManager::new(
-            "base_witgen".to_string(),
+        let mut tail_pm = PassManager::new(
+            "program_tail".to_string(),
             self.draw_cfg,
             vec![
-                Box::new(LowerGuards::new()),
-                Box::new(WitnessWriteToVoid::new()),
-                Box::new(StripWitnessOf::new()),
-                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
                 Box::new(RCInsertion::new()),
                 Box::new(FixDoubleJumps::new()),
             ],
         );
-        pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
-        pass_manager.run(&mut ssa);
+        tail_pm.set_debug_output_dir(self.get_debug_output_dir().clone());
+        tail_pm.run(&mut ssa);
 
-        self.base_witgen_ssa = Some(ssa);
+        fs::write(
+            self.get_debug_output_dir().join("program_ssa.txt"),
+            ssa.to_string(&DefaultSSAAnnotator),
+        )
+        .unwrap();
+
+        self.program_ssa = Some(ssa);
     }
 
     #[tracing::instrument(skip_all)]
@@ -477,8 +504,8 @@ impl Driver {
         use crate::compiler::ssa::hlssa_to_llssa;
         use inkwell::context::Context;
 
-        self.prepare_base_witgen_ssa();
-        let ssa = self.base_witgen_ssa.as_ref().unwrap();
+        self.prepare_program_ssa();
+        let ssa = self.program_ssa.as_ref().unwrap();
 
         let flow_analysis = FlowAnalysis::run(ssa);
         let type_info = Types::new().run(ssa, &flow_analysis);
@@ -516,7 +543,7 @@ impl Driver {
 
         let llvm_ir = if emit_llvm {
             let ir = codegen.get_ir();
-            fs::write(self.get_debug_output_dir().join("witgen.ll"), &ir).unwrap();
+            fs::write(self.get_debug_output_dir().join("program.ll"), &ir).unwrap();
             info!(message = %"LLVM IR generated", ir_size = ir.len());
             Some(ir)
         } else {
@@ -531,102 +558,6 @@ impl Driver {
         }
 
         Ok(llvm_ir)
-    }
-
-    #[tracing::instrument(skip_all)]
-    pub fn compile_ad_llvm_targets(
-        &mut self,
-        wasm_path: std::path::PathBuf,
-        r1cs: &R1CS,
-        wasm_opts: WasmCompileOpts,
-    ) -> Result<(), Error> {
-        use crate::compiler::codegen::llssa_to_llvm::LLVMCodeGen;
-        use crate::compiler::ssa::hlssa_to_llssa;
-        use inkwell::context::Context;
-
-        // Prepare AD SSA: same pass pipeline as compile_ad()
-        let mut ssa = self.r1cs_ssa.clone().unwrap();
-        let mut ad_pm = PassManager::new(
-            "ad_wasm".to_string(),
-            self.draw_cfg,
-            vec![
-                Box::new(WitnessLowering::new()),
-                // Cleanup before lowering Map casts: dead hint computations
-                // (e.g. strip-maps feeding unconstrained calls) are easy to
-                // delete while still single instructions, but not once they
-                // are expanded into loops with block-parameter cycles.
-                Box::new(CSE::post_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
-                Box::new(LowerMapCasts::new()),
-                Box::new(CSE::post_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
-                Box::new(RCInsertion::new()),
-                Box::new(FixDoubleJumps::new()),
-            ],
-        );
-        ad_pm.set_debug_output_dir(self.get_debug_output_dir().clone());
-        ad_pm.run(&mut ssa);
-
-        let flow_analysis = FlowAnalysis::run(&ssa);
-        let type_info = Types::new().run(&ssa, &flow_analysis);
-
-        // Dump HLSSA just before lowering
-        fs::write(
-            self.get_debug_output_dir()
-                .join("ad_hlssa_before_lowering.txt"),
-            ssa.to_string(&DefaultSSAAnnotator),
-        )
-        .unwrap();
-
-        // Lower HLSSA → LLSSA
-        let llssa = hlssa_to_llssa::lower_with_layout(
-            &ssa,
-            &flow_analysis,
-            &type_info,
-            r1cs.witness_layout,
-            r1cs.constraints_layout,
-            CodeGenOptions::default(),
-        );
-
-        // Dump LLSSA after lowering
-        fs::write(
-            self.get_debug_output_dir()
-                .join("ad_llssa_after_lowering.txt"),
-            llssa.to_string(&DefaultSSAAnnotator),
-        )
-        .unwrap();
-
-        // Compile LLSSA → LLVM
-        let ll_flow_analysis = FlowAnalysis::run(&llssa);
-        let context = Context::create();
-        let mut codegen = LLVMCodeGen::new(&context, "mavros_ad_module");
-        codegen.compile(&llssa, &ll_flow_analysis);
-
-        codegen.write_ir(&wasm_path.with_extension("ll"));
-        codegen.compile_to_wasm(&wasm_path, wasm_opts);
-        info!(message = %"AD WASM object generated", path = %wasm_path.display());
-        self.write_ad_wasm_metadata(&wasm_path, r1cs)?;
-
-        Ok(())
-    }
-
-    /// Write AD WASM metadata JSON file
-    fn write_ad_wasm_metadata(&self, wasm_path: &Path, r1cs: &R1CS) -> Result<(), Error> {
-        let metadata = serde_json::json!({
-            "witnessCount": r1cs.witness_layout.size(),
-            "constraintCount": r1cs.constraints.len(),
-        });
-
-        let metadata_path = format!("{}.meta.json", wasm_path.display());
-        fs::write(
-            &metadata_path,
-            serde_json::to_string_pretty(&metadata).unwrap(),
-        )
-        .unwrap();
-
-        info!(message = %"AD WASM metadata generated", path = %metadata_path);
-
-        Ok(())
     }
 
     /// Write WASM metadata JSON file
@@ -659,6 +590,15 @@ impl Driver {
         info!(message = %"WASM metadata generated", path = %metadata_path);
 
         Ok(())
+    }
+}
+
+/// Whether a constant contains a function pointer anywhere within it.
+fn const_contains_fn_ptr(constant: &Constant) -> bool {
+    match constant {
+        Constant::FnPtr(_) => true,
+        Constant::Blob(blob) => blob.elements.iter().any(const_contains_fn_ptr),
+        Constant::U(..) | Constant::I(..) | Constant::Field(_) => false,
     }
 }
 

@@ -1492,7 +1492,7 @@ mod tests {
         let c5 = ssa.add_const(Constant::U(32, 5));
         let (sum, is_five) = (ssa.fresh_value(), ssa.fresh_value());
 
-        let f = ssa.get_main_mut();
+        let f = ssa.get_unique_entrypoint_mut();
         let then_b = f.add_block();
         let else_b = f.add_block();
 
@@ -1517,7 +1517,7 @@ mod tests {
 
         SCCP::new().do_run(&mut ssa);
 
-        let f = ssa.get_main();
+        let f = ssa.get_unique_entrypoint();
         // Both instructions folded away.
         assert_eq!(f.get_entry().get_instructions().count(), 0);
         // The branch is decided and the dead block is gone.
@@ -1541,7 +1541,7 @@ mod tests {
         let c7 = ssa.add_const(Constant::Field(Field::from(7u64)));
         let (cond, m_param) = (ssa.fresh_value(), ssa.fresh_value());
 
-        let f = ssa.get_main_mut();
+        let f = ssa.get_unique_entrypoint_mut();
         f.get_entry_mut().push_parameter(cond, Type::u(1));
         let a = f.add_block();
         let b = f.add_block();
@@ -1559,7 +1559,7 @@ mod tests {
 
         SCCP::new().do_run(&mut ssa);
 
-        let f = ssa.get_main();
+        let f = ssa.get_unique_entrypoint();
         // All blocks reachable (unknown condition), but the merge value is the constant.
         assert_eq!(f.get_blocks().count(), 4);
         assert!(matches!(
@@ -1579,7 +1579,7 @@ mod tests {
         let c10 = ssa.add_const(Constant::U(32, 10));
         let (i_param, lt, next) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
-        let f = ssa.get_main_mut();
+        let f = ssa.get_unique_entrypoint_mut();
         let header = f.add_block();
         let body = f.add_block();
         let exit = f.add_block();
@@ -1608,7 +1608,7 @@ mod tests {
 
         SCCP::new().do_run(&mut ssa);
 
-        let f = ssa.get_main();
+        let f = ssa.get_unique_entrypoint();
         // The loop-carried counter varies: nothing folds, all blocks survive.
         assert_eq!(f.get_blocks().count(), 4);
         assert_eq!(f.get_block(header).get_instructions().count(), 1);
@@ -1624,7 +1624,7 @@ mod tests {
         let c100 = ssa.add_const(Constant::U(8, 100));
         let sum = ssa.fresh_value();
 
-        let f = ssa.get_main_mut();
+        let f = ssa.get_unique_entrypoint_mut();
         let entry = f.get_entry_mut();
         entry.push_instruction(OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::Add,
@@ -1636,7 +1636,7 @@ mod tests {
 
         SCCP::new().do_run(&mut ssa);
 
-        let f = ssa.get_main();
+        let f = ssa.get_unique_entrypoint();
         assert_eq!(f.get_entry().get_instructions().count(), 1);
         assert!(matches!(
             f.get_entry().get_terminator(),
@@ -1652,7 +1652,7 @@ mod tests {
         let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
         let (wit, doubled) = (ssa.fresh_value(), ssa.fresh_value());
 
-        let f = ssa.get_main_mut();
+        let f = ssa.get_unique_entrypoint_mut();
         let entry = f.get_entry_mut();
         entry.push_instruction(OpCode::Cast {
             result: wit,
@@ -1669,7 +1669,7 @@ mod tests {
 
         SCCP::new().do_run(&mut ssa);
 
-        let f = ssa.get_main();
+        let f = ssa.get_unique_entrypoint();
         assert_eq!(f.get_entry().get_instructions().count(), 2);
     }
 
@@ -1684,7 +1684,7 @@ mod tests {
         let mut ssa = HLSSA::with_main("main".to_string());
         let cond = ssa.fresh_value();
 
-        let f = ssa.get_main_mut();
+        let f = ssa.get_unique_entrypoint_mut();
         let header = f.add_block();
         let body = f.add_block();
         let exit = f.add_block();
@@ -1710,7 +1710,7 @@ mod tests {
         let c_true = ssa.add_const(Constant::U(1, 1));
         let (arm_t, arm_f, sel) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
-        let f = ssa.get_main_mut();
+        let f = ssa.get_unique_entrypoint_mut();
         f.get_entry_mut().push_parameter(arm_t, Type::field());
         f.get_entry_mut().push_parameter(arm_f, Type::field());
         let entry = f.get_entry_mut();
@@ -1724,7 +1724,7 @@ mod tests {
 
         SCCP::new().do_run(&mut ssa);
 
-        let f = ssa.get_main();
+        let f = ssa.get_unique_entrypoint();
         assert_eq!(f.get_entry().get_instructions().count(), 0);
         assert!(matches!(
             f.get_entry().get_terminator(),

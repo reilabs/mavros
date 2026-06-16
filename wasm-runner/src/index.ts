@@ -19,8 +19,8 @@ Expected project structure:
   <project-root>/
     Prover.toml                      # Input values
     mavros_debug/
-      witgen.wasm                    # Generated WASM artifact
-      witgen.wasm.meta.json          # Metadata
+      program.wasm                    # Generated WASM artifact
+      program.wasm.meta.json          # Metadata
 
 Output is written to: <project-root>/mavros_debug/output.json
 `);
@@ -36,7 +36,7 @@ async function main(): Promise<void> {
 
   const projectRoot = args[0] || './';
   const inputPath = path.join(projectRoot, 'Prover.toml');
-  const wasmPath = path.join(projectRoot, 'mavros_debug', 'witgen.wasm');
+  const wasmPath = path.join(projectRoot, 'mavros_debug', 'program.wasm');
   const outputPath = path.join(projectRoot, 'mavros_debug', 'output.json');
 
   // Validate paths

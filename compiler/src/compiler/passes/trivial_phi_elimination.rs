@@ -199,7 +199,7 @@ mod tests {
             (ValueId(10), ValueId(11), ValueId(20), ValueId(21));
         let (m_shared, m_diff) = (ValueId(30), ValueId(31));
 
-        let f = ssa.get_main_mut();
+        let f = ssa.get_unique_entrypoint_mut();
         let then_b = f.add_block();
         let else_b = f.add_block();
         let merge = f.add_block();
@@ -220,7 +220,7 @@ mod tests {
 
         TrivialPhiElimination::new().do_run(&mut ssa);
 
-        let f = ssa.get_main();
+        let f = ssa.get_unique_entrypoint();
         // The agreeing parameter is gone; the differing one remains.
         let params: Vec<_> = f.get_block(merge).get_parameter_values().copied().collect();
         assert_eq!(params, vec![m_diff]);
@@ -247,7 +247,7 @@ mod tests {
         let mut ssa = HLSSA::with_main("main".to_string());
         let (init, cond, param) = (ValueId(10), ValueId(11), ValueId(50));
 
-        let f = ssa.get_main_mut();
+        let f = ssa.get_unique_entrypoint_mut();
         let header = f.add_block();
         let body = f.add_block();
         let exit = f.add_block();
@@ -268,7 +268,7 @@ mod tests {
 
         TrivialPhiElimination::new().do_run(&mut ssa);
 
-        let f = ssa.get_main();
+        let f = ssa.get_unique_entrypoint();
         // The self-referential parameter collapses to `init`.
         assert!(f.get_block(header).get_parameter_values().next().is_none());
         assert!(matches!(
@@ -293,7 +293,7 @@ mod tests {
         let (cond, then_val, else_val, param) =
             (ValueId(10), ValueId(20), ValueId(21), ValueId(30));
 
-        let f = ssa.get_main_mut();
+        let f = ssa.get_unique_entrypoint_mut();
         let then_b = f.add_block();
         let else_b = f.add_block();
         let merge = f.add_block();
@@ -310,7 +310,7 @@ mod tests {
 
         TrivialPhiElimination::new().do_run(&mut ssa);
 
-        let f = ssa.get_main();
+        let f = ssa.get_unique_entrypoint();
         let params: Vec<_> = f.get_block(merge).get_parameter_values().copied().collect();
         assert_eq!(params, vec![param]);
         assert!(matches!(

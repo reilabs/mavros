@@ -171,34 +171,32 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         }
     };
 
-    // 3. Compile witgen  (depends on R1CS)
-    let witgen_binary = r1cs.as_ref().and_then(|_| {
+    // 3. Compile bytecode: a single binary with both the witgen and AD entry
+    //    points (depends on R1CS). The pipeline produces one artifact, but we
+    //    emit the historical WITGEN_COMPILE/AD_COMPILE stage pair (mirrored) so
+    //    CI's `--check-regression` keeps comparing against pre-merge baselines.
+    let program_binary = r1cs.as_ref().and_then(|_| {
         emit("START:WITGEN_COMPILE");
-        match driver.compile_witgen(checking_codegen) {
+        // One binary holds both entry points, but the native AD pipeline is reported as
+        // skipped for expected-failure tests, so only mirror the AD_COMPILE stage when it
+        // actually applies.
+        if !expect_failure {
+            emit("START:AD_COMPILE");
+        }
+        match driver.compile_bytecode(checking_codegen) {
             Ok(b) => {
                 let bytes = b.len() * 8;
                 emit(&format!("END:WITGEN_COMPILE:ok:{bytes}"));
+                if !expect_failure {
+                    emit(&format!("END:AD_COMPILE:ok:{bytes}"));
+                }
                 Some(b)
             }
             Err(_) => {
                 emit("END:WITGEN_COMPILE:fail");
-                None
-            }
-        }
-    });
-
-    // 4. Compile AD  (depends on R1CS, independent of witgen; skipped for
-    //    expected-failure tests)
-    let ad_binary = r1cs.as_ref().filter(|_| !expect_failure).and_then(|_| {
-        emit("START:AD_COMPILE");
-        match driver.compile_ad() {
-            Ok(b) => {
-                let bytes = b.len() * 8;
-                emit(&format!("END:AD_COMPILE:ok:{bytes}"));
-                Some(b)
-            }
-            Err(_) => {
-                emit("END:AD_COMPILE:fail");
+                if !expect_failure {
+                    emit("END:AD_COMPILE:fail");
+                }
                 None
             }
         }
@@ -208,16 +206,11 @@ fn run_single(root: PathBuf, expect_failure: bool) {
     let ordered_params = load_inputs(&driver.package_root().join("Prover.toml"), &driver);
 
     // 5. Run witgen  (depends on WITGEN_COMPILE)
-    let witgen_result = witgen_binary.and_then(|mut binary| {
+    let witgen_result = program_binary.as_ref().and_then(|binary| {
         emit("START:WITGEN_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-        match interpreter::run(
-            &mut binary,
-            r1cs.witness_layout,
-            r1cs.constraints_layout,
-            params,
-        ) {
+        match interpreter::run(binary, r1cs.witness_layout, r1cs.constraints_layout, params) {
             Ok(result) => {
                 emit("END:WITGEN_RUN:ok");
                 Some(result)
@@ -258,31 +251,35 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         });
     }
 
-    // 8. Run AD  (depends on AD_COMPILE, independent of witgen)
-    let ad_result = ad_binary.and_then(|mut binary| {
-        emit("START:AD_RUN");
-        let r1cs = r1cs.as_ref().unwrap();
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        let ad_coeffs: Vec<Field> = (0..r1cs.constraints.len())
-            .map(|_| ark_bn254::Fr::rand(&mut rng))
-            .collect();
-        match interpreter::run_ad(
-            &mut binary,
-            &ad_coeffs,
-            r1cs.witness_layout,
-            r1cs.constraints_layout,
-        ) {
-            Ok((ad_a, ad_b, ad_c, ad_instrumenter)) => {
-                emit("END:AD_RUN:ok");
-                Some((ad_coeffs, ad_a, ad_b, ad_c, ad_instrumenter))
+    // 8. Run AD  (depends on AD_COMPILE, independent of witgen). Skipped for expected-failure
+    //    tests, matching the skipped native AD compile stage above.
+    let ad_result = program_binary
+        .as_ref()
+        .filter(|_| !expect_failure)
+        .and_then(|binary| {
+            emit("START:AD_RUN");
+            let r1cs = r1cs.as_ref().unwrap();
+            let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+            let ad_coeffs: Vec<Field> = (0..r1cs.constraints.len())
+                .map(|_| ark_bn254::Fr::rand(&mut rng))
+                .collect();
+            match interpreter::run_ad(
+                binary,
+                &ad_coeffs,
+                r1cs.witness_layout,
+                r1cs.constraints_layout,
+            ) {
+                Ok((ad_a, ad_b, ad_c, ad_instrumenter)) => {
+                    emit("END:AD_RUN:ok");
+                    Some((ad_coeffs, ad_a, ad_b, ad_c, ad_instrumenter))
+                }
+                Err(e) => {
+                    eprintln!("AD run error: {e}");
+                    emit("END:AD_RUN:fail");
+                    None
+                }
             }
-            Err(e) => {
-                eprintln!("AD run error: {e}");
-                emit("END:AD_RUN:fail");
-                None
-            }
-        }
-    });
+        });
 
     // 9. Check AD correctness  (depends on AD_RUN)
     if let (Some((coeffs, ad_a, ad_b, ad_c, _)), Some(r1cs)) = (&ad_result, &r1cs) {
@@ -306,11 +303,15 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         });
     }
 
-    // 11. Compile WASM  (depends on R1CS)
+    // 11. Compile WASM: a single module exporting both the witgen and AD entry
+    //     points (depends on R1CS). As with bytecode, we emit the historical
+    //     WITGEN_WASM_COMPILE/AD_WASM_COMPILE stage pair (mirrored) for CI
+    //     regression compatibility.
     let wasm_path = r1cs.as_ref().and_then(|r1cs| {
         emit("START:WITGEN_WASM_COMPILE");
+        emit("START:AD_WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
-        let wasm_path = tmpdir.keep().join("witgen.wasm");
+        let wasm_path = tmpdir.keep().join("program.wasm");
         let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
         match driver.compile_llvm_targets(
             false,
@@ -320,6 +321,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         ) {
             Ok(_) if wasm_path.exists() => {
                 emit("END:WITGEN_WASM_COMPILE:ok");
+                emit("END:AD_WASM_COMPILE:ok");
                 Some(wasm_path)
             }
             Ok(_) => {
@@ -328,11 +330,13 @@ fn run_single(root: PathBuf, expect_failure: bool) {
                     wasm_path
                 );
                 emit("END:WITGEN_WASM_COMPILE:fail");
+                emit("END:AD_WASM_COMPILE:fail");
                 None
             }
             Err(e) => {
                 eprintln!("WASM compile error: {:?}", e);
                 emit("END:WITGEN_WASM_COMPILE:fail");
+                emit("END:AD_WASM_COMPILE:fail");
                 None
             }
         }
@@ -384,35 +388,8 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         });
     }
 
-    // 14. AD WASM Compile  (depends on R1CS)
-    let ad_wasm_path: Option<std::path::PathBuf> = r1cs.as_ref().and_then(|r1cs| {
-        emit("START:AD_WASM_COMPILE");
-        let tmpdir = tempfile::tempdir().ok()?;
-        let wasm_path = tmpdir.keep().join("ad.wasm");
-        let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
-        match driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs, wasm_opts) {
-            Ok(_) if wasm_path.exists() => {
-                emit("END:AD_WASM_COMPILE:ok");
-                Some(wasm_path)
-            }
-            Ok(_) => {
-                eprintln!(
-                    "AD WASM compile succeeded but output file not found at {:?}",
-                    wasm_path
-                );
-                emit("END:AD_WASM_COMPILE:fail");
-                None
-            }
-            Err(e) => {
-                eprintln!("AD WASM compile error: {:?}", e);
-                emit("END:AD_WASM_COMPILE:fail");
-                None
-            }
-        }
-    });
-
-    // 15. AD WASM Run  (depends on AD_WASM_COMPILE)
-    let ad_wasm_result = ad_wasm_path.as_ref().and_then(|wasm_path| {
+    // 15. AD WASM Run  (depends on AD_WASM_COMPILE; same module, AD entry point)
+    let ad_wasm_result = wasm_path.as_ref().and_then(|wasm_path| {
         emit("START:AD_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
@@ -989,8 +966,8 @@ fn run_ad_wasm(
     }
 
     let func: wasmtime::Func = instance
-        .get_func(&mut store, "mavros_main")
-        .ok_or("mavros_main not found")?;
+        .get_func(&mut store, "mavros_ad_main")
+        .ok_or("mavros_ad_main not found")?;
 
     // AD main takes only vm_ptr (no input parameters)
     let args = vec![wasmtime::Val::I32(vm_struct_ptr as i32)];
@@ -1045,10 +1022,10 @@ const STEP_KEYS: &[&str] = &[
     "COMPILED",
     "R1CS",
     "WITGEN_COMPILE",
-    "AD_COMPILE",
     "WITGEN_RUN",
     "WITGEN_CORRECT",
     "WITGEN_NOLEAK",
+    "AD_COMPILE",
     "AD_RUN",
     "AD_CORRECT",
     "AD_NOLEAK",
@@ -1067,8 +1044,7 @@ struct TestResult {
     steps: HashMap<String, Status>,
     rows: Option<usize>,
     cols: Option<usize>,
-    witgen_bytes: Option<usize>,
-    ad_bytes: Option<usize>,
+    binary_bytes: Option<usize>,
 }
 
 /// Determined purely from child output:
@@ -1284,8 +1260,7 @@ fn ignored_test_result(name: &str) -> TestResult {
         steps,
         rows: None,
         cols: None,
-        witgen_bytes: None,
-        ad_bytes: None,
+        binary_bytes: None,
     }
 }
 
@@ -1294,8 +1269,7 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
     let mut ended = HashMap::<String, bool>::default();
     let mut rows = None;
     let mut cols = None;
-    let mut witgen_bytes = None;
-    let mut ad_bytes = None;
+    let mut binary_bytes = None;
 
     for line in lines {
         let parts: Vec<&str> = line.split(':').collect();
@@ -1310,10 +1284,7 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
                     cols = parts[4].parse().ok();
                 }
                 if *key == "WITGEN_COMPILE" && parts.len() >= 4 {
-                    witgen_bytes = parts[3].parse().ok();
-                }
-                if *key == "AD_COMPILE" && parts.len() >= 4 {
-                    ad_bytes = parts[3].parse().ok();
+                    binary_bytes = parts[3].parse().ok();
                 }
             }
             ["END", key, "fail"] => {
@@ -1339,8 +1310,7 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
         steps,
         rows,
         cols,
-        witgen_bytes,
-        ad_bytes,
+        binary_bytes,
     }
 }
 
@@ -1365,10 +1335,10 @@ const DUMP_STAGE_ORDER: &[&str] = &[
     "initial_ssa.txt",
     "monomorphized_ssa.txt",
     "untainted_ssa.txt",
+    "program_ssa.txt",
     "hlssa_before_lowering.txt",
     "llssa_after_lowering.txt",
-    "witgen_bytecode.txt",
-    "ad_bytecode.txt",
+    "program_bytecode.txt",
 ];
 
 fn parse_runs_arg(args: &[String]) -> usize {
@@ -1987,6 +1957,11 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
     println!("\n</details>");
 }
 
+// The table keeps the historical 23-column layout so CI's `--check-regression` can compare
+// against pre-merged-pipeline baselines. The pipeline now produces a single program artifact per
+// backend, so the witgen/AD "Compile" columns mirror the same shared compile stage and both size
+// columns carry the combined binary size.
+// TODO: Collapse the duplicated columns once baselines have rolled over.
 fn render_markdown(results: &[TestResult]) -> String {
     let mut md = String::new();
     md.push_str("| Test | Compiled | R1CS | Rows | Cols | Witgen Size | AD Size | Witgen Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Compile | AD Run VM | AD Correct | AD No Leak | Witgen WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak | AD WASM Compile | AD WASM Run | AD WASM Correct | AD WASM No Leak |\n");
@@ -1996,8 +1971,7 @@ fn render_markdown(results: &[TestResult]) -> String {
         let s = |key: &str| r.steps.get(key).copied().unwrap_or(Status::Skip).emoji();
         let rows = r.rows.map_or("-".to_string(), |v| v.to_string());
         let cols = r.cols.map_or("-".to_string(), |v| v.to_string());
-        let witgen_sz = r.witgen_bytes.map_or("-".to_string(), |v| v.to_string());
-        let ad_sz = r.ad_bytes.map_or("-".to_string(), |v| v.to_string());
+        let binary_sz = r.binary_bytes.map_or("-".to_string(), |v| v.to_string());
         md.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             r.name,
@@ -2005,8 +1979,8 @@ fn render_markdown(results: &[TestResult]) -> String {
             s("R1CS"),
             rows,
             cols,
-            witgen_sz,
-            ad_sz,
+            binary_sz,
+            binary_sz,
             s("WITGEN_COMPILE"),
             s("WITGEN_RUN"),
             s("WITGEN_CORRECT"),

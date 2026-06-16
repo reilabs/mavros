@@ -269,6 +269,17 @@ impl Instruction for OpCode {
         }
     }
 
+    fn map_call_targets(&mut self, f: &mut dyn FnMut(FunctionId) -> FunctionId) {
+        match self {
+            OpCode::Call {
+                function: CallTarget::Static(id),
+                ..
+            } => *id = f(*id),
+            OpCode::Guard { inner, .. } => inner.map_call_targets(f),
+            _ => {}
+        }
+    }
+
     fn display_instruction(
         &self,
         func_name: &dyn Fn(FunctionId) -> String,

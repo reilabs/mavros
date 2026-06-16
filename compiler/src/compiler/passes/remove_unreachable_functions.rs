@@ -1,4 +1,4 @@
-//! Removes functions that are not reachable from main via the call graph.
+//! Removes functions that are not reachable from any entry point via the call graph.
 //!
 //! This pass should run after defunctionalization, and entry point preparation. This ensures that
 //! all calls are static and hence avoids producing incorrect results.
@@ -33,8 +33,10 @@ impl Pass for RemoveUnreachableFunctions {
         let cfg = store.get::<FlowAnalysis>();
         let call_graph = cfg.get_call_graph();
 
-        let main_id = ssa.get_main_id();
-        let reachable: HashSet<_> = call_graph.get_post_order(main_id).collect();
+        let mut reachable: HashSet<_> = HashSet::default();
+        for entry_point in ssa.get_entry_points() {
+            reachable.extend(call_graph.get_post_order(*entry_point));
+        }
 
         let all_function_ids: Vec<_> = ssa.get_function_ids().collect();
         for function_id in all_function_ids {
