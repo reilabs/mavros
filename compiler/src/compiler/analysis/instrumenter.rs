@@ -16,7 +16,7 @@ use crate::{
     compiler::{
         Field,
         analysis::{
-            symbolic_executor::{self, SymbolicExecutor},
+            symbolic_executor::{self, AssertionFailure, SymbolicExecutor},
             types::TypeInfo,
         },
         ssa::{
@@ -1111,7 +1111,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         b: &SpecSplitValue,
         c: &SpecSplitValue,
         ctx: &mut CostAnalysis,
-    ) {
+    ) -> Result<(), AssertionFailure> {
         Value::assert_r1c(
             &a.unspecialized,
             &b.unspecialized,
@@ -1124,6 +1124,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
             &c.specialized,
             ctx.get_specialized(),
         );
+        Ok(())
     }
 
     fn array_get(
@@ -1195,7 +1196,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         b: &SpecSplitValue,
         c: &SpecSplitValue,
         instrumenter: &mut CostAnalysis,
-    ) {
+    ) -> Result<(), AssertionFailure> {
         Value::constrain(
             &a.unspecialized,
             &b.unspecialized,
@@ -1208,12 +1209,16 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
             &c.specialized,
             instrumenter.get_specialized(),
         );
+        Ok(())
     }
 
     // Witness asserts and rangechecks are lowered to explicit Constrain/Lookup ops before the
     // cost analysis runs (and those are costed via `record_constrain`/`record_lookup`), so any
-    // op still in these high-level forms carries no cost of its own.
-    fn assert_bool(&self, _instrumenter: &mut CostAnalysis) {}
+    // op still in these high-level forms carries no cost of its own. The cost estimator also
+    // runs over fully-symbolic inputs, so these never fold to a constant that could fail.
+    fn assert_bool(&self, _instrumenter: &mut CostAnalysis) -> Result<(), AssertionFailure> {
+        Ok(())
+    }
 
     fn assert_cmp(
         _kind: CmpKind,
@@ -1221,10 +1226,17 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         _b: &Self,
         _lhs_type: &Type,
         _instrumenter: &mut CostAnalysis,
-    ) {
+    ) -> Result<(), AssertionFailure> {
+        Ok(())
     }
 
-    fn rangecheck(&self, _max_bits: usize, _instrumenter: &mut CostAnalysis) {}
+    fn rangecheck(
+        &self,
+        _max_bits: usize,
+        _instrumenter: &mut CostAnalysis,
+    ) -> Result<(), AssertionFailure> {
+        Ok(())
+    }
 
     fn to_bits(
         &self,
@@ -2158,7 +2170,11 @@ impl CostEstimator {
                 specialized: param.to_value(),
             })
             .collect();
-        SymbolicExecutor::new().run(ssa, type_info, sig.id, inputs, costs);
+        // The cost estimator evaluates over fully-symbolic inputs, so assertions never fold to
+        // a failing constant; a static assertion failure here would be a bug in this pass.
+        SymbolicExecutor::new()
+            .run(ssa, type_info, sig.id, inputs, costs)
+            .expect("ICE: cost analysis hit a static assertion failure on symbolic inputs");
     }
 
     fn type_to_unknown_sig(&self, tp: &Type) -> ValueSignature {
