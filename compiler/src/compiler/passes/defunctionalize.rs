@@ -487,6 +487,9 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                         OpCode::Load { result, ptr } => {
                             changed |= propagate(&mut reaching, (fid, *ptr), (fid, *result));
                         }
+                        OpCode::Alloc { result, value, .. } => {
+                            changed |= propagate(&mut reaching, (fid, *value), (fid, *result));
+                        }
                         OpCode::Store { ptr, value } => {
                             changed |= propagate(&mut reaching, (fid, *value), (fid, *ptr));
                         }
