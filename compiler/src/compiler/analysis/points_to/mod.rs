@@ -186,7 +186,7 @@ impl PointsTo {
         /// Call-string depth for the context-sensitive (Phase 2) pass — 1-CFA.
         const K: usize = 1;
 
-        let main = ssa.get_main_id();
+        let main = ssa.get_unique_entrypoint_id();
 
         // Array flow-group classification — a function of body shape only, so computed once per
         // function and reused across both the summary fixpoint and the per-context BFS.
@@ -444,7 +444,7 @@ mod tests {
     #[test]
     fn merged_refs_do_not_alias() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn unmerged_refs_stay_separate() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -525,7 +525,7 @@ mod tests {
     #[test]
     fn store_load_forwards_pointee_object() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -556,7 +556,7 @@ mod tests {
     #[test]
     fn returned_ref_escapes_local_does_not() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -597,7 +597,7 @@ mod tests {
     #[test]
     fn non_leaking_callee_keeps_arg_local() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -640,7 +640,7 @@ mod tests {
     #[test]
     fn returned_ref_resolves_to_callee_alloc() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -684,7 +684,7 @@ mod tests {
     fn callee_stashing_arg_in_global_escapes_it() {
         let mut ssa = HLSSA::with_main("main".to_string());
         ssa.set_global_types(vec![Type::field().ref_of()]);
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn recursion_converges_and_returns_resolve() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -764,7 +764,7 @@ mod tests {
     #[test]
     fn distinct_call_sites_get_distinct_objects() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -818,7 +818,7 @@ mod tests {
     #[test]
     fn const_array_cells_split_per_index() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -867,7 +867,7 @@ mod tests {
     #[test]
     fn scalar_array_is_splittable() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -898,7 +898,7 @@ mod tests {
     #[test]
     fn dynamic_index_collapses_group() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -937,7 +937,7 @@ mod tests {
     #[test]
     fn phi_merged_array_is_cell_aligned() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -993,7 +993,7 @@ mod tests {
     #[test]
     fn array_under_ref_collapses() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -1027,7 +1027,7 @@ mod tests {
     #[test]
     fn mk_repeated_is_not_splittable() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -1053,7 +1053,7 @@ mod tests {
     #[test]
     fn const_blob_array_is_splittable() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -1090,7 +1090,7 @@ mod tests {
     fn two_reads_same_global_alias() {
         let mut ssa = HLSSA::with_main("main".to_string());
         ssa.set_global_types(vec![Type::field().ref_of()]);
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -1124,7 +1124,7 @@ mod tests {
     fn read_global_does_not_alias_local() {
         let mut ssa = HLSSA::with_main("main".to_string());
         ssa.set_global_types(vec![Type::field().ref_of()]);
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -1153,7 +1153,7 @@ mod tests {
     fn load_through_global_yields_external() {
         let mut ssa = HLSSA::with_main("main".to_string());
         ssa.set_global_types(vec![Type::field().ref_of().ref_of()]); // Ref<Ref<Field>>
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -1183,7 +1183,7 @@ mod tests {
     fn store_through_opaque_global_escapes() {
         let mut ssa = HLSSA::with_main("main".to_string());
         ssa.set_global_types(vec![Type::field().ref_of().ref_of()]);
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -1215,7 +1215,7 @@ mod tests {
     #[test]
     fn callee_write_through_param_resolves_precisely() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -1261,7 +1261,7 @@ mod tests {
     #[test]
     fn callee_copies_param_into_param_pointee() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
             let mut sb = HLSSABuilder::new(&mut ssa);

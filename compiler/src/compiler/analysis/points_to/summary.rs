@@ -86,7 +86,7 @@ pub fn compute_summaries(
     types: &TypeInfo,
     array_cells: &HashMap<FunctionId, ArrayCells>,
 ) -> HashMap<FunctionId, PointsToSummary> {
-    let main = ssa.get_main_id();
+    let main = ssa.get_unique_entrypoint_id();
     let fids: Vec<FunctionId> = ssa
         .get_function_ids()
         .filter(|f| types.has_function(*f))
@@ -210,7 +210,7 @@ pub fn specialize(
     k: usize,
     array_cells: &HashMap<FunctionId, ArrayCells>,
 ) -> HashMap<(FunctionId, Context), PointsToSolution> {
-    let main = ssa.get_main_id();
+    let main = ssa.get_unique_entrypoint_id();
     let mut results: HashMap<(FunctionId, Context), PointsToSolution> = HashMap::default();
     let mut seen: HashSet<(FunctionId, Context)> = HashSet::default();
     let mut worklist: VecDeque<(FunctionId, Context)> = VecDeque::new();
