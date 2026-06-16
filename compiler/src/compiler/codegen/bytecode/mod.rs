@@ -9,8 +9,11 @@ use crate::{
             flow_analysis::{CFG, FlowAnalysis},
             types::{FunctionTypeInfo, TypeInfo},
         },
-        codegen::bytecode::layout::{
-            FrameLayouter, GlobalFrameLayouter, StructLayoutInterner, int_cell_count,
+        codegen::{
+            CodeGenOptions,
+            bytecode::layout::{
+                FrameLayouter, GlobalFrameLayouter, StructLayoutInterner, int_cell_count,
+            },
         },
         ssa::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
@@ -158,11 +161,13 @@ fn spill_constant_to_frame(
 // ================================================================================================
 
 /// The code generator that lowers HLSSA to Mavros bytecode.
-pub struct CodeGen {}
+pub struct CodeGen {
+    options: CodeGenOptions,
+}
 
 impl CodeGen {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(options: CodeGenOptions) -> Self {
+        Self { options }
     }
 
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
@@ -970,6 +975,9 @@ impl CodeGen {
                             a_type, b_type, c_type
                         );
                     }
+                    if self.options.check_constraints {
+                        emit_assert_r1c(layouter, emitter, *a, *b, *c);
+                    }
                     emitter.push_op(bytecode::OpCode::R1C {
                         a: layouter.get_value(*a),
                         b: layouter.get_value(*b),
@@ -1263,16 +1271,7 @@ impl CodeGen {
                     });
                 }
                 hlssa::OpCode::AssertR1C { a, b, c } => {
-                    let tmp = layouter.alloc_scratch(4);
-                    emitter.push_op(bytecode::OpCode::MulField {
-                        res: tmp,
-                        a: layouter.get_value(*a),
-                        b: layouter.get_value(*b),
-                    });
-                    emitter.push_op(bytecode::OpCode::AssertEqField {
-                        a: tmp,
-                        b: layouter.get_value(*c),
-                    });
+                    emit_assert_r1c(layouter, emitter, *a, *b, *c);
                 }
                 hlssa::OpCode::ToBits {
                     result: r,
@@ -1691,6 +1690,25 @@ impl EmitterState {
     fn exit_block(&mut self, block: BlockId) {
         self.block_exits.insert(block, self.code.len());
     }
+}
+
+fn emit_assert_r1c(
+    layouter: &mut FrameLayouter,
+    emitter: &mut EmitterState,
+    a: ValueId,
+    b: ValueId,
+    c: ValueId,
+) {
+    let product = layouter.alloc_temp_field();
+    emitter.push_op(bytecode::OpCode::MulField {
+        res: product,
+        a: layouter.get_value(a),
+        b: layouter.get_value(b),
+    });
+    emitter.push_op(bytecode::OpCode::AssertEqField {
+        a: product,
+        b: layouter.get_value(c),
+    });
 }
 
 // UTILITY FUNCTIONS

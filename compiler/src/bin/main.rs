@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use mavros_compiler::Project;
 use mavros_compiler::api;
 use mavros_compiler::compiler::Field;
+use mavros_compiler::compiler::codegen::CodeGenOptions;
 use mavros_compiler::compiler::codegen::hlssa_to_r1cs::R1CS;
 use mavros_compiler::compiler::codegen::llssa_to_llvm::WasmCompileOpts;
 use mavros_compiler::driver::Driver;
@@ -116,7 +117,7 @@ pub fn run_compile(
     info!(message = %"Compiling Noir project", root = ?path, r1cs_output = ?r1cs_output, binary_output = ?binary_output);
 
     let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs)?;
-    let witgen_binary = api::compile_witgen(&mut driver)?;
+    let witgen_binary = api::compile_witgen(&mut driver, CodeGenOptions::default())?;
     let ad_binary = api::compile_ad(&driver)?;
 
     // Ensure output directories exist
@@ -183,7 +184,12 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         }
 
         driver
-            .compile_llvm_targets(args.emit_llvm, &r1cs, wasm_config)
+            .compile_llvm_targets(
+                args.emit_llvm,
+                &r1cs,
+                wasm_config,
+                CodeGenOptions::default(),
+            )
             .unwrap();
     }
 
@@ -193,10 +199,10 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let params = api::read_prover_inputs(&args.root, driver.abi())?;
-    let mut binary = api::compile_witgen(&mut driver)?;
+    let params = api::read_prover_inputs(driver.package_root(), driver.abi())?;
+    let mut binary = api::compile_witgen(&mut driver, CodeGenOptions::default())?;
 
-    let witgen_result = api::run_witgen_from_binary(&mut binary, &r1cs, &params);
+    let witgen_result = api::run_witgen_from_binary(&mut binary, &r1cs, &params)?;
 
     let correct = api::check_witgen(&r1cs, &witgen_result);
     if !correct {
@@ -261,7 +267,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let ad_coeffs: Vec<Field> = api::random_ad_coeffs(&r1cs);
 
     let (ad_a, ad_b, ad_c, ad_instrumenter) =
-        api::run_ad_from_binary(&mut ad_binary, &r1cs, &ad_coeffs);
+        api::run_ad_from_binary(&mut ad_binary, &r1cs, &ad_coeffs)?;
 
     let leftover_memory = plotting::plot_memory_chart(
         &ad_instrumenter,
