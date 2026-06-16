@@ -175,34 +175,27 @@ impl CodeGen {
         let struct_interner = StructLayoutInterner::new();
         let constants = ssa.const_snapshot();
 
-        let function = ssa.get_main();
-        let function = self.run_function(
-            function,
-            cfg.get_function_cfg(ssa.get_main_id()),
-            type_info.get_function(ssa.get_main_id()),
-            &global_layouter,
-            &constants,
-        );
+        // Entry points are emitted first, in entry-table order; the remaining functions follow.
+        let entry_ids: Vec<FunctionId> = ssa.get_entry_points().to_vec();
+        let function_order: Vec<FunctionId> = entry_ids
+            .iter()
+            .copied()
+            .chain(ssa.get_function_ids().filter(|id| !entry_ids.contains(id)))
+            .collect();
 
-        let mut functions = vec![function];
-
+        let mut functions = Vec::new();
         let mut function_ids = HashMap::default();
-        function_ids.insert(ssa.get_main_id(), 0);
+        let mut cur_fn_begin = 0;
 
-        let mut cur_fn_begin = functions[0].code.len();
-
-        for (function_id, function) in ssa.iter_functions() {
-            if *function_id == ssa.get_main_id() {
-                continue;
-            }
+        for function_id in function_order {
             let function = self.run_function(
-                function,
-                cfg.get_function_cfg(*function_id),
-                type_info.get_function(*function_id),
+                ssa.get_function(function_id),
+                cfg.get_function_cfg(function_id),
+                type_info.get_function(function_id),
                 &global_layouter,
                 &constants,
             );
-            function_ids.insert(*function_id, cur_fn_begin);
+            function_ids.insert(function_id, cur_fn_begin);
             cur_fn_begin += function.code.len();
             functions.push(function);
         }
@@ -229,6 +222,7 @@ impl CodeGen {
 
         bytecode::Program {
             functions,
+            entry_points: (0..entry_ids.len()).collect(),
             global_frame_size: global_layouter.total_size,
             struct_layouts: struct_interner.into_table(),
         }

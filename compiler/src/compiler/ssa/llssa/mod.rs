@@ -534,6 +534,12 @@ impl Instruction for LLOp {
         }
     }
 
+    fn map_call_targets(&mut self, f: &mut dyn FnMut(FunctionId) -> FunctionId) {
+        if let LLOp::Call { func, .. } = self {
+            *func = f(*func);
+        }
+    }
+
     fn display_instruction(
         &self,
         func_name: &dyn Fn(FunctionId) -> String,
@@ -1268,7 +1274,7 @@ mod tests {
     #[should_panic(expected = "incompatible with layout")]
     fn emit_struct_const_rejects_incompatible() {
         let mut ssa = LLSSA::with_main("bad_struct".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
@@ -1327,7 +1333,7 @@ mod tests {
     #[test]
     fn build_simple_function() {
         let mut ssa = LLSSA::with_main("test_main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
@@ -1349,7 +1355,7 @@ mod tests {
     #[test]
     fn build_struct_ops() {
         let mut ssa = LLSSA::with_main("struct_test".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
 
         let field_elem = LLStruct::new(vec![
             LLFieldType::Int(64),
@@ -1379,7 +1385,7 @@ mod tests {
     #[test]
     fn build_memory_ops() {
         let mut ssa = LLSSA::with_main("memory_test".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
 
         let rc_header = LLStruct::new(vec![LLFieldType::Int(64)]);
         let field_elem = LLStruct::new(vec![
@@ -1424,7 +1430,7 @@ mod tests {
     fn build_call_and_select() {
         let mut ssa = LLSSA::with_main("call_test".to_string());
         let helper_id = ssa.add_function("helper".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
@@ -1446,7 +1452,7 @@ mod tests {
     #[test]
     fn build_field_ops() {
         let mut ssa = LLSSA::with_main("field_test".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
 
         let field_elem = LLStruct::new(vec![
             LLFieldType::Int(64),
@@ -1485,7 +1491,7 @@ mod tests {
     #[test]
     fn build_width_and_global() {
         let mut ssa = LLSSA::with_main("width_test".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
@@ -1508,7 +1514,7 @@ mod tests {
     #[test]
     fn build_branching() {
         let mut ssa = LLSSA::with_main("branch_test".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
@@ -1545,7 +1551,7 @@ mod tests {
     #[test]
     fn build_memcpy() {
         let mut ssa = LLSSA::with_main("memcpy_test".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
 
         let elem = LLStruct::new(vec![LLFieldType::Int(64)]);
 

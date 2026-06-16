@@ -896,7 +896,7 @@ impl R1CGen {
 
     #[instrument(skip_all, name = "R1CGen::run")]
     pub fn run(&mut self, ssa: &HLSSA, type_info: &TypeInfo) {
-        let entry_point = ssa.get_main_id();
+        let entry_point = ssa.get_unique_entrypoint_id();
         assert!(
             ssa.get_function(entry_point).get_param_types().len() == 0,
             "Main should not have parameters as WitnessWriteToFresh pass should remove them"

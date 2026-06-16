@@ -109,7 +109,7 @@ This works as follows:
    info, so the host knows how to set up the witness generator's inputs and interpret its outputs.
 
 Running with `--emit-wasm` will execute the full compilation pipeline, and _additionall_ emit the
-`mavros_debug/witgen.wasm` and `mavros_debug/witgen.wasm.meta.json`. This can be combined with the
+`mavros_debug/program.wasm` and `mavros_debug/program.wasm.meta.json`. This can be combined with the
 `--emit-llvm` flag to also save the intermediate LLVM IR as an `.ll` file.
 
 > **Note:** WASM output is only currently available via the default command (no subcommand), not via

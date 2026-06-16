@@ -70,7 +70,7 @@ impl SSAConverter {
         // so that calls from unconstrained context propagate is_unconstrained=true.
         for func in &program.functions {
             let ssa_id = if func.id == Program::main_id() {
-                ssa.get_main_id()
+                ssa.get_unique_entrypoint_id()
             } else {
                 ssa.add_function(func.name.clone())
             };

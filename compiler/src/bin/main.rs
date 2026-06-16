@@ -117,8 +117,7 @@ pub fn run_compile(
     info!(message = %"Compiling Noir project", root = ?path, r1cs_output = ?r1cs_output, binary_output = ?binary_output);
 
     let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs)?;
-    let witgen_binary = api::compile_witgen(&mut driver, CodeGenOptions::default())?;
-    let ad_binary = api::compile_ad(&driver)?;
+    let binary = api::compile_bytecode(&mut driver, CodeGenOptions::default())?;
 
     // Ensure output directories exist
     if let Some(parent) = r1cs_output.parent() {
@@ -137,8 +136,7 @@ pub fn run_compile(
     fs::write(r1cs_output, r1cs_bytes)?;
 
     let basic = serde_json::json!({
-        "witgen_binary": witgen_binary,
-        "ad_binary": ad_binary,
+        "binary": binary,
         "abi": serde_json::to_value(driver.abi())?,
     });
     let basic_json = serde_json::to_string_pretty(&basic)?;
@@ -149,8 +147,7 @@ pub fn run_compile(
         r1cs_output = ?r1cs_output,
         binary_output = ?binary_output,
         r1cs_constraints = r1cs.constraints.len(),
-        witgen_binary_size = witgen_binary.len() * 8,
-        ad_binary_size = ad_binary.len() * 8,
+        binary_size = binary.len() * 8,
     );
 
     Ok(ExitCode::SUCCESS)
@@ -171,7 +168,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
 
     if args.emit_llvm || args.emit_wasm {
         let wasm_config = if args.emit_wasm {
-            let wasm_path = driver.get_debug_output_dir().join("witgen.wasm");
+            let wasm_path = driver.get_debug_output_dir().join("program.wasm");
             info!(message = %"Generating WebAssembly", path = %wasm_path.display());
             let runtime_lib = mavros_compiler::wasm_runtime::locate_or_build();
             Some((wasm_path, WasmCompileOpts::release(runtime_lib)))
@@ -200,7 +197,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     }
 
     let params = api::read_prover_inputs(driver.package_root(), driver.abi())?;
-    let mut binary = api::compile_witgen(&mut driver, CodeGenOptions::default())?;
+    let mut binary = api::compile_bytecode(&mut driver, CodeGenOptions::default())?;
 
     let witgen_result = api::run_witgen_from_binary(&mut binary, &r1cs, &params)?;
 
@@ -262,12 +259,10 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     )
     .unwrap();
 
-    let mut ad_binary = api::compile_ad(&driver)?;
-
     let ad_coeffs: Vec<Field> = api::random_ad_coeffs(&r1cs);
 
     let (ad_a, ad_b, ad_c, ad_instrumenter) =
-        api::run_ad_from_binary(&mut ad_binary, &r1cs, &ad_coeffs)?;
+        api::run_ad_from_binary(&mut binary, &r1cs, &ad_coeffs)?;
 
     let leftover_memory = plotting::plot_memory_chart(
         &ad_instrumenter,
