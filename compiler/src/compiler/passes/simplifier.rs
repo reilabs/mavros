@@ -1,6 +1,7 @@
 //! Performs both peephole optimization and algebraic simplification on the SSA IR, running until it
 //! reaches an iteration limit or a fixed point.
 
+use ark_ff::Field as _;
 use num_traits::{One, Zero};
 
 use crate::{
@@ -227,6 +228,21 @@ impl Simplifier {
                                 result: *result,
                                 target: *lhs,
                             });
+                        }
+                        let result_type = types.get_value_type(*result);
+                        if result_type.strip_witness().is_field()
+                            && let Some(Constant::Field(denom)) = fb.ssa.get_const(*rhs).as_deref()
+                            && !denom.is_zero()
+                        {
+                            let inv = fb
+                                .ssa
+                                .add_const(Constant::Field((*denom).inverse().unwrap()));
+                            return Some(Rewrite::Replace(vec![OpCode::BinaryArithOp {
+                                kind: BinaryArithOpKind::Mul,
+                                result: *result,
+                                lhs: *lhs,
+                                rhs: inv,
+                            }]));
                         }
                     }
                     BinaryArithOpKind::And => {

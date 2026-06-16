@@ -41,6 +41,9 @@ pub struct SSAConverter {
     /// Maps GlobalId to global slot index.
     global_slots: HashMap<GlobalId, usize>,
 
+    /// Maps GlobalId to its interned constant ValueId when the initializer is a constant.
+    global_constants: HashMap<GlobalId, crate::compiler::ssa::ValueId>,
+
     /// Utility for converting between types.
     type_converter: TypeConverter,
 }
@@ -52,6 +55,7 @@ impl SSAConverter {
             unconstrained_mapper: HashMap::default(),
             natively_unconstrained: HashSet::default(),
             global_slots: HashMap::default(),
+            global_constants: HashMap::default(),
             type_converter: TypeConverter::new(),
         }
     }
@@ -66,7 +70,7 @@ impl SSAConverter {
         // so that calls from unconstrained context propagate is_unconstrained=true.
         for func in &program.functions {
             let ssa_id = if func.id == Program::main_id() {
-                ssa.get_main_id()
+                ssa.get_unique_entrypoint_id()
             } else {
                 ssa.add_function(func.name.clone())
             };
@@ -251,25 +255,30 @@ impl SSAConverter {
         sb.modify_function(init_fn_id, |b| {
             let entry = b.function.get_entry_id();
 
-            // We need an ExpressionConverter to evaluate initializer expressions
-            let mut expr_converter = ExpressionConverter::new_with_globals(
-                &self.constrained_mapper,
-                &self.natively_unconstrained,
-                false,
-                &self.global_slots,
-                entry,
-            );
+            let mut current_block = entry;
 
             for gid in &ordered_ids {
+                // Use a fresh converter for each initializer so we can record a constant global
+                // after one initializer and let later initializers read it directly.
+                let mut expr_converter = ExpressionConverter::new_with_globals(
+                    &self.constrained_mapper,
+                    &self.natively_unconstrained,
+                    false,
+                    &self.global_slots,
+                    &self.global_constants,
+                    current_block,
+                );
                 let (_name, _typ, init_expr) = &program.globals[gid];
                 let value = expr_converter.convert_expression(init_expr, b).unwrap();
+                current_block = expr_converter.current_block();
                 let idx = self.global_slots[gid];
-                b.block(expr_converter.current_block())
-                    .init_global(idx, value);
+                b.block(current_block).init_global(idx, value);
+                if b.ssa.is_const(value) {
+                    self.global_constants.insert(*gid, value);
+                }
             }
 
-            b.block(expr_converter.current_block())
-                .terminate_return(vec![]);
+            b.block(current_block).terminate_return(vec![]);
         });
 
         // Build deinit function
@@ -322,6 +331,7 @@ impl SSAConverter {
             &self.natively_unconstrained,
             in_unconstrained,
             &self.global_slots,
+            &self.global_constants,
             entry_block,
         );
 

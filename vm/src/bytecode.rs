@@ -2097,8 +2097,16 @@ impl Display for Function {
     }
 }
 
+/// Index of the witness-generation entry point in a program's entry table.
+pub const ENTRY_WITGEN: usize = 0;
+/// Index of the AD entry point in a program's entry table.
+pub const ENTRY_AD: usize = 1;
+
 pub struct Program {
     pub functions: Vec<Function>,
+    /// Indices into `functions` of the program's entry points, in entry-table order
+    /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], ...).
+    pub entry_points: Vec<usize>,
     pub global_frame_size: usize,
     pub struct_layouts: Vec<StructDescriptor>,
 }
@@ -2154,11 +2162,21 @@ impl Program {
         }
 
         binary.push(self.global_frame_size as u64);
+
+        // Entry-point table: [num_entries, marker_offset_0, ...]. The offsets are absolute word
+        // indices of each entry function's `u64::MAX` marker; they are patched in once function
+        // positions are known.
+        binary.push(self.entry_points.len() as u64);
+        let entry_table_start = binary.len();
+        binary.extend(std::iter::repeat(0u64).take(self.entry_points.len()));
+
         let mut positions = vec![];
         let mut jumps_to_fix: Vec<(usize, isize)> = vec![];
+        let mut function_markers = vec![];
 
         for function in &self.functions {
             // Function marker
+            function_markers.push(binary.len());
             binary.push(u64::MAX);
             binary.push(function.frame_size as u64);
 
@@ -2167,6 +2185,10 @@ impl Program {
                 op.to_binary(&mut binary, &mut jumps_to_fix);
             }
         }
+
+        for (slot, fn_idx) in self.entry_points.iter().enumerate() {
+            binary[entry_table_start + slot] = function_markers[*fn_idx] as u64;
+        }
         for (jump_position, add_offset) in jumps_to_fix {
             let target = binary[jump_position];
             let target_pos = positions[target as usize];
@@ -2174,6 +2196,35 @@ impl Program {
                 (target_pos as isize - (jump_position as isize + add_offset)) as u64;
         }
         binary
+    }
+}
+
+/// The decoded header of a program binary.
+pub struct ProgramHeader {
+    pub struct_layouts: Vec<StructDescriptor>,
+    pub global_frame_size: usize,
+    /// Absolute word offsets of each entry point's function marker, in entry-table order
+    /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], ...). The entry's frame size lives at `offset + 1` and
+    /// its first opcode at `offset + 2`.
+    pub entry_points: Vec<usize>,
+    /// Word offset of the first function marker, i.e. where the opcode stream begins.
+    pub code_start: usize,
+}
+
+/// Decode a program binary's header: struct layouts, global frame size and the entry-point
+/// table.
+pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
+    let (struct_layouts, off) = parse_struct_layouts(program);
+    let global_frame_size = program[off] as usize;
+    let num_entries = program[off + 1] as usize;
+    let entry_points = (0..num_entries)
+        .map(|i| program[off + 2 + i] as usize)
+        .collect();
+    ProgramHeader {
+        struct_layouts,
+        global_frame_size,
+        entry_points,
+        code_start: off + 2 + num_entries,
     }
 }
 

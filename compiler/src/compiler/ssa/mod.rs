@@ -149,12 +149,9 @@ pub struct SSA<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> {
     /// The function used to de-initialize/drop the global values.
     globals_deinit_fn: Option<FunctionId>,
 
-    /// The identifier of the main function.
-    ///
-    /// This may be the true program main as provided by Noir, or the identifier of the synthetic
-    /// main created during the compilation process. While the exact details depend on the stage of
-    /// the pipeline, this will always point to the entry point.
-    main_id: FunctionId,
+    /// The identifiers of the program's entry points. Each one serves as a reachability root and
+    /// is emitted as a separately callable entry in the generated artifacts.
+    entry_points: Vec<FunctionId>,
 
     /// A monotonic counter for function identifiers, used to ensure uniqueness.
     next_function_id: u64,
@@ -179,7 +176,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Clone for SSA<O
             global_types: self.global_types.clone(),
             globals_init_fn: self.globals_init_fn,
             globals_deinit_fn: self.globals_deinit_fn,
-            main_id: self.main_id,
+            entry_points: self.entry_points.clone(),
             next_function_id: self.next_function_id,
             next_value_id: AtomicU64::new(self.next_value_id.load(Ordering::Relaxed)),
             constants: RwLock::new(self.constants.read().unwrap().clone()),
@@ -188,21 +185,27 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Clone for SSA<O
 }
 
 impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> {
-    pub fn with_main(name: String) -> Self {
-        let main_function = Function::<Op, Ty>::empty(name);
-        let main_id = FunctionId(0);
-        let mut functions = HashMap::default();
-        functions.insert(main_id, main_function);
+    /// Constructs an empty SSA: no functions and no entry points. Functions are added with
+    /// [`Self::add_function`] / [`Self::insert_function`] and registered as entry points with
+    /// [`Self::add_entry_point`].
+    pub fn empty() -> Self {
         SSA {
-            functions,
+            functions: HashMap::default(),
             global_types: Vec::new(),
             globals_init_fn: None,
             globals_deinit_fn: None,
-            main_id,
-            next_function_id: 1,
+            entry_points: Vec::new(),
+            next_function_id: 0,
             next_value_id: AtomicU64::new(0),
             constants: RwLock::new(BiHashMap::default()),
         }
+    }
+
+    pub fn with_main(name: String) -> Self {
+        let mut ssa = Self::empty();
+        let main_id = ssa.add_function(name);
+        ssa.add_entry_point(main_id);
+        ssa
     }
 }
 
@@ -220,7 +223,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
                 global_types: Vec::new(),
                 globals_init_fn: self.globals_init_fn,
                 globals_deinit_fn: self.globals_deinit_fn,
-                main_id: self.main_id,
+                entry_points: self.entry_points.clone(),
                 next_function_id: self.next_function_id,
                 next_value_id: self.next_value_id,
                 constants: self.constants,
@@ -248,26 +251,63 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
         self.functions.retain(|id, fun| f(*id, fun));
     }
 
-    pub fn set_entry_point(&mut self, id: FunctionId) {
-        self.main_id = id;
+    /// Replaces the program's sole entry point. Panics unless there is exactly one entry point —
+    /// callers that work with a multi-entry program must go through [`Self::get_entry_points`].
+    pub fn set_unique_entrypoint(&mut self, id: FunctionId) {
+        assert_eq!(
+            self.entry_points.len(),
+            1,
+            "set_unique_entrypoint called on an SSA with {} entry points",
+            self.entry_points.len()
+        );
+        self.entry_points[0] = id;
     }
 
-    pub fn get_main_id(&self) -> FunctionId {
-        self.main_id
+    /// Registers an additional entry point for the program.
+    pub fn add_entry_point(&mut self, id: FunctionId) {
+        assert!(
+            !self.entry_points.contains(&id),
+            "Function {id:?} is already an entry point"
+        );
+        self.entry_points.push(id);
     }
 
-    /// Gets a mutable reference to the main function or panics if no main function exists.
-    pub fn get_main_mut(&mut self) -> &mut Function<Op, Ty> {
+    /// All entry points of the program.
+    pub fn get_entry_points(&self) -> &[FunctionId] {
+        &self.entry_points
+    }
+
+    /// Whether `id` names one of the program's entry points.
+    pub fn is_entry_point(&self, id: FunctionId) -> bool {
+        self.entry_points.contains(&id)
+    }
+
+    /// The program's sole entry point. Panics unless there is exactly one entry point — callers
+    /// that work with a multi-entry program must go through [`Self::get_entry_points`].
+    pub fn get_unique_entrypoint_id(&self) -> FunctionId {
+        assert_eq!(
+            self.entry_points.len(),
+            1,
+            "get_unique_entrypoint_id called on an SSA with {} entry points",
+            self.entry_points.len()
+        );
+        self.entry_points[0]
+    }
+
+    /// Gets a mutable reference to the program's sole entry point function. Panics unless there is
+    /// exactly one entry point.
+    pub fn get_unique_entrypoint_mut(&mut self) -> &mut Function<Op, Ty> {
         self.functions
-            .get_mut(&self.main_id)
-            .expect("Main function should exist")
+            .get_mut(&self.get_unique_entrypoint_id())
+            .expect("Entry point function should exist")
     }
 
-    /// Gets a reference to the main function or panics if no main function exists.
-    pub fn get_main(&self) -> &Function<Op, Ty> {
+    /// Gets a reference to the program's sole entry point function. Panics unless there is exactly
+    /// one entry point.
+    pub fn get_unique_entrypoint(&self) -> &Function<Op, Ty> {
         self.functions
-            .get(&self.main_id)
-            .expect("Main function should exist")
+            .get(&self.get_unique_entrypoint_id())
+            .expect("Entry point function should exist")
     }
 
     pub fn get_function(&self, id: FunctionId) -> &Function<Op, Ty> {
@@ -387,6 +427,115 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
         }
 
         (self.insert_function(cloned), remap)
+    }
+
+    /// Merges another SSA into this one, returning the `other FunctionId -> new FunctionId`
+    /// remap.
+    ///
+    /// Every function of `other` is inserted under a fresh `FunctionId`, with all of its
+    /// non-constant `ValueId`s freshened (the two SSAs may descend from a common ancestor, so
+    /// their value identifiers can collide) and its constants re-interned by value into this
+    /// SSA's constants table. Static call targets are rewritten to the remapped identifiers.
+    ///
+    /// Both SSAs must agree on the global value layout: globals are shared state addressed by
+    /// offset, so diverging global types would silently corrupt the global frame.
+    ///
+    /// `other`'s entry points and globals init/deinit functions are NOT transferred; the caller
+    /// decides which of the merged functions (if any) become entry points via
+    /// [`SSA::add_entry_point`].
+    pub fn merge(&mut self, other: Self) -> HashMap<FunctionId, FunctionId> {
+        assert_eq!(
+            self.global_types, other.global_types,
+            "Cannot merge SSAs with diverging global types"
+        );
+
+        let mut other_fn_ids: Vec<FunctionId> = other.functions.keys().copied().collect();
+        other_fn_ids.sort_by_key(|id| id.0);
+
+        let mut fn_remap: HashMap<FunctionId, FunctionId> = HashMap::default();
+        for old_id in &other_fn_ids {
+            let new_id = FunctionId(self.next_function_id);
+            self.next_function_id += 1;
+            fn_remap.insert(*old_id, new_id);
+        }
+
+        // Re-intern all of `other`'s constants by value; identical values collapse onto this
+        // SSA's existing ids. Sorted for deterministic fresh-id allocation.
+        let mut value_remap: HashMap<ValueId, ValueId> = HashMap::default();
+        let other_constants = other.const_snapshot();
+        let mut const_ids: Vec<ValueId> = other_constants.keys().copied().collect();
+        const_ids.sort_by_key(|v| v.0);
+        for vid in const_ids {
+            let new_id = self.add_const(other_constants[&vid].as_ref().clone());
+            value_remap.insert(vid, new_id);
+        }
+
+        let mut other = other;
+        for old_id in other_fn_ids {
+            let mut function = other.take_function(old_id);
+
+            // Freshen every non-constant ValueId. Walk blocks sorted by id so fresh-id
+            // allocation (and thus the emitted program) is deterministic.
+            let mut block_ids: Vec<BlockId> = function.blocks.keys().copied().collect();
+            block_ids.sort_by_key(|b| b.0);
+            for block_id in &block_ids {
+                let block = function.get_block(*block_id);
+                let mut ids: Vec<ValueId> = Vec::new();
+                for (v, _) in block.get_parameters() {
+                    ids.push(*v);
+                }
+                for instr in block.get_instructions() {
+                    ids.extend(instr.get_inputs().copied());
+                    ids.extend(instr.get_results().copied());
+                }
+                if let Some(term) = block.get_terminator() {
+                    match term {
+                        Terminator::Jmp(_, args) | Terminator::Return(args) => {
+                            ids.extend(args.iter().copied())
+                        }
+                        Terminator::JmpIf(cond, _, _) => ids.push(*cond),
+                    }
+                }
+                for v in ids {
+                    if !value_remap.contains_key(&v) {
+                        value_remap.insert(v, self.fresh_value());
+                    }
+                }
+            }
+
+            // Apply the value remap and rewrite call targets to the new function ids.
+            for (_, block) in function.get_blocks_mut() {
+                for (v, _) in block.get_parameters_mut() {
+                    *v = value_remap[v];
+                }
+                for instr in block.get_instructions_mut() {
+                    for op in instr.get_operands_mut() {
+                        *op = value_remap[op];
+                    }
+                    instr.map_call_targets(&mut |callee| {
+                        *fn_remap
+                            .get(&callee)
+                            .expect("Merged function calls a function missing from the merged SSA")
+                    });
+                }
+                if block.get_terminator().is_some() {
+                    match block.get_terminator_mut() {
+                        Terminator::Jmp(_, args) | Terminator::Return(args) => {
+                            for v in args.iter_mut() {
+                                *v = value_remap[v];
+                            }
+                        }
+                        Terminator::JmpIf(cond, _, _) => {
+                            *cond = value_remap[cond];
+                        }
+                    }
+                }
+            }
+
+            self.functions.insert(fn_remap[&old_id], function);
+        }
+
+        fn_remap
     }
 
     /// Allocate a fresh `ValueId` from the SSA-wide counter.

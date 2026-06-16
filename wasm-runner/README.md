@@ -44,8 +44,8 @@ node dist/index.js ./my-noir-project
 <project-root>/
   Prover.toml                      # Input values
   mavros_debug/
-    witgen.wasm                    # Generated WASM artifact
-    witgen.wasm.meta.json          # Metadata
+    program.wasm                    # Generated WASM artifact
+    program.wasm.meta.json          # Metadata
 ```
 
 ## Input Format

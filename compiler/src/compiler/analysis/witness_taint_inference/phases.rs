@@ -76,7 +76,7 @@ fn compute_summaries(
     // any analyzed function unreachable from main so none are dropped.
     let mut order: Vec<FunctionId> = flow
         .get_call_graph()
-        .get_post_order(ssa.get_main_id())
+        .get_post_order(ssa.get_unique_entrypoint_id())
         .filter(|f| summaries.contains_key(f))
         .collect();
     let mut queued: HashSet<FunctionId> = order.iter().copied().collect();
@@ -492,7 +492,7 @@ fn specialize_contexts(
     block_conds: &HashMap<FunctionId, HashMap<BlockId, Vec<ValueId>>>,
     witness_globals: &HashSet<usize>,
 ) -> HashMap<FunctionId, FunctionWitnessType> {
-    let main_id = ssa.get_main_id();
+    let main_id = ssa.get_unique_entrypoint_id();
     // Program-wide global slot types, captured before the SSA is mutated (clones/rewiring below).
     let global_types: Vec<Type> = ssa.get_global_types().to_vec();
     let main_args: Vec<WitnessShape> = ssa
@@ -604,7 +604,7 @@ fn specialize_contexts(
         ssa.put_function(*clone_id, clone_func);
     }
 
-    ssa.set_entry_point(main_clone_id);
+    ssa.set_unique_entrypoint(main_clone_id);
     functions
 }
 
