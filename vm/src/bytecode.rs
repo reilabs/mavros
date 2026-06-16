@@ -1148,9 +1148,6 @@ mod def {
 
     #[opcode]
     fn cast_u128_to_field(#[out] res: *mut Field, #[frame] a: U128) {
-        // `From<u128>` builds the field element directly from its little-endian
-        // limbs via a single Montgomery conversion (`from_bigint`) — no field
-        // multiplication, and in particular no recomputation of 2^64.
         unsafe {
             *res = Field::from(a.to_u128());
         }
