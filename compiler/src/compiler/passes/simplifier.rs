@@ -1,6 +1,7 @@
 //! Performs both peephole optimization and algebraic simplification on the SSA IR, running until it
 //! reaches an iteration limit or a fixed point.
 
+use ark_ff::Field as _;
 use num_traits::{One, Zero};
 
 use crate::{
@@ -227,6 +228,19 @@ impl Simplifier {
                                 result: *result,
                                 target: *lhs,
                             });
+                        }
+                        let result_type = types.get_value_type(*result);
+                        if result_type.strip_witness().is_field()
+                            && let Some(denom) = const_as_field(fb.ssa, defs, *rhs)
+                            && !denom.is_zero()
+                        {
+                            let inv = fb.ssa.add_const(Constant::Field(denom.inverse().unwrap()));
+                            return Some(Rewrite::Replace(vec![OpCode::BinaryArithOp {
+                                kind: BinaryArithOpKind::Mul,
+                                result: *result,
+                                lhs: *lhs,
+                                rhs: inv,
+                            }]));
                         }
                     }
                     BinaryArithOpKind::And => {
@@ -554,6 +568,41 @@ fn is_all_ones(ssa: &HLSSA, v: ValueId) -> bool {
 fn const_as_usize(ssa: &HLSSA, v: ValueId) -> Option<usize> {
     match ssa.get_const(v).as_deref() {
         Some(Constant::U(_, value) | Constant::I(_, value)) => (*value).try_into().ok(),
+        _ => None,
+    }
+}
+
+fn scalar_constant_as_field(constant: &Constant) -> Option<ark_bn254::Fr> {
+    match constant {
+        Constant::Field(value) => Some(*value),
+        Constant::U(_, value) | Constant::I(_, value) => Some(ark_bn254::Fr::from(*value)),
+        Constant::FnPtr(_) | Constant::Blob(_) => None,
+    }
+}
+
+fn const_as_field(
+    ssa: &HLSSA,
+    defs: &FunctionValueDefinitions,
+    v: ValueId,
+) -> Option<ark_bn254::Fr> {
+    if let Some(value) = ssa
+        .get_const(v)
+        .as_deref()
+        .and_then(scalar_constant_as_field)
+    {
+        return Some(value);
+    }
+
+    match defs.get_definition(v) {
+        Some(ValueDefinition::Instruction(
+            _,
+            _,
+            OpCode::Cast {
+                result: _,
+                value,
+                target: CastTarget::Field,
+            },
+        )) => const_as_field(ssa, defs, *value),
         _ => None,
     }
 }
