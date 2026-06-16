@@ -1,5 +1,4 @@
 pub mod common_subexpression_elimination;
-pub mod condition_propagation;
 pub mod dead_code_elimination;
 pub mod deduplicate_phis;
 pub mod defunctionalize;

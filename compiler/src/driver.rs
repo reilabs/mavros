@@ -30,7 +30,6 @@ use crate::{
         pass_manager::PassManager,
         passes::{
             common_subexpression_elimination::CSE,
-            condition_propagation::ConditionPropagation,
             dead_code_elimination::{self, DCE},
             deduplicate_phis::DeduplicatePhis,
             defunctionalize::Defunctionalize,
@@ -280,7 +279,8 @@ impl Driver {
                 Box::new(Simplifier::new()),
                 Box::new(CSE::pre_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
-                Box::new(ConditionPropagation::new()),
+                // Re-run SCCP after cleanup exposes new constants and branch predicate facts.
+                Box::new(SCCP::new()),
                 Box::new(CSE::pre_r1c()),
                 Box::new(DeduplicatePhis::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
