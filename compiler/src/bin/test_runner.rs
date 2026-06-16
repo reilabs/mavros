@@ -17,7 +17,7 @@ use mavros_compiler::{
     Project, abi_helpers,
     compiler::Field,
     compiler::codegen::{CodeGenOptions, hlssa_to_r1cs::R1CS, llssa_to_llvm::WasmCompileOpts},
-    driver::Driver,
+    driver::{Driver, Error as DriverError},
     vm::{bytecode::TableInfo, interpreter},
     wasm_runtime,
 };
@@ -165,7 +165,17 @@ fn run_single(root: PathBuf, expect_failure: bool) {
             emit(&format!("END:R1CS:ok:{rows}:{cols}"));
             Some(r)
         }
-        Err(_) => {
+        // A program whose assertion can never hold is rejected as unsatisfiable while
+        // generating R1CS. That is the *expected* outcome for an execution_failure test, so
+        // it gets its own `reject` marker — distinct from a plain `fail`, which signals a real
+        // problem (e.g. an unsupported construct) that should never be silently accepted.
+        Err(DriverError::UnsatisfiableProgram(msg)) => {
+            eprintln!("R1CS rejected program as unsatisfiable: {msg}");
+            emit("END:R1CS:reject");
+            None
+        }
+        Err(e) => {
+            eprintln!("R1CS generation error: {e}");
             emit("END:R1CS:fail");
             None
         }
@@ -1049,6 +1059,7 @@ struct TestResult {
 
 /// Determined purely from child output:
 /// - `started && ended ok` → Pass
+/// - `started && ended reject` → Rejected (program proven unsatisfiable — a legit failing assert)
 /// - `started && ended fail` → Fail
 /// - `started && no end` → Crash
 /// - `never started` → Skip
@@ -1059,6 +1070,10 @@ enum Status {
     Crash,
     Skip,
     NotApplicable,
+    /// The compiler cleanly rejected the program as unsatisfiable (an assertion that can never
+    /// hold). For an execution_failure test this is the expected outcome; for an
+    /// execution_success test it is a genuine failure.
+    Rejected,
 }
 
 impl Status {
@@ -1069,6 +1084,9 @@ impl Status {
             Status::Crash => "💥",
             Status::Skip => "➖",
             Status::NotApplicable => "N/A",
+            // Only surfaces in the table if it escapes `expected_step_status` unmapped, which
+            // would itself be a bug; render it distinctly rather than hide it.
+            Status::Rejected => "🚫",
         }
     }
 }
@@ -1267,6 +1285,7 @@ fn ignored_test_result(name: &str) -> TestResult {
 fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]) -> TestResult {
     let mut started = HashMap::<String, bool>::default();
     let mut ended = HashMap::<String, bool>::default();
+    let mut rejected = HashMap::<String, bool>::default();
     let mut rows = None;
     let mut cols = None;
     let mut binary_bytes = None;
@@ -1287,6 +1306,9 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
                     binary_bytes = parts[3].parse().ok();
                 }
             }
+            ["END", key, "reject"] => {
+                rejected.insert(key.to_string(), true);
+            }
             ["END", key, "fail"] => {
                 ended.insert(key.to_string(), false);
             }
@@ -1297,7 +1319,7 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
     let steps = STEP_KEYS
         .iter()
         .map(|&key| {
-            let raw_status = raw_step_status(key, &started, &ended);
+            let raw_status = raw_step_status(key, &started, &ended, &rejected);
             (
                 key.to_string(),
                 expected_step_status(key, raw_status, expectation),
@@ -1594,8 +1616,11 @@ fn raw_step_status(
     key: &str,
     started: &HashMap<String, bool>,
     ended: &HashMap<String, bool>,
+    rejected: &HashMap<String, bool>,
 ) -> Status {
-    if let Some(&ok) = ended.get(key) {
+    if rejected.contains_key(key) {
+        Status::Rejected
+    } else if let Some(&ok) = ended.get(key) {
         if ok { Status::Pass } else { Status::Fail }
     } else if started.contains_key(key) {
         Status::Crash
@@ -1606,12 +1631,29 @@ fn raw_step_status(
 
 fn expected_step_status(key: &str, raw_status: Status, expectation: TestExpectation) -> Status {
     match expectation {
-        TestExpectation::ExecutionSuccess => raw_status,
+        // A program that is supposed to execute must not be rejected as unsatisfiable; if it
+        // was, that is a real failure. Every other stage uses its raw status unchanged.
+        TestExpectation::ExecutionSuccess => match raw_status {
+            Status::Rejected => Status::Fail,
+            other => other,
+        },
         TestExpectation::ExecutionFailure => match key {
+            // A statically-unsatisfiable program (an assertion or range/equality constraint
+            // that folds to a failing constant) is now rejected cleanly during R1CS
+            // generation instead of panicking the compiler — `generate_r1cs` returns
+            // `Err(UnsatisfiableProgram)`, which the child reports as a `reject`. That clean
+            // rejection is exactly the expected failure, so it counts as success and the
+            // downstream stages it skips stay neutral. A plain `Fail` (some other R1CS error)
+            // or a `Crash` (an un-converted panic) is NOT accepted — those surface as-is so a
+            // real regression is never masked by the expected-failure flag.
+            "R1CS" => match raw_status {
+                Status::Rejected => Status::Pass,
+                other => other,
+            },
             "WITGEN_RUN" | "WITGEN_WASM_RUN" => match raw_status {
                 Status::Fail | Status::Crash => Status::Pass,
                 Status::Pass => Status::Fail,
-                Status::Skip | Status::NotApplicable => raw_status,
+                Status::Skip | Status::NotApplicable | Status::Rejected => raw_status,
             },
             // Correctness/leak checks need a witness, and the native AD
             // pipeline only feeds proving; neither is meaningful for a program
@@ -2087,6 +2129,58 @@ mod tests {
         assert_eq!(result.steps["AD_WASM_RUN"], Status::Pass);
         assert_eq!(result.steps["AD_WASM_CORRECT"], Status::Pass);
         assert_eq!(result.steps["AD_WASM_NOLEAK"], Status::Pass);
+    }
+
+    #[test]
+    fn execution_failure_passes_when_r1cs_rejects_program() {
+        // A statically-unsatisfiable program is rejected during R1CS generation. The clean
+        // rejection is the expected failure, so R1CS reads ✅ and the witgen stages it skips
+        // stay neutral rather than being treated as failures.
+        let result = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&[
+                "START:COMPILED",
+                "END:COMPILED:ok",
+                "START:R1CS",
+                "END:R1CS:reject",
+            ]),
+        );
+
+        assert_eq!(result.steps["COMPILED"], Status::Pass);
+        assert_eq!(result.steps["R1CS"], Status::Pass);
+        assert_eq!(result.steps["WITGEN_RUN"], Status::Skip);
+        assert_eq!(result.steps["WITGEN_WASM_RUN"], Status::Skip);
+    }
+
+    #[test]
+    fn execution_failure_does_not_accept_plain_r1cs_failure() {
+        // Only a clean rejection counts. A plain R1CS `fail` (some other error) or a crash is a
+        // real problem and must not be silently turned green by the expected-failure flag.
+        let failed = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&["START:COMPILED", "END:COMPILED:ok", "START:R1CS", "END:R1CS:fail"]),
+        );
+        assert_eq!(failed.steps["R1CS"], Status::Fail);
+
+        let crashed = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&["START:COMPILED", "END:COMPILED:ok", "START:R1CS"]),
+        );
+        assert_eq!(crashed.steps["R1CS"], Status::Crash);
+    }
+
+    #[test]
+    fn execution_success_treats_r1cs_rejection_as_failure() {
+        // A program that is supposed to execute should never be rejected as unsatisfiable.
+        let result = parse_child_output(
+            "ok",
+            TestExpectation::ExecutionSuccess,
+            &lines(&["START:COMPILED", "END:COMPILED:ok", "START:R1CS", "END:R1CS:reject"]),
+        );
+        assert_eq!(result.steps["R1CS"], Status::Fail);
     }
 
     #[test]

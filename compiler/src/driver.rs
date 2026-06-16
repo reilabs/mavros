@@ -81,6 +81,10 @@ pub struct Driver {
 #[derive(Debug)]
 pub enum Error {
     NoirCompilerError(Vec<noirc_errors::reporter::CustomDiagnostic>),
+    /// The program contains an assertion (or range/equality constraint) that can never be
+    /// satisfied, discovered while symbolically executing the program to generate R1CS. Such a
+    /// program will never execute, so it is rejected rather than compiled into constraints.
+    UnsatisfiableProgram(String),
 }
 
 impl std::fmt::Display for Error {
@@ -88,6 +92,9 @@ impl std::fmt::Display for Error {
         match self {
             Error::NoirCompilerError(diagnostics) => {
                 write!(f, "Noir compiler error ({} diagnostics)", diagnostics.len())
+            }
+            Error::UnsatisfiableProgram(message) => {
+                write!(f, "program will never execute: {message}")
             }
         }
     }
@@ -345,7 +352,9 @@ impl Driver {
         let type_info = Types::new().run(&r1cs_ssa, &flow_analysis);
 
         let mut r1cs_gen = R1CGen::new();
-        r1cs_gen.run(&r1cs_ssa, &type_info);
+        r1cs_gen
+            .run(&r1cs_ssa, &type_info)
+            .map_err(|e| Error::UnsatisfiableProgram(e.message))?;
         let r1cs = r1cs_gen.seal();
         let mut num_non_zero_terms = 0;
         for r1c in r1cs.constraints.iter() {
