@@ -1630,7 +1630,9 @@ fn expected_step_status(
         // later stage. Those preempted stages are not applicable (the program was correctly
         // rejected before reaching them) — mark them N/A so they neither read as failures nor
         // dilute the success rate. `COMPILED` and `R1CS` themselves keep their real statuses.
-        TestExpectation::ExecutionFailure if r1cs_rejected && key != "COMPILED" && key != "R1CS" => {
+        TestExpectation::ExecutionFailure
+            if r1cs_rejected && key != "COMPILED" && key != "R1CS" =>
+        {
             Status::NotApplicable
         }
         TestExpectation::ExecutionFailure => match key {
@@ -2161,7 +2163,12 @@ mod tests {
         let failed = parse_child_output(
             "exec_fail",
             TestExpectation::ExecutionFailure,
-            &lines(&["START:COMPILED", "END:COMPILED:ok", "START:R1CS", "END:R1CS:fail"]),
+            &lines(&[
+                "START:COMPILED",
+                "END:COMPILED:ok",
+                "START:R1CS",
+                "END:R1CS:fail",
+            ]),
         );
         assert_eq!(failed.steps["R1CS"], Status::Fail);
 
@@ -2179,7 +2186,12 @@ mod tests {
         let result = parse_child_output(
             "ok",
             TestExpectation::ExecutionSuccess,
-            &lines(&["START:COMPILED", "END:COMPILED:ok", "START:R1CS", "END:R1CS:reject"]),
+            &lines(&[
+                "START:COMPILED",
+                "END:COMPILED:ok",
+                "START:R1CS",
+                "END:R1CS:reject",
+            ]),
         );
         assert_eq!(result.steps["R1CS"], Status::Fail);
     }
