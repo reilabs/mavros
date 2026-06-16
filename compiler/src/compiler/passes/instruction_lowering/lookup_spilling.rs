@@ -2,11 +2,14 @@ use ark_ff::{AdditiveGroup, Field as _};
 
 use crate::compiler::{
     Field,
-    analysis::types::FunctionTypeInfo,
+    analysis::{
+        lookup_sizing::{Chunk, LookupSizing, TableKind},
+        types::FunctionTypeInfo,
+    },
     ssa::{
         ValueId,
         hlssa::{
-            CastTarget, Endianness, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix,
+            CastTarget, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, OpCode,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -14,8 +17,11 @@ use crate::compiler::{
 
 use super::{InstructionLoweringRule, LoweringContext};
 
-const SPREAD_SPILL_THRESHOLD_BITS: u8 = 16;
-
+/// Lowers rangecheck and spread lookups into chunked lookups against the table sizes chosen by the
+/// [`LookupSizing`] analysis. A `w`-bit value is split into chunks; a full chunk of exactly the
+/// table width is one lookup, while a residual chunk narrower than the table is bounded with the
+/// "2-larger" trick (two lookups). Rangechecks may be served by a spread table's key column when
+/// the optimizer found that cheaper.
 pub struct LowerLookupSpillingOps {}
 
 impl InstructionLoweringRule for LowerLookupSpillingOps {
@@ -25,6 +31,9 @@ impl InstructionLoweringRule for LowerLookupSpillingOps {
         context: &LoweringContext<'_>,
         instruction: &OpCode,
     ) -> bool {
+        let sizing = context
+            .lookup_sizing()
+            .expect("lookup_spilling requires the LookupSizing analysis");
         match instruction {
             OpCode::Lookup {
                 target: LookupTarget::Rangecheck(bits),
@@ -32,21 +41,34 @@ impl InstructionLoweringRule for LowerLookupSpillingOps {
                 flag,
             } => {
                 assert_eq!(args.len(), 1, "Rangecheck lookup must have exactly one key");
-                self.spill_rangecheck_bits(b, args[0], *bits as usize, *flag);
-                true
+                self.spill_rangecheck(b, context.types(), sizing, args[0], *bits as usize, *flag)
+            }
+            OpCode::Lookup {
+                target: LookupTarget::DynRangecheck(_),
+                args,
+                flag,
+            } => {
+                // Dynamic-radix digit checks currently only support radix 256 (8-bit digits;
+                // asserted in the cost model and R1CS gen), so treat them as static 8-bit
+                // rangechecks and route them through the chosen tables.
+                assert_eq!(
+                    args.len(),
+                    1,
+                    "DynRangecheck lookup must have exactly one key"
+                );
+                self.spill_rangecheck(b, context.types(), sizing, args[0], 8, *flag)
             }
             OpCode::Lookup {
                 target: LookupTarget::Spread(bits),
                 args,
                 flag,
-            } if *bits >= SPREAD_SPILL_THRESHOLD_BITS => {
+            } => {
                 assert_eq!(
                     args.len(),
                     2,
                     "Spread lookup must have exactly one key and one result"
                 );
-                self.spill_wide_spread_lookup(b, context.types(), args[0], args[1], *flag, *bits);
-                true
+                self.spill_spread(b, context.types(), sizing, args[0], args[1], *flag, *bits)
             }
             _ => false,
         }
@@ -58,160 +80,290 @@ impl LowerLookupSpillingOps {
         Self {}
     }
 
-    /// Rangecheck `value in [0, 2^bits)` for any `bits >= 1`.
-    fn spill_rangecheck_bits(
+    /// Rangecheck `value in [0, 2^bits)`. Returns `false` (pass through unchanged) when the value
+    /// is served directly by a single same-width rangecheck table, otherwise emits the chunked
+    /// lookups and returns `true`.
+    fn spill_rangecheck(
         &self,
         b: &mut HLBlockEmitter<'_>,
+        types: &FunctionTypeInfo,
+        sizing: &LookupSizing,
         value: ValueId,
         bits: usize,
         flag: ValueId,
-    ) {
+    ) -> bool {
         assert!(bits >= 1, "rangecheck width must be at least 1 bit");
 
         if bits == 1 {
-            let one = b.field_const(Field::ONE);
-            if flag == one {
-                b.constrain(value, value, value);
-                return;
-            }
-            let value_plain = b.value_of(value);
-            let square_hint = b.mul(value_plain, value_plain);
-            let square = b.write_witness(square_hint);
-            b.constrain(value, value, square);
-            let diff = b.sub(square, value);
-            let zero = b.field_const(Field::ZERO);
-            b.constrain(flag, diff, zero);
+            self.spill_one_bit_rangecheck(b, value, flag);
+            return true;
+        }
+
+        assert!(
+            bits <= MAX_SUPPORTED_UNSIGNED_BITS,
+            "rangecheck spilling supports widths up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got {bits}"
+        );
+
+        let plan = sizing.decompose_rangecheck(bits as u8);
+        if is_direct_passthrough(&plan, bits as u8, TableKind::Range) {
+            return false;
+        }
+
+        let value_ty = types.get_value_type(value);
+        let is_witness = value_ty.is_witness_of();
+        let pure = if is_witness { b.value_of(value) } else { value };
+        // Chunk extraction works on an unsigned integer; widen to the smallest backend-supported
+        // width that holds the value (bytecode only materializes u-constants of width <= 64 or
+        // exactly 128, so e.g. a 96-bit rangecheck must extract through u128).
+        let extract_bits = if bits <= 64 {
+            64
+        } else {
+            MAX_SUPPORTED_UNSIGNED_BITS
+        };
+        let pure_u = b.cast_to(CastTarget::U(extract_bits), pure);
+
+        let offsets = cumulative_offsets(&plan);
+        let mut rest = b.field_const(Field::ZERO);
+
+        // Extract every chunk above the lowest as a witness and accumulate `rest`. The lowest
+        // chunk (offset 0) is derived below as `value - rest`, which is a linear combination and
+        // needs no reconstruction constraint.
+        for i in 1..plan.len() {
+            let chunk = plan[i];
+            let raw_u = extract_low_chunk(b, pure_u, extract_bits, offsets[i], chunk.width as usize);
+            let key_field = b.cast_to_field(raw_u);
+            let key = if is_witness {
+                b.write_witness(key_field)
+            } else {
+                key_field
+            };
+            self.emit_rangecheck_chunk(b, chunk, key, flag, is_witness);
+
+            let shift = b.field_const(two_pow(offsets[i]));
+            let shifted = b.mul(key, shift);
+            rest = b.add(rest, shifted);
+        }
+
+        let low_chunk = plan[0];
+        let low = b.sub(value, rest);
+        self.emit_rangecheck_chunk(b, low_chunk, low, flag, is_witness);
+        true
+    }
+
+    /// 1-bit rangecheck, lowered algebraically as `b·(b-1) = 0` rather than a table lookup.
+    fn spill_one_bit_rangecheck(&self, b: &mut HLBlockEmitter<'_>, value: ValueId, flag: ValueId) {
+        let one = b.field_const(Field::ONE);
+        if flag == one {
+            b.constrain(value, value, value);
             return;
         }
-        if bits == 8 {
-            b.lookup_rngchk_8(value, flag);
-            return;
-        }
+        let value_plain = b.value_of(value);
+        let square_hint = b.mul(value_plain, value_plain);
+        let square = b.write_witness(square_hint);
+        b.constrain(value, value, square);
+        let diff = b.sub(square, value);
+        let zero = b.field_const(Field::ZERO);
+        b.constrain(flag, diff, zero);
+    }
 
-        let full_bytes = bits / 8;
-        let leftover_bits = bits % 8;
-        let total_chunks = full_bytes + if leftover_bits > 0 { 1 } else { 0 };
-
-        let pure_value = b.value_of(value);
-        let bytes_val = b.fresh_value();
-        b.emit(OpCode::ToRadix {
-            result: bytes_val,
-            value: pure_value,
-            radix: Radix::Bytes,
-            endianness: Endianness::Big,
-            count: total_chunks,
-        });
-        let two_to_8 = b.field_const(Field::from(256));
-
-        let mut partial = b.field_const(Field::ZERO);
-        let mut top_chunk: Option<ValueId> = None;
-        for i in 0..total_chunks - 1 {
-            let idx = b.u_const(32, i as u128);
-            let byte = b.array_get(bytes_val, idx);
-            let byte_field = b.cast_to_field(byte);
-            let byte_wit = b.write_witness(byte_field);
-            b.lookup_rngchk_8(byte_wit, flag);
-            if i == 0 {
-                top_chunk = Some(byte_wit);
+    /// Emit the lookup(s) for one rangecheck chunk: one lookup for a full chunk, plus the
+    /// "2-larger" gap lookup for a partial chunk. The chunk may target a rangecheck table or, when
+    /// the optimizer chose to share, a spread table's key column (which needs a `spread(key)`
+    /// hint that is otherwise discarded).
+    fn emit_rangecheck_chunk(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        chunk: Chunk,
+        key: ValueId,
+        flag: ValueId,
+        is_witness: bool,
+    ) {
+        match chunk.table {
+            TableKind::Range => {
+                b.lookup_rngchk(LookupTarget::Rangecheck(chunk.table_size), key, flag);
+                if chunk.partial {
+                    let gap = self.partial_gap(b, chunk, key);
+                    b.lookup_rngchk(LookupTarget::Rangecheck(chunk.table_size), gap, flag);
+                }
             }
-            let shift_prev = b.mul(partial, two_to_8);
-            partial = b.add(shift_prev, byte_wit);
-        }
-
-        let partial_shifted = b.mul(partial, two_to_8);
-        let lsb = b.sub(value, partial_shifted);
-        b.lookup_rngchk_8(lsb, flag);
-        if total_chunks == 1 {
-            top_chunk = Some(lsb);
-        }
-
-        if leftover_bits > 0 {
-            let top = top_chunk.expect("top_chunk set when total_chunks >= 1");
-            let bound = b.field_const(Field::from((1u128 << leftover_bits) - 1));
-            let gap = b.sub(bound, top);
-            b.lookup_rngchk_8(gap, flag);
+            TableKind::Spread => {
+                let spread = self.spread_hint(b, key, chunk.table_size, is_witness);
+                b.lookup_spread(chunk.table_size, key, spread, flag);
+                if chunk.partial {
+                    let gap = self.partial_gap(b, chunk, key);
+                    let gap_spread = self.spread_hint(b, gap, chunk.table_size, is_witness);
+                    b.lookup_spread(chunk.table_size, gap, gap_spread, flag);
+                }
+            }
         }
     }
 
-    fn spill_wide_spread_lookup(
+    /// Spread `key in [0, 2^bits)` to `expected_spread`. Returns `false` (pass through unchanged)
+    /// when served directly by a single same-width spread table, otherwise emits the chunked
+    /// lookups and returns `true`.
+    fn spill_spread(
         &self,
         b: &mut HLBlockEmitter<'_>,
-        function_type_info: &FunctionTypeInfo,
+        types: &FunctionTypeInfo,
+        sizing: &LookupSizing,
         key: ValueId,
         expected_spread: ValueId,
         flag: ValueId,
         bits: u8,
-    ) {
+    ) -> bool {
         assert!(
             bits as usize <= MAX_SUPPORTED_UNSIGNED_BITS,
-            "wide Spread lookup spilling currently supports widths up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got {bits}"
+            "spread spilling supports widths up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got {bits}"
         );
 
-        let key_type = function_type_info.get_value_type(key);
-        let key_is_witness = key_type.is_witness_of();
-        let key_inner = key_type.strip_witness();
+        let plan = sizing.decompose_spread(bits);
+        if is_direct_passthrough(&plan, bits, TableKind::Spread) {
+            return false;
+        }
+
+        let key_ty = types.get_value_type(key);
+        let key_is_witness = key_ty.is_witness_of();
+        let key_inner_is_field = key_ty.strip_witness().is_field();
+        let flag_field = b.ensure_field(flag, types.get_value_type(flag));
+        let zero = b.field_const(Field::ZERO);
+
+        // Single chunk: the whole value, looked up directly (full, or partial with a gap). The key
+        // is the value itself, so there is no reconstruction to constrain.
+        if plan.len() == 1 {
+            let chunk = plan[0];
+            let key_field = if key_inner_is_field {
+                key
+            } else {
+                b.cast_to_field(key)
+            };
+            b.lookup_spread(chunk.table_size, key_field, expected_spread, flag_field);
+            if chunk.partial {
+                let gap = self.partial_gap(b, chunk, key_field);
+                let gap_spread = self.spread_hint(b, gap, chunk.table_size, key_is_witness);
+                b.lookup_spread(chunk.table_size, gap, gap_spread, flag_field);
+            }
+            return true;
+        }
+
         let mut pure_key = if key_is_witness { b.value_of(key) } else { key };
-        if key_inner.is_field() {
+        if key_inner_is_field {
             pure_key = b.cast_to(CastTarget::U(bits as usize), pure_key);
         }
 
-        let flag_field = b.ensure_field(flag, function_type_info.get_value_type(flag));
-        let zero = b.field_const(Field::ZERO);
+        // Order the partial (if any) first so the last chunk — whose spread we derive to keep the
+        // reconstruction exact — is always a full chunk.
+        let ordered = partial_first(&plan);
+        let offsets = cumulative_offsets(&ordered);
+        let last = ordered.len() - 1;
+
         let mut reconstructed_key = zero;
         let mut reconstructed_spread = zero;
-        let mut offset = 0usize;
-        let bits = bits as usize;
-
-        while offset < bits {
-            let chunk_bits = (bits - offset).min(8);
-            let chunk = extract_low_chunk(b, pure_key, bits, offset, chunk_bits);
-            let chunk_field = b.cast_to_field(chunk);
+        for i in 0..ordered.len() {
+            let chunk = ordered[i];
+            let offset = offsets[i];
+            let chunk_u = extract_low_chunk(b, pure_key, bits as usize, offset, chunk.width as usize);
+            let chunk_field = b.cast_to_field(chunk_u);
             let chunk_key = if key_is_witness {
                 b.write_witness(chunk_field)
             } else {
                 chunk_field
             };
-            let is_last = offset + chunk_bits == bits;
 
-            let chunk_spread = if is_last {
-                let remaining_spread = b.sub(expected_spread, reconstructed_spread);
-                let inv_spread_shift = two_pow(offset * 2)
+            // The last (full) chunk's spread is derived from what's left of `expected_spread`,
+            // which makes the spread reconstruction exact without a separate constraint.
+            let chunk_spread = if i == last {
+                let remaining = b.sub(expected_spread, reconstructed_spread);
+                let inv_shift = two_pow(offset * 2)
                     .inverse()
-                    .expect("non-zero power of two must be invertible");
-                let inv_spread_shift = b.field_const(inv_spread_shift);
-                b.mul(remaining_spread, inv_spread_shift)
-            } else if key_is_witness {
-                let spread_hint = b.spread(chunk, chunk_bits as u8);
-                let spread_hint_field = b.cast_to_field(spread_hint);
-                b.write_witness(spread_hint_field)
+                    .expect("non-zero power of two is invertible");
+                let inv_shift = b.field_const(inv_shift);
+                b.mul(remaining, inv_shift)
             } else {
-                let spread = b.spread(chunk, chunk_bits as u8);
-                b.cast_to_field(spread)
+                self.spread_hint(b, chunk_key, chunk.table_size, key_is_witness)
             };
 
-            b.lookup_spread(chunk_bits as u8, chunk_key, chunk_spread, flag_field);
+            b.lookup_spread(chunk.table_size, chunk_key, chunk_spread, flag_field);
+            if chunk.partial {
+                let gap = self.partial_gap(b, chunk, chunk_key);
+                let gap_spread = self.spread_hint(b, gap, chunk.table_size, key_is_witness);
+                b.lookup_spread(chunk.table_size, gap, gap_spread, flag_field);
+            }
 
-            let value_shift = b.field_const(two_pow(offset));
-            let shifted_key = b.mul(chunk_key, value_shift);
+            let key_shift = b.field_const(two_pow(offset));
+            let shifted_key = b.mul(chunk_key, key_shift);
             reconstructed_key = b.add(reconstructed_key, shifted_key);
 
-            if !is_last {
+            if i != last {
                 let spread_shift = b.field_const(two_pow(offset * 2));
                 let shifted_spread = b.mul(chunk_spread, spread_shift);
                 reconstructed_spread = b.add(reconstructed_spread, shifted_spread);
             }
-
-            offset += chunk_bits;
         }
 
-        let key_field = if key_inner.is_field() {
+        let key_field = if key_inner_is_field {
             key
         } else {
             b.cast_to_field(key)
         };
         let key_diff = b.sub(reconstructed_key, key_field);
         b.constrain(key_diff, flag_field, zero);
+        true
     }
+
+    /// `(2^width - 1) - key`, the complement looked up by the "2-larger" trick to bound `key` to
+    /// exactly `width` bits.
+    fn partial_gap(&self, b: &mut HLBlockEmitter<'_>, chunk: Chunk, key: ValueId) -> ValueId {
+        let bound = b.field_const(Field::from((1u128 << chunk.width) - 1));
+        b.sub(bound, key)
+    }
+
+    /// Compute `spread(key)` as a hint matching the `table_size`-bit spread table, returned as a
+    /// field (wrapped in a witness when the surrounding values are witnesses).
+    fn spread_hint(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        key: ValueId,
+        table_size: u8,
+        is_witness: bool,
+    ) -> ValueId {
+        let pure = if is_witness { b.value_of(key) } else { key };
+        let key_u = b.cast_to(CastTarget::U(table_size as usize), pure);
+        let spread = b.spread(key_u, table_size);
+        let spread_field = b.cast_to_field(spread);
+        if is_witness {
+            b.write_witness(spread_field)
+        } else {
+            spread_field
+        }
+    }
+}
+
+/// A plan that is a single full chunk in a same-width table of the expected kind is already a
+/// direct lookup; spilling can leave it untouched and let R1CS generation materialize the table.
+fn is_direct_passthrough(plan: &[Chunk], bits: u8, kind: TableKind) -> bool {
+    plan.len() == 1
+        && !plan[0].partial
+        && plan[0].width == bits
+        && plan[0].table_size == bits
+        && plan[0].table == kind
+}
+
+/// Bit offset of each chunk, assigned lowest-order first in plan order.
+fn cumulative_offsets(plan: &[Chunk]) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(plan.len());
+    let mut acc = 0;
+    for chunk in plan {
+        offsets.push(acc);
+        acc += chunk.width as usize;
+    }
+    offsets
+}
+
+/// Reorder a plan to put the partial chunk (if any) first, so the last chunk is always full.
+fn partial_first(plan: &[Chunk]) -> Vec<Chunk> {
+    let mut ordered: Vec<Chunk> = plan.iter().copied().filter(|c| c.partial).collect();
+    ordered.extend(plan.iter().copied().filter(|c| !c.partial));
+    ordered
 }
 
 fn extract_low_chunk(

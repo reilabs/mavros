@@ -355,8 +355,9 @@ pub struct VM {
     pub data: Arrays,
     pub allocation_instrumenter: AllocationInstrumenter,
     pub tables: Vec<TableInfo>,
-    pub rgchk_8: Option<usize>,
-    pub spread_tables: [Option<usize>; 17],
+    /// Lazily-allocated rangecheck tables, indexed by table size in bits (a `2^bits`-row table).
+    pub rgchk_tables: [Option<usize>; 33],
+    pub spread_tables: [Option<usize>; 33],
     pub globals: *mut u64,
     pub struct_layouts: Vec<StructDescriptor>,
     /// Set when the program executes a trap (e.g. a failed assertion). The
@@ -398,8 +399,8 @@ impl VM {
             },
             allocation_instrumenter: AllocationInstrumenter::new(),
             tables: vec![],
-            rgchk_8: None,
-            spread_tables: [None; 17],
+            rgchk_tables: [None; 33],
+            spread_tables: [None; 33],
             globals,
             struct_layouts,
             trapped: false,
@@ -436,8 +437,8 @@ impl VM {
             },
             allocation_instrumenter: AllocationInstrumenter::new(),
             tables: vec![],
-            rgchk_8: None,
-            spread_tables: [None; 17],
+            rgchk_tables: [None; 33],
+            spread_tables: [None; 33],
             globals,
             struct_layouts,
             trapped: false,
@@ -1705,13 +1706,14 @@ mod def {
     }
 
     #[opcode]
-    fn rngchk_8_field(#[frame] val: Field, #[frame] flag: Field, vm: &mut VM) {
-        if vm.rgchk_8.is_none() {
+    fn rngchk_field(#[frame] val: Field, #[frame] flag: Field, bits: usize, vm: &mut VM) {
+        if vm.rgchk_tables[bits].is_none() {
+            let length = 1usize << bits;
             let table_info = TableInfo {
                 multiplicities_wit: unsafe { vm.data.as_forward.multiplicities_witness },
                 num_indices: 1,
                 num_values: 0,
-                length: 256,
+                length,
                 elem_inverses_constraint_section_offset: unsafe {
                     vm.data.as_forward.elem_inverses_constraint_section_offset
                 },
@@ -1719,17 +1721,17 @@ mod def {
                     vm.data.as_forward.elem_inverses_witness_section_offset
                 },
             };
-            vm.rgchk_8 = Some(vm.tables.len());
+            vm.rgchk_tables[bits] = Some(vm.tables.len());
             vm.tables.push(table_info);
             unsafe {
                 vm.data.as_forward.multiplicities_witness =
-                    vm.data.as_forward.multiplicities_witness.offset(256);
-                vm.data.as_forward.elem_inverses_constraint_section_offset += 257;
-                vm.data.as_forward.elem_inverses_witness_section_offset += 256;
+                    vm.data.as_forward.multiplicities_witness.add(length);
+                vm.data.as_forward.elem_inverses_constraint_section_offset += length + 1;
+                vm.data.as_forward.elem_inverses_witness_section_offset += length;
             }
         }
         let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
-        let table_idx = *vm.rgchk_8.as_ref().unwrap();
+        let table_idx = vm.rgchk_tables[bits].unwrap();
         let table_info = &vm.tables[table_idx];
         unsafe {
             if flag_u64 != 0 {
@@ -1815,8 +1817,9 @@ mod def {
     }
 
     #[opcode]
-    fn drngchk_8_field(#[frame] val: BoxedValue, #[frame] flag: BoxedValue, vm: &mut VM) {
-        if vm.rgchk_8.is_none() {
+    fn drngchk_field(#[frame] val: BoxedValue, #[frame] flag: BoxedValue, bits: usize, vm: &mut VM) {
+        let length = 1usize << bits;
+        if vm.rgchk_tables[bits].is_none() {
             let inverses_constraint_section_offset =
                 unsafe { vm.data.as_ad.current_cnst_tables_off };
             let inverses_witness_section_offset = unsafe { vm.data.as_ad.current_wit_tables_off };
@@ -1825,25 +1828,25 @@ mod def {
                 multiplicities_wit: ptr::null_mut(),
                 num_indices: 1,
                 num_values: 0,
-                length: 256,
+                length,
                 elem_inverses_witness_section_offset: inverses_witness_section_offset,
                 elem_inverses_constraint_section_offset: inverses_constraint_section_offset,
             };
-            vm.rgchk_8 = Some(vm.tables.len());
+            vm.rgchk_tables[bits] = Some(vm.tables.len());
             vm.tables.push(table_info);
             unsafe {
-                vm.data.as_ad.current_wit_multiplicities_off += 256;
-                vm.data.as_ad.current_wit_tables_off += 256;
-                vm.data.as_ad.current_cnst_tables_off += 257;
+                vm.data.as_ad.current_wit_multiplicities_off += length;
+                vm.data.as_ad.current_wit_tables_off += length;
+                vm.data.as_ad.current_cnst_tables_off += length + 1;
             }
             let inv_sum_coeff = unsafe {
                 *vm.data
                     .as_ad
                     .ad_coeffs
-                    .offset(inverses_constraint_section_offset as isize + 256)
+                    .offset(inverses_constraint_section_offset as isize + length as isize)
             };
 
-            for i in 0..256 {
+            for i in 0..length as isize {
                 // For each element in the table, we have constraint `elem_inv_witness * (alpha - i) - multiplicity_witness = 0`
                 let coeff = unsafe {
                     *vm.data
@@ -1886,7 +1889,7 @@ mod def {
                 *vm.data.as_ad.out_db += inv_sum_coeff;
             }
         }
-        let table_idx = *vm.rgchk_8.as_ref().unwrap();
+        let table_idx = vm.rgchk_tables[bits].unwrap();
         let table_info = &vm.tables[table_idx];
 
         let inv_coeff = unsafe {
@@ -1903,7 +1906,7 @@ mod def {
             *vm.data
                 .as_ad
                 .ad_coeffs
-                .add(table_info.elem_inverses_constraint_section_offset + 256)
+                .add(table_info.elem_inverses_constraint_section_offset + length)
         };
 
         let current_inv_wit_offset = unsafe {

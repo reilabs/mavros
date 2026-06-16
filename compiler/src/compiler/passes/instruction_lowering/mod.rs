@@ -15,10 +15,11 @@ mod witness_spread;
 use crate::compiler::{
     analysis::{
         flow_analysis::FlowAnalysis,
+        lookup_sizing::LookupSizing,
         types::{FunctionTypeInfo, Types},
         value_range_analysis::{FunctionValueRanges, IntInterval, ValueRangeAnalysis},
     },
-    pass_manager::{AnalysisId, AnalysisStore, Pass},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::hlssa::{
         HLSSA, OpCode,
         builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder, HLSSABuilder},
@@ -41,23 +42,34 @@ pub struct InstructionLowering {
     name: &'static str,
     lowerers: Vec<Box<dyn InstructionLoweringRule>>,
     fixed_point: bool,
+    needs: Vec<AnalysisId>,
 }
 
 pub(super) struct LoweringContext<'a> {
     types: &'a FunctionTypeInfo,
     value_ranges: Option<&'a FunctionValueRanges>,
+    lookup_sizing: Option<&'a LookupSizing>,
 }
 
 impl<'a> LoweringContext<'a> {
-    pub fn new(types: &'a FunctionTypeInfo, value_ranges: Option<&'a FunctionValueRanges>) -> Self {
+    pub fn new(
+        types: &'a FunctionTypeInfo,
+        value_ranges: Option<&'a FunctionValueRanges>,
+        lookup_sizing: Option<&'a LookupSizing>,
+    ) -> Self {
         Self {
             types,
             value_ranges,
+            lookup_sizing,
         }
     }
 
     pub fn types(&self) -> &'a FunctionTypeInfo {
         self.types
+    }
+
+    pub fn lookup_sizing(&self) -> Option<&'a LookupSizing> {
+        self.lookup_sizing
     }
 
     pub fn range(&self, value: crate::compiler::ssa::ValueId) -> IntInterval {
@@ -122,11 +134,13 @@ impl InstructionLowering {
     }
 
     pub fn lookup_spilling() -> Self {
-        Self::with_lowerers(
+        let mut pass = Self::with_lowerers(
             "lookup_spilling",
             vec![Box::new(LowerLookupSpillingOps::new())],
             false,
-        )
+        );
+        pass.needs = vec![LookupSizing::id()];
+        pass
     }
 
     pub fn degree_spilling() -> Self {
@@ -146,10 +160,11 @@ impl InstructionLowering {
             name,
             lowerers,
             fixed_point,
+            needs: vec![],
         }
     }
 
-    fn run_iteration(&self, ssa: &mut HLSSA) -> bool {
+    fn run_iteration(&self, ssa: &mut HLSSA, lookup_sizing: Option<&LookupSizing>) -> bool {
         let flow = FlowAnalysis::run(ssa);
         let types = Types::new().run(ssa, &flow);
         let value_ranges = ValueRangeAnalysis::new().run(ssa, &flow, &types);
@@ -161,8 +176,12 @@ impl InstructionLowering {
             let function_type_info = types.get_function(function_id);
             let function_value_ranges = value_ranges.get_function(function_id);
             sb.modify_function(function_id, |fb| {
-                changed |=
-                    self.run_on_function(fb, function_type_info, Some(function_value_ranges));
+                changed |= self.run_on_function(
+                    fb,
+                    function_type_info,
+                    Some(function_value_ranges),
+                    lookup_sizing,
+                );
             });
         }
         changed
@@ -173,8 +192,10 @@ impl InstructionLowering {
         fb: &mut HLFunctionBuilder<'_>,
         function_type_info: &FunctionTypeInfo,
         function_value_ranges: Option<&FunctionValueRanges>,
+        lookup_sizing: Option<&LookupSizing>,
     ) -> bool {
-        let context = LoweringContext::new(function_type_info, function_value_ranges);
+        let context =
+            LoweringContext::new(function_type_info, function_value_ranges, lookup_sizing);
         let mut changed = false;
         let block_ids: Vec<_> = fb.function.get_blocks().map(|(bid, _)| *bid).collect();
         for block_id in block_ids {
@@ -221,14 +242,20 @@ impl Pass for InstructionLowering {
         self.name
     }
 
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+    fn needs(&self) -> Vec<AnalysisId> {
+        self.needs.clone()
+    }
+
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+        let lookup_sizing = store.try_get::<LookupSizing>();
+
         if !self.fixed_point {
-            self.run_iteration(ssa);
+            self.run_iteration(ssa, lookup_sizing);
             return;
         }
 
         for _ in 0..ITERATION_LIMIT {
-            if !self.run_iteration(ssa) {
+            if !self.run_iteration(ssa, lookup_sizing) {
                 return;
             }
         }

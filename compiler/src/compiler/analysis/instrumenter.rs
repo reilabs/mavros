@@ -1907,6 +1907,13 @@ pub struct Summary {
     total_constraints: usize,
     total_savings_to_make: usize,
     pub functions: HashMap<FunctionSignature, SpecializationSummary>,
+    /// Whole-program rangecheck lookup requests by *original* width (call-multiplicity
+    /// weighted, before any spilling into chunks). Consumed by `LookupSizing` to pick
+    /// optimal table sizes.
+    pub global_rangecheck_lookups: HashMap<u8, usize>,
+    /// Whole-program spread lookup requests by *original* width (call-multiplicity
+    /// weighted, before any spilling into chunks).
+    pub global_spread_lookups: HashMap<u8, usize>,
 }
 
 #[derive(Default)]
@@ -2064,6 +2071,8 @@ impl CostAnalysis {
             functions: HashMap::default(),
             total_constraints: 0,
             total_savings_to_make: 0,
+            global_rangecheck_lookups: HashMap::default(),
+            global_spread_lookups: HashMap::default(),
         };
         for (sig, cost) in self.functions.iter() {
             r.functions.insert(
@@ -2085,7 +2094,17 @@ impl CostAnalysis {
                 .saturating_sub(summary.specialized_constraints)
                 * summary.calls;
             r.total_savings_to_make += summary.specialization_total_savings;
-            aggregate.add(&self.functions[sig].raw, summary.calls);
+            let raw = &self.functions[sig].raw;
+            aggregate.add(raw, summary.calls);
+            // Aggregate the *raw* (un-spilled) lookup widths for the table-size optimizer.
+            // Note `AggregatedConstraintCost` pre-splits spreads into bytes via
+            // `final_spread_lookups()`; the optimizer needs the original widths instead.
+            for (&bits, &count) in raw.rangecheck_lookups.iter() {
+                *r.global_rangecheck_lookups.entry(bits).or_insert(0) += count * summary.calls;
+            }
+            for (&bits, &count) in raw.spread_lookups.iter() {
+                *r.global_spread_lookups.entry(bits).or_insert(0) += count * summary.calls;
+            }
         }
         r.total_constraints = aggregate.total_constraints();
         r
