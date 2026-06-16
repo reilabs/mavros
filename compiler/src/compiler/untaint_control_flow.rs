@@ -12,7 +12,7 @@ use crate::{
             witness_taint_inference::WitnessTaintInference,
         },
         ssa::{
-            BlockId, FunctionId, Terminator, ValueId,
+            BlockId, FunctionId, LocatedInstruction, Terminator, ValueId,
             hlssa::{
                 BinaryArithOpKind, CallTarget, CastTarget, HLBlock, HLFunction, HLSSA, OpCode,
                 SequenceTargetType, Type, TypeExpr,
@@ -524,7 +524,9 @@ impl UntaintControlFlow {
                                     }
                                 }
                                 for instr in instrs {
-                                    function.get_block_mut(merger_block).push_instruction(instr);
+                                    function
+                                        .get_block_mut(merger_block)
+                                        .push_located_instruction(instr);
                                 }
                             }
                         }
@@ -884,10 +886,10 @@ fn emit_strip_witness(
 fn flush_conversion_instrs(
     instrs: &mut Vec<OpCode>,
     taint: Option<ValueId>,
-    cast_instrs: Vec<OpCode>,
+    cast_instrs: Vec<LocatedInstruction<OpCode>>,
 ) {
     for instr in cast_instrs {
-        maybe_guard(instrs, taint, instr);
+        maybe_guard(instrs, taint, instr.instruction);
     }
 }
 
