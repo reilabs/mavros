@@ -60,6 +60,10 @@ pub struct ExpressionConverter<'a> {
     /// Maps GlobalId to global slot index
     global_slots: &'a HashMap<GlobalId, usize>,
 
+    /// Maps GlobalId to an interned constant ValueId when the global initializer lowered to a
+    /// constant.
+    global_constants: &'a HashMap<GlobalId, ValueId>,
+
     /// Current block being emitted into
     current_block: BlockId,
 }
@@ -70,6 +74,7 @@ impl<'a> ExpressionConverter<'a> {
         natively_unconstrained: &'a HashSet<AstFuncId>,
         in_unconstrained: bool,
         global_slots: &'a HashMap<GlobalId, usize>,
+        global_constants: &'a HashMap<GlobalId, ValueId>,
         entry_block: BlockId,
     ) -> Self {
         Self {
@@ -81,6 +86,7 @@ impl<'a> ExpressionConverter<'a> {
             loop_stack: Vec::new(),
             in_unconstrained,
             global_slots,
+            global_constants,
             current_block: entry_block,
         }
     }
@@ -227,6 +233,9 @@ impl<'a> ExpressionConverter<'a> {
                 todo!("Oracle function not yet supported: {}", name)
             }
             Definition::Global(global_id) => {
+                if let Some(value) = self.global_constants.get(global_id) {
+                    return Some(*value);
+                }
                 let slot = *self
                     .global_slots
                     .get(global_id)
