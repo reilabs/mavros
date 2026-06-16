@@ -1663,7 +1663,36 @@ const REGRESSION_COLS: &[(usize, &str)] = &[
     (19, "AD WASM No Leak"),
 ];
 
+/// Verify the table's header matches the column layout the index-based checks assume. Without
+/// this, a stale-format status file (e.g. a baseline from before a column change) still has enough
+/// cells to parse, so the checks would silently compare misaligned columns.
+fn validate_layout(path: &Path) {
+    let content =
+        fs::read_to_string(path).unwrap_or_else(|_| panic!("Cannot read {}", path.display()));
+    let header: Vec<String> = content
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split('|')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    for &(col, name) in REGRESSION_COLS {
+        let found = header.get(col).map(String::as_str).unwrap_or("<missing>");
+        assert_eq!(
+            found,
+            name,
+            "Status table {} has an unexpected layout (column {col} is {found:?}, expected {name:?}). \
+             Regenerate the baseline — the regression/growth checks compare columns by position and \
+             cannot align mismatched layouts.",
+            path.display(),
+        );
+    }
+}
+
 fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
+    validate_layout(baseline_path);
+    validate_layout(current_path);
     let baseline = parse_status_rows(baseline_path);
     let current = parse_status_rows(current_path);
 
@@ -1697,6 +1726,8 @@ fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
 }
 
 fn check_growth(baseline_path: &Path, current_path: &Path) {
+    validate_layout(baseline_path);
+    validate_layout(current_path);
     let baseline = parse_status_rows(baseline_path);
     let current = parse_status_rows(current_path);
 
