@@ -136,25 +136,37 @@ fn run_single(root: PathBuf, expect_failure: bool) {
 
     // 1. Compile
     emit("START:COMPILED");
-    let driver = (|| {
-        let project = Project::new(root.clone()).ok()?;
-        let mut driver = Driver::new(project, false);
-        driver.run_noir_compiler().ok()?;
-        driver.make_struct_access_static().ok()?;
-        driver.monomorphize().ok()?;
-        driver.spill_witness().ok()?;
-        Some(driver)
+    let Some(project) = Project::new(root.clone()).ok() else {
+        emit("END:COMPILED:fail");
+        return;
+    };
+    let mut driver = Driver::new(project, false);
+    let compile_result = (|| -> Result<(), DriverError> {
+        driver.run_noir_compiler()?;
+        driver.make_struct_access_static()?;
+        driver.monomorphize()?;
+        driver.spill_witness()?;
+        Ok(())
     })();
-    let mut driver = match driver {
-        Some(d) => {
-            emit("END:COMPILED:ok");
-            d
+    match compile_result {
+        Ok(()) => emit("END:COMPILED:ok"),
+        // If the Noir compiler itself rejects the program — a comptime expression that
+        // overflows (`comptime_bitshift_failure`), a type error, etc. — the program will never
+        // execute. That is a legitimate expected failure, accepted the same way as a
+        // statically-unsatisfiable R1CS, so it gets the `reject` marker regardless of which
+        // compile sub-step surfaced it. Any other error is a mavros-side problem and stays a
+        // plain `fail`, so a real regression is never masked.
+        Err(DriverError::NoirCompilerError(diags)) => {
+            eprintln!("Noir compiler rejected program: {diags:?}");
+            emit("END:COMPILED:reject");
+            return;
         }
-        None => {
+        Err(e) => {
+            eprintln!("Compile error: {e}");
             emit("END:COMPILED:fail");
             return;
         }
-    };
+    }
 
     // 2. R1CS
     emit("START:R1CS");
@@ -1294,19 +1306,21 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
         }
     }
 
-    // When the program is cleanly rejected at R1CS, no later stage runs at all. For an
-    // expected-failure test that rejection *is* the success, so the stages it preempts must be
-    // reported N/A rather than ➖ Skip — otherwise the success-rate denominator (which counts
-    // every non-N/A cell) would count them against an otherwise fully-handled test.
-    let r1cs_rejected = rejected.contains_key("R1CS");
+    // A program can be cleanly rejected at the first stage where it is proven it will never
+    // execute — the Noir frontend (COMPILED) or R1CS generation. That rejection preempts every
+    // later stage, so we track which stage it happened at (by position in the pipeline) and
+    // report all later stages N/A rather than ➖ Skip — otherwise the success-rate denominator
+    // (which counts every non-N/A cell) would count them against an otherwise handled test.
+    let reject_idx = STEP_KEYS.iter().position(|key| rejected.contains_key(*key));
 
     let steps = STEP_KEYS
         .iter()
-        .map(|&key| {
+        .enumerate()
+        .map(|(idx, &key)| {
             let raw_status = raw_step_status(key, &started, &ended, &rejected);
             (
                 key.to_string(),
-                expected_step_status(key, raw_status, expectation, r1cs_rejected),
+                expected_step_status(idx, key, raw_status, expectation, reject_idx),
             )
         })
         .collect();
@@ -1614,10 +1628,11 @@ fn raw_step_status(
 }
 
 fn expected_step_status(
+    idx: usize,
     key: &str,
     raw_status: Status,
     expectation: TestExpectation,
-    r1cs_rejected: bool,
+    reject_idx: Option<usize>,
 ) -> Status {
     match expectation {
         // A program that is supposed to execute must not be rejected as unsatisfiable; if it
@@ -1626,28 +1641,23 @@ fn expected_step_status(
             Status::Rejected => Status::Fail,
             other => other,
         },
-        // A clean R1CS rejection is the expected failure for these tests, and it preempts every
-        // later stage. Those preempted stages are not applicable (the program was correctly
-        // rejected before reaching them) — mark them N/A so they neither read as failures nor
-        // dilute the success rate. `COMPILED` and `R1CS` themselves keep their real statuses.
-        TestExpectation::ExecutionFailure
-            if r1cs_rejected && key != "COMPILED" && key != "R1CS" =>
-        {
-            Status::NotApplicable
+        // A program proven to never execute is rejected cleanly at the first stage that can
+        // prove it: the Noir frontend (`COMPILED`, e.g. a comptime overflow) or R1CS generation
+        // (`R1CS`, a statically-unsatisfiable assertion — `Err(UnsatisfiableProgram)`). The
+        // child reports that with a `reject` marker. For an expected-failure test that
+        // rejection is exactly the success, so: stages before it keep their real status (they
+        // genuinely ran), the rejecting stage itself reads ✅, and every later stage is
+        // preempted and reads N/A — so it neither looks like a failure nor dilutes the success
+        // rate. A plain `Fail` or a `Crash` has no `reject` marker, so a real regression is
+        // never masked by the expected-failure flag.
+        TestExpectation::ExecutionFailure if reject_idx.is_some() => {
+            match idx.cmp(&reject_idx.unwrap()) {
+                std::cmp::Ordering::Less => raw_status,
+                std::cmp::Ordering::Equal => Status::Pass,
+                std::cmp::Ordering::Greater => Status::NotApplicable,
+            }
         }
         TestExpectation::ExecutionFailure => match key {
-            // A statically-unsatisfiable program (an assertion or range/equality constraint
-            // that folds to a failing constant) is now rejected cleanly during R1CS
-            // generation instead of panicking the compiler — `generate_r1cs` returns
-            // `Err(UnsatisfiableProgram)`, which the child reports as a `reject`. That clean
-            // rejection is exactly the expected failure, so it counts as success and the
-            // downstream stages it skips stay neutral. A plain `Fail` (some other R1CS error)
-            // or a `Crash` (an un-converted panic) is NOT accepted — those surface as-is so a
-            // real regression is never masked by the expected-failure flag.
-            "R1CS" => match raw_status {
-                Status::Rejected => Status::Pass,
-                other => other,
-            },
             "WITGEN_RUN" | "WITGEN_WASM_RUN" => match raw_status {
                 Status::Fail | Status::Crash => Status::Pass,
                 Status::Pass => Status::Fail,
@@ -2143,13 +2153,37 @@ mod tests {
         assert_eq!(result.steps["COMPILED"], Status::Pass);
         assert_eq!(result.steps["R1CS"], Status::Pass);
         for key in [
-            "WITGEN_COMPILE",
+            "COMPILE",
             "WITGEN_RUN",
             "WITGEN_CORRECT",
             "WITGEN_NOLEAK",
-            "WITGEN_WASM_COMPILE",
+            "WASM_COMPILE",
             "WITGEN_WASM_RUN",
-            "AD_WASM_COMPILE",
+            "AD_WASM_RUN",
+        ] {
+            assert_eq!(result.steps[key], Status::NotApplicable, "{key}");
+        }
+    }
+
+    #[test]
+    fn execution_failure_passes_when_noir_frontend_rejects_program() {
+        // The Noir frontend itself can reject a program that will never execute (e.g. the
+        // comptime bit-shift overflow in `comptime_bitshift_failure`). That clean rejection at
+        // COMPILED is the expected failure: COMPILED reads ✅ and every later stage — which
+        // never ran — reads N/A rather than dragging the success rate down.
+        let result = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&["START:COMPILED", "END:COMPILED:reject"]),
+        );
+
+        assert_eq!(result.steps["COMPILED"], Status::Pass);
+        for key in [
+            "R1CS",
+            "COMPILE",
+            "WITGEN_RUN",
+            "WASM_COMPILE",
+            "WITGEN_WASM_RUN",
             "AD_WASM_RUN",
         ] {
             assert_eq!(result.steps[key], Status::NotApplicable, "{key}");
