@@ -154,14 +154,14 @@ impl LatticeResult<'_> {
 
 type Facts = HashMap<ValueId, Fact>;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Fact {
     constant: Arc<Constant>,
     source: FactSource,
 }
 
 impl Fact {
-    fn new(constant: Arc<Constant>, source: FactSource) -> Self {
+    const fn new(constant: Arc<Constant>, source: FactSource) -> Self {
         Self { constant, source }
     }
 }
@@ -173,15 +173,15 @@ impl FactSource {
     const BRANCH: Self = Self(1 << 0);
     const ASSERT: Self = Self(1 << 1);
 
-    fn union(self, other: Self) -> Self {
+    const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
-    fn intersection(self, other: Self) -> Self {
+    const fn intersection(self, other: Self) -> Self {
         Self(self.0 & other.0)
     }
 
-    fn contains_branch(self) -> bool {
+    const fn contains_branch(self) -> bool {
         self.0 & Self::BRANCH.0 != 0
     }
 }
@@ -234,11 +234,8 @@ fn branch_propagated_facts(facts: Option<&Facts>) -> Facts {
     facts
         .into_iter()
         .flat_map(|facts| facts.iter())
-        .filter_map(|(value, fact)| {
-            fact.source
-                .contains_branch()
-                .then(|| (*value, Fact::new(fact.constant.clone(), FactSource::BRANCH)))
-        })
+        .filter(|(_, fact)| fact.source.contains_branch())
+        .map(|(value, fact)| (*value, Fact::new(fact.constant.clone(), FactSource::BRANCH)))
         .collect()
 }
 
@@ -730,9 +727,6 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
                 lhs,
                 rhs,
             } => self.add_equality_operand_facts(facts, *lhs, *rhs, FactSource::ASSERT),
-            OpCode::AssertCmp {
-                kind: CmpKind::Lt, ..
-            } => {}
             _ => {}
         }
     }
