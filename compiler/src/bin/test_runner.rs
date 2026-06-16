@@ -17,7 +17,7 @@ use mavros_compiler::{
     Project, abi_helpers,
     compiler::Field,
     compiler::codegen::{CodeGenOptions, hlssa_to_r1cs::R1CS, llssa_to_llvm::WasmCompileOpts},
-    driver::Driver,
+    driver::{Driver, Error as DriverError},
     vm::{bytecode::TableInfo, interpreter},
     wasm_runtime,
 };
@@ -136,25 +136,37 @@ fn run_single(root: PathBuf, expect_failure: bool) {
 
     // 1. Compile
     emit("START:COMPILED");
-    let driver = (|| {
-        let project = Project::new(root.clone()).ok()?;
-        let mut driver = Driver::new(project, false);
-        driver.run_noir_compiler().ok()?;
-        driver.make_struct_access_static().ok()?;
-        driver.monomorphize().ok()?;
-        driver.spill_witness().ok()?;
-        Some(driver)
+    let Some(project) = Project::new(root.clone()).ok() else {
+        emit("END:COMPILED:fail");
+        return;
+    };
+    let mut driver = Driver::new(project, false);
+    let compile_result = (|| -> Result<(), DriverError> {
+        driver.run_noir_compiler()?;
+        driver.make_struct_access_static()?;
+        driver.monomorphize()?;
+        driver.spill_witness()?;
+        Ok(())
     })();
-    let mut driver = match driver {
-        Some(d) => {
-            emit("END:COMPILED:ok");
-            d
+    match compile_result {
+        Ok(()) => emit("END:COMPILED:ok"),
+        // If the Noir compiler itself rejects the program — a comptime expression that
+        // overflows (`comptime_bitshift_failure`), a type error, etc. — the program will never
+        // execute. That is a legitimate expected failure, accepted the same way as a
+        // statically-unsatisfiable R1CS, so it gets the `reject` marker regardless of which
+        // compile sub-step surfaced it. Any other error is a mavros-side problem and stays a
+        // plain `fail`, so a real regression is never masked.
+        Err(DriverError::NoirCompilerError(diags)) => {
+            eprintln!("Noir compiler rejected program: {diags:?}");
+            emit("END:COMPILED:reject");
+            return;
         }
-        None => {
+        Err(e) => {
+            eprintln!("Compile error: {e}");
             emit("END:COMPILED:fail");
             return;
         }
-    };
+    }
 
     // 2. R1CS
     emit("START:R1CS");
@@ -165,7 +177,17 @@ fn run_single(root: PathBuf, expect_failure: bool) {
             emit(&format!("END:R1CS:ok:{rows}:{cols}"));
             Some(r)
         }
-        Err(_) => {
+        // A program whose assertion can never hold is rejected as unsatisfiable while
+        // generating R1CS. That is the *expected* outcome for an execution_failure test, so
+        // it gets its own `reject` marker — distinct from a plain `fail`, which signals a real
+        // problem (e.g. an unsupported construct) that should never be silently accepted.
+        Err(DriverError::UnsatisfiableProgram(msg)) => {
+            eprintln!("R1CS rejected program as unsatisfiable: {msg}");
+            emit("END:R1CS:reject");
+            None
+        }
+        Err(e) => {
+            eprintln!("R1CS generation error: {e}");
             emit("END:R1CS:fail");
             None
         }
@@ -1027,6 +1049,7 @@ struct TestResult {
 
 /// Determined purely from child output:
 /// - `started && ended ok` → Pass
+/// - `started && ended reject` → Rejected (program proven unsatisfiable — a legit failing assert)
 /// - `started && ended fail` → Fail
 /// - `started && no end` → Crash
 /// - `never started` → Skip
@@ -1037,6 +1060,10 @@ enum Status {
     Crash,
     Skip,
     NotApplicable,
+    /// The compiler cleanly rejected the program as unsatisfiable (an assertion that can never
+    /// hold). For an execution_failure test this is the expected outcome; for an
+    /// execution_success test it is a genuine failure.
+    Rejected,
 }
 
 impl Status {
@@ -1047,6 +1074,9 @@ impl Status {
             Status::Crash => "💥",
             Status::Skip => "➖",
             Status::NotApplicable => "N/A",
+            // Only surfaces in the table if it escapes `expected_step_status` unmapped, which
+            // would itself be a bug; render it distinctly rather than hide it.
+            Status::Rejected => "🚫",
         }
     }
 }
@@ -1245,6 +1275,7 @@ fn ignored_test_result(name: &str) -> TestResult {
 fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]) -> TestResult {
     let mut started = HashMap::<String, bool>::default();
     let mut ended = HashMap::<String, bool>::default();
+    let mut rejected = HashMap::<String, bool>::default();
     let mut rows = None;
     let mut cols = None;
     let mut binary_bytes = None;
@@ -1265,6 +1296,9 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
                     binary_bytes = parts[3].parse().ok();
                 }
             }
+            ["END", key, "reject"] => {
+                rejected.insert(key.to_string(), true);
+            }
             ["END", key, "fail"] => {
                 ended.insert(key.to_string(), false);
             }
@@ -1272,13 +1306,21 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
         }
     }
 
+    // A program can be cleanly rejected at the first stage where it is proven it will never
+    // execute — the Noir frontend (COMPILED) or R1CS generation. That rejection preempts every
+    // later stage, so we track which stage it happened at (by position in the pipeline) and
+    // report all later stages N/A rather than ➖ Skip — otherwise the success-rate denominator
+    // (which counts every non-N/A cell) would count them against an otherwise handled test.
+    let reject_idx = STEP_KEYS.iter().position(|key| rejected.contains_key(*key));
+
     let steps = STEP_KEYS
         .iter()
-        .map(|&key| {
-            let raw_status = raw_step_status(key, &started, &ended);
+        .enumerate()
+        .map(|(idx, &key)| {
+            let raw_status = raw_step_status(key, &started, &ended, &rejected);
             (
                 key.to_string(),
-                expected_step_status(key, raw_status, expectation),
+                expected_step_status(idx, key, raw_status, expectation, reject_idx),
             )
         })
         .collect();
@@ -1572,8 +1614,11 @@ fn raw_step_status(
     key: &str,
     started: &HashMap<String, bool>,
     ended: &HashMap<String, bool>,
+    rejected: &HashMap<String, bool>,
 ) -> Status {
-    if let Some(&ok) = ended.get(key) {
+    if rejected.contains_key(key) {
+        Status::Rejected
+    } else if let Some(&ok) = ended.get(key) {
         if ok { Status::Pass } else { Status::Fail }
     } else if started.contains_key(key) {
         Status::Crash
@@ -1582,14 +1627,41 @@ fn raw_step_status(
     }
 }
 
-fn expected_step_status(key: &str, raw_status: Status, expectation: TestExpectation) -> Status {
+fn expected_step_status(
+    idx: usize,
+    key: &str,
+    raw_status: Status,
+    expectation: TestExpectation,
+    reject_idx: Option<usize>,
+) -> Status {
     match expectation {
-        TestExpectation::ExecutionSuccess => raw_status,
+        // A program that is supposed to execute must not be rejected as unsatisfiable; if it
+        // was, that is a real failure. Every other stage uses its raw status unchanged.
+        TestExpectation::ExecutionSuccess => match raw_status {
+            Status::Rejected => Status::Fail,
+            other => other,
+        },
+        // A program proven to never execute is rejected cleanly at the first stage that can
+        // prove it: the Noir frontend (`COMPILED`, e.g. a comptime overflow) or R1CS generation
+        // (`R1CS`, a statically-unsatisfiable assertion — `Err(UnsatisfiableProgram)`). The
+        // child reports that with a `reject` marker. For an expected-failure test that
+        // rejection is exactly the success, so: stages before it keep their real status (they
+        // genuinely ran), the rejecting stage itself reads ✅, and every later stage is
+        // preempted and reads N/A — so it neither looks like a failure nor dilutes the success
+        // rate. A plain `Fail` or a `Crash` has no `reject` marker, so a real regression is
+        // never masked by the expected-failure flag.
+        TestExpectation::ExecutionFailure if reject_idx.is_some() => {
+            match idx.cmp(&reject_idx.unwrap()) {
+                std::cmp::Ordering::Less => raw_status,
+                std::cmp::Ordering::Equal => Status::Pass,
+                std::cmp::Ordering::Greater => Status::NotApplicable,
+            }
+        }
         TestExpectation::ExecutionFailure => match key {
             "WITGEN_RUN" | "WITGEN_WASM_RUN" => match raw_status {
                 Status::Fail | Status::Crash => Status::Pass,
                 Status::Pass => Status::Fail,
-                Status::Skip | Status::NotApplicable => raw_status,
+                Status::Skip | Status::NotApplicable | Status::Rejected => raw_status,
             },
             // Correctness/leak checks need a witness, and the native AD
             // pipeline only feeds proving; neither is meaningful for a program
@@ -1690,6 +1762,17 @@ fn validate_layout(path: &Path) {
     }
 }
 
+/// A cell counts as "handled" if it passed (✅) or the stage legitimately did not apply (N/A).
+/// N/A is only ever assigned where a stage genuinely cannot run — the witgen/AD/WASM stages of a
+/// program correctly rejected at compile or R1CS time, or the correctness/leak checks that need a
+/// witness an expected-failure test never produces. A real failure is always ❌/💥/➖, never N/A,
+/// so counting N/A as handled cannot mask a regression. Treating the two alike lets a
+/// correctly-rejected expected-failure test score 100% with its full weight instead of a single
+/// green cell among thousands.
+fn cell_is_handled(cell: &str) -> bool {
+    cell == "✅" || cell == "N/A"
+}
+
 fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
     validate_layout(baseline_path);
     validate_layout(current_path);
@@ -1707,7 +1790,9 @@ fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
         for &(col, col_name) in REGRESSION_COLS {
             let base_val = &base.cells[col];
             let cur_val = &cur.cells[col];
-            if base_val == "✅" && cur_val != "✅" {
+            // `✅ → N/A` is not a regression: it means the stage stopped being applicable (e.g. a
+            // failure test whose rejection now happens earlier), which is still a handled cell.
+            if base_val == "✅" && !cell_is_handled(cur_val) {
                 regressions.push(format!("  {} / {}: ✅ → {}", cur.name, col_name, cur_val));
             }
         }
@@ -1751,12 +1836,12 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
     let mut warnings = Vec::new();
 
     for cur in &current {
-        // Count checkmarkable cells in current (all tests)
+        // Success rate counts handled cells (✅ or N/A) over every cell. N/A is a legitimate
+        // "nothing to run here" outcome, not a gap, so a correctly-rejected expected-failure test
+        // scores 100% across its whole row rather than one green cell diluted among thousands.
         for &(col, _) in REGRESSION_COLS {
-            if cur.cells[col] != "N/A" {
-                total_current_cells += 1;
-            }
-            if cur.cells[col] == "✅" {
+            total_current_cells += 1;
+            if cell_is_handled(&cur.cells[col]) {
                 total_current_checkmarks += 1;
             }
         }
@@ -1765,20 +1850,21 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
             continue;
         };
 
-        // For existing tests: count baseline/current checkmarks and new checkmarks
+        // For existing tests: count baseline/current handled cells, and list cells that newly
+        // turned green. `new_checkmarks` stays literal-✅ so the report's "turned into
+        // checkmarks ✅" list means what it says (a cell that became N/A is handled, but it did
+        // not turn green).
         for &(col, col_name) in REGRESSION_COLS {
-            if base.cells[col] != "N/A" || cur.cells[col] != "N/A" {
-                existing_total += 1;
-            }
-            let base_pass = base.cells[col] == "✅";
-            let cur_pass = cur.cells[col] == "✅";
-            if base_pass {
+            existing_total += 1;
+            let base_handled = cell_is_handled(&base.cells[col]);
+            let cur_handled = cell_is_handled(&cur.cells[col]);
+            if base_handled {
                 existing_baseline_checkmarks += 1;
             }
-            if cur_pass {
+            if cur_handled {
                 existing_current_checkmarks += 1;
             }
-            if !base_pass && cur_pass {
+            if base.cells[col] != "✅" && cur.cells[col] == "✅" {
                 new_checkmarks.push((cur.name.clone(), col_name));
             }
         }
@@ -2059,6 +2145,103 @@ mod tests {
         assert_eq!(result.steps["AD_WASM_RUN"], Status::Pass);
         assert_eq!(result.steps["AD_WASM_CORRECT"], Status::Pass);
         assert_eq!(result.steps["AD_WASM_NOLEAK"], Status::Pass);
+    }
+
+    #[test]
+    fn execution_failure_passes_when_r1cs_rejects_program() {
+        // A statically-unsatisfiable program is rejected during R1CS generation. The clean
+        // rejection is the expected failure, so R1CS reads ✅. Every later stage is preempted
+        // by that rejection and must read N/A — not ➖ Skip — so it neither counts as a failure
+        // nor dilutes the success rate (whose denominator counts every non-N/A cell).
+        let result = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&[
+                "START:COMPILED",
+                "END:COMPILED:ok",
+                "START:R1CS",
+                "END:R1CS:reject",
+            ]),
+        );
+
+        assert_eq!(result.steps["COMPILED"], Status::Pass);
+        assert_eq!(result.steps["R1CS"], Status::Pass);
+        for key in [
+            "COMPILE",
+            "WITGEN_RUN",
+            "WITGEN_CORRECT",
+            "WITGEN_NOLEAK",
+            "WASM_COMPILE",
+            "WITGEN_WASM_RUN",
+            "AD_WASM_RUN",
+        ] {
+            assert_eq!(result.steps[key], Status::NotApplicable, "{key}");
+        }
+    }
+
+    #[test]
+    fn execution_failure_passes_when_noir_frontend_rejects_program() {
+        // The Noir frontend itself can reject a program that will never execute (e.g. the
+        // comptime bit-shift overflow in `comptime_bitshift_failure`). That clean rejection at
+        // COMPILED is the expected failure: COMPILED reads ✅ and every later stage — which
+        // never ran — reads N/A rather than dragging the success rate down.
+        let result = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&["START:COMPILED", "END:COMPILED:reject"]),
+        );
+
+        assert_eq!(result.steps["COMPILED"], Status::Pass);
+        for key in [
+            "R1CS",
+            "COMPILE",
+            "WITGEN_RUN",
+            "WASM_COMPILE",
+            "WITGEN_WASM_RUN",
+            "AD_WASM_RUN",
+        ] {
+            assert_eq!(result.steps[key], Status::NotApplicable, "{key}");
+        }
+    }
+
+    #[test]
+    fn execution_failure_does_not_accept_plain_r1cs_failure() {
+        // Only a clean rejection counts. A plain R1CS `fail` (some other error) or a crash is a
+        // real problem and must not be silently turned green by the expected-failure flag.
+        let failed = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&[
+                "START:COMPILED",
+                "END:COMPILED:ok",
+                "START:R1CS",
+                "END:R1CS:fail",
+            ]),
+        );
+        assert_eq!(failed.steps["R1CS"], Status::Fail);
+
+        let crashed = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&["START:COMPILED", "END:COMPILED:ok", "START:R1CS"]),
+        );
+        assert_eq!(crashed.steps["R1CS"], Status::Crash);
+    }
+
+    #[test]
+    fn execution_success_treats_r1cs_rejection_as_failure() {
+        // A program that is supposed to execute should never be rejected as unsatisfiable.
+        let result = parse_child_output(
+            "ok",
+            TestExpectation::ExecutionSuccess,
+            &lines(&[
+                "START:COMPILED",
+                "END:COMPILED:ok",
+                "START:R1CS",
+                "END:R1CS:reject",
+            ]),
+        );
+        assert_eq!(result.steps["R1CS"], Status::Fail);
     }
 
     #[test]
