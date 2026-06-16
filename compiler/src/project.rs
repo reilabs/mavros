@@ -223,6 +223,13 @@ impl Project {
         &self.nargo_workspace.members[0]
     }
 
+    /// Root directory of the package being compiled. For a workspace this is
+    /// the member's directory, not the workspace root — `Prover.toml` and
+    /// other per-package files live here (matching nargo's behaviour).
+    pub fn package_root(&self) -> &Path {
+        &self.get_only_crate().root_dir
+    }
+
     pub fn file_manager(&self) -> &FileManager {
         &self.nargo_file_manager
     }

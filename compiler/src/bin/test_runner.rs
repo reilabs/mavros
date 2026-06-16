@@ -16,7 +16,7 @@ use ark_ff::UniformRand as _;
 use mavros_compiler::{
     Project, abi_helpers,
     compiler::Field,
-    compiler::codegen::{hlssa_to_r1cs::R1CS, llssa_to_llvm::WasmCompileOpts},
+    compiler::codegen::{CodeGenOptions, hlssa_to_r1cs::R1CS, llssa_to_llvm::WasmCompileOpts},
     driver::Driver,
     vm::{bytecode::TableInfo, interpreter},
     wasm_runtime,
@@ -42,9 +42,10 @@ use wasmtime::{Engine, Linker, Memory, Module, Store};
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // Child mode: --run-single <path>
+    // Child mode: --run-single <path> [--expect-failure]
     if args.len() >= 3 && args[1] == "--run-single" {
-        run_single(PathBuf::from(&args[2]));
+        let expect_failure = args[3..].iter().any(|a| a == "--expect-failure");
+        run_single(PathBuf::from(&args[2]), expect_failure);
         return;
     }
 
@@ -82,6 +83,12 @@ fn main() {
 
 const DEFAULT_IGNORED_TESTS: &[&str] = &[];
 
+#[derive(Clone, Copy, Debug)]
+enum TestExpectation {
+    ExecutionSuccess,
+    ExecutionFailure,
+}
+
 fn parse_output_arg(args: &[String]) -> PathBuf {
     let mut i = 1;
     while i < args.len() {
@@ -117,7 +124,16 @@ fn emit(line: &str) {
     let _ = out.flush();
 }
 
-fn run_single(root: PathBuf) {
+/// Runs every pipeline step for one test directory, emitting START/END
+/// markers for the parent to parse. With `expect_failure` (execution_failure /
+/// execution_panic tests) the native AD pipeline is skipped: AD output only
+/// feeds proving, and a program whose witgen is expected to trap is never
+/// proven. WASM paths still run as compile/runtime sanity checks.
+fn run_single(root: PathBuf, expect_failure: bool) {
+    let checking_codegen = CodeGenOptions {
+        check_constraints: true,
+    };
+
     // 1. Compile
     emit("START:COMPILED");
     let driver = (|| {
@@ -158,7 +174,7 @@ fn run_single(root: PathBuf) {
     // 3. Compile witgen  (depends on R1CS)
     let witgen_binary = r1cs.as_ref().and_then(|_| {
         emit("START:WITGEN_COMPILE");
-        match driver.compile_witgen() {
+        match driver.compile_witgen(checking_codegen) {
             Ok(b) => {
                 let bytes = b.len() * 8;
                 emit(&format!("END:WITGEN_COMPILE:ok:{bytes}"));
@@ -171,8 +187,9 @@ fn run_single(root: PathBuf) {
         }
     });
 
-    // 4. Compile AD  (depends on R1CS, independent of witgen)
-    let ad_binary = r1cs.as_ref().and_then(|_| {
+    // 4. Compile AD  (depends on R1CS, independent of witgen; skipped for
+    //    expected-failure tests)
+    let ad_binary = r1cs.as_ref().filter(|_| !expect_failure).and_then(|_| {
         emit("START:AD_COMPILE");
         match driver.compile_ad() {
             Ok(b) => {
@@ -188,27 +205,30 @@ fn run_single(root: PathBuf) {
     });
 
     // Load inputs (needed for witgen run)
-    let ordered_params = load_inputs(&root.join("Prover.toml"), &driver);
+    let ordered_params = load_inputs(&driver.package_root().join("Prover.toml"), &driver);
 
     // 5. Run witgen  (depends on WITGEN_COMPILE)
-    let had_witgen_binary = witgen_binary.is_some();
     let witgen_result = witgen_binary.and_then(|mut binary| {
         emit("START:WITGEN_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-        let result = interpreter::run(
+        match interpreter::run(
             &mut binary,
             r1cs.witness_layout,
             r1cs.constraints_layout,
             params,
-        );
-        emit("END:WITGEN_RUN:ok");
-        Some(result)
+        ) {
+            Ok(result) => {
+                emit("END:WITGEN_RUN:ok");
+                Some(result)
+            }
+            Err(e) => {
+                eprintln!("witgen run error: {e}");
+                emit("END:WITGEN_RUN:fail");
+                None
+            }
+        }
     });
-    if had_witgen_binary && witgen_result.is_none() {
-        emit("START:WITGEN_RUN");
-        emit("END:WITGEN_RUN:fail");
-    }
 
     // 6. Check witgen correctness  (depends on WITGEN_RUN)
     if let (Some(result), Some(r1cs)) = (&witgen_result, &r1cs) {
@@ -246,14 +266,22 @@ fn run_single(root: PathBuf) {
         let ad_coeffs: Vec<Field> = (0..r1cs.constraints.len())
             .map(|_| ark_bn254::Fr::rand(&mut rng))
             .collect();
-        let (ad_a, ad_b, ad_c, ad_instrumenter) = interpreter::run_ad(
+        match interpreter::run_ad(
             &mut binary,
             &ad_coeffs,
             r1cs.witness_layout,
             r1cs.constraints_layout,
-        );
-        emit("END:AD_RUN:ok");
-        Some((ad_coeffs, ad_a, ad_b, ad_c, ad_instrumenter))
+        ) {
+            Ok((ad_a, ad_b, ad_c, ad_instrumenter)) => {
+                emit("END:AD_RUN:ok");
+                Some((ad_coeffs, ad_a, ad_b, ad_c, ad_instrumenter))
+            }
+            Err(e) => {
+                eprintln!("AD run error: {e}");
+                emit("END:AD_RUN:fail");
+                None
+            }
+        }
     });
 
     // 9. Check AD correctness  (depends on AD_RUN)
@@ -284,7 +312,12 @@ fn run_single(root: PathBuf) {
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.keep().join("witgen.wasm");
         let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
-        match driver.compile_llvm_targets(false, r1cs, Some((wasm_path.clone(), wasm_opts))) {
+        match driver.compile_llvm_targets(
+            false,
+            r1cs,
+            Some((wasm_path.clone(), wasm_opts)),
+            checking_codegen,
+        ) {
             Ok(_) if wasm_path.exists() => {
                 emit("END:WITGEN_WASM_COMPILE:ok");
                 Some(wasm_path)
@@ -1043,12 +1076,13 @@ struct TestResult {
 /// - `started && ended fail` → Fail
 /// - `started && no end` → Crash
 /// - `never started` → Skip
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Status {
     Pass,
     Fail,
     Crash,
     Skip,
+    NotApplicable,
 }
 
 impl Status {
@@ -1058,13 +1092,14 @@ impl Status {
             Status::Fail => "❌",
             Status::Crash => "💥",
             Status::Skip => "➖",
+            Status::NotApplicable => "N/A",
         }
     }
 }
 
 /// Use `cargo metadata` to find the root of the noir git dependency, then
-/// return the path to `test_programs/execution_success` inside it.
-fn find_noir_execution_success_dir() -> Option<PathBuf> {
+/// return the path to `test_programs` inside it.
+fn find_noir_test_programs_dir() -> Option<PathBuf> {
     let metadata = MetadataCommand::new().exec().ok()?;
     // Find any package from the noir git repo (e.g. "nargo").
     let noir_pkg = metadata.packages.iter().find(|p| {
@@ -1073,12 +1108,12 @@ fn find_noir_execution_success_dir() -> Option<PathBuf> {
             .is_some_and(|s| s.repr.contains("noir-lang/noir") || s.repr.contains("reilabs/noir"))
     })?;
     // Walk up from the package manifest to find the repo root containing
-    // `test_programs/execution_success`.
+    // `test_programs`.
     let mut dir: &Path = noir_pkg.manifest_path.as_std_path();
     loop {
         dir = dir.parent()?;
-        let candidate = dir.join("test_programs").join("execution_success");
-        if candidate.is_dir() {
+        let candidate = dir.join("test_programs");
+        if candidate.join("execution_success").is_dir() {
             return Some(candidate);
         }
     }
@@ -1088,9 +1123,10 @@ fn find_noir_execution_success_dir() -> Option<PathBuf> {
 struct TestEntry {
     path: PathBuf,
     display_name: String,
+    expectation: TestExpectation,
 }
 
-fn collect_test_dirs(base: &Path, prefix: &str) -> Vec<TestEntry> {
+fn collect_test_dirs(base: &Path, prefix: &str, expectation: TestExpectation) -> Vec<TestEntry> {
     let Ok(entries) = fs::read_dir(base) else {
         return Vec::new();
     };
@@ -1103,6 +1139,7 @@ fn collect_test_dirs(base: &Path, prefix: &str) -> Vec<TestEntry> {
             TestEntry {
                 path: p,
                 display_name: format!("{prefix}{test_name}"),
+                expectation,
             }
         })
         .collect();
@@ -1116,23 +1153,33 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
     // 1. Local noir_tests/ directory
     let local_tests = PathBuf::from("noir_tests");
     if local_tests.is_dir() {
-        entries.extend(collect_test_dirs(&local_tests, "noir_tests/"));
+        entries.extend(collect_test_dirs(
+            &local_tests,
+            "noir_tests/",
+            TestExpectation::ExecutionSuccess,
+        ));
     }
 
-    // 2. Noir repo test_programs/execution_success (discovered via cargo-metadata)
-    if let Some(exec_success) = find_noir_execution_success_dir() {
-        eprintln!(
-            "Found noir execution_success tests at: {}",
-            exec_success.display()
-        );
+    // 2. Noir repo test_programs/* (discovered via cargo-metadata)
+    if let Some(test_programs) = find_noir_test_programs_dir() {
+        eprintln!("Found noir test_programs at: {}", test_programs.display());
         entries.extend(collect_test_dirs(
-            &exec_success,
+            &test_programs.join("execution_success"),
             "noir/test_programs/execution_success/",
+            TestExpectation::ExecutionSuccess,
+        ));
+        entries.extend(collect_test_dirs(
+            &test_programs.join("execution_failure"),
+            "noir/test_programs/execution_failure/",
+            TestExpectation::ExecutionFailure,
+        ));
+        entries.extend(collect_test_dirs(
+            &test_programs.join("execution_panic"),
+            "noir/test_programs/execution_panic/",
+            TestExpectation::ExecutionFailure,
         ));
     } else {
-        eprintln!(
-            "Warning: could not locate noir test_programs/execution_success via cargo-metadata"
-        );
+        eprintln!("Warning: could not locate noir test_programs via cargo-metadata");
     }
 
     assert!(!entries.is_empty(), "No test directories found");
@@ -1175,8 +1222,12 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
 
                     let abs = fs::canonicalize(&entry.path).unwrap();
 
-                    let mut child = Command::new(&exe)
-                        .args(["--run-single", abs.to_str().unwrap()])
+                    let mut cmd = Command::new(&exe);
+                    cmd.args(["--run-single", abs.to_str().unwrap()]);
+                    if matches!(entry.expectation, TestExpectation::ExecutionFailure) {
+                        cmd.arg("--expect-failure");
+                    }
+                    let mut child = cmd
                         .env(wasm_runtime::WASM_RUNTIME_LIB_ENV, &wasm_runtime_lib)
                         .stdout(Stdio::piped())
                         .stderr(Stdio::inherit())
@@ -1190,7 +1241,7 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
                         .collect();
 
                     let _ = child.wait();
-                    let result = parse_child_output(&entry.display_name, &lines);
+                    let result = parse_child_output(&entry.display_name, entry.expectation, &lines);
 
                     let n = completed.fetch_add(1, Ordering::SeqCst) + 1;
                     eprintln!("[{n}/{total}] {}", entry.display_name);
@@ -1238,7 +1289,7 @@ fn ignored_test_result(name: &str) -> TestResult {
     }
 }
 
-fn parse_child_output(name: &str, lines: &[String]) -> TestResult {
+fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]) -> TestResult {
     let mut started = HashMap::<String, bool>::default();
     let mut ended = HashMap::<String, bool>::default();
     let mut rows = None;
@@ -1275,14 +1326,11 @@ fn parse_child_output(name: &str, lines: &[String]) -> TestResult {
     let steps = STEP_KEYS
         .iter()
         .map(|&key| {
-            let status = if let Some(&ok) = ended.get(key) {
-                if ok { Status::Pass } else { Status::Fail }
-            } else if started.contains_key(key) {
-                Status::Crash
-            } else {
-                Status::Skip
-            };
-            (key.to_string(), status)
+            let raw_status = raw_step_status(key, &started, &ended);
+            (
+                key.to_string(),
+                expected_step_status(key, raw_status, expectation),
+            )
         })
         .collect();
 
@@ -1481,6 +1529,7 @@ fn check_determinism(tests: &[String], runs: usize, jobs: usize) -> i32 {
             TestEntry {
                 path: fs::canonicalize(&path).unwrap(),
                 display_name: name.clone(),
+                expectation: TestExpectation::ExecutionSuccess,
             }
         })
         .collect();
@@ -1568,6 +1617,46 @@ fn check_determinism(tests: &[String], runs: usize, jobs: usize) -> i32 {
         let kept = scratch.keep();
         eprintln!("NONDETERMINISM DETECTED — dumps kept at {}", kept.display());
         1
+    }
+}
+
+fn raw_step_status(
+    key: &str,
+    started: &HashMap<String, bool>,
+    ended: &HashMap<String, bool>,
+) -> Status {
+    if let Some(&ok) = ended.get(key) {
+        if ok { Status::Pass } else { Status::Fail }
+    } else if started.contains_key(key) {
+        Status::Crash
+    } else {
+        Status::Skip
+    }
+}
+
+fn expected_step_status(key: &str, raw_status: Status, expectation: TestExpectation) -> Status {
+    match expectation {
+        TestExpectation::ExecutionSuccess => raw_status,
+        TestExpectation::ExecutionFailure => match key {
+            "WITGEN_RUN" | "WITGEN_WASM_RUN" => match raw_status {
+                Status::Fail | Status::Crash => Status::Pass,
+                Status::Pass => Status::Fail,
+                Status::Skip | Status::NotApplicable => raw_status,
+            },
+            // Correctness/leak checks need a witness, and the native AD
+            // pipeline only feeds proving; neither is meaningful for a program
+            // whose witgen is expected to trap. WASM AD still runs as a
+            // compile/runtime sanity check and uses raw status.
+            "WITGEN_CORRECT"
+            | "WITGEN_NOLEAK"
+            | "WITGEN_WASM_CORRECT"
+            | "WITGEN_WASM_NOLEAK"
+            | "AD_COMPILE"
+            | "AD_RUN"
+            | "AD_CORRECT"
+            | "AD_NOLEAK" => Status::NotApplicable,
+            _ => raw_status,
+        },
     }
 }
 
@@ -1691,7 +1780,9 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
     for cur in &current {
         // Count checkmarkable cells in current (all tests)
         for &(col, _) in REGRESSION_COLS {
-            total_current_cells += 1;
+            if cur.cells[col] != "N/A" {
+                total_current_cells += 1;
+            }
             if cur.cells[col] == "✅" {
                 total_current_checkmarks += 1;
             }
@@ -1703,7 +1794,9 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
 
         // For existing tests: count baseline/current checkmarks and new checkmarks
         for &(col, col_name) in REGRESSION_COLS {
-            existing_total += 1;
+            if base.cells[col] != "N/A" || cur.cells[col] != "N/A" {
+                existing_total += 1;
+            }
             let base_pass = base.cells[col] == "✅";
             let cur_pass = cur.cells[col] == "✅";
             if base_pass {
@@ -1934,4 +2027,108 @@ fn render_markdown(results: &[TestResult]) -> String {
     }
 
     md
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines(input: &[&str]) -> Vec<String> {
+        input.iter().map(|line| line.to_string()).collect()
+    }
+
+    #[test]
+    fn execution_success_uses_raw_statuses() {
+        let result = parse_child_output(
+            "ok",
+            TestExpectation::ExecutionSuccess,
+            &lines(&["START:COMPILED", "END:COMPILED:ok"]),
+        );
+
+        assert_eq!(result.steps["COMPILED"], Status::Pass);
+        assert_eq!(result.steps["R1CS"], Status::Skip);
+    }
+
+    #[test]
+    fn execution_failure_passes_when_witgen_runs_fail() {
+        let result = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&[
+                "START:COMPILED",
+                "END:COMPILED:ok",
+                "START:WITGEN_RUN",
+                "END:WITGEN_RUN:fail",
+                "START:WITGEN_WASM_RUN",
+                "END:WITGEN_WASM_RUN:fail",
+            ]),
+        );
+
+        assert_eq!(result.steps["COMPILED"], Status::Pass);
+        assert_eq!(result.steps["WITGEN_RUN"], Status::Pass);
+        assert_eq!(result.steps["WITGEN_CORRECT"], Status::NotApplicable);
+        assert_eq!(result.steps["WITGEN_WASM_RUN"], Status::Pass);
+        assert_eq!(result.steps["WITGEN_WASM_CORRECT"], Status::NotApplicable);
+    }
+
+    #[test]
+    fn execution_failure_reports_native_ad_steps_as_not_applicable() {
+        // The child skips the native AD pipeline for expected-failure tests, so
+        // no native AD START/END markers are emitted; those columns must read
+        // N/A, not ➖.
+        let result = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&[
+                "START:COMPILED",
+                "END:COMPILED:ok",
+                "START:WITGEN_RUN",
+                "END:WITGEN_RUN:fail",
+            ]),
+        );
+
+        for key in ["AD_COMPILE", "AD_RUN", "AD_CORRECT", "AD_NOLEAK"] {
+            assert_eq!(result.steps[key], Status::NotApplicable, "{key}");
+        }
+    }
+
+    #[test]
+    fn execution_failure_uses_raw_ad_wasm_statuses() {
+        let result = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&[
+                "START:AD_WASM_COMPILE",
+                "END:AD_WASM_COMPILE:ok",
+                "START:AD_WASM_RUN",
+                "END:AD_WASM_RUN:ok",
+                "START:AD_WASM_CORRECT",
+                "END:AD_WASM_CORRECT:ok",
+                "START:AD_WASM_NOLEAK",
+                "END:AD_WASM_NOLEAK:ok",
+            ]),
+        );
+
+        assert_eq!(result.steps["AD_WASM_COMPILE"], Status::Pass);
+        assert_eq!(result.steps["AD_WASM_RUN"], Status::Pass);
+        assert_eq!(result.steps["AD_WASM_CORRECT"], Status::Pass);
+        assert_eq!(result.steps["AD_WASM_NOLEAK"], Status::Pass);
+    }
+
+    #[test]
+    fn execution_failure_fails_when_witgen_runs_succeed() {
+        let result = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&[
+                "START:WITGEN_RUN",
+                "END:WITGEN_RUN:ok",
+                "START:WITGEN_WASM_RUN",
+                "END:WITGEN_WASM_RUN:ok",
+            ]),
+        );
+
+        assert_eq!(result.steps["WITGEN_RUN"], Status::Fail);
+        assert_eq!(result.steps["WITGEN_WASM_RUN"], Status::Fail);
+    }
 }
