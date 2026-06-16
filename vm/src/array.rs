@@ -411,6 +411,16 @@ impl BoxedValue {
 
     // #[inline(always)]
     pub fn dec_rc(&self, vm: &mut VM) {
+        // Fast path: a value still held elsewhere is just a decrement. This is
+        // by far the most common case, and it must not allocate the worklist.
+        let rc = self.rc();
+        if unsafe { *rc } > 1 {
+            unsafe {
+                *rc -= 1;
+            }
+            return;
+        }
+
         let mut queue = VecDeque::<BoxedValue>::new();
         queue.push_back(*self);
         while let Some(item) = queue.pop_front() {

@@ -341,7 +341,13 @@ pub fn run_phase1(
 
     let pc = unsafe { program.as_mut_ptr().add(entry + 2) };
 
+    #[cfg(feature = "vm-profile")]
+    bytecode::reset_opcode_profile();
+
     unsafe { dispatch(pc, frame, &mut vm) };
+
+    #[cfg(feature = "vm-profile")]
+    bytecode::report_opcode_profile("witgen phase 1");
 
     if vm.trapped {
         return Err(TrapError);
@@ -678,7 +684,13 @@ pub fn run_ad(
 
     let pc = unsafe { program.as_mut_ptr().add(entry + 2) };
 
+    #[cfg(feature = "vm-profile")]
+    bytecode::reset_opcode_profile();
+
     unsafe { dispatch(pc, frame, &mut vm) };
+
+    #[cfg(feature = "vm-profile")]
+    bytecode::report_opcode_profile("AD");
 
     if vm.trapped {
         return Err(TrapError);

@@ -429,8 +429,8 @@ pub fn interpreter(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    for code in &codes {
-        result.extend(gen_handler(code));
+    for (idx, code) in codes.iter().enumerate() {
+        result.extend(gen_handler(idx, code));
     }
 
     result.extend(gen_opcode_enum(&codes));
@@ -603,7 +603,8 @@ fn parse_host_type(ty: &syn::Type) -> HostType {
     }
 }
 
-fn gen_handler(def: &OpCodeDef) -> proc_macro2::TokenStream {
+fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
+    let prof_idx = idx;
     let mut getters = proc_macro2::TokenStream::new();
     for input in &def.inputs {
         match input {
@@ -717,6 +718,7 @@ fn gen_handler(def: &OpCodeDef) -> proc_macro2::TokenStream {
     };
 
     let handler_name = format_ident!("{}_handler", def.name);
+    let prof_idx = prof_idx;
     quote! {
         #[allow(clippy::not_unsafe_ptr_arg_deref)]
         pub fn #handler_name(
@@ -727,11 +729,21 @@ fn gen_handler(def: &OpCodeDef) -> proc_macro2::TokenStream {
             // unsafe {
             //     println!("opcode: {:?}", *(pc as *mut (*mut usize)));
             // }
+            #[cfg(feature = "vm-profile")]
+            let __prof_start = read_cycles();
             let mut current_field_offset = 1isize;
             #getters
             #call_and_finish
 
-            #return_call
+            let __prof_ret = { #return_call };
+            #[cfg(feature = "vm-profile")]
+            {
+                use core::sync::atomic::Ordering::Relaxed;
+                let __prof_elapsed = read_cycles().wrapping_sub(__prof_start);
+                OPCODE_PROFILE[#prof_idx].0.fetch_add(1, Relaxed);
+                OPCODE_PROFILE[#prof_idx].1.fetch_add(__prof_elapsed, Relaxed);
+            }
+            __prof_ret
         }
     }
 }
@@ -872,7 +884,26 @@ fn gen_opcode_helpers(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
         }
     });
 
+    let opcode_name_strs = codes.iter().map(|code| code.name.clone());
+
     quote! {
+        /// Per-opcode profiling counters: `(invocation_count, accumulated_cycles)`.
+        /// Indexed by opcode discriminant; populated by the generated handlers
+        /// when the `vm-profile` feature is enabled.
+        #[cfg(feature = "vm-profile")]
+        pub static OPCODE_PROFILE: [(
+            core::sync::atomic::AtomicU64,
+            core::sync::atomic::AtomicU64,
+        ); #dsp_size] = [const {
+            (
+                core::sync::atomic::AtomicU64::new(0),
+                core::sync::atomic::AtomicU64::new(0),
+            )
+        }; #dsp_size];
+
+        #[cfg(feature = "vm-profile")]
+        pub static OPCODE_NAMES: [&str; #dsp_size] = [ #(#opcode_name_strs),* ];
+
         impl OpCode {
             pub fn to_binary(&self, binary: &mut Vec<u64>, jumps_to_fix: &mut Vec<(usize, isize)>) {
                 match self {
