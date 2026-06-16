@@ -458,7 +458,7 @@ impl Driver {
             );
         });
 
-        let ad_main_id = ad_ssa.get_main_id();
+        let ad_main_id = ad_ssa.get_unique_entrypoint_id();
         let fn_remap = ssa.merge(ad_ssa);
         let ad_entry = fn_remap[&ad_main_id];
         ssa.get_function_mut(ad_entry)

@@ -471,9 +471,10 @@ fn lower_inner(
     type_info: &TypeInfo,
     layout: Option<(WitnessLayout, ConstraintsLayout)>,
 ) -> LLSSA {
-    let main_id = hlssa.get_main_id();
-    let main_name = hlssa.get_main().get_name().to_string();
-    let mut llssa = LLSSA::with_main(main_name);
+    // The lowered program preserves the HLSSA's entry-point set. This runs on the merged program,
+    // which may have several entry points, so it treats them uniformly rather than singling one
+    // out as "main".
+    let mut llssa = LLSSA::empty();
     let mut fn_map: HashMap<FunctionId, FunctionId> = HashMap::default();
     let mut drop_fns: Vec<DropFnEntry> = Vec::new();
     let mut ad_fns = AdFunctions::new();
@@ -484,19 +485,22 @@ fn lower_inner(
     let ll_global_types: Vec<LLType> = hlssa_global_types.iter().map(lower_type).collect();
     llssa.set_global_types(ll_global_types);
 
-    // First pass: create all functions (so we can map FunctionIds)
-    fn_map.insert(main_id, llssa.get_main_id());
-
+    // First pass: create every LL function and record the HL→LL id mapping. Entry-point functions
+    // are created first so their LL ids follow the program's entry-point order.
+    for entry in hlssa.get_entry_points() {
+        let ll_fn_id = llssa.add_function(hlssa.get_function(*entry).get_name().to_string());
+        fn_map.insert(*entry, ll_fn_id);
+    }
     for (fn_id, function) in hlssa.iter_functions() {
-        if *fn_id == main_id {
+        if hlssa.is_entry_point(*fn_id) {
             continue;
         }
         let ll_fn_id = llssa.add_function(function.get_name().to_string());
         fn_map.insert(*fn_id, ll_fn_id);
     }
 
-    // Propagate any additional entry points (the main entry is already LLSSA's main).
-    for entry in hlssa.get_entry_points().iter().skip(1) {
+    // Mirror the HLSSA's entry-point set onto the lowered program.
+    for entry in hlssa.get_entry_points() {
         llssa.add_entry_point(fn_map[entry]);
     }
 
@@ -4200,7 +4204,7 @@ mod tests {
     #[test]
     fn guarded_rc_add_emits_immortal_check() {
         let mut ssa = LLSSA::with_main("guard_test".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
 
         let rc_header = LLStruct::rc_header();
         let rc_array = LLStruct::new(vec![
@@ -4244,7 +4248,7 @@ mod tests {
         use crate::compiler::ssa::hlssa::builder::{HLEmitter, HLSSABuilder};
 
         let mut hlssa = HLSSA::with_main("felt_test".to_string());
-        let main_id = hlssa.get_main_id();
+        let main_id = hlssa.get_unique_entrypoint_id();
         let mut hb = HLSSABuilder::new(&mut hlssa);
         hb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
@@ -4254,7 +4258,7 @@ mod tests {
         });
 
         let constants = hlssa.const_snapshot();
-        let function = hlssa.get_main();
+        let function = hlssa.get_unique_entrypoint();
 
         let mut llssa = LLSSA::with_main("felt_test".to_string());
         let mut ll_func = LLFunction::empty("felt_test".to_string());
@@ -4289,7 +4293,7 @@ mod tests {
         };
 
         let mut hlssa = HLSSA::with_main("blob_seq_test".to_string());
-        let main_id = hlssa.get_main_id();
+        let main_id = hlssa.get_unique_entrypoint_id();
         hlssa
             .get_function_mut(main_id)
             .add_return_type(HLType::u(8).array_of(3));

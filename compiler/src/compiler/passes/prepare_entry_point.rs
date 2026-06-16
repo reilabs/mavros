@@ -66,15 +66,16 @@ impl PrepareEntryPoint {
     }
 
     fn wrap_main(ssa: &mut HLSSA, main_is_unconstrained: bool) {
-        let original_main_id = ssa.get_main_id();
-        let original_main = ssa.get_main();
+        let original_main_id = ssa.get_unique_entrypoint_id();
+        let original_main = ssa.get_unique_entrypoint();
         let param_types = original_main.get_param_types();
         let return_types = original_main.get_returns().to_vec();
 
         let globals_init_fn = ssa.get_globals_init_fn();
         let globals_deinit_fn = ssa.get_globals_deinit_fn();
 
-        ssa.get_main_mut().set_name("original_main".to_string());
+        ssa.get_unique_entrypoint_mut()
+            .set_name("original_main".to_string());
 
         // Reconstruct functions rebuild each typed input value from its
         // flattened field representation, range-checking integers on the way.
@@ -185,7 +186,7 @@ impl PrepareEntryPoint {
 
             e.terminate_return(vec![]);
         });
-        ssa.set_entry_point(wrapper_id);
+        ssa.set_unique_entrypoint(wrapper_id);
     }
 
     fn assert_eq_deep(

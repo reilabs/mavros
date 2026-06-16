@@ -78,13 +78,8 @@ pub struct SSA<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> {
     /// The function used to de-initialize/drop the global values.
     globals_deinit_fn: Option<FunctionId>,
 
-    /// The identifiers of the program's entry points, in order.
-    ///
-    /// The first entry is the "main" entry point. This may be the true program main as provided
-    /// by Noir, or the identifier of the synthetic main created during the compilation process.
-    /// Late in the pipeline additional entry points may be registered (e.g. the AD entry point),
-    /// at which point every entry serves as a reachability root and is emitted as a separately
-    /// callable entry in the generated artifacts.
+    /// The identifiers of the program's entry points. Each one serves as a reachability root and
+    /// is emitted as a separately callable entry in the generated artifacts.
     entry_points: Vec<FunctionId>,
 
     /// A monotonic counter for function identifiers, used to ensure uniqueness.
@@ -119,21 +114,27 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Clone for SSA<O
 }
 
 impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> {
-    pub fn with_main(name: String) -> Self {
-        let main_function = Function::<Op, Ty>::empty(name);
-        let main_id = FunctionId(0);
-        let mut functions = HashMap::default();
-        functions.insert(main_id, main_function);
+    /// Constructs an empty SSA: no functions and no entry points. Functions are added with
+    /// [`Self::add_function`] / [`Self::insert_function`] and registered as entry points with
+    /// [`Self::add_entry_point`].
+    pub fn empty() -> Self {
         SSA {
-            functions,
+            functions: HashMap::default(),
             global_types: Vec::new(),
             globals_init_fn: None,
             globals_deinit_fn: None,
-            entry_points: vec![main_id],
-            next_function_id: 1,
+            entry_points: Vec::new(),
+            next_function_id: 0,
             next_value_id: AtomicU64::new(0),
             constants: RwLock::new(BiHashMap::default()),
         }
+    }
+
+    pub fn with_main(name: String) -> Self {
+        let mut ssa = Self::empty();
+        let main_id = ssa.add_function(name);
+        ssa.add_entry_point(main_id);
+        ssa
     }
 }
 
@@ -179,8 +180,15 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
         self.functions.retain(|id, fun| f(*id, fun));
     }
 
-    /// Replaces the main (first) entry point of the program.
-    pub fn set_entry_point(&mut self, id: FunctionId) {
+    /// Replaces the program's sole entry point. Panics unless there is exactly one entry point —
+    /// callers that work with a multi-entry program must go through [`Self::get_entry_points`].
+    pub fn set_unique_entrypoint(&mut self, id: FunctionId) {
+        assert_eq!(
+            self.entry_points.len(),
+            1,
+            "set_unique_entrypoint called on an SSA with {} entry points",
+            self.entry_points.len()
+        );
         self.entry_points[0] = id;
     }
 
@@ -193,7 +201,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
         self.entry_points.push(id);
     }
 
-    /// All entry points of the program, the main entry point first.
+    /// All entry points of the program.
     pub fn get_entry_points(&self) -> &[FunctionId] {
         &self.entry_points
     }
@@ -203,22 +211,32 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
         self.entry_points.contains(&id)
     }
 
-    pub fn get_main_id(&self) -> FunctionId {
+    /// The program's sole entry point. Panics unless there is exactly one entry point — callers
+    /// that work with a multi-entry program must go through [`Self::get_entry_points`].
+    pub fn get_unique_entrypoint_id(&self) -> FunctionId {
+        assert_eq!(
+            self.entry_points.len(),
+            1,
+            "get_unique_entrypoint_id called on an SSA with {} entry points",
+            self.entry_points.len()
+        );
         self.entry_points[0]
     }
 
-    /// Gets a mutable reference to the main function or panics if no main function exists.
-    pub fn get_main_mut(&mut self) -> &mut Function<Op, Ty> {
+    /// Gets a mutable reference to the program's sole entry point function. Panics unless there is
+    /// exactly one entry point.
+    pub fn get_unique_entrypoint_mut(&mut self) -> &mut Function<Op, Ty> {
         self.functions
-            .get_mut(&self.get_main_id())
-            .expect("Main function should exist")
+            .get_mut(&self.get_unique_entrypoint_id())
+            .expect("Entry point function should exist")
     }
 
-    /// Gets a reference to the main function or panics if no main function exists.
-    pub fn get_main(&self) -> &Function<Op, Ty> {
+    /// Gets a reference to the program's sole entry point function. Panics unless there is exactly
+    /// one entry point.
+    pub fn get_unique_entrypoint(&self) -> &Function<Op, Ty> {
         self.functions
-            .get(&self.get_main_id())
-            .expect("Main function should exist")
+            .get(&self.get_unique_entrypoint_id())
+            .expect("Entry point function should exist")
     }
 
     pub fn get_function(&self, id: FunctionId) -> &Function<Op, Ty> {

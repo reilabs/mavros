@@ -2167,7 +2167,7 @@ impl CostEstimator {
     }
 
     fn make_main_sig(&self, ssa: &HLSSA) -> FunctionSignature {
-        let id = ssa.get_main_id();
+        let id = ssa.get_unique_entrypoint_id();
         let main_fn = ssa.get_function(id);
         let params = main_fn.get_param_types();
         let params = params
