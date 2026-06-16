@@ -1762,6 +1762,17 @@ fn validate_layout(path: &Path) {
     }
 }
 
+/// A cell counts as "handled" if it passed (✅) or the stage legitimately did not apply (N/A).
+/// N/A is only ever assigned where a stage genuinely cannot run — the witgen/AD/WASM stages of a
+/// program correctly rejected at compile or R1CS time, or the correctness/leak checks that need a
+/// witness an expected-failure test never produces. A real failure is always ❌/💥/➖, never N/A,
+/// so counting N/A as handled cannot mask a regression. Treating the two alike lets a
+/// correctly-rejected expected-failure test score 100% with its full weight instead of a single
+/// green cell among thousands.
+fn cell_is_handled(cell: &str) -> bool {
+    cell == "✅" || cell == "N/A"
+}
+
 fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
     validate_layout(baseline_path);
     validate_layout(current_path);
@@ -1779,7 +1790,9 @@ fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
         for &(col, col_name) in REGRESSION_COLS {
             let base_val = &base.cells[col];
             let cur_val = &cur.cells[col];
-            if base_val == "✅" && cur_val != "✅" {
+            // `✅ → N/A` is not a regression: it means the stage stopped being applicable (e.g. a
+            // failure test whose rejection now happens earlier), which is still a handled cell.
+            if base_val == "✅" && !cell_is_handled(cur_val) {
                 regressions.push(format!("  {} / {}: ✅ → {}", cur.name, col_name, cur_val));
             }
         }
@@ -1823,12 +1836,12 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
     let mut warnings = Vec::new();
 
     for cur in &current {
-        // Count checkmarkable cells in current (all tests)
+        // Success rate counts handled cells (✅ or N/A) over every cell. N/A is a legitimate
+        // "nothing to run here" outcome, not a gap, so a correctly-rejected expected-failure test
+        // scores 100% across its whole row rather than one green cell diluted among thousands.
         for &(col, _) in REGRESSION_COLS {
-            if cur.cells[col] != "N/A" {
-                total_current_cells += 1;
-            }
-            if cur.cells[col] == "✅" {
+            total_current_cells += 1;
+            if cell_is_handled(&cur.cells[col]) {
                 total_current_checkmarks += 1;
             }
         }
@@ -1837,20 +1850,21 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
             continue;
         };
 
-        // For existing tests: count baseline/current checkmarks and new checkmarks
+        // For existing tests: count baseline/current handled cells, and list cells that newly
+        // turned green. `new_checkmarks` stays literal-✅ so the report's "turned into
+        // checkmarks ✅" list means what it says (a cell that became N/A is handled, but it did
+        // not turn green).
         for &(col, col_name) in REGRESSION_COLS {
-            if base.cells[col] != "N/A" || cur.cells[col] != "N/A" {
-                existing_total += 1;
-            }
-            let base_pass = base.cells[col] == "✅";
-            let cur_pass = cur.cells[col] == "✅";
-            if base_pass {
+            existing_total += 1;
+            let base_handled = cell_is_handled(&base.cells[col]);
+            let cur_handled = cell_is_handled(&cur.cells[col]);
+            if base_handled {
                 existing_baseline_checkmarks += 1;
             }
-            if cur_pass {
+            if cur_handled {
                 existing_current_checkmarks += 1;
             }
-            if !base_pass && cur_pass {
+            if base.cells[col] != "✅" && cur.cells[col] == "✅" {
                 new_checkmarks.push((cur.name.clone(), col_name));
             }
         }
