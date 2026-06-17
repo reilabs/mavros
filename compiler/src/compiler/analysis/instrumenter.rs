@@ -1560,9 +1560,9 @@ impl Instrumenter {
         } else {
             0
         };
-        // Spread tables fold each entry into a single constraint (both operands
-        // are compile-time constants), so allocation costs 2^bits + 1 (one per
-        // entry plus the sum constraint), not 2·2^bits + 1.
+        // Both operands of a spread entry are compile-time constants, so each
+        // entry is a single folded constraint: 2^bits per-entry constraints
+        // plus one sum constraint.
         let spread_constraints = self
             .final_spread_lookups()
             .keys()
