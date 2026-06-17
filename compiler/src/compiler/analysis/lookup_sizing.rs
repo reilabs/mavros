@@ -2,9 +2,7 @@
 //!
 //! Every rangecheck and spread is ultimately served by one or more lookup tables. A table of
 //! size `2^s` checks a key against `[0, 2^s)`; a `w`-bit value too wide for a single table is
-//! split into chunks. Historically the compiler always used 8-bit (byte) tables, which is
-//! wasteful: a circuit dominated by 16-bit rangechecks pays two lookups each, and SHA-style
-//! circuits with many spreads split everything into byte chunks.
+//! split into chunks.
 //!
 //! This analysis reads the whole-program lookup-width histograms (from [`Summary`]) and picks an
 //! optimal *set* of table sizes — separately for rangechecks (`R`, width-1 tables) and spreads
@@ -14,7 +12,10 @@
 //!
 //! ## Cost model (R1CS constraints)
 //! * Rangecheck table at size `s`: `2^s + 1` allocation, `1` constraint per lookup.
-//! * Spread table at size `s`: `2·2^s + 1` allocation, `2` constraints per lookup.
+//! * Spread table at size `s`: `2^s + 1` allocation, `2` constraints per lookup. (The value
+//!   column `spread(i)` is a compile-time constant, so it folds into the multiplicity-constraint
+//!   denominator — the table costs the same to allocate as a rangecheck; only the per-lookup cost
+//!   is 2, because there the looked-up value is a runtime witness.)
 //! * A multi-chunk spread costs one extra recombination constraint.
 //!
 //! ## Simulation tricks
@@ -260,7 +261,11 @@ fn allocation_constraints(size: u8, kind: TableKind) -> usize {
     let rows = 1usize << size;
     match kind {
         TableKind::Range => rows + 1,
-        TableKind::Spread => 2 * rows + 1,
+        // A spread table's value column is the compile-time constant `spread(i)`, so `β·spread(i)`
+        // folds into the multiplicity-constraint denominator — one constraint per row, same as a
+        // rangecheck table. (The per-*lookup* cost is still 2: there the looked-up value is a
+        // runtime witness, so `β·value` must be materialized.)
+        TableKind::Spread => rows + 1,
     }
 }
 
