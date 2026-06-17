@@ -31,11 +31,6 @@ use crate::{
     },
 };
 
-/// Maximum number of distinct table sizes the optimizer will allocate per category. The optimal
-/// set is small because allocation cost grows exponentially with size; if a chosen set ever uses
-/// the full budget we log a warning so this can be bumped.
-const MAX_TABLES_PER_CATEGORY: usize = 3;
-
 /// Hard ceiling on a single table's bit-width. The affordability bound (a table can't save more
 /// lookups than its `2^s` allocation costs) keeps realistic sizes far below this; the ceiling only
 /// guarantees the backends' fixed-size table caches (`vm::VM::{rgchk_tables,spread_tables}`) are
@@ -388,60 +383,6 @@ fn candidate_sizes(rc_hist: &[(u8, usize)], sp_hist: &[(u8, usize)]) -> Vec<u8> 
     (2..=s_max).collect()
 }
 
-/// All subset bitmasks over candidate indices `0..n` with popcount `0 ..= max_size` (includes the
-/// empty set). Masks make the optimizer's hot loop allocation-free: subset membership, the
-/// spread-only difference, and memo keys are all cheap integer ops.
-fn bounded_subset_masks(n: usize, max_size: usize) -> Vec<u32> {
-    assert!(n <= 32, "candidate set too large for u32 subset masks");
-    let mut out = vec![0u32];
-    fn rec(n: usize, start: usize, max_size: usize, cur: u32, depth: usize, out: &mut Vec<u32>) {
-        if depth == max_size {
-            return;
-        }
-        for i in start..n {
-            let next = cur | (1u32 << i);
-            out.push(next);
-            rec(n, i + 1, max_size, next, depth + 1, out);
-        }
-    }
-    rec(n, 0, max_size, 0, 0, &mut out);
-    out
-}
-
-/// The candidate sizes selected by `mask`.
-fn mask_sizes(mask: u32, candidates: &[u8]) -> Vec<u8> {
-    (0..candidates.len())
-        .filter(|i| mask & (1u32 << i) != 0)
-        .map(|i| candidates[i])
-        .collect()
-}
-
-/// Build the canonical rangecheck provider set: range tables (cost 1) for `range_mask`, plus
-/// spread-only tables (cost 2) for `spread_only_mask` (already disjoint from `range_mask`).
-fn providers_from_masks(
-    range_mask: u32,
-    spread_only_mask: u32,
-    candidates: &[u8],
-) -> Vec<Provider> {
-    let mut providers: Vec<Provider> = (0..candidates.len())
-        .filter(|i| range_mask & (1u32 << i) != 0)
-        .map(|i| Provider {
-            size: candidates[i],
-            kind: TableKind::Range,
-        })
-        .collect();
-    for i in 0..candidates.len() {
-        if spread_only_mask & (1u32 << i) != 0 {
-            providers.push(Provider {
-                size: candidates[i],
-                kind: TableKind::Spread,
-            });
-        }
-    }
-    sort_providers(&mut providers);
-    providers
-}
-
 fn spread_providers_for(p: &[u8]) -> Vec<Provider> {
     let mut providers: Vec<Provider> = p
         .iter()
@@ -454,13 +395,99 @@ fn spread_providers_for(p: &[u8]) -> Vec<Provider> {
     providers
 }
 
+/// Rangecheck providers for table-size sets `(R, P)`: range tables (cost 1) plus spread-only sizes
+/// (cost 2, via the shared key column).
+fn providers_from_sizes(r: &[u8], p: &[u8]) -> Vec<Provider> {
+    let mut providers: Vec<Provider> = r
+        .iter()
+        .map(|&size| Provider {
+            size,
+            kind: TableKind::Range,
+        })
+        .collect();
+    for &size in p {
+        if !r.contains(&size) {
+            providers.push(Provider {
+                size,
+                kind: TableKind::Spread,
+            });
+        }
+    }
+    sort_providers(&mut providers);
+    providers
+}
+
+/// Total R1CS cost (allocation + recurring) of a concrete `(R, P)` table-size configuration, or
+/// `None` if it can't serve every lookup. Used to score the native-floor config against the
+/// bounded search.
+fn config_cost(
+    rc_hist: &[(u8, usize)],
+    sp_hist: &[(u8, usize)],
+    r: &[u8],
+    p: &[u8],
+    has_spreads: bool,
+    has_rangechecks: bool,
+) -> Option<usize> {
+    if has_spreads && p.is_empty() {
+        return None;
+    }
+    if has_rangechecks && r.is_empty() && p.is_empty() {
+        return None;
+    }
+    let spread_alloc: usize = p
+        .iter()
+        .map(|&s| allocation_constraints(s, TableKind::Spread))
+        .sum();
+    let spread_recurring = spread_recurring_cost(sp_hist, &spread_providers_for(p))?;
+    let rc_recurring = rangecheck_recurring_cost(rc_hist, &providers_from_sizes(r, p))?;
+    let range_alloc: usize = r
+        .iter()
+        .map(|&s| allocation_constraints(s, TableKind::Range))
+        .sum();
+    Some(spread_alloc + spread_recurring + range_alloc + rc_recurring)
+}
+
+/// A candidate table-size configuration: the chosen range (`r`) and spread (`p`) table sizes.
+///
+/// The whole search is deterministic — the chosen tables are a pure function of the input
+/// histograms. The only nondeterminism source this crate guards against is hash-map iteration
+/// order, and the search never iterates the input maps: it reads them once via [`sorted_histogram`]
+/// into sorted vectors and then works entirely with `Vec`s and integer costs (no randomness,
+/// clocks, or floats). Every step is therefore a deterministic function, so neighbour order and
+/// best-improving tie-breaks are identical run to run. (`r`/`p` are sorted before returning, for a
+/// canonical result.)
+#[derive(Clone, Default, PartialEq, Eq)]
+struct Config {
+    r: Vec<u8>,
+    p: Vec<u8>,
+}
+
+/// `true` if cost `a` is strictly cheaper than `b`, treating `None` (an unservable configuration)
+/// as `+∞`.
+fn cheaper(a: Option<usize>, b: Option<usize>) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => x < y,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
+
 /// Pick the table-size sets `(R, P)` minimizing total R1CS constraints for the given whole-program
 /// lookup-width histograms.
 ///
-/// Spread tables (`P`) serve both spreads and (optionally) rangechecks, so we enumerate `P` and,
-/// for each, the rangecheck-only tables `R`, scoring by the full joint cost. The candidate space
-/// is small (a handful of sizes, ≤[`MAX_TABLES_PER_CATEGORY`] tables each), so this exhaustive
-/// search is cheap and globally optimal within the cardinality budget.
+/// This is an uncapacitated-facility-location problem: each table is a "facility" with a fixed
+/// opening cost (its `2^s + 1` allocation) and each lookup is a "client" served at the cost of its
+/// cheapest decomposition over the open tables. Opening a table can only lower (never raise) every
+/// client's serving cost, so the savings are submodular — which is exactly the regime where greedy
+/// construction plus add/drop/swap local search find near-optimal solutions while touching the
+/// *entire* candidate space (every size, both kinds), rather than a fixed-cardinality slice of it.
+///
+/// We run local search from several seeds and keep the cheapest result:
+/// * greedy-from-empty — repeatedly open whichever table most reduces total cost;
+/// * one dedicated table per distinct lookup width (the allocate-on-demand strategy);
+/// * the legacy 8-bit byte tables.
+///
+/// Seeding from the latter two guarantees we never do worse than either baseline.
 pub fn optimize(
     rangecheck_hist: &HashMap<u8, usize>,
     spread_hist: &HashMap<u8, usize>,
@@ -475,87 +502,162 @@ pub fn optimize(
     }
 
     let candidates = candidate_sizes(&rc_hist, &sp_hist);
-    let n = candidates.len();
+    if candidates.is_empty() {
+        return LookupSizing::default();
+    }
+    let s_max = *candidates.last().expect("candidates is non-empty");
 
-    // Enumerate table-size subsets as bitmasks over candidate indices. Costs are memoized: spreads
-    // by the spread mask, rangechecks by the provider profile `(range sizes, spread-only sizes)`
-    // packed into a `u64` — so each (R, P) pair only pays cheap integer ops, no allocation.
-    let masks = bounded_subset_masks(n, MAX_TABLES_PER_CATEGORY);
-    let alloc_for = |mask: u32, kind: TableKind| -> usize {
-        (0..n)
-            .filter(|i| mask & (1u32 << i) != 0)
-            .map(|i| allocation_constraints(candidates[i], kind))
-            .sum()
+    let cost = |cfg: &Config| {
+        config_cost(
+            &rc_hist,
+            &sp_hist,
+            &cfg.r,
+            &cfg.p,
+            has_spreads,
+            has_rangechecks,
+        )
     };
 
-    let mut spread_memo: HashMap<u32, Option<usize>> = HashMap::default();
-    let mut rangecheck_memo: HashMap<u64, Option<usize>> = HashMap::default();
-
-    let mut best: Option<(usize, u32, u32)> = None;
-
-    for &p_mask in &masks {
-        if has_spreads && p_mask == 0 {
-            continue; // spreads need at least one table
+    // Seeds for the local search (see the function doc).
+    let distinct = Config {
+        r: rc_hist
+            .iter()
+            .filter(|&&(w, c)| w >= 2 && c > 0 && w <= s_max)
+            .map(|&(w, _)| w)
+            .collect(),
+        p: sp_hist
+            .iter()
+            .filter(|&&(w, c)| c > 0 && w <= s_max)
+            .map(|&(w, _)| w)
+            .collect(),
+    };
+    let byte = {
+        let b = 8u8.min(s_max);
+        Config {
+            r: if has_rangechecks { vec![b] } else { vec![] },
+            p: if has_spreads { vec![b] } else { vec![] },
         }
+    };
+    let seeds = [greedy_construct(&candidates, &cost), distinct, byte];
 
-        let spread_alloc = alloc_for(p_mask, TableKind::Spread);
-        let spread_recurring = *spread_memo.entry(p_mask).or_insert_with(|| {
-            spread_recurring_cost(
-                &sp_hist,
-                &spread_providers_for(&mask_sizes(p_mask, &candidates)),
-            )
-        });
-        let Some(spread_recurring) = spread_recurring else {
-            continue;
-        };
-
-        for &r_mask in &masks {
-            if has_rangechecks && r_mask == 0 && p_mask == 0 {
-                continue; // rangechecks need at least one provider
-            }
-            // The rangecheck cost depends only on the provider profile: range sizes (`r_mask`) plus
-            // spread-only sizes (`p_mask & !r_mask`). Many (R, P) pairs share a profile, so key the
-            // memo on it directly.
-            let spread_only = p_mask & !r_mask;
-            let key = ((r_mask as u64) << 32) | spread_only as u64;
-            let rc_recurring = *rangecheck_memo.entry(key).or_insert_with(|| {
-                rangecheck_recurring_cost(
-                    &rc_hist,
-                    &providers_from_masks(r_mask, spread_only, &candidates),
-                )
-            });
-            let Some(rc_recurring) = rc_recurring else {
-                continue;
-            };
-            let range_alloc = alloc_for(r_mask, TableKind::Range);
-
-            let total = spread_alloc + spread_recurring + range_alloc + rc_recurring;
-            if best.as_ref().map_or(true, |(c, _, _)| total < *c) {
-                best = Some((total, r_mask, p_mask));
-            }
+    let mut best: Option<Config> = None;
+    for seed in seeds {
+        let refined = local_search(seed, &candidates, &cost);
+        if best
+            .as_ref()
+            .is_none_or(|b| cheaper(cost(&refined), cost(b)))
+        {
+            best = Some(refined);
         }
     }
 
-    let (_, r_mask, p_mask) =
-        best.expect("at least one feasible configuration exists when lookups are present");
-    let mut rangecheck_tables = mask_sizes(r_mask, &candidates);
-    let mut spread_tables = mask_sizes(p_mask, &candidates);
-    rangecheck_tables.sort_unstable();
-    spread_tables.sort_unstable();
-
-    if rangecheck_tables.len() == MAX_TABLES_PER_CATEGORY
-        || spread_tables.len() == MAX_TABLES_PER_CATEGORY
-    {
-        tracing::warn!(
-            "lookup sizing used the full table budget ({MAX_TABLES_PER_CATEGORY}); \
-             consider raising MAX_TABLES_PER_CATEGORY (R={rangecheck_tables:?}, P={spread_tables:?})"
-        );
-    }
-
+    let mut best = best.expect("at least one seed is feasible when lookups are present");
+    best.r.sort_unstable();
+    best.p.sort_unstable();
     LookupSizing {
-        rangecheck_tables,
-        spread_tables,
+        rangecheck_tables: best.r,
+        spread_tables: best.p,
     }
+}
+
+/// Build a configuration greedily: starting from no tables, repeatedly open whichever single table
+/// (range or spread, any candidate size) reduces total cost the most, until none does. The first
+/// step necessarily reaches a servable configuration (any one table can chunk every width).
+fn greedy_construct(candidates: &[u8], cost: &dyn Fn(&Config) -> Option<usize>) -> Config {
+    let mut cfg = Config::default();
+    loop {
+        let current = cost(&cfg);
+        let mut best: Option<Config> = None;
+        for cand in neighbors_add(&cfg, candidates) {
+            let cand_cost = cost(&cand);
+            let beats = best.as_ref().map_or(current, cost);
+            if cheaper(cand_cost, beats) {
+                best = Some(cand);
+            }
+        }
+        match best {
+            Some(next) => cfg = next,
+            None => return cfg,
+        }
+    }
+}
+
+/// Refine a configuration to a local optimum under add/drop/swap moves (best-improving). Each move
+/// either opens a table, closes one, or replaces one with a different size.
+fn local_search(
+    mut cfg: Config,
+    candidates: &[u8],
+    cost: &dyn Fn(&Config) -> Option<usize>,
+) -> Config {
+    loop {
+        let current = cost(&cfg);
+        let mut best: Option<Config> = None;
+        for cand in neighbors(&cfg, candidates) {
+            let cand_cost = cost(&cand);
+            let beats = best.as_ref().map_or(current, cost);
+            if cheaper(cand_cost, beats) {
+                best = Some(cand);
+            }
+        }
+        match best {
+            Some(next) => cfg = next,
+            None => return cfg,
+        }
+    }
+}
+
+/// All configurations reachable by opening one more table (one per candidate size, each kind).
+fn neighbors_add(cfg: &Config, candidates: &[u8]) -> Vec<Config> {
+    let mut out = Vec::new();
+    for &s in candidates {
+        if !cfg.r.contains(&s) {
+            let mut c = cfg.clone();
+            c.r.push(s);
+            out.push(c);
+        }
+        if !cfg.p.contains(&s) {
+            let mut c = cfg.clone();
+            c.p.push(s);
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// All configurations one add/drop/swap move away from `cfg`.
+fn neighbors(cfg: &Config, candidates: &[u8]) -> Vec<Config> {
+    let mut out = neighbors_add(cfg, candidates);
+    // Drops.
+    for i in 0..cfg.r.len() {
+        let mut c = cfg.clone();
+        c.r.remove(i);
+        out.push(c);
+    }
+    for i in 0..cfg.p.len() {
+        let mut c = cfg.clone();
+        c.p.remove(i);
+        out.push(c);
+    }
+    // Swaps (replace one open table with a different size of the same kind).
+    for i in 0..cfg.r.len() {
+        for &s in candidates {
+            if !cfg.r.contains(&s) {
+                let mut c = cfg.clone();
+                c.r[i] = s;
+                out.push(c);
+            }
+        }
+    }
+    for i in 0..cfg.p.len() {
+        for &s in candidates {
+            if !cfg.p.contains(&s) {
+                let mut c = cfg.clone();
+                c.p[i] = s;
+                out.push(c);
+            }
+        }
+    }
+    out
 }
 
 impl Analysis for LookupSizing {
