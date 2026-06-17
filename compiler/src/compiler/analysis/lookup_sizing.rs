@@ -6,19 +6,26 @@
 //!
 //! This analysis reads the whole-program lookup-width histograms (from [`Summary`]) and picks an
 //! optimal *set* of table sizes — separately for rangechecks (`R`, width-1 tables) and spreads
-//! (`P`, width-2 tables) — minimizing total R1CS constraints. Because a spread table's key column
-//! is itself a rangecheck, rangechecks may also be served by a spread table (at 2 constraints per
-//! lookup instead of 1), so the two decisions are optimized jointly.
+//! (`P`, width-2 tables) — minimizing total R1CS **witnesses** (≈ the prover's commitment size).
+//! Because a spread table's key column is itself a rangecheck, rangechecks may also be served by a
+//! spread table (at 2 witnesses per lookup instead of 1), so the two decisions are optimized
+//! jointly.
 //!
-//! ## Cost model (R1CS constraints)
-//! * Rangecheck table at size `s`: `2^s + 1` allocation, `1` constraint per lookup.
-//! * Spread table at size `s`: `2^s + 1` allocation, `2` constraints per lookup.
+//! ## Cost model (witnesses)
+//! * Rangecheck table at size `s`: `2^s` allocation, `1` witness per lookup.
+//! * Spread table at size `s`: `2^s` allocation, `2` witnesses per lookup.
+//!
+//! (Allocations would each be `+1` if we counted *constraints* — the per-table sum constraint —
+//! but that is a constraint, not a witness.)
 //!
 //! ## Simulation tricks
 //! * A full chunk of exactly `s` bits is one lookup in an `s`-bit table.
 //! * A residual chunk of `r < s` bits is bounded with the "2-larger" trick: look up `x` and
-//!   `(2^r − 1) − x` in the `s`-bit table (two lookups). This keeps the range *exactly* `r` bits,
-//!   which is required for spreads since they double as rangechecks.
+//!   `(2^r − 1) − x` in a larger table. The complement `(2^r − 1) − x` only has to be
+//!   range-bounded (to rule out field wraparound), so when an `r`-or-larger *rangecheck* table
+//!   exists it is a 1-witness rangecheck rather than a second 2-witness spread lookup — a spread
+//!   partial costs `2 + 1` rather than `2 + 2`. The primary lookup keeps its kind (a spread must
+//!   stay a spread to produce `spread(x)`).
 
 use std::fmt::Debug;
 
@@ -40,19 +47,40 @@ const MAX_TABLE_BITS: u8 = 24;
 /// Which physical table a chunk lookup targets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TableKind {
-    /// A width-1 rangecheck table (`Rangecheck(s)`), 1 constraint per lookup.
+    /// A width-1 rangecheck table (`Rangecheck(s)`), 1 witness per lookup.
     Range,
-    /// A width-2 spread table (`Spread(s)`), 2 constraints per lookup.
+    /// A width-2 spread table (`Spread(s)`), 2 witnesses per lookup.
     Spread,
 }
 
 impl TableKind {
-    fn per_lookup_constraints(self) -> usize {
+    fn per_lookup_witnesses(self) -> usize {
         match self {
             TableKind::Range => 1,
             TableKind::Spread => 2,
         }
     }
+}
+
+/// Witness cost of one chunk of `width` bits looked up in a table of the given `kind`.
+///
+/// A *full* chunk (`width == table_size`) is a single lookup. A *partial* chunk uses the "2-larger"
+/// trick — one lookup for the value plus one for its complement `(2^r − 1) − x`. The complement
+/// only needs to be range-bounded (to rule out field wraparound), not spread, so when a rangecheck
+/// table of size ≥ `width` is available (`max_range_size`) it is a 1-witness rangecheck rather than
+/// a full lookup in the chunk's own table. The primary lookup keeps the chunk's kind (a spread must
+/// stay a spread to produce `spread(x)`).
+fn chunk_witnesses(width: u8, kind: TableKind, partial: bool, max_range_size: u8) -> usize {
+    let primary = kind.per_lookup_witnesses();
+    if !partial {
+        return primary;
+    }
+    let complement = if max_range_size >= width {
+        TableKind::Range.per_lookup_witnesses()
+    } else {
+        kind.per_lookup_witnesses()
+    };
+    primary + complement
 }
 
 /// One chunk of a decomposed rangecheck/spread lookup, lowest-order chunk first.
@@ -67,16 +95,6 @@ pub struct Chunk {
     /// When true, `width < table_size` and the chunk is bounded with the "2-larger" trick (two
     /// lookups instead of one).
     pub partial: bool,
-}
-
-impl Chunk {
-    fn lookups(self) -> usize {
-        if self.partial { 2 } else { 1 }
-    }
-
-    fn constraints(self) -> usize {
-        self.lookups() * self.table.per_lookup_constraints()
-    }
 }
 
 /// A provider is one available table the decomposition DP may draw chunks from.
@@ -136,20 +154,25 @@ impl LookupSizing {
         providers
     }
 
+    /// The largest rangecheck table available — bounds partial chunks' complements at 1 witness.
+    fn max_range_size(&self) -> u8 {
+        self.rangecheck_tables.iter().copied().max().unwrap_or(0)
+    }
+
     /// How to decompose a `width`-bit rangecheck into chunk lookups (lowest chunk first).
     /// `width == 1` is handled algebraically by the caller and returns an empty plan.
     pub fn decompose_rangecheck(&self, width: u8) -> Vec<Chunk> {
         if width <= 1 {
             return vec![];
         }
-        decompose(width, &self.rangecheck_providers())
+        decompose(width, &self.rangecheck_providers(), self.max_range_size())
             .unwrap_or_else(|| panic!("no rangecheck table can serve a {width}-bit rangecheck"))
             .1
     }
 
     /// How to decompose a `width`-bit spread into chunk lookups (lowest chunk first).
     pub fn decompose_spread(&self, width: u8) -> Vec<Chunk> {
-        decompose(width, &self.spread_providers())
+        decompose(width, &self.spread_providers(), self.max_range_size())
             .unwrap_or_else(|| panic!("no spread table can serve a {width}-bit spread"))
             .1
     }
@@ -174,7 +197,7 @@ fn sort_providers(providers: &mut [Provider]) {
 /// no per-state `Vec<Chunk>` allocation/cloning. The optimizer evaluates this across millions of
 /// `(R, P)` candidate pairs, so the plan-building variant (used only by the actual spilling, a
 /// handful of times) is far too expensive here.
-fn decompose_cost(width: u8, providers: &[Provider]) -> Option<usize> {
+fn decompose_cost(width: u8, providers: &[Provider], max_range_size: u8) -> Option<usize> {
     if width == 0 {
         return Some(0);
     }
@@ -196,13 +219,13 @@ fn decompose_cost(width: u8, providers: &[Provider]) -> Option<usize> {
                 continue;
             }
             if let Some(sub) = best[x - s] {
-                consider(sub + p.kind.per_lookup_constraints());
+                consider(sub + chunk_witnesses(p.size, p.kind, false, max_range_size));
             }
         }
-        // Cover all x bits as one partial chunk (two lookups) in a strictly-larger table.
+        // Cover all x bits as one partial chunk (2-larger trick) in a strictly-larger table.
         for p in providers {
             if (p.size as usize) > x {
-                consider(2 * p.kind.per_lookup_constraints());
+                consider(chunk_witnesses(x as u8, p.kind, true, max_range_size));
             }
         }
         best[x] = chosen;
@@ -210,7 +233,7 @@ fn decompose_cost(width: u8, providers: &[Provider]) -> Option<usize> {
     best[w]
 }
 
-fn decompose(width: u8, providers: &[Provider]) -> Option<(usize, Vec<Chunk>)> {
+fn decompose(width: u8, providers: &[Provider], max_range_size: u8) -> Option<(usize, Vec<Chunk>)> {
     if width == 0 {
         return Some((0, vec![]));
     }
@@ -242,7 +265,8 @@ fn decompose(width: u8, providers: &[Provider]) -> Option<(usize, Vec<Chunk>)> {
                     table: p.kind,
                     partial: false,
                 };
-                consider(sub_cost + chunk.constraints(), &|| {
+                let cost = sub_cost + chunk_witnesses(p.size, p.kind, false, max_range_size);
+                consider(cost, &|| {
                     let mut plan = sub_plan.clone();
                     plan.push(chunk);
                     plan
@@ -259,7 +283,8 @@ fn decompose(width: u8, providers: &[Provider]) -> Option<(usize, Vec<Chunk>)> {
                     table: p.kind,
                     partial: true,
                 };
-                consider(chunk.constraints(), &|| vec![chunk]);
+                let cost = chunk_witnesses(x as u8, p.kind, true, max_range_size);
+                consider(cost, &|| vec![chunk]);
             }
         }
 
@@ -288,13 +313,12 @@ fn canonicalize_plan(plan: Vec<Chunk>) -> Vec<Chunk> {
     fulls
 }
 
-/// Allocation cost (R1CS constraints) for a table of the given kind and size.
-fn allocation_constraints(size: u8, kind: TableKind) -> usize {
-    let rows = 1usize << size;
-    match kind {
-        TableKind::Range => rows + 1,
-        TableKind::Spread => rows + 1,
-    }
+/// Allocation cost (post-commitment witnesses) for a table of the given size. A size-`s` table has
+/// `2^s` rows, each contributing one inverse witness; both range and spread tables use this compact
+/// one-row-per-entry layout. (The constraint count is one more — the per-table sum constraint — but
+/// that is a constraint, not a witness, and the witness count is the metric we minimize.)
+fn allocation_witnesses(size: u8) -> usize {
+    1usize << size
 }
 
 /// Sorted `(width, count)` histogram, deterministic for reproducible optimization.
@@ -305,14 +329,19 @@ fn sorted_histogram(hist: &HashMap<u8, usize>) -> Vec<(u8, usize)> {
 }
 
 /// Total per-lookup rangecheck cost over the histogram for the given providers (excludes table
-/// allocation; 1-bit checks are algebraic and excluded). `None` if some width can't be served.
-fn rangecheck_recurring_cost(rc_hist: &[(u8, usize)], providers: &[Provider]) -> Option<usize> {
+/// allocation; 1-bit checks are algebraic and excluded). `max_range_size` is the largest rangecheck
+/// table available, used to price partial chunks' complements. `None` if some width can't be served.
+fn rangecheck_recurring_cost(
+    rc_hist: &[(u8, usize)],
+    providers: &[Provider],
+    max_range_size: u8,
+) -> Option<usize> {
     let mut total = 0;
     for &(width, count) in rc_hist {
         if width <= 1 || count == 0 {
             continue;
         }
-        let cost = decompose_cost(width, providers)?;
+        let cost = decompose_cost(width, providers, max_range_size)?;
         total += cost * count;
     }
     Some(total)
@@ -320,15 +349,20 @@ fn rangecheck_recurring_cost(rc_hist: &[(u8, usize)], providers: &[Provider]) ->
 
 /// Total per-lookup spread cost over the histogram (excludes table allocation). A multi-chunk
 /// spread reconstructs both its key and its spread from the lowest chunk by subtracting the higher
-/// chunks (free linear combinations), so it needs no recombination constraint. `None` if some
-/// width can't be served.
-fn spread_recurring_cost(sp_hist: &[(u8, usize)], providers: &[Provider]) -> Option<usize> {
+/// chunks (free linear combinations), so it needs no recombination constraint. A partial chunk's
+/// complement is a plain rangecheck when a rangecheck table of sufficient size exists, hence the
+/// `max_range_size`. `None` if some width can't be served.
+fn spread_recurring_cost(
+    sp_hist: &[(u8, usize)],
+    providers: &[Provider],
+    max_range_size: u8,
+) -> Option<usize> {
     let mut total = 0;
     for &(width, count) in sp_hist {
         if count == 0 {
             continue;
         }
-        let cost = decompose_cost(width, providers)?;
+        let cost = decompose_cost(width, providers, max_range_size)?;
         total += cost * count;
     }
     Some(total)
@@ -434,16 +468,15 @@ fn config_cost(
     if has_rangechecks && r.is_empty() && p.is_empty() {
         return None;
     }
-    let spread_alloc: usize = p
-        .iter()
-        .map(|&s| allocation_constraints(s, TableKind::Spread))
-        .sum();
-    let spread_recurring = spread_recurring_cost(sp_hist, &spread_providers_for(p))?;
-    let rc_recurring = rangecheck_recurring_cost(rc_hist, &providers_from_sizes(r, p))?;
-    let range_alloc: usize = r
-        .iter()
-        .map(|&s| allocation_constraints(s, TableKind::Range))
-        .sum();
+    // The largest rangecheck table available to bound partial chunks' complements (only true range
+    // tables count — a spread table's key column would cost 2, not 1).
+    let max_range_size = r.iter().copied().max().unwrap_or(0);
+    let spread_alloc: usize = p.iter().map(|&s| allocation_witnesses(s)).sum();
+    let spread_recurring =
+        spread_recurring_cost(sp_hist, &spread_providers_for(p), max_range_size)?;
+    let rc_recurring =
+        rangecheck_recurring_cost(rc_hist, &providers_from_sizes(r, p), max_range_size)?;
+    let range_alloc: usize = r.iter().map(|&s| allocation_witnesses(s)).sum();
     Some(spread_alloc + spread_recurring + range_alloc + rc_recurring)
 }
 
@@ -688,20 +721,22 @@ mod tests {
         entries.iter().copied().collect()
     }
 
-    /// The constraint total the optimizer believes a configuration costs (mirrors `optimize`).
+    /// The witness total the optimizer believes a configuration costs (mirrors `optimize`).
     fn cost_of(sizing: &LookupSizing, rc: &[(u8, usize)], sp: &[(u8, usize)]) -> usize {
         let alloc: usize = sizing
             .rangecheck_tables
             .iter()
-            .map(|&s| allocation_constraints(s, TableKind::Range))
+            .map(|&s| allocation_witnesses(s))
             .sum::<usize>()
             + sizing
                 .spread_tables
                 .iter()
-                .map(|&s| allocation_constraints(s, TableKind::Spread))
+                .map(|&s| allocation_witnesses(s))
                 .sum::<usize>();
-        let rc_cost = rangecheck_recurring_cost(rc, &sizing.rangecheck_providers()).unwrap();
-        let sp_cost = spread_recurring_cost(sp, &sizing.spread_providers()).unwrap();
+        let max_range = sizing.max_range_size();
+        let rc_cost =
+            rangecheck_recurring_cost(rc, &sizing.rangecheck_providers(), max_range).unwrap();
+        let sp_cost = spread_recurring_cost(sp, &sizing.spread_providers(), max_range).unwrap();
         alloc + rc_cost + sp_cost
     }
 

@@ -653,8 +653,7 @@ impl LowerLookupSpillingOps {
             b.lookup_spread(chunk.table_size, key_field, expected_spread, flag_field);
             if chunk.partial {
                 let gap = self.partial_gap(b, chunk, key_field);
-                let gap_spread = self.spread_hint(b, gap, chunk.table_size, key_is_witness);
-                b.lookup_spread(chunk.table_size, gap, gap_spread, flag_field);
+                self.emit_spread_partial_gap(b, sizing, chunk, gap, flag_field, key_is_witness);
             }
             return true;
         }
@@ -718,8 +717,7 @@ impl LowerLookupSpillingOps {
             b.lookup_spread(chunk.table_size, chunk_key, chunk_spread, flag_field);
             if chunk.partial {
                 let gap = self.partial_gap(b, chunk, chunk_key);
-                let gap_spread = self.spread_hint(b, gap, chunk.table_size, key_is_witness);
-                b.lookup_spread(chunk.table_size, gap, gap_spread, flag_field);
+                self.emit_spread_partial_gap(b, sizing, chunk, gap, flag_field, key_is_witness);
             }
 
             if i != last {
@@ -740,6 +738,33 @@ impl LowerLookupSpillingOps {
     fn partial_gap(&self, b: &mut HLBlockEmitter<'_>, chunk: Chunk, key: ValueId) -> ValueId {
         let bound = b.field_const(Field::from((1u128 << chunk.width) - 1));
         b.sub(bound, key)
+    }
+
+    /// Emit the "2-larger" complement lookup for a *partial spread* chunk. The complement only needs
+    /// to be range-bounded (to rule out field wraparound), not spread, so when a rangecheck table of
+    /// size `>= chunk.width` exists it is a single 1-witness rangecheck. Otherwise it falls back to
+    /// a spread lookup in the chunk's own table. This mirrors the cost model in `lookup_sizing`
+    /// (a spread partial costs `2 + 1` when a range table is available, else `2 + 2`).
+    fn emit_spread_partial_gap(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        sizing: &LookupSizing,
+        chunk: Chunk,
+        gap: ValueId,
+        flag_field: ValueId,
+        key_is_witness: bool,
+    ) {
+        if let Some(&table) = sizing
+            .rangecheck_tables
+            .iter()
+            .filter(|&&t| t >= chunk.width)
+            .min()
+        {
+            b.lookup_rngchk(LookupTarget::Rangecheck(table), gap, flag_field);
+        } else {
+            let gap_spread = self.spread_hint(b, gap, chunk.table_size, key_is_witness);
+            b.lookup_spread(chunk.table_size, gap, gap_spread, flag_field);
+        }
     }
 
     /// Compute `spread(key)` as a hint matching the `table_size`-bit spread table, returned as a
