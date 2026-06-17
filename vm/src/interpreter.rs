@@ -12,7 +12,7 @@ pub use crate::InputValueOrdered;
 
 use crate::bytecode::{ENTRY_AD, ENTRY_WITGEN, parse_program_header, spread_bits};
 use crate::{
-    ConstraintsLayout, Field, WitnessLayout,
+    ConstraintsLayout, Field, TableKind, WitnessLayout,
     array::BoxedValue,
     bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, U128, VM},
 };
@@ -382,62 +382,61 @@ pub fn run_phase2(
         let alpha = phase1.out_wit_post_comm[0];
         let base = tbl.elem_inverses_constraint_section_offset;
 
-        if tbl.num_values == 0 {
-            // Width-1 table (rangecheck): denom_i = α - i
-            for i in 0..tbl.length {
-                let multiplicity = unsafe { *tbl.multiplicities_wit.add(i) };
-                let denom = alpha - Field::from(i as u64);
-                phase1.out_b[base + i] = denom;
-                phase1.out_c[base + i] = multiplicity;
-                if multiplicity != Field::ZERO {
-                    phase1.out_a[base + i] = running_prod;
-                    running_prod *= denom;
+        match tbl.kind {
+            TableKind::RangeCheck => {
+                // One constraint per entry: denom_i = α - i
+                for i in 0..tbl.length {
+                    let multiplicity = unsafe { *tbl.multiplicities_wit.add(i) };
+                    let denom = alpha - Field::from(i as u64);
+                    phase1.out_b[base + i] = denom;
+                    phase1.out_c[base + i] = multiplicity;
+                    if multiplicity != Field::ZERO {
+                        phase1.out_a[base + i] = running_prod;
+                        running_prod *= denom;
+                    }
                 }
             }
-        } else if tbl.num_values == 2 {
-            // Spread allocation: one folded constraint per entry. Both operands
-            // (key=i, value=spread(i)) are constants, so β·spread(i) is folded
-            // into the denominator: denom_i = α - i + β·spread(i). spread(i) is
-            // recomputed here rather than dumped by the VM.
-            let beta = phase1.out_wit_post_comm[1];
-            for i in 0..tbl.length {
-                let multiplicity = unsafe { *tbl.multiplicities_wit.add(i) };
-                let spread_i = Field::from(spread_bits(i as u32));
-                let denom = alpha - Field::from(i as u64) + beta * spread_i;
-                phase1.out_b[base + i] = denom;
-                phase1.out_c[base + i] = multiplicity;
-                if multiplicity != Field::ZERO {
-                    phase1.out_a[base + i] = running_prod;
-                    running_prod *= denom;
+            TableKind::Spread => {
+                // One folded constraint per entry. Both operands (key=i,
+                // value=spread(i)) are constants, so β·spread(i) folds into the
+                // denominator: denom_i = α - i + β·spread(i). spread(i) is
+                // recomputed here rather than dumped by the VM.
+                let beta = phase1.out_wit_post_comm[1];
+                for i in 0..tbl.length {
+                    let multiplicity = unsafe { *tbl.multiplicities_wit.add(i) };
+                    let spread_i = Field::from(spread_bits(i as u32));
+                    let denom = alpha - Field::from(i as u64) + beta * spread_i;
+                    phase1.out_b[base + i] = denom;
+                    phase1.out_c[base + i] = multiplicity;
+                    if multiplicity != Field::ZERO {
+                        phase1.out_a[base + i] = running_prod;
+                        running_prod *= denom;
+                    }
                 }
             }
-        } else {
-            assert_eq!(
-                tbl.num_values, 1,
-                "expected width-2 table, got num_values={}",
-                tbl.num_values
-            );
-            // Width-2 table (array): x_i = -β*v_i, denom_i = α - i - x_i
-            let beta = phase1.out_wit_post_comm[1];
-            for i in 0..tbl.length {
-                let multiplicity = unsafe { *tbl.multiplicities_wit.add(i) };
+            TableKind::Array => {
+                // Two constraints per entry: x_i = -β*v_i, denom_i = α - i - x_i
+                let beta = phase1.out_wit_post_comm[1];
+                for i in 0..tbl.length {
+                    let multiplicity = unsafe { *tbl.multiplicities_wit.add(i) };
 
-                // Read v_i from the x-slot where the VM dumped it
-                let v_i = phase1.out_a[base + 2 * i];
-                let x_i = -beta * v_i;
+                    // Read v_i from the x-slot where the VM dumped it
+                    let v_i = phase1.out_a[base + 2 * i];
+                    let x_i = -beta * v_i;
 
-                // Fill x-constraint: β * v_i = -x_i
-                phase1.out_a[base + 2 * i] = beta;
-                phase1.out_b[base + 2 * i] = v_i;
-                phase1.out_c[base + 2 * i] = -x_i;
+                    // Fill x-constraint: β * v_i = -x_i
+                    phase1.out_a[base + 2 * i] = beta;
+                    phase1.out_b[base + 2 * i] = v_i;
+                    phase1.out_c[base + 2 * i] = -x_i;
 
-                // Fill y-constraint slots (will be overwritten by batch inversion)
-                let denom = alpha - Field::from(i as u64) - x_i;
-                phase1.out_b[base + 2 * i + 1] = denom;
-                phase1.out_c[base + 2 * i + 1] = multiplicity;
-                if multiplicity != Field::ZERO {
-                    phase1.out_a[base + 2 * i + 1] = running_prod;
-                    running_prod *= denom;
+                    // Fill y-constraint slots (will be overwritten by batch inversion)
+                    let denom = alpha - Field::from(i as u64) - x_i;
+                    phase1.out_b[base + 2 * i + 1] = denom;
+                    phase1.out_c[base + 2 * i + 1] = multiplicity;
+                    if multiplicity != Field::ZERO {
+                        phase1.out_a[base + 2 * i + 1] = running_prod;
+                        running_prod *= denom;
+                    }
                 }
             }
         }
@@ -448,9 +447,8 @@ pub fn run_phase2(
     for tbl in phase1.tables.iter().rev() {
         let base = tbl.elem_inverses_constraint_section_offset;
 
-        if tbl.num_values == 0 || tbl.num_values == 2 {
-            // One folded constraint per entry (rangecheck width-1 and spread):
-            // y-values live at consecutive offsets.
+        if matches!(tbl.kind, TableKind::RangeCheck | TableKind::Spread) {
+            // One constraint per entry: y-values live at consecutive offsets.
             for i in (0..tbl.length).rev() {
                 let multiplicity = phase1.out_c[base + i];
                 let denom = phase1.out_b[base + i];
@@ -462,12 +460,7 @@ pub fn run_phase2(
                 }
             }
         } else {
-            assert_eq!(
-                tbl.num_values, 1,
-                "expected width-2 table, got num_values={}",
-                tbl.num_values
-            );
-            // Width-2: y-values at odd offsets
+            // Array: y-values at odd offsets.
             for i in (0..tbl.length).rev() {
                 let multiplicity = phase1.out_c[base + 2 * i + 1];
                 let denom = phase1.out_b[base + 2 * i + 1];
@@ -494,8 +487,8 @@ pub fn run_phase2(
 
         let alpha = phase1.out_wit_post_comm[0];
 
-        if table.num_values == 0 {
-            // Width-1 lookup (rangecheck): 1 constraint per lookup
+        if table.kind == TableKind::RangeCheck {
+            // Key-only lookup (rangecheck): 1 constraint per lookup
             let flag_u64 = phase1.out_c[cnst_off].0.0[0];
 
             if flag_u64 == 0 {
@@ -519,19 +512,17 @@ pub fn run_phase2(
 
             current_lookup_off += 1;
         } else {
-            assert!(
-                table.num_values == 1 || table.num_values == 2,
-                "expected width-2 lookup table, got num_values={}",
-                table.num_values
-            );
-            // Width-2 lookup (array or spread): 2 constraints per lookup. The
+            // Key-value lookup (array or spread): 2 constraints per lookup. The
             // looked-up key & value are witnesses regardless of how the table
             // is allocated; only the *table's* internal y-slot stride differs —
             // array stores x,y per entry (stride 2, y at the odd slot) while a
             // folded spread table stores just y per entry (stride 1).
             // Entry 1 (x-constraint): out_a=table_id, out_b=result_value, out_c=0
             // Entry 2 (y-constraint): out_a=table_id, out_b=index, out_c=flag
-            let entry_stride = if table.num_values == 2 { 1 } else { 2 };
+            let entry_stride = match table.kind {
+                TableKind::Spread => 1,
+                _ => 2,
+            };
             let beta = phase1.out_wit_post_comm[1];
             let result_value = phase1.out_b[cnst_off];
             let flag_u64 = phase1.out_c[cnst_off + 1].0.0[0];
@@ -578,10 +569,9 @@ pub fn run_phase2(
         let base = tbl.elem_inverses_constraint_section_offset;
         let wit_base = tbl.elem_inverses_witness_section_offset;
 
-        if tbl.num_values == 0 || tbl.num_values == 2 {
-            // One folded constraint per entry (rangecheck width-1 and spread):
-            // y-values at consecutive offsets, sum constraint at offset length,
-            // one witness per entry.
+        if matches!(tbl.kind, TableKind::RangeCheck | TableKind::Spread) {
+            // One constraint per entry: y-values at consecutive offsets, sum
+            // constraint at offset length, one witness per entry.
             for i in 0..tbl.length {
                 let multiplicity = phase1.out_c[base + i];
                 if multiplicity != Field::ZERO {
@@ -593,12 +583,7 @@ pub fn run_phase2(
             }
             phase1.out_b[base + tbl.length] = Field::ONE;
         } else {
-            assert_eq!(
-                tbl.num_values, 1,
-                "expected width-2 table, got num_values={}",
-                tbl.num_values
-            );
-            // Width-2: y-values at odd offsets, sum constraint at offset 2*length
+            // Array: y-values at odd offsets, sum constraint at offset 2*length
             for i in 0..tbl.length {
                 let multiplicity = phase1.out_c[base + 2 * i + 1];
                 if multiplicity != Field::ZERO {

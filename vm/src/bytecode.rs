@@ -1,6 +1,6 @@
 #![allow(unused_variables)]
 
-use crate::{ConstraintsLayout, Field, WitnessLayout};
+use crate::{ConstraintsLayout, Field, TableKind, WitnessLayout};
 use ark_ff::{AdditiveGroup as _, BigInteger as _};
 use mavros_opcode_gen::interpreter;
 
@@ -404,7 +404,7 @@ impl AllocationInstrumenter {
 pub struct TableInfo {
     pub multiplicities_wit: *mut Field,
     pub num_indices: usize,
-    pub num_values: usize,
+    pub kind: TableKind,
     pub length: usize,
     pub elem_inverses_witness_section_offset: usize,
     pub elem_inverses_constraint_section_offset: usize,
@@ -630,8 +630,8 @@ unsafe fn ad_kv_lookup_emit(
     let cnst_off = table_info.elem_inverses_constraint_section_offset;
     let length = table_info.length;
     // Sum constraint sits past the table's per-entry constraints: spread tables
-    // (num_values==2) fold each entry into one constraint, arrays use two.
-    let sum_off = if table_info.num_values == 2 {
+    // fold each entry into one constraint, arrays use two.
+    let sum_off = if table_info.kind == TableKind::Spread {
         cnst_off + length
     } else {
         cnst_off + 2 * length
@@ -1667,7 +1667,7 @@ mod def {
         // Initialize spread table for this bit-width on first call.
         //
         // Spread tables use the folded single-constraint allocation
-        // (`num_values == 2`): both operands of each entry (key=i,
+        // (`TableKind::Spread`): both operands of each entry (key=i,
         // value=spread(i)) are constants, so each entry is just one
         // `y·(α-i+β·spread(i))=m` constraint/witness instead of the generic
         // two-constraint key-value form. Phase 2 recomputes `spread(i)` itself,
@@ -1677,7 +1677,7 @@ mod def {
             let table_info = TableInfo {
                 multiplicities_wit: unsafe { vm.data.as_forward.multiplicities_witness },
                 num_indices: 1,
-                num_values: 2,
+                kind: TableKind::Spread,
                 length,
                 elem_inverses_constraint_section_offset: unsafe {
                     vm.data.as_forward.elem_inverses_constraint_section_offset
@@ -1720,7 +1720,7 @@ mod def {
             let table_info = TableInfo {
                 multiplicities_wit: ptr::null_mut(),
                 num_indices: 1,
-                num_values: 2,
+                kind: TableKind::Spread,
                 length,
                 elem_inverses_witness_section_offset: inverses_witness_section_offset,
                 elem_inverses_constraint_section_offset: inverses_constraint_section_offset,
@@ -1802,7 +1802,7 @@ mod def {
             let table_info = TableInfo {
                 multiplicities_wit: unsafe { vm.data.as_forward.multiplicities_witness },
                 num_indices: 1,
-                num_values: 0,
+                kind: TableKind::RangeCheck,
                 length: 256,
                 elem_inverses_constraint_section_offset: unsafe {
                     vm.data.as_forward.elem_inverses_constraint_section_offset
@@ -1878,7 +1878,7 @@ mod def {
             let table_info = TableInfo {
                 multiplicities_wit: mult_wit,
                 num_indices: 1,
-                num_values: 1,
+                kind: TableKind::Array,
                 length,
                 elem_inverses_constraint_section_offset: cnst_off,
                 elem_inverses_witness_section_offset: wit_off,
@@ -1916,7 +1916,7 @@ mod def {
             let table_info = TableInfo {
                 multiplicities_wit: ptr::null_mut(),
                 num_indices: 1,
-                num_values: 0,
+                kind: TableKind::RangeCheck,
                 length: 256,
                 elem_inverses_witness_section_offset: inverses_witness_section_offset,
                 elem_inverses_constraint_section_offset: inverses_constraint_section_offset,
@@ -2117,7 +2117,7 @@ mod def {
             let table_info = TableInfo {
                 multiplicities_wit: ptr::null_mut(),
                 num_indices: 1,
-                num_values: 1,
+                kind: TableKind::Array,
                 length,
                 elem_inverses_witness_section_offset: inverses_witness_section_offset,
                 elem_inverses_constraint_section_offset: inverses_constraint_section_offset,

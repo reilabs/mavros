@@ -3,7 +3,7 @@
 //! Array types lower to heap-allocated RC'd structs behind `Ptr`. MkSeq, ArrayGet, ArraySet, and
 //! MemOp (Bump/Drop) are lowered to explicit memory operations.
 
-use mavros_artifacts::{ConstraintsLayout, WitnessLayout};
+use mavros_artifacts::{ConstraintsLayout, TableKind, WitnessLayout};
 use std::{collections::BTreeMap, marker::PhantomData};
 
 use crate::{
@@ -3015,12 +3015,6 @@ enum ForwardLookupTableState {
 enum LookupTableColumns {
     KeyOnly,
     KeyValue,
-    /// Key-value table whose value is a compile-time function of the key
-    /// (`spread(i)`). Because both operands are pure constants, each entry is
-    /// allocated with a single folded constraint `y·(α-i+β·spread(i))=m`
-    /// instead of the generic two-constraint `KeyValue` form, so it uses one
-    /// witness/constraint slot per entry. Lookups into it are still ordinary
-    /// key-value (witness) lookups.
     Spread,
 }
 
@@ -3052,13 +3046,11 @@ impl LookupTableSpec {
         }
     }
 
-    fn num_values(self) -> u64 {
+    fn kind(self) -> TableKind {
         match self.columns {
-            LookupTableColumns::KeyOnly => 0,
-            LookupTableColumns::KeyValue => 1,
-            // Discriminant only: marks the folded single-constraint allocation
-            // layout for Phase 2 (`TableInfo.num_values`). Never used for sizing.
-            LookupTableColumns::Spread => 2,
+            LookupTableColumns::KeyOnly => TableKind::RangeCheck,
+            LookupTableColumns::KeyValue => TableKind::Array,
+            LookupTableColumns::Spread => TableKind::Spread,
         }
     }
 
@@ -3134,7 +3126,7 @@ fn get_or_init_forward_lookup_table(
             let slot_ptr = witgen_table_info_ptr(e, table_idx);
             let one_i32 = e.emit_int_const(32, 1);
             let table_len_i32 = e.emit_int_const(32, lookup.length as u64);
-            let table_values_i32 = e.emit_int_const(32, lookup.num_values());
+            let table_kind_i32 = e.emit_int_const(32, lookup.kind().code() as u64);
             let table_wit_bump_i32 = e.emit_int_const(32, lookup.witness_slots() as u64);
             let table_cnst_bump_i32 = e.emit_int_const(32, lookup.constraint_slots() as u64);
             let table_info_writes = [
@@ -3142,7 +3134,7 @@ fn get_or_init_forward_lookup_table(
                 (LLStruct::TABLE_INFO_INV_CNST_OFF, inv_cnst_off),
                 (LLStruct::TABLE_INFO_INV_WIT_OFF, inv_wit_off),
                 (LLStruct::TABLE_INFO_NUM_INDICES, one_i32),
-                (LLStruct::TABLE_INFO_NUM_VALUES, table_values_i32),
+                (LLStruct::TABLE_INFO_KIND, table_kind_i32),
                 (LLStruct::TABLE_INFO_LENGTH, table_len_i32),
             ];
             for (field, value) in table_info_writes {

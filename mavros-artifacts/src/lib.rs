@@ -91,6 +91,48 @@ impl Display for R1C {
 }
 
 // ---------------------------------------------------------------------------
+// Lookup table layout
+// ---------------------------------------------------------------------------
+
+/// How a lookup table's allocation entries are laid out in the constraint
+/// system. This is the discriminant Phase 2 of witness generation branches on
+/// to fill each entry's constraint(s); it is carried through the witgen VM's
+/// table-info slot as the integer [`TableKind::code`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableKind {
+    /// Key-only (rangecheck): one constraint per entry, `denom = α - i`.
+    RangeCheck,
+    /// Key-value with witness values: two constraints per entry
+    /// (`β·v = -x`; `y·(α - i - x) = m`).
+    Array,
+    /// Key-value whose values are the compile-time constants `spread(i)`. Both
+    /// operands of every entry are constant, so `β·spread(i)` folds into the
+    /// denominator and each entry needs only one constraint
+    /// (`y·(α - i + β·spread(i)) = m`).
+    Spread,
+}
+
+impl TableKind {
+    /// Wire encoding stored in the table-info slot.
+    pub fn code(self) -> u32 {
+        match self {
+            TableKind::RangeCheck => 0,
+            TableKind::Array => 1,
+            TableKind::Spread => 2,
+        }
+    }
+
+    pub fn from_code(code: u32) -> Self {
+        match code {
+            0 => TableKind::RangeCheck,
+            1 => TableKind::Array,
+            2 => TableKind::Spread,
+            other => panic!("invalid TableKind code: {other}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Witness & constraints layout
 // ---------------------------------------------------------------------------
 
