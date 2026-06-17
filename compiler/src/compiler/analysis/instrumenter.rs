@@ -1560,11 +1560,14 @@ impl Instrumenter {
         } else {
             0
         };
+        // Both operands of a spread entry are compile-time constants, so each
+        // entry is a single folded constraint: 2^bits per-entry constraints
+        // plus one sum constraint.
         let spread_constraints = self
             .final_spread_lookups()
             .keys()
             .filter(|bits| **bits >= 2)
-            .map(|bits| 2 * (1usize << *bits as usize) + 1)
+            .map(|bits| (1usize << *bits as usize) + 1)
             .sum::<usize>();
         range_constraints + spread_constraints
     }

@@ -1085,27 +1085,26 @@ impl R1CGen {
                     table_info.sum_constraint_idx = result.len() - 1;
                 }
                 Table::Spread(bits) => {
-                    // Spread table: for each entry i in 0..2^bits, value = spread(i)
-                    // Width = 2 (key=i, value=spread(i)), same structure as OfElems
+                    // Spread table: for each entry i in 0..2^bits, value = spread(i).
+                    // Both operands (key=i, value=spread(i)) are compile-time
+                    // constants, so the `x = β·spread(i)` intermediate of the
+                    // generic key-value table (`OfElems`) collapses: β·spread(i)
+                    // is linear in the witness and folds directly into the
+                    // denominator. One witness/constraint per entry instead of two:
+                    // -> y = mᵢ / (α - i + β·spread(i)),
+                    //    constraint `y · (α - i + β·spread(i)) - mᵢ = 0`
                     let len = 1usize << bits;
                     let mut sum_lhs: LC = vec![];
                     for i in 0..len {
                         let spread_val = spread_bits(i as u128, 32);
-                        let v: LC = vec![(0, crate::compiler::Field::from(spread_val))];
-                        let x = witness_layout.next_table_data();
                         let y = witness_layout.next_table_data();
                         let m = table_info.multiplicities_witness_off + i;
-                        result.push(R1C {
-                            a: vec![(beta, crate::compiler::Field::ONE)],
-                            b: v,
-                            c: vec![(x, -crate::compiler::Field::ONE)],
-                        });
                         result.push(R1C {
                             a: vec![(y, ark_bn254::Fr::ONE)],
                             b: vec![
                                 (alpha, ark_bn254::Fr::ONE),
                                 (0, -crate::compiler::Field::from(i as u64)),
-                                (x, -crate::compiler::Field::ONE),
+                                (beta, crate::compiler::Field::from(spread_val)),
                             ],
                             c: vec![(m, crate::compiler::Field::ONE)],
                         });
