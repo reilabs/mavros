@@ -1,0 +1,6 @@
+[package]
+name = "mut_array_loop"
+type = "bin"
+authors = [""]
+
+[dependencies]

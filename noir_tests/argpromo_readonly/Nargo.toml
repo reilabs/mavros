@@ -1,0 +1,6 @@
+[package]
+name = "argpromo_readonly"
+type = "bin"
+authors = [""]
+
+[dependencies]

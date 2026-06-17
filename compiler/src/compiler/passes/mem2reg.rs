@@ -8,6 +8,9 @@
 //! through a pointer that points to _only_ it. The pass, thus, runs partially, promoting clean
 //! locals while leaving escaping refs, ref parameters, and aliased allocations as ordinary memory
 //! traffic in the same function.
+//!
+//! This analysis is purely _intraprocedural_ and does not perform promotions through arguments or
+//! returns. For an _interprocedural_ pass that handles this, see `arg_promotion.rs`.
 
 use std::collections::VecDeque;
 

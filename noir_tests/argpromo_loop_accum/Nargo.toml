@@ -1,0 +1,6 @@
+[package]
+name = "argpromo_loop_accum"
+type = "bin"
+authors = [""]
+
+[dependencies]
