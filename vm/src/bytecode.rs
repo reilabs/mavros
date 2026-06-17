@@ -1,6 +1,6 @@
 #![allow(unused_variables)]
 
-use crate::{ConstraintsLayout, Field, WitnessLayout};
+use crate::{ConstraintsLayout, Field, TableKind, WitnessLayout};
 use ark_ff::{AdditiveGroup as _, BigInteger as _};
 use mavros_opcode_gen::interpreter;
 
@@ -404,7 +404,7 @@ impl AllocationInstrumenter {
 pub struct TableInfo {
     pub multiplicities_wit: *mut Field,
     pub num_indices: usize,
-    pub num_values: usize,
+    pub kind: TableKind,
     pub length: usize,
     pub elem_inverses_witness_section_offset: usize,
     pub elem_inverses_constraint_section_offset: usize,
@@ -553,7 +553,7 @@ impl VM {
 }
 
 /// Compute spread of a u32: interleave zero bits between each bit.
-fn spread_bits(v: u32) -> u64 {
+pub(crate) fn spread_bits(v: u32) -> u64 {
     let mut x = v as u64;
     x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF;
     x = (x | (x << 8)) & 0x00FF_00FF_00FF_00FF;
@@ -630,6 +630,14 @@ unsafe fn ad_kv_lookup_emit(
     let table_info = &vm.tables[table_idx];
     let cnst_off = table_info.elem_inverses_constraint_section_offset;
     let length = table_info.length;
+    // Sum constraint sits past the table's per-entry constraints: spread tables
+    // fold each entry into one constraint, arrays use two. Rangecheck tables
+    // are key-only and never reach this key-value lookup path.
+    let sum_off = match table_info.kind {
+        TableKind::Spread => cnst_off + length,
+        TableKind::Array => cnst_off + 2 * length,
+        TableKind::RangeCheck => panic!("ad_kv_lookup_emit called on a rangecheck table"),
+    };
 
     let x_coeff = unsafe {
         let r = *vm
@@ -659,7 +667,7 @@ unsafe fn ad_kv_lookup_emit(
         vm.data.as_ad.current_wit_lookups_off += 1;
         r
     };
-    let inv_sum_coeff = unsafe { *vm.data.as_ad.ad_coeffs.add(cnst_off + 2 * length) };
+    let inv_sum_coeff = unsafe { *vm.data.as_ad.ad_coeffs.add(sum_off) };
 
     // x-constraint: beta * result - x_lookup = 0
     unsafe {
@@ -1658,13 +1666,20 @@ mod def {
         bits: usize,
         vm: &mut VM,
     ) {
-        // Initialize spread table for this bit-width on first call
+        // Initialize spread table for this bit-width on first call.
+        //
+        // Spread tables use the folded single-constraint allocation
+        // (`TableKind::Spread`): both operands of each entry (key=i,
+        // value=spread(i)) are constants, so each entry is just one
+        // `y·(α-i+β·spread(i))=m` constraint/witness instead of the generic
+        // two-constraint key-value form. Phase 2 recomputes `spread(i)` itself,
+        // so there is nothing to dump here.
         if vm.spread_tables[bits].is_none() {
             let length = 1usize << bits;
             let table_info = TableInfo {
                 multiplicities_wit: unsafe { vm.data.as_forward.multiplicities_witness },
                 num_indices: 1,
-                num_values: 1,
+                kind: TableKind::Spread,
                 length,
                 elem_inverses_constraint_section_offset: unsafe {
                     vm.data.as_forward.elem_inverses_constraint_section_offset
@@ -1676,18 +1691,12 @@ mod def {
             vm.spread_tables[bits] = Some(vm.tables.len());
             vm.tables.push(table_info);
 
-            // Fill table x-slots with spread values
             unsafe {
-                let cnst_off = vm.data.as_forward.elem_inverses_constraint_section_offset;
-                for i in 0..length {
-                    *vm.data.as_forward.out_a_base.add(cnst_off + 2 * i) =
-                        Field::from(spread_bits(i as u32));
-                }
-
                 vm.data.as_forward.multiplicities_witness =
                     vm.data.as_forward.multiplicities_witness.add(length);
-                vm.data.as_forward.elem_inverses_constraint_section_offset += 2 * length + 1;
-                vm.data.as_forward.elem_inverses_witness_section_offset += 2 * length;
+                // One constraint per entry + one sum constraint; one witness per entry.
+                vm.data.as_forward.elem_inverses_constraint_section_offset += length + 1;
+                vm.data.as_forward.elem_inverses_witness_section_offset += length;
             }
         }
 
@@ -1713,7 +1722,7 @@ mod def {
             let table_info = TableInfo {
                 multiplicities_wit: ptr::null_mut(),
                 num_indices: 1,
-                num_values: 1,
+                kind: TableKind::Spread,
                 length,
                 elem_inverses_witness_section_offset: inverses_witness_section_offset,
                 elem_inverses_constraint_section_offset: inverses_constraint_section_offset,
@@ -1721,81 +1730,61 @@ mod def {
             vm.spread_tables[bits] = Some(vm.tables.len());
             vm.tables.push(table_info);
             unsafe {
+                // Folded allocation: one constraint per entry + one sum
+                // constraint; one witness per entry.
                 vm.data.as_ad.current_wit_multiplicities_off += length;
-                vm.data.as_ad.current_wit_tables_off += 2 * length;
-                vm.data.as_ad.current_cnst_tables_off += 2 * length + 1;
+                vm.data.as_ad.current_wit_tables_off += length;
+                vm.data.as_ad.current_cnst_tables_off += length + 1;
             }
 
             let inv_sum_coeff = unsafe {
                 *vm.data
                     .as_ad
                     .ad_coeffs
-                    .offset(inverses_constraint_section_offset as isize + 2 * length as isize)
+                    .offset(inverses_constraint_section_offset as isize + length as isize)
             };
 
             for i in 0..length {
-                // x-constraint: β * spread(i) - x = 0
-                let x_coeff = unsafe {
+                // Single folded constraint: y · (α - i + β·spread(i)) - m = 0
+                //   A = (y), B = (α) + (w0, -i) + (β, spread(i)), C = (m)
+                let coeff = unsafe {
                     *vm.data
                         .as_ad
                         .ad_coeffs
-                        .offset(inverses_constraint_section_offset as isize + 2 * i as isize)
+                        .offset(inverses_constraint_section_offset as isize + i as isize)
                 };
                 unsafe {
-                    // x-constraint: β * spread(i) = -x
-                    // A=(β,1), B=(w0, spread(i)), C=(x,-1)
-                    // da[β] += x_coeff
+                    // da[y_wit] += coeff
                     *vm.data
                         .as_ad
                         .out_da
-                        .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) += x_coeff;
-                    // db[w0] += x_coeff * spread(i)
-                    *vm.data.as_ad.out_db += x_coeff * Field::from(spread_bits(i as u32));
-                    // dc[x_wit] -= x_coeff
-                    *vm.data
-                        .as_ad
-                        .out_dc
-                        .offset(inverses_witness_section_offset as isize + 2 * i as isize) -=
-                        x_coeff;
-                }
+                        .offset(inverses_witness_section_offset as isize + i as isize) += coeff;
 
-                // y-constraint: y * (α - i - x) - m = 0
-                let y_coeff = unsafe {
-                    *vm.data
-                        .as_ad
-                        .ad_coeffs
-                        .offset(inverses_constraint_section_offset as isize + 2 * i as isize + 1)
-                };
-                unsafe {
-                    *vm.data
-                        .as_ad
-                        .out_da
-                        .offset(inverses_witness_section_offset as isize + 2 * i as isize + 1) +=
-                        y_coeff;
-
+                    // db[α] += coeff
                     *vm.data
                         .as_ad
                         .out_db
-                        .add(vm.data.as_ad.logup_wit_challenge_off) += y_coeff;
-                    *vm.data.as_ad.out_db -= y_coeff * Field::from(i as u64);
+                        .add(vm.data.as_ad.logup_wit_challenge_off) += coeff;
+                    // db[w0] -= coeff * i
+                    *vm.data.as_ad.out_db -= coeff * Field::from(i as u64);
+                    // db[β] += coeff * spread(i)
                     *vm.data
                         .as_ad
                         .out_db
-                        .offset(inverses_witness_section_offset as isize + 2 * i as isize) -=
-                        y_coeff;
+                        .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) +=
+                        coeff * Field::from(spread_bits(i as u32));
 
+                    // dc[m] += coeff
                     *vm.data
                         .as_ad
                         .out_dc
-                        .offset(multiplicities_wit_offset as isize + i as isize) += y_coeff;
-                }
+                        .offset(multiplicities_wit_offset as isize + i as isize) += coeff;
 
-                // Sum: inv goes into A position
-                unsafe {
+                    // Sum: inv goes into A position
                     *vm.data
                         .as_ad
                         .out_da
-                        .offset(inverses_witness_section_offset as isize + 2 * i as isize + 1) +=
+                        .offset(inverses_witness_section_offset as isize + i as isize) +=
                         inv_sum_coeff;
                 }
             }
@@ -1816,7 +1805,7 @@ mod def {
             let table_info = TableInfo {
                 multiplicities_wit: unsafe { vm.data.as_forward.multiplicities_witness },
                 num_indices: 1,
-                num_values: 0,
+                kind: TableKind::RangeCheck,
                 length,
                 elem_inverses_constraint_section_offset: unsafe {
                     vm.data.as_forward.elem_inverses_constraint_section_offset
@@ -1892,7 +1881,7 @@ mod def {
             let table_info = TableInfo {
                 multiplicities_wit: mult_wit,
                 num_indices: 1,
-                num_values: 1,
+                kind: TableKind::Array,
                 length,
                 elem_inverses_constraint_section_offset: cnst_off,
                 elem_inverses_witness_section_offset: wit_off,
@@ -1936,7 +1925,7 @@ mod def {
             let table_info = TableInfo {
                 multiplicities_wit: ptr::null_mut(),
                 num_indices: 1,
-                num_values: 0,
+                kind: TableKind::RangeCheck,
                 length,
                 elem_inverses_witness_section_offset: inverses_witness_section_offset,
                 elem_inverses_constraint_section_offset: inverses_constraint_section_offset,
@@ -2137,7 +2126,7 @@ mod def {
             let table_info = TableInfo {
                 multiplicities_wit: ptr::null_mut(),
                 num_indices: 1,
-                num_values: 1,
+                kind: TableKind::Array,
                 length,
                 elem_inverses_witness_section_offset: inverses_witness_section_offset,
                 elem_inverses_constraint_section_offset: inverses_constraint_section_offset,

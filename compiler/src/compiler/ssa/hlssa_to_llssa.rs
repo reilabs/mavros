@@ -3,7 +3,7 @@
 //! Array types lower to heap-allocated RC'd structs behind `Ptr`. MkSeq, ArrayGet, ArraySet, and
 //! MemOp (Bump/Drop) are lowered to explicit memory operations.
 
-use mavros_artifacts::{ConstraintsLayout, WitnessLayout};
+use mavros_artifacts::{ConstraintsLayout, TableKind, WitnessLayout};
 use std::{collections::BTreeMap, marker::PhantomData};
 
 use crate::{
@@ -3022,6 +3022,7 @@ enum ForwardLookupTableState {
 enum LookupTableColumns {
     KeyOnly,
     KeyValue,
+    Spread,
 }
 
 #[derive(Clone, Copy)]
@@ -3041,7 +3042,7 @@ impl LookupTableSpec {
     fn spread(bits: u8) -> Self {
         Self {
             length: 1usize << bits,
-            columns: LookupTableColumns::KeyValue,
+            columns: LookupTableColumns::Spread,
         }
     }
 
@@ -3052,10 +3053,11 @@ impl LookupTableSpec {
         }
     }
 
-    fn num_values(self) -> u64 {
+    fn kind(self) -> TableKind {
         match self.columns {
-            LookupTableColumns::KeyOnly => 0,
-            LookupTableColumns::KeyValue => 1,
+            LookupTableColumns::KeyOnly => TableKind::RangeCheck,
+            LookupTableColumns::KeyValue => TableKind::Array,
+            LookupTableColumns::Spread => TableKind::Spread,
         }
     }
 
@@ -3063,6 +3065,8 @@ impl LookupTableSpec {
         match self.columns {
             LookupTableColumns::KeyOnly => self.length,
             LookupTableColumns::KeyValue => 2 * self.length,
+            // One folded constraint/witness per entry, like a key-only table.
+            LookupTableColumns::Spread => self.length,
         }
     }
 
@@ -3076,7 +3080,10 @@ impl LookupTableSpec {
 
     fn assert_key_value(self, context: &str) {
         assert!(
-            matches!(self.columns, LookupTableColumns::KeyValue),
+            matches!(
+                self.columns,
+                LookupTableColumns::KeyValue | LookupTableColumns::Spread
+            ),
             "{} expects a key-value lookup table",
             context
         );
@@ -3126,7 +3133,7 @@ fn get_or_init_forward_lookup_table(
             let slot_ptr = witgen_table_info_ptr(e, table_idx);
             let one_i32 = e.emit_int_const(32, 1);
             let table_len_i32 = e.emit_int_const(32, lookup.length as u64);
-            let table_values_i32 = e.emit_int_const(32, lookup.num_values());
+            let table_kind_i32 = e.emit_int_const(32, lookup.kind().code() as u64);
             let table_wit_bump_i32 = e.emit_int_const(32, lookup.witness_slots() as u64);
             let table_cnst_bump_i32 = e.emit_int_const(32, lookup.constraint_slots() as u64);
             let table_info_writes = [
@@ -3134,7 +3141,7 @@ fn get_or_init_forward_lookup_table(
                 (LLStruct::TABLE_INFO_INV_CNST_OFF, inv_cnst_off),
                 (LLStruct::TABLE_INFO_INV_WIT_OFF, inv_wit_off),
                 (LLStruct::TABLE_INFO_NUM_INDICES, one_i32),
-                (LLStruct::TABLE_INFO_NUM_VALUES, table_values_i32),
+                (LLStruct::TABLE_INFO_KIND, table_kind_i32),
                 (LLStruct::TABLE_INFO_LENGTH, table_len_i32),
             ];
             for (field, value) in table_info_writes {
@@ -3500,7 +3507,6 @@ fn generate_spread_lookup_function(
         bits
     );
     let lookup = LookupTableSpec::spread(bits);
-    let length = lookup.length;
     let mut func = new_ll_function(llssa, format!("__spread_{}_lookup", bits));
     let entry = func.get_entry_id();
 
@@ -3524,34 +3530,16 @@ fn generate_spread_lookup_function(
         assert(&mut e, ok);
     }
 
+    // The folded spread allocation needs no per-entry value dump: each entry's
+    // value `spread(i)` is a pure function of its index, so Phase 2 recomputes
+    // it directly when filling the single `y·(α-i+β·spread(i))=m` constraint
+    // (see `run_phase2` in `vm/src/interpreter.rs`). We only reserve the table
+    // region (its footprint comes from `LookupTableSpec::spread`).
     let (mults_base, table_idx_i32) = get_or_init_forward_lookup_table(
         &mut e,
         ForwardLookupTableState::Global { table_idx_global },
         lookup,
-        |e, inv_cnst_off| {
-            let a_base_slot = e.witgen_vm_field_ptr(LLStruct::WITGEN_VM_A_BASE);
-            let a_base = e.ll_load(a_base_slot, LLType::Ptr);
-            let input_ty = HLType::u(bits as usize);
-            let result_ty = HLType::u(bits as usize * 2);
-            let length = e.emit_int_const(64, length as u64);
-            e.build_counted_loop(length, vec![], |e, i_i64, _| {
-                let i_key = e.truncate(i_i64, bits as u32);
-                let spread = lower_spread(e, i_key, &input_ty, &result_ty, bits);
-                let spread_u64 = if bits as u32 * 2 == 64 {
-                    spread
-                } else {
-                    e.zext(spread, 64)
-                };
-                let spread_field = u64_as_field(e, spread_u64);
-                let i_i32 = e.truncate(i_i64, 32);
-                let two_i32 = e.emit_int_const(32, 2);
-                let doubled_i = e.int_arith(IntArithOp::Mul, i_i32, two_i32);
-                let table_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, doubled_i);
-                let table_slot = e.array_elem_ptr(a_base, LLStruct::field_elem(), table_idx);
-                e.ll_store(table_slot, spread_field);
-                vec![]
-            });
-        },
+        |_, _| {},
     );
 
     emit_forward_key_value_lookup(
@@ -3697,47 +3685,6 @@ fn store_ad_global_snapshot(
     let one_i32 = e.emit_int_const(32, 1);
     let snap = e.int_arith(IntArithOp::Add, inv_cnst_off, one_i32);
     e.ll_store(snap_slot, snap);
-}
-
-fn emit_key_value_ad_table_init_body(
-    e: &mut LLBlockEmitter<'_>,
-    lookup: LookupTableSpec,
-    witness_layout: WitnessLayout,
-    save_table_snapshot: impl FnOnce(&mut LLBlockEmitter<'_>, ValueId),
-    mut emit_value_db: impl FnMut(&mut LLBlockEmitter<'_>, ValueId, ValueId),
-) -> ValueId {
-    lookup.assert_key_value("AD table init");
-
-    let (inv_cnst_off, inv_wit_off, mults_wit_off) = claim_ad_lookup_table_region(e, lookup);
-    save_table_snapshot(e, inv_cnst_off);
-
-    let sum_offset_i32 = e.emit_int_const(32, lookup.sum_constraint_offset() as u64);
-    let sum_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, sum_offset_i32);
-    let inv_sum_coeff = ad_read_coeff_at_dyn(e, sum_idx);
-    let logup_alpha_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64);
-    let logup_beta_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64 + 1);
-
-    let length = e.emit_int_const(64, lookup.length as u64);
-    e.build_counted_loop(length, vec![], |e, i_i64, _| {
-        emit_key_value_ad_table_row(
-            e,
-            inv_cnst_off,
-            inv_wit_off,
-            mults_wit_off,
-            inv_sum_coeff,
-            logup_alpha_i32,
-            logup_beta_i32,
-            i_i64,
-            |e, x_coeff| emit_value_db(e, i_i64, x_coeff),
-        );
-        vec![]
-    });
-
-    let one_i64 = e.emit_int_const(64, 1);
-    let one_field = u64_as_field(e, one_i64);
-    e.ad_write_const(DMatrix::B, one_field, inv_sum_coeff);
-
-    inv_cnst_off
 }
 
 fn emit_key_value_ad_table_row(
@@ -3914,26 +3861,72 @@ fn emit_spread_ad_init_body(
         bits
     );
     let lookup = LookupTableSpec::spread(bits);
-
     let input_ty = HLType::u(bits as usize);
     let result_ty = HLType::u(bits as usize * 2);
-    emit_key_value_ad_table_init_body(
-        e,
-        lookup,
-        witness_layout,
-        |e, inv_cnst_off| store_ad_global_snapshot(e, inv_cnst_off_global, inv_cnst_off),
-        |e, i_i64, x_coeff| {
-            let i_key = e.truncate(i_i64, bits as u32);
-            let spread = lower_spread(e, i_key, &input_ty, &result_ty, bits);
-            let spread_u64 = if bits as u32 * 2 == 64 {
-                spread
-            } else {
-                e.zext(spread, 64)
-            };
-            let spread_field = u64_as_field(e, spread_u64);
-            e.ad_write_const(DMatrix::B, spread_field, x_coeff);
-        },
-    )
+
+    // The folded spread allocation is one constraint per entry:
+    //   y · (α - i + β·spread(i)) = mᵢ
+    // so this mirrors the single-constraint rangecheck AD init
+    // (`emit_rngchk_8_ad_init_body`), with the extra `β·spread(i)` B-term.
+    let (inv_cnst_off, inv_wit_off, mults_wit_off) = claim_ad_lookup_table_region(e, lookup);
+    store_ad_global_snapshot(e, inv_cnst_off_global, inv_cnst_off);
+
+    // Sum-constraint AD coefficient sits one past the `length` per-entry ones.
+    let sum_offset_i32 = e.emit_int_const(32, lookup.sum_constraint_offset() as u64);
+    let sum_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, sum_offset_i32);
+    let inv_sum_coeff = ad_read_coeff_at_dyn(e, sum_idx);
+
+    let logup_alpha_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64);
+    let logup_beta_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64 + 1);
+
+    let length = e.emit_int_const(64, lookup.length as u64);
+    e.build_counted_loop(length, vec![], |e, i_i64, _| {
+        let i_i32 = e.truncate(i_i64, 32);
+        // coeff = ad_coeffs[inv_cnst_off + i] (random access; no cursor bump).
+        let coeff_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, i_i32);
+        let coeff = ad_read_coeff_at_dyn(e, coeff_idx);
+
+        // A = (y): out_da[inv_wit_off + i] += coeff
+        let da_idx = e.int_arith(IntArithOp::Add, inv_wit_off, i_i32);
+        e.ad_write_witness(DMatrix::A, da_idx, coeff);
+
+        // B = α - i + β·spread(i):
+        //   out_db[α] += coeff
+        e.ad_write_witness(DMatrix::B, logup_alpha_i32, coeff);
+        //   out_db[0] += (-i) · coeff  (express `-i` as `0 - i`, no field_neg op)
+        let i_field = u64_as_field(e, i_i64);
+        let zero_i64_f = e.emit_int_const(64, 0);
+        let zero_field = u64_as_field(e, zero_i64_f);
+        let neg_i_field = e.field_arith(FieldArithOp::Sub, zero_field, i_field);
+        e.ad_write_const(DMatrix::B, neg_i_field, coeff);
+        //   out_db[β] += spread(i) · coeff
+        let i_key = e.truncate(i_i64, bits as u32);
+        let spread = lower_spread(e, i_key, &input_ty, &result_ty, bits);
+        let spread_u64 = if bits as u32 * 2 == 64 {
+            spread
+        } else {
+            e.zext(spread, 64)
+        };
+        let spread_field = u64_as_field(e, spread_u64);
+        let spread_coeff = e.field_arith(FieldArithOp::Mul, spread_field, coeff);
+        e.ad_write_witness(DMatrix::B, logup_beta_i32, spread_coeff);
+
+        // C = (m): out_dc[mults_wit_off + i] += coeff
+        let dc_idx = e.int_arith(IntArithOp::Add, mults_wit_off, i_i32);
+        e.ad_write_witness(DMatrix::C, dc_idx, coeff);
+
+        // Sum constraint: out_da[inv_wit_off + i] += inv_sum_coeff
+        e.ad_write_witness(DMatrix::A, da_idx, inv_sum_coeff);
+
+        vec![]
+    });
+
+    // After the loop: out_db[0] += inv_sum_coeff (sum constraint B = (1)).
+    let one_i64 = e.emit_int_const(64, 1);
+    let one_field = u64_as_field(e, one_i64);
+    e.ad_write_const(DMatrix::B, one_field, inv_sum_coeff);
+
+    inv_cnst_off
 }
 
 fn emit_array_ad_init_body(
