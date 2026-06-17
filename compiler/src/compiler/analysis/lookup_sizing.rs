@@ -174,6 +174,47 @@ fn sort_providers(providers: &mut [Provider]) {
 /// provider (recursing on `x − s`) or by covering all of `x` as a single partial chunk in a
 /// provider strictly larger than `x` (the 2-larger trick). A partial is always terminal, so a
 /// plan is "some full chunks then at most one partial top chunk", matching what spilling emits.
+/// Minimum decomposition cost for `width` over `providers`, without building the plan. This is the
+/// cost-only twin of [`decompose`] (same recurrence, returning only `.0`): a pure integer DP with
+/// no per-state `Vec<Chunk>` allocation/cloning. The optimizer evaluates this across millions of
+/// `(R, P)` candidate pairs, so the plan-building variant (used only by the actual spilling, a
+/// handful of times) is far too expensive here.
+fn decompose_cost(width: u8, providers: &[Provider]) -> Option<usize> {
+    if width == 0 {
+        return Some(0);
+    }
+    if providers.is_empty() {
+        return None;
+    }
+    let w = width as usize;
+    let mut best: Vec<Option<usize>> = vec![None; w + 1];
+    best[0] = Some(0);
+    for x in 1..=w {
+        let mut chosen: Option<usize> = None;
+        let mut consider = |cost: usize| {
+            chosen = Some(chosen.map_or(cost, |b: usize| b.min(cost)));
+        };
+        // Peel a full chunk of size s <= x (one lookup) off the top; recurse on the low x - s bits.
+        for p in providers {
+            let s = p.size as usize;
+            if s > x {
+                continue;
+            }
+            if let Some(sub) = best[x - s] {
+                consider(sub + p.kind.per_lookup_constraints());
+            }
+        }
+        // Cover all x bits as one partial chunk (two lookups) in a strictly-larger table.
+        for p in providers {
+            if (p.size as usize) > x {
+                consider(2 * p.kind.per_lookup_constraints());
+            }
+        }
+        best[x] = chosen;
+    }
+    best[w]
+}
+
 fn decompose(width: u8, providers: &[Provider]) -> Option<(usize, Vec<Chunk>)> {
     if width == 0 {
         return Some((0, vec![]));
@@ -276,7 +317,7 @@ fn rangecheck_recurring_cost(rc_hist: &[(u8, usize)], providers: &[Provider]) ->
         if width <= 1 || count == 0 {
             continue;
         }
-        let (cost, _) = decompose(width, providers)?;
+        let cost = decompose_cost(width, providers)?;
         total += cost * count;
     }
     Some(total)
@@ -292,7 +333,7 @@ fn spread_recurring_cost(sp_hist: &[(u8, usize)], providers: &[Provider]) -> Opt
         if count == 0 {
             continue;
         }
-        let (cost, _plan) = decompose(width, providers)?;
+        let cost = decompose_cost(width, providers)?;
         total += cost * count;
     }
     Some(total)
@@ -347,38 +388,48 @@ fn candidate_sizes(rc_hist: &[(u8, usize)], sp_hist: &[(u8, usize)]) -> Vec<u8> 
     (2..=s_max).collect()
 }
 
-/// All subsets of `items` with cardinality `0 ..= max_size` (includes the empty set).
-fn bounded_subsets(items: &[u8], max_size: usize) -> Vec<Vec<u8>> {
-    let mut out = vec![vec![]];
-    fn rec(items: &[u8], start: usize, max_size: usize, cur: &mut Vec<u8>, out: &mut Vec<Vec<u8>>) {
-        if cur.len() == max_size {
+/// All subset bitmasks over candidate indices `0..n` with popcount `0 ..= max_size` (includes the
+/// empty set). Masks make the optimizer's hot loop allocation-free: subset membership, the
+/// spread-only difference, and memo keys are all cheap integer ops.
+fn bounded_subset_masks(n: usize, max_size: usize) -> Vec<u32> {
+    assert!(n <= 32, "candidate set too large for u32 subset masks");
+    let mut out = vec![0u32];
+    fn rec(n: usize, start: usize, max_size: usize, cur: u32, depth: usize, out: &mut Vec<u32>) {
+        if depth == max_size {
             return;
         }
-        for i in start..items.len() {
-            cur.push(items[i]);
-            out.push(cur.clone());
-            rec(items, i + 1, max_size, cur, out);
-            cur.pop();
+        for i in start..n {
+            let next = cur | (1u32 << i);
+            out.push(next);
+            rec(n, i + 1, max_size, next, depth + 1, out);
         }
     }
-    rec(items, 0, max_size, &mut Vec::new(), &mut out);
+    rec(n, 0, max_size, 0, 0, &mut out);
     out
 }
 
-/// Build the canonical rangecheck provider set for chosen `(R, P)`: range tables (cost 1) plus
-/// any spread-only sizes (cost 2).
-fn rangecheck_providers_for(r: &[u8], p: &[u8]) -> Vec<Provider> {
-    let mut providers: Vec<Provider> = r
-        .iter()
-        .map(|&size| Provider {
-            size,
+/// The candidate sizes selected by `mask`.
+fn mask_sizes(mask: u32, candidates: &[u8]) -> Vec<u8> {
+    (0..candidates.len())
+        .filter(|i| mask & (1u32 << i) != 0)
+        .map(|i| candidates[i])
+        .collect()
+}
+
+/// Build the canonical rangecheck provider set: range tables (cost 1) for `range_mask`, plus
+/// spread-only tables (cost 2) for `spread_only_mask` (already disjoint from `range_mask`).
+fn providers_from_masks(range_mask: u32, spread_only_mask: u32, candidates: &[u8]) -> Vec<Provider> {
+    let mut providers: Vec<Provider> = (0..candidates.len())
+        .filter(|i| range_mask & (1u32 << i) != 0)
+        .map(|i| Provider {
+            size: candidates[i],
             kind: TableKind::Range,
         })
         .collect();
-    for &size in p {
-        if !r.contains(&size) {
+    for i in 0..candidates.len() {
+        if spread_only_mask & (1u32 << i) != 0 {
             providers.push(Provider {
-                size,
+                size: candidates[i],
                 kind: TableKind::Spread,
             });
         }
@@ -420,57 +471,68 @@ pub fn optimize(
     }
 
     let candidates = candidate_sizes(&rc_hist, &sp_hist);
+    let n = candidates.len();
 
-    // spread_cost[P] and rangecheck_cost[providers] are reused across many (R, P) pairs.
-    let mut spread_memo: HashMap<Vec<u8>, Option<usize>> = HashMap::default();
-    let mut rangecheck_memo: HashMap<Vec<Provider>, Option<usize>> = HashMap::default();
+    // Enumerate table-size subsets as bitmasks over candidate indices. Costs are memoized: spreads
+    // by the spread mask, rangechecks by the provider profile `(range sizes, spread-only sizes)`
+    // packed into a `u64` — so each (R, P) pair only pays cheap integer ops, no allocation.
+    let masks = bounded_subset_masks(n, MAX_TABLES_PER_CATEGORY);
+    let alloc_for = |mask: u32, kind: TableKind| -> usize {
+        (0..n)
+            .filter(|i| mask & (1u32 << i) != 0)
+            .map(|i| allocation_constraints(candidates[i], kind))
+            .sum()
+    };
 
-    let r_candidates = bounded_subsets(&candidates, MAX_TABLES_PER_CATEGORY);
-    let p_candidates = bounded_subsets(&candidates, MAX_TABLES_PER_CATEGORY);
+    let mut spread_memo: HashMap<u32, Option<usize>> = HashMap::default();
+    let mut rangecheck_memo: HashMap<u64, Option<usize>> = HashMap::default();
 
-    let mut best: Option<(usize, Vec<u8>, Vec<u8>)> = None;
+    let mut best: Option<(usize, u32, u32)> = None;
 
-    for p in &p_candidates {
-        if has_spreads && p.is_empty() {
+    for &p_mask in &masks {
+        if has_spreads && p_mask == 0 {
             continue; // spreads need at least one table
         }
 
-        let spread_alloc: usize = p
-            .iter()
-            .map(|&s| allocation_constraints(s, TableKind::Spread))
-            .sum();
-        let spread_recurring = *spread_memo
-            .entry(p.clone())
-            .or_insert_with(|| spread_recurring_cost(&sp_hist, &spread_providers_for(p)));
+        let spread_alloc = alloc_for(p_mask, TableKind::Spread);
+        let spread_recurring = *spread_memo.entry(p_mask).or_insert_with(|| {
+            spread_recurring_cost(&sp_hist, &spread_providers_for(&mask_sizes(p_mask, &candidates)))
+        });
         let Some(spread_recurring) = spread_recurring else {
             continue;
         };
 
-        for r in &r_candidates {
-            if has_rangechecks && r.is_empty() && p.is_empty() {
+        for &r_mask in &masks {
+            if has_rangechecks && r_mask == 0 && p_mask == 0 {
                 continue; // rangechecks need at least one provider
             }
-            let providers = rangecheck_providers_for(r, p);
-            let rc_recurring = *rangecheck_memo
-                .entry(providers.clone())
-                .or_insert_with(|| rangecheck_recurring_cost(&rc_hist, &providers));
+            // The rangecheck cost depends only on the provider profile: range sizes (`r_mask`) plus
+            // spread-only sizes (`p_mask & !r_mask`). Many (R, P) pairs share a profile, so key the
+            // memo on it directly.
+            let spread_only = p_mask & !r_mask;
+            let key = ((r_mask as u64) << 32) | spread_only as u64;
+            let rc_recurring = *rangecheck_memo.entry(key).or_insert_with(|| {
+                rangecheck_recurring_cost(
+                    &rc_hist,
+                    &providers_from_masks(r_mask, spread_only, &candidates),
+                )
+            });
             let Some(rc_recurring) = rc_recurring else {
                 continue;
             };
-            let range_alloc: usize = r
-                .iter()
-                .map(|&s| allocation_constraints(s, TableKind::Range))
-                .sum();
+            let range_alloc = alloc_for(r_mask, TableKind::Range);
 
             let total = spread_alloc + spread_recurring + range_alloc + rc_recurring;
             if best.as_ref().map_or(true, |(c, _, _)| total < *c) {
-                best = Some((total, r.clone(), p.clone()));
+                best = Some((total, r_mask, p_mask));
             }
         }
     }
 
-    let (_, mut rangecheck_tables, mut spread_tables) =
+    let (_, r_mask, p_mask) =
         best.expect("at least one feasible configuration exists when lookups are present");
+    let mut rangecheck_tables = mask_sizes(r_mask, &candidates);
+    let mut spread_tables = mask_sizes(p_mask, &candidates);
     rangecheck_tables.sort_unstable();
     spread_tables.sort_unstable();
 
