@@ -1,8 +1,8 @@
 use std::{fmt::Debug, hash::Hash};
 
 use crate::compiler::ssa::{
-    Block, BlockId, Function, FunctionId, Instruction, LocatedInstruction, SSA, SSAType,
-    Terminator, ValueId,
+    Block, BlockId, Function, FunctionId, Instruction, InstructionNode, SSA, SSAType, Terminator,
+    ValueId,
 };
 
 // ---------------------------------------------------------------------------
@@ -12,14 +12,14 @@ use crate::compiler::ssa::{
 pub struct InstrBuilder<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> {
     pub function: &'a mut Function<Op, Ty>,
     pub ssa: &'a mut SSA<Op, Ty, C>,
-    pub instructions: &'a mut Vec<LocatedInstruction<Op>>,
+    pub instructions: &'a mut Vec<InstructionNode<Op>>,
 }
 
 impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> InstrBuilder<'a, Op, Ty, C> {
     pub fn new(
         function: &'a mut Function<Op, Ty>,
         ssa: &'a mut SSA<Op, Ty, C>,
-        instructions: &'a mut Vec<LocatedInstruction<Op>>,
+        instructions: &'a mut Vec<InstructionNode<Op>>,
     ) -> Self {
         Self {
             function,
@@ -29,7 +29,7 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> InstrBuilde
     }
 
     /// Push a pre-built instruction (passthrough or pre-allocated result).
-    pub fn push(&mut self, instruction: impl Into<LocatedInstruction<Op>>) {
+    pub fn push(&mut self, instruction: impl Into<InstructionNode<Op>>) {
         self.instructions.push(instruction.into());
     }
 }
@@ -183,7 +183,7 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         self.block.get_terminator().is_some()
     }
 
-    pub fn emit_instruction(&mut self, instruction: impl Into<LocatedInstruction<Op>>) {
+    pub fn emit_instruction(&mut self, instruction: impl Into<InstructionNode<Op>>) {
         self.block.push_located_instruction(instruction.into());
     }
 
@@ -384,7 +384,7 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSABuilder<
 #[cfg(test)]
 mod tests {
     use crate::compiler::ssa::{
-        Function, LocatedInstruction, SourceLocation, SourcePosition, ValueId,
+        Function, InstructionNode, SourceLocation, SourcePosition, ValueId,
         builder::InstrBuilder,
         hlssa::{
             HLSSA, OpCode, Type,
@@ -470,7 +470,7 @@ mod tests {
             sb.modify_function(main_id, |fb| {
                 let entry_id = fb.function.get_entry_id();
                 let mut block = fb.block(entry_id);
-                block.emit(LocatedInstruction::with_source_location(
+                block.emit(InstructionNode::with_source_location(
                     OpCode::Not {
                         result: ValueId(1),
                         value: ValueId(0),
@@ -493,7 +493,7 @@ mod tests {
 
         {
             let mut builder = InstrBuilder::new(&mut function, &mut ssa, &mut instructions);
-            builder.emit(LocatedInstruction::with_source_location(
+            builder.emit(InstructionNode::with_source_location(
                 OpCode::Not {
                     result: ValueId(1),
                     value: ValueId(0),

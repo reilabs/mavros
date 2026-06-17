@@ -12,7 +12,7 @@ use crate::{
             witness_taint_inference::WitnessTaintInference,
         },
         ssa::{
-            BlockId, FunctionId, LocatedInstruction, Terminator, ValueId,
+            BlockId, FunctionId, InstructionNode, Terminator, ValueId,
             hlssa::{
                 BinaryArithOpKind, CallTarget, CastTarget, HLBlock, HLFunction, HLSSA, OpCode,
                 SequenceTargetType, Type, TypeExpr,
@@ -886,7 +886,7 @@ fn emit_strip_witness(
 fn flush_conversion_instrs(
     instrs: &mut Vec<OpCode>,
     taint: Option<ValueId>,
-    cast_instrs: Vec<LocatedInstruction<OpCode>>,
+    cast_instrs: Vec<InstructionNode<OpCode>>,
 ) {
     for instr in cast_instrs {
         maybe_guard(instrs, taint, instr.instruction);

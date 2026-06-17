@@ -19,7 +19,7 @@ use crate::{
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
         ssa::{
-            BlockId, FunctionId, LocatedInstruction, ValueId,
+            BlockId, FunctionId, InstructionNode, ValueId,
             hlssa::{
                 BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness, HLFunction,
                 HLSSA, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, RefCountOp,
@@ -96,7 +96,7 @@ impl HLEmitter for SpecializationState<'_> {
         self.ssa.fresh_value()
     }
 
-    fn emit(&mut self, instruction: impl Into<LocatedInstruction<OpCode>>) {
+    fn emit(&mut self, instruction: impl Into<InstructionNode<OpCode>>) {
         let entry = self.body.get_entry_id();
         self.body
             .get_block_mut(entry)
