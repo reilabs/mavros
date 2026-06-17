@@ -871,7 +871,7 @@ impl LLStruct {
     ///   1: inv_cnst_off (i32)
     ///   2: inv_wit_off  (i32)
     ///   3: num_indices  (i32)
-    ///   4: num_values   (i32)
+    ///   4: kind         (i32; `TableKind::code`)
     ///   5: length       (i32)
     pub fn table_info_slot() -> Self {
         Self::new(vec![
@@ -888,7 +888,7 @@ impl LLStruct {
     pub const TABLE_INFO_INV_CNST_OFF: usize = 1;
     pub const TABLE_INFO_INV_WIT_OFF: usize = 2;
     pub const TABLE_INFO_NUM_INDICES: usize = 3;
-    pub const TABLE_INFO_NUM_VALUES: usize = 4;
+    pub const TABLE_INFO_KIND: usize = 4;
     pub const TABLE_INFO_LENGTH: usize = 5;
 
     /// AD mul-const node: { RC, tag, FieldElem(coeff), Ptr(value), FieldElem(da), FieldElem(db), FieldElem(dc) }

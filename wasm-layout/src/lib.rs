@@ -30,8 +30,9 @@ pub const WASM_PTR_SIZE: u32 = 4;
 //   1: inv_cnst_off     (i32; constraints-section start of this table)
 //   2: inv_wit_off      (i32; witness-section start of this table)
 //   3: num_indices      (i32; matches VM `TableInfo.num_indices`)
-//   4: num_values       (i32; matches VM `TableInfo.num_values` — Phase 2
-//                        dispatches on this: 0 = width-1, 1 = width-2)
+//   4: kind             (i32; `TableKind::code` — matches VM `TableInfo.kind`;
+//                        Phase 2 dispatches on this: 0 = rangecheck,
+//                        1 = array, 2 = spread)
 //   5: length           (i32; matches VM `TableInfo.length`)
 
 /// Offsets of fields *within a single `TableInfoSlot`*.
@@ -39,7 +40,7 @@ pub const TABLE_INFO_MULTS_BASE_PTR_OFFSET: u32 = 0;
 pub const TABLE_INFO_INV_CNST_OFF_OFFSET: u32 = 4;
 pub const TABLE_INFO_INV_WIT_OFF_OFFSET: u32 = 8;
 pub const TABLE_INFO_NUM_INDICES_OFFSET: u32 = 12;
-pub const TABLE_INFO_NUM_VALUES_OFFSET: u32 = 16;
+pub const TABLE_INFO_KIND_OFFSET: u32 = 16;
 pub const TABLE_INFO_LENGTH_OFFSET: u32 = 20;
 /// Total size of one `TableInfoSlot` (6 × 4 = 24 bytes on wasm32).
 pub const TABLE_INFO_SLOT_SIZE: u32 = 24;
@@ -48,8 +49,8 @@ const _: () =
     assert!(TABLE_INFO_INV_CNST_OFF_OFFSET == TABLE_INFO_MULTS_BASE_PTR_OFFSET + WASM_PTR_SIZE);
 const _: () = assert!(TABLE_INFO_INV_WIT_OFF_OFFSET == TABLE_INFO_INV_CNST_OFF_OFFSET + 4);
 const _: () = assert!(TABLE_INFO_NUM_INDICES_OFFSET == TABLE_INFO_INV_WIT_OFF_OFFSET + 4);
-const _: () = assert!(TABLE_INFO_NUM_VALUES_OFFSET == TABLE_INFO_NUM_INDICES_OFFSET + 4);
-const _: () = assert!(TABLE_INFO_LENGTH_OFFSET == TABLE_INFO_NUM_VALUES_OFFSET + 4);
+const _: () = assert!(TABLE_INFO_KIND_OFFSET == TABLE_INFO_NUM_INDICES_OFFSET + 4);
+const _: () = assert!(TABLE_INFO_LENGTH_OFFSET == TABLE_INFO_KIND_OFFSET + 4);
 const _: () = assert!(TABLE_INFO_SLOT_SIZE == TABLE_INFO_LENGTH_OFFSET + 4);
 
 // ── Forward-pass (witgen) VM struct ─────────────────────────────────────
