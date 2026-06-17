@@ -12,11 +12,7 @@
 //!
 //! ## Cost model (R1CS constraints)
 //! * Rangecheck table at size `s`: `2^s + 1` allocation, `1` constraint per lookup.
-//! * Spread table at size `s`: `2^s + 1` allocation, `2` constraints per lookup. (The value
-//!   column `spread(i)` is a compile-time constant, so it folds into the multiplicity-constraint
-//!   denominator — the table costs the same to allocate as a rangecheck; only the per-lookup cost
-//!   is 2, because there the looked-up value is a runtime witness.)
-//! * A multi-chunk spread costs one extra recombination constraint.
+//! * Spread table at size `s`: `2^s + 1` allocation, `2` constraints per lookup.
 //!
 //! ## Simulation tricks
 //! * A full chunk of exactly `s` bits is one lookup in an `s`-bit table.
@@ -261,10 +257,6 @@ fn allocation_constraints(size: u8, kind: TableKind) -> usize {
     let rows = 1usize << size;
     match kind {
         TableKind::Range => rows + 1,
-        // A spread table's value column is the compile-time constant `spread(i)`, so `β·spread(i)`
-        // folds into the multiplicity-constraint denominator — one constraint per row, same as a
-        // rangecheck table. (The per-*lookup* cost is still 2: there the looked-up value is a
-        // runtime witness, so `β·value` must be materialized.)
         TableKind::Spread => rows + 1,
     }
 }
@@ -290,19 +282,18 @@ fn rangecheck_recurring_cost(rc_hist: &[(u8, usize)], providers: &[Provider]) ->
     Some(total)
 }
 
-/// Total per-lookup spread cost over the histogram (excludes table allocation), including one
-/// recombination constraint per multi-chunk spread. `None` if some width can't be served.
+/// Total per-lookup spread cost over the histogram (excludes table allocation). A multi-chunk
+/// spread reconstructs both its key and its spread from the lowest chunk by subtracting the higher
+/// chunks (free linear combinations), so it needs no recombination constraint. `None` if some
+/// width can't be served.
 fn spread_recurring_cost(sp_hist: &[(u8, usize)], providers: &[Provider]) -> Option<usize> {
     let mut total = 0;
     for &(width, count) in sp_hist {
         if count == 0 {
             continue;
         }
-        let (cost, plan) = decompose(width, providers)?;
+        let (cost, _plan) = decompose(width, providers)?;
         total += cost * count;
-        if plan.len() >= 2 {
-            total += count; // key recombination constraint
-        }
     }
     Some(total)
 }

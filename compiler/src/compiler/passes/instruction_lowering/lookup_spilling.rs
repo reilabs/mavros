@@ -257,31 +257,49 @@ impl LowerLookupSpillingOps {
         let offsets = cumulative_offsets(&ordered);
         let last = ordered.len() - 1;
 
+        let key_field = if key_inner_is_field {
+            key
+        } else {
+            b.cast_to_field(key)
+        };
+
         let mut reconstructed_key = zero;
         let mut reconstructed_spread = zero;
         for i in 0..ordered.len() {
             let chunk = ordered[i];
             let offset = offsets[i];
-            let chunk_u =
-                extract_low_chunk(b, pure_key, bits as usize, offset, chunk.width as usize);
-            let chunk_field = b.cast_to_field(chunk_u);
-            let chunk_key = if key_is_witness {
-                b.write_witness(chunk_field)
-            } else {
-                chunk_field
-            };
 
-            // The last (full) chunk's spread is derived from what's left of `expected_spread`,
-            // which makes the spread reconstruction exact without a separate constraint.
-            let chunk_spread = if i == last {
-                let remaining = b.sub(expected_spread, reconstructed_spread);
-                let inv_shift = two_pow(offset * 2)
+            // The last (full) chunk's key and spread are both derived from what's left of `key`
+            // and `expected_spread`. These are linear combinations of values already bounded by
+            // their own lookups, so the recombination is exact with no separate constraint: the
+            // derived chunk's lookup pins `spread(low_key) == low_spread` and `low_key`'s range,
+            // and `key`/`expected_spread` equal the chunk sums by construction.
+            let (chunk_key, chunk_spread) = if i == last {
+                let key_remaining = b.sub(key_field, reconstructed_key);
+                let inv_key_shift = two_pow(offset)
                     .inverse()
                     .expect("non-zero power of two is invertible");
-                let inv_shift = b.field_const(inv_shift);
-                b.mul(remaining, inv_shift)
+                let inv_key_shift = b.field_const(inv_key_shift);
+                let chunk_key = b.mul(key_remaining, inv_key_shift);
+
+                let spread_remaining = b.sub(expected_spread, reconstructed_spread);
+                let inv_spread_shift = two_pow(offset * 2)
+                    .inverse()
+                    .expect("non-zero power of two is invertible");
+                let inv_spread_shift = b.field_const(inv_spread_shift);
+                let chunk_spread = b.mul(spread_remaining, inv_spread_shift);
+                (chunk_key, chunk_spread)
             } else {
-                self.spread_hint(b, chunk_key, chunk.table_size, key_is_witness)
+                let chunk_u =
+                    extract_low_chunk(b, pure_key, bits as usize, offset, chunk.width as usize);
+                let chunk_field = b.cast_to_field(chunk_u);
+                let chunk_key = if key_is_witness {
+                    b.write_witness(chunk_field)
+                } else {
+                    chunk_field
+                };
+                let chunk_spread = self.spread_hint(b, chunk_key, chunk.table_size, key_is_witness);
+                (chunk_key, chunk_spread)
             };
 
             b.lookup_spread(chunk.table_size, chunk_key, chunk_spread, flag_field);
@@ -291,24 +309,16 @@ impl LowerLookupSpillingOps {
                 b.lookup_spread(chunk.table_size, gap, gap_spread, flag_field);
             }
 
-            let key_shift = b.field_const(two_pow(offset));
-            let shifted_key = b.mul(chunk_key, key_shift);
-            reconstructed_key = b.add(reconstructed_key, shifted_key);
-
             if i != last {
+                let key_shift = b.field_const(two_pow(offset));
+                let shifted_key = b.mul(chunk_key, key_shift);
+                reconstructed_key = b.add(reconstructed_key, shifted_key);
+
                 let spread_shift = b.field_const(two_pow(offset * 2));
                 let shifted_spread = b.mul(chunk_spread, spread_shift);
                 reconstructed_spread = b.add(reconstructed_spread, shifted_spread);
             }
         }
-
-        let key_field = if key_inner_is_field {
-            key
-        } else {
-            b.cast_to_field(key)
-        };
-        let key_diff = b.sub(reconstructed_key, key_field);
-        b.constrain(key_diff, flag_field, zero);
         true
     }
 
