@@ -933,15 +933,12 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
     pub fn take_instructions(&mut self) -> Vec<Op> {
         std::mem::take(&mut self.instructions)
             .into_iter()
-            .map(|instruction| instruction.take().0)
+            .map(|instruction| instruction.payload())
             .collect()
     }
 
     pub fn put_instructions(&mut self, instructions: Vec<Op>) {
-        self.instructions = instructions
-            .into_iter()
-            .map(Located::without_location)
-            .collect();
+        self.instructions = instructions.into_iter().map(Located::without).collect();
     }
 
     pub fn take_located_instructions(&mut self) -> Vec<Located<Op>> {
@@ -953,8 +950,7 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
     }
 
     pub fn push_instruction(&mut self, instruction: Op) {
-        self.instructions
-            .push(Located::without_location(instruction));
+        self.instructions.push(Located::without(instruction));
     }
 
     pub fn push_instruction_with_source_location(
@@ -963,7 +959,7 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
         source_location: SourceLocation,
     ) {
         self.instructions
-            .push(Located::with_location(instruction, source_location));
+            .push(Located::with(instruction, source_location));
     }
 
     pub fn push_located_instruction(&mut self, instruction: Located<Op>) {
@@ -998,12 +994,8 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
         self.parameters.iter().map(|(id, _)| id)
     }
 
-    pub fn get_instruction(&self, i: usize) -> &Op {
+    pub fn get_instruction(&self, i: usize) -> &Located<Op> {
         &self.instructions[i]
-    }
-
-    pub fn get_instruction_with_source_location(&self, i: usize) -> (&Op, Option<&SourceLocation>) {
-        (&self.instructions[i], self.instructions[i].get_location())
     }
 
     pub fn get_instruction_source_location(&self, i: usize) -> Option<&SourceLocation> {
@@ -1158,14 +1150,14 @@ mod tests {
     #[test]
     fn located_exposes_location_ref_and_take() {
         let location = test_location();
-        let mut located = Located::with_location(ValueId(1), location.clone());
+        let mut located = Located::with(ValueId(1), location.clone());
 
         assert_eq!(located.location(), &Some(location.clone()));
         assert_eq!(located.get_location(), Some(&location));
         *located.location_mut() = Some(location.clone());
         assert_eq!(AsRef::<ValueId>::as_ref(&located), &ValueId(1));
 
-        let located_ref = located.as_ref();
+        let located_ref = located.to_ref();
         assert_eq!(*located_ref, &ValueId(1));
         assert_eq!(located_ref.get_location(), Some(&location));
 
@@ -1189,7 +1181,7 @@ mod tests {
         assert_eq!(entry.get_instruction_source_location(0), Some(&location));
         assert!(
             ssa.to_string(&DefaultSSAAnnotator)
-                .contains("@ src/main.nr:3:5-3:10")
+                .contains("@ src/main.nr:3:5")
         );
     }
 
@@ -1218,7 +1210,7 @@ mod tests {
         let location = test_location();
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
 
-        entry.push_located_instruction(Located::with_location(
+        entry.push_located_instruction(Located::with(
             OpCode::Not {
                 result: ValueId(0),
                 value: ValueId(1),

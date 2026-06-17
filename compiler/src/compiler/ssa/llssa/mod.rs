@@ -7,7 +7,9 @@ use itertools::Itertools;
 use std::fmt::{self, Display, Formatter};
 use std::mem::size_of_val;
 
-use crate::compiler::ssa::{Block, Function, FunctionId, Instruction, SSA, SSAConstants, ValueId};
+use crate::compiler::ssa::{
+    Block, Function, FunctionId, Instruction, Located, SSA, SSAConstants, ValueId,
+};
 pub use type_system::Type;
 
 // Re-export DMatrix for use by other LLSSA modules.
@@ -19,6 +21,8 @@ pub use super::hlssa::DMatrix;
 /// The low-level SSA exposes runtime details: explicit struct layouts, pointer arithmetic,
 /// integer/field arithmetic split, and explicit memory management.
 pub type LLSSA = SSA<LLOp, Type, Constant>;
+
+pub type LocatedLLOp = Located<LLOp>;
 
 // CONSTANTS
 // ================================================================================================

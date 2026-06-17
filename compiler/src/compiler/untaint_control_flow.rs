@@ -12,10 +12,10 @@ use crate::{
             witness_taint_inference::WitnessTaintInference,
         },
         ssa::{
-            BlockId, FunctionId, Located, Terminator, ValueId,
+            BlockId, FunctionId, Terminator, ValueId,
             hlssa::{
-                BinaryArithOpKind, CallTarget, CastTarget, HLBlock, HLFunction, HLSSA, OpCode,
-                SequenceTargetType, Type, TypeExpr,
+                BinaryArithOpKind, CallTarget, CastTarget, HLBlock, HLFunction, HLSSA,
+                LocatedOpCode, OpCode, SequenceTargetType, Type, TypeExpr,
                 builder::{HLEmitter, HLInstrBuilder},
             },
         },
@@ -886,10 +886,10 @@ fn emit_strip_witness(
 fn flush_conversion_instrs(
     instrs: &mut Vec<OpCode>,
     taint: Option<ValueId>,
-    cast_instrs: Vec<Located<OpCode>>,
+    cast_instrs: Vec<LocatedOpCode>,
 ) {
     for instr in cast_instrs {
-        maybe_guard(instrs, taint, instr.take().0);
+        maybe_guard(instrs, taint, instr.payload());
     }
 }
 

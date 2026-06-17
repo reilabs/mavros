@@ -1,8 +1,8 @@
 use crate::compiler::ssa::{
-    FunctionId, Located, ValueId,
+    FunctionId, ValueId,
     builder::{BlockEmitter, FunctionBuilder, InstrBuilder, SSABuilder},
     hlssa::DMatrix,
-    llssa::{Constant, FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, Type},
+    llssa::{Constant, FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, LocatedLLOp, Type},
 };
 
 // ---------------------------------------------------------------------------
@@ -11,7 +11,7 @@ use crate::compiler::ssa::{
 
 pub trait LLEmitter {
     fn fresh_value(&mut self) -> ValueId;
-    fn emit_ll(&mut self, instruction: impl Into<Located<LLOp>>);
+    fn emit_ll(&mut self, instruction: impl Into<LocatedLLOp>);
     fn vm_ptr(&mut self) -> ValueId;
     fn emit_constant(&mut self, value: Constant) -> ValueId;
 
@@ -423,7 +423,7 @@ impl LLEmitter for LLInstrBuilder<'_> {
         self.ssa.fresh_value()
     }
 
-    fn emit_ll(&mut self, instruction: impl Into<Located<LLOp>>) {
+    fn emit_ll(&mut self, instruction: impl Into<LocatedLLOp>) {
         self.push(instruction);
     }
 
@@ -446,7 +446,7 @@ impl LLEmitter for LLBlockEmitter<'_> {
         self.ssa.fresh_value()
     }
 
-    fn emit_ll(&mut self, instruction: impl Into<Located<LLOp>>) {
+    fn emit_ll(&mut self, instruction: impl Into<LocatedLLOp>) {
         self.emit_instruction(instruction);
     }
 

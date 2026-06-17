@@ -469,7 +469,7 @@ mod tests {
             sb.modify_function(main_id, |fb| {
                 let entry_id = fb.function.get_entry_id();
                 let mut block = fb.block(entry_id);
-                block.emit(Located::with_location(
+                block.emit(Located::with(
                     OpCode::Not {
                         result: ValueId(1),
                         value: ValueId(0),
@@ -492,7 +492,7 @@ mod tests {
 
         {
             let mut builder = InstrBuilder::new(&mut function, &mut ssa, &mut instructions);
-            builder.emit(Located::with_location(
+            builder.emit(Located::with(
                 OpCode::Not {
                     result: ValueId(1),
                     value: ValueId(0),
