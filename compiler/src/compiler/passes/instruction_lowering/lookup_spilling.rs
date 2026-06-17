@@ -1,7 +1,6 @@
-use std::collections::{HashMap, HashSet};
-
 use ark_ff::{AdditiveGroup, Field as _};
 
+use crate::collections::{HashMap, HashSet};
 use crate::compiler::{
     Field,
     analysis::{
@@ -246,7 +245,7 @@ impl Pass for LookupSpilling {
         // Phase 1: collect the distinct helpers needed across the whole module.
         let original_fns: Vec<FunctionId> = ssa.get_function_ids().collect();
         let mut needed: Vec<HelperKey> = vec![];
-        let mut seen: HashSet<HelperKey> = HashSet::new();
+        let mut seen: HashSet<HelperKey> = HashSet::default();
         for &fid in &original_fns {
             let fti = types.get_function(fid);
             for (_bid, block) in ssa.get_function(fid).get_blocks() {
@@ -261,7 +260,7 @@ impl Pass for LookupSpilling {
         }
 
         // Phase 2: create the helper functions.
-        let mut cache: HashMap<HelperKey, FunctionId> = HashMap::new();
+        let mut cache: HashMap<HelperKey, FunctionId> = HashMap::default();
         {
             let mut sb = HLSSABuilder::new(ssa);
             for (index, key) in needed.iter().enumerate() {
@@ -434,7 +433,15 @@ impl LowerLookupSpillingOps {
                 .all(|c| matches!(c.table, TableKind::Range) && !c.partial && c.width == s);
 
         let rest = if uniform_full {
-            self.emit_uniform_rangecheck_loop(b, pure_u, extract_bits, s, plan.len(), flag, is_witness)
+            self.emit_uniform_rangecheck_loop(
+                b,
+                pure_u,
+                extract_bits,
+                s,
+                plan.len(),
+                flag,
+                is_witness,
+            )
         } else {
             let mut rest = b.field_const(Field::ZERO);
             for i in 1..plan.len() {

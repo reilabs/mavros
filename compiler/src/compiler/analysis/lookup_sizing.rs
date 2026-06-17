@@ -418,7 +418,11 @@ fn mask_sizes(mask: u32, candidates: &[u8]) -> Vec<u8> {
 
 /// Build the canonical rangecheck provider set: range tables (cost 1) for `range_mask`, plus
 /// spread-only tables (cost 2) for `spread_only_mask` (already disjoint from `range_mask`).
-fn providers_from_masks(range_mask: u32, spread_only_mask: u32, candidates: &[u8]) -> Vec<Provider> {
+fn providers_from_masks(
+    range_mask: u32,
+    spread_only_mask: u32,
+    candidates: &[u8],
+) -> Vec<Provider> {
     let mut providers: Vec<Provider> = (0..candidates.len())
         .filter(|i| range_mask & (1u32 << i) != 0)
         .map(|i| Provider {
@@ -496,7 +500,10 @@ pub fn optimize(
 
         let spread_alloc = alloc_for(p_mask, TableKind::Spread);
         let spread_recurring = *spread_memo.entry(p_mask).or_insert_with(|| {
-            spread_recurring_cost(&sp_hist, &spread_providers_for(&mask_sizes(p_mask, &candidates)))
+            spread_recurring_cost(
+                &sp_hist,
+                &spread_providers_for(&mask_sizes(p_mask, &candidates)),
+            )
         });
         let Some(spread_recurring) = spread_recurring else {
             continue;
