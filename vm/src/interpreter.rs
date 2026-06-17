@@ -550,8 +550,7 @@ pub fn run_phase2(
                 let tbl_base = table.elem_inverses_constraint_section_offset;
                 // Copy precomputed inverse from the table entry's y-slot
                 // (array: 2*ix+1; spread: ix).
-                let y_slot =
-                    tbl_base + entry_stride * ix_in_table as usize + (entry_stride - 1);
+                let y_slot = tbl_base + entry_stride * ix_in_table as usize + (entry_stride - 1);
                 phase1.out_a[y_cnst_off] = phase1.out_a[y_slot];
                 phase1.out_b[y_cnst_off] = phase1.out_b[y_slot];
                 phase1.out_c[y_cnst_off] = Field::from(flag_u64);
