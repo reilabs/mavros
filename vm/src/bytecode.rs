@@ -1921,7 +1921,12 @@ mod def {
     }
 
     #[opcode]
-    fn drngchk_field(#[frame] val: BoxedValue, #[frame] flag: BoxedValue, bits: usize, vm: &mut VM) {
+    fn drngchk_field(
+        #[frame] val: BoxedValue,
+        #[frame] flag: BoxedValue,
+        bits: usize,
+        vm: &mut VM,
+    ) {
         let length = 1usize << bits;
         if vm.rgchk_tables[bits].is_none() {
             let inverses_constraint_section_offset =

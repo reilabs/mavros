@@ -130,7 +130,8 @@ impl LowerLookupSpillingOps {
         // needs no reconstruction constraint.
         for i in 1..plan.len() {
             let chunk = plan[i];
-            let raw_u = extract_low_chunk(b, pure_u, extract_bits, offsets[i], chunk.width as usize);
+            let raw_u =
+                extract_low_chunk(b, pure_u, extract_bits, offsets[i], chunk.width as usize);
             let key_field = b.cast_to_field(raw_u);
             let key = if is_witness {
                 b.write_witness(key_field)
@@ -261,7 +262,8 @@ impl LowerLookupSpillingOps {
         for i in 0..ordered.len() {
             let chunk = ordered[i];
             let offset = offsets[i];
-            let chunk_u = extract_low_chunk(b, pure_key, bits as usize, offset, chunk.width as usize);
+            let chunk_u =
+                extract_low_chunk(b, pure_key, bits as usize, offset, chunk.width as usize);
             let chunk_field = b.cast_to_field(chunk_u);
             let chunk_key = if key_is_witness {
                 b.write_witness(chunk_field)

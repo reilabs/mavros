@@ -1445,11 +1445,7 @@ fn lower_instruction(
             args,
             flag,
         } => {
-            assert_eq!(
-                args.len(),
-                1,
-                "Rangecheck lookup must have exactly one key"
-            );
+            assert_eq!(args.len(), 1, "Rangecheck lookup must have exactly one key");
             let key = val_map[&args[0]];
             let flag_val = val_map[flag];
             let fn_id = lookup_fns.get_rngchk_fn(*bits, e.ssa);
