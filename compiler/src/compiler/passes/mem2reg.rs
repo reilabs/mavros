@@ -22,7 +22,7 @@ use crate::{
         analysis::{
             flow_analysis::{CFG, FlowAnalysis},
             points_to::{
-                PointsTo,
+                PointerUse, PointsTo,
                 object::{AbstractObject, Context},
             },
             types::{FunctionTypeInfo, TypeInfo},
@@ -30,7 +30,7 @@ use crate::{
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
         passes::fix_double_jumps::ValueReplacements,
         ssa::{
-            BlockId, FunctionId, Instruction, Terminator, ValueId,
+            BlockId, FunctionId, Terminator, ValueId,
             hlssa::{
                 HLFunction, HLSSA, OpCode,
                 builder::{HLFunctionBuilder, HLSSABuilder},
@@ -135,6 +135,36 @@ impl Mem2Reg {
         self.remove_ptrs(fb.function, cfg, &phi_args, fid, points_to, &promotable);
     }
 
+    /// Walk the CFG in domination pre-order, threading a per-block state `S` that is seeded from
+    /// the immediate dominator's outgoing state (an entry/unreachable block starts from
+    /// `S::default()`). `visit` receives each block id and that incoming state, already seeded, and
+    /// updates it in place; the resulting state is stored and becomes the seed for every block this
+    /// one immediately dominates.
+    ///
+    /// This is the single shared dataflow skeleton of [`Self::remove_ptrs`] (whose state threads
+    /// the promoted-alloc → live-value map) and [`Self::uninitialized_allocs`] (whose state tracks
+    /// which allocs have an available value). Both must visit blocks in the same order and inherit
+    /// from the immediate dominator identically — keeping that traversal in one place is what
+    /// guarantees they cannot drift, since a divergence would turn `remove_ptrs`'s "no threaded
+    /// value" `expect` into an ICE on a program the guard was supposed to have pruned.
+    fn propagate_in_domination_order<S: Clone + Default>(
+        cfg: &CFG,
+        mut visit: impl FnMut(BlockId, &mut S),
+    ) {
+        let mut state_at: HashMap<BlockId, S> = HashMap::default();
+        for block_id in cfg.get_domination_pre_order() {
+            // Fetch the outgoing state of the immediate dominator (already finalized, since
+            // dominators precede the blocks they dominate in this order); the entry block and any
+            // block with no recorded dominator start fresh.
+            let mut state = cfg
+                .get_immediate_dominator(block_id)
+                .and_then(|parent| state_at.get(&parent).cloned())
+                .unwrap_or_default();
+            visit(block_id, &mut state);
+            state_at.insert(block_id, state);
+        }
+    }
+
     fn remove_ptrs(
         &self,
         function: &mut HLFunction,
@@ -147,130 +177,130 @@ impl Mem2Reg {
         // The threaded-value map is keyed on the *promoted alloc* (the abstract object's identity),
         // not the syntactic pointer — a Store/Load ptr may be a load-derived ref or a singleton
         // phi whose points-to is exactly `{alloc}` but which is not literally the alloc result.
-        let mut ptr_values = HashMap::<BlockId, HashMap<ValueId, ValueId>>::default();
+        //
+        // Traverse in domination pre-order (via `propagate_in_domination_order`): for each ptr the
+        // last value is then already defined when we enter the block — either defined by some
+        // dominator (inherited as the `values` seed) or carried in as a phi parameter.
         let mut value_replacements = ValueReplacements::new();
 
-        // Traverse the CFG in domination pre-order. This ensures that for each ptr the last value
-        // is already defined when we enter the block: either it is defined by some dominator, or it
-        // is a phi parameter.
-        for block_id in cfg.get_domination_pre_order() {
-            // Fetch all possible values from the parent block
-            let mut values = if let Some(parent) = cfg.get_immediate_dominator(block_id) {
-                if let Some(parent_values) = ptr_values.get(&parent) {
-                    parent_values.clone()
-                } else {
-                    HashMap::default()
+        Self::propagate_in_domination_order(
+            cfg,
+            |block_id, values: &mut HashMap<ValueId, ValueId>| {
+                // Add phi parameters (keyed on the promoted alloc the phi carries)
+                for (param, alloc) in phi_map.get(&block_id).unwrap_or(&vec![]) {
+                    values.insert(*alloc, *param);
                 }
-            } else {
-                HashMap::default()
-            };
 
-            // Add phi parameters (keyed on the promoted alloc the phi carries)
-            for (param, alloc) in phi_map.get(&block_id).unwrap_or(&vec![]) {
-                values.insert(*alloc, *param);
-            }
+                let instructions = function.get_block_mut(block_id).take_instructions();
+                let mut new_instructions = Vec::new();
 
-            let instructions = function.get_block_mut(block_id).take_instructions();
-            let mut new_instructions = Vec::new();
-
-            for mut instruction in instructions {
-                // `&instruction` is borrowed only for this match; the borrow ends before the
-                // fall-through keep path rewrites and pushes the instruction. Each promoted
-                // Store/Load resolves its alloc exactly once.
-                match &instruction {
-                    // A promoted alloc's defining instruction is dropped; a non-promoted alloc
-                    // (escaping, ref-pointee, or aliased) falls through and is kept verbatim.
-                    OpCode::Alloc { result, value } if promotable.contains(result) => {
-                        // Thread the alloc's initial value; a later store overwrites it.
-                        values.insert(*result, *value);
-                        continue;
-                    }
-                    // A Store whose ptr resolves to a promoted alloc threads its value; otherwise
-                    // it stays a real instruction (the pass is now partial).
-                    OpCode::Store { ptr, value } => {
-                        if let Some(alloc) = Self::resolved_alloc(points_to, fid, *ptr, promotable)
-                        {
-                            values.insert(alloc, *value);
+                for mut instruction in instructions {
+                    // `&instruction` is borrowed only for this match; the borrow ends before the
+                    // fall-through keep path rewrites and pushes the instruction. Each promoted
+                    // Store/Load resolves its alloc exactly once.
+                    match &instruction {
+                        // A promoted alloc's defining instruction is dropped; a non-promoted alloc
+                        // (escaping, ref-pointee, or aliased) falls through and is kept verbatim.
+                        OpCode::Alloc { result, value } if promotable.contains(result) => {
+                            // Thread the alloc's initial value; a later store overwrites it.
+                            values.insert(*result, *value);
                             continue;
                         }
-                    }
-                    // A Load whose ptr resolves to a promoted alloc is replaced by the threaded
-                    // value; otherwise it stays a real instruction.
-                    OpCode::Load { result, ptr } => {
-                        if let Some(alloc) = Self::resolved_alloc(points_to, fid, *ptr, promotable)
-                        {
-                            let replacement = values.get(&alloc).expect(
+                        // A Store whose ptr resolves to a promoted alloc threads its value;
+                        // otherwise it stays a real instruction (the pass is now partial).
+                        OpCode::Store { ptr, value } => {
+                            if let Some(alloc) =
+                                Self::resolved_alloc(points_to, fid, *ptr, promotable)
+                            {
+                                values.insert(alloc, *value);
+                                continue;
+                            }
+                        }
+                        // A Load whose ptr resolves to a promoted alloc is replaced by the threaded
+                        // value; otherwise it stays a real instruction.
+                        OpCode::Load { result, ptr } => {
+                            if let Some(alloc) =
+                                Self::resolved_alloc(points_to, fid, *ptr, promotable)
+                            {
+                                let replacement = values.get(&alloc).expect(
                                 "ICE: promoted alloc read with no threaded value (an uninitialized \
                                  read should have been pruned by `uninitialized_allocs`)",
                             );
-                            value_replacements.insert(*result, *replacement);
-                            continue;
+                                value_replacements.insert(*result, *replacement);
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                    // A non-promoted access or any other instruction is kept, with operands
+                    // rewritten.
+                    value_replacements.replace_instruction(&mut instruction);
+                    new_instructions.push(instruction);
+                }
+
+                function
+                    .get_block_mut(block_id)
+                    .put_instructions(new_instructions);
+
+                let mut terminator = function.get_block_mut(block_id).take_terminator().unwrap();
+                value_replacements.replace_terminator(&mut terminator);
+
+                match &mut terminator {
+                    Terminator::Jmp(tgt, params) => {
+                        let tmp = vec![];
+                        let additional_params = phi_map.get(tgt).unwrap_or(&tmp);
+                        for (_, val) in additional_params {
+                            let param_val = values.get(val).unwrap_or_else(|| {
+                                panic!("ICE: block {} has no value for v{}", block_id.0, val.0)
+                            });
+                            params.push(value_replacements.get_replacement(*param_val));
+                        }
+                    }
+                    Terminator::JmpIf(_cond, t1, t2) => {
+                        if phi_map.contains_key(t1) {
+                            let jumper = function.add_block();
+                            let params = phi_map
+                                .get(t1)
+                                .unwrap()
+                                .iter()
+                                .map(|(_, val)| {
+                                    let v = *values.get(val).unwrap_or_else(|| {
+                                        panic!(
+                                            "ICE: block {} has no value for v{}",
+                                            block_id.0, val.0
+                                        )
+                                    });
+                                    value_replacements.get_replacement(v)
+                                })
+                                .collect::<Vec<_>>();
+                            function.terminate_block_with_jmp(jumper, *t1, params);
+                            *t1 = jumper;
+                        }
+                        if phi_map.contains_key(t2) {
+                            let jumper = function.add_block();
+                            let params = phi_map
+                                .get(t2)
+                                .unwrap()
+                                .iter()
+                                .map(|(_, val)| {
+                                    let v = *values.get(val).unwrap_or_else(|| {
+                                        panic!(
+                                            "ICE: block {} has no value for v{}",
+                                            block_id.0, val.0
+                                        )
+                                    });
+                                    value_replacements.get_replacement(v)
+                                })
+                                .collect::<Vec<_>>();
+                            function.terminate_block_with_jmp(jumper, *t2, params);
+                            *t2 = jumper;
                         }
                     }
                     _ => {}
                 }
-                // A non-promoted access or any other instruction is kept, with operands rewritten.
-                value_replacements.replace_instruction(&mut instruction);
-                new_instructions.push(instruction);
-            }
-
-            function
-                .get_block_mut(block_id)
-                .put_instructions(new_instructions);
-
-            let mut terminator = function.get_block_mut(block_id).take_terminator().unwrap();
-            value_replacements.replace_terminator(&mut terminator);
-
-            match &mut terminator {
-                Terminator::Jmp(tgt, params) => {
-                    let tmp = vec![];
-                    let additional_params = phi_map.get(tgt).unwrap_or(&tmp);
-                    for (_, val) in additional_params {
-                        let param_val = values.get(val).unwrap_or_else(|| {
-                            panic!("ICE: block {} has no value for v{}", block_id.0, val.0)
-                        });
-                        params.push(value_replacements.get_replacement(*param_val));
-                    }
-                }
-                Terminator::JmpIf(_cond, t1, t2) => {
-                    if phi_map.contains_key(t1) {
-                        let jumper = function.add_block();
-                        let params = phi_map
-                            .get(t1)
-                            .unwrap()
-                            .iter()
-                            .map(|(_, val)| {
-                                let v = *values.get(val).unwrap_or_else(|| {
-                                    panic!("ICE: block {} has no value for v{}", block_id.0, val.0)
-                                });
-                                value_replacements.get_replacement(v)
-                            })
-                            .collect::<Vec<_>>();
-                        function.terminate_block_with_jmp(jumper, *t1, params);
-                        *t1 = jumper;
-                    }
-                    if phi_map.contains_key(t2) {
-                        let jumper = function.add_block();
-                        let params = phi_map
-                            .get(t2)
-                            .unwrap()
-                            .iter()
-                            .map(|(_, val)| {
-                                let v = *values.get(val).unwrap_or_else(|| {
-                                    panic!("ICE: block {} has no value for v{}", block_id.0, val.0)
-                                });
-                                value_replacements.get_replacement(v)
-                            })
-                            .collect::<Vec<_>>();
-                        function.terminate_block_with_jmp(jumper, *t2, params);
-                        *t2 = jumper;
-                    }
-                }
-                _ => {}
-            }
-            function.get_block_mut(block_id).set_terminator(terminator);
-            ptr_values.insert(block_id, values);
-        }
+                function.get_block_mut(block_id).set_terminator(terminator);
+            },
+        );
     }
 
     // For each block, returns the vector of (param_id, value_id), where param_id is the id of a new
@@ -395,16 +425,15 @@ impl Mem2Reg {
             }
         }
 
-        let mut available_at: HashMap<BlockId, HashSet<ValueId>> = HashMap::default();
+        // Shares `remove_ptrs`'s domination-order propagation (`propagate_in_domination_order`):
+        // `available` (the per-block state) is the set of allocs with a defined value — the
+        // analogue of `remove_ptrs`'s threaded-value map domain. An alloc read while absent (or
+        // owed to a successor phi while absent) is a read-before-write that would make `remove_ptrs`
+        // hit its "no threaded value" panic, so it is flagged here instead.
         let mut uninitialized: HashSet<ValueId> = HashSet::default();
 
-        for block_id in cfg.get_domination_pre_order() {
-            // Values flow in from the immediate dominator (as in `remove_ptrs`), plus this block's
-            // own phi parameters.
-            let mut available = cfg
-                .get_immediate_dominator(block_id)
-                .and_then(|parent| available_at.get(&parent).cloned())
-                .unwrap_or_default();
+        Self::propagate_in_domination_order(cfg, |block_id, available: &mut HashSet<ValueId>| {
+            // This block's own phi parameters make their allocs available on entry.
             if let Some(allocs) = phi_at.get(&block_id) {
                 available.extend(allocs.iter().copied());
             }
@@ -449,9 +478,7 @@ impl Mem2Reg {
                     }
                 }
             }
-
-            available_at.insert(block_id, available);
-        }
+        });
 
         uninitialized
     }
@@ -502,108 +529,25 @@ impl Mem2Reg {
         }
 
         // Disqualify candidates by aliased/opaque access (condition 3) or by any non-pointer use of
-        // a value that may point to them (condition 4).
+        // a value that may point to them (condition 4), via the shared pointer-use classifier. Both
+        // an ambiguous deref (`Deref`) and a non-pointer use (`Consume`) disqualify every candidate
+        // the use may touch; the `Write` direction is irrelevant here (mem2reg, unlike
+        // arg_promotion, does not need the out-direction).
         let mut disqualified: HashSet<ValueId> = HashSet::default();
-        for (_, block) in function.get_blocks() {
-            for instruction in block.get_instructions() {
-                match instruction {
-                    // The pointer of a Load/Store is a legitimate (promotable) use; only check that
-                    // the access is unambiguous (condition 3).
-                    OpCode::Load { ptr, .. } => {
-                        Self::check_access(points_to, fid, *ptr, &candidates, &mut disqualified);
-                    }
-                    OpCode::Store { ptr, value } => {
-                        Self::check_access(points_to, fid, *ptr, &candidates, &mut disqualified);
-                        // The stored *value*, however, is a non-pointer use (condition 4).
-                        Self::disqualify_use(
-                            points_to,
-                            fid,
-                            *value,
-                            &candidates,
-                            &mut disqualified,
-                        );
-                    }
-                    // An Alloc defines a ref but uses none.
-                    OpCode::Alloc { .. } => {}
-                    // Every input of any other opcode is a non-pointer use (condition 4).
-                    other => {
-                        for v in other.get_inputs() {
-                            Self::disqualify_use(
-                                points_to,
-                                fid,
-                                *v,
-                                &candidates,
-                                &mut disqualified,
-                            );
+        points_to.classify_pointer_uses(fid, function, |kind, pts| {
+            if matches!(kind, PointerUse::Deref | PointerUse::Consume) {
+                for o in pts {
+                    if let Some(a) = Self::local_alloc(o, fid) {
+                        if candidates.contains(&a) {
+                            disqualified.insert(a);
                         }
                     }
                 }
             }
-            // Terminator operands are non-pointer uses too (a returned/branched ref is consumed).
-            match block.get_terminator() {
-                Some(Terminator::Return(vals)) => {
-                    for v in vals {
-                        Self::disqualify_use(points_to, fid, *v, &candidates, &mut disqualified);
-                    }
-                }
-                Some(Terminator::Jmp(_, params)) => {
-                    for v in params {
-                        Self::disqualify_use(points_to, fid, *v, &candidates, &mut disqualified);
-                    }
-                }
-                Some(Terminator::JmpIf(cond, _, _)) => {
-                    Self::disqualify_use(points_to, fid, *cond, &candidates, &mut disqualified);
-                }
-                None => {}
-            }
-        }
+        });
 
         candidates.retain(|a| !disqualified.contains(a));
         candidates
-    }
-
-    /// Condition 3: a `Load`/`Store` whose pointer may touch a candidate but does not point to
-    /// *exactly* that candidate (a multi-object or opaque deref) disqualifies every candidate it
-    /// may touch.
-    fn check_access(
-        points_to: &PointsTo,
-        fid: FunctionId,
-        ptr: ValueId,
-        candidates: &HashSet<ValueId>,
-        disqualified: &mut HashSet<ValueId>,
-    ) {
-        let pts = points_to.points_to(fid, ptr);
-        let clean = pts.len() == 1
-            && Self::local_alloc(pts.iter().next().unwrap(), fid)
-                .is_some_and(|a| candidates.contains(&a));
-        if clean {
-            return;
-        }
-        for o in pts {
-            if let Some(a) = Self::local_alloc(o, fid) {
-                if candidates.contains(&a) {
-                    disqualified.insert(a);
-                }
-            }
-        }
-    }
-
-    /// Condition 4: a non-pointer use of value `v` disqualifies every candidate `v` may point to —
-    /// the candidate's ref is consumed as a value, so its `Alloc` cannot be removed.
-    fn disqualify_use(
-        points_to: &PointsTo,
-        fid: FunctionId,
-        v: ValueId,
-        candidates: &HashSet<ValueId>,
-        disqualified: &mut HashSet<ValueId>,
-    ) {
-        for o in points_to.points_to(fid, v) {
-            if let Some(a) = Self::local_alloc(o, fid) {
-                if candidates.contains(&a) {
-                    disqualified.insert(a);
-                }
-            }
-        }
     }
 
     /// If `ptr` points to exactly one promoted allocation, that allocation's result `ValueId`.

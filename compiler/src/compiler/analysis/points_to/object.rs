@@ -158,9 +158,6 @@ pub enum Owner {
 
     /// The `i`-th return value of the function (a formal output).
     Return(usize),
-
-    /// A program global slot (shared program-wide).
-    Global(usize),
 }
 
 /// A node in the points-to constraint graph, with each carrying a points-to set.

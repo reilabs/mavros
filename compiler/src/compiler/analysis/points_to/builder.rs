@@ -44,7 +44,7 @@ use crate::{
             types::FunctionTypeInfo,
         },
         ssa::{
-            FunctionId, Terminator, ValueId,
+            FunctionId, Instruction, Terminator, ValueId,
             hlssa::{CallTarget, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr},
         },
         util::ice_non_elided_tuple,
@@ -552,7 +552,22 @@ impl FnBuilder<'_> {
             | OpCode::AssertCmp { .. }
             | OpCode::AssertR1C { .. }
             | OpCode::Rangecheck { .. }
-            | OpCode::MemOp { .. } => {}
+            | OpCode::MemOp { .. } => {
+                // Soundness invariant: a "no flow" opcode must not define a ref-bearing result.
+                //
+                // If one ever did, its result would get an empty points-to set and escape/alias
+                // analysis would silently miss it, letting mem2reg / arg_promotion perform an
+                // unsound strong update or promotion. This arm is hand-maintained, so pin the
+                // invariant rather than trust it: a future ref-typed result trips here instead of
+                // miscompiling. (Asserted via `ref_levels`, the same predicate the ref-aware
+                // Store/Load/copy arms use to decide whether a value carries a pointer.)
+                debug_assert!(
+                    instr
+                        .get_results()
+                        .all(|r| ref_levels(self.value_type(*r)).is_empty()),
+                    "ICE: points-to 'no pointer flow' opcode defines a ref-bearing result: {instr:?}",
+                );
+            }
 
             OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } | OpCode::MkTuple { .. } => {
                 ice_non_elided_tuple()
@@ -583,10 +598,17 @@ impl FnBuilder<'_> {
         results: &[ValueId],
         unconstrained: bool,
     ) {
+        // `self.summaries` is a shared reference, so copy it out: the chosen summary then borrows
+        // for the builder's lifetime `'a` (its maps live outside `*self`), letting us read them
+        // while the `&mut self` emission calls below mutate `self.cs`. This avoids deep-cloning the
+        // summary's `returns` / `param_writes` / `leaks_param` maps at every call site, every
+        // rebuild (a hot path: the summary fixpoint, the polymorphic pass, and per-context
+        // specialization all re-run this).
+        let summaries = self.summaries;
         let summary = if unconstrained {
             None
         } else {
-            self.summaries.get(&g)
+            summaries.get(&g)
         };
         let Some(summary) = summary else {
             for arg in args {
@@ -600,17 +622,27 @@ impl FnBuilder<'_> {
             return;
         };
 
-        // Clone the bits we need so the immutable borrow of `self.summaries` ends before the
-        // `&mut self` emission calls below.
-        let returns = summary.returns.clone();
-        let param_writes = summary.param_writes.clone();
-        let leaks = summary.leaks_param.clone();
+        // Defensive: every `results[j]` / `args[i]` index below comes from the callee summary's
+        // return-slot / parameter indices, and relies on the IR invariant that a static `Call`'s
+        // result/argument arity matches its callee's signature exactly. That holds by construction
+        // (Unit-driven return count; 1:1 params from the same monomorphized AST), so this can only
+        // trip on a malformed call — turning a raw out-of-bounds index panic into a clear ICE.
+        debug_assert!(
+            summary.returns.keys().all(|(j, _)| *j < results.len())
+                && summary.param_writes.keys().all(|(i, _, _)| *i < args.len())
+                && summary.leaks_param.iter().all(|i| *i < args.len()),
+            "ICE: callee {g:?} summary indexes beyond the call site arity \
+             (results={}, args={})",
+            results.len(),
+            args.len(),
+        );
+
         let callee_ctx = self.callee_ctx(args, results);
 
         // Record the reachable callee context for the Phase-2 BFS.
         self.callee_contexts.push((g, callee_ctx.clone()));
 
-        for ((j, path), objset) in &returns {
+        for ((j, path), objset) in &summary.returns {
             let target = NodeKey::Val(Owner::Value(results[*j]), path.clone());
             for o in objset {
                 self.emit_object_into(&target, o, args, &callee_ctx);
@@ -618,13 +650,13 @@ impl FnBuilder<'_> {
         }
 
         // Precise arg-out: store the exact objects the callee wrote into the caller's arg memory.
-        for ((i, plpath, cellpath), objset) in &param_writes {
+        for ((i, plpath, cellpath), objset) in &summary.param_writes {
             let ptr = NodeKey::Val(Owner::Value(args[*i]), plpath.clone());
             for o in objset {
                 self.store_summand(&ptr, cellpath, o, args, &callee_ctx);
             }
         }
-        for i in &leaks {
+        for i in &summary.leaks_param {
             let arg_ty = self.value_type(args[*i]).clone();
             self.escape_value(args[*i], &arg_ty);
         }

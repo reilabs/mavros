@@ -5,12 +5,12 @@
 //! `splittable_cells(f, v)` returns `Some(indices)` exactly for a `Split` group.
 //!
 //! This pass **peels every `Split` array value into one SSA value per cell**, deleting the array
-//! aggregate: `MkSeq`/`MkSeqOfBlob`/`MkRepeated`/`ArrayGet`/`ArraySet` collapse into pure dataflow and
-//! array-typed phis (block parameters) become per-cell phis. Cells of scalar arrays become plain
-//! scalars (which `WitnessTaintInference` can then classify `Pure`); cells of ref arrays become
-//! individual refs that the follow-up [`super::mem2reg`] promotes. It is the array analog of tuple
-//! elision (which explodes tuples the same way), but driven by the analysis rather than by syntax —
-//! so it fires only where aliasing is *proven* separable, never speculatively.
+//! aggregate: `MkSeq`/`MkSeqOfBlob`/`MkRepeated`/`ArrayGet`/`ArraySet` collapse into pure dataflow
+//! and array-typed phis (block parameters) become per-cell phis. Cells of scalar arrays become
+//! plain scalars (which `WitnessTaintInference` can then classify `Pure`); cells of ref arrays
+//! become individual refs that the follow-up [`super::mem2reg`] promotes. It is the array analog of
+//! tuple elision (which explodes tuples the same way), but driven by the analysis rather than by
+//! syntax — so it fires only where aliasing is *proven* separable, never speculatively.
 //!
 //! ## One-Level Value Rewriting
 //!
@@ -40,10 +40,10 @@
 //!
 //! 1. **Plan:** Create a `value_map: ValueId -> Vec<ValueId>` for the peeled values only. A `Split`
 //!    array maps to its `N` per-cell component values (index `k` at position `k` — the cell set is
-//!    dense `0..N`). `MkSeq`/`MkSeqOfBlob`/`MkRepeated`/`ArrayGet`/`ArraySet` results *alias* slices
-//!    of their operands' components (no fresh ids, no emitted op); `Select`/`Cast` results and split
-//!    params get fresh per-cell ids. Everything else is absent from the map and is its own single
-//!    component.
+//!    dense `0..N`). `MkSeq`/`MkSeqOfBlob`/`MkRepeated`/`ArrayGet`/`ArraySet` results *alias*
+//!    slices of their operands' components (no fresh ids, no emitted op); `Select`/`Cast` results
+//!    and split params get fresh per-cell ids. Everything else is absent from the map and is its
+//!    own single component.
 //! 2. **Rewrite:**: Split-array block params expand into `N` per-cell params; the aliasing
 //!    producers are dropped; `Select`/`Cast` emit one op per cell; every other instruction is kept
 //!    with its operands mapped through `single`; `Jmp` args expand a split-array arg into its `N`
@@ -144,7 +144,7 @@ impl ArraySroa {
         // params are formals and always `Collapsed`, so this only ever fires for phi params.
         for bid in reachable {
             for (pid, ty) in func.get_block(*bid).get_parameters() {
-                if points_to.splittable_cells(fid, *pid).is_some() {
+                if points_to.is_split(fid, *pid) {
                     let n = array_size(ty);
                     let cells: Vec<ValueId> = (0..n).map(|_| ssa.fresh_value()).collect();
                     plan.mark_split(*pid, cells);
@@ -171,7 +171,7 @@ impl ArraySroa {
         instr: &OpCode,
         plan: &mut Plan,
     ) {
-        let is_split = |v: ValueId| points_to.splittable_cells(fid, v).is_some();
+        let is_split = |v: ValueId| points_to.is_split(fid, v);
         match instr {
             // `MkSeq` regroups its elements as cells; emits no instruction. Each element is a
             // single component (a deeper array element is `Collapsed`), so `single` enforces that

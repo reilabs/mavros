@@ -87,13 +87,13 @@ use crate::{
     collections::{HashMap, HashSet},
     compiler::{
         analysis::{
-            points_to::{PointsTo, object::AbstractObject},
+            points_to::{PointerUse, PointsTo, object::AbstractObject},
             types::{FunctionTypeInfo, TypeInfo},
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
         passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
         ssa::{
-            BlockId, FunctionId, Instruction, Terminator, ValueId,
+            BlockId, FunctionId, Terminator, ValueId,
             hlssa::{CallTarget, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr},
         },
     },
@@ -373,70 +373,29 @@ fn classify_params(
     let mut clean = vec![true; cands.len()];
     let mut writes = vec![false; cands.len()];
 
-    // A non-pointer use of a value that may point to a candidate would dangle if its ref were
-    // promoted away, so it disqualifies that candidate.
-    let taint = |clean: &mut [bool], v: ValueId| {
-        let pts = points_to.points_to(g, v);
-        for (k, (_, p)) in cands.iter().enumerate() {
-            if pts.contains(p) {
-                clean[k] = false;
-            }
-        }
-    };
-
-    for (_, block) in func.get_blocks() {
-        for instr in block.get_instructions() {
-            match instr {
-                // The pointer of a Load/Store is the legitimate use; only an *ambiguous* deref that
-                // may also touch a candidate disqualifies it.
-                OpCode::Load { ptr, .. } => {
-                    let pts = points_to.points_to(g, *ptr);
-                    if pts.len() != 1 {
-                        for (k, (_, p)) in cands.iter().enumerate() {
-                            if pts.contains(p) {
-                                clean[k] = false;
-                            }
-                        }
-                    }
-                }
-                OpCode::Store { ptr, value } => {
-                    let pts = points_to.points_to(g, *ptr);
-                    let ambiguous = pts.len() != 1;
-                    for (k, (_, p)) in cands.iter().enumerate() {
-                        if pts.contains(p) {
-                            if ambiguous {
-                                clean[k] = false;
-                            }
-                            writes[k] = true;
-                        }
-                    }
-                    // The stored *value* is a non-pointer use.
-                    taint(&mut clean, *value);
-                }
-                OpCode::Alloc { .. } => {}
-                // Every input of any other opcode is a non-pointer use.
-                other => {
-                    for v in other.get_inputs() {
-                        taint(&mut clean, *v);
-                    }
+    // Shares `mem2reg`'s pointer-use classifier ([`PointsTo::classify_pointer_uses`]), keyed on the
+    // candidate placeholders rather than local allocs. An ambiguous deref (`Deref`) or a
+    // non-pointer use (`Consume`) of a value that may reach a candidate makes it un-`clean` —
+    // establishing that the ref is used only as an unambiguous `Load`/`Store` pointer (C3); a
+    // `Write` through it records the out-direction. For a `clean` candidate, C3 then guarantees any
+    // such write points to exactly it. (`writes` is meaningless for a non-`clean` candidate, which
+    // the caller drops.)
+    points_to.classify_pointer_uses(g, func, |kind, pts| match kind {
+        PointerUse::Deref | PointerUse::Consume => {
+            for (k, (_, p)) in cands.iter().enumerate() {
+                if pts.contains(p) {
+                    clean[k] = false;
                 }
             }
         }
-        match block.get_terminator() {
-            Some(Terminator::Return(vals)) => {
-                for v in vals {
-                    taint(&mut clean, *v);
+        PointerUse::Write => {
+            for (k, (_, p)) in cands.iter().enumerate() {
+                if pts.contains(p) {
+                    writes[k] = true;
                 }
             }
-            Some(Terminator::Jmp(_, params)) => {
-                for v in params {
-                    taint(&mut clean, *v);
-                }
-            }
-            Some(Terminator::JmpIf(cond, _, _)) => taint(&mut clean, *cond),
-            None => {}
         }
-    }
+    });
 
     clean.into_iter().zip(writes).collect()
 }

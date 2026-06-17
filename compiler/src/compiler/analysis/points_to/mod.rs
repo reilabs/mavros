@@ -120,7 +120,10 @@ use crate::{
             flow_analysis::FlowAnalysis, points_to::builder::build_function, types::TypeInfo,
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore},
-        ssa::{FunctionId, ValueId, hlssa::HLSSA},
+        ssa::{
+            FunctionId, Instruction, Terminator, ValueId,
+            hlssa::{HLFunction, HLSSA, OpCode},
+        },
     },
 };
 
@@ -142,6 +145,25 @@ use solver::PointsToSolution;
 /// refinement is held alongside in [`contexts`](Self::contexts) and queried through the `*_in`
 /// methods. The query surface ([`PointsTo::may_alias`], [`PointsTo::escapes`],
 /// [`PointsTo::is_singleton_reached`], …) is what that transform consumes.
+///
+/// How a value is used with respect to a pointer, as reported by
+/// [`PointsTo::classify_pointer_uses`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerUse {
+    /// A `Load`/`Store` *pointer* operand whose points-to set is ambiguous (more than one possible
+    /// object): no object it may touch can be strongly updated or promoted.
+    Deref,
+
+    /// A `Store` *pointer* operand (reported regardless of ambiguity): every object it may touch is
+    /// written through — the out-direction an in/out parameter must replay.
+    Write,
+
+    /// A non-pointer use — a stored value, a non-`Load`/`Store` instruction input, or a terminator
+    /// operand — so any object the value may point to is consumed *as a value* and its allocation
+    /// cannot be removed.
+    Consume,
+}
+
 #[derive(Debug)]
 pub struct PointsTo {
     /// The polymorphic (context-insensitive) solution per function.
@@ -296,6 +318,80 @@ impl PointsTo {
     /// as the peeled slot just holds that ref. Works uniformly for scalar and ref arrays.
     pub fn splittable_cells(&self, f: FunctionId, v: ValueId) -> Option<HashSet<usize>> {
         self.array_cells.get(&f)?.split_indices(v).cloned()
+    }
+
+    /// Whether `v`'s flow-group in `f` is `Split` (i.e. SROA may peel it). Borrowing and
+    /// allocation-free: prefer this over `splittable_cells(..).is_some()` on hot paths, which
+    /// clones the index set only to drop it.
+    pub fn is_split(&self, f: FunctionId, v: ValueId) -> bool {
+        self.array_cells
+            .get(&f)
+            .map_or(false, |ac| ac.split_indices(v).is_some())
+    }
+
+    /// Walk function `f`'s body and report every pointer use, paired with the points-to set at that
+    /// site (see [`PointerUse`]).
+    ///
+    /// This is the shared core of the "is this object used *only* as an unambiguous `Load`/`Store`
+    /// pointer?" predicate that both `mem2reg` (which local allocations are promotable) and
+    /// `arg_promotion` (which ref parameters are clean, and whether they are written) build on.
+    /// Each caller maps the reported set onto its own candidate representation — `mem2reg` keys
+    /// candidates by local `Alloc`, `arg_promotion` by parameter placeholder object — so the walk
+    /// and the notion of a "disqualifying use" live here once instead of being mirrored across the
+    /// two passes (where a fix to one could silently miss the other).
+    pub fn classify_pointer_uses(
+        &self,
+        f: FunctionId,
+        func: &HLFunction,
+        mut visit: impl FnMut(PointerUse, &HashSet<AbstractObject>),
+    ) {
+        for (_, block) in func.get_blocks() {
+            for instr in block.get_instructions() {
+                match instr {
+                    // A Load's pointer is a legitimate use; only an *ambiguous* deref disqualifies.
+                    OpCode::Load { ptr, .. } => {
+                        let pts = self.points_to(f, *ptr);
+                        if pts.len() != 1 {
+                            visit(PointerUse::Deref, pts);
+                        }
+                    }
+                    OpCode::Store { ptr, value } => {
+                        let pts = self.points_to(f, *ptr);
+                        if pts.len() != 1 {
+                            visit(PointerUse::Deref, pts);
+                        }
+                        visit(PointerUse::Write, pts);
+                        // The stored *value* is a non-pointer use.
+                        visit(PointerUse::Consume, self.points_to(f, *value));
+                    }
+                    // An Alloc defines a ref but uses none.
+                    OpCode::Alloc { .. } => {}
+                    // Every input of any other opcode is a non-pointer use.
+                    other => {
+                        for v in other.get_inputs() {
+                            visit(PointerUse::Consume, self.points_to(f, *v));
+                        }
+                    }
+                }
+            }
+            // Terminator operands are non-pointer uses too (a returned/branched ref is consumed).
+            match block.get_terminator() {
+                Some(Terminator::Return(vals)) => {
+                    for v in vals {
+                        visit(PointerUse::Consume, self.points_to(f, *v));
+                    }
+                }
+                Some(Terminator::Jmp(_, params)) => {
+                    for v in params {
+                        visit(PointerUse::Consume, self.points_to(f, *v));
+                    }
+                }
+                Some(Terminator::JmpIf(cond, _, _)) => {
+                    visit(PointerUse::Consume, self.points_to(f, *cond))
+                }
+                None => {}
+            }
+        }
     }
 
     // CONTEXT-SENSITIVE QUERIES
