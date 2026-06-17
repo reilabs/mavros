@@ -630,11 +630,12 @@ unsafe fn ad_kv_lookup_emit(
     let cnst_off = table_info.elem_inverses_constraint_section_offset;
     let length = table_info.length;
     // Sum constraint sits past the table's per-entry constraints: spread tables
-    // fold each entry into one constraint, arrays use two.
-    let sum_off = if table_info.kind == TableKind::Spread {
-        cnst_off + length
-    } else {
-        cnst_off + 2 * length
+    // fold each entry into one constraint, arrays use two. Rangecheck tables
+    // are key-only and never reach this key-value lookup path.
+    let sum_off = match table_info.kind {
+        TableKind::Spread => cnst_off + length,
+        TableKind::Array => cnst_off + 2 * length,
+        TableKind::RangeCheck => panic!("ad_kv_lookup_emit called on a rangecheck table"),
     };
 
     let x_coeff = unsafe {
