@@ -36,6 +36,9 @@ use crate::{
     },
 };
 
+// MEM2REG PASS
+// ================================================================================================
+
 pub struct Mem2Reg {}
 
 impl Pass for Mem2Reg {
@@ -628,12 +631,16 @@ impl Mem2Reg {
     }
 }
 
+// TESTS
+// ================================================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::analysis::types::Types;
-    use crate::compiler::ssa::hlssa::Type;
-    use crate::compiler::ssa::hlssa::builder::HLEmitter;
+    use crate::compiler::{
+        analysis::types::Types,
+        ssa::hlssa::{Type, builder::HLEmitter},
+    };
 
     fn fr(n: u64) -> ark_bn254::Fr {
         ark_bn254::Fr::from(n)

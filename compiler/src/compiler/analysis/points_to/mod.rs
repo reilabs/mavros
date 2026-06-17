@@ -98,7 +98,8 @@
 //!   `SlicePush` result collapses to `Elem(AllElems)`. Constant-cell enumeration is ill-defined for
 //!   a runtime-sized container, so this is effectively forced rather than a tunable trade-off.
 //! - **All-or-Nothing Group Collapse:** A single collapse trigger (one dynamic index, a
-//!   `MkRepeated`, a slice op) collapses an array's *entire* flow-group to one `AllElems` cell,
+//!   `MkRepeated` of a non-scalar element, a slice op) collapses an array's *entire* flow-group to
+//!   one `AllElems` cell,
 //!   rather than keeping its constant `Index(k)` cells alongside an `AllElems` overflow (the
 //!   textbook field-sensitive model: a dynamic write weak-updates `AllElems`; a constant read sees
 //!   `Index(k) ∪ AllElems`). The hybrid would only sharpen `may_alias` on groups mixing constant
@@ -1022,10 +1023,10 @@ mod tests {
         );
     }
 
-    /// `MkRepeated` is a collapse trigger (every cell shares one source), so its result is not
-    /// cell-splittable.
+    /// A constant-count repeat of a *scalar* element is cell-splittable over `0..count` (the cells
+    /// all alias the one source value until an `ArraySet` diverges them — the O1 refinement).
     #[test]
-    fn mk_repeated_is_not_splittable() {
+    fn mk_repeated_scalar_is_splittable() {
         let mut ssa = HLSSA::with_main("main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
@@ -1040,6 +1041,38 @@ mod tests {
                 let i0 = e.u_const(32, 0);
                 let got = e.array_get(arr, i0);
                 e.terminate_return(vec![got]);
+                captured = Some(arr);
+            });
+        }
+        let arr = captured.unwrap();
+        let pt = solve(&ssa);
+        assert_eq!(
+            pt.splittable_cells(main_id, arr),
+            Some(idx_set(&[0, 1, 2, 3]))
+        );
+    }
+
+    /// A repeat of a *ref* element stays collapsed: every cell aliases the one object, so peeling is
+    /// pointless and the analysis reports it un-splittable.
+    #[test]
+    fn mk_repeated_ref_is_not_splittable() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut captured = None;
+        {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(main_id, |b| {
+                b.function.add_return_type(Type::field());
+                let entry = b.function.get_entry_id();
+                let mut e = b.block(entry);
+                let r = e.alloc(Type::field());
+                let c = e.field_const(fr(3));
+                e.store(r, c);
+                let arr = e.mk_repeated(r, SequenceTargetType::Array(4), 4, Type::field().ref_of());
+                let i0 = e.u_const(32, 0);
+                let got = e.array_get(arr, i0);
+                let v = e.load(got);
+                e.terminate_return(vec![v]);
                 captured = Some(arr);
             });
         }
