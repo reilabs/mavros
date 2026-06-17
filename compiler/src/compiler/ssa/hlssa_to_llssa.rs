@@ -3500,7 +3500,6 @@ fn generate_spread_lookup_function(
         bits
     );
     let lookup = LookupTableSpec::spread(bits);
-    let length = lookup.length;
     let mut func = new_ll_function(llssa, format!("__spread_{}_lookup", bits));
     let entry = func.get_entry_id();
 
@@ -3529,7 +3528,6 @@ fn generate_spread_lookup_function(
     // it directly when filling the single `y·(α-i+β·spread(i))=m` constraint
     // (see `run_phase2` in `vm/src/interpreter.rs`). We only reserve the table
     // region (its footprint comes from `LookupTableSpec::spread`).
-    let _ = length;
     let (mults_base, table_idx_i32) = get_or_init_forward_lookup_table(
         &mut e,
         ForwardLookupTableState::Global { table_idx_global },
