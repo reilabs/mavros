@@ -10,7 +10,7 @@ use tracing::instrument;
 
 pub use crate::InputValueOrdered;
 
-use crate::bytecode::{ENTRY_AD, ENTRY_WITGEN, parse_program_header};
+use crate::bytecode::{ENTRY_AD, ENTRY_WITGEN, parse_program_header, spread_bits};
 use crate::{
     ConstraintsLayout, Field, WitnessLayout,
     array::BoxedValue,
@@ -394,6 +394,23 @@ pub fn run_phase2(
                     running_prod *= denom;
                 }
             }
+        } else if tbl.num_values == 2 {
+            // Spread allocation: one folded constraint per entry. Both operands
+            // (key=i, value=spread(i)) are constants, so β·spread(i) is folded
+            // into the denominator: denom_i = α - i + β·spread(i). spread(i) is
+            // recomputed here rather than dumped by the VM.
+            let beta = phase1.out_wit_post_comm[1];
+            for i in 0..tbl.length {
+                let multiplicity = unsafe { *tbl.multiplicities_wit.add(i) };
+                let spread_i = Field::from(spread_bits(i as u32));
+                let denom = alpha - Field::from(i as u64) + beta * spread_i;
+                phase1.out_b[base + i] = denom;
+                phase1.out_c[base + i] = multiplicity;
+                if multiplicity != Field::ZERO {
+                    phase1.out_a[base + i] = running_prod;
+                    running_prod *= denom;
+                }
+            }
         } else {
             assert_eq!(
                 tbl.num_values, 1,
@@ -431,8 +448,9 @@ pub fn run_phase2(
     for tbl in phase1.tables.iter().rev() {
         let base = tbl.elem_inverses_constraint_section_offset;
 
-        if tbl.num_values == 0 {
-            // Width-1: y-values at consecutive offsets
+        if tbl.num_values == 0 || tbl.num_values == 2 {
+            // One folded constraint per entry (rangecheck width-1 and spread):
+            // y-values live at consecutive offsets.
             for i in (0..tbl.length).rev() {
                 let multiplicity = phase1.out_c[base + i];
                 let denom = phase1.out_b[base + i];
@@ -501,14 +519,19 @@ pub fn run_phase2(
 
             current_lookup_off += 1;
         } else {
-            assert_eq!(
-                table.num_values, 1,
-                "expected width-2 table, got num_values={}",
+            assert!(
+                table.num_values == 1 || table.num_values == 2,
+                "expected width-2 lookup table, got num_values={}",
                 table.num_values
             );
-            // Width-2 lookup (array): 2 constraints per lookup
+            // Width-2 lookup (array or spread): 2 constraints per lookup. The
+            // looked-up key & value are witnesses regardless of how the table
+            // is allocated; only the *table's* internal y-slot stride differs —
+            // array stores x,y per entry (stride 2, y at the odd slot) while a
+            // folded spread table stores just y per entry (stride 1).
             // Entry 1 (x-constraint): out_a=table_id, out_b=result_value, out_c=0
             // Entry 2 (y-constraint): out_a=table_id, out_b=index, out_c=flag
+            let entry_stride = if table.num_values == 2 { 1 } else { 2 };
             let beta = phase1.out_wit_post_comm[1];
             let result_value = phase1.out_b[cnst_off];
             let flag_u64 = phase1.out_c[cnst_off + 1].0.0[0];
@@ -534,13 +557,16 @@ pub fn run_phase2(
             } else {
                 let ix_in_table = phase1.out_b[y_cnst_off].0.0[0];
                 let tbl_base = table.elem_inverses_constraint_section_offset;
-                // Copy precomputed inverse from table's y-slot (odd offset)
-                phase1.out_a[y_cnst_off] = phase1.out_a[tbl_base + 2 * ix_in_table as usize + 1];
-                phase1.out_b[y_cnst_off] = phase1.out_b[tbl_base + 2 * ix_in_table as usize + 1];
+                // Copy precomputed inverse from the table entry's y-slot
+                // (array: 2*ix+1; spread: ix).
+                let y_slot =
+                    tbl_base + entry_stride * ix_in_table as usize + (entry_stride - 1);
+                phase1.out_a[y_cnst_off] = phase1.out_a[y_slot];
+                phase1.out_b[y_cnst_off] = phase1.out_b[y_slot];
                 phase1.out_c[y_cnst_off] = Field::from(flag_u64);
                 phase1.out_wit_post_comm[y_wit_off] = phase1.out_a[y_cnst_off];
-                // Add to sum constraint (at offset 2*n in wide table)
-                let sum_off = tbl_base + 2 * table.length;
+                // Add to sum constraint (array: 2*n; spread: n).
+                let sum_off = tbl_base + entry_stride * table.length;
                 phase1.out_c[sum_off] += phase1.out_a[y_cnst_off];
             }
 
@@ -552,8 +578,10 @@ pub fn run_phase2(
         let base = tbl.elem_inverses_constraint_section_offset;
         let wit_base = tbl.elem_inverses_witness_section_offset;
 
-        if tbl.num_values == 0 {
-            // Width-1: y-values at consecutive offsets, sum constraint at offset length
+        if tbl.num_values == 0 || tbl.num_values == 2 {
+            // One folded constraint per entry (rangecheck width-1 and spread):
+            // y-values at consecutive offsets, sum constraint at offset length,
+            // one witness per entry.
             for i in 0..tbl.length {
                 let multiplicity = phase1.out_c[base + i];
                 if multiplicity != Field::ZERO {

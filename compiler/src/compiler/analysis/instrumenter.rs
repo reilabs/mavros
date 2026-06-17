@@ -1560,11 +1560,14 @@ impl Instrumenter {
         } else {
             0
         };
+        // Spread tables fold each entry into a single constraint (both operands
+        // are compile-time constants), so allocation costs 2^bits + 1 (one per
+        // entry plus the sum constraint), not 2·2^bits + 1.
         let spread_constraints = self
             .final_spread_lookups()
             .keys()
             .filter(|bits| **bits >= 2)
-            .map(|bits| 2 * (1usize << *bits as usize) + 1)
+            .map(|bits| (1usize << *bits as usize) + 1)
             .sum::<usize>();
         range_constraints + spread_constraints
     }
