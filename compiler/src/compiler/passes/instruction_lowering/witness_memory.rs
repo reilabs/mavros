@@ -2,7 +2,7 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            OpCode, SequenceTargetType, Type, TypeExpr,
+            OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -45,14 +45,12 @@ fn emit_select(
 ) -> ValueId {
     match &typ.expr {
         TypeExpr::Array(elem_type, size) => {
-            let mut elems = Vec::with_capacity(*size);
-            for i in 0..*size {
-                let idx = b.u_const(32, i as u128);
+            let elem_type = (**elem_type).clone();
+            b.build_array_loop(*size, elem_type.clone(), |b, idx| {
                 let lhs_elem = b.array_get(lhs, idx);
                 let rhs_elem = b.array_get(rhs, idx);
-                elems.push(emit_select(b, cond, lhs_elem, rhs_elem, elem_type));
-            }
-            b.mk_seq(elems, SequenceTargetType::Array(*size), *elem_type.clone())
+                emit_select(b, cond, lhs_elem, rhs_elem, &elem_type)
+            })
         }
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
         TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::WitnessOf(_) => {
