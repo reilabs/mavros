@@ -477,11 +477,6 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             };
             let slot = builder.value_position(*result).child(Descent::Deref);
             builder.copy_levels(slot.clone(), builder.value_position(*value), pointee);
-
-            for path in leaf_paths(pointee) {
-                let written = slot.extend(&path);
-                builder.add_cf_taint_to(&written, branch_conditions);
-            }
         }
         OpCode::Store { ptr, value } => {
             // A store writes the pointee: covariant at the written value levels (`*ptr ≥ value`,
