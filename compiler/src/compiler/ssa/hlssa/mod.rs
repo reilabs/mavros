@@ -773,7 +773,10 @@ impl Instruction for OpCode {
 
     fn get_inputs(&self) -> impl Iterator<Item = &ValueId> {
         match self {
-            Self::Alloc { result: _, value: v } => vec![v].into_iter(),
+            Self::Alloc {
+                result: _,
+                value: v,
+            } => vec![v].into_iter(),
             Self::FreshWitness {
                 result: _,
                 result_type: _,
@@ -1096,7 +1099,10 @@ impl Instruction for OpCode {
 
     fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
         match self {
-            Self::Alloc { result: _, value: v } => vec![v].into_iter(),
+            Self::Alloc {
+                result: _,
+                value: v,
+            } => vec![v].into_iter(),
             Self::FreshWitness {
                 result: _,
                 result_type: _,
