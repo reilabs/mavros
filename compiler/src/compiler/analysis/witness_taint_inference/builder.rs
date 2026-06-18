@@ -671,7 +671,6 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         OpCode::ArraySet { .. }
         | OpCode::SlicePush { .. }
         | OpCode::Store { .. }
-        | OpCode::Alloc { .. }
         | OpCode::InitGlobal { .. } => true,
         OpCode::Guard { inner, .. } => writes_under_witness_cf(inner),
         OpCode::Cmp { .. }
@@ -710,7 +709,8 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         | OpCode::MulConst { .. }
         | OpCode::Lookup { .. }
         | OpCode::DLookup { .. }
-        | OpCode::Todo { .. } => false,
+        | OpCode::Todo { .. }
+        | OpCode::Alloc { .. } => false,
     }
 }
 
