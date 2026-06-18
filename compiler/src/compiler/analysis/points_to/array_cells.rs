@@ -15,13 +15,19 @@
 //!   cells all alias the one source value until an `ArraySet` diverges them).
 //! - **`Collapsed`** — some collapse trigger fired (a dynamic or out-of-bounds index, a slice or any
 //!   non-fixed-array result, a `MkRepeated` of a ref/array element, an array stored/loaded through a
-//!   `Ref`, or any boundary crossing: a parameter, a `Call` arg/result, a
-//!   `Return`/`InitGlobal`/`ReadGlobal`). The group keeps the single `Elem(AllElems)` cell — today's
-//!   sound behavior.
+//!   `Ref`, a call-boundary crossing — a parameter, a `Call` arg/result, or a `Return` — or a global
+//!   store/load via `InitGlobal`/`ReadGlobal`). The group keeps the single `Elem(AllElems)` cell —
+//!   today's sound behavior.
 //!
 //! Because every boundary-crossing or through-`Ref` array is `Collapsed`, the builder's `AllElems`
 //! paths (parameter seeding, summary instantiation, `Store`/`Load`) never touch a `Split` group, so
 //! there is no seeding/reading mismatch — see [`super::builder`].
+//!
+//! A `Collapsed` group is further classified by *why* it collapsed (a `Collapse`): a *severable call
+//! boundary* (a `BoundaryKind`) versus a *hard* obstacle. Whole-program array boundary expansion (the
+//! `passes::array_boundary_expansion` pass) consumes the boundary case — via
+//! [`ArrayCells::boundary_splittable_param`] and its siblings — to decide which call boundaries it can
+//! sever, after which a re-run can `Split` the now-local array.
 //!
 //! Construction is **two-pass**. Pass 1 records every union edge and every observation
 //! `(value, Index(k) | Collapse)` while pass 2 folds each observation onto its value's *final*
@@ -39,7 +45,7 @@ use crate::{
     },
 };
 
-// PUBLIC RESULT
+// ARRAY CELLS RESULT
 // ================================================================================================
 
 /// The array-cell flow-group classification for one function.
@@ -52,26 +58,67 @@ pub struct ArrayCells {
     facts: HashMap<ValueId, GroupFacts>,
 }
 
-#[derive(Debug, Clone, Default)]
-struct GroupFacts {
-    /// Constant indices observed on the group (array literal positions + constant get/set indices).
-    indices: HashSet<usize>,
-
-    /// Whether any collapse trigger fired for the group.
-    collapsed: bool,
-}
-
 impl ArrayCells {
     /// The live constant indices of `v`'s flow-group if it is `Split` (cell-precise), or `None` if
     /// it is `Collapsed` (use `Elem(AllElems)`) or `v` is not a tracked array value.
     pub fn split_indices(&self, v: ValueId) -> Option<&HashSet<usize>> {
         let rep = self.rep.get(&v)?;
         let facts = self.facts.get(rep)?;
-        if facts.collapsed {
+        if facts.collapse.is_collapsed() {
             None
         } else {
             Some(&facts.indices)
         }
+    }
+
+    /// Whether `v`'s flow-group would be `Split` were its only obstacle the `allowed` call
+    /// boundary — i.e. no *hard* trigger fired and every boundary crossing on the group is
+    /// `allowed`.
+    ///
+    /// This is the "splittable modulo a single severable boundary" predicate that whole-program
+    /// array boundary expansion gates on; the caller still confirms `v` is a fixed-size array (so
+    /// the post-expansion reconstruction is dense `0..N`). Returns `false` for an untracked value.
+    ///
+    /// Sound by construction: a missed *hard* reason can only ever promote a group to
+    /// `Collapse::Hard` (blocking expansion), never enable a bad one.
+    ///
+    /// A group with no boundary crossing satisfies the relaxability check vacuously, so this is
+    /// only meaningful when `v` actually plays the `allowed` boundary role — which every public
+    /// wrapper below guarantees (a param for `EntryParam`, a call arg for `CallArg`, etc.).
+    fn boundary_only(&self, v: ValueId, allowed: BoundaryKind) -> bool {
+        let Some(rep) = self.rep.get(&v) else {
+            return false;
+        };
+        let Some(facts) = self.facts.get(rep) else {
+            return false;
+        };
+        facts.collapse.relaxable_with(allowed)
+    }
+
+    /// Whether array parameter `v` would be `Split` if it weren't an entry formal — the callee-side
+    /// precondition for expanding it into per-cell parameters.
+    pub fn boundary_splittable_param(&self, v: ValueId) -> bool {
+        self.boundary_only(v, BoundaryKind::EntryParam)
+    }
+
+    /// Whether a returned array value `v` would be `Split` if it weren't returned — the callee-side
+    /// precondition for expanding the return into per-cell returns.
+    pub fn boundary_splittable_return(&self, v: ValueId) -> bool {
+        self.boundary_only(v, BoundaryKind::Return)
+    }
+
+    /// Whether a call-argument array value `v` would be `Split` if it weren't passed to the call —
+    /// the caller-side profitability guard ensuring the inserted per-cell `ArrayGet`s peel rather
+    /// than widening the boundary.
+    pub fn boundary_splittable_arg(&self, v: ValueId) -> bool {
+        self.boundary_only(v, BoundaryKind::CallArg)
+    }
+
+    /// Whether a call-result array value `v` would be `Split` if it weren't a call result — the
+    /// caller-side profitability guard for expanding a callee's return, ensuring the reconstructing
+    /// `MkSeq` the caller emits itself peels.
+    pub fn boundary_splittable_result(&self, v: ValueId) -> bool {
+        self.boundary_only(v, BoundaryKind::CallResult)
     }
 
     /// Compute the classification for one function.
@@ -104,8 +151,7 @@ impl ArrayCells {
         // A parameter array is caller memory (a boundary): collapse.
         for (value, ty) in func.get_entry().get_parameters() {
             if ty.peel_witness().is_array_or_slice() {
-                uf.add(*value);
-                obs.push((*value, Obs::Collapse));
+                collapse_boundary(&mut uf, &mut obs, *value, BoundaryKind::EntryParam);
             }
         }
 
@@ -127,8 +173,7 @@ impl ArrayCells {
                 Some(Terminator::Return(values)) => {
                     for v in values {
                         if is_arr(*v) {
-                            uf.add(*v);
-                            obs.push((*v, Obs::Collapse));
+                            collapse_boundary(&mut uf, &mut obs, *v, BoundaryKind::Return);
                         }
                     }
                 }
@@ -145,7 +190,7 @@ impl ArrayCells {
                 Obs::Index(k) => {
                     f.indices.insert(k);
                 }
-                Obs::Collapse => f.collapsed = true,
+                Obs::Collapse(reason) => f.collapse.observe(reason),
             }
         }
 
@@ -157,6 +202,88 @@ impl ArrayCells {
     }
 }
 
+// COLLAPSES AND BOUNDARIES
+// ================================================================================================
+
+/// The collapse state of an array flow-group.
+///
+/// A three-level lattice `None ⊑ Boundary ⊑ Hard`, joined as observations accrue (`Hard` is top).
+/// `None` means the group is `Split`.
+#[derive(Debug, Clone, Copy, Default)]
+enum Collapse {
+    /// No collapse trigger fired — the group is `Split` (cell-precise).
+    #[default]
+    None,
+
+    /// Collapsed at exactly one kind of call boundary, which whole-program expansion can sever.
+    Boundary(BoundaryKind),
+
+    /// Irreparably collapsed — never relaxable by severing a single boundary.
+    ///
+    /// Either a *hard* trigger fired (a dynamic/out-of-bounds index, a slice, a `Ref<Array>`
+    /// store/load, a deeper array level, a global, or any opaque consumer), or the group crosses
+    /// ≥2 *distinct* boundary kinds (which no single severance could relax — equivalent to a hard
+    /// collapse for every query).
+    Hard,
+}
+
+impl Collapse {
+    /// Fold one observed collapse in (a semilattice join; `Hard` is top, `None` is identity). Two
+    /// *distinct* boundary kinds join to `Hard`, since no single severance can relax both.
+    fn observe(&mut self, other: Collapse) {
+        *self = match (*self, other) {
+            (Collapse::Hard, _) | (_, Collapse::Hard) => Collapse::Hard,
+            (Collapse::None, c) | (c, Collapse::None) => c,
+            (Collapse::Boundary(a), Collapse::Boundary(b)) => {
+                if a == b {
+                    Collapse::Boundary(a)
+                } else {
+                    Collapse::Hard
+                }
+            }
+        };
+    }
+
+    /// Whether any collapse trigger fired (i.e. the group is not `Split`).
+    fn is_collapsed(&self) -> bool {
+        !matches!(self, Collapse::None)
+    }
+
+    /// Whether the group's *only* obstacle to `Split` is the single `allowed` boundary kind — no
+    /// hard trigger fired and the one boundary crossing on the group is `allowed`.
+    ///
+    /// `None` satisfies this vacuously (no obstacle at all), so it is meaningful only when the
+    /// queried value actually plays the `allowed` boundary role (which every
+    /// `boundary_splittable_*` wrapper guarantees).
+    fn relaxable_with(&self, allowed: BoundaryKind) -> bool {
+        match self {
+            Collapse::None => true,
+            Collapse::Boundary(k) => *k == allowed,
+            Collapse::Hard => false,
+        }
+    }
+}
+
+/// The kind of call-boundary crossing that collapsed an array flow-group.
+///
+/// These are the collapse triggers that whole-program array boundary expansion can *sever* (by
+/// passing/returning the array as its cells), as opposed to the [`Collapse::Hard`] triggers
+/// that always block splitting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BoundaryKind {
+    /// The array is an entry-block formal (caller-supplied memory).
+    EntryParam,
+
+    /// The array is passed as a `Call` argument.
+    CallArg,
+
+    /// The array is received as a `Call` result.
+    CallResult,
+
+    /// The array is returned from the function.
+    Return,
+}
+
 // CONSTRUCTION
 // ================================================================================================
 
@@ -165,8 +292,29 @@ enum Obs {
     /// A constant index `k` is accessed on the group.
     Index(usize),
 
-    /// A collapse trigger fired.
-    Collapse,
+    /// A collapse trigger fired, tagged with why (a severable call boundary vs. a hard obstacle).
+    /// Observations are always `Collapse::Boundary`/`Collapse::Hard` — never `Collapse::None`.
+    Collapse(Collapse),
+}
+
+/// Record `v` as *hard*-collapsed, entering it into the union-find first. Idempotent in `v`
+/// (`UnionFind::add` is a no-op when present, and a duplicate observation folds harmlessly), so it
+/// is safe even where `v` was already added or unioned.
+fn collapse_hard(uf: &mut UnionFind<ValueId>, obs: &mut Vec<(ValueId, Obs)>, v: ValueId) {
+    uf.add(v);
+    obs.push((v, Obs::Collapse(Collapse::Hard)));
+}
+
+/// Record `v` as collapsed at the severable call boundary `kind`, entering it into the union-find
+/// first (idempotent, as in [`collapse_hard`]).
+fn collapse_boundary(
+    uf: &mut UnionFind<ValueId>,
+    obs: &mut Vec<(ValueId, Obs)>,
+    v: ValueId,
+    kind: BoundaryKind,
+) {
+    uf.add(v);
+    obs.push((v, Obs::Collapse(Collapse::Boundary(kind))));
 }
 
 /// Process one instruction: union wholesale-copy edges and record observations.
@@ -198,7 +346,7 @@ fn process_instr(
                     obs.push((*result, Obs::Index(i)));
                 }
             } else {
-                obs.push((*result, Obs::Collapse));
+                collapse_hard(uf, obs, *result);
             }
 
             // An array-typed element flows into a cell of `result` (array-of-arrays): it is a
@@ -211,8 +359,7 @@ fn process_instr(
             // `result`'s (kept or peeled) constructor.
             for elem in elems {
                 if is_arr(*elem) {
-                    uf.add(*elem);
-                    obs.push((*elem, Obs::Collapse));
+                    collapse_hard(uf, obs, *elem);
                 }
             }
         }
@@ -235,13 +382,12 @@ fn process_instr(
                         obs.push((*result, Obs::Index(i)));
                     }
                 }
-                _ => obs.push((*result, Obs::Collapse)),
+                _ => collapse_hard(uf, obs, *result),
             }
 
             // An array-typed repeated element is a deeper array level — collapse it.
             if is_arr(*element) {
-                uf.add(*element);
-                obs.push((*element, Obs::Collapse));
+                collapse_hard(uf, obs, *element);
             }
         }
         OpCode::MkSeqOfBlob { result, blob, .. } => {
@@ -256,7 +402,7 @@ fn process_instr(
                         obs.push((*result, Obs::Index(i)));
                     }
                 }
-                _ => obs.push((*result, Obs::Collapse)),
+                _ => collapse_hard(uf, obs, *result),
             }
         }
 
@@ -269,8 +415,7 @@ fn process_instr(
             record_index(ssa, arr_size, obs, *array, *index);
             // A nested inner array extracted from a cell is tracked separately and collapsed.
             if is_arr(*result) {
-                uf.add(*result);
-                obs.push((*result, Obs::Collapse));
+                collapse_hard(uf, obs, *result);
             }
         }
         OpCode::ArraySet {
@@ -284,8 +429,7 @@ fn process_instr(
             // A stored inner array (array-of-arrays) flows into a cell; track it separately,
             // collapsed.
             if is_arr(*value) {
-                uf.add(*value);
-                obs.push((*value, Obs::Collapse));
+                collapse_hard(uf, obs, *value);
             }
         }
 
@@ -298,7 +442,7 @@ fn process_instr(
             // A slice `Select` is not peelable (branches share the result's type); collapse so a
             // slice never lands in a `Split` group.
             if arr_size(*result).is_none() {
-                obs.push((*result, Obs::Collapse));
+                collapse_hard(uf, obs, *result);
             }
         }
         OpCode::Cast { result, value, .. } if is_arr(*result) => {
@@ -308,18 +452,16 @@ fn process_instr(
             // the array peelable while the `Cast` consuming it is kept, tripping `single()` in the
             // client's fallback arm.
             if arr_size(*result).is_none() || arr_size(*value).is_none() {
-                obs.push((*result, Obs::Collapse));
+                collapse_hard(uf, obs, *result);
             }
         }
 
         // Through-`Ref` and slice flow: collapse.
         OpCode::Store { value, .. } if is_arr(*value) => {
-            uf.add(*value);
-            obs.push((*value, Obs::Collapse));
+            collapse_hard(uf, obs, *value);
         }
         OpCode::Load { result, .. } if is_arr(*result) => {
-            uf.add(*result);
-            obs.push((*result, Obs::Collapse));
+            collapse_hard(uf, obs, *result);
         }
         OpCode::SlicePush {
             result,
@@ -327,34 +469,36 @@ fn process_instr(
             values,
             ..
         } => {
-            uf.add(*result);
-            obs.push((*result, Obs::Collapse));
-            uf.add(*slice);
-            obs.push((*slice, Obs::Collapse));
+            collapse_hard(uf, obs, *result);
+            collapse_hard(uf, obs, *slice);
             for v in values {
                 if is_arr(*v) {
-                    uf.add(*v);
-                    obs.push((*v, Obs::Collapse));
+                    collapse_hard(uf, obs, *v);
                 }
             }
         }
 
-        // Boundary crossings: collapse every array arg/result/value.
+        // Call boundary crossings: collapse every array arg/result, tagged by direction so
+        // whole-program boundary expansion can tell an argument (caller-side severable) from a
+        // result (callee-return severable).
         OpCode::Call { results, args, .. } => {
-            for v in args.iter().chain(results.iter()) {
+            for v in args {
                 if is_arr(*v) {
-                    uf.add(*v);
-                    obs.push((*v, Obs::Collapse));
+                    collapse_boundary(uf, obs, *v, BoundaryKind::CallArg);
+                }
+            }
+            for v in results {
+                if is_arr(*v) {
+                    collapse_boundary(uf, obs, *v, BoundaryKind::CallResult);
                 }
             }
         }
+        // Globals are out of scope for boundary expansion, so they collapse hard.
         OpCode::InitGlobal { value, .. } if is_arr(*value) => {
-            uf.add(*value);
-            obs.push((*value, Obs::Collapse));
+            collapse_hard(uf, obs, *value);
         }
         OpCode::ReadGlobal { result, .. } if is_arr(*result) => {
-            uf.add(*result);
-            obs.push((*result, Obs::Collapse));
+            collapse_hard(uf, obs, *result);
         }
 
         // Delegate guards to their inner op (mirrors `builder::FnBuilder::build_instr`); guards do
@@ -375,13 +519,27 @@ fn process_instr(
         other => {
             for v in other.get_inputs().chain(other.get_results()) {
                 if is_arr(*v) {
-                    uf.add(*v);
-                    obs.push((*v, Obs::Collapse));
+                    collapse_hard(uf, obs, *v);
                 }
             }
         }
     }
 }
+
+// GROUP FACTS
+// ================================================================================================
+
+#[derive(Debug, Clone, Default)]
+struct GroupFacts {
+    /// Constant indices observed on the group (array literal positions + constant get/set indices).
+    indices: HashSet<usize>,
+
+    /// The group's collapse state (`Collapse::None` ⇒ `Split`).
+    collapse: Collapse,
+}
+
+// UTILITIES
+// ================================================================================================
 
 /// Record a constant in-bounds index as an `Index(k)` observation, else collapse the group.
 ///
@@ -398,7 +556,7 @@ fn record_index(
 ) {
     match const_index(ssa, index) {
         Some(k) if arr_size(array).map_or(false, |n| k < n) => obs.push((array, Obs::Index(k))),
-        _ => obs.push((array, Obs::Collapse)),
+        _ => obs.push((array, Obs::Collapse(Collapse::Hard))),
     }
 }
 

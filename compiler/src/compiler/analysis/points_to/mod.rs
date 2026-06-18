@@ -339,6 +339,44 @@ impl PointsTo {
             .map_or(false, |ac| ac.split_indices(v).is_some())
     }
 
+    /// Whether the array parameter `v` of `f` would be `Split` were it not an entry formal.
+    ///
+    /// The callee-side precondition for whole-program *array boundary expansion* to peel it (see
+    /// [`ArrayCells::boundary_splittable_param`]). The caller confirms `v` is a fixed-size array.
+    pub fn boundary_splittable_param(&self, f: FunctionId, v: ValueId) -> bool {
+        self.array_cells
+            .get(&f)
+            .map_or(false, |ac| ac.boundary_splittable_param(v))
+    }
+
+    /// Whether the returned array value `v` of `f` would be `Split` were it not returned.
+    ///
+    /// The callee-side precondition for expanding a return into per-cell returns.
+    pub fn boundary_splittable_return(&self, f: FunctionId, v: ValueId) -> bool {
+        self.array_cells
+            .get(&f)
+            .map_or(false, |ac| ac.boundary_splittable_return(v))
+    }
+
+    /// Whether the call-argument array value `v` in `f` would be `Split` were it not passed to the
+    /// call.
+    ///
+    /// The caller-side profitability guard for expanding a callee's array parameter.
+    pub fn boundary_splittable_arg(&self, f: FunctionId, v: ValueId) -> bool {
+        self.array_cells
+            .get(&f)
+            .map_or(false, |ac| ac.boundary_splittable_arg(v))
+    }
+
+    /// Whether the call-result array value `v` in `f` would be `Split` were it not a call result.
+    ///
+    /// The caller-side profitability guard for expanding a callee's array return.
+    pub fn boundary_splittable_result(&self, f: FunctionId, v: ValueId) -> bool {
+        self.array_cells
+            .get(&f)
+            .map_or(false, |ac| ac.boundary_splittable_result(v))
+    }
+
     /// Walk function `f`'s body and report every pointer use, paired with the points-to set at that
     /// site (see [`PointerUse`]).
     ///

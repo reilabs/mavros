@@ -30,6 +30,7 @@ use crate::{
         pass_manager::PassManager,
         passes::{
             arg_promotion::ArgPromotion,
+            array_boundary_expansion::ArrayBoundaryExpansion,
             array_sroa::ArraySroa,
             common_subexpression_elimination::CSE,
             dead_code_elimination::{self, DCE},
@@ -241,6 +242,24 @@ impl Driver {
                 // A third Mem2Reg promotes the materialized callee allocs and the now-local caller
                 // allocs that arg promotion exposed.
                 Box::new(Mem2Reg::new()),
+                // Sever array *call boundaries*: expand an array parameter/return whose only
+                // obstacle to being `Split` is crossing the boundary into per-cell scalars,
+                // reconstructing the array locally on each side.
+                Box::new(ArrayBoundaryExpansion::new()),
+                // A fresh ArraySroa peels the now-local reconstructed arrays (they only become
+                // `Split` on this re-analysis), and a Mem2Reg promotes any per-cell ref allocs the
+                // peel exposes.
+                Box::new(ArraySroa::new()),
+                Box::new(Mem2Reg::new()),
+                // Reclaim cells a side never used: dead by-value formals, their matching arguments
+                // at every static call site, dead return slots, and the now-dead caller-side
+                // `ArrayGet`s — interprocedurally. (`pre_wti` otherwise runs no DCE, and
+                // TrivialPhiElimination does not touch entry-block formals).
+                //
+                // Uses `preserve_blocks()` so it does not collapse empty intermediate blocks into
+                // multiple-predecessor merges that the later untaint_control_flow cannot yet
+                // handle.
+                Box::new(DCE::new(dead_code_elimination::Config::preserve_blocks())),
                 // Mem2Reg promotes each scalarized leaf cell into its own block-parameter phi. For
                 // an aggregate threaded through control flow that is mostly trivial phis (the same
                 // value from every predecessor); collapse them before they reach WTI and codegen.
