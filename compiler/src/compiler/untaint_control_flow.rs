@@ -246,7 +246,7 @@ impl UntaintControlFlow {
                             HLInstrBuilder::new(&mut function, ssa, &mut cast_instructions);
                         convert_if_needed(value, &cell_type, func_type_info, &mut builder)
                     };
-                    new_instructions.extend(cast_instructions);
+                    new_instructions.extend(cast_instructions.into_iter().map(|i| i.payload()));
                     new_instructions.push(OpCode::Alloc {
                         result,
                         value: converted,
