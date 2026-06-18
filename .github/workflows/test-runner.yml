@@ -7,6 +7,7 @@ on:
     types: [opened, reopened, synchronize]
 
 permissions:
+  actions: read
   contents: read
   pull-requests: write
 
@@ -87,7 +88,7 @@ jobs:
       - name: Download Nix Dependencies
         run: nix develop
 
-      - name: Cache Cargo dependencies
+      - name: Cache Cargo Dependencies
         uses: actions/cache@v4
         with:
           path: |
@@ -106,7 +107,7 @@ jobs:
     name: Run Tests
     runs-on: ubuntu-latest
     steps:
-      - name: Generate MavrosBot token
+      - name: Generate MavrosBot Token
         id: app-token
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/create-github-app-token@v1
@@ -131,7 +132,7 @@ jobs:
       - name: Download Nix Dependencies
         run: nix develop
 
-      - name: Cache Cargo dependencies
+      - name: Cache Cargo Dependencies
         uses: actions/cache@v4
         with:
           path: |
@@ -146,6 +147,13 @@ jobs:
       - name: Run Tests
         run: nix develop --command cargo run --release --bin test-runner -- --output STATUS.md --jobs 4
 
+      - name: Upload STATUS.md
+        uses: actions/upload-artifact@v4
+        with:
+          name: status-md-${{ github.event.pull_request.head.sha || github.sha }}
+          path: STATUS.md
+          retention-days: 90
+
       - name: Commit STATUS.md
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
@@ -158,13 +166,80 @@ jobs:
       - name: Fetch Baseline
         if: github.event_name == 'pull_request'
         id: baseline
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if git show origin/main:STATUS.md > baseline-STATUS.md 2>/dev/null; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
+          set -uo pipefail
+          found=false
+          source=""
+          WALK_LIMIT=25
+
+          # Base commit = divergence point of HEAD from the PR's base branch.
+          #
+          # (origin/<base.ref> tip / base.sha track the *moving* tip, so they would not yield "a
+          # non-HEAD commit on main"; merge-base does).
+          BASE_SHA=$(git merge-base "origin/${BASE_REF}" HEAD 2>/dev/null | head -1 || true)
+
+          if [ -z "$BASE_SHA" ]; then
+            echo "Could not determine base commit (no merge-base with origin/${BASE_REF})."
           else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "No baseline found, skipping checks"
+            echo "Base commit: $BASE_SHA — $(git log -1 --format='%s' "$BASE_SHA" 2>/dev/null)"
+
+            # Walk the first-parent ancestry of the base commit, nearest first, and use the closest
+            # commit that has a usable baseline -- either a MavrosBot [skip ci] commit (committed
+            # STATUS.md) or an uploaded artifact. This tolerates a base commit that was never itself
+            # a CI head (e.g. an intermediate commit from a multi-commit push): we step back to the
+            # nearest ancestor that was. Distance 0 == the merge-base itself; a baseline N commits
+            # back means the diff also reflects those N intervening base-branch commits, which we
+            # note in the comment.
+            dist=0
+            for sha in $(git rev-list --first-parent --max-count="$WALK_LIMIT" "$BASE_SHA" 2>/dev/null); do
+              # Short hash for display only; lookups below still use the full $sha.
+              short_sha="${sha:0:7}"
+              if [ "$(git log -1 --format='%an' "$sha" 2>/dev/null)" = "MavrosBot[bot]" ] \
+                 && git show "$sha:STATUS.md" > baseline-STATUS.md 2>/dev/null; then
+
+                # Bot [skip ci] commit: no CI run/artifact, but the tree holds the
+                # freshly-generated STATUS.md. Use it directly.
+                found=true
+                source="Committed STATUS.md at \`${short_sha}\` (MavrosBot)"
+              else
+                # Otherwise fetch the artifact uploaded by that commit's CI run.
+                aid=$(gh api "/repos/${REPO}/actions/artifacts?name=status-md-${sha}&per_page=1" \
+                        --jq '.artifacts[0].id' 2>/dev/null || true)
+                if [ -n "$aid" ] && [ "$aid" != "null" ] \
+                   && gh api "/repos/${REPO}/actions/artifacts/${aid}/zip" > baseline.zip 2>/dev/null \
+                   && unzip -o baseline.zip -d baseline-dir >/dev/null 2>&1 \
+                   && [ -f baseline-dir/STATUS.md ]; then
+                  mv baseline-dir/STATUS.md baseline-STATUS.md
+                  found=true
+                  source="STATUS.md artifact from \`${short_sha}\`"
+                fi
+              fi
+
+              if [ "$found" = "true" ]; then
+                [ "$dist" -gt 0 ] && source="${source} (${dist} commit(s) back from the base; diff includes intervening base-branch history)"
+                break
+              fi
+              dist=$((dist + 1))
+            done
           fi
+
+          # Fallback: compare against main's committed STATUS.md.
+          if [ "$found" != "true" ]; then
+            if git show origin/main:STATUS.md > baseline-STATUS.md 2>/dev/null; then
+              found=true
+              source="⚠️ **Fell back to \`origin/main\`** — no baseline found within ${WALK_LIMIT} commits of the base"
+            else
+              echo "No baseline available (including main); skipping checks."
+            fi
+          fi
+
+          echo "found=${found}" >> "$GITHUB_OUTPUT"
+          echo "baseline_source=${source}" >> "$GITHUB_OUTPUT"
+          echo "Baseline source: ${source}"
 
       - name: Check for Regressions
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true'
@@ -173,7 +248,8 @@ jobs:
       - name: Comment on Constraint/Witness Growth
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true' && !cancelled()
         run: |
-          COMMENT=$(nix develop --command cargo run --release --bin test-runner -- --check-growth baseline-STATUS.md STATUS.md)
+          GROWTH=$(nix develop --command cargo run --release --bin test-runner -- --check-growth baseline-STATUS.md STATUS.md)
+          COMMENT=$(printf '%s\n\n<details>\n<summary>Comparison Base Details</summary>\n\nCompared against: %s\n\n</details>\n' "$GROWTH" "$BASELINE_SOURCE")
           echo "$COMMENT" >> "$GITHUB_STEP_SUMMARY"
           # GITHUB_TOKEN is read-only on fork PRs, so commenting would fail there;
           # the report is still visible in the job summary above.
@@ -182,3 +258,4 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASELINE_SOURCE: ${{ steps.baseline.outputs.baseline_source }}
