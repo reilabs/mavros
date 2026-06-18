@@ -1425,7 +1425,9 @@ impl FunctionSignature {
 trait OpInstrumenter {
     fn record_constrain(&mut self);
     fn record_high_degree_mul(&mut self);
-    fn record_lookup(&mut self, target: &LookupTarget<Value>);
+    /// `unconditional` is true when the lookup's flag is the literal constant `1`; such lookups
+    /// spill bit chunks to the free `b·(b−1) = 0` form (no gating witness).
+    fn record_lookup(&mut self, target: &LookupTarget<Value>, unconditional: bool);
 }
 
 trait FunctionInstrumenter {
@@ -1445,8 +1447,12 @@ struct Instrumenter {
 
     /// Rangecheck lookup requests by width.
     rangecheck_lookups: HashMap<u8, usize>,
+    /// The unconditional (flag == 1) subset of `rangecheck_lookups`, by width.
+    rangecheck_lookups_uncond: HashMap<u8, usize>,
     /// Spread lookup requests by width.
     spread_lookups: HashMap<u8, usize>,
+    /// The unconditional (flag == 1) subset of `spread_lookups`, by width.
+    spread_lookups_uncond: HashMap<u8, usize>,
     array_lookups: usize,
 }
 
@@ -1459,15 +1465,18 @@ impl OpInstrumenter for Instrumenter {
         self.high_degree_muls += 1;
     }
 
-    fn record_lookup(&mut self, target: &LookupTarget<Value>) {
+    fn record_lookup(&mut self, target: &LookupTarget<Value>, unconditional: bool) {
         match target {
-            LookupTarget::Rangecheck(bits) => self.record_rangecheck_lookup(*bits),
+            LookupTarget::Rangecheck(bits) => self.record_rangecheck_lookup(*bits, unconditional),
             LookupTarget::DynRangecheck(bound) => {
-                self.record_rangecheck_lookup(dynamic_rangecheck_bits(bound))
+                self.record_rangecheck_lookup(dynamic_rangecheck_bits(bound), unconditional)
             }
             LookupTarget::Spread(bits) => {
                 assert!(*bits >= 1, "spread width must be at least 1 bit");
                 *self.spread_lookups.entry(*bits).or_insert(0) += 1;
+                if unconditional {
+                    *self.spread_lookups_uncond.entry(*bits).or_insert(0) += 1;
+                }
             }
             LookupTarget::Array(_) => self.array_lookups += 1,
         }
@@ -1477,9 +1486,12 @@ impl OpInstrumenter for Instrumenter {
 /// Interpretation of the raw events, mirroring the lookup-spilling expansion that runs before
 /// R1CS generation. Everything here is derived; the struct stores no interpreted state.
 impl Instrumenter {
-    fn record_rangecheck_lookup(&mut self, bits: u8) {
+    fn record_rangecheck_lookup(&mut self, bits: u8, unconditional: bool) {
         assert!(bits >= 1, "rangecheck width must be at least 1 bit");
         *self.rangecheck_lookups.entry(bits).or_insert(0) += 1;
+        if unconditional {
+            *self.rangecheck_lookups_uncond.entry(bits).or_insert(0) += 1;
+        }
     }
 
     /// 8-bit rangecheck table lookups after spilling: a w-bit rangecheck (w >= 2) becomes one
@@ -1681,7 +1693,7 @@ impl FunctionInstrumenter for DummyInstrumenter {
 impl OpInstrumenter for DummyInstrumenter {
     fn record_constrain(&mut self) {}
     fn record_high_degree_mul(&mut self) {}
-    fn record_lookup(&mut self, _: &LookupTarget<Value>) {}
+    fn record_lookup(&mut self, _: &LookupTarget<Value>, _: bool) {}
 }
 
 pub struct CostAnalysis {
@@ -1801,14 +1813,22 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         &mut self,
         target: LookupTarget<SpecSplitValue>,
         _args: Vec<SpecSplitValue>,
-        _flag: SpecSplitValue,
+        flag: SpecSplitValue,
     ) {
+        // A flag that folds to the constant 1 means the lookup is unconditional, so its spilled bit
+        // chunks take the free algebraic form. `as_field_const` treats `U(_,1)`/`Field(1)` alike.
+        let one = Some(Field::from(1u64));
         let unspecialized_target = target.map(|v| v.unspecialized.clone());
-        self.get_unspecialized()
-            .record_lookup(&unspecialized_target);
+        self.get_unspecialized().record_lookup(
+            &unspecialized_target,
+            flag.unspecialized.as_field_const() == one,
+        );
 
         let specialized_target = target.map(|v| v.specialized.clone());
-        self.get_specialized().record_lookup(&specialized_target);
+        self.get_specialized().record_lookup(
+            &specialized_target,
+            flag.specialized.as_field_const() == one,
+        );
     }
 
     fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<SpecSplitValue> {
@@ -1926,9 +1946,14 @@ pub struct Summary {
     /// weighted, before any spilling into chunks). Consumed by `LookupSizing` to pick
     /// optimal table sizes.
     pub global_rangecheck_lookups: HashMap<u8, usize>,
+    /// The unconditional (flag == 1) subset of `global_rangecheck_lookups`. Their bit chunks spill
+    /// to the free `b·(b−1) = 0` form, so `LookupSizing` prices their width-1 chunks at zero.
+    pub global_rangecheck_lookups_uncond: HashMap<u8, usize>,
     /// Whole-program spread lookup requests by *original* width (call-multiplicity
     /// weighted, before any spilling into chunks).
     pub global_spread_lookups: HashMap<u8, usize>,
+    /// The unconditional (flag == 1) subset of `global_spread_lookups`.
+    pub global_spread_lookups_uncond: HashMap<u8, usize>,
 }
 
 #[derive(Default)]
@@ -2087,7 +2112,9 @@ impl CostAnalysis {
             total_constraints: 0,
             total_savings_to_make: 0,
             global_rangecheck_lookups: HashMap::default(),
+            global_rangecheck_lookups_uncond: HashMap::default(),
             global_spread_lookups: HashMap::default(),
+            global_spread_lookups_uncond: HashMap::default(),
         };
         for (sig, cost) in self.functions.iter() {
             r.functions.insert(
@@ -2117,8 +2144,15 @@ impl CostAnalysis {
             for (&bits, &count) in raw.rangecheck_lookups.iter() {
                 *r.global_rangecheck_lookups.entry(bits).or_insert(0) += count * summary.calls;
             }
+            for (&bits, &count) in raw.rangecheck_lookups_uncond.iter() {
+                *r.global_rangecheck_lookups_uncond.entry(bits).or_insert(0) +=
+                    count * summary.calls;
+            }
             for (&bits, &count) in raw.spread_lookups.iter() {
                 *r.global_spread_lookups.entry(bits).or_insert(0) += count * summary.calls;
+            }
+            for (&bits, &count) in raw.spread_lookups_uncond.iter() {
+                *r.global_spread_lookups_uncond.entry(bits).or_insert(0) += count * summary.calls;
             }
         }
         r.total_constraints = aggregate.total_constraints();

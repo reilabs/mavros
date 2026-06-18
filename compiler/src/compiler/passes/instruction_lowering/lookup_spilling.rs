@@ -12,8 +12,8 @@ use crate::compiler::{
     ssa::{
         FunctionId, ValueId,
         hlssa::{
-            Blob, CastTarget, Constant, HLSSA, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, OpCode,
-            Type,
+            Blob, CastTarget, Constant, HLSSA, HLSSAConstantsSnapshot, LookupTarget,
+            MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type,
             builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
         },
     },
@@ -37,6 +37,21 @@ struct HelperKey {
     value_type: Type,
     spread_type: Option<Type>,
     flag_type: Type,
+    /// Whether every site routed here passes a literal `1` flag. An unconditional helper bakes
+    /// `flag = 1` into its body instead of taking it as a parameter, so the gated `flag·b·(b−1)=0`
+    /// bit-bound (which needs an intermediate `b²` witness) collapses to the free `b·(b−1)=0`.
+    /// Conditional and unconditional sites of the same `(kind, width, types)` get distinct helpers.
+    flag_is_const_one: bool,
+}
+
+/// Whether `flag` is the literal constant `1` (an unconditional lookup). Such a flag lets the
+/// spilled bit-bounds take their free algebraic form; see [`HelperKey::flag_is_const_one`].
+fn flag_is_const_one(consts: &HLSSAConstantsSnapshot, flag: ValueId) -> bool {
+    match consts.get(&flag).map(|c| &**c) {
+        Some(Constant::Field(f)) => *f == Field::ONE,
+        Some(Constant::U(_, v)) => *v == 1,
+        _ => false,
+    }
 }
 
 /// Factors multi-chunk rangecheck/spread decompositions into one shared helper function per
@@ -62,6 +77,7 @@ impl LookupSpilling {
         instr: &OpCode,
         types: &FunctionTypeInfo,
         sizing: &LookupSizing,
+        consts: &HLSSAConstantsSnapshot,
     ) -> Option<HelperKey> {
         match instr {
             OpCode::Lookup {
@@ -73,7 +89,8 @@ impl LookupSpilling {
                 if width == 1 {
                     return None;
                 }
-                let plan = sizing.decompose_rangecheck(width);
+                let uncond = flag_is_const_one(consts, *flag);
+                let plan = sizing.decompose_rangecheck(width, !uncond);
                 if is_direct_passthrough(&plan, width, TableKind::Range) {
                     return None;
                 }
@@ -83,6 +100,7 @@ impl LookupSpilling {
                     value_type: types.get_value_type(args[0]).clone(),
                     spread_type: None,
                     flag_type: types.get_value_type(*flag).clone(),
+                    flag_is_const_one: uncond,
                 })
             }
             OpCode::Lookup {
@@ -90,7 +108,8 @@ impl LookupSpilling {
                 args,
                 flag,
             } => {
-                let plan = sizing.decompose_rangecheck(8);
+                let uncond = flag_is_const_one(consts, *flag);
+                let plan = sizing.decompose_rangecheck(8, !uncond);
                 if is_direct_passthrough(&plan, 8, TableKind::Range) {
                     return None;
                 }
@@ -100,6 +119,7 @@ impl LookupSpilling {
                     value_type: types.get_value_type(args[0]).clone(),
                     spread_type: None,
                     flag_type: types.get_value_type(*flag).clone(),
+                    flag_is_const_one: uncond,
                 })
             }
             OpCode::Lookup {
@@ -107,7 +127,8 @@ impl LookupSpilling {
                 args,
                 flag,
             } => {
-                let plan = sizing.decompose_spread(*bits);
+                let uncond = flag_is_const_one(consts, *flag);
+                let plan = sizing.decompose_spread(*bits, !uncond);
                 if is_direct_passthrough(&plan, *bits, TableKind::Spread) {
                     return None;
                 }
@@ -117,6 +138,7 @@ impl LookupSpilling {
                     value_type: types.get_value_type(args[0]).clone(),
                     spread_type: Some(types.get_value_type(args[1]).clone()),
                     flag_type: types.get_value_type(*flag).clone(),
+                    flag_is_const_one: uncond,
                 })
             }
             _ => None,
@@ -143,7 +165,13 @@ impl LookupSpilling {
             match key.kind {
                 HelperKind::Rangecheck => {
                     let value = e.add_parameter(key.value_type.clone());
-                    let flag = e.add_parameter(key.flag_type.clone());
+                    // An unconditional helper bakes `flag = 1` so the spilled bit-bounds take their
+                    // free algebraic form; a conditional helper takes the flag as a parameter.
+                    let flag = if key.flag_is_const_one {
+                        e.field_const(Field::ONE)
+                    } else {
+                        e.add_parameter(key.flag_type.clone())
+                    };
                     let is_witness = key.value_type.is_witness_of();
                     rule.spill_rangecheck_inner(
                         &mut e,
@@ -157,10 +185,14 @@ impl LookupSpilling {
                 HelperKind::Spread => {
                     let spread_key = e.add_parameter(key.value_type.clone());
                     let spread = e.add_parameter(key.spread_type.clone().unwrap());
-                    let flag = e.add_parameter(key.flag_type.clone());
                     let key_is_witness = key.value_type.is_witness_of();
                     let key_inner_is_field = key.value_type.strip_witness().is_field();
-                    let flag_field = e.ensure_field(flag, &key.flag_type);
+                    let flag_field = if key.flag_is_const_one {
+                        e.field_const(Field::ONE)
+                    } else {
+                        let flag = e.add_parameter(key.flag_type.clone());
+                        e.ensure_field(flag, &key.flag_type)
+                    };
                     rule.spill_spread_inner(
                         &mut e,
                         sizing,
@@ -186,6 +218,7 @@ impl LookupSpilling {
         instr: &OpCode,
         types: &FunctionTypeInfo,
         sizing: &LookupSizing,
+        consts: &HLSSAConstantsSnapshot,
         cache: &HashMap<HelperKey, FunctionId>,
     ) -> bool {
         match instr {
@@ -203,10 +236,16 @@ impl LookupSpilling {
                 target: LookupTarget::Rangecheck(_) | LookupTarget::DynRangecheck(_),
                 args,
                 flag,
-            } => match self.helper_key_for(instr, types, sizing) {
+            } => match self.helper_key_for(instr, types, sizing, consts) {
                 Some(key) => {
                     let helper = cache[&key];
-                    e.call(helper, vec![args[0], *flag], 0);
+                    // Unconditional helpers bake `flag = 1` and take no flag parameter.
+                    let call_args = if key.flag_is_const_one {
+                        vec![args[0]]
+                    } else {
+                        vec![args[0], *flag]
+                    };
+                    e.call(helper, call_args, 0);
                     true
                 }
                 None => false,
@@ -215,10 +254,15 @@ impl LookupSpilling {
                 target: LookupTarget::Spread(_),
                 args,
                 flag,
-            } => match self.helper_key_for(instr, types, sizing) {
+            } => match self.helper_key_for(instr, types, sizing, consts) {
                 Some(key) => {
                     let helper = cache[&key];
-                    e.call(helper, vec![args[0], args[1], *flag], 0);
+                    let call_args = if key.flag_is_const_one {
+                        vec![args[0], args[1]]
+                    } else {
+                        vec![args[0], args[1], *flag]
+                    };
+                    e.call(helper, call_args, 0);
                     true
                 }
                 None => false,
@@ -241,6 +285,7 @@ impl Pass for LookupSpilling {
         let sizing = store.get::<LookupSizing>();
         let flow = FlowAnalysis::run(ssa);
         let types = Types::new().run(ssa, &flow);
+        let consts = ssa.const_snapshot();
 
         // Phase 1: collect the distinct helpers needed across the whole module.
         let original_fns: Vec<FunctionId> = ssa.get_function_ids().collect();
@@ -250,7 +295,7 @@ impl Pass for LookupSpilling {
             let fti = types.get_function(fid);
             for (_bid, block) in ssa.get_function(fid).get_blocks() {
                 for instr in block.get_instructions() {
-                    if let Some(key) = self.helper_key_for(instr, fti, sizing) {
+                    if let Some(key) = self.helper_key_for(instr, fti, sizing, &consts) {
                         if seen.insert(key.clone()) {
                             needed.push(key);
                         }
@@ -285,7 +330,7 @@ impl Pass for LookupSpilling {
                     };
                     let mut e = fb.block(block_id);
                     for instr in instructions {
-                        if !self.rewrite_lookup(&mut e, &instr, fti, sizing, &cache) {
+                        if !self.rewrite_lookup(&mut e, &instr, fti, sizing, &consts, &cache) {
                             e.emit(instr);
                         }
                     }
@@ -402,7 +447,11 @@ impl LowerLookupSpillingOps {
             "rangecheck spilling supports widths up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got {bits}"
         );
 
-        let plan = sizing.decompose_rangecheck(bits as u8);
+        // `gated` mirrors the per-bit free/witnessed split in `spill_one_bit_rangecheck`: an
+        // unconditional lookup (flag baked to the constant 1) bit-bounds for free, so its plan may
+        // use width-1 chunks the cost model also priced for free.
+        let gated = flag != b.field_const(Field::ONE);
+        let plan = sizing.decompose_rangecheck(bits as u8, gated);
         if is_direct_passthrough(&plan, bits as u8, TableKind::Range) {
             return false;
         }
@@ -428,6 +477,7 @@ impl LowerLookupSpillingOps {
         // helper body compact. R1CS generation unrolls the loop, so constraints are unchanged.
         let s = plan[0].width;
         let uniform_full = plan.len() >= 3
+            && s > 1
             && plan
                 .iter()
                 .all(|c| matches!(c.table, TableKind::Range) && !c.partial && c.width == s);
@@ -565,6 +615,11 @@ impl LowerLookupSpillingOps {
         flag: ValueId,
         is_witness: bool,
     ) {
+        if chunk.width == 1 {
+            // A 1-bit chunk needs no table: bound it algebraically with `key·(key-1) = 0`.
+            self.spill_one_bit_rangecheck(b, key, flag);
+            return;
+        }
         match chunk.table {
             TableKind::Range => {
                 b.lookup_rngchk(LookupTarget::Rangecheck(chunk.table_size), key, flag);
@@ -634,7 +689,10 @@ impl LowerLookupSpillingOps {
             "spread spilling supports widths up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got {bits}"
         );
 
-        let plan = sizing.decompose_spread(bits);
+        // `gated` mirrors `spill_one_bit_rangecheck`: an unconditional spread (flag baked to 1)
+        // bit-bounds for free, so its plan may use the free width-1 chunks (see the rangecheck path).
+        let gated = flag_field != b.field_const(Field::ONE);
+        let plan = sizing.decompose_spread(bits, gated);
         if is_direct_passthrough(&plan, bits, TableKind::Spread) {
             return false;
         }
@@ -650,6 +708,13 @@ impl LowerLookupSpillingOps {
             } else {
                 b.cast_to_field(key)
             };
+            if chunk.width == 1 {
+                // A 1-bit spread is the identity: bound the bit and pin `expected_spread == key`.
+                self.spill_one_bit_rangecheck(b, key_field, flag_field);
+                let diff = b.sub(expected_spread, key_field);
+                b.constrain(flag_field, diff, zero);
+                return true;
+            }
             b.lookup_spread(chunk.table_size, key_field, expected_spread, flag_field);
             if chunk.partial {
                 let gap = self.partial_gap(b, chunk, key_field);
@@ -710,14 +775,30 @@ impl LowerLookupSpillingOps {
                 } else {
                     chunk_field
                 };
-                let chunk_spread = self.spread_hint(b, chunk_key, chunk.table_size, key_is_witness);
+                // A 1-bit chunk's spread is the identity (`spread(bit) = bit`), so reuse the key
+                // rather than witnessing a separate `spread(key)` hint.
+                let chunk_spread = if chunk.width == 1 {
+                    chunk_key
+                } else {
+                    self.spread_hint(b, chunk_key, chunk.table_size, key_is_witness)
+                };
                 (chunk_key, chunk_spread)
             };
 
-            b.lookup_spread(chunk.table_size, chunk_key, chunk_spread, flag_field);
-            if chunk.partial {
-                let gap = self.partial_gap(b, chunk, chunk_key);
-                self.emit_spread_partial_gap(b, sizing, chunk, gap, flag_field, key_is_witness);
+            if chunk.width == 1 {
+                // No table: bound the bit, and (for the derived last chunk, whose key and spread
+                // are derived independently) tie `spread == key` so the reconstruction closes.
+                self.spill_one_bit_rangecheck(b, chunk_key, flag_field);
+                if i == last {
+                    let diff = b.sub(chunk_key, chunk_spread);
+                    b.constrain(flag_field, diff, zero);
+                }
+            } else {
+                b.lookup_spread(chunk.table_size, chunk_key, chunk_spread, flag_field);
+                if chunk.partial {
+                    let gap = self.partial_gap(b, chunk, chunk_key);
+                    self.emit_spread_partial_gap(b, sizing, chunk, gap, flag_field, key_is_witness);
+                }
             }
 
             if i != last {
