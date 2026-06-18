@@ -562,6 +562,50 @@ mod tests {
         assert_eq!(fwt.returns_witness, vec![witness()]);
     }
 
+    /// Nested-ref `alloc` (`alloc` of a `Ref<Field>`, giving `Ref<Ref<Field>>`): two-way `Deref`
+    /// unification welds the stored ref's pointee to the cell's inner pointee, so a witness stored
+    /// through `inner` makes `outer`'s inferred shape `Ref<Ref<WitnessOf<Field>>>`.
+    #[test]
+    fn nested_ref_alloc_infers_witness_pointee() {
+        use crate::compiler::ssa::hlssa::OpCode;
+
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |b| {
+            b.function.add_return_type(Type::field());
+            let entry = b.function.get_entry_id();
+            let mut e = b.block(entry);
+            let x = e.add_parameter(Type::field());
+            let c0 = e.field_const(fr(0));
+            let inner = e.alloc(c0);
+            let outer = e.alloc(inner); // the nested-ref alloc under test
+            let w = e.write_witness(x);
+            e.store(inner, w);
+            let loaded = e.load(outer);
+            let final_val = e.load(loaded);
+            e.terminate_return(vec![final_val]);
+        });
+        let wti = run_wti(&mut ssa);
+        let (clone_id, fwt) = clone_fwt(&ssa, &wti, "main");
+
+        assert_eq!(fwt.returns_witness, vec![witness()]);
+
+        // Pick the nested-ref alloc (pointee is itself a `Ref`) and check its inferred shape.
+        // Value ids are remapped onto the clone, so the alloc is found by scanning.
+        let outer_shape = ssa
+            .get_function(clone_id)
+            .get_blocks()
+            .flat_map(|(_, block)| block.get_instructions())
+            .filter_map(|instr| match instr {
+                OpCode::Alloc { result, .. } => fwt.value_witness_types.get(result),
+                _ => None,
+            })
+            .find(|s| matches!(s.child_witness_type(), Some(WitnessShape::Ref(..))))
+            .expect("nested-ref alloc shape");
+        assert_eq!(*outer_shape, ref_of_shape(ref_of_shape(witness())));
+    }
+
     /// Characterization of the accepted unification imprecision: a phi over refs to two distinct
     /// allocations welds their pointee classes together, so a witness store through ONE original
     /// ref taints loads through the *other*, even though the two never alias at runtime
