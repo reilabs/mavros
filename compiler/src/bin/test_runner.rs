@@ -17,8 +17,8 @@ use mavros_compiler::{
     Project, abi_helpers,
     compiler::Field,
     compiler::codegen::{CodeGenOptions, hlssa_to_r1cs::R1CS, llssa_to_llvm::WasmCompileOpts},
-    driver::Driver,
-    vm::{bytecode::TableInfo, interpreter},
+    driver::{Driver, Error as DriverError},
+    vm::{TableKind, bytecode::TableInfo, interpreter},
     wasm_runtime,
 };
 use mavros_wasm_layout::{
@@ -26,8 +26,8 @@ use mavros_wasm_layout::{
     AD_CURRENT_LOOKUP_WIT_OFF_OFFSET, AD_CURRENT_WIT_MULTIPLICITIES_OFF_OFFSET,
     AD_CURRENT_WIT_OFF_OFFSET, AD_CURRENT_WIT_TABLES_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET,
     AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET, AD_VM_STRUCT_SIZE, TABLE_INFO_INV_CNST_OFF_OFFSET,
-    TABLE_INFO_INV_WIT_OFF_OFFSET, TABLE_INFO_LENGTH_OFFSET, TABLE_INFO_MULTS_BASE_PTR_OFFSET,
-    TABLE_INFO_NUM_INDICES_OFFSET, TABLE_INFO_NUM_VALUES_OFFSET, TABLE_INFO_SLOT_SIZE,
+    TABLE_INFO_INV_WIT_OFF_OFFSET, TABLE_INFO_KIND_OFFSET, TABLE_INFO_LENGTH_OFFSET,
+    TABLE_INFO_MULTS_BASE_PTR_OFFSET, TABLE_INFO_NUM_INDICES_OFFSET, TABLE_INFO_SLOT_SIZE,
     WITGEN_A_BASE_PTR_OFFSET, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET,
     WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET, WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET,
     WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET, WITGEN_LOOKUPS_B_PTR_OFFSET,
@@ -136,25 +136,37 @@ fn run_single(root: PathBuf, expect_failure: bool) {
 
     // 1. Compile
     emit("START:COMPILED");
-    let driver = (|| {
-        let project = Project::new(root.clone()).ok()?;
-        let mut driver = Driver::new(project, false);
-        driver.run_noir_compiler().ok()?;
-        driver.make_struct_access_static().ok()?;
-        driver.monomorphize().ok()?;
-        driver.spill_witness().ok()?;
-        Some(driver)
+    let Some(project) = Project::new(root.clone()).ok() else {
+        emit("END:COMPILED:fail");
+        return;
+    };
+    let mut driver = Driver::new(project, false);
+    let compile_result = (|| -> Result<(), DriverError> {
+        driver.run_noir_compiler()?;
+        driver.make_struct_access_static()?;
+        driver.monomorphize()?;
+        driver.spill_witness()?;
+        Ok(())
     })();
-    let mut driver = match driver {
-        Some(d) => {
-            emit("END:COMPILED:ok");
-            d
+    match compile_result {
+        Ok(()) => emit("END:COMPILED:ok"),
+        // If the Noir compiler itself rejects the program — a comptime expression that
+        // overflows (`comptime_bitshift_failure`), a type error, etc. — the program will never
+        // execute. That is a legitimate expected failure, accepted the same way as a
+        // statically-unsatisfiable R1CS, so it gets the `reject` marker regardless of which
+        // compile sub-step surfaced it. Any other error is a mavros-side problem and stays a
+        // plain `fail`, so a real regression is never masked.
+        Err(DriverError::NoirCompilerError(diags)) => {
+            eprintln!("Noir compiler rejected program: {diags:?}");
+            emit("END:COMPILED:reject");
+            return;
         }
-        None => {
+        Err(e) => {
+            eprintln!("Compile error: {e}");
             emit("END:COMPILED:fail");
             return;
         }
-    };
+    }
 
     // 2. R1CS
     emit("START:R1CS");
@@ -165,40 +177,34 @@ fn run_single(root: PathBuf, expect_failure: bool) {
             emit(&format!("END:R1CS:ok:{rows}:{cols}"));
             Some(r)
         }
-        Err(_) => {
+        // A program whose assertion can never hold is rejected as unsatisfiable while
+        // generating R1CS. That is the *expected* outcome for an execution_failure test, so
+        // it gets its own `reject` marker — distinct from a plain `fail`, which signals a real
+        // problem (e.g. an unsupported construct) that should never be silently accepted.
+        Err(DriverError::UnsatisfiableProgram(msg)) => {
+            eprintln!("R1CS rejected program as unsatisfiable: {msg}");
+            emit("END:R1CS:reject");
+            None
+        }
+        Err(e) => {
+            eprintln!("R1CS generation error: {e}");
             emit("END:R1CS:fail");
             None
         }
     };
 
-    // 3. Compile witgen  (depends on R1CS)
-    let witgen_binary = r1cs.as_ref().and_then(|_| {
-        emit("START:WITGEN_COMPILE");
-        match driver.compile_witgen(checking_codegen) {
+    // 3. Compile bytecode: a single binary holding both the witgen and AD entry points
+    //    (depends on R1CS).
+    let program_binary = r1cs.as_ref().and_then(|_| {
+        emit("START:COMPILE");
+        match driver.compile_bytecode(checking_codegen) {
             Ok(b) => {
                 let bytes = b.len() * 8;
-                emit(&format!("END:WITGEN_COMPILE:ok:{bytes}"));
+                emit(&format!("END:COMPILE:ok:{bytes}"));
                 Some(b)
             }
             Err(_) => {
-                emit("END:WITGEN_COMPILE:fail");
-                None
-            }
-        }
-    });
-
-    // 4. Compile AD  (depends on R1CS, independent of witgen; skipped for
-    //    expected-failure tests)
-    let ad_binary = r1cs.as_ref().filter(|_| !expect_failure).and_then(|_| {
-        emit("START:AD_COMPILE");
-        match driver.compile_ad() {
-            Ok(b) => {
-                let bytes = b.len() * 8;
-                emit(&format!("END:AD_COMPILE:ok:{bytes}"));
-                Some(b)
-            }
-            Err(_) => {
-                emit("END:AD_COMPILE:fail");
+                emit("END:COMPILE:fail");
                 None
             }
         }
@@ -207,17 +213,12 @@ fn run_single(root: PathBuf, expect_failure: bool) {
     // Load inputs (needed for witgen run)
     let ordered_params = load_inputs(&driver.package_root().join("Prover.toml"), &driver);
 
-    // 5. Run witgen  (depends on WITGEN_COMPILE)
-    let witgen_result = witgen_binary.and_then(|mut binary| {
+    // 4. Run witgen  (depends on COMPILE)
+    let witgen_result = program_binary.as_ref().and_then(|binary| {
         emit("START:WITGEN_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-        match interpreter::run(
-            &mut binary,
-            r1cs.witness_layout,
-            r1cs.constraints_layout,
-            params,
-        ) {
+        match interpreter::run(binary, r1cs.witness_layout, r1cs.constraints_layout, params) {
             Ok(result) => {
                 emit("END:WITGEN_RUN:ok");
                 Some(result)
@@ -230,7 +231,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         }
     });
 
-    // 6. Check witgen correctness  (depends on WITGEN_RUN)
+    // 5. Check witgen correctness  (depends on WITGEN_RUN)
     if let (Some(result), Some(r1cs)) = (&witgen_result, &r1cs) {
         emit("START:WITGEN_CORRECT");
         let correct = r1cs.check_witgen_output(
@@ -247,7 +248,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         });
     }
 
-    // 7. Witgen leak check  (depends on WITGEN_RUN)
+    // 6. Witgen leak check  (depends on WITGEN_RUN)
     if let Some(result) = &witgen_result {
         emit("START:WITGEN_NOLEAK");
         let leftover = result.instrumenter.final_memory_usage();
@@ -258,33 +259,37 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         });
     }
 
-    // 8. Run AD  (depends on AD_COMPILE, independent of witgen)
-    let ad_result = ad_binary.and_then(|mut binary| {
-        emit("START:AD_RUN");
-        let r1cs = r1cs.as_ref().unwrap();
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        let ad_coeffs: Vec<Field> = (0..r1cs.constraints.len())
-            .map(|_| ark_bn254::Fr::rand(&mut rng))
-            .collect();
-        match interpreter::run_ad(
-            &mut binary,
-            &ad_coeffs,
-            r1cs.witness_layout,
-            r1cs.constraints_layout,
-        ) {
-            Ok((ad_a, ad_b, ad_c, ad_instrumenter)) => {
-                emit("END:AD_RUN:ok");
-                Some((ad_coeffs, ad_a, ad_b, ad_c, ad_instrumenter))
+    // 7. Run AD  (depends on COMPILE, independent of witgen). Skipped for expected-failure
+    //    tests, so the native AD steps report as not-applicable.
+    let ad_result = program_binary
+        .as_ref()
+        .filter(|_| !expect_failure)
+        .and_then(|binary| {
+            emit("START:AD_RUN");
+            let r1cs = r1cs.as_ref().unwrap();
+            let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+            let ad_coeffs: Vec<Field> = (0..r1cs.constraints.len())
+                .map(|_| ark_bn254::Fr::rand(&mut rng))
+                .collect();
+            match interpreter::run_ad(
+                binary,
+                &ad_coeffs,
+                r1cs.witness_layout,
+                r1cs.constraints_layout,
+            ) {
+                Ok((ad_a, ad_b, ad_c, ad_instrumenter)) => {
+                    emit("END:AD_RUN:ok");
+                    Some((ad_coeffs, ad_a, ad_b, ad_c, ad_instrumenter))
+                }
+                Err(e) => {
+                    eprintln!("AD run error: {e}");
+                    emit("END:AD_RUN:fail");
+                    None
+                }
             }
-            Err(e) => {
-                eprintln!("AD run error: {e}");
-                emit("END:AD_RUN:fail");
-                None
-            }
-        }
-    });
+        });
 
-    // 9. Check AD correctness  (depends on AD_RUN)
+    // 8. Check AD correctness  (depends on AD_RUN)
     if let (Some((coeffs, ad_a, ad_b, ad_c, _)), Some(r1cs)) = (&ad_result, &r1cs) {
         emit("START:AD_CORRECT");
         let correct = r1cs.check_ad_output(coeffs, ad_a, ad_b, ad_c);
@@ -295,7 +300,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         });
     }
 
-    // 10. AD leak check  (depends on AD_RUN)
+    // 9. AD leak check  (depends on AD_RUN)
     if let Some((_, _, _, _, instrumenter)) = &ad_result {
         emit("START:AD_NOLEAK");
         let leftover = instrumenter.final_memory_usage();
@@ -306,11 +311,12 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         });
     }
 
-    // 11. Compile WASM  (depends on R1CS)
+    // 10. Compile WASM: a single module exporting both the witgen and AD entry
+    //     points (depends on R1CS).
     let wasm_path = r1cs.as_ref().and_then(|r1cs| {
-        emit("START:WITGEN_WASM_COMPILE");
+        emit("START:WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
-        let wasm_path = tmpdir.keep().join("witgen.wasm");
+        let wasm_path = tmpdir.keep().join("program.wasm");
         let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
         match driver.compile_llvm_targets(
             false,
@@ -319,7 +325,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
             checking_codegen,
         ) {
             Ok(_) if wasm_path.exists() => {
-                emit("END:WITGEN_WASM_COMPILE:ok");
+                emit("END:WASM_COMPILE:ok");
                 Some(wasm_path)
             }
             Ok(_) => {
@@ -327,18 +333,18 @@ fn run_single(root: PathBuf, expect_failure: bool) {
                     "WASM compile succeeded but output file not found at {:?}",
                     wasm_path
                 );
-                emit("END:WITGEN_WASM_COMPILE:fail");
+                emit("END:WASM_COMPILE:fail");
                 None
             }
             Err(e) => {
                 eprintln!("WASM compile error: {:?}", e);
-                emit("END:WITGEN_WASM_COMPILE:fail");
+                emit("END:WASM_COMPILE:fail");
                 None
             }
         }
     });
 
-    // 12. Run WASM  (depends on WITGEN_WASM_COMPILE)
+    // 11. Run witgen WASM  (depends on WASM_COMPILE)
     let wasm_result = wasm_path.as_ref().and_then(|wasm_path| {
         emit("START:WITGEN_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
@@ -356,7 +362,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         }
     });
 
-    // 13. Check WASM correctness  (depends on WITGEN_WASM_RUN)
+    // 12. Check witgen WASM correctness  (depends on WITGEN_WASM_RUN)
     if let (Some(result), Some(r1cs)) = (&wasm_result, &r1cs) {
         emit("START:WITGEN_WASM_CORRECT");
 
@@ -374,7 +380,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         });
     }
 
-    // 13b. Witgen WASM leak check  (depends on WITGEN_WASM_RUN)
+    // 13. Witgen WASM leak check  (depends on WITGEN_WASM_RUN)
     if let Some(result) = &wasm_result {
         emit("START:WITGEN_WASM_NOLEAK");
         emit(if result.live_bytes == 0 {
@@ -384,35 +390,8 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         });
     }
 
-    // 14. AD WASM Compile  (depends on R1CS)
-    let ad_wasm_path: Option<std::path::PathBuf> = r1cs.as_ref().and_then(|r1cs| {
-        emit("START:AD_WASM_COMPILE");
-        let tmpdir = tempfile::tempdir().ok()?;
-        let wasm_path = tmpdir.keep().join("ad.wasm");
-        let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
-        match driver.compile_ad_llvm_targets(wasm_path.clone(), r1cs, wasm_opts) {
-            Ok(_) if wasm_path.exists() => {
-                emit("END:AD_WASM_COMPILE:ok");
-                Some(wasm_path)
-            }
-            Ok(_) => {
-                eprintln!(
-                    "AD WASM compile succeeded but output file not found at {:?}",
-                    wasm_path
-                );
-                emit("END:AD_WASM_COMPILE:fail");
-                None
-            }
-            Err(e) => {
-                eprintln!("AD WASM compile error: {:?}", e);
-                emit("END:AD_WASM_COMPILE:fail");
-                None
-            }
-        }
-    });
-
-    // 15. AD WASM Run  (depends on AD_WASM_COMPILE)
-    let ad_wasm_result = ad_wasm_path.as_ref().and_then(|wasm_path| {
+    // 14. AD WASM Run  (depends on WASM_COMPILE; same module, AD entry point)
+    let ad_wasm_result = wasm_path.as_ref().and_then(|wasm_path| {
         emit("START:AD_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
@@ -432,7 +411,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         }
     });
 
-    // 16. AD WASM Correct  (depends on AD_WASM_RUN)
+    // 15. AD WASM Correct  (depends on AD_WASM_RUN)
     if let (Some((coeffs, result)), Some(r1cs)) = (&ad_wasm_result, &r1cs) {
         emit("START:AD_WASM_CORRECT");
         let correct = r1cs.check_ad_output(coeffs, &result.out_da, &result.out_db, &result.out_dc);
@@ -443,7 +422,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         });
     }
 
-    // 16b. AD WASM leak check  (depends on AD_WASM_RUN)
+    // 16. AD WASM leak check  (depends on AD_WASM_RUN)
     if let Some((_, result)) = &ad_wasm_result {
         emit("START:AD_WASM_NOLEAK");
         emit(if result.live_bytes == 0 {
@@ -501,7 +480,7 @@ fn read_table_info_slot(
         read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_INV_WIT_OFF_OFFSET);
     let num_indices =
         read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_NUM_INDICES_OFFSET);
-    let num_values = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_NUM_VALUES_OFFSET);
+    let kind_code = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_KIND_OFFSET);
     let length = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_LENGTH_OFFSET);
     let mults_off = mults_base
         .checked_sub(wasm_witness_ptr)
@@ -512,7 +491,7 @@ fn read_table_info_slot(
         TableInfo {
             multiplicities_wit: host_witness_base.wrapping_add(mults_off as usize),
             num_indices: num_indices as usize,
-            num_values: num_values as usize,
+            kind: TableKind::from_code(kind_code),
             length: length as usize,
             elem_inverses_witness_section_offset: inv_wit_off as usize,
             elem_inverses_constraint_section_offset: inv_cnst_off as usize,
@@ -989,8 +968,8 @@ fn run_ad_wasm(
     }
 
     let func: wasmtime::Func = instance
-        .get_func(&mut store, "mavros_main")
-        .ok_or("mavros_main not found")?;
+        .get_func(&mut store, "mavros_ad_main")
+        .ok_or("mavros_ad_main not found")?;
 
     // AD main takes only vm_ptr (no input parameters)
     let args = vec![wasmtime::Val::I32(vm_struct_ptr as i32)];
@@ -1044,19 +1023,17 @@ fn run_ad_wasm(
 const STEP_KEYS: &[&str] = &[
     "COMPILED",
     "R1CS",
-    "WITGEN_COMPILE",
-    "AD_COMPILE",
+    "COMPILE",
     "WITGEN_RUN",
     "WITGEN_CORRECT",
     "WITGEN_NOLEAK",
     "AD_RUN",
     "AD_CORRECT",
     "AD_NOLEAK",
-    "WITGEN_WASM_COMPILE",
+    "WASM_COMPILE",
     "WITGEN_WASM_RUN",
     "WITGEN_WASM_CORRECT",
     "WITGEN_WASM_NOLEAK",
-    "AD_WASM_COMPILE",
     "AD_WASM_RUN",
     "AD_WASM_CORRECT",
     "AD_WASM_NOLEAK",
@@ -1067,12 +1044,12 @@ struct TestResult {
     steps: HashMap<String, Status>,
     rows: Option<usize>,
     cols: Option<usize>,
-    witgen_bytes: Option<usize>,
-    ad_bytes: Option<usize>,
+    binary_bytes: Option<usize>,
 }
 
 /// Determined purely from child output:
 /// - `started && ended ok` → Pass
+/// - `started && ended reject` → Rejected (program proven unsatisfiable — a legit failing assert)
 /// - `started && ended fail` → Fail
 /// - `started && no end` → Crash
 /// - `never started` → Skip
@@ -1083,6 +1060,10 @@ enum Status {
     Crash,
     Skip,
     NotApplicable,
+    /// The compiler cleanly rejected the program as unsatisfiable (an assertion that can never
+    /// hold). For an execution_failure test this is the expected outcome; for an
+    /// execution_success test it is a genuine failure.
+    Rejected,
 }
 
 impl Status {
@@ -1093,6 +1074,9 @@ impl Status {
             Status::Crash => "💥",
             Status::Skip => "➖",
             Status::NotApplicable => "N/A",
+            // Only surfaces in the table if it escapes `expected_step_status` unmapped, which
+            // would itself be a bug; render it distinctly rather than hide it.
+            Status::Rejected => "🚫",
         }
     }
 }
@@ -1284,18 +1268,17 @@ fn ignored_test_result(name: &str) -> TestResult {
         steps,
         rows: None,
         cols: None,
-        witgen_bytes: None,
-        ad_bytes: None,
+        binary_bytes: None,
     }
 }
 
 fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]) -> TestResult {
     let mut started = HashMap::<String, bool>::default();
     let mut ended = HashMap::<String, bool>::default();
+    let mut rejected = HashMap::<String, bool>::default();
     let mut rows = None;
     let mut cols = None;
-    let mut witgen_bytes = None;
-    let mut ad_bytes = None;
+    let mut binary_bytes = None;
 
     for line in lines {
         let parts: Vec<&str> = line.split(':').collect();
@@ -1309,12 +1292,12 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
                     rows = parts[3].parse().ok();
                     cols = parts[4].parse().ok();
                 }
-                if *key == "WITGEN_COMPILE" && parts.len() >= 4 {
-                    witgen_bytes = parts[3].parse().ok();
+                if *key == "COMPILE" && parts.len() >= 4 {
+                    binary_bytes = parts[3].parse().ok();
                 }
-                if *key == "AD_COMPILE" && parts.len() >= 4 {
-                    ad_bytes = parts[3].parse().ok();
-                }
+            }
+            ["END", key, "reject"] => {
+                rejected.insert(key.to_string(), true);
             }
             ["END", key, "fail"] => {
                 ended.insert(key.to_string(), false);
@@ -1323,13 +1306,21 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
         }
     }
 
+    // A program can be cleanly rejected at the first stage where it is proven it will never
+    // execute — the Noir frontend (COMPILED) or R1CS generation. That rejection preempts every
+    // later stage, so we track which stage it happened at (by position in the pipeline) and
+    // report all later stages N/A rather than ➖ Skip — otherwise the success-rate denominator
+    // (which counts every non-N/A cell) would count them against an otherwise handled test.
+    let reject_idx = STEP_KEYS.iter().position(|key| rejected.contains_key(*key));
+
     let steps = STEP_KEYS
         .iter()
-        .map(|&key| {
-            let raw_status = raw_step_status(key, &started, &ended);
+        .enumerate()
+        .map(|(idx, &key)| {
+            let raw_status = raw_step_status(key, &started, &ended, &rejected);
             (
                 key.to_string(),
-                expected_step_status(key, raw_status, expectation),
+                expected_step_status(idx, key, raw_status, expectation, reject_idx),
             )
         })
         .collect();
@@ -1339,8 +1330,7 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
         steps,
         rows,
         cols,
-        witgen_bytes,
-        ad_bytes,
+        binary_bytes,
     }
 }
 
@@ -1365,10 +1355,10 @@ const DUMP_STAGE_ORDER: &[&str] = &[
     "initial_ssa.txt",
     "monomorphized_ssa.txt",
     "untainted_ssa.txt",
+    "program_ssa.txt",
     "hlssa_before_lowering.txt",
     "llssa_after_lowering.txt",
-    "witgen_bytecode.txt",
-    "ad_bytecode.txt",
+    "program_bytecode.txt",
 ];
 
 fn parse_runs_arg(args: &[String]) -> usize {
@@ -1624,8 +1614,11 @@ fn raw_step_status(
     key: &str,
     started: &HashMap<String, bool>,
     ended: &HashMap<String, bool>,
+    rejected: &HashMap<String, bool>,
 ) -> Status {
-    if let Some(&ok) = ended.get(key) {
+    if rejected.contains_key(key) {
+        Status::Rejected
+    } else if let Some(&ok) = ended.get(key) {
         if ok { Status::Pass } else { Status::Fail }
     } else if started.contains_key(key) {
         Status::Crash
@@ -1634,14 +1627,41 @@ fn raw_step_status(
     }
 }
 
-fn expected_step_status(key: &str, raw_status: Status, expectation: TestExpectation) -> Status {
+fn expected_step_status(
+    idx: usize,
+    key: &str,
+    raw_status: Status,
+    expectation: TestExpectation,
+    reject_idx: Option<usize>,
+) -> Status {
     match expectation {
-        TestExpectation::ExecutionSuccess => raw_status,
+        // A program that is supposed to execute must not be rejected as unsatisfiable; if it
+        // was, that is a real failure. Every other stage uses its raw status unchanged.
+        TestExpectation::ExecutionSuccess => match raw_status {
+            Status::Rejected => Status::Fail,
+            other => other,
+        },
+        // A program proven to never execute is rejected cleanly at the first stage that can
+        // prove it: the Noir frontend (`COMPILED`, e.g. a comptime overflow) or R1CS generation
+        // (`R1CS`, a statically-unsatisfiable assertion — `Err(UnsatisfiableProgram)`). The
+        // child reports that with a `reject` marker. For an expected-failure test that
+        // rejection is exactly the success, so: stages before it keep their real status (they
+        // genuinely ran), the rejecting stage itself reads ✅, and every later stage is
+        // preempted and reads N/A — so it neither looks like a failure nor dilutes the success
+        // rate. A plain `Fail` or a `Crash` has no `reject` marker, so a real regression is
+        // never masked by the expected-failure flag.
+        TestExpectation::ExecutionFailure if reject_idx.is_some() => {
+            match idx.cmp(&reject_idx.unwrap()) {
+                std::cmp::Ordering::Less => raw_status,
+                std::cmp::Ordering::Equal => Status::Pass,
+                std::cmp::Ordering::Greater => Status::NotApplicable,
+            }
+        }
         TestExpectation::ExecutionFailure => match key {
             "WITGEN_RUN" | "WITGEN_WASM_RUN" => match raw_status {
                 Status::Fail | Status::Crash => Status::Pass,
                 Status::Pass => Status::Fail,
-                Status::Skip | Status::NotApplicable => raw_status,
+                Status::Skip | Status::NotApplicable | Status::Rejected => raw_status,
             },
             // Correctness/leak checks need a witness, and the native AD
             // pipeline only feeds proving; neither is meaningful for a program
@@ -1651,7 +1671,6 @@ fn expected_step_status(key: &str, raw_status: Status, expectation: TestExpectat
             | "WITGEN_NOLEAK"
             | "WITGEN_WASM_CORRECT"
             | "WITGEN_WASM_NOLEAK"
-            | "AD_COMPILE"
             | "AD_RUN"
             | "AD_CORRECT"
             | "AD_NOLEAK" => Status::NotApplicable,
@@ -1667,8 +1686,7 @@ struct ParsedRow {
     cells: Vec<String>,
     rows: Option<usize>,
     cols: Option<usize>,
-    witgen_bytes: Option<usize>,
-    ad_bytes: Option<usize>,
+    size_bytes: Option<usize>,
 }
 
 fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
@@ -1681,20 +1699,18 @@ fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        if cells.len() < 23 {
+        if cells.len() < 20 {
             continue;
         }
         let rows = cells[3].parse().ok();
         let cols = cells[4].parse().ok();
-        let witgen_bytes = cells[5].parse().ok();
-        let ad_bytes = cells[6].parse().ok();
+        let size_bytes = cells[5].parse().ok();
         result.push(ParsedRow {
             name: cells[0].clone(),
             cells,
             rows,
             cols,
-            witgen_bytes,
-            ad_bytes,
+            size_bytes,
         });
     }
     result
@@ -1703,25 +1719,63 @@ fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
 const REGRESSION_COLS: &[(usize, &str)] = &[
     (1, "Compiled"),
     (2, "R1CS"),
-    (7, "Witgen Compile"),
-    (8, "Witgen Run VM"),
-    (9, "Witgen Correct"),
-    (10, "Witgen No Leak"),
-    (11, "AD Compile"),
-    (12, "AD Run VM"),
-    (13, "AD Correct"),
-    (14, "AD No Leak"),
-    (15, "Witgen WASM Compile"),
-    (16, "Witgen WASM Run"),
-    (17, "Witgen WASM Correct"),
-    (18, "Witgen WASM No Leak"),
-    (19, "AD WASM Compile"),
-    (20, "AD WASM Run"),
-    (21, "AD WASM Correct"),
-    (22, "AD WASM No Leak"),
+    (6, "Compile"),
+    (7, "Witgen Run VM"),
+    (8, "Witgen Correct"),
+    (9, "Witgen No Leak"),
+    (10, "AD Run VM"),
+    (11, "AD Correct"),
+    (12, "AD No Leak"),
+    (13, "WASM Compile"),
+    (14, "Witgen WASM Run"),
+    (15, "Witgen WASM Correct"),
+    (16, "Witgen WASM No Leak"),
+    (17, "AD WASM Run"),
+    (18, "AD WASM Correct"),
+    (19, "AD WASM No Leak"),
 ];
 
+/// Verify the table's header matches the column layout the index-based checks assume. Without
+/// this, a stale-format status file (e.g. a baseline from before a column change) still has enough
+/// cells to parse, so the checks would silently compare misaligned columns.
+fn validate_layout(path: &Path) {
+    let content =
+        fs::read_to_string(path).unwrap_or_else(|_| panic!("Cannot read {}", path.display()));
+    let header: Vec<String> = content
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split('|')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    for &(col, name) in REGRESSION_COLS {
+        let found = header.get(col).map(String::as_str).unwrap_or("<missing>");
+        assert_eq!(
+            found,
+            name,
+            "Status table {} has an unexpected layout (column {col} is {found:?}, expected {name:?}). \
+             Regenerate the baseline — the regression/growth checks compare columns by position and \
+             cannot align mismatched layouts.",
+            path.display(),
+        );
+    }
+}
+
+/// A cell counts as "handled" if it passed (✅) or the stage legitimately did not apply (N/A).
+/// N/A is only ever assigned where a stage genuinely cannot run — the witgen/AD/WASM stages of a
+/// program correctly rejected at compile or R1CS time, or the correctness/leak checks that need a
+/// witness an expected-failure test never produces. A real failure is always ❌/💥/➖, never N/A,
+/// so counting N/A as handled cannot mask a regression. Treating the two alike lets a
+/// correctly-rejected expected-failure test score 100% with its full weight instead of a single
+/// green cell among thousands.
+fn cell_is_handled(cell: &str) -> bool {
+    cell == "✅" || cell == "N/A"
+}
+
 fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
+    validate_layout(baseline_path);
+    validate_layout(current_path);
     let baseline = parse_status_rows(baseline_path);
     let current = parse_status_rows(current_path);
 
@@ -1736,7 +1790,9 @@ fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
         for &(col, col_name) in REGRESSION_COLS {
             let base_val = &base.cells[col];
             let cur_val = &cur.cells[col];
-            if base_val == "✅" && cur_val != "✅" {
+            // `✅ → N/A` is not a regression: it means the stage stopped being applicable (e.g. a
+            // failure test whose rejection now happens earlier), which is still a handled cell.
+            if base_val == "✅" && !cell_is_handled(cur_val) {
                 regressions.push(format!("  {} / {}: ✅ → {}", cur.name, col_name, cur_val));
             }
         }
@@ -1755,6 +1811,8 @@ fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
 }
 
 fn check_growth(baseline_path: &Path, current_path: &Path) {
+    validate_layout(baseline_path);
+    validate_layout(current_path);
     let baseline = parse_status_rows(baseline_path);
     let current = parse_status_rows(current_path);
 
@@ -1778,12 +1836,12 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
     let mut warnings = Vec::new();
 
     for cur in &current {
-        // Count checkmarkable cells in current (all tests)
+        // Success rate counts handled cells (✅ or N/A) over every cell. N/A is a legitimate
+        // "nothing to run here" outcome, not a gap, so a correctly-rejected expected-failure test
+        // scores 100% across its whole row rather than one green cell diluted among thousands.
         for &(col, _) in REGRESSION_COLS {
-            if cur.cells[col] != "N/A" {
-                total_current_cells += 1;
-            }
-            if cur.cells[col] == "✅" {
+            total_current_cells += 1;
+            if cell_is_handled(&cur.cells[col]) {
                 total_current_checkmarks += 1;
             }
         }
@@ -1792,20 +1850,21 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
             continue;
         };
 
-        // For existing tests: count baseline/current checkmarks and new checkmarks
+        // For existing tests: count baseline/current handled cells, and list cells that newly
+        // turned green. `new_checkmarks` stays literal-✅ so the report's "turned into
+        // checkmarks ✅" list means what it says (a cell that became N/A is handled, but it did
+        // not turn green).
         for &(col, col_name) in REGRESSION_COLS {
-            if base.cells[col] != "N/A" || cur.cells[col] != "N/A" {
-                existing_total += 1;
-            }
-            let base_pass = base.cells[col] == "✅";
-            let cur_pass = cur.cells[col] == "✅";
-            if base_pass {
+            existing_total += 1;
+            let base_handled = cell_is_handled(&base.cells[col]);
+            let cur_handled = cell_is_handled(&cur.cells[col]);
+            if base_handled {
                 existing_baseline_checkmarks += 1;
             }
-            if cur_pass {
+            if cur_handled {
                 existing_current_checkmarks += 1;
             }
-            if !base_pass && cur_pass {
+            if base.cells[col] != "✅" && cur.cells[col] == "✅" {
                 new_checkmarks.push((cur.name.clone(), col_name));
             }
         }
@@ -1856,48 +1915,25 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
             }
         }
 
-        // Check witgen bytecode size changes
-        if let (Some(bw), Some(cw)) = (base.witgen_bytes, cur.witgen_bytes) {
-            if cw > bw {
+        // Check binary size changes
+        if let (Some(bs), Some(cs)) = (base.size_bytes, cur.size_bytes) {
+            if cs > bs {
                 warnings.push(format!(
-                    "| {} | Witgen Size (bytes) | {} | {} | +{} ({:+.1}%) |",
+                    "| {} | Bytecode Size (bytes) | {} | {} | +{} ({:+.1}%) |",
                     cur.name,
-                    bw,
-                    cw,
-                    cw - bw,
-                    (cw as f64 - bw as f64) / bw as f64 * 100.0
+                    bs,
+                    cs,
+                    cs - bs,
+                    (cs as f64 - bs as f64) / bs as f64 * 100.0
                 ));
-            } else if cw < bw {
+            } else if cs < bs {
                 improvements.push(format!(
-                    "| {} | Witgen Size (bytes) | {} | {} | {} ({:.1}%) |",
+                    "| {} | Bytecode Size (bytes) | {} | {} | {} ({:.1}%) |",
                     cur.name,
-                    bw,
-                    cw,
-                    cw as i64 - bw as i64,
-                    (cw as f64 - bw as f64) / bw as f64 * 100.0
-                ));
-            }
-        }
-
-        // Check AD bytecode size changes
-        if let (Some(ba), Some(ca)) = (base.ad_bytes, cur.ad_bytes) {
-            if ca > ba {
-                warnings.push(format!(
-                    "| {} | AD Size (bytes) | {} | {} | +{} ({:+.1}%) |",
-                    cur.name,
-                    ba,
-                    ca,
-                    ca - ba,
-                    (ca as f64 - ba as f64) / ba as f64 * 100.0
-                ));
-            } else if ca < ba {
-                improvements.push(format!(
-                    "| {} | AD Size (bytes) | {} | {} | {} ({:.1}%) |",
-                    cur.name,
-                    ba,
-                    ca,
-                    ca as i64 - ba as i64,
-                    (ca as f64 - ba as f64) / ba as f64 * 100.0
+                    bs,
+                    cs,
+                    cs as i64 - bs as i64,
+                    (cs as f64 - bs as f64) / bs as f64 * 100.0
                 ));
             }
         }
@@ -1987,39 +2023,38 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
     println!("\n</details>");
 }
 
+// The program is a single artifact with both the witgen and AD entry points, so it has one
+// `Size` column and one `Compile` / `WASM Compile` column each. The run/correctness/leak columns
+// stay split because witgen and AD are distinct executions of their respective entry points.
 fn render_markdown(results: &[TestResult]) -> String {
     let mut md = String::new();
-    md.push_str("| Test | Compiled | R1CS | Rows | Cols | Witgen Size | AD Size | Witgen Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Compile | AD Run VM | AD Correct | AD No Leak | Witgen WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak | AD WASM Compile | AD WASM Run | AD WASM Correct | AD WASM No Leak |\n");
-    md.push_str("|------|----------|------|------|------|-------------|---------|----------------|---------------|----------------|----------------|------------|-----------|------------|------------|---------------------|-----------------|---------------------|---------------------|-----------------|-------------|---------------------|---------------------|\n");
+    md.push_str("| Test | Compiled | R1CS | Rows | Cols | Bytecode Size | Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Run VM | AD Correct | AD No Leak | WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak | AD WASM Run | AD WASM Correct | AD WASM No Leak |\n");
+    md.push_str("|------|----------|------|------|------|---------------|---------|---------------|----------------|----------------|-----------|------------|------------|--------------|-----------------|---------------------|---------------------|-------------|---------------------|---------------------|\n");
 
     for r in results {
         let s = |key: &str| r.steps.get(key).copied().unwrap_or(Status::Skip).emoji();
         let rows = r.rows.map_or("-".to_string(), |v| v.to_string());
         let cols = r.cols.map_or("-".to_string(), |v| v.to_string());
-        let witgen_sz = r.witgen_bytes.map_or("-".to_string(), |v| v.to_string());
-        let ad_sz = r.ad_bytes.map_or("-".to_string(), |v| v.to_string());
+        let size = r.binary_bytes.map_or("-".to_string(), |v| v.to_string());
         md.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             r.name,
             s("COMPILED"),
             s("R1CS"),
             rows,
             cols,
-            witgen_sz,
-            ad_sz,
-            s("WITGEN_COMPILE"),
+            size,
+            s("COMPILE"),
             s("WITGEN_RUN"),
             s("WITGEN_CORRECT"),
             s("WITGEN_NOLEAK"),
-            s("AD_COMPILE"),
             s("AD_RUN"),
             s("AD_CORRECT"),
             s("AD_NOLEAK"),
-            s("WITGEN_WASM_COMPILE"),
+            s("WASM_COMPILE"),
             s("WITGEN_WASM_RUN"),
             s("WITGEN_WASM_CORRECT"),
             s("WITGEN_WASM_NOLEAK"),
-            s("AD_WASM_COMPILE"),
             s("AD_WASM_RUN"),
             s("AD_WASM_CORRECT"),
             s("AD_WASM_NOLEAK"),
@@ -2087,7 +2122,7 @@ mod tests {
             ]),
         );
 
-        for key in ["AD_COMPILE", "AD_RUN", "AD_CORRECT", "AD_NOLEAK"] {
+        for key in ["AD_RUN", "AD_CORRECT", "AD_NOLEAK"] {
             assert_eq!(result.steps[key], Status::NotApplicable, "{key}");
         }
     }
@@ -2098,8 +2133,6 @@ mod tests {
             "exec_fail",
             TestExpectation::ExecutionFailure,
             &lines(&[
-                "START:AD_WASM_COMPILE",
-                "END:AD_WASM_COMPILE:ok",
                 "START:AD_WASM_RUN",
                 "END:AD_WASM_RUN:ok",
                 "START:AD_WASM_CORRECT",
@@ -2109,10 +2142,106 @@ mod tests {
             ]),
         );
 
-        assert_eq!(result.steps["AD_WASM_COMPILE"], Status::Pass);
         assert_eq!(result.steps["AD_WASM_RUN"], Status::Pass);
         assert_eq!(result.steps["AD_WASM_CORRECT"], Status::Pass);
         assert_eq!(result.steps["AD_WASM_NOLEAK"], Status::Pass);
+    }
+
+    #[test]
+    fn execution_failure_passes_when_r1cs_rejects_program() {
+        // A statically-unsatisfiable program is rejected during R1CS generation. The clean
+        // rejection is the expected failure, so R1CS reads ✅. Every later stage is preempted
+        // by that rejection and must read N/A — not ➖ Skip — so it neither counts as a failure
+        // nor dilutes the success rate (whose denominator counts every non-N/A cell).
+        let result = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&[
+                "START:COMPILED",
+                "END:COMPILED:ok",
+                "START:R1CS",
+                "END:R1CS:reject",
+            ]),
+        );
+
+        assert_eq!(result.steps["COMPILED"], Status::Pass);
+        assert_eq!(result.steps["R1CS"], Status::Pass);
+        for key in [
+            "COMPILE",
+            "WITGEN_RUN",
+            "WITGEN_CORRECT",
+            "WITGEN_NOLEAK",
+            "WASM_COMPILE",
+            "WITGEN_WASM_RUN",
+            "AD_WASM_RUN",
+        ] {
+            assert_eq!(result.steps[key], Status::NotApplicable, "{key}");
+        }
+    }
+
+    #[test]
+    fn execution_failure_passes_when_noir_frontend_rejects_program() {
+        // The Noir frontend itself can reject a program that will never execute (e.g. the
+        // comptime bit-shift overflow in `comptime_bitshift_failure`). That clean rejection at
+        // COMPILED is the expected failure: COMPILED reads ✅ and every later stage — which
+        // never ran — reads N/A rather than dragging the success rate down.
+        let result = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&["START:COMPILED", "END:COMPILED:reject"]),
+        );
+
+        assert_eq!(result.steps["COMPILED"], Status::Pass);
+        for key in [
+            "R1CS",
+            "COMPILE",
+            "WITGEN_RUN",
+            "WASM_COMPILE",
+            "WITGEN_WASM_RUN",
+            "AD_WASM_RUN",
+        ] {
+            assert_eq!(result.steps[key], Status::NotApplicable, "{key}");
+        }
+    }
+
+    #[test]
+    fn execution_failure_does_not_accept_plain_r1cs_failure() {
+        // Only a clean rejection counts. A plain R1CS `fail` (some other error) or a crash is a
+        // real problem and must not be silently turned green by the expected-failure flag.
+        let failed = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&[
+                "START:COMPILED",
+                "END:COMPILED:ok",
+                "START:R1CS",
+                "END:R1CS:fail",
+            ]),
+        );
+        assert_eq!(failed.steps["R1CS"], Status::Fail);
+
+        let crashed = parse_child_output(
+            "exec_fail",
+            TestExpectation::ExecutionFailure,
+            &lines(&["START:COMPILED", "END:COMPILED:ok", "START:R1CS"]),
+        );
+        assert_eq!(crashed.steps["R1CS"], Status::Crash);
+    }
+
+    #[test]
+    fn execution_success_treats_r1cs_rejection_as_failure() {
+        // A program that is supposed to execute should never be rejected as unsatisfiable.
+        let result = parse_child_output(
+            "ok",
+            TestExpectation::ExecutionSuccess,
+            &lines(&[
+                "START:COMPILED",
+                "END:COMPILED:ok",
+                "START:R1CS",
+                "END:R1CS:reject",
+            ]),
+        );
+        assert_eq!(result.steps["R1CS"], Status::Fail);
     }
 
     #[test]

@@ -42,6 +42,17 @@ fn push_witness_of_to_leaves(t: Type) -> Type {
     }
 }
 
+fn replace_array_element_type(container: &Type, element_type: Type) -> Type {
+    match &container.expr {
+        TypeExpr::Array(_, size) => element_type.array_of(*size),
+        TypeExpr::Slice(_) => element_type.slice_of(),
+        TypeExpr::WitnessOf(inner) => {
+            Type::witness_of_collapsed(replace_array_element_type(inner, element_type))
+        }
+        _ => panic!("Type is not an array: {}", container),
+    }
+}
+
 pub struct TypeInfo {
     functions: HashMap<FunctionId, FunctionTypeInfo>,
 }
@@ -354,17 +365,12 @@ impl Types {
                     .get(value)
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
 
-                // If the value is witness-typed but the array element is not,
-                // promote the result array's element type to match.
                 let elem_type = array_type.get_array_element();
-                let result_type = if value_type.is_witness_of() && !elem_type.is_witness_of() {
-                    match &array_type.expr {
-                        TypeExpr::Array(_, size) => value_type.clone().array_of(*size),
-                        TypeExpr::Slice(_) => value_type.clone().slice_of(),
-                        _ => array_type.clone(),
-                    }
-                } else {
+                let result_elem_type = Type::join(&elem_type, value_type);
+                let result_type = if result_elem_type == elem_type {
                     array_type.clone()
+                } else {
+                    replace_array_element_type(array_type, result_elem_type)
                 };
                 function_info.values.insert(*result, result_type);
                 Ok(())

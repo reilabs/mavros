@@ -387,7 +387,7 @@ mod tests {
     fn global_value_ids_are_unique_across_functions() {
         let mut ssa = HLSSA::with_main("main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
-        let main_id = sb.ssa().get_main_id();
+        let main_id = sb.ssa().get_unique_entrypoint_id();
         let other_id = sb.ssa().add_function("other".to_string());
 
         let v_main = sb.modify_function(main_id, |fb| fb.fresh_value());
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn modify_function_noop_roundtrip() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let _ = ssa.add_function("other".to_string());
 
         // Allocate some values so the counter is non-zero.
