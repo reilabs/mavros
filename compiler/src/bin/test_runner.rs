@@ -18,7 +18,7 @@ use mavros_compiler::{
     compiler::Field,
     compiler::codegen::{CodeGenOptions, hlssa_to_r1cs::R1CS, llssa_to_llvm::WasmCompileOpts},
     driver::{Driver, Error as DriverError},
-    vm::{bytecode::TableInfo, interpreter},
+    vm::{TableKind, bytecode::TableInfo, interpreter},
     wasm_runtime,
 };
 use mavros_wasm_layout::{
@@ -26,8 +26,8 @@ use mavros_wasm_layout::{
     AD_CURRENT_LOOKUP_WIT_OFF_OFFSET, AD_CURRENT_WIT_MULTIPLICITIES_OFF_OFFSET,
     AD_CURRENT_WIT_OFF_OFFSET, AD_CURRENT_WIT_TABLES_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET,
     AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET, AD_VM_STRUCT_SIZE, TABLE_INFO_INV_CNST_OFF_OFFSET,
-    TABLE_INFO_INV_WIT_OFF_OFFSET, TABLE_INFO_LENGTH_OFFSET, TABLE_INFO_MULTS_BASE_PTR_OFFSET,
-    TABLE_INFO_NUM_INDICES_OFFSET, TABLE_INFO_NUM_VALUES_OFFSET, TABLE_INFO_SLOT_SIZE,
+    TABLE_INFO_INV_WIT_OFF_OFFSET, TABLE_INFO_KIND_OFFSET, TABLE_INFO_LENGTH_OFFSET,
+    TABLE_INFO_MULTS_BASE_PTR_OFFSET, TABLE_INFO_NUM_INDICES_OFFSET, TABLE_INFO_SLOT_SIZE,
     WITGEN_A_BASE_PTR_OFFSET, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET,
     WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET, WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET,
     WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET, WITGEN_LOOKUPS_B_PTR_OFFSET,
@@ -480,7 +480,7 @@ fn read_table_info_slot(
         read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_INV_WIT_OFF_OFFSET);
     let num_indices =
         read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_NUM_INDICES_OFFSET);
-    let num_values = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_NUM_VALUES_OFFSET);
+    let kind_code = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_KIND_OFFSET);
     let length = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_LENGTH_OFFSET);
     let mults_off = mults_base
         .checked_sub(wasm_witness_ptr)
@@ -491,7 +491,7 @@ fn read_table_info_slot(
         TableInfo {
             multiplicities_wit: host_witness_base.wrapping_add(mults_off as usize),
             num_indices: num_indices as usize,
-            num_values: num_values as usize,
+            kind: TableKind::from_code(kind_code),
             length: length as usize,
             elem_inverses_witness_section_offset: inv_wit_off as usize,
             elem_inverses_constraint_section_offset: inv_cnst_off as usize,
