@@ -92,7 +92,6 @@ pub enum OpCode {
     },
     Alloc {
         result: ValueId,
-        elem_type: Type,
         value: ValueId,
     },
     Store {
@@ -322,15 +321,10 @@ impl Instruction for OpCode {
                     rhs.0
                 )
             }
-            OpCode::Alloc {
-                result,
-                elem_type: typ,
-                value,
-            } => format!(
-                "v{}{} = alloc({}, v{})",
+            OpCode::Alloc { result, value } => format!(
+                "v{}{} = alloc(v{})",
                 result.0,
                 annotate_value(*result),
-                typ,
                 value.0
             ),
             OpCode::Store { ptr, value } => {
@@ -779,11 +773,7 @@ impl Instruction for OpCode {
 
     fn get_inputs(&self) -> impl Iterator<Item = &ValueId> {
         match self {
-            Self::Alloc {
-                result: _,
-                elem_type: _,
-                value: v,
-            } => vec![v].into_iter(),
+            Self::Alloc { result: _, value: v } => vec![v].into_iter(),
             Self::FreshWitness {
                 result: _,
                 result_type: _,
@@ -1106,11 +1096,7 @@ impl Instruction for OpCode {
 
     fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
         match self {
-            Self::Alloc {
-                result: _,
-                elem_type: _,
-                value: v,
-            } => vec![v].into_iter(),
+            Self::Alloc { result: _, value: v } => vec![v].into_iter(),
             Self::FreshWitness {
                 result: _,
                 result_type: _,
@@ -1324,7 +1310,6 @@ impl Instruction for OpCode {
         match self {
             Self::Alloc {
                 result: r,
-                elem_type: _,
                 value: v,
             } => vec![r, v].into_iter(),
             Self::MemOp { kind: _, value: r }

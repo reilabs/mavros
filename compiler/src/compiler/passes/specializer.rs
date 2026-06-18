@@ -620,8 +620,8 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         Self(val)
     }
 
-    fn alloc(elem_type: &Type, value: &Self, ctx: &mut SpecializationState) -> Self {
-        let val = ctx.alloc(elem_type.clone(), value.0);
+    fn alloc(value: &Self, ctx: &mut SpecializationState) -> Self {
+        let val = ctx.alloc(value.0);
         Self(val)
     }
 

@@ -394,13 +394,9 @@ pub trait HLEmitter {
         r
     }
 
-    fn alloc(&mut self, elem_type: Type, value: ValueId) -> ValueId {
+    fn alloc(&mut self, value: ValueId) -> ValueId {
         let r = self.fresh_value();
-        self.emit(OpCode::Alloc {
-            result: r,
-            elem_type,
-            value,
-        });
+        self.emit(OpCode::Alloc { result: r, value });
         r
     }
 

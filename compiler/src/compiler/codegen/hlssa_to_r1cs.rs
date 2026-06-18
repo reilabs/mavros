@@ -765,7 +765,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::mk_array(a)
     }
 
-    fn alloc(_elem_type: &Type, value: &Self, _ctx: &mut R1CGen) -> Self {
+    fn alloc(value: &Self, _ctx: &mut R1CGen) -> Self {
         Value::Ptr(Rc::new(RefCell::new(value.clone())))
     }
 

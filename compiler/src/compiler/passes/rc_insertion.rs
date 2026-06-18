@@ -393,11 +393,7 @@ impl RCInsertion {
                         }
                         currently_live.insert(*element);
                     }
-                    OpCode::Alloc {
-                        result,
-                        elem_type: _,
-                        value,
-                    } => {
+                    OpCode::Alloc { result, value } => {
                         let value = *value;
                         if !currently_live.contains(result) {
                             new_instructions.push(OpCode::MemOp {

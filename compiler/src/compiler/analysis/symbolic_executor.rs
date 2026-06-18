@@ -71,7 +71,7 @@ where
         seq_type: SequenceTargetType,
         elem_type: &Type,
     ) -> Self;
-    fn alloc(elem_type: &Type, value: &Self, ctx: &mut Context) -> Self;
+    fn alloc(value: &Self, ctx: &mut Context) -> Self;
     fn ptr_write(&self, val: &Self, ctx: &mut Context);
     fn ptr_read(&self, out_type: &Type, ctx: &mut Context) -> Self;
     fn expect_constant_bool(&self, ctx: &mut Context) -> bool;
@@ -328,13 +328,9 @@ impl SymbolicExecutor {
                         let a = vec![elem; *count];
                         scope.insert(*r, V::mk_array(a, ctx, *seq_type, elem_type));
                     }
-                    OpCode::Alloc {
-                        result: r,
-                        elem_type,
-                        value,
-                    } => {
+                    OpCode::Alloc { result: r, value } => {
                         let v = scope[value].clone();
-                        scope.insert(*r, V::alloc(elem_type, &v, ctx));
+                        scope.insert(*r, V::alloc(&v, ctx));
                     }
                     OpCode::Store { ptr, value: val } => {
                         let ptr = &scope[ptr];

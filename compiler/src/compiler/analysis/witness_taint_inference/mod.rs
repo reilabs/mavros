@@ -395,7 +395,7 @@ mod tests {
             let mut e = b.block(entry);
             let x = e.add_parameter(Type::field());
             let c = e.field_const(fr(5));
-            let p = e.alloc(Type::field(), c); // pure init store
+            let p = e.alloc(c); // pure init store
             let w = e.write_witness(x); // Witness
             e.store(p, w); // witness store → pointee becomes Witness
             let r = e.load(p); // reads the (now Witness) pointee
@@ -489,7 +489,7 @@ mod tests {
             let mut e = b.block(entry);
             let _x = e.add_parameter(Type::field());
             let c0 = e.field_const(fr(0));
-            let q = e.alloc(Type::field(), c0);
+            let q = e.alloc(c0);
             e.call(helper_id, vec![q], 0);
             let r = e.load(q);
             e.terminate_return(vec![r]);
@@ -523,7 +523,7 @@ mod tests {
             let mut e = b.block(entry);
             let _x = e.add_parameter(Type::field());
             let c0 = e.field_const(fr(0));
-            let q = e.alloc(Type::field(), c0);
+            let q = e.alloc(c0);
             e.call(rec_id, vec![q], 0);
             let r = e.load(q);
             e.terminate_return(vec![r]);
@@ -548,11 +548,11 @@ mod tests {
             let _x = e.add_parameter(Type::field());
             // inner: Ref<Field>, with a witness stored into its pointee.
             let c = e.field_const(fr(9));
-            let inner = e.alloc(Type::field(), c);
+            let inner = e.alloc(c);
             let w = e.write_witness(c);
             e.store(inner, w);
             // outer: Ref<Ref<Field>>, holding `inner`.
-            let outer = e.alloc(Type::field().ref_of(), inner);
+            let outer = e.alloc(inner);
             // Read the ref back out and deref it: aliases `inner`'s (witness) pointee.
             let loaded = e.load(outer);
             let final_val = e.load(loaded);
@@ -579,8 +579,8 @@ mod tests {
             let mut e = b.block(entry);
             let x = e.add_parameter(Type::field());
             let c0 = e.field_const(fr(0));
-            let ra = e.alloc(Type::field(), c0);
-            let rb = e.alloc(Type::field(), c0);
+            let ra = e.alloc(c0);
+            let rb = e.alloc(c0);
             let cond = e.eq(x, c0); // a pure condition
             // The merge phi unifies ra/rb pointees.
             let _merged = e.build_if_else(
@@ -613,9 +613,9 @@ mod tests {
             let x = e.add_parameter(Type::field());
             let c1 = e.field_const(fr(1));
             let c2 = e.field_const(fr(2));
-            let r1 = e.alloc(Type::field(), c1);
-            let r2 = e.alloc(Type::field(), c2);
-            let p = e.alloc(Type::field().ref_of(), r1);
+            let r1 = e.alloc(c1);
+            let r2 = e.alloc(c2);
+            let p = e.alloc(r1);
             let w = e.write_witness(x);
             let zero = e.field_const(fr(0));
             let cond = e.eq(w, zero); // witness condition
@@ -654,9 +654,9 @@ mod tests {
             let x = e.add_parameter(Type::field());
             let c1 = e.field_const(fr(1));
             let c2 = e.field_const(fr(2));
-            let r1 = e.alloc(Type::field(), c1);
-            let r2 = e.alloc(Type::field(), c2);
-            let p = e.alloc(Type::field().ref_of(), r1);
+            let r1 = e.alloc(c1);
+            let r2 = e.alloc(c2);
+            let p = e.alloc(r1);
             let w = e.write_witness(x);
             let zero = e.field_const(fr(0));
             let cond = e.eq(w, zero); // witness condition
@@ -694,9 +694,9 @@ mod tests {
             let _x = e.add_parameter(Type::field());
             let c1 = e.field_const(fr(1));
             let c2 = e.field_const(fr(2));
-            let r1 = e.alloc(Type::field(), c1);
-            let r2 = e.alloc(Type::field(), c2);
-            let p = e.alloc(Type::field().ref_of(), r1);
+            let r1 = e.alloc(c1);
+            let r2 = e.alloc(c2);
+            let p = e.alloc(r1);
             e.store(p, r2);
             let q = e.load(p);
             let v = e.load(q);
@@ -719,8 +719,8 @@ mod tests {
             let mut e = b.block(entry);
             let x = e.add_parameter(Type::field());
             let c0 = e.field_const(fr(0));
-            let ra = e.alloc(Type::field(), c0);
-            let rb = e.alloc(Type::field(), c0);
+            let ra = e.alloc(c0);
+            let rb = e.alloc(c0);
             let w = e.write_witness(x);
             e.store(rb, w); // witness store through rb
             let v = e.load(ra); // ra was never merged with rb: stays Pure
@@ -750,7 +750,7 @@ mod tests {
             let zero = e.field_const(fr(0));
             let cond = e.eq(w, zero); // a witness-dependent condition
             let init = e.field_const(fr(0)); // pure initializer, leaves the slot Pure until the conditional store
-            let p = e.alloc(Type::field(), init);
+            let p = e.alloc(init);
             let merge = e.build_if_else(
                 cond,
                 vec![Type::field()],
@@ -811,7 +811,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.block(entry);
             let c = e.field_const(fr(17));
-            let p = e.alloc(Type::field(), c);
+            let p = e.alloc(c);
             e.terminate_return(vec![p]);
         });
         // main(x): z = make_ref(); *z = write_witness(x); return *z
@@ -868,7 +868,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.block(entry);
             let c = e.field_const(fr(17));
-            let p = e.alloc(Type::field(), c);
+            let p = e.alloc(c);
             e.terminate_return(vec![p]);
         });
         // mid() -> Ref<Field>: just forwards inner()'s ref.
@@ -963,7 +963,7 @@ mod tests {
             let mut e = b.block(entry);
             let x = e.add_parameter(Type::field());
             let c0 = e.field_const(fr(0));
-            let q = e.alloc(Type::field(), c0);
+            let q = e.alloc(c0);
             let r = e.call(id_id, vec![q], 1)[0];
             let w = e.write_witness(x);
             e.store(r, w);
@@ -987,7 +987,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.block(entry);
             let c = e.field_const(fr(17));
-            let p = e.alloc(Type::field(), c);
+            let p = e.alloc(c);
             e.terminate_return(vec![p]);
         });
         sb.modify_function(main_id, |b| {

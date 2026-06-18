@@ -1263,11 +1263,8 @@ fn lower_instruction(
             ice_non_elided_tuple()
         }
 
-        OpCode::Alloc {
-            result,
-            elem_type,
-            value,
-        } => {
+        OpCode::Alloc { result, value } => {
+            let elem_type = fn_type_info.get_value_type(*value);
             lower_alloc(e, val_map, *result, elem_type, *value);
         }
 

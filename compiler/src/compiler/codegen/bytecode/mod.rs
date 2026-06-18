@@ -1578,11 +1578,8 @@ impl CodeGen {
                         size: global_layouter.get_size(global_idx),
                     });
                 }
-                hlssa::OpCode::Alloc {
-                    result,
-                    elem_type,
-                    value,
-                } => {
+                hlssa::OpCode::Alloc { result, value } => {
+                    let elem_type = type_info.get_value_type(*value);
                     let res = layouter.alloc_ptr(*result);
                     let elem_size = layouter.type_size(elem_type);
                     let elem_rc = elem_type.is_heap_allocated();

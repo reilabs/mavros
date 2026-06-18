@@ -117,7 +117,6 @@ impl Mem2Reg {
                 match instruction {
                     OpCode::Alloc {
                         result: lhs,
-                        elem_type: _,
                         value: rhs,
                     } => {
                         values.insert(lhs, rhs);
@@ -238,7 +237,6 @@ impl Mem2Reg {
                     }
                     OpCode::Alloc {
                         result: lhs,
-                        elem_type: _,
                         value: _,
                     } => {
                         defs.insert(*lhs, *block_id);

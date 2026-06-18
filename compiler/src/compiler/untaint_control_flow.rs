@@ -7,7 +7,7 @@ use crate::{
     compiler::{
         analysis::{
             flow_analysis::{CFG, FlowAnalysis},
-            types::{FunctionTypeInfo, Types},
+            types::{FunctionTypeInfo, TypeInfo, Types},
             witness_info::{FunctionWitnessType, WitnessInfo, WitnessShape, WitnessType},
             witness_taint_inference::WitnessTaintInference,
         },
@@ -104,22 +104,7 @@ impl UntaintControlFlow {
             let mut new_instructions = Vec::<OpCode>::new();
             for instruction in block.take_instructions() {
                 let new = match instruction {
-                    OpCode::Alloc {
-                        result: r,
-                        elem_type: l,
-                        value,
-                    } => {
-                        let r_wt = function_wt
-                            .try_get_value_witness_type(r)
-                            .expect("ICE: instruction result without an inferred witness shape");
-                        let child = r_wt.child_witness_type().unwrap();
-                        let child_typ = apply_witness_type(l, &child);
-                        OpCode::Alloc {
-                            result: r,
-                            elem_type: child_typ,
-                            value,
-                        }
-                    }
+                    OpCode::Alloc { .. } => instruction,
                     OpCode::FreshWitness { .. } => instruction,
                     OpCode::MkSeq {
                         result: r,
@@ -219,6 +204,63 @@ impl UntaintControlFlow {
         function
     }
 
+    fn cast_alloc_inits(
+        &self,
+        ssa: &mut HLSSA,
+        type_info: &TypeInfo,
+        witness_inference: &WitnessTaintInference,
+    ) {
+        let function_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
+        for function_id in function_ids {
+            let Some(function_wt) = witness_inference.try_get_function_witness_type(function_id)
+            else {
+                continue;
+            };
+            if !type_info.has_function(function_id) {
+                continue;
+            }
+            let func_type_info = type_info.get_function(function_id);
+            let mut function = ssa.take_function(function_id);
+
+            let block_ids: Vec<BlockId> = function.get_blocks().map(|(bid, _)| *bid).collect();
+            for block_id in block_ids {
+                let instructions = function.get_block_mut(block_id).take_instructions();
+                let mut new_instructions = Vec::new();
+                for instruction in instructions {
+                    let OpCode::Alloc { result, value } = instruction else {
+                        new_instructions.push(instruction);
+                        continue;
+                    };
+                    let cell_shape = function_wt
+                        .try_get_value_witness_type(result)
+                        .expect("ICE: Alloc result without an inferred witness shape")
+                        .child_witness_type()
+                        .expect("ICE: Alloc result of a non-ref witness shape");
+                    let cell_type = apply_witness_type(
+                        func_type_info.get_value_type(value).strip_all_witness(),
+                        &cell_shape,
+                    );
+                    let mut cast_instructions = Vec::new();
+                    let converted = {
+                        let mut builder =
+                            HLInstrBuilder::new(&mut function, ssa, &mut cast_instructions);
+                        convert_if_needed(value, &cell_type, func_type_info, &mut builder)
+                    };
+                    new_instructions.extend(cast_instructions);
+                    new_instructions.push(OpCode::Alloc {
+                        result,
+                        value: converted,
+                    });
+                }
+                function
+                    .get_block_mut(block_id)
+                    .put_instructions(new_instructions);
+            }
+
+            ssa.put_function(function_id, function);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Step 2: Cast insertion + control flow linearization
     //
@@ -240,6 +282,10 @@ impl UntaintControlFlow {
         let mut ssa = self.apply_types(ssa, witness_inference);
 
         // Recompute flow + type info (types changed in step 1)
+        let flow_analysis = FlowAnalysis::run(&ssa);
+        let type_info = Types::new().run(&ssa, &flow_analysis);
+
+        self.cast_alloc_inits(&mut ssa, &type_info, witness_inference);
         let flow_analysis = FlowAnalysis::run(&ssa);
         let type_info = Types::new().run(&ssa, &flow_analysis);
 
