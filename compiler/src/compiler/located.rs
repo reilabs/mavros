@@ -73,7 +73,7 @@ impl<T> AsRef<T> for Located<T> {
 }
 
 impl<T> From<T> for Located<T> {
-    // TODO: Remove this once source locations become non-optional.
+    // TODO: Remove this once source locations become non-optional and callers must pass Located<T>.
     fn from(value: T) -> Self {
         Located::without(value)
     }
@@ -85,10 +85,11 @@ impl<T: Display> Display for Located<T> {
     }
 }
 
+// TODO: Remove this alias once locations become non-optional and this can be `SourceLocation`.
 pub type Location = Option<SourceLocation>;
 
 /// Lines and columns, when available, are expected to be 1-based.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SourcePosition {
     pub line: u64,
     pub column: u64,

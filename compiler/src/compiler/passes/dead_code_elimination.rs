@@ -286,9 +286,10 @@ impl DCE {
                                                 continue;
                                             }
                                             let caller = ssa.get_function(*caller_fn);
-                                            if let OpCode::Call { args, .. } = &**caller
+                                            if let OpCode::Call { args, .. } = caller
                                                 .get_block(*caller_block)
                                                 .get_instruction(*caller_i)
+                                                .as_ref()
                                             {
                                                 assert!(
                                                     *i < args.len(),
@@ -330,7 +331,7 @@ impl DCE {
                                 results,
                                 function: CallTarget::Static(callee),
                                 ..
-                            } = &**instruction
+                            } = instruction.as_ref()
                             {
                                 if let Some(result_idx) =
                                     results.iter().position(|result| *result == value_id)
@@ -364,7 +365,7 @@ impl DCE {
                         function: CallTarget::Static(callee),
                         args,
                         ..
-                    } = &**instruction
+                    } = instruction.as_ref()
                     {
                         // When a Call becomes live, propagate already-live callee entry
                         // params back to the corresponding callsite args. Other callee

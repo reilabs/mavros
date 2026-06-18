@@ -18,6 +18,7 @@ pub use type_system::{MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Ty
 /// The high-level SSA is designed for domain-level analysis without concretizing runtime details.
 pub type HLSSA = SSA<OpCode, Type, Constant>;
 
+/// Opcodes for HLSSA with attached location metadata.
 pub type LocatedOpCode = Located<OpCode>;
 
 impl HLSSA {

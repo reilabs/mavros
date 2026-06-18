@@ -930,6 +930,8 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
         }
     }
 
+    // TODO: Once locations become non-optional, make the plain instruction APIs traffic in
+    // Located<Op> and remove the separate located instruction variants below.
     pub fn take_instructions(&mut self) -> Vec<Op> {
         std::mem::take(&mut self.instructions)
             .into_iter()

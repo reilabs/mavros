@@ -22,6 +22,7 @@ pub use super::hlssa::DMatrix;
 /// integer/field arithmetic split, and explicit memory management.
 pub type LLSSA = SSA<LLOp, Type, Constant>;
 
+/// Opcodes for LLSSA with attached location metadata.
 pub type LocatedLLOp = Located<LLOp>;
 
 // CONSTANTS
