@@ -2,8 +2,8 @@ use crate::compiler::ssa::{
     ValueId,
     builder::{BlockEmitter, FunctionBuilder, InstrBuilder, SSABuilder},
     hlssa::{
-        BinaryArithOpKind, CallTarget, CastTarget, CmpKind, Constant, Endianness, LookupTarget,
-        OpCode, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
+        BinaryArithOpKind, CallTarget, CastTarget, CmpKind, Constant, Endianness, LocatedOpCode,
+        LookupTarget, OpCode, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
     },
 };
 
@@ -13,7 +13,7 @@ use crate::compiler::ssa::{
 
 pub trait HLEmitter {
     fn fresh_value(&mut self) -> ValueId;
-    fn emit(&mut self, op: OpCode);
+    fn emit(&mut self, instruction: impl Into<LocatedOpCode>);
 
     /// Intern a constant value into the SSA's constants side-table, returning the `ValueId` that
     /// names it. Identical `Constant`s collapse to the same `ValueId`.
@@ -644,8 +644,8 @@ impl HLEmitter for HLInstrBuilder<'_> {
         self.ssa.fresh_value()
     }
 
-    fn emit(&mut self, op: OpCode) {
-        self.instructions.push(op);
+    fn emit(&mut self, instruction: impl Into<LocatedOpCode>) {
+        self.push(instruction);
     }
 
     fn emit_constant(&mut self, value: Constant) -> ValueId {
@@ -658,8 +658,8 @@ impl HLEmitter for HLBlockEmitter<'_> {
         self.ssa.fresh_value()
     }
 
-    fn emit(&mut self, op: OpCode) {
-        self.block.push_instruction(op);
+    fn emit(&mut self, instruction: impl Into<LocatedOpCode>) {
+        self.emit_instruction(instruction);
     }
 
     fn emit_constant(&mut self, value: Constant) -> ValueId {
