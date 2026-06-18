@@ -22,8 +22,8 @@ use crate::{
             BlockId, FunctionId, ValueId,
             hlssa::{
                 BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness, HLFunction,
-                HLSSA, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, RefCountOp,
-                SequenceTargetType, Type, TypeExpr,
+                HLSSA, LocatedOpCode, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix,
+                RefCountOp, SequenceTargetType, Type, TypeExpr,
                 builder::{HLEmitter, HLFunctionBuilder},
             },
         },
@@ -96,9 +96,11 @@ impl HLEmitter for SpecializationState<'_> {
         self.ssa.fresh_value()
     }
 
-    fn emit(&mut self, op: OpCode) {
+    fn emit(&mut self, instruction: impl Into<LocatedOpCode>) {
         let entry = self.body.get_entry_id();
-        self.body.get_block_mut(entry).push_instruction(op);
+        self.body
+            .get_block_mut(entry)
+            .push_located_instruction(instruction.into());
     }
 
     fn emit_constant(&mut self, value: Constant) -> ValueId {

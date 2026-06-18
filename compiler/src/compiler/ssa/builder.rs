@@ -1,7 +1,7 @@
 use std::{fmt::Debug, hash::Hash};
 
 use crate::compiler::ssa::{
-    Block, BlockId, Function, FunctionId, Instruction, SSA, SSAType, Terminator, ValueId,
+    Block, BlockId, Function, FunctionId, Instruction, Located, SSA, SSAType, Terminator, ValueId,
 };
 
 // ---------------------------------------------------------------------------
@@ -11,14 +11,14 @@ use crate::compiler::ssa::{
 pub struct InstrBuilder<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> {
     pub function: &'a mut Function<Op, Ty>,
     pub ssa: &'a mut SSA<Op, Ty, C>,
-    pub instructions: &'a mut Vec<Op>,
+    pub instructions: &'a mut Vec<Located<Op>>,
 }
 
 impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> InstrBuilder<'a, Op, Ty, C> {
     pub fn new(
         function: &'a mut Function<Op, Ty>,
         ssa: &'a mut SSA<Op, Ty, C>,
-        instructions: &'a mut Vec<Op>,
+        instructions: &'a mut Vec<Located<Op>>,
     ) -> Self {
         Self {
             function,
@@ -28,8 +28,8 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> InstrBuilde
     }
 
     /// Push a pre-built instruction (passthrough or pre-allocated result).
-    pub fn push(&mut self, op: Op) {
-        self.instructions.push(op);
+    pub fn push(&mut self, instruction: impl Into<Located<Op>>) {
+        self.instructions.push(instruction.into());
     }
 }
 
@@ -182,6 +182,10 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         self.block.get_terminator().is_some()
     }
 
+    pub fn emit_instruction(&mut self, instruction: impl Into<Located<Op>>) {
+        self.block.push_located_instruction(instruction.into());
+    }
+
     /// Build a loop with the three-block structure: header -> body -> back-edge.
     ///
     /// The caller provides:
@@ -232,7 +236,7 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         };
         self.function
             .get_block_mut(header_id)
-            .put_instructions(header_instructions);
+            .put_located_instructions(header_instructions);
         self.function
             .get_block_mut(header_id)
             .set_terminator(Terminator::JmpIf(cond, body_id, cont_id));
@@ -378,8 +382,22 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSABuilder<
 
 #[cfg(test)]
 mod tests {
-    use crate::compiler::ssa::hlssa::HLSSA;
-    use crate::compiler::ssa::hlssa::builder::HLSSABuilder;
+    use crate::compiler::ssa::{
+        Function, Located, SourceLocation, SourcePosition, ValueId,
+        builder::InstrBuilder,
+        hlssa::{
+            HLSSA, OpCode, Type,
+            builder::{HLEmitter, HLSSABuilder},
+        },
+    };
+
+    fn test_location() -> SourceLocation {
+        SourceLocation::new(
+            "src/main.nr".to_string(),
+            SourcePosition::new(7, 11),
+            SourcePosition::new(7, 16),
+        )
+    }
 
     /// `ValueId`s issued inside two different functions must not collide:
     /// the counter lives on the SSA, not the function.
@@ -438,5 +456,52 @@ mod tests {
         let function_ids_after: Vec<_> = ssa.get_function_ids().collect();
         assert_eq!(function_ids_after.len(), function_ids_before.len());
         assert!(ssa.get_function(main_id).get_blocks().count() > 0);
+    }
+
+    #[test]
+    fn block_emitter_emit_accepts_located_instruction() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let loc = test_location();
+
+        {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(main_id, |fb| {
+                let entry_id = fb.function.get_entry_id();
+                let mut block = fb.block(entry_id);
+                block.emit(Located::with(
+                    OpCode::Not {
+                        result: ValueId(1),
+                        value: ValueId(0),
+                    },
+                    loc.clone(),
+                ));
+            });
+        }
+
+        let entry = ssa.get_unique_entrypoint().get_entry();
+        assert_eq!(entry.get_instruction_source_location(0), Some(&loc));
+    }
+
+    #[test]
+    fn instr_builder_accepts_source_locations_for_temporary_buffers() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut function = Function::<OpCode, Type>::empty("tmp".to_string());
+        let mut instructions = Vec::new();
+        let loc = test_location();
+
+        {
+            let mut builder = InstrBuilder::new(&mut function, &mut ssa, &mut instructions);
+            builder.emit(Located::with(
+                OpCode::Not {
+                    result: ValueId(1),
+                    value: ValueId(0),
+                },
+                loc.clone(),
+            ));
+        }
+
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(instructions[0].get_location(), Some(&loc));
     }
 }
