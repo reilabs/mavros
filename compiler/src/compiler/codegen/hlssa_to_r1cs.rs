@@ -879,7 +879,8 @@ impl R1CGen {
         }
     }
 
-    /// Return the id of the rangecheck table of size `2^bits`, creating it if absent.
+    /// Return the id of the rangecheck table for `bits`-bit values (i.e. `2^bits` rows), creating
+    /// it if absent.
     fn find_or_create_range_table(&mut self, bits: u64) -> usize {
         if let Some(idx) = self
             .tables

@@ -19,17 +19,16 @@ use crate::compiler::{
     },
 };
 
-use super::{InstructionLoweringRule, LoweringContext};
-
-/// Identifies a decomposition-helper function: its kind, the lookup width, and the exact argument
-/// types at the call sites (so the generated body is byte-for-byte the inline output and the call
-/// is well-typed). Sites with different arg types get distinct helpers.
+/// Which kind of lookup a decomposition helper serves.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum HelperKind {
     Rangecheck,
     Spread,
 }
 
+/// Identifies a decomposition-helper function: its kind, the lookup width, and the exact argument
+/// types at the call sites (so the generated body matches the per-site output and the call is
+/// well-typed). Sites with different arg types — or different conditionality — get distinct helpers.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct HelperKey {
     kind: HelperKind,
@@ -59,15 +58,11 @@ fn flag_is_const_one(consts: &HLSSAConstantsSnapshot, flag: ValueId) -> bool {
 /// in the module instead of at each lookup. R1CS generation symbolically re-executes each call, so
 /// constraint counts are unchanged; only the bytecode/WASM code size shrinks. Single same-width
 /// (direct) lookups and 1-bit algebraic rangechecks are left inline.
-pub struct LookupSpilling {
-    rule: LowerLookupSpillingOps,
-}
+pub struct LookupSpilling {}
 
 impl LookupSpilling {
     pub fn new() -> Self {
-        Self {
-            rule: LowerLookupSpillingOps::new(),
-        }
+        Self {}
     }
 
     /// The helper key for a lookup instruction, or `None` when it needs no helper (direct
@@ -81,13 +76,17 @@ impl LookupSpilling {
     ) -> Option<HelperKey> {
         match instr {
             OpCode::Lookup {
-                target: LookupTarget::Rangecheck(bits),
+                target: target @ (LookupTarget::Rangecheck(_) | LookupTarget::DynRangecheck(_)),
                 args,
                 flag,
             } => {
-                let width = *bits;
+                // Dynamic-radix digit checks are radix-256, i.e. 8-bit rangechecks.
+                let width = match target {
+                    LookupTarget::Rangecheck(bits) => *bits,
+                    _ => 8,
+                };
                 if width == 1 {
-                    return None;
+                    return None; // 1-bit rangechecks are lowered inline (algebraic), no helper.
                 }
                 let uncond = flag_is_const_one(consts, *flag);
                 let plan = sizing.decompose_rangecheck(width, !uncond);
@@ -97,25 +96,6 @@ impl LookupSpilling {
                 Some(HelperKey {
                     kind: HelperKind::Rangecheck,
                     width,
-                    value_type: types.get_value_type(args[0]).clone(),
-                    spread_type: None,
-                    flag_type: types.get_value_type(*flag).clone(),
-                    flag_is_const_one: uncond,
-                })
-            }
-            OpCode::Lookup {
-                target: LookupTarget::DynRangecheck(_),
-                args,
-                flag,
-            } => {
-                let uncond = flag_is_const_one(consts, *flag);
-                let plan = sizing.decompose_rangecheck(8, !uncond);
-                if is_direct_passthrough(&plan, 8, TableKind::Range) {
-                    return None;
-                }
-                Some(HelperKey {
-                    kind: HelperKind::Rangecheck,
-                    width: 8,
                     value_type: types.get_value_type(args[0]).clone(),
                     spread_type: None,
                     flag_type: types.get_value_type(*flag).clone(),
@@ -158,7 +138,6 @@ impl LookupSpilling {
             HelperKind::Rangecheck => format!("__rangecheck_spill_{}_{index}", key.width),
             HelperKind::Spread => format!("__spread_spill_{}_{index}", key.width),
         };
-        let rule = &self.rule;
         let (id, ()) = sb.add_function(name, |fb| {
             let entry = fb.function().get_entry_id();
             let mut e = fb.block(entry);
@@ -173,7 +152,7 @@ impl LookupSpilling {
                         e.add_parameter(key.flag_type.clone())
                     };
                     let is_witness = key.value_type.is_witness_of();
-                    rule.spill_rangecheck_inner(
+                    self.spill_rangecheck_inner(
                         &mut e,
                         sizing,
                         value,
@@ -193,7 +172,7 @@ impl LookupSpilling {
                         let flag = e.add_parameter(key.flag_type.clone());
                         e.ensure_field(flag, &key.flag_type)
                     };
-                    rule.spill_spread_inner(
+                    self.spill_spread_inner(
                         &mut e,
                         sizing,
                         spread_key,
@@ -228,8 +207,7 @@ impl LookupSpilling {
                 flag,
             } if *bits == 1 => {
                 let is_witness = types.get_value_type(args[0]).is_witness_of();
-                self.rule
-                    .spill_rangecheck_inner(e, sizing, args[0], 1, *flag, is_witness);
+                self.spill_rangecheck_inner(e, sizing, args[0], 1, *flag, is_witness);
                 true
             }
             OpCode::Lookup {
@@ -343,89 +321,15 @@ impl Pass for LookupSpilling {
     }
 }
 
-/// Lowers rangecheck and spread lookups into chunked lookups against the table sizes chosen by the
-/// [`LookupSizing`] analysis. A `w`-bit value is split into chunks; a full chunk of exactly the
-/// table width is one lookup, while a residual chunk narrower than the table is bounded with the
-/// "2-larger" trick (two lookups). Rangechecks may be served by a spread table's key column when
-/// the optimizer found that cheaper.
-pub struct LowerLookupSpillingOps {}
-
-impl InstructionLoweringRule for LowerLookupSpillingOps {
-    fn lower_instruction(
-        &self,
-        b: &mut HLBlockEmitter<'_>,
-        context: &LoweringContext<'_>,
-        instruction: &OpCode,
-    ) -> bool {
-        let sizing = context
-            .lookup_sizing()
-            .expect("lookup_spilling requires the LookupSizing analysis");
-        match instruction {
-            OpCode::Lookup {
-                target: LookupTarget::Rangecheck(bits),
-                args,
-                flag,
-            } => {
-                assert_eq!(args.len(), 1, "Rangecheck lookup must have exactly one key");
-                self.spill_rangecheck(b, context.types(), sizing, args[0], *bits as usize, *flag)
-            }
-            OpCode::Lookup {
-                target: LookupTarget::DynRangecheck(_),
-                args,
-                flag,
-            } => {
-                // Dynamic-radix digit checks currently only support radix 256 (8-bit digits;
-                // asserted in the cost model and R1CS gen), so treat them as static 8-bit
-                // rangechecks and route them through the chosen tables.
-                assert_eq!(
-                    args.len(),
-                    1,
-                    "DynRangecheck lookup must have exactly one key"
-                );
-                self.spill_rangecheck(b, context.types(), sizing, args[0], 8, *flag)
-            }
-            OpCode::Lookup {
-                target: LookupTarget::Spread(bits),
-                args,
-                flag,
-            } => {
-                assert_eq!(
-                    args.len(),
-                    2,
-                    "Spread lookup must have exactly one key and one result"
-                );
-                self.spill_spread(b, context.types(), sizing, args[0], args[1], *flag, *bits)
-            }
-            _ => false,
-        }
-    }
-}
-
-impl LowerLookupSpillingOps {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    /// Rangecheck `value in [0, 2^bits)`. Returns `false` (pass through unchanged) when the value
-    /// is served directly by a single same-width rangecheck table, otherwise emits the chunked
-    /// lookups and returns `true`.
-    fn spill_rangecheck(
-        &self,
-        b: &mut HLBlockEmitter<'_>,
-        types: &FunctionTypeInfo,
-        sizing: &LookupSizing,
-        value: ValueId,
-        bits: usize,
-        flag: ValueId,
-    ) -> bool {
-        let is_witness = types.get_value_type(value).is_witness_of();
-        self.spill_rangecheck_inner(b, sizing, value, bits, flag, is_witness)
-    }
-
+/// Chunk-emission helpers shared by [`LookupSpilling::build_helper`] (and the inline 1-bit case in
+/// [`LookupSpilling::rewrite_lookup`]). A `w`-bit value is split into chunks against the table sizes
+/// chosen by [`LookupSizing`]: a full chunk of exactly the table width is one lookup, a residual
+/// chunk narrower than the table is bounded with the "2-larger" trick (two lookups), and a width-1
+/// chunk is bounded algebraically. Rangechecks may be served by a spread table's key column.
+impl LookupSpilling {
     /// Decompose `value in [0, 2^bits)` into chunked lookups. `is_witness` says whether the
     /// surrounding values are `WitnessOf`-wrapped (so chunk hints must be re-wrapped); the value is
-    /// assumed castable to an unsigned integer. Returns `false` (leave the lookup untouched) when a
-    /// single same-width table serves it directly.
+    /// assumed castable to an unsigned integer.
     fn spill_rangecheck_inner(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -434,12 +338,10 @@ impl LowerLookupSpillingOps {
         bits: usize,
         flag: ValueId,
         is_witness: bool,
-    ) -> bool {
-        assert!(bits >= 1, "rangecheck width must be at least 1 bit");
-
+    ) {
         if bits == 1 {
             self.spill_one_bit_rangecheck(b, value, flag);
-            return true;
+            return;
         }
 
         assert!(
@@ -452,9 +354,6 @@ impl LowerLookupSpillingOps {
         // use width-1 chunks the cost model also priced for free.
         let gated = flag != b.field_const(Field::ONE);
         let plan = sizing.decompose_rangecheck(bits as u8, gated);
-        if is_direct_passthrough(&plan, bits as u8, TableKind::Range) {
-            return false;
-        }
 
         let pure = if is_witness { b.value_of(value) } else { value };
         // Chunk extraction works on an unsigned integer; widen to the smallest backend-supported
@@ -516,7 +415,6 @@ impl LowerLookupSpillingOps {
         let low_chunk = plan[0];
         let low = b.sub(value, rest);
         self.emit_rangecheck_chunk(b, low_chunk, low, flag, is_witness);
-        true
     }
 
     /// Extract the upper `n_chunks - 1` full `s`-bit rangecheck chunks of `pure_u` with a counted
@@ -640,38 +538,8 @@ impl LowerLookupSpillingOps {
         }
     }
 
-    /// Spread `key in [0, 2^bits)` to `expected_spread`. Returns `false` (pass through unchanged)
-    /// when served directly by a single same-width spread table, otherwise emits the chunked
-    /// lookups and returns `true`.
-    fn spill_spread(
-        &self,
-        b: &mut HLBlockEmitter<'_>,
-        types: &FunctionTypeInfo,
-        sizing: &LookupSizing,
-        key: ValueId,
-        expected_spread: ValueId,
-        flag: ValueId,
-        bits: u8,
-    ) -> bool {
-        let key_ty = types.get_value_type(key);
-        let key_is_witness = key_ty.is_witness_of();
-        let key_inner_is_field = key_ty.strip_witness().is_field();
-        let flag_field = b.ensure_field(flag, types.get_value_type(flag));
-        self.spill_spread_inner(
-            b,
-            sizing,
-            key,
-            expected_spread,
-            flag_field,
-            bits,
-            key_is_witness,
-            key_inner_is_field,
-        )
-    }
-
     /// Decompose a spread of `key in [0, 2^bits)` to `expected_spread` into chunked lookups.
-    /// `flag_field` must already be a `Field`. Returns `false` (leave untouched) when a single
-    /// same-width spread table serves it directly.
+    /// `flag_field` must already be a `Field`.
     #[allow(clippy::too_many_arguments)]
     fn spill_spread_inner(
         &self,
@@ -683,7 +551,7 @@ impl LowerLookupSpillingOps {
         bits: u8,
         key_is_witness: bool,
         key_inner_is_field: bool,
-    ) -> bool {
+    ) {
         assert!(
             bits as usize <= MAX_SUPPORTED_UNSIGNED_BITS,
             "spread spilling supports widths up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got {bits}"
@@ -693,9 +561,6 @@ impl LowerLookupSpillingOps {
         // bit-bounds for free, so its plan may use the free width-1 chunks (see the rangecheck path).
         let gated = flag_field != b.field_const(Field::ONE);
         let plan = sizing.decompose_spread(bits, gated);
-        if is_direct_passthrough(&plan, bits, TableKind::Spread) {
-            return false;
-        }
 
         let zero = b.field_const(Field::ZERO);
 
@@ -713,14 +578,14 @@ impl LowerLookupSpillingOps {
                 self.spill_one_bit_rangecheck(b, key_field, flag_field);
                 let diff = b.sub(expected_spread, key_field);
                 b.constrain(flag_field, diff, zero);
-                return true;
+                return;
             }
             b.lookup_spread(chunk.table_size, key_field, expected_spread, flag_field);
             if chunk.partial {
                 let gap = self.partial_gap(b, chunk, key_field);
                 self.emit_spread_partial_gap(b, sizing, chunk, gap, flag_field, key_is_witness);
             }
-            return true;
+            return;
         }
 
         let mut pure_key = if key_is_witness { b.value_of(key) } else { key };
@@ -811,7 +676,6 @@ impl LowerLookupSpillingOps {
                 reconstructed_spread = b.add(reconstructed_spread, shifted_spread);
             }
         }
-        true
     }
 
     /// `(2^width - 1) - key`, the complement looked up by the "2-larger" trick to bound `key` to
