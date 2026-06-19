@@ -116,9 +116,11 @@ impl Mem2Reg {
             for mut instruction in instructions {
                 match instruction {
                     OpCode::Alloc {
-                        result: _,
-                        elem_type: _,
-                    } => {}
+                        result: lhs,
+                        value: rhs,
+                    } => {
+                        values.insert(lhs, rhs);
+                    }
                     OpCode::Store {
                         ptr: lhs,
                         value: rhs,
@@ -235,9 +237,10 @@ impl Mem2Reg {
                     }
                     OpCode::Alloc {
                         result: lhs,
-                        elem_type: _,
+                        value: _,
                     } => {
                         defs.insert(*lhs, *block_id);
+                        writes.entry(*lhs).or_default().insert(*block_id);
                     }
                     _ => {}
                 }

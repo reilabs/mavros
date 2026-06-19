@@ -257,11 +257,13 @@ impl Types {
                     .insert(*result, lhs_type.get_arithmetic_result_type(rhs_type));
                 Ok(())
             }
-            OpCode::Alloc {
-                result,
-                elem_type: typ,
-            } => {
-                function_info.values.insert(*result, typ.clone().ref_of());
+            OpCode::Alloc { result, value } => {
+                let value_type = function_info.values.get(value).ok_or_else(|| {
+                    format!("Alloc value {:?} not found in type assignments", value)
+                })?;
+                function_info
+                    .values
+                    .insert(*result, value_type.clone().ref_of());
                 Ok(())
             }
             OpCode::Store { ptr: _, value: _ } => Ok(()),

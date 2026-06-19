@@ -1347,10 +1347,10 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
-    fn alloc(_elem_type: &Type, _ctx: &mut CostAnalysis) -> Self {
+    fn alloc(value: &Self, _ctx: &mut CostAnalysis) -> Self {
         Self {
-            unspecialized: Value::Pointer(Rc::new(RefCell::new(Value::Unknown(ScalarKind::Field)))),
-            specialized: Value::Pointer(Rc::new(RefCell::new(Value::Unknown(ScalarKind::Field)))),
+            unspecialized: Value::Pointer(Rc::new(RefCell::new(value.unspecialized.clone()))),
+            specialized: Value::Pointer(Rc::new(RefCell::new(value.specialized.clone()))),
         }
     }
 
