@@ -510,6 +510,14 @@ mod tests {
         ark_bn254::Fr::from(n)
     }
 
+    /// Pre-#255 `alloc(Field)`: a `Ref<Field>` cell seeded with an inert default field value.
+    /// The constant is interned (never a block instruction), so the seed never shows up in the
+    /// opcode `Counts` these tests assert on.
+    fn falloc(e: &mut impl HLEmitter) -> ValueId {
+        let init = e.field_const(fr(0));
+        e.alloc(init)
+    }
+
     fn arr2(elem: Type) -> Type {
         elem.array_of(2)
     }
@@ -811,8 +819,8 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let ra = e.alloc(Type::field());
-                let rb = e.alloc(Type::field());
+                let ra = falloc(&mut e);
+                let rb = falloc(&mut e);
                 let c1 = e.field_const(fr(3));
                 let c2 = e.field_const(fr(4));
                 e.store(ra, c1);
@@ -856,11 +864,10 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let p = e.alloc(arr2(Type::field())); // Ref<Array<Field,2>>
                 let x = e.field_const(fr(5));
                 let y = e.field_const(fr(6));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
-                e.store(p, arr);
+                let p = e.alloc(arr); // Ref<Array<Field,2>>, seeded with arr (store folded into the alloc)
                 let loaded = e.load(p); // Array<Field,2>
                 let i0 = e.u_const(32, 0);
                 let got = e.array_get(loaded, i0);
@@ -921,7 +928,7 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let r = e.alloc(Type::field());
+                let r = falloc(&mut e);
                 let c = e.field_const(fr(5));
                 e.store(r, c);
                 let arr = e.mk_repeated(r, SequenceTargetType::Array(3), 3, Type::field().ref_of()); // [r;3]

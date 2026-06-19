@@ -446,6 +446,16 @@ impl Mem2Reg {
                             available.insert(alloc);
                         }
                     }
+                    OpCode::Alloc { result, .. } => {
+                        // An `Alloc` carries its initial value, so the cell is defined (available)
+                        // at the allocation site — mirroring the write recorded for phi placement.
+                        // Without this, a promotable alloc whose only initializing write is the
+                        // folded init value (no separate `Store`) would be wrongly flagged as a
+                        // read-before-write.
+                        if promotable.contains(result) {
+                            available.insert(*result);
+                        }
+                    }
                     OpCode::Load { ptr, .. } => {
                         if let Some(alloc) = Self::resolved_alloc(points_to, fid, *ptr, promotable)
                         {
@@ -516,7 +526,11 @@ impl Mem2Reg {
         for (_, block) in function.get_blocks() {
             for instruction in block.get_instructions() {
                 if let OpCode::Alloc { result, .. } = instruction {
-                    if type_info.get_value_type(*result).get_pointed().contains_ptrs() {
+                    if type_info
+                        .get_value_type(*result)
+                        .get_pointed()
+                        .contains_ptrs()
+                    {
                         continue; // ref-bearing pointee — out of scope for scalar promotion
                     }
                     let object = AbstractObject::Alloc(fid, *result, Context::empty());
@@ -587,11 +601,8 @@ mod tests {
     use crate::compiler::{
         analysis::types::Types,
         ssa::hlssa::{Type, builder::HLEmitter},
+        util::test::{falloc, fr},
     };
-
-    fn fr(n: u64) -> ark_bn254::Fr {
-        ark_bn254::Fr::from(n)
-    }
 
     /// Build the analyses on the pre-pass IR and run mem2reg, mirroring the pass-manager wiring.
     fn run_pass(ssa: &mut HLSSA) {
@@ -630,8 +641,8 @@ mod tests {
                 b.function.add_return_type(Type::field().ref_of());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let kept = e.alloc(Type::field());
-                let returned = e.alloc(Type::field());
+                let kept = falloc(&mut e);
+                let returned = falloc(&mut e);
                 let c = e.field_const(fr(1));
                 e.store(kept, c);
                 e.store(returned, c);
@@ -666,11 +677,11 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let other = e.alloc(Type::field());
+                let other = falloc(&mut e);
                 let c = e.field_const(fr(2));
                 e.store(other, c);
                 e.call(reader, vec![other], 0);
-                let kept = e.alloc(Type::field());
+                let kept = falloc(&mut e);
                 e.store(kept, c);
                 let v = e.load(kept);
                 e.terminate_return(vec![v]);
@@ -698,7 +709,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
                 let p = e.add_parameter(Type::field().ref_of());
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
                 let c = e.field_const(fr(5));
                 e.store(a, c);
                 let _ = e.load(p);
@@ -729,8 +740,8 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
                 let cond = e.add_parameter(Type::bool());
-                let ra = e.alloc(Type::field());
-                let rb = e.alloc(Type::field());
+                let ra = falloc(&mut e);
+                let rb = falloc(&mut e);
                 let c = e.field_const(fr(5));
                 e.store(ra, c);
                 e.store(rb, c);
@@ -762,7 +773,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
                 let cond = e.add_parameter(Type::bool());
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
                 let c0 = e.field_const(fr(7));
                 let c1 = e.field_const(fr(9));
                 e.store(a, c0);
@@ -795,10 +806,10 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let pp = e.alloc(Type::field().ref_of()); // Ref<Ref<Field>>, ref pointee
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
+                let pp = e.alloc(a); // Ref<Ref<Field>>, ref pointee, seeded with `a`
                 e.store(pp, a); // *pp = a — `a`'s ref is consumed as a value
-                let kept = e.alloc(Type::field());
+                let kept = falloc(&mut e);
                 let c = e.field_const(fr(3));
                 e.store(kept, c);
                 let v = e.load(kept);
@@ -810,12 +821,12 @@ mod tests {
         assert_eq!(op_counts(&ssa, main_id), (2, 1, 0));
     }
 
-    /// A promotion-eligible local that is *read before it is written* has no value to thread, so
-    /// `remove_ptrs` would panic. `uninitialized_allocs` must prune it, leaving the alloc and its
-    /// load as ordinary memory traffic. (The frontend forbids reading an uninitialized local; this
-    /// asserts the pass degrades gracefully rather than ICE-ing — it would panic without the guard.)
+    /// Post-#255 an `Alloc` carries its initial value, so a local whose only initializing write is
+    /// that folded init value (no separate `Store`) is *not* a read-before-write: it promotes to
+    /// the init value, threading it to the load. Exercises the alloc-seeds-the-value path with no
+    /// store. (`uninitialized_allocs` therefore never fires here; the guard remains defensive.)
     #[test]
-    fn uninitialized_read_is_not_promoted() {
+    fn alloc_init_value_promotes_without_store() {
         let mut ssa = HLSSA::with_main("main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
@@ -824,14 +835,14 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let a = e.alloc(Type::field());
-                let v = e.load(a); // read with no prior store — uninitialized
+                let a = falloc(&mut e); // cell seeded with its init value, never stored to
+                let v = e.load(a); // reads the alloc's initial value
                 e.terminate_return(vec![v]);
             });
         }
         run_pass(&mut ssa);
-        // `a` is not promoted: its alloc and load survive (and no panic).
-        assert_eq!(op_counts(&ssa, main_id), (1, 0, 1));
+        // `a` promotes to its init value: alloc and load both removed.
+        assert_eq!(op_counts(&ssa, main_id), (0, 0, 0));
     }
 
     /// An aggregate (array) pointee is in scope: `contains_ptrs(Array<Field, N>)` is false, so a
@@ -852,8 +863,7 @@ mod tests {
                 let cond = e.add_parameter(Type::bool());
                 let arr0 = e.add_parameter(arr_ty.clone());
                 let arr1 = e.add_parameter(arr_ty.clone());
-                let a = e.alloc(arr_ty.clone());
-                e.store(a, arr0);
+                let a = e.alloc(arr0); // seed the cell with arr0 (the unconditional first store folded into the alloc)
                 e.build_if_else(
                     cond,
                     vec![],

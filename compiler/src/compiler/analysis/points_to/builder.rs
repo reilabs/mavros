@@ -338,12 +338,26 @@ impl FnBuilder<'_> {
 
     fn build_instr(&mut self, instr: &OpCode) {
         match instr {
-            // --- Allocation: the one base rule. ---
-            OpCode::Alloc { result, .. } => {
+            // --- Allocation: a base fact plus the folded initial store. ---
+            OpCode::Alloc { result, value } => {
                 self.cs.add_base(
                     NodeKey::value(*result),
                     AbstractObject::Alloc(self.fid, *result, self.ctx.clone()),
                 );
+                // An `Alloc` folds in an initializing store of `value` into the new cell. Emit
+                // exactly the constraint a `store(result, value)` immediately after the alloc used
+                // to carry, so the cell is seeded with the init value's objects — keeping
+                // load-through-cell and the escape closure (`compute_escaped` walks cell contents)
+                // sound. A scalar init has an empty points-to set, so this is a no-op for the
+                // common non-ref cell.
+                let pointee = self.pointee_of(*result, "Alloc");
+                for path in ref_levels(&pointee) {
+                    self.cs.add_store(
+                        NodeKey::value(*result),
+                        path.clone(),
+                        NodeKey::value(*value).extend(&path),
+                    );
+                }
             }
 
             // --- Copy-shaped value flows. ---
@@ -617,6 +631,15 @@ impl FnBuilder<'_> {
             }
             for result in results {
                 let ty = self.value_type(*result).clone();
+                // Documents Noir's unconstrained-boundary invariant: an unconstrained call cannot
+                // return a reference, so its results carry no ref-levels. `seed_external` stays
+                // unconditional so the model is sound in release even if the invariant is ever
+                // violated.
+                debug_assert!(
+                    !unconstrained || ref_levels(&ty).is_empty(),
+                    "ICE: Unconstrained call {g:?} has a reference-bearing result, violating the \
+                     Noir invariant that unconstrained calls cannot return references",
+                );
                 self.seed_external(*result, &ty);
             }
             return;

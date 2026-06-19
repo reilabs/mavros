@@ -82,6 +82,17 @@
 //!   *contents*. A future whole-program global-constants pre-pass (`InitGlobal` → `Global` cells
 //!   seeded into every `ReadGlobal`) would tighten loads through global-derived refs. As Globals
 //!   are init-time constants and program-wide escaped this rarely unblocks a split.
+//! - **Unconstrained-Boundary Refs:** Noir guarantees an unconstrained call cannot return a
+//!   reference and only accepts read-only references as inputs. We use the no-ref-return half only
+//!   as documentation — a `debug_assert` in [`builder`]'s `instantiate_call` while `seed_external`
+//!   stays unconditional, so the model is sound even if the invariant is ever violated. We do NOT
+//!   exploit the read-only-input half to stop escaping ref arguments at an unconstrained call:
+//!   doing so would let objects reached only through such an argument stay non-escaped (a narrow
+//!   precision win, since mem2reg already declines an alloc whose ref is a call argument), but the
+//!   read-only property is unenforceable here (HLSSA `Ref<T>` carries no mutability — see
+//!   `type_converter.rs`) and lives entirely in upstream `noirc_frontend`, so escaping the argument
+//!   keeps the analysis sound by construction rather than load-bearing on an external,
+//!   silently-relaxable invariant.
 //! - **Context Depth (1-CFA):** The context-sensitive layer is currently `k = 1` as the splitting
 //!   decision is context-independent and uses the join over the contexts. This means that deeper
 //!   `k` would only sharpen the per-context `*_in` and `may_alias` queries, while risking call
@@ -99,13 +110,12 @@
 //!   a runtime-sized container, so this is effectively forced rather than a tunable trade-off.
 //! - **All-or-Nothing Group Collapse:** A single collapse trigger (one dynamic index, a
 //!   `MkRepeated` of a non-scalar element, a slice op) collapses an array's *entire* flow-group to
-//!   one `AllElems` cell,
-//!   rather than keeping its constant `Index(k)` cells alongside an `AllElems` overflow (the
-//!   textbook field-sensitive model: a dynamic write weak-updates `AllElems`; a constant read sees
-//!   `Index(k) ∪ AllElems`). The hybrid would only sharpen `may_alias` on groups mixing constant
-//!   and dynamic accesses, and such a group is never `splittable_cells` (splitting needs *every*
-//!   access constant), so the planned SROA/mem2reg clients gain nothing — hence the simpler
-//!   disjoint-roles invariant (`Split` xor `Collapsed`).
+//!   one `AllElems` cell, rather than keeping its constant `Index(k)` cells alongside an `AllElems`
+//!   overflow (the textbook field-sensitive model: a dynamic write weak-updates `AllElems`; a
+//!   constant read sees `Index(k) ∪ AllElems`). The hybrid would only sharpen `may_alias` on groups
+//!   mixing constant and dynamic accesses, and such a group is never `splittable_cells` (splitting
+//!   needs *every* access constant), so the planned SROA/mem2reg clients gain nothing — hence the
+//!   simpler disjoint-roles invariant (`Split` xor `Collapsed`).
 
 mod array_cells;
 mod builder;
@@ -364,8 +374,14 @@ impl PointsTo {
                         // The stored *value* is a non-pointer use.
                         visit(PointerUse::Consume, self.points_to(f, *value));
                     }
-                    // An Alloc defines a ref but uses none.
-                    OpCode::Alloc { .. } => {}
+                    // An Alloc defines a ref and consumes its initial value into the new cell —
+                    // exactly like a Store's stored value. Without this, a ref handle used *only*
+                    // as an alloc's init value (e.g. `let p = &mut inner;` lowering to
+                    // `p = alloc(inner_ref)`) would look unused and be wrongly promoted, leaving a
+                    // dangling reference.
+                    OpCode::Alloc { value, .. } => {
+                        visit(PointerUse::Consume, self.points_to(f, *value));
+                    }
                     // Every input of any other opcode is a non-pointer use.
                     other => {
                         for v in other.get_inputs() {
@@ -512,18 +528,17 @@ fn empty_object_set() -> &'static HashSet<AbstractObject> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::analysis::{flow_analysis::FlowAnalysis, types::Types};
-    use crate::compiler::ssa::hlssa::{
-        Blob, Constant, SequenceTargetType, Type,
-        builder::{HLEmitter, HLSSABuilder},
+    use crate::compiler::{
+        analysis::{flow_analysis::FlowAnalysis, types::Types},
+        ssa::hlssa::{
+            Blob, Constant, SequenceTargetType, Type,
+            builder::{HLEmitter, HLSSABuilder},
+        },
+        util::test::{falloc, fr},
     };
 
     fn idx_set(ks: &[usize]) -> HashSet<usize> {
         ks.iter().copied().collect()
-    }
-
-    fn fr(n: u64) -> ark_bn254::Fr {
-        ark_bn254::Fr::from(n)
     }
 
     fn solve(ssa: &HLSSA) -> PointsTo {
@@ -550,8 +565,8 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
                 let cond = e.add_parameter(Type::bool());
-                let ra = e.alloc(Type::field());
-                let rb = e.alloc(Type::field());
+                let ra = falloc(&mut e);
+                let rb = falloc(&mut e);
                 let c = e.field_const(fr(5));
                 e.store(ra, c);
                 e.store(rb, c);
@@ -601,8 +616,8 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let ra = e.alloc(Type::field());
-                let rb = e.alloc(Type::field());
+                let ra = falloc(&mut e);
+                let rb = falloc(&mut e);
                 let c = e.field_const(fr(7));
                 e.store(ra, c);
                 let r = e.load(rb);
@@ -630,8 +645,8 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let p = e.alloc(Type::field().ref_of()); // p: Ref<Ref<Field>>
-                let q = e.alloc(Type::field()); // q: Ref<Field>
+                let q = falloc(&mut e); // q: Ref<Field>
+                let p = e.alloc(q); // p: Ref<Ref<Field>>, init-seeded with q; the explicit store below drives the same edge, so q's object reaches *p either way
                 e.store(p, q); // *p = q
                 let r = e.load(p); // r = *p  (a Ref<Field>)
                 let v = e.load(r);
@@ -661,8 +676,8 @@ mod tests {
                 b.function.add_return_type(Type::field().ref_of());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let kept = e.alloc(Type::field());
-                let returned = e.alloc(Type::field());
+                let kept = falloc(&mut e);
+                let returned = falloc(&mut e);
                 let c = e.field_const(fr(1));
                 e.store(kept, c);
                 e.store(returned, c);
@@ -712,7 +727,7 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let q = e.alloc(Type::field());
+                let q = falloc(&mut e);
                 let c = e.field_const(fr(3));
                 e.store(q, c);
                 e.call(reader, vec![q], 0);
@@ -747,7 +762,7 @@ mod tests {
                 b.function.add_return_type(Type::field().ref_of());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
                 e.terminate_return(vec![a]);
             });
             // main(): z = make_ref(); return *z
@@ -798,7 +813,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let q = e.alloc(Type::field());
+                let q = falloc(&mut e);
                 let c = e.field_const(fr(0));
                 e.store(q, c);
                 e.call(stash, vec![q], 0);
@@ -840,7 +855,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let q = e.alloc(Type::field());
+                let q = falloc(&mut e);
                 let z = e.call(rec, vec![q], 1)[0];
                 e.terminate_return(vec![]);
                 captured = Some((q, z));
@@ -871,7 +886,7 @@ mod tests {
                 b.function.add_return_type(Type::field().ref_of());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
                 e.terminate_return(vec![a]);
             });
             // main(): z1 = make(); z2 = make(); let _ = *z1; let _ = *z2; return *z1
@@ -923,8 +938,8 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let ra = e.alloc(Type::field());
-                let rb = e.alloc(Type::field());
+                let ra = falloc(&mut e);
+                let rb = falloc(&mut e);
                 let arr = e.mk_seq(
                     vec![ra, rb],
                     SequenceTargetType::Array(2),
@@ -1004,8 +1019,8 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
                 let n = e.add_parameter(Type::u(32)); // dynamic index
-                let ra = e.alloc(Type::field());
-                let rb = e.alloc(Type::field());
+                let ra = falloc(&mut e);
+                let rb = falloc(&mut e);
                 let arr = e.mk_seq(
                     vec![ra, rb],
                     SequenceTargetType::Array(2),
@@ -1043,10 +1058,10 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
                 let cond = e.add_parameter(Type::bool());
-                let a = e.alloc(Type::field());
-                let bb = e.alloc(Type::field());
-                let c = e.alloc(Type::field());
-                let d = e.alloc(Type::field());
+                let a = falloc(&mut e);
+                let bb = falloc(&mut e);
+                let c = falloc(&mut e);
+                let d = falloc(&mut e);
                 let arr_t = e.mk_seq(
                     vec![a, bb],
                     SequenceTargetType::Array(2),
@@ -1097,14 +1112,14 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let ra = e.alloc(Type::field());
-                let rb = e.alloc(Type::field());
+                let ra = falloc(&mut e);
+                let rb = falloc(&mut e);
                 let arr = e.mk_seq(
                     vec![ra, rb],
                     SequenceTargetType::Array(2),
                     Type::field().ref_of(),
                 );
-                let p = e.alloc(Type::field().ref_of().array_of(2)); // p: Ref<Array<Ref<Field>,2>>
+                let p = e.alloc(arr); // p: Ref<Array<Ref<Field>,2>>, init-seeded with arr (both the alloc-init and the store below put arr into object-land ⇒ collapse)
                 e.store(p, arr); // arr escapes into object-land ⇒ collapse
                 e.terminate_return(vec![]);
                 captured = Some(arr);
@@ -1161,7 +1176,7 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let r = e.alloc(Type::field());
+                let r = falloc(&mut e);
                 let c = e.field_const(fr(3));
                 e.store(r, c);
                 let arr = e.mk_repeated(r, SequenceTargetType::Array(4), 4, Type::field().ref_of());
@@ -1262,7 +1277,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
                 let r = e.read_global(0, Type::field().ref_of());
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
                 let v = e.load(a);
                 e.terminate_return(vec![v]);
                 captured = Some((r, a));
@@ -1292,7 +1307,7 @@ mod tests {
                 let mut e = b.block(entry);
                 let g = e.read_global(0, Type::field().ref_of().ref_of());
                 let inner = e.load(g); // Ref<Field>, points to External (load through opaque)
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
                 let v = e.load(inner);
                 e.terminate_return(vec![v]);
                 captured = Some((inner, a));
@@ -1320,7 +1335,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
                 let g = e.read_global(0, Type::field().ref_of().ref_of());
-                let a = e.alloc(Type::field()); // a: Ref<Field>
+                let a = falloc(&mut e); // a: Ref<Field>
                 e.store(g, a); // *g = a — published through opaque memory
                 e.terminate_return(vec![]);
                 captured = Some(a);
@@ -1341,6 +1356,11 @@ mod tests {
     /// A callee that allocates and writes a ref *through* a ref parameter: the caller's load of
     /// that param's pointee resolves to the callee's actual allocation — not `External`. The
     /// headline precise-arg-out win over the old `External`-pollution model.
+    ///
+    /// `pp`'s cell carries two objects: the alloc's init seed and the object the callee writes
+    /// through `*pp` (the analysis is weak-update, so the seed is not killed). The win is that
+    /// *both* are concrete, non-escaping allocations — the callee's write never decays to the
+    /// opaque `External`.
     #[test]
     fn callee_write_through_param_resolves_precisely() {
         let mut ssa = HLSSA::with_main("main".to_string());
@@ -1354,7 +1374,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
                 let pp = e.add_parameter(Type::field().ref_of().ref_of());
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
                 e.store(pp, a);
                 e.terminate_return(vec![]);
             });
@@ -1363,7 +1383,8 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let pp = e.alloc(Type::field().ref_of());
+                let seed = falloc(&mut e); // a Ref<Field> init-seeded into pp's cell; the weak-update analysis keeps it alongside what writer stores through *pp
+                let pp = e.alloc(seed);
                 e.call(writer, vec![pp], 0);
                 let r = e.load(pp);
                 let v = e.load(r);
@@ -1373,14 +1394,25 @@ mod tests {
         }
         let r = captured.unwrap();
         let pt = solve(&ssa);
+        let targets = pt.points_to(main_id, r);
         assert_eq!(
-            pt.points_to(main_id, r).len(),
-            1,
-            "arg-pointee resolves to the callee's allocation, not the opaque External"
+            targets.len(),
+            2,
+            "arg-pointee sees the alloc init seed ∪ the callee's arg-out write"
         );
         assert!(
-            pt.is_singleton_reached(main_id, r),
-            "and that object is concrete and non-escaping (precise, not External-poisoned)"
+            !targets.contains(&AbstractObject::External),
+            "the callee's write resolves precisely, not to the opaque External"
+        );
+        assert!(
+            targets
+                .iter()
+                .all(|o| !o.is_inherently_escaped() && !pt.escapes(o)),
+            "every target is a concrete, non-escaping allocation"
+        );
+        assert!(
+            !pt.is_singleton_reached(main_id, r),
+            "two objects reach r (the seed and the arg-out write), so it is not singleton-reached"
         );
     }
 
@@ -1409,8 +1441,8 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let dst = e.alloc(Type::field().ref_of());
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
+                let dst = e.alloc(a); // init-seeded with a; the callee also copies a through *dst, so *dst resolves to a's object either way
                 e.call(copy, vec![dst, a], 0);
                 let r = e.load(dst);
                 let v = e.load(r);
@@ -1425,5 +1457,70 @@ mod tests {
             "the param copied through dst resolves to the caller's src object"
         );
         assert_eq!(pt.points_to(main_id, r), pt.points_to(main_id, a));
+    }
+
+    // FOLDED ALLOC INIT VALUE (POST-#255)
+    // --------------------------------------------------------------------------------------------
+
+    /// The builder seeds an alloc's new cell with the init value's points-to set (post-#255 the
+    /// initializing store is folded into the `Alloc`). A load through the fresh cell, with _no_
+    /// explicit store, therefore resolves to the init value's object — the load-through-cell
+    /// precision the old "ignore the init value" builder lacked.
+    #[test]
+    fn alloc_seeds_cell_with_init_value() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut captured = None;
+        {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(main_id, |b| {
+                b.function.add_return_type(Type::field());
+                let entry = b.function.get_entry_id();
+                let mut e = b.block(entry);
+                let q = falloc(&mut e); // q: Ref<Field>
+                let p = e.alloc(q); // p: Ref<Ref<Field>>, init-seeded with q; no explicit store
+                let r = e.load(p); // r = *p (a Ref<Field>) — sees the init seed
+                let v = e.load(r);
+                e.terminate_return(vec![v]);
+                captured = Some((q, r));
+            });
+        }
+        let (q, r) = captured.unwrap();
+        let pt = solve(&ssa);
+        assert!(
+            pt.may_alias(main_id, q, r),
+            "the load through the freshly-alloc'd cell resolves to the init value's object"
+        );
+        assert_eq!(pt.points_to(main_id, q), pt.points_to(main_id, r));
+    }
+
+    /// Escape soundness through a folded init store: an object that reaches an escaping cell _only_
+    /// via an alloc's init value (no explicit store) still escapes. `q` flows into `p`'s cell as
+    /// the init seed, and `p` is published to a global, so `q` escapes through it.
+    #[test]
+    fn escape_through_alloc_init_value() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        ssa.set_global_types(vec![Type::field().ref_of().ref_of()]);
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut captured = None;
+        {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(main_id, |b| {
+                let entry = b.function.get_entry_id();
+                let mut e = b.block(entry);
+                let q = falloc(&mut e); // q: Ref<Field>
+                let p = e.alloc(q); // p: Ref<Ref<Field>>, init-seeded with q; no explicit store
+                e.init_global(0, p); // p escapes ⇒ q escapes through p's cell
+                e.terminate_return(vec![]);
+                captured = Some(q);
+            });
+        }
+        let q = captured.unwrap();
+        let pt = solve(&ssa);
+        let q_obj = pt.points_to(main_id, q).iter().next().unwrap().clone();
+        assert!(
+            pt.escapes(&q_obj),
+            "an object reaching an escaping cell only via an alloc's init value still escapes"
+        );
     }
 }

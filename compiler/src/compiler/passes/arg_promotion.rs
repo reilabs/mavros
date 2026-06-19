@@ -575,12 +575,10 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan) {
         let old_instrs = entry.take_instructions();
         let mut new_instrs = Vec::with_capacity(old_instrs.len() + cp.params.len() * 2);
         for pp in &cp.params {
+            // The alloc carries its initial value, so seed it directly from the by-value parameter
+            // with no follow-up store needed.
             new_instrs.push(OpCode::Alloc {
                 result: pp.alloc,
-                elem_type: pp.pointee.clone(),
-            });
-            new_instrs.push(OpCode::Store {
-                ptr: pp.alloc,
                 value: pp.new_param,
             });
         }
@@ -704,11 +702,8 @@ mod tests {
             SequenceTargetType,
             builder::{HLEmitter, HLSSABuilder},
         },
+        util::test::{falloc, fr},
     };
-
-    fn fr(n: u64) -> ark_bn254::Fr {
-        ark_bn254::Fr::from(n)
-    }
 
     /// Build the analyses on the current IR and run only ArgPromotion (mirrors the pass-manager).
     fn run_argpromo(ssa: &mut HLSSA) {
@@ -787,7 +782,7 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
                 let c = e.field_const(fr(5));
                 e.store(a, c);
                 e.call(g, vec![a], 0);
@@ -842,24 +837,20 @@ mod tests {
                 }
             });
             // main(): a = alloc; *a = [1,2,3]; g(a); return
-            sb.modify_function(main_id, {
-                let arr_ty = arr_ty.clone();
-                move |b| {
-                    let entry = b.function.get_entry_id();
-                    let mut e = b.block(entry);
-                    let a = e.alloc(arr_ty.clone());
-                    let c1 = e.field_const(fr(1));
-                    let c2 = e.field_const(fr(2));
-                    let c3 = e.field_const(fr(3));
-                    let arr = e.mk_seq(
-                        vec![c1, c2, c3],
-                        SequenceTargetType::Array(3),
-                        Type::field(),
-                    );
-                    e.store(a, arr);
-                    e.call(g, vec![a], 0);
-                    e.terminate_return(vec![]);
-                }
+            sb.modify_function(main_id, |b| {
+                let entry = b.function.get_entry_id();
+                let mut e = b.block(entry);
+                let c1 = e.field_const(fr(1));
+                let c2 = e.field_const(fr(2));
+                let c3 = e.field_const(fr(3));
+                let arr = e.mk_seq(
+                    vec![c1, c2, c3],
+                    SequenceTargetType::Array(3),
+                    Type::field(),
+                );
+                let a = e.alloc(arr); // Ref<Array<Field,3>>, seeded with arr (store folded into the alloc)
+                e.call(g, vec![a], 0);
+                e.terminate_return(vec![]);
             });
         }
         run_argpromo(&mut ssa);
@@ -895,7 +886,7 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
                 let c = e.field_const(fr(5));
                 e.store(a, c);
                 let r = e.call(g, vec![a], 1)[0];
@@ -942,8 +933,8 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let a = e.alloc(Type::field());
-                let bb = e.alloc(Type::field());
+                let a = falloc(&mut e);
+                let bb = falloc(&mut e);
                 let c1 = e.field_const(fr(1));
                 let c2 = e.field_const(fr(2));
                 e.store(a, c1);
@@ -996,7 +987,7 @@ mod tests {
             sb.modify_function(h, |b| {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let c = e.alloc(Type::field());
+                let c = falloc(&mut e);
                 let nine = e.field_const(fr(9));
                 e.store(c, nine);
                 e.call(g, vec![c], 0);
@@ -1006,7 +997,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
                 let five = e.field_const(fr(5));
                 e.store(a, five);
                 e.call(g, vec![a], 0);
@@ -1040,7 +1031,7 @@ mod tests {
                 let mut e = b.block(entry);
                 let p = e.add_parameter(Type::field().ref_of());
                 let v = e.load(p);
-                let q = e.alloc(Type::field());
+                let q = falloc(&mut e);
                 e.store(q, v);
                 e.call(g, vec![q], 0);
                 let r = e.load(q);
@@ -1051,7 +1042,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
                 let z = e.field_const(fr(0));
                 e.store(a, z);
                 e.call(g, vec![a], 0);
@@ -1095,7 +1086,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
                 let c = e.field_const(fr(5));
                 e.store(a, c);
                 e.call(g, vec![a], 0);
@@ -1137,7 +1128,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
                 let c = e.field_const(fr(5));
                 e.store(a, c);
                 e.call(g, vec![a, a], 0);
@@ -1177,10 +1168,10 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
                 let c = e.field_const(fr(5));
                 e.store(a, c);
-                let rr = e.alloc(Type::field().ref_of());
+                let rr = e.alloc(a); // Ref<Ref<Field>>, seeded with `a`
                 e.store(rr, a);
                 e.call(g, vec![a, rr], 0);
                 e.terminate_return(vec![]);
@@ -1225,7 +1216,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
                 let c = e.field_const(fr(5));
                 e.store(a, c);
                 e.call(g, vec![a], 0);
@@ -1270,7 +1261,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.block(entry);
                 let _fp = e.emit_constant(Constant::FnPtr(g));
-                let a = e.alloc(Type::field());
+                let a = falloc(&mut e);
                 let c = e.field_const(fr(5));
                 e.store(a, c);
                 e.call(g, vec![a], 0);
