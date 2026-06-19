@@ -1,0 +1,6 @@
+[package]
+name = "mem2reg_phi_merge"
+type = "bin"
+authors = [""]
+
+[dependencies]

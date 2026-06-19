@@ -92,3 +92,24 @@ pub fn unspread_u64(v: u64) -> (u32, u32) {
 pub fn spread_u64(v: u32) -> u64 {
     spread_bits(v as u128, 32) as u64
 }
+
+/// Utilities only available in tests.
+#[cfg(test)]
+pub mod test {
+    use crate::compiler::ssa::{ValueId, hlssa::builder::HLEmitter};
+
+    /// Convert the provided `n` into a field value.
+    pub fn fr(n: u64) -> ark_bn254::Fr {
+        ark_bn254::Fr::from(n)
+    }
+
+    /// `alloc` of a scalar `Ref<Field>` seeded with an inert default value (0).
+    ///
+    /// The constant is interned (never a block instruction), so the seed never shows up in
+    /// `op_counts`; tests that care about the contents `store` to the cell afterward (the store
+    /// overwrites the seed).
+    pub fn falloc(e: &mut impl HLEmitter) -> ValueId {
+        let init = e.field_const(fr(0));
+        e.alloc(init)
+    }
+}

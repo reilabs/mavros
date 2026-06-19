@@ -1,0 +1,6 @@
+[package]
+name = "struct_through_ref_helper"
+type = "bin"
+authors = [""]
+
+[dependencies]

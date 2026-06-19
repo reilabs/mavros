@@ -29,6 +29,8 @@ use crate::{
         },
         pass_manager::PassManager,
         passes::{
+            arg_promotion::ArgPromotion,
+            array_sroa::ArraySroa,
             common_subexpression_elimination::CSE,
             dead_code_elimination::{self, DCE},
             deduplicate_phis::DeduplicatePhis,
@@ -210,6 +212,9 @@ impl Driver {
         Ok(())
     }
 
+    /// Performs comprehensive monomorphization on the SSA.
+    ///
+    /// Must have had [`Self::make_struct_access_static`] run prior to being run.
     #[tracing::instrument(skip_all)]
     pub fn monomorphize(&mut self) -> Result<(), Error> {
         let mut ssa = self.static_struct_access_ssa.clone().unwrap();
@@ -220,6 +225,21 @@ impl Driver {
             "pre_wti".to_string(),
             self.draw_cfg,
             vec![
+                // The initial mem2reg handles the obvious conversions of heap traffic to SSA
+                // variables using the points-to analysis.
+                Box::new(Mem2Reg::new()),
+                // Promote `Ref<Array>` locals to array values, then peel every proven-`Split` array
+                // into per-cell values so the cells become individually `Pure`-able / promotable.
+                Box::new(ArraySroa::new()),
+                // A second Mem2Reg promotes the underlying allocs now reached only through the
+                // peeled per-cell refs (the array-of-ref case); it self-skips functions with
+                // nothing newly promotable, so it is cheap when no ref-arrays were peeled.
+                Box::new(Mem2Reg::new()),
+                // Promote `Ref<T>` parameters across call boundaries into by-value in/out values,
+                // turning callee/caller pointee memory into clean locals.
+                Box::new(ArgPromotion::new()),
+                // A third Mem2Reg promotes the materialized callee allocs and the now-local caller
+                // allocs that arg promotion exposed.
                 Box::new(Mem2Reg::new()),
                 // Mem2Reg promotes each scalarized leaf cell into its own block-parameter phi. For
                 // an aggregate threaded through control flow that is mostly trivial phis (the same
