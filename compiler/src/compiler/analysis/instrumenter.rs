@@ -1465,8 +1465,12 @@ impl OpInstrumenter for Instrumenter {
     fn record_lookup(&mut self, target: &LookupTarget<Value>, unconditional: bool) {
         match target {
             LookupTarget::Rangecheck(bits) => self.record_rangecheck_lookup(*bits, unconditional),
-            LookupTarget::DynRangecheck(bound) => {
-                self.record_rangecheck_lookup(dynamic_rangecheck_bits(bound), unconditional)
+            LookupTarget::DynRangecheck(_) => {
+                // `to_radix` lowers its (asserted radix-256) digit checks to static 8-bit
+                // rangechecks, so none survive to cost analysis.
+                unreachable!(
+                    "DynRangecheck is lowered to a static 8-bit rangecheck before spilling"
+                )
             }
             LookupTarget::Spread(bits) => {
                 assert!(*bits >= 1, "spread width must be at least 1 bit");
@@ -1632,20 +1636,6 @@ impl Instrumenter {
             self.table_allocation_constraints()
         )
     }
-}
-
-fn dynamic_rangecheck_bits(bound: &Value) -> u8 {
-    let bound = match bound {
-        Value::U(_, v) | Value::I(_, v) => *v,
-        Value::Field(f) => {
-            let bigint = f.into_bigint();
-            bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)
-        }
-        Value::WitnessOf(inner) => return dynamic_rangecheck_bits(inner),
-        other => panic!("dynamic rangecheck bound must be constant, got {:?}", other),
-    };
-    assert_eq!(bound, 256, "TODO: support dynamic rangecheck bound {bound}");
-    8
 }
 
 #[derive(Debug, Clone)]

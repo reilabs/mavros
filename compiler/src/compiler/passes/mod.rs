@@ -5,6 +5,7 @@ pub mod defunctionalize;
 pub mod elide_tuples;
 pub mod fix_double_jumps;
 pub mod instruction_lowering;
+pub mod lookup_spilling;
 pub mod lower_guards;
 pub mod lower_map_casts;
 mod lowering_pass;

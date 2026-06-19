@@ -352,18 +352,12 @@ impl symbolic_executor::Context<Value> for R1CGen {
                     flag: flag_lc.clone(),
                 });
             }
-            hlssa::LookupTarget::DynRangecheck(v) => {
-                // Dynamic-radix digit checks only support radix 256 (8-bit digits). Lookup
-                // spilling normally rewrites these into static rangechecks; any that reach here
-                // map to an 8-bit range table.
-                let v = v.expect_u32();
-                assert!(v == 256, "TODO: support other rangecheck sizes");
-                let table_id = self.find_or_create_range_table(8);
-                self.lookups.push(LookupConstraint {
-                    table_id,
-                    elements: els,
-                    flag: flag_lc.clone(),
-                });
+            hlssa::LookupTarget::DynRangecheck(_) => {
+                // `to_radix` lowers its (asserted radix-256) digit checks to static 8-bit
+                // rangechecks, so no `DynRangecheck` survives to R1CS generation.
+                unreachable!(
+                    "DynRangecheck is lowered to a static 8-bit rangecheck before R1CS gen"
+                )
             }
             hlssa::LookupTarget::Spread(bits) => {
                 let table_id = {

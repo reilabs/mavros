@@ -1,7 +1,5 @@
 mod bit_range;
 mod degree_spilling;
-mod lookup_spilling;
-pub use lookup_spilling::LookupSpilling;
 mod pure_guards;
 mod side_effect_free_guards;
 mod witness_array;

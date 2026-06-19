@@ -76,15 +76,17 @@ impl LookupSpilling {
     ) -> Option<HelperKey> {
         match instr {
             OpCode::Lookup {
-                target: target @ (LookupTarget::Rangecheck(_) | LookupTarget::DynRangecheck(_)),
+                target: LookupTarget::DynRangecheck(_),
+                ..
+            } => unreachable!(
+                "DynRangecheck is lowered to a static 8-bit rangecheck before spilling"
+            ),
+            OpCode::Lookup {
+                target: LookupTarget::Rangecheck(bits),
                 args,
                 flag,
             } => {
-                // Dynamic-radix digit checks are radix-256, i.e. 8-bit rangechecks.
-                let width = match target {
-                    LookupTarget::Rangecheck(bits) => *bits,
-                    _ => 8,
-                };
+                let width = *bits;
                 if width == 1 {
                     return None; // 1-bit rangechecks are lowered inline (algebraic), no helper.
                 }
@@ -202,6 +204,12 @@ impl LookupSpilling {
     ) -> bool {
         match instr {
             OpCode::Lookup {
+                target: LookupTarget::DynRangecheck(_),
+                ..
+            } => unreachable!(
+                "DynRangecheck is lowered to a static 8-bit rangecheck before spilling"
+            ),
+            OpCode::Lookup {
                 target: LookupTarget::Rangecheck(bits),
                 args,
                 flag,
@@ -211,7 +219,7 @@ impl LookupSpilling {
                 true
             }
             OpCode::Lookup {
-                target: LookupTarget::Rangecheck(_) | LookupTarget::DynRangecheck(_),
+                target: LookupTarget::Rangecheck(_),
                 args,
                 flag,
             } => match self.helper_key_for(instr, types, sizing, consts) {
