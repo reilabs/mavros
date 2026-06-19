@@ -12,7 +12,7 @@ use crate::compiler::{
     ssa::{
         FunctionId, ValueId,
         hlssa::{
-            Blob, CastTarget, Constant, HLSSA, HLSSAConstantsSnapshot, LookupTarget,
+            CastTarget, Constant, HLSSA, HLSSAConstantsSnapshot, LookupTarget,
             MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type,
             builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
         },
@@ -376,121 +376,30 @@ impl LookupSpilling {
 
         let offsets = cumulative_offsets(&plan);
 
-        // Extract every chunk above the lowest and accumulate `rest`; the lowest chunk (offset 0)
-        // is derived below as `value - rest`, a linear combination that needs no reconstruction
-        // constraint. When the chunks are a uniform run of full same-size rangecheck chunks (the
-        // common case, e.g. a 32-bit value as four 8-bit chunks), extract them with a counted loop
-        // over a blob constant array of shift divisors rather than unrolling, keeping the shared
-        // helper body compact. R1CS generation unrolls the loop, so constraints are unchanged.
-        let s = plan[0].width;
-        let uniform_full = plan.len() >= 3
-            && s > 1
-            && plan
-                .iter()
-                .all(|c| matches!(c.table, TableKind::Range) && !c.partial && c.width == s);
-
-        let rest = if uniform_full {
-            self.emit_uniform_rangecheck_loop(
-                b,
-                pure_u,
-                extract_bits,
-                s,
-                plan.len(),
-                flag,
-                is_witness,
-            )
-        } else {
-            let mut rest = b.field_const(Field::ZERO);
-            for i in 1..plan.len() {
-                let chunk = plan[i];
-                let raw_u =
-                    extract_low_chunk(b, pure_u, extract_bits, offsets[i], chunk.width as usize);
-                let key_field = b.cast_to_field(raw_u);
-                let key = if is_witness {
-                    b.write_witness(key_field)
-                } else {
-                    key_field
-                };
-                self.emit_rangecheck_chunk(b, chunk, key, flag, is_witness);
-
-                let shift = b.field_const(two_pow(offsets[i]));
-                let shifted = b.mul(key, shift);
-                rest = b.add(rest, shifted);
-            }
-            rest
-        };
-
-        let low_chunk = plan[0];
-        let low = b.sub(value, rest);
-        self.emit_rangecheck_chunk(b, low_chunk, low, flag, is_witness);
-    }
-
-    /// Extract the upper `n_chunks - 1` full `s`-bit rangecheck chunks of `pure_u` with a counted
-    /// loop over a blob constant array of shift divisors (`2^(i·s)`), looking up each and
-    /// accumulating their weighted sum. Returns `rest`; the caller derives the lowest chunk as
-    /// `value - rest`. Used only for uniform decompositions (see `spill_rangecheck_inner`).
-    #[allow(clippy::too_many_arguments)]
-    fn emit_uniform_rangecheck_loop(
-        &self,
-        b: &mut HLBlockEmitter<'_>,
-        pure_u: ValueId,
-        extract_bits: usize,
-        s: u8,
-        n_chunks: usize,
-        flag: ValueId,
-        is_witness: bool,
-    ) -> ValueId {
-        let s_bits = s as usize;
-
-        // Peel chunk 1 (offset `s`) to seed `rest` directly as a witness product, matching the
-        // unrolled path which starts from a *constant* zero — seeding the loop accumulator with a
-        // fresh `write_witness(0)` instead would add a spurious witness column per call.
-        let div1 = b.u_const(extract_bits, two_pow_u128(s_bits));
-        let chunk1_u = extract_low_chunk_dyn(b, pure_u, extract_bits, div1, s_bits);
-        let chunk1_field = b.cast_to_field(chunk1_u);
-        let key1 = if is_witness {
-            b.write_witness(chunk1_field)
-        } else {
-            chunk1_field
-        };
-        b.lookup_rngchk(LookupTarget::Rangecheck(s), key1, flag);
-        let shift1 = b.cast_to_field(div1);
-        let rest_seed = b.mul(key1, shift1);
-
-        // Remaining chunks 2..n_chunks: loop over a blob constant array of their shift divisors.
-        let divisor_consts: Vec<Constant> = (2..n_chunks)
-            .map(|i| Constant::U(extract_bits, two_pow_u128(i * s_bits)))
-            .collect();
-        if divisor_consts.is_empty() {
-            return rest_seed;
-        }
-        let count = divisor_consts.len();
-        let elem_ty = Type::u(extract_bits);
-        let blob = b.emit_constant(Constant::Blob(Blob::new(elem_ty.clone(), divisor_consts)));
-        let divisors = b.mk_seq_of_blob(elem_ty, blob);
-        let rest_ty = if is_witness {
-            Type::witness_of(Type::field())
-        } else {
-            Type::field()
-        };
-        let results = b.build_counted_loop(count, vec![(rest_seed, rest_ty)], |b, idx, accs| {
-            let rest = accs[0];
-            let divisor = b.array_get(divisors, idx);
-            let chunk_u = extract_low_chunk_dyn(b, pure_u, extract_bits, divisor, s_bits);
-            let key_field = b.cast_to_field(chunk_u);
+        // Extract every chunk above the lowest and accumulate `rest`; the lowest chunk (offset 0) is
+        // derived below as `value - rest`, a linear combination needing no reconstruction
+        // constraint. Always unrolled — a counted-loop fast path for uniform runs is future work.
+        let mut rest = b.field_const(Field::ZERO);
+        for i in 1..plan.len() {
+            let chunk = plan[i];
+            let raw_u =
+                extract_low_chunk(b, pure_u, extract_bits, offsets[i], chunk.width as usize);
+            let key_field = b.cast_to_field(raw_u);
             let key = if is_witness {
                 b.write_witness(key_field)
             } else {
                 key_field
             };
-            b.lookup_rngchk(LookupTarget::Rangecheck(s), key, flag);
-            // `rest += key · 2^offset`; the shift is the same divisor, viewed as a field.
-            let shift = b.cast_to_field(divisor);
+            self.emit_rangecheck_chunk(b, chunk, key, flag, is_witness);
+
+            let shift = b.field_const(two_pow(offsets[i]));
             let shifted = b.mul(key, shift);
-            let rest_next = b.add(rest, shifted);
-            vec![rest_next]
-        });
-        results[0]
+            rest = b.add(rest, shifted);
+        }
+
+        let low_chunk = plan[0];
+        let low = b.sub(value, rest);
+        self.emit_rangecheck_chunk(b, low_chunk, low, flag, is_witness);
     }
 
     /// 1-bit rangecheck, lowered algebraically as `b·(b-1) = 0` rather than a table lookup.
@@ -620,69 +529,41 @@ impl LookupSpilling {
         let offsets = cumulative_offsets(&plan);
 
         // Extract chunks `1..` and accumulate their weighted key and spread sums; chunk 0 is derived
-        // below from what's left. A uniform run of full same-size spread chunks extracts via a
-        // counted loop (R1CS generation unrolls it, so constraints are unchanged); else they unroll.
-        let s = plan[0].width;
-        let uniform_full = plan.len() >= 3
-            && s > 1
-            && plan
-                .iter()
-                .all(|c| matches!(c.table, TableKind::Spread) && !c.partial && c.width == s);
-
-        let (rec_key, rec_spread) = if uniform_full {
-            self.emit_uniform_spread_loop(
-                b,
-                pure_u,
-                extract_bits,
-                s,
-                plan.len(),
-                flag_field,
-                key_is_witness,
-            )
-        } else {
-            let mut rec_key = zero;
-            let mut rec_spread = zero;
-            for i in 1..plan.len() {
-                let chunk = plan[i];
-                let offset = offsets[i];
-                let chunk_u =
-                    extract_low_chunk(b, pure_u, extract_bits, offset, chunk.width as usize);
-                let chunk_field = b.cast_to_field(chunk_u);
-                let chunk_key = if key_is_witness {
-                    b.write_witness(chunk_field)
-                } else {
-                    chunk_field
-                };
-                // A 1-bit chunk's spread is the identity (`spread(bit) = bit`); a table chunk needs
-                // its `spread(key)` hint and lookup.
-                let chunk_spread = if chunk.width == 1 {
-                    self.spill_one_bit_rangecheck(b, chunk_key, flag_field);
-                    chunk_key
-                } else {
-                    let spread = self.spread_hint(b, chunk_key, chunk.table_size, key_is_witness);
-                    b.lookup_spread(chunk.table_size, chunk_key, spread, flag_field);
-                    if chunk.partial {
-                        let gap = self.partial_gap(b, chunk, chunk_key);
-                        self.emit_spread_partial_gap(
-                            b,
-                            sizing,
-                            chunk,
-                            gap,
-                            flag_field,
-                            key_is_witness,
-                        );
-                    }
-                    spread
-                };
-                let key_shift = b.field_const(two_pow(offset));
-                let shifted_key = b.mul(chunk_key, key_shift);
-                rec_key = b.add(rec_key, shifted_key);
-                let spread_shift = b.field_const(two_pow(offset * 2));
-                let shifted_spread = b.mul(chunk_spread, spread_shift);
-                rec_spread = b.add(rec_spread, shifted_spread);
-            }
-            (rec_key, rec_spread)
-        };
+        // below from what's left. Always unrolled — a counted-loop fast path for uniform runs is
+        // future work.
+        let mut rec_key = zero;
+        let mut rec_spread = zero;
+        for i in 1..plan.len() {
+            let chunk = plan[i];
+            let offset = offsets[i];
+            let chunk_u = extract_low_chunk(b, pure_u, extract_bits, offset, chunk.width as usize);
+            let chunk_field = b.cast_to_field(chunk_u);
+            let chunk_key = if key_is_witness {
+                b.write_witness(chunk_field)
+            } else {
+                chunk_field
+            };
+            // A 1-bit chunk's spread is the identity (`spread(bit) = bit`); a table chunk needs its
+            // `spread(key)` hint and lookup.
+            let chunk_spread = if chunk.width == 1 {
+                self.spill_one_bit_rangecheck(b, chunk_key, flag_field);
+                chunk_key
+            } else {
+                let spread = self.spread_hint(b, chunk_key, chunk.table_size, key_is_witness);
+                b.lookup_spread(chunk.table_size, chunk_key, spread, flag_field);
+                if chunk.partial {
+                    let gap = self.partial_gap(b, chunk, chunk_key);
+                    self.emit_spread_partial_gap(b, sizing, chunk, gap, flag_field, key_is_witness);
+                }
+                spread
+            };
+            let key_shift = b.field_const(two_pow(offset));
+            let shifted_key = b.mul(chunk_key, key_shift);
+            rec_key = b.add(rec_key, shifted_key);
+            let spread_shift = b.field_const(two_pow(offset * 2));
+            let shifted_spread = b.mul(chunk_spread, spread_shift);
+            rec_spread = b.add(rec_spread, shifted_spread);
+        }
 
         // Derive chunk 0 from what's left and pin it. Its `lookup_spread` closes the spread sum, so
         // no extra constraint — unless it's a bit (an all-bit plan), where there is no lookup to
@@ -701,105 +582,6 @@ impl LookupSpilling {
                 self.emit_spread_partial_gap(b, sizing, chunk0, gap, flag_field, key_is_witness);
             }
         }
-    }
-
-    /// Extract the `n_chunks - 1` upper full `s`-bit spread chunks of `pure_u` with a counted loop,
-    /// looking up each `spread(key)` and accumulating their weighted key and spread sums. Returns
-    /// `(reconstructed_key, reconstructed_spread)`; the caller derives chunk 0 from what's left.
-    /// Used only for uniform spread decompositions (see `spill_spread_inner`), mirroring
-    /// [`Self::emit_uniform_rangecheck_loop`].
-    #[allow(clippy::too_many_arguments)]
-    fn emit_uniform_spread_loop(
-        &self,
-        b: &mut HLBlockEmitter<'_>,
-        pure_u: ValueId,
-        extract_bits: usize,
-        s: u8,
-        n_chunks: usize,
-        flag: ValueId,
-        is_witness: bool,
-    ) -> (ValueId, ValueId) {
-        let s_bits = s as usize;
-
-        // Seed the accumulators from chunk 1 (offset `s`) directly, matching the unrolled path's
-        // constant-zero start without a spurious `write_witness(0)` accumulator column.
-        let div1 = b.u_const(extract_bits, two_pow_u128(s_bits));
-        let (key1, spread1) =
-            self.extract_spread_chunk(b, pure_u, extract_bits, div1, s, flag, is_witness);
-        let kshift1 = b.cast_to_field(div1);
-        let sshift1 = b.mul(kshift1, kshift1);
-        let rec_key_seed = b.mul(key1, kshift1);
-        let rec_spread_seed = b.mul(spread1, sshift1);
-
-        // Remaining chunks 2..n_chunks: loop over a blob constant array of their shift divisors.
-        let divisor_consts: Vec<Constant> = (2..n_chunks)
-            .map(|i| Constant::U(extract_bits, two_pow_u128(i * s_bits)))
-            .collect();
-        if divisor_consts.is_empty() {
-            return (rec_key_seed, rec_spread_seed);
-        }
-        let count = divisor_consts.len();
-        let elem_ty = Type::u(extract_bits);
-        let blob = b.emit_constant(Constant::Blob(Blob::new(elem_ty.clone(), divisor_consts)));
-        let divisors = b.mk_seq_of_blob(elem_ty, blob);
-        let acc_ty = if is_witness {
-            Type::witness_of(Type::field())
-        } else {
-            Type::field()
-        };
-        let results = b.build_counted_loop(
-            count,
-            vec![(rec_key_seed, acc_ty.clone()), (rec_spread_seed, acc_ty)],
-            |b, idx, accs| {
-                let rec_key = accs[0];
-                let rec_spread = accs[1];
-                let divisor = b.array_get(divisors, idx);
-                let (key, spread) = self.extract_spread_chunk(
-                    b,
-                    pure_u,
-                    extract_bits,
-                    divisor,
-                    s,
-                    flag,
-                    is_witness,
-                );
-                // `rec_key += key · 2^offset`, `rec_spread += spread · 4^offset`; the divisor is
-                // `2^offset` viewed as a field, and `4^offset = (2^offset)²`.
-                let kshift = b.cast_to_field(divisor);
-                let sshift = b.mul(kshift, kshift);
-                let key_term = b.mul(key, kshift);
-                let rec_key_next = b.add(rec_key, key_term);
-                let spread_term = b.mul(spread, sshift);
-                let rec_spread_next = b.add(rec_spread, spread_term);
-                vec![rec_key_next, rec_spread_next]
-            },
-        );
-        (results[0], results[1])
-    }
-
-    /// Extract one `s`-bit spread chunk of `pure_u` at the bit offset encoded by `divisor` (`2^o`),
-    /// look up its `spread(key)`, and return `(key, spread)` as fields.
-    #[allow(clippy::too_many_arguments)]
-    fn extract_spread_chunk(
-        &self,
-        b: &mut HLBlockEmitter<'_>,
-        pure_u: ValueId,
-        extract_bits: usize,
-        divisor: ValueId,
-        s: u8,
-        flag: ValueId,
-        is_witness: bool,
-    ) -> (ValueId, ValueId) {
-        let chunk_u = extract_low_chunk_dyn(b, pure_u, extract_bits, divisor, s as usize);
-        let chunk_field = b.cast_to_field(chunk_u);
-        let key = if is_witness {
-            b.write_witness(chunk_field)
-        } else {
-            chunk_field
-        };
-        let spread = self.spread_hint(b, key, s, is_witness);
-        b.lookup_spread(s, key, spread, flag);
-        (key, spread)
     }
 
     /// `(2^width - 1) - key`, the complement looked up by the "2-larger" trick to bound `key` to
@@ -891,21 +673,6 @@ fn extract_low_chunk(
         let divisor = b.u_const(value_bits, two_pow_u128(offset));
         b.div(value, divisor)
     };
-    let modulus = b.u_const(value_bits, two_pow_u128(chunk_bits));
-    let chunk = b.modulo(shifted, modulus);
-    b.cast_to(CastTarget::U(chunk_bits), chunk)
-}
-
-/// Like [`extract_low_chunk`] but with a runtime shift `divisor` (= `2^offset`, read from a
-/// constant array) instead of a compile-time offset: `(value / divisor) mod 2^chunk_bits`.
-fn extract_low_chunk_dyn(
-    b: &mut HLBlockEmitter<'_>,
-    value: ValueId,
-    value_bits: usize,
-    divisor: ValueId,
-    chunk_bits: usize,
-) -> ValueId {
-    let shifted = b.div(value, divisor);
     let modulus = b.u_const(value_bits, two_pow_u128(chunk_bits));
     let chunk = b.modulo(shifted, modulus);
     b.cast_to(CastTarget::U(chunk_bits), chunk)
