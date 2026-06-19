@@ -405,9 +405,17 @@ fn allocation_cost(size: u8) -> usize {
     allocation_witnesses(size) + CONSTRAINT_WEIGHT * allocation_constraints(size)
 }
 
-/// Sorted `(width, count)` histogram, deterministic for reproducible optimization.
-fn sorted_histogram(hist: &HashMap<u8, usize>) -> Vec<(u8, usize)> {
-    let mut v: Vec<(u8, usize)> = hist.iter().map(|(&b, &c)| (b, c)).collect();
+/// Project a `(width, is_unconditional) -> count` histogram into a sorted `(width, count)` one,
+/// optionally restricted to one conditionality (`Some(true)` = unconditional, `Some(false)` =
+/// gated, `None` = both). Sorted for deterministic, reproducible optimization.
+fn project(hist: &HashMap<(u8, bool), usize>, conditionality: Option<bool>) -> Vec<(u8, usize)> {
+    let mut by_width: HashMap<u8, usize> = HashMap::default();
+    for (&(width, uncond), &count) in hist {
+        if conditionality.is_none_or(|c| c == uncond) {
+            *by_width.entry(width).or_default() += count;
+        }
+    }
+    let mut v: Vec<(u8, usize)> = by_width.into_iter().collect();
     v.sort_unstable();
     v
 }
@@ -554,18 +562,6 @@ fn config_cost(w: &Workload, r: &[u8], p: &[u8]) -> usize {
     alloc + spread_recurring + rc_recurring
 }
 
-/// The gated (flag-conditional) portion of a histogram: `total − unconditional` per width, keeping
-/// only positive counts. `total` is sorted; `uncond` is the raw unconditional-count map.
-fn gated_histogram(total: &[(u8, usize)], uncond: &HashMap<u8, usize>) -> Vec<(u8, usize)> {
-    total
-        .iter()
-        .filter_map(|&(w, c)| {
-            let gated = c.saturating_sub(uncond.get(&w).copied().unwrap_or(0));
-            (gated > 0).then_some((w, gated))
-        })
-        .collect()
-}
-
 /// A candidate table-size configuration: the chosen range (`r`) and spread (`p`) table sizes.
 #[derive(Clone, Default, PartialEq, Eq)]
 struct Config {
@@ -576,9 +572,12 @@ struct Config {
 /// Pick the table-size sets `(R, P)` minimizing the joint cost for the given whole-program
 /// lookup-width histograms.
 ///
+/// Each histogram is keyed by `(width, is_unconditional)`; [`project`] splits it into the total
+/// (for candidate sizing) and the per-conditionality slices the cost model prices separately.
+///
 /// Deterministic: the chosen tables are a pure function of the input histograms. The search reads
-/// the maps once via [`sorted_histogram`] and then works entirely with `Vec`s and integer costs (no
-/// randomness, clocks, or floats), so neighbour order and tie-breaks are identical run to run.
+/// the maps once into sorted `Vec`s and then works entirely with integer costs (no randomness,
+/// clocks, or floats), so neighbour order and tie-breaks are identical run to run.
 ///
 /// This is an uncapacitated-facility-location problem: each table is a "facility" with a fixed
 /// opening cost (its `2^s + 1` allocation) and each lookup is a "client" served at the cost of its
@@ -594,13 +593,11 @@ struct Config {
 ///
 /// Seeding from the latter two guarantees we never do worse than either baseline.
 fn optimize(
-    rangecheck_hist: &HashMap<u8, usize>,
-    rangecheck_hist_uncond: &HashMap<u8, usize>,
-    spread_hist: &HashMap<u8, usize>,
-    spread_hist_uncond: &HashMap<u8, usize>,
+    rangecheck_hist: &HashMap<(u8, bool), usize>,
+    spread_hist: &HashMap<(u8, bool), usize>,
 ) -> LookupSizing {
-    let rc_hist = sorted_histogram(rangecheck_hist);
-    let sp_hist = sorted_histogram(spread_hist);
+    let rc_hist = project(rangecheck_hist, None);
+    let sp_hist = project(spread_hist, None);
 
     let has_rangechecks = rc_hist.iter().any(|&(w, c)| w >= 2 && c > 0);
     let has_spreads = sp_hist.iter().any(|&(_, c)| c > 0);
@@ -608,12 +605,12 @@ fn optimize(
         return LookupSizing::default();
     }
 
-    // Split each histogram into its unconditional (free width-1 bits) and gated (a width-1 bit
-    // costs a gating witness) portions. Both share the chosen tables; only the per-bit price differs.
-    let rc_uncond = sorted_histogram(rangecheck_hist_uncond);
-    let sp_uncond = sorted_histogram(spread_hist_uncond);
-    let rc_gated = gated_histogram(&rc_hist, rangecheck_hist_uncond);
-    let sp_gated = gated_histogram(&sp_hist, spread_hist_uncond);
+    // Unconditional lookups (free width-1 bits) and gated ones (a width-1 bit costs a gating
+    // witness) share the chosen tables but price bit chunks differently.
+    let rc_uncond = project(rangecheck_hist, Some(true));
+    let sp_uncond = project(spread_hist, Some(true));
+    let rc_gated = project(rangecheck_hist, Some(false));
+    let sp_gated = project(spread_hist, Some(false));
 
     let candidates = candidate_sizes(&rc_hist, &sp_hist);
     if candidates.is_empty() {
@@ -773,9 +770,7 @@ impl Analysis for LookupSizing {
         let summary = store.get::<Summary>();
         let sizing = optimize(
             &summary.global_rangecheck_lookups,
-            &summary.global_rangecheck_lookups_uncond,
             &summary.global_spread_lookups,
-            &summary.global_spread_lookups_uncond,
         );
         tracing::info!(
             "lookup sizing: rangecheck tables {:?}, spread tables {:?}",
@@ -790,8 +785,14 @@ impl Analysis for LookupSizing {
 mod tests {
     use super::*;
 
-    fn hist(entries: &[(u8, usize)]) -> HashMap<u8, usize> {
-        entries.iter().copied().collect()
+    /// A `(width, is_unconditional) -> count` histogram from `gated` and `uncond` `(width, count)`
+    /// entries.
+    fn hist(gated: &[(u8, usize)], uncond: &[(u8, usize)]) -> HashMap<(u8, bool), usize> {
+        gated
+            .iter()
+            .map(|&(w, c)| ((w, false), c))
+            .chain(uncond.iter().map(|&(w, c)| ((w, true), c)))
+            .collect()
     }
 
     /// Joint cost of a configuration treating every lookup as gated. Used by the byte-baseline
@@ -817,14 +818,14 @@ mod tests {
 
     #[test]
     fn no_lookups_means_no_tables() {
-        let sizing = optimize(&hist(&[]), &hist(&[]), &hist(&[]), &hist(&[]));
+        let sizing = optimize(&hist(&[], &[]), &hist(&[], &[]));
         assert!(sizing.rangecheck_tables.is_empty());
         assert!(sizing.spread_tables.is_empty());
     }
 
     #[test]
     fn one_bit_rangechecks_need_no_table() {
-        let sizing = optimize(&hist(&[(1, 1000)]), &hist(&[]), &hist(&[]), &hist(&[]));
+        let sizing = optimize(&hist(&[(1, 1000)], &[]), &hist(&[], &[]));
         assert!(sizing.rangecheck_tables.is_empty());
         assert!(sizing.spread_tables.is_empty());
     }
@@ -891,7 +892,7 @@ mod tests {
         // Lots of 16-bit checks: a 16-bit table (1 lookup each) beats an 8-bit table (2 each)
         // once the lookup savings outweigh the 2^16 allocation.
         let rc = [(16u8, 200_000usize)];
-        let sizing = optimize(&hist(&rc), &hist(&[]), &hist(&[]), &hist(&[]));
+        let sizing = optimize(&hist(&rc, &[]), &hist(&[], &[]));
         assert!(
             sizing.rangecheck_tables.contains(&16),
             "expected a 16-bit table, got {:?}",
@@ -911,7 +912,7 @@ mod tests {
         // optimizer prefers a smaller table (two cheap lookups per check) and never does worse
         // than the byte baseline.
         let rc = [(8u8, 10usize)];
-        let sizing = optimize(&hist(&rc), &hist(&[]), &hist(&[]), &hist(&[]));
+        let sizing = optimize(&hist(&rc, &[]), &hist(&[], &[]));
         assert_eq!(sizing.rangecheck_tables.len(), 1);
         assert!(
             sizing.rangecheck_tables[0] <= 8,
@@ -932,7 +933,7 @@ mod tests {
         // can also serve the rangechecks via its key column.
         let sp = [(16u8, 100_000usize)];
         let rc = [(32u8, 50_000usize), (16u8, 50_000usize)];
-        let sizing = optimize(&hist(&rc), &hist(&[]), &hist(&sp), &hist(&[]));
+        let sizing = optimize(&hist(&rc, &[]), &hist(&sp, &[]));
 
         let chosen = cost_of(&sizing, &rc, &sp);
         let byte = LookupSizing {
@@ -966,7 +967,7 @@ mod tests {
         // witnesses) undercuts the cheapest table (a 2^4 table costs 32 to allocate alone), so the
         // optimizer opens none.
         let rc = [(8u8, 3usize)];
-        let sizing = optimize(&hist(&rc), &hist(&rc), &hist(&[]), &hist(&[]));
+        let sizing = optimize(&hist(&[], &rc), &hist(&[], &[]));
         assert!(
             sizing.rangecheck_tables.is_empty(),
             "all-unconditional very-low-volume checks should bit-decompose, not allocate: {:?}",
@@ -979,7 +980,7 @@ mod tests {
         // The same low-volume workload, but gated: bit decomposition now costs 3×15 = 45, so a
         // small table wins and the optimizer allocates one (contrast `unconditional_lookups_*`).
         let rc = [(8u8, 3usize)];
-        let sizing = optimize(&hist(&rc), &hist(&[]), &hist(&[]), &hist(&[]));
+        let sizing = optimize(&hist(&rc, &[]), &hist(&[], &[]));
         assert!(
             !sizing.rangecheck_tables.is_empty(),
             "gated checks should allocate rather than pay per-bit gating witnesses"
@@ -991,7 +992,7 @@ mod tests {
         // At high volume the per-lookup extraction witnesses of bit decomposition outweigh a
         // table's one-time allocation, so even unconditional lookups open a table.
         let rc = [(8u8, 200_000usize)];
-        let sizing = optimize(&hist(&rc), &hist(&rc), &hist(&[]), &hist(&[]));
+        let sizing = optimize(&hist(&[], &rc), &hist(&[], &[]));
         assert!(
             !sizing.rangecheck_tables.is_empty(),
             "high-volume checks should still allocate a table"
@@ -1008,7 +1009,7 @@ mod tests {
             (&[(12, 3000), (24, 1500)], &[(11, 2000)]),
         ];
         for (rc, sp) in workloads {
-            let sizing = optimize(&hist(rc), &hist(&[]), &hist(sp), &hist(&[]));
+            let sizing = optimize(&hist(rc, &[]), &hist(sp, &[]));
             let byte = LookupSizing {
                 rangecheck_tables: if rc.iter().any(|&(w, _)| w >= 2) {
                     vec![8]
