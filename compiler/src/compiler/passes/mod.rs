@@ -1,3 +1,6 @@
+pub mod arg_promotion;
+pub mod array_boundary_expansion;
+pub mod array_sroa;
 pub mod common_subexpression_elimination;
 pub mod dead_code_elimination;
 pub mod deduplicate_phis;

@@ -472,8 +472,20 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
     ///
     /// Takes `&self` so passes that hold a shared `&HLSSA` (e.g. the specializer, while the
     /// symbolic executor borrows the SSA) can still mint ids. The counter is atomic.
+    ///
+    /// For minting a known number of values, see [`Self::fresh_values`].
     pub fn fresh_value(&self) -> ValueId {
         ValueId(self.next_value_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Allocate `n` fresh `ValueId`s from the SSA-wide counter.
+    ///
+    /// Takes `&self` so passes that hold a shared `&HLSSA` (e.g. the specializer, while the
+    /// symbolic executor borrows the SSA) can still mint ids. The counter is atomic.
+    ///
+    /// For minting single values, see [`Self::fresh_value`].
+    pub fn fresh_values(&self, n: usize) -> Vec<ValueId> {
+        (0..n).map(|_| self.fresh_value()).collect()
     }
 
     /// Upper bound on `ValueId`s issued so far. Useful for sizing dense per-value tables.

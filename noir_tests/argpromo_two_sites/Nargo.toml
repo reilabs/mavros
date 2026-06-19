@@ -1,0 +1,6 @@
+[package]
+name = "argpromo_two_sites"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -29,6 +29,9 @@ use crate::{
         },
         pass_manager::PassManager,
         passes::{
+            arg_promotion::ArgPromotion,
+            array_boundary_expansion::ArrayBoundaryExpansion,
+            array_sroa::ArraySroa,
             common_subexpression_elimination::CSE,
             dead_code_elimination::{self, DCE},
             deduplicate_phis::DeduplicatePhis,
@@ -211,6 +214,9 @@ impl Driver {
         Ok(())
     }
 
+    /// Performs comprehensive monomorphization on the SSA.
+    ///
+    /// Must have had [`Self::make_struct_access_static`] run prior to being run.
     #[tracing::instrument(skip_all)]
     pub fn monomorphize(&mut self) -> Result<(), Error> {
         let mut ssa = self.static_struct_access_ssa.clone().unwrap();
@@ -221,7 +227,40 @@ impl Driver {
             "pre_wti".to_string(),
             self.draw_cfg,
             vec![
+                // The initial mem2reg handles the obvious conversions of heap traffic to SSA
+                // variables using the points-to analysis.
                 Box::new(Mem2Reg::new()),
+                // Promote `Ref<Array>` locals to array values, then peel every proven-`Split` array
+                // into per-cell values so the cells become individually `Pure`-able / promotable.
+                Box::new(ArraySroa::new()),
+                // A second Mem2Reg promotes the underlying allocs now reached only through the
+                // peeled per-cell refs (the array-of-ref case); it self-skips functions with
+                // nothing newly promotable, so it is cheap when no ref-arrays were peeled.
+                Box::new(Mem2Reg::new()),
+                // Promote `Ref<T>` parameters across call boundaries into by-value in/out values,
+                // turning callee/caller pointee memory into clean locals.
+                Box::new(ArgPromotion::new()),
+                // A third Mem2Reg promotes the materialized callee allocs and the now-local caller
+                // allocs that arg promotion exposed.
+                Box::new(Mem2Reg::new()),
+                // Sever array *call boundaries*: expand an array parameter/return whose only
+                // obstacle to being `Split` is crossing the boundary into per-cell scalars,
+                // reconstructing the array locally on each side.
+                Box::new(ArrayBoundaryExpansion::new()),
+                // A fresh ArraySroa peels the now-local reconstructed arrays (they only become
+                // `Split` on this re-analysis), and a Mem2Reg promotes any per-cell ref allocs the
+                // peel exposes.
+                Box::new(ArraySroa::new()),
+                Box::new(Mem2Reg::new()),
+                // Reclaim cells a side never used: dead by-value formals, their matching arguments
+                // at every static call site, dead return slots, and the now-dead caller-side
+                // `ArrayGet`s — interprocedurally. (`pre_wti` otherwise runs no DCE, and
+                // TrivialPhiElimination does not touch entry-block formals).
+                //
+                // Uses `preserve_blocks()` so it does not collapse empty intermediate blocks into
+                // multiple-predecessor merges that the later untaint_control_flow cannot yet
+                // handle.
+                Box::new(DCE::new(dead_code_elimination::Config::preserve_blocks())),
                 // Mem2Reg promotes each scalarized leaf cell into its own block-parameter phi. For
                 // an aggregate threaded through control flow that is mostly trivial phis (the same
                 // value from every predecessor); collapse them before they reach WTI and codegen.

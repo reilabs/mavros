@@ -1,0 +1,6 @@
+[package]
+name = "argpromo_multi_param"
+type = "bin"
+authors = [""]
+
+[dependencies]
