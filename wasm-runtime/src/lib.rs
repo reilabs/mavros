@@ -24,16 +24,21 @@ use ark_ff::BigInt;
 //
 // ═══════════════════════════════════════════════════════════════════════════════
 
+#[cfg(target_arch = "wasm32")]
 const HEADER: usize = 8;
+#[cfg(target_arch = "wasm32")]
 const ALIGN: usize = 8;
 
+#[cfg(target_arch = "wasm32")]
 static mut LIVE_BYTES: usize = 0;
 
+#[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __live_bytes() -> usize {
     unsafe { LIVE_BYTES }
 }
 
+#[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn malloc(size: u32) -> *mut u8 {
     unsafe {
@@ -49,6 +54,7 @@ pub unsafe extern "C" fn malloc(size: u32) -> *mut u8 {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free(ptr: *mut u8) {
     #[allow(static_mut_refs)]
