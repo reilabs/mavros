@@ -103,10 +103,7 @@ impl StripWitnessOf {
             OpCode::MkRepeated { elem_type, .. } => {
                 *elem_type = elem_type.strip_all_witness();
             }
-            OpCode::Alloc { elem_type, .. } => {
-                *elem_type = elem_type.strip_all_witness();
-            }
-            OpCode::Cast { .. } => {}
+            OpCode::Alloc { .. } | OpCode::Cast { .. } => {}
             OpCode::MkTuple { .. } | OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } => {
                 ice_non_elided_tuple()
             }

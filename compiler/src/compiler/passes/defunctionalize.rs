@@ -272,16 +272,10 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
     let mut is_ref_with_fn: HashSet<(FunctionId, ValueId)> = HashSet::default();
     for &fid in &func_ids {
         let func = ssa.get_function(fid);
-        // Check Alloc instructions
         for (_bid, block) in func.get_blocks() {
             for instr in block.get_instructions() {
-                if let OpCode::Alloc {
-                    result, elem_type, ..
-                } = instr
-                {
-                    if contains_function(elem_type) {
-                        is_ref_with_fn.insert((fid, *result));
-                    }
+                if let OpCode::Alloc { result, .. } = instr {
+                    is_ref_with_fn.insert((fid, *result));
                 }
             }
         }
@@ -487,6 +481,9 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                         OpCode::Load { result, ptr } => {
                             changed |= propagate(&mut reaching, (fid, *ptr), (fid, *result));
                         }
+                        OpCode::Alloc { result, value, .. } => {
+                            changed |= propagate(&mut reaching, (fid, *value), (fid, *result));
+                        }
                         OpCode::Store { ptr, value } => {
                             changed |= propagate(&mut reaching, (fid, *value), (fid, *ptr));
                         }
@@ -660,7 +657,6 @@ fn replace_function_types_in_instruction(instr: &mut OpCode) {
         OpCode::MkSeq { elem_type, .. } => replace_function_type(elem_type),
         OpCode::MkSeqOfBlob { element_type, .. } => replace_function_type(element_type),
         OpCode::MkRepeated { elem_type, .. } => replace_function_type(elem_type),
-        OpCode::Alloc { elem_type, .. } => replace_function_type(elem_type),
         OpCode::MkTuple { element_types, .. } => {
             for t in element_types.iter_mut() {
                 replace_function_type(t);

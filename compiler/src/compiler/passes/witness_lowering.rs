@@ -164,13 +164,18 @@ impl WitnessLowering {
                                 elem_type: new_elem_type,
                             });
                         }
-                        OpCode::Alloc {
-                            result: r,
-                            elem_type: tp,
-                        } => {
+                        OpCode::Alloc { result: r, value } => {
+                            let elem_type = type_info.get_value_type(value).clone();
+                            let new_elem_type = self.witness_lowering_in_type(&elem_type);
+                            let converted = self.convert_if_needed(
+                                value,
+                                &new_elem_type,
+                                type_info,
+                                &mut emitter,
+                            );
                             emitter.emit(OpCode::Alloc {
                                 result: r,
-                                elem_type: self.witness_lowering_in_type(&tp),
+                                value: converted,
                             });
                         }
                         OpCode::Constrain { a, b, c } => {

@@ -338,11 +338,11 @@ impl SSAConverter {
         // Add function parameters as block parameters
         for (local_id, mutable, _name, param_type, _visibility) in &ast_func.parameters {
             let converted_type = self.type_converter.convert_type(param_type);
-            let value_id = b.block(entry_block).add_parameter(converted_type.clone());
+            let value_id = b.block(entry_block).add_parameter(converted_type);
 
             if *mutable {
                 // For mutable parameters, allocate a pointer and store the value
-                expr_converter.bind_local_mut(*local_id, value_id, converted_type, &mut b);
+                expr_converter.bind_local_mut(*local_id, value_id, &mut b);
             } else {
                 expr_converter.bind_local(*local_id, value_id);
             }

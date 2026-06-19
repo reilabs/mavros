@@ -393,17 +393,22 @@ impl RCInsertion {
                         }
                         currently_live.insert(*element);
                     }
-                    OpCode::Alloc {
-                        result,
-                        elem_type: _,
-                    } => {
-                        if self.needs_rc(type_info, result) && !currently_live.contains(result) {
+                    OpCode::Alloc { result, value } => {
+                        let value = *value;
+                        if !currently_live.contains(result) {
                             new_instructions.push(OpCode::MemOp {
                                 kind: RefCountOp::Drop,
                                 value: *result,
                             });
                         }
                         new_instructions.push(instruction);
+                        if self.needs_rc(type_info, &value) && currently_live.contains(&value) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: RefCountOp::Bump(1),
+                                value,
+                            });
+                        }
+                        currently_live.insert(value);
                     }
                     OpCode::Store { ptr, value } => {
                         // In forward order: bump value if still live (aliased into cell),

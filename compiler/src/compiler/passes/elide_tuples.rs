@@ -334,13 +334,13 @@ fn lower_instruction(
             }
         }
 
-        OpCode::Alloc { result, elem_type } => {
-            let leaves = leaf_types(elem_type);
+        OpCode::Alloc { result, value } => {
             let results = components(value_map, *result);
-            for (leaf, r) in leaves.into_iter().zip(results) {
+            let values = components(value_map, *value);
+            for (r, v) in results.into_iter().zip(values) {
                 out.push(OpCode::Alloc {
                     result: r,
-                    elem_type: leaf,
+                    value: v,
                 });
             }
         }
@@ -765,7 +765,6 @@ fn verify_op_tuple_free(op: &OpCode, fid: FunctionId, bid: BlockId) {
             "elide_tuples verification: fn {:?} block_{} still contains a TupleRefProj",
             fid, bid.0
         ),
-        OpCode::Alloc { elem_type, .. } => assert_free(elem_type, "alloc element type"),
         OpCode::MkSeq { elem_type, .. } | OpCode::MkRepeated { elem_type, .. } => {
             assert_free(elem_type, "sequence element type")
         }
