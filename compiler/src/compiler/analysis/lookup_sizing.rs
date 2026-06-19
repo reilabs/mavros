@@ -225,47 +225,40 @@ impl LookupSizing {
     }
 }
 
-/// Minimum decomposition cost (joint witnesses + constraints) of a `width`-bit value over
-/// `providers`, without building the plan: the cost-only twin of [`decompose`], a pure integer DP
-/// with no per-state `Vec<Chunk>`. The optimizer evaluates this across millions of `(R, P)`
-/// candidate pairs, so the plan-building variant (run only by the actual spilling) is too expensive
-/// here. Always terminating: the always-available width-1 bit chunk serves any width.
-fn decompose_cost(width: u8, providers: &[Provider], max_range_size: u8, gated: bool) -> usize {
-    if width == 0 {
-        return 0;
-    }
-    let w = width as usize;
-    let mut best: Vec<Option<usize>> = vec![None; w + 1];
-    best[0] = Some(0);
+/// DP table of the minimum decomposition cost (joint witnesses + constraints) for *every* width
+/// `0..=max_width` over `providers` — the cost-only twin of [`decompose`], a pure integer DP with
+/// no per-state `Vec<Chunk>`. One pass fills the whole table, so the optimizer (which evaluates this
+/// across millions of `(R, P)` candidate pairs) computes it once per (provider set, conditionality)
+/// and indexes it per histogram width rather than re-running the DP per width.
+///
+/// The recurrence covers `x` bits by peeling a full provider-sized chunk off the top (recursing on
+/// the low `x − s` bits; the chunk reaching the base pays no extraction), peeling a single width-1
+/// bit chunk (`x − 1`), or covering all of `x` as one partial chunk in a strictly-larger table (the
+/// 2-larger trick). The always-available bit chunk makes every width servable.
+fn decompose_costs(
+    max_width: u8,
+    providers: &[Provider],
+    max_range_size: u8,
+    gated: bool,
+) -> Vec<usize> {
+    let w = max_width as usize;
+    let mut best = vec![0usize; w + 1]; // best[0] = 0
     for x in 1..=w {
-        let mut chosen: Option<usize> = None;
-        let mut consider = |cost: usize| {
-            chosen = Some(chosen.map_or(cost, |b: usize| b.min(cost)));
-        };
-        // Peel a full chunk of provider size s <= x off the top; recurse on the low x - s bits. The
-        // chunk reaching the base (x - s == 0) is the lowest, derived, so it pays no extraction.
+        let mut chosen = usize::MAX;
         for p in providers {
             let s = p.size as usize;
-            if s > x {
-                continue;
-            }
-            if let Some(sub) = best[x - s] {
+            if s <= x {
                 let extracted = x - s > 0;
-                consider(sub + chunk_cost(p.size, p.kind, false, max_range_size, extracted, gated));
+                let cost = chunk_cost(p.size, p.kind, false, max_range_size, extracted, gated);
+                chosen = chosen.min(best[x - s] + cost);
             }
         }
-        // Peel a single bit off the top (a width-1 chunk needs no table); recurse on x - 1. Free
-        // when unconditional, so this is how the DP can fully bit-decompose without a table.
-        if let Some(sub) = best[x - 1] {
-            let extracted = x - 1 > 0;
-            consider(
-                sub + chunk_cost(1, TableKind::Range, false, max_range_size, extracted, gated),
-            );
-        }
-        // Cover all x bits as one partial chunk (2-larger trick) in a strictly-larger table.
+        let extracted = x - 1 > 0;
+        let bit = chunk_cost(1, TableKind::Range, false, max_range_size, extracted, gated);
+        chosen = chosen.min(best[x - 1] + bit);
         for p in providers {
             if (p.size as usize) > x {
-                consider(chunk_cost(
+                chosen = chosen.min(chunk_cost(
                     x as u8,
                     p.kind,
                     true,
@@ -277,14 +270,14 @@ fn decompose_cost(width: u8, providers: &[Provider], max_range_size: u8, gated: 
         }
         best[x] = chosen;
     }
-    best[w].expect("the width-1 bit chunk serves every width")
+    best
 }
 
 /// Optimal decomposition of a `width`-bit value over `providers`, as `(cost, chunks)` with the
 /// lowest-order chunk first. The recurrence covers `x` bits by peeling a full provider-sized chunk
 /// off the top (recursing on `x − s`), peeling a single width-1 bit chunk (recursing on `x − 1`),
 /// or covering all of `x` as one partial chunk in a strictly-larger table (the 2-larger trick,
-/// always terminal). The cost-only twin used by the optimizer is [`decompose_cost`].
+/// always terminal). The cost-only twin used by the optimizer is [`decompose_costs`].
 fn decompose(
     width: u8,
     providers: &[Provider],
@@ -429,11 +422,7 @@ fn rangecheck_recurring_cost(
     max_range_size: u8,
     gated: bool,
 ) -> usize {
-    rc_hist
-        .iter()
-        .filter(|&&(width, count)| width > 1 && count > 0)
-        .map(|&(width, count)| decompose_cost(width, providers, max_range_size, gated) * count)
-        .sum()
+    recurring_cost(rc_hist, providers, max_range_size, gated, true)
 }
 
 /// Total per-lookup spread cost over the histogram (excludes table allocation). A multi-chunk
@@ -447,10 +436,27 @@ fn spread_recurring_cost(
     max_range_size: u8,
     gated: bool,
 ) -> usize {
-    sp_hist
-        .iter()
-        .filter(|&&(_, count)| count > 0)
-        .map(|&(width, count)| decompose_cost(width, providers, max_range_size, gated) * count)
+    recurring_cost(sp_hist, providers, max_range_size, gated, false)
+}
+
+/// Sum of per-lookup decomposition costs over a width histogram. Builds the cost-for-all-widths DP
+/// table once (see [`decompose_costs`]) and indexes it per width, rather than decomposing each width
+/// separately. `skip_width_one` drops 1-bit lookups, which rangechecks lower inline for free.
+fn recurring_cost(
+    hist: &[(u8, usize)],
+    providers: &[Provider],
+    max_range_size: u8,
+    gated: bool,
+    skip_width_one: bool,
+) -> usize {
+    let served = |&&(width, count): &&(u8, usize)| count > 0 && (width > 1 || !skip_width_one);
+    let Some(max_width) = hist.iter().filter(served).map(|&(width, _)| width).max() else {
+        return 0;
+    };
+    let costs = decompose_costs(max_width, providers, max_range_size, gated);
+    hist.iter()
+        .filter(served)
+        .map(|&(width, count)| costs[width as usize] * count)
         .sum()
 }
 
@@ -953,8 +959,8 @@ mod tests {
         // No tables available, so a 3-bit value must be fully bit-decomposed. Both costs are the
         // joint `witnesses + W·constraints`; gated bits add a gating witness and a second
         // constraint each, so the gated decomposition is strictly more expensive.
-        let uncond = decompose_cost(3, &[], 0, false);
-        let gated = decompose_cost(3, &[], 0, true);
+        let uncond = decompose_costs(3, &[], 0, false)[3];
+        let gated = decompose_costs(3, &[], 0, true)[3];
         assert!(
             uncond < gated,
             "unconditional decomposition ({uncond}) must be cheaper than gated ({gated})"
