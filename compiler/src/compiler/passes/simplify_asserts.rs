@@ -14,7 +14,7 @@ use crate::{
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
         ssa::{
-            Instruction, ValueId,
+            Instruction, Located, ValueId,
             hlssa::{BinaryArithOpKind, CmpKind, HLSSA, OpCode, TypeExpr},
         },
     },
@@ -58,29 +58,33 @@ impl SimplifyAsserts {
             let mut new_blocks = HashMap::default();
             for (block_id, mut block) in function.take_blocks() {
                 let mut new_instructions = Vec::new();
-                for instruction in block.take_instructions().into_iter() {
-                    match instruction {
+                for instruction in block.take_located_instructions().into_iter() {
+                    let location = instruction.location().clone();
+                    match instruction.payload() {
                         OpCode::Assert { value } => {
-                            new_instructions.extend(emit_assert(value, &defs, function_type_info));
+                            new_instructions.extend(
+                                emit_assert(value, &defs, function_type_info)
+                                    .into_iter()
+                                    .map(|instruction| Located::new(instruction, location.clone())),
+                            );
                         }
                         OpCode::AssertCmp {
                             kind: CmpKind::Eq,
                             lhs,
                             rhs,
                         } => {
-                            new_instructions.extend(emit_assert_eq(
-                                lhs,
-                                rhs,
-                                &defs,
-                                function_type_info,
-                            ));
+                            new_instructions.extend(
+                                emit_assert_eq(lhs, rhs, &defs, function_type_info)
+                                    .into_iter()
+                                    .map(|instruction| Located::new(instruction, location.clone())),
+                            );
                         }
-                        _ => {
-                            new_instructions.push(instruction);
+                        other => {
+                            new_instructions.push(Located::new(other, location));
                         }
                     }
                 }
-                block.put_instructions(new_instructions);
+                block.put_located_instructions(new_instructions);
                 new_blocks.insert(block_id, block);
             }
             function.put_blocks(new_blocks);

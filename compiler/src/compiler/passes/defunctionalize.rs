@@ -161,11 +161,12 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         let func = ssa.get_function_mut(fid);
         for bid in block_ids {
             let block = func.get_block_mut(bid);
-            let instructions = block.take_instructions();
+            let instructions = block.take_located_instructions();
             let mut new_instructions = Vec::new();
 
             for instr in instructions {
-                match instr {
+                let location = instr.location().clone();
+                match instr.payload() {
                     OpCode::Call {
                         results,
                         function: CallTarget::Dynamic(fn_ptr_val),
@@ -181,19 +182,24 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
                         new_args.push(fn_ptr_val);
                         new_args.extend(args);
 
-                        new_instructions.push(OpCode::Call {
-                            results,
-                            function: CallTarget::Static(dispatch_fn),
-                            args: new_args,
-                            unconstrained,
-                        });
+                        new_instructions.push(crate::compiler::ssa::Located::new(
+                            OpCode::Call {
+                                results,
+                                function: CallTarget::Static(dispatch_fn),
+                                args: new_args,
+                                unconstrained,
+                            },
+                            location,
+                        ));
                     }
-                    other => new_instructions.push(other),
+                    other => {
+                        new_instructions.push(crate::compiler::ssa::Located::new(other, location))
+                    }
                 }
             }
 
             let block = func.get_block_mut(bid);
-            block.put_instructions(new_instructions);
+            block.put_located_instructions(new_instructions);
         }
     }
 
@@ -231,11 +237,11 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
             }
             block.put_parameters(params);
 
-            let mut instructions = block.take_instructions();
+            let mut instructions = block.take_located_instructions();
             for instr in instructions.iter_mut() {
-                replace_function_types_in_instruction(instr);
+                replace_function_types_in_instruction(&mut *instr);
             }
-            block.put_instructions(instructions);
+            block.put_located_instructions(instructions);
         }
     }
 }

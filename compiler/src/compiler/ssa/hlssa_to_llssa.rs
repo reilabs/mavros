@@ -734,7 +734,8 @@ fn lower_function(
         let mut emitter = LLBlockEmitter::new(&mut ll_func, llssa, ll_block_id);
 
         // Lower instructions
-        for instruction in block.get_instructions() {
+        for (instruction, source_location) in block.get_instructions_with_source_locations() {
+            let start = emitter.instruction_count();
             lower_instruction(
                 instruction,
                 &mut emitter,
@@ -747,6 +748,7 @@ fn lower_function(
                 hlssa_global_types,
                 options,
             );
+            emitter.set_instruction_source_locations_from(start, source_location.cloned());
         }
 
         // Lower terminator (into current block, which may have changed due to block splits)

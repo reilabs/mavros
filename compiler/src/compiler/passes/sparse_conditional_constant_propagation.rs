@@ -962,9 +962,9 @@ fn rewrite(function: &mut HLFunction, ssa: &HLSSA, res: &LatticeResult) {
         let block = function.get_block_mut(bid);
         let local_replacements = bool_fact_replacements(ssa, res.block_facts.get(&bid));
 
-        let instructions = block.take_instructions();
+        let instructions = block.take_located_instructions();
         let mut kept = Vec::with_capacity(instructions.len());
-        for instr in instructions {
+        for mut instr in instructions {
             // A single-result instruction whose result the lattice proved constant is one of the
             // pure scalar folds (see `transfer`): its uses are aliased, so drop it.
             {
@@ -982,7 +982,7 @@ fn rewrite(function: &mut HLFunction, ssa: &HLSSA, res: &LatticeResult) {
                 cond,
                 if_t,
                 if_f,
-            } = &instr
+            } = &*instr
             {
                 if let LatticeElement::Const(c) = res.lookup_in_block(bid, *cond) {
                     if let Some(b) = const_bool(&c) {
@@ -991,11 +991,10 @@ fn rewrite(function: &mut HLFunction, ssa: &HLSSA, res: &LatticeResult) {
                     }
                 }
             }
-            let mut instr = instr;
-            local_replacements.replace_inputs(&mut instr);
+            local_replacements.replace_inputs(&mut *instr);
             kept.push(instr);
         }
-        block.put_instructions(kept);
+        block.put_located_instructions(kept);
 
         if let Some(Terminator::JmpIf(cond, t, f)) = block.get_terminator() {
             let (cond, t, f) = (*cond, *t, *f);

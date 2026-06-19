@@ -428,7 +428,7 @@ impl DCE {
                     continue;
                 }
 
-                let instructions = block.take_instructions();
+                let instructions = block.take_located_instructions();
                 let mut new_instructions = vec![];
 
                 for (i, mut instruction) in instructions.into_iter().enumerate() {
@@ -441,7 +441,7 @@ impl DCE {
                         function: CallTarget::Static(callee),
                         args,
                         unconstrained: _,
-                    } = &mut instruction
+                    } = &mut *instruction
                     {
                         let mut new_args = vec![];
                         for (arg_i, arg) in args.iter().enumerate() {
@@ -463,7 +463,7 @@ impl DCE {
                     new_instructions.push(instruction);
                 }
 
-                block.put_instructions(new_instructions);
+                block.put_located_instructions(new_instructions);
 
                 let new_terminator = match block.take_terminator() {
                     Some(Terminator::Jmp(target, params)) => {

@@ -17,7 +17,7 @@ use crate::compiler::{
     },
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        Instruction, Terminator, ValueId,
+        Instruction, Located, Terminator, ValueId,
         hlssa::{CastTarget, HLFunction, HLSSA, OpCode, RefCountOp, Type, TypeExpr},
     },
 };
@@ -67,6 +67,11 @@ impl RCInsertion {
             // inserting drops.
             let mut currently_live = liveness.block_liveness[block_id].live_out.clone();
             let mut new_instructions = vec![];
+            macro_rules! push_op {
+                ($op:expr) => {
+                    new_instructions.push(Located::without($op))
+                };
+            }
 
             match block.get_terminator().unwrap() {
                 Terminator::Return(values) => {
@@ -80,7 +85,7 @@ impl RCInsertion {
                         // We then decrease by one, because the original value dies here.
                         let count = count.count() - 1;
                         if self.needs_rc(type_info, value) && count > 0 {
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Bump(count),
                                 value: *value,
                             });
@@ -105,7 +110,7 @@ impl RCInsertion {
                             count -= 1;
                         }
                         if self.needs_rc(type_info, value) && count > 0 {
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Bump(count),
                                 value: *value,
                             });
@@ -119,8 +124,8 @@ impl RCInsertion {
                 }
             }
 
-            for instruction in block.take_instructions().into_iter().rev() {
-                match &instruction {
+            for instruction in block.take_located_instructions().into_iter().rev() {
+                match &*instruction {
                     OpCode::BinaryArithOp {
                         kind: _,
                         result: r,
@@ -144,7 +149,7 @@ impl RCInsertion {
                                 count -= 1;
                             }
                             if count > 0 {
-                                new_instructions.push(OpCode::MemOp {
+                                push_op!(OpCode::MemOp {
                                     kind: RefCountOp::Bump(count),
                                     value: *input,
                                 });
@@ -163,7 +168,7 @@ impl RCInsertion {
                         var: v,
                     } => {
                         if currently_live.contains(v) {
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Bump(1),
                                 value: *v,
                             });
@@ -195,7 +200,7 @@ impl RCInsertion {
                             }
                             if currently_live.contains(v) {
                                 // Both input and output are live — two refs to the same boxed value.
-                                new_instructions.push(OpCode::MemOp {
+                                push_op!(OpCode::MemOp {
                                     kind: RefCountOp::Bump(1),
                                     value: *v,
                                 });
@@ -269,7 +274,7 @@ impl RCInsertion {
                             .collect_vec();
                         for input in rcd_inputs.iter() {
                             if !currently_live.contains(input) {
-                                new_instructions.push(OpCode::MemOp {
+                                push_op!(OpCode::MemOp {
                                     kind: RefCountOp::Drop,
                                     value: *input,
                                 });
@@ -285,7 +290,7 @@ impl RCInsertion {
                         // it is possible that fresh_witness is only used for the side effect,
                         // but the actual value is not used.
                         if !currently_live.contains(r) {
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Drop,
                                 value: *r,
                             });
@@ -298,7 +303,7 @@ impl RCInsertion {
                         sensitivity: _,
                     } => {
                         if !currently_live.contains(v) {
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Drop,
                                 value: *v,
                             });
@@ -330,7 +335,7 @@ impl RCInsertion {
                                     count -= 1;
                                 }
                                 if count > 0 {
-                                    new_instructions.push(OpCode::MemOp {
+                                    push_op!(OpCode::MemOp {
                                         kind: RefCountOp::Bump(count),
                                         value: *input,
                                     });
@@ -342,7 +347,7 @@ impl RCInsertion {
                             // The line below is the temporary solution if we run into this ever.
                             // It should be debugged properly though, we expect DCE to sweep this
                             // entire instruction.
-                            // new_instructions.push(OpCode::MemOp(MemOp::DropAndSweep, *result));
+                            // push_op!(OpCode::MemOp(MemOp::DropAndSweep, *result));
                         }
                         currently_live.extend(inputs);
                     }
@@ -380,7 +385,7 @@ impl RCInsertion {
                                 bump -= 1;
                             }
                             if bump > 0 {
-                                new_instructions.push(OpCode::MemOp {
+                                push_op!(OpCode::MemOp {
                                     kind: RefCountOp::Bump(bump),
                                     value: *element,
                                 });
@@ -396,14 +401,14 @@ impl RCInsertion {
                     OpCode::Alloc { result, value } => {
                         let value = *value;
                         if !currently_live.contains(result) {
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Drop,
                                 value: *result,
                             });
                         }
                         new_instructions.push(instruction);
                         if self.needs_rc(type_info, &value) && currently_live.contains(&value) {
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Bump(1),
                                 value,
                             });
@@ -417,14 +422,14 @@ impl RCInsertion {
                         let ptr = *ptr;
                         let value = *value;
                         if !currently_live.contains(&ptr) {
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Drop,
                                 value: ptr,
                             });
                         }
                         new_instructions.push(instruction);
                         if self.needs_rc(type_info, &value) && currently_live.contains(&value) {
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Bump(1),
                                 value,
                             });
@@ -434,14 +439,14 @@ impl RCInsertion {
                     }
                     OpCode::Load { result, ptr } => {
                         if !currently_live.contains(ptr) {
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Drop,
                                 value: *ptr,
                             });
                         }
                         if self.needs_rc(type_info, result) {
                             if currently_live.contains(result) {
-                                new_instructions.push(OpCode::MemOp {
+                                push_op!(OpCode::MemOp {
                                     kind: RefCountOp::Bump(1),
                                     value: *result,
                                 });
@@ -469,7 +474,7 @@ impl RCInsertion {
                             if self.needs_rc(type_info, return_id)
                                 && !currently_live.contains(return_id)
                             {
-                                new_instructions.push(OpCode::MemOp {
+                                push_op!(OpCode::MemOp {
                                     kind: RefCountOp::Drop,
                                     value: *return_id,
                                 });
@@ -489,7 +494,7 @@ impl RCInsertion {
                                 count -= 1;
                             }
                             if self.needs_rc(type_info, param) && count > 0 {
-                                new_instructions.push(OpCode::MemOp {
+                                push_op!(OpCode::MemOp {
                                     kind: RefCountOp::Bump(count),
                                     value: *param,
                                 });
@@ -505,7 +510,7 @@ impl RCInsertion {
                         if !currently_live.contains(array) && self.needs_rc(type_info, array) {
                             // The array dies here, so we drop it _after_ the read.
                             // Blobs are not RC'd and need no drop.
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Drop,
                                 value: *array,
                             });
@@ -514,7 +519,7 @@ impl RCInsertion {
                             if currently_live.contains(result) {
                                 // The result gets a bump to the RC counter, because
                                 // it's now both accessed here and in the array.
-                                new_instructions.push(OpCode::MemOp {
+                                push_op!(OpCode::MemOp {
                                     kind: RefCountOp::Bump(1),
                                     value: *result,
                                 });
@@ -539,7 +544,7 @@ impl RCInsertion {
                         // But we need to keep the slice alive if it's currently live
                         if !currently_live.contains(slice) {
                             // The slice dies here, so we drop it _after_ the read.
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Drop,
                                 value: *slice,
                             });
@@ -558,7 +563,7 @@ impl RCInsertion {
                                     "ICE: Result of ReadGlobal is immediately dropped. This is a bug."
                                 )
                             }
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Bump(1),
                                 value: *r,
                             });
@@ -577,13 +582,13 @@ impl RCInsertion {
                             // Array set will decrease the RC and oportunistically reuse the storage,
                             // if it notices a refcount of 0. So we need to bump _before_
                             // we enter it.
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Bump(1),
                                 value: *array,
                             });
                         }
                         if self.needs_rc(type_info, value) && currently_live.contains(value) {
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Bump(1),
                                 value: *value,
                             })
@@ -593,7 +598,7 @@ impl RCInsertion {
                             // The line below is the temporary solution if we run into this ever.
                             // It should be debugged properly though, we expect DCE to sweep this
                             // entire instruction.
-                            // new_instructions.push(OpCode::MemOp(MemOp::Drop, *result));
+                            // push_op!(OpCode::MemOp(MemOp::Drop, *result));
                         }
                         currently_live.extend(vec![*array, *value]);
                     }
@@ -607,7 +612,7 @@ impl RCInsertion {
                         if currently_live.contains(slice) {
                             // Slice push will decrease the RC and oportunistically reuse the storage,
                             // if it notices a refcount of 0. So we need to bump _before_ we enter it.
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Bump(1),
                                 value: *slice,
                             });
@@ -628,7 +633,7 @@ impl RCInsertion {
                                     count -= 1;
                                 }
                                 if count > 0 {
-                                    new_instructions.push(OpCode::MemOp {
+                                    push_op!(OpCode::MemOp {
                                         kind: RefCountOp::Bump(count),
                                         value: *value,
                                     });
@@ -652,7 +657,7 @@ impl RCInsertion {
                         // If the value needs RC, bump it since the global now holds a reference.
                         let v = *v;
                         if self.needs_rc(type_info, &v) && currently_live.contains(&v) {
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Bump(1),
                                 value: v,
                             });
@@ -683,7 +688,7 @@ impl RCInsertion {
                     } => {
                         if !currently_live.contains(r) {
                             // We contend with this, because ToBits can be used for a range check.
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Drop,
                                 value: *r,
                             });
@@ -700,7 +705,7 @@ impl RCInsertion {
                     } => {
                         if !currently_live.contains(r) {
                             // We contend with this, because ToRadix can be used for a range check.
-                            new_instructions.push(OpCode::MemOp {
+                            push_op!(OpCode::MemOp {
                                 kind: RefCountOp::Drop,
                                 value: *r,
                             });
@@ -726,13 +731,13 @@ impl RCInsertion {
             }
             for param in block.get_parameter_values() {
                 if self.needs_rc(type_info, param) && !currently_live.contains(param) {
-                    new_instructions.push(OpCode::MemOp {
+                    push_op!(OpCode::MemOp {
                         kind: RefCountOp::Drop,
                         value: *param,
                     });
                 }
             }
-            block.put_instructions(new_instructions.into_iter().rev().collect());
+            block.put_located_instructions(new_instructions.into_iter().rev().collect());
         }
 
         for (source, target) in cfg.get_edges() {

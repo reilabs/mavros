@@ -116,7 +116,7 @@ fn run_on_function<T: LoweringPass + ?Sized>(
     for block_id in block_ids {
         let (instructions, terminator) = {
             let mut block = fb.function.take_block(block_id);
-            let instructions = block.take_instructions();
+            let instructions = block.take_located_instructions();
             let terminator = block.take_terminator();
             fb.function.put_block(block_id, block);
             (instructions, terminator)
@@ -124,7 +124,10 @@ fn run_on_function<T: LoweringPass + ?Sized>(
 
         let mut b = fb.block(block_id);
         for instruction in instructions {
-            pass.process_instruction(&mut b, &context, instruction);
+            let location = instruction.location().clone();
+            let start = b.instruction_count();
+            pass.process_instruction(&mut b, &context, instruction.payload());
+            b.set_instruction_source_locations_from(start, location);
         }
         if let Some(terminator) = terminator {
             b.set_terminator(terminator);

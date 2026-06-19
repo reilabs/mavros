@@ -101,11 +101,12 @@ impl UntaintControlFlow {
             }
             new_block.put_parameters(new_parameters);
 
-            let mut new_instructions = Vec::<OpCode>::new();
-            for instruction in block.take_instructions() {
-                let new = match instruction {
-                    OpCode::Alloc { .. } => instruction,
-                    OpCode::FreshWitness { .. } => instruction,
+            let mut new_instructions = Vec::<LocatedOpCode>::new();
+            for instruction in block.take_located_instructions() {
+                let location = instruction.location().clone();
+                let new = match instruction.payload() {
+                    instr @ OpCode::Alloc { .. } => instr,
+                    instr @ OpCode::FreshWitness { .. } => instr,
                     OpCode::MkSeq {
                         result: r,
                         elems: l,
@@ -189,9 +190,9 @@ impl UntaintControlFlow {
                     },
                     other => other,
                 };
-                new_instructions.push(new);
+                new_instructions.push(LocatedOpCode::new(new, location));
             }
-            new_block.put_instructions(new_instructions);
+            new_block.put_located_instructions(new_instructions);
             new_block.set_terminator(block.take_terminator().unwrap());
             function.put_block(block_id, new_block);
         }

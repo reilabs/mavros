@@ -55,11 +55,13 @@ impl LowerMapCasts {
             sb.modify_function(function_id, |fb| {
                 for bid in block_ids {
                     let terminator = fb.function.get_block_mut(bid).take_terminator();
-                    let instructions = fb.function.get_block_mut(bid).take_instructions();
+                    let instructions = fb.function.get_block_mut(bid).take_located_instructions();
 
                     let mut emitter = fb.block(bid);
                     for instruction in instructions {
-                        match instruction {
+                        let location = instruction.location().clone();
+                        let start = emitter.instruction_count();
+                        match instruction.payload() {
                             OpCode::Cast {
                                 result,
                                 value,
@@ -92,6 +94,7 @@ impl LowerMapCasts {
                             }
                             other => emitter.emit(other),
                         }
+                        emitter.set_instruction_source_locations_from(start, location);
                     }
                     if let Some(terminator) = terminator {
                         emitter.set_terminator(terminator);

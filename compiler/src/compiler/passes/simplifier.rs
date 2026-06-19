@@ -15,7 +15,7 @@ use crate::{
         pass_manager::{AnalysisId, AnalysisStore, Pass},
         passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
         ssa::{
-            FunctionId, ValueId,
+            FunctionId, Located, ValueId,
             hlssa::{
                 BinaryArithOpKind, CastTarget, CmpKind, Constant, HLSSA, OpCode, Type, TypeExpr,
                 builder::{HLFunctionBuilder, HLSSABuilder},
@@ -119,11 +119,10 @@ impl Simplifier {
         let mut new_blocks = HashMap::default();
         for (bid, mut block) in fb.function.take_blocks().into_iter() {
             let mut new_instructions = Vec::new();
-            for instruction in block.take_instructions().into_iter() {
+            for mut instruction in block.take_located_instructions().into_iter() {
                 // Apply aliases collected so far in this iteration before pattern-matching, so we
                 // see up-to-date operands.
-                let mut instruction = instruction;
-                aliases.replace_inputs(&mut instruction);
+                aliases.replace_inputs(&mut *instruction);
 
                 let rewrite =
                     self.try_algebraic(&instruction, &definitions, function_type_info, fb);
@@ -134,7 +133,12 @@ impl Simplifier {
                         changed = true;
                     }
                     Some(Rewrite::Replace(new_ops)) => {
-                        new_instructions.extend(new_ops);
+                        let location = instruction.location().clone();
+                        new_instructions.extend(
+                            new_ops
+                                .into_iter()
+                                .map(|new_op| Located::new(new_op, location.clone())),
+                        );
                         changed = true;
                     }
                     None => {
@@ -142,7 +146,7 @@ impl Simplifier {
                     }
                 }
             }
-            block.put_instructions(new_instructions);
+            block.put_located_instructions(new_instructions);
             new_blocks.insert(bid, block);
         }
         fb.function.put_blocks(new_blocks);

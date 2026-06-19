@@ -21,6 +21,7 @@ use crate::{
     },
 };
 
+use fm::FileManager;
 use expression_converter::ExpressionConverter;
 use type_converter::TypeConverter;
 
@@ -62,7 +63,11 @@ impl SSAConverter {
 
     /// Convert an entire program to SSA.
     /// Returns the SSA and whether main is unconstrained.
-    pub fn convert_program(&mut self, program: &Program) -> (HLSSA, bool) {
+    pub fn convert_program(
+        &mut self,
+        program: &Program,
+        file_manager: Option<&FileManager>,
+    ) -> (HLSSA, bool) {
         let mut ssa = HLSSA::new();
 
         // Phase 1: Register all functions to handle mutual recursion.
@@ -97,20 +102,35 @@ impl SSAConverter {
             if ast_func.unconstrained {
                 // Natively unconstrained: convert once with is_unconstrained=true
                 let ssa_func_id = *self.constrained_mapper.get(&ast_func.id).unwrap();
-                let converted =
-                    self.convert_function(&mut ssa, ast_func, &self.unconstrained_mapper, true);
+                let converted = self.convert_function(
+                    &mut ssa,
+                    ast_func,
+                    &self.unconstrained_mapper,
+                    true,
+                    file_manager,
+                );
                 *ssa.get_function_mut(ssa_func_id) = converted;
             } else {
                 // Constrained version
                 let constrained_id = *self.constrained_mapper.get(&ast_func.id).unwrap();
-                let converted =
-                    self.convert_function(&mut ssa, ast_func, &self.constrained_mapper, false);
+                let converted = self.convert_function(
+                    &mut ssa,
+                    ast_func,
+                    &self.constrained_mapper,
+                    false,
+                    file_manager,
+                );
                 *ssa.get_function_mut(constrained_id) = converted;
 
                 // Unconstrained variant (for calls from unconstrained context)
                 let unconstrained_id = *self.unconstrained_mapper.get(&ast_func.id).unwrap();
-                let converted =
-                    self.convert_function(&mut ssa, ast_func, &self.unconstrained_mapper, true);
+                let converted = self.convert_function(
+                    &mut ssa,
+                    ast_func,
+                    &self.unconstrained_mapper,
+                    true,
+                    file_manager,
+                );
                 *ssa.get_function_mut(unconstrained_id) = converted;
             }
         }
@@ -267,6 +287,7 @@ impl SSAConverter {
                     &self.global_slots,
                     &self.global_constants,
                     current_block,
+                    None,
                 );
                 let (_name, _typ, init_expr) = &program.globals[gid];
                 let value = expr_converter.convert_expression(init_expr, b).unwrap();
@@ -305,6 +326,7 @@ impl SSAConverter {
         ast_func: &AstFunction,
         function_mapper: &HashMap<AstFuncId, FunctionId>,
         in_unconstrained: bool,
+        file_manager: Option<&FileManager>,
     ) -> HLFunction {
         let name = if in_unconstrained && !ast_func.unconstrained {
             format!("{}_unconstrained", ast_func.name)
@@ -333,6 +355,7 @@ impl SSAConverter {
             &self.global_slots,
             &self.global_constants,
             entry_block,
+            file_manager,
         );
 
         // Add function parameters as block parameters
@@ -363,7 +386,16 @@ impl SSAConverter {
 impl HLSSA {
     /// Create SSA directly from a monomorphized program.
     pub fn from_program(program: &Program) -> (HLSSA, bool) {
+        Self::from_program_with_file_manager(program, None)
+    }
+
+    /// Create SSA directly from a monomorphized program, preserving source locations when
+    /// a Noir file manager is available.
+    pub fn from_program_with_file_manager(
+        program: &Program,
+        file_manager: Option<&FileManager>,
+    ) -> (HLSSA, bool) {
         let mut converter = SSAConverter::new();
-        converter.convert_program(program)
+        converter.convert_program(program, file_manager)
     }
 }

@@ -141,6 +141,19 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         self.block_id
     }
 
+    pub fn instruction_count(&self) -> usize {
+        self.block.instruction_count()
+    }
+
+    pub fn set_instruction_source_locations_from(
+        &mut self,
+        start: usize,
+        source_location: Option<crate::compiler::ssa::SourceLocation>,
+    ) {
+        self.block
+            .set_instruction_source_locations_from(start, source_location);
+    }
+
     pub fn add_block(&mut self) -> (BlockId, &mut Block<Op, Ty>) {
         self.function.add_block_mut()
     }

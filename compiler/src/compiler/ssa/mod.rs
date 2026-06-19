@@ -1024,6 +1024,26 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
         *self.instructions[i].location_mut() = source_location;
     }
 
+    pub fn instruction_count(&self) -> usize {
+        self.instructions.len()
+    }
+
+    pub fn set_instruction_source_locations_from(
+        &mut self,
+        start: usize,
+        source_location: Option<SourceLocation>,
+    ) {
+        let Some(source_location) = source_location else {
+            return;
+        };
+
+        for instruction in self.instructions.iter_mut().skip(start) {
+            if instruction.get_location().is_none() {
+                *instruction.location_mut() = Some(source_location.clone());
+            }
+        }
+    }
+
     pub fn get_instructions(&self) -> impl DoubleEndedIterator<Item = &Op> {
         self.instructions.iter().map(|instruction| &**instruction)
     }

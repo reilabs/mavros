@@ -141,8 +141,8 @@ impl FixDoubleJumps {
                     value_replacements.insert(*param, arg);
                 }
 
-                for instruction in target_block.take_instructions() {
-                    source_block.push_instruction(instruction);
+                for instruction in target_block.take_located_instructions() {
+                    source_block.push_located_instruction(instruction);
                 }
 
                 source_block.set_terminator(target_block.take_terminator().unwrap());

@@ -79,12 +79,15 @@ impl WitnessLowering {
                 fb.function.get_block_mut(bid).put_parameters(new_params);
 
                 let terminator = fb.function.get_block_mut(bid).take_terminator();
-                let instructions = fb.function.get_block_mut(bid).take_instructions();
+                let instructions = fb.function.get_block_mut(bid).take_located_instructions();
 
                 let mut emitter = fb.block(bid);
 
-                for mut instruction in instructions.into_iter() {
+                for instruction in instructions.into_iter() {
+                    let location = instruction.location().clone();
+                    let mut instruction = instruction.payload();
                     replacements.replace_instruction(&mut instruction);
+                    let start = emitter.instruction_count();
                     match instruction {
                         OpCode::Guard { .. } => {
                             panic!("ICE: Guard should be lowered before witness lowering");
@@ -99,7 +102,11 @@ impl WitnessLowering {
                                 // Already WitnessOf — don't double-wrap
                                 replacements.insert(r, v);
                             } else {
-                                emitter.emit(instruction);
+                                emitter.emit(OpCode::Cast {
+                                    result: r,
+                                    value: v,
+                                    target: target.clone(),
+                                });
                             }
                         }
                         OpCode::FreshWitness { .. } => {
@@ -454,6 +461,7 @@ impl WitnessLowering {
                         | OpCode::TupleProj { .. }
                         | OpCode::TupleRefProj { .. } => ice_non_elided_tuple(),
                     };
+                    emitter.set_instruction_source_locations_from(start, location);
                 }
 
                 // Handle terminator on current (possibly split) block

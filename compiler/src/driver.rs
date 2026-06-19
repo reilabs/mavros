@@ -166,7 +166,8 @@ impl Driver {
         ));
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
-        let (ssa, main_is_unconstrained) = HLSSA::from_program(&program);
+        let (ssa, main_is_unconstrained) =
+            HLSSA::from_program_with_file_manager(&program, Some(self.project.file_manager()));
         self.initial_ssa = Some(ssa);
         self.main_is_unconstrained = main_is_unconstrained;
 
