@@ -446,13 +446,17 @@ pub union Arrays {
     pub as_ad: AdArrays,
 }
 
+/// Number of slots in the fixed-size table caches ([`VM::rgchk_tables`]/[`VM::spread_tables`]).
+/// These are indexed by table size in bits, so this covers every width in `0..=32`.
+pub const NUM_TABLE_SIZE_SLOTS: usize = 33;
+
 pub struct VM {
     pub data: Arrays,
     pub allocation_instrumenter: AllocationInstrumenter,
     pub tables: Vec<TableInfo>,
     /// Lazily-allocated rangecheck tables, indexed by table size in bits (a `2^bits`-row table).
-    pub rgchk_tables: [Option<usize>; 33],
-    pub spread_tables: [Option<usize>; 33],
+    pub rgchk_tables: [Option<usize>; NUM_TABLE_SIZE_SLOTS],
+    pub spread_tables: [Option<usize>; NUM_TABLE_SIZE_SLOTS],
     pub globals: *mut u64,
     pub struct_layouts: Vec<StructDescriptor>,
     /// Set when the program executes a trap (e.g. a failed assertion). The
@@ -499,8 +503,8 @@ impl VM {
             },
             allocation_instrumenter: AllocationInstrumenter::new(),
             tables: vec![],
-            rgchk_tables: [None; 33],
-            spread_tables: [None; 33],
+            rgchk_tables: [None; NUM_TABLE_SIZE_SLOTS],
+            spread_tables: [None; NUM_TABLE_SIZE_SLOTS],
             globals,
             struct_layouts,
             trapped: false,
@@ -539,8 +543,8 @@ impl VM {
             },
             allocation_instrumenter: AllocationInstrumenter::new(),
             tables: vec![],
-            rgchk_tables: [None; 33],
-            spread_tables: [None; 33],
+            rgchk_tables: [None; NUM_TABLE_SIZE_SLOTS],
+            spread_tables: [None; NUM_TABLE_SIZE_SLOTS],
             globals,
             struct_layouts,
             trapped: false,

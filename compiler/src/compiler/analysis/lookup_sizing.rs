@@ -48,6 +48,13 @@ use crate::{
 /// never indexed out of range.
 const MAX_TABLE_BITS: u8 = 24;
 
+/// A table of `MAX_TABLE_BITS` bits is indexed into the backends' fixed-size table caches by its
+/// bit-width, so the cache must have a slot for that width. Guarantee it at compile time.
+const _: () = assert!(
+    (MAX_TABLE_BITS as usize) < crate::vm::bytecode::NUM_TABLE_SIZE_SLOTS,
+    "MAX_TABLE_BITS exceeds the VM's fixed-size table cache; widen rgchk_tables/spread_tables",
+);
+
 /// How many witnesses one R1CS constraint is worth in the joint cost the optimizer minimizes
 /// (`witnesses + CONSTRAINT_WEIGHT · constraints`). Witnesses dominate the prover's commitment, but
 /// constraints are not free (sumcheck rounds, matrix nonzeros), so a witness saving that costs
