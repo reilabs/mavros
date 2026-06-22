@@ -217,6 +217,21 @@ pub trait LLEmitter {
             result: r,
             struct_type,
             flex_count,
+            zeroed: false,
+        });
+        r
+    }
+
+    /// Like [`heap_alloc`](Self::heap_alloc), but the returned region is
+    /// zero-filled (lowered to `calloc`). Callers may then skip storing zero
+    /// into fields that should start at zero.
+    fn heap_alloc_zeroed(&mut self, struct_type: LLStruct, flex_count: Option<ValueId>) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::HeapAlloc {
+            result: r,
+            struct_type,
+            flex_count,
+            zeroed: true,
         });
         r
     }

@@ -94,6 +94,7 @@ pub struct LLVMCodeGen<'ctx> {
     field_div_fn: Option<FunctionValue<'ctx>>,
     field_lt_fn: Option<FunctionValue<'ctx>>,
     malloc_fn: Option<FunctionValue<'ctx>>,
+    calloc_fn: Option<FunctionValue<'ctx>>,
     free_fn: Option<FunctionValue<'ctx>>,
     field_from_limbs_fn: Option<FunctionValue<'ctx>>,
     field_to_limbs_fn: Option<FunctionValue<'ctx>>,
@@ -133,6 +134,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             field_div_fn: None,
             field_lt_fn: None,
             malloc_fn: None,
+            calloc_fn: None,
             free_fn: None,
             field_from_limbs_fn: None,
             field_to_limbs_fn: None,
@@ -452,6 +454,14 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.malloc_fn = Some(self.module.add_function(
             "malloc",
             malloc_type,
+            Some(Linkage::External),
+        ));
+
+        // calloc(i32) -> ptr  (zero-filled; single size arg, same convention as malloc)
+        let calloc_type = ptr_type.fn_type(&[i32_type.into()], false);
+        self.calloc_fn = Some(self.module.add_function(
+            "calloc",
+            calloc_type,
             Some(Linkage::External),
         ));
 
@@ -1094,6 +1104,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 result,
                 struct_type,
                 flex_count,
+                zeroed,
             } => {
                 let struct_ty = self.convert_struct_type(struct_type);
                 let size = struct_ty.size_of().unwrap();
@@ -1128,10 +1139,14 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                         .build_int_add(size_i32, flex_size, "alloc_size")
                         .unwrap();
                 }
-                let malloc_fn = self.malloc_fn.expect("malloc not declared");
+                let alloc_fn = if *zeroed {
+                    self.calloc_fn.expect("calloc not declared")
+                } else {
+                    self.malloc_fn.expect("malloc not declared")
+                };
                 let call_site = self
                     .builder
-                    .build_call(malloc_fn, &[size_i32.into()], "alloc")
+                    .build_call(alloc_fn, &[size_i32.into()], "alloc")
                     .unwrap();
                 let ptr_val = call_site
                     .try_as_basic_value()

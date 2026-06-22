@@ -206,6 +206,9 @@ pub enum LLOp {
         result: ValueId,
         struct_type: LLStruct,
         flex_count: Option<ValueId>,
+        /// When true, the allocation is zero-filled (lowered to `calloc`), so
+        /// initializers may skip storing zero into freshly-allocated fields.
+        zeroed: bool,
     },
     Free {
         ptr: ValueId,
@@ -657,12 +660,14 @@ impl Instruction for LLOp {
                 result,
                 struct_type,
                 flex_count,
+                zeroed,
             } => {
                 let flex_str = match flex_count {
                     Some(c) => format!(", flex_count={}", vr(*c)),
                     None => "".to_string(),
                 };
-                format!("{} = heap_alloc {}{}", v(*result), struct_type, flex_str)
+                let kind = if *zeroed { "heap_alloc_zeroed" } else { "heap_alloc" };
+                format!("{} = {} {}{}", v(*result), kind, struct_type, flex_str)
             }
             LLOp::Free { ptr } => {
                 format!("free {}", vr(*ptr))

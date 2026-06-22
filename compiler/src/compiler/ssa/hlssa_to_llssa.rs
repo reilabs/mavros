@@ -2255,7 +2255,9 @@ fn lower_ad_fresh_witness(
 /// Allocate an ADSumNode for two AD values.
 fn lower_ad_sum(e: &mut LLBlockEmitter<'_>, ll_a: ValueId, ll_b: ValueId) -> ValueId {
     let node_struct = LLStruct::ad_sum_node();
-    let node = e.heap_alloc(node_struct.clone(), None);
+    // Zero-filled: the da/db/dc derivative accumulators must start at zero and
+    // are left untouched here — calloc gives us that for free.
+    let node = e.heap_alloc_zeroed(node_struct.clone(), None);
 
     // RC = 1
     let rc_hdr = e.struct_field_ptr(node, node_struct.clone(), 0);
@@ -2271,18 +2273,10 @@ fn lower_ad_sum(e: &mut LLBlockEmitter<'_>, ll_a: ValueId, ll_b: ValueId) -> Val
     // a, b = children
     let a_ptr = e.struct_field_ptr(node, node_struct.clone(), 2);
     e.ll_store(a_ptr, ll_a);
-    let b_ptr = e.struct_field_ptr(node, node_struct.clone(), 3);
+    let b_ptr = e.struct_field_ptr(node, node_struct, 3);
     e.ll_store(b_ptr, ll_b);
 
-    // da, db, dc = zero
-    let zero_field = make_field_zero(e);
-    let da_ptr = e.struct_field_ptr(node, node_struct.clone(), 4);
-    e.ll_store(da_ptr, zero_field);
-    let db_ptr = e.struct_field_ptr(node, node_struct.clone(), 5);
-    e.ll_store(db_ptr, zero_field);
-    let dc_ptr = e.struct_field_ptr(node, node_struct, 6);
-    e.ll_store(dc_ptr, zero_field);
-
+    // da, db, dc already zero (calloc).
     node
 }
 
@@ -2298,7 +2292,9 @@ fn lower_ad_mul_const(
     let ll_coeff = ensure_field_sized(e, val_map[&const_val], coeff_type);
     let ll_var = val_map[&var];
     let node_struct = LLStruct::ad_mul_const_node();
-    let node = e.heap_alloc(node_struct.clone(), None);
+    // Zero-filled: the da/db/dc derivative accumulators must start at zero and
+    // are left untouched here — calloc gives us that for free.
+    let node = e.heap_alloc_zeroed(node_struct.clone(), None);
 
     // RC = 1
     let rc_hdr = e.struct_field_ptr(node, node_struct.clone(), 0);
@@ -2316,18 +2312,10 @@ fn lower_ad_mul_const(
     e.ll_store(coeff_ptr, ll_coeff);
 
     // value (child)
-    let val_ptr = e.struct_field_ptr(node, node_struct.clone(), 3);
+    let val_ptr = e.struct_field_ptr(node, node_struct, 3);
     e.ll_store(val_ptr, ll_var);
 
-    // da, db, dc = zero
-    let zero_field = make_field_zero(e);
-    let da_ptr = e.struct_field_ptr(node, node_struct.clone(), 4);
-    e.ll_store(da_ptr, zero_field);
-    let db_ptr = e.struct_field_ptr(node, node_struct.clone(), 5);
-    e.ll_store(db_ptr, zero_field);
-    let dc_ptr = e.struct_field_ptr(node, node_struct, 6);
-    e.ll_store(dc_ptr, zero_field);
-
+    // da, db, dc already zero (calloc).
     val_map.insert(result, node);
 }
 
@@ -2355,12 +2343,6 @@ fn lower_ad_rc_drop(
     let ll_node = val_map[&value];
     let drop_fn = ad_fns.get_drop_fn(e.ssa);
     e.call(drop_fn, vec![ll_node], 0);
-}
-
-/// Construct a zero field element as a struct value.
-fn make_field_zero(e: &mut LLBlockEmitter<'_>) -> ValueId {
-    let z = e.emit_int_const(64, 0);
-    e.mk_struct(LLStruct::field_elem(), vec![z, z, z, z])
 }
 
 // =============================================================================

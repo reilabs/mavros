@@ -54,6 +54,27 @@ pub unsafe extern "C" fn malloc(size: u32) -> *mut u8 {
     }
 }
 
+/// Zeroing allocation. Same header/layout convention as `malloc`, but the
+/// returned region is guaranteed zero-filled (via the global allocator's
+/// `alloc_zeroed`). Used for heap structs whose initializer would otherwise
+/// store zeros field-by-field (e.g. AD sum/mul-const nodes' da/db/dc slots) —
+/// the codegen elides those stores when allocating through `calloc`.
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn calloc(size: u32) -> *mut u8 {
+    unsafe {
+        let total = HEADER + size as usize;
+        let layout = std::alloc::Layout::from_size_align_unchecked(total, ALIGN);
+        let base = std::alloc::alloc_zeroed(layout);
+        if base.is_null() {
+            return base;
+        }
+        *(base as *mut u32) = size;
+        LIVE_BYTES += size as usize;
+        base.add(HEADER)
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free(ptr: *mut u8) {
