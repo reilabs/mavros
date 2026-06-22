@@ -1388,15 +1388,16 @@ impl CodeGen {
                     });
                 }
                 hlssa::OpCode::Lookup {
-                    target: LookupTarget::Rangecheck(8),
+                    target: LookupTarget::Rangecheck(bits),
                     args,
                     flag,
                 } => {
                     assert!(args.len() == 1);
                     assert!(type_info.get_value_type(args[0]).is_field());
-                    emitter.push_op(bytecode::OpCode::Rngchk8Field {
+                    emitter.push_op(bytecode::OpCode::RngchkField {
                         val: layouter.get_value(args[0]),
                         flag: layouter.get_value(*flag),
+                        bits: *bits as usize,
                     });
                 }
                 hlssa::OpCode::Lookup {
@@ -1418,15 +1419,16 @@ impl CodeGen {
                     });
                 }
                 hlssa::OpCode::DLookup {
-                    target: LookupTarget::Rangecheck(8),
+                    target: LookupTarget::Rangecheck(bits),
                     args,
                     flag,
                 } => {
                     assert!(args.len() == 1);
                     assert!(type_info.get_value_type(args[0]).is_witness_of());
-                    emitter.push_op(bytecode::OpCode::Drngchk8Field {
+                    emitter.push_op(bytecode::OpCode::DrngchkField {
                         val: layouter.get_value(args[0]),
                         flag: layouter.get_value(*flag),
+                        bits: *bits as usize,
                     });
                 }
                 hlssa::OpCode::DLookup {

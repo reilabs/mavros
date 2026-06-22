@@ -304,14 +304,10 @@ impl LowerWitnessFieldOps {
         let guard_field = guard
             .map(|condition| b.ensure_field(condition, context.types().get_value_type(condition)));
         let flag = guard_field.unwrap_or_else(|| b.field_const(Field::ONE));
-        let radix_val = match radix {
-            Radix::Bytes => b.field_const(Field::from(256)),
-            Radix::Dyn(radix) => b.cast_to(CastTarget::Field, radix),
-        };
-        let rangecheck_type = match radix {
-            Radix::Bytes => LookupTarget::Rangecheck(8),
-            Radix::Dyn(radix) => LookupTarget::DynRangecheck(radix),
-        };
+        // `radix` is always `Bytes` here: a dynamic radix was asserted `== 256` and normalized to
+        // `Bytes` above, so each digit is a static 8-bit rangecheck. No `DynRangecheck` is emitted.
+        let radix_val = b.field_const(Field::from(256));
+        let rangecheck_type = LookupTarget::Rangecheck(8);
         let visit_order: Box<dyn Iterator<Item = usize>> = match endianness {
             Endianness::Little => Box::new((0..count).rev()),
             Endianness::Big => Box::new(0..count),

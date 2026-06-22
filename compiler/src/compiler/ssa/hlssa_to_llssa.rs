@@ -301,12 +301,12 @@ impl AdFunctions {
 
 /// IDs of the lookup helper functions generated on demand.
 struct LookupFunctions {
-    /// Forward-pass rangecheck-8 helper id, set on first registration.
-    rngchk_8: Option<FunctionId>,
-    /// AD-path rangecheck-8 helper id. Branches internally on the runtime
-    /// rangecheck-8 sentinel: first call allocates the table region and runs
-    /// the init body; subsequent calls reuse the snapshot.
-    drngchk_8_call: Option<FunctionId>,
+    /// Forward-pass rangecheck helpers, keyed by rangecheck bit-width.
+    rngchk: BTreeMap<u8, FunctionId>,
+    /// AD-path rangecheck helpers, keyed by rangecheck bit-width. Each branches
+    /// internally on the runtime rangecheck sentinel: first call allocates the
+    /// table region and runs the init body; subsequent calls reuse the snapshot.
+    drngchk_call: BTreeMap<u8, FunctionId>,
     /// Forward-pass spread lookup helpers, keyed by spread input bit-width.
     spread: BTreeMap<u8, FunctionId>,
     /// AD-path spread lookup helpers, keyed by spread input bit-width.
@@ -315,42 +315,42 @@ struct LookupFunctions {
     array: Vec<ArrayLookupFnEntry<ArrayFn>>,
     /// AD-path array lookup helpers, keyed by concrete array type.
     darray_call: Vec<ArrayLookupFnEntry<DArrayFn>>,
-    /// Internal zero-initialized global storing `table_idx + 1` for the
-    /// forward helper. Zero means unallocated.
-    rngchk_8_table_idx_global: Option<usize>,
+    /// Internal zero-initialized globals storing `table_idx + 1` for the
+    /// forward rangecheck helpers, keyed by bit-width. Zero means unallocated.
+    rngchk_table_idx_globals: BTreeMap<u8, usize>,
     /// Internal zero-initialized globals storing `table_idx + 1` for forward
     /// spread helpers. Zero means unallocated.
     spread_table_idx_globals: BTreeMap<u8, usize>,
     /// Internal zero-initialized globals storing `inv_cnst_off + 1` for AD
     /// spread helpers. Zero means unallocated.
     dspread_inv_cnst_off_globals: BTreeMap<u8, usize>,
-    /// Internal zero-initialized global storing `inv_cnst_off + 1` for the
-    /// AD helper. Zero means unallocated.
-    drngchk_8_inv_cnst_off_global: Option<usize>,
+    /// Internal zero-initialized globals storing `inv_cnst_off + 1` for the
+    /// AD rangecheck helpers, keyed by bit-width. Zero means unallocated.
+    drngchk_inv_cnst_off_globals: BTreeMap<u8, usize>,
 }
 
 impl LookupFunctions {
     fn new() -> Self {
         Self {
-            rngchk_8: None,
-            drngchk_8_call: None,
+            rngchk: BTreeMap::new(),
+            drngchk_call: BTreeMap::new(),
             spread: BTreeMap::new(),
             dspread_call: BTreeMap::new(),
             array: Vec::new(),
             darray_call: Vec::new(),
-            rngchk_8_table_idx_global: None,
+            rngchk_table_idx_globals: BTreeMap::new(),
             spread_table_idx_globals: BTreeMap::new(),
             dspread_inv_cnst_off_globals: BTreeMap::new(),
-            drngchk_8_inv_cnst_off_global: None,
+            drngchk_inv_cnst_off_globals: BTreeMap::new(),
         }
     }
 
-    fn get_rngchk_8_fn(&mut self, llssa: &mut LLSSA) -> FunctionId {
-        if let Some(id) = self.rngchk_8 {
-            return id;
+    fn get_rngchk_fn(&mut self, bits: u8, llssa: &mut LLSSA) -> FunctionId {
+        if let Some(id) = self.rngchk.get(&bits) {
+            return *id;
         }
-        let id = llssa.add_function("__rngchk_8".to_string());
-        self.rngchk_8 = Some(id);
+        let id = llssa.add_function(format!("__rngchk_{}", bits));
+        self.rngchk.insert(bits, id);
         id
     }
 
@@ -396,27 +396,30 @@ impl LookupFunctions {
         id
     }
 
-    /// Lazily register the AD rangecheck-8 helper. Allocation of the table
-    /// region happens lazily inside the helper on first call, so there's no
-    /// separate init step or main-prologue hoist.
-    fn get_drngchk_8_call_fn(&mut self, llssa: &mut LLSSA) -> FunctionId {
-        if let Some(id) = self.drngchk_8_call {
-            return id;
+    /// Lazily register the AD rangecheck helper for `bits`. Allocation of the
+    /// table region happens lazily inside the helper on first call, so there's
+    /// no separate init step or main-prologue hoist.
+    fn get_drngchk_call_fn(&mut self, bits: u8, llssa: &mut LLSSA) -> FunctionId {
+        if let Some(id) = self.drngchk_call.get(&bits) {
+            return *id;
         }
-        let id = llssa.add_function("__drngchk_8_ad_call".to_string());
-        self.drngchk_8_call = Some(id);
+        let id = llssa.add_function(format!("__drngchk_{}_ad_call", bits));
+        self.drngchk_call.insert(bits, id);
         id
     }
 
     fn needs_ad_bump_helpers(&self) -> bool {
-        self.drngchk_8_call.is_some()
+        !self.drngchk_call.is_empty()
             || !self.dspread_call.is_empty()
             || !self.darray_call.is_empty()
     }
 
     fn allocate_internal_globals(&mut self, llssa: &mut LLSSA) {
-        if self.rngchk_8.is_some() && self.rngchk_8_table_idx_global.is_none() {
-            self.rngchk_8_table_idx_global = Some(add_ll_global(llssa, LLType::i32()));
+        for bits in self.rngchk.keys() {
+            if !self.rngchk_table_idx_globals.contains_key(bits) {
+                let global = add_ll_global(llssa, LLType::i32());
+                self.rngchk_table_idx_globals.insert(*bits, global);
+            }
         }
         for bits in self.spread.keys() {
             if !self.spread_table_idx_globals.contains_key(bits) {
@@ -430,8 +433,11 @@ impl LookupFunctions {
                 self.dspread_inv_cnst_off_globals.insert(*bits, global);
             }
         }
-        if self.drngchk_8_call.is_some() && self.drngchk_8_inv_cnst_off_global.is_none() {
-            self.drngchk_8_inv_cnst_off_global = Some(add_ll_global(llssa, LLType::i32()));
+        for bits in self.drngchk_call.keys() {
+            if !self.drngchk_inv_cnst_off_globals.contains_key(bits) {
+                let global = add_ll_global(llssa, LLType::i32());
+                self.drngchk_inv_cnst_off_globals.insert(*bits, global);
+            }
         }
     }
 }
@@ -1436,18 +1442,14 @@ fn lower_instruction(
             e.call(fn_id, vec![ll_arr, key, result, flag_val], 0);
         }
         OpCode::Lookup {
-            target: crate::compiler::ssa::hlssa::LookupTarget::Rangecheck(8),
+            target: crate::compiler::ssa::hlssa::LookupTarget::Rangecheck(bits),
             args,
             flag,
         } => {
-            assert_eq!(
-                args.len(),
-                1,
-                "Rangecheck(8) lookup must have exactly one key"
-            );
+            assert_eq!(args.len(), 1, "Rangecheck lookup must have exactly one key");
             let key = val_map[&args[0]];
             let flag_val = val_map[flag];
-            let fn_id = lookup_fns.get_rngchk_8_fn(e.ssa);
+            let fn_id = lookup_fns.get_rngchk_fn(*bits, e.ssa);
             e.call(fn_id, vec![key, flag_val], 0);
         }
         OpCode::Lookup {
@@ -1492,18 +1494,18 @@ fn lower_instruction(
             e.call(fn_id, vec![ll_arr, key, result, flag_val], 0);
         }
         OpCode::DLookup {
-            target: crate::compiler::ssa::hlssa::LookupTarget::Rangecheck(8),
+            target: crate::compiler::ssa::hlssa::LookupTarget::Rangecheck(bits),
             args,
             flag,
         } => {
             assert_eq!(
                 args.len(),
                 1,
-                "Rangecheck(8) dlookup must have exactly one key"
+                "Rangecheck dlookup must have exactly one key"
             );
             let key = val_map[&args[0]];
             let flag_val = val_map[flag];
-            let fn_id = lookup_fns.get_drngchk_8_call_fn(e.ssa);
+            let fn_id = lookup_fns.get_drngchk_call_fn(*bits, e.ssa);
             e.call(fn_id, vec![key, flag_val], 0);
         }
         OpCode::DLookup {
@@ -2845,12 +2847,14 @@ fn generate_all_lookup_functions(
     layout: Option<(WitnessLayout, ConstraintsLayout)>,
     ad_fns: &mut AdFunctions,
 ) {
-    if let Some(id) = lookup_fns.rngchk_8 {
+    for (bits, id) in &lookup_fns.rngchk {
         let table_idx_global = lookup_fns
-            .rngchk_8_table_idx_global
-            .expect("rangecheck-8 helper registered without internal table-id global");
-        let func = generate_rngchk_8_function(llssa, table_idx_global);
-        llssa.put_function(id, func);
+            .rngchk_table_idx_globals
+            .get(bits)
+            .copied()
+            .expect("rangecheck helper registered without internal table-id global");
+        let func = generate_rngchk_function(llssa, *bits, table_idx_global);
+        llssa.put_function(*id, func);
     }
 
     for (bits, id) in &lookup_fns.spread {
@@ -2868,23 +2872,26 @@ fn generate_all_lookup_functions(
         llssa.put_function(entry.fn_id, func);
     }
 
-    if let Some(call_id) = lookup_fns.drngchk_8_call {
+    for (bits, call_id) in &lookup_fns.drngchk_call {
         let inv_cnst_off_global = lookup_fns
-            .drngchk_8_inv_cnst_off_global
-            .expect("AD rangecheck-8 helper registered without internal offset global");
+            .drngchk_inv_cnst_off_globals
+            .get(bits)
+            .copied()
+            .expect("AD rangecheck helper registered without internal offset global");
         let (witness_layout, constraints_layout) =
-            layout.expect("R1CS layout required to generate AD rangecheck-8 helper");
+            layout.expect("R1CS layout required to generate AD rangecheck helper");
         let bump_db_id = ad_fns.get_bump_fn(DMatrix::B, llssa);
         let bump_dc_id = ad_fns.get_bump_fn(DMatrix::C, llssa);
-        let call_fn = generate_drngchk_8_ad_call(
+        let call_fn = generate_drngchk_ad_call(
             llssa,
+            *bits,
             inv_cnst_off_global,
             witness_layout,
             constraints_layout,
             bump_db_id,
             bump_dc_id,
         );
-        llssa.put_function(call_id, call_fn);
+        llssa.put_function(*call_id, call_fn);
     }
 
     for (bits, call_id) in &lookup_fns.dspread_call {
@@ -3025,9 +3032,9 @@ struct LookupTableSpec {
 }
 
 impl LookupTableSpec {
-    fn rangecheck8() -> Self {
+    fn rangecheck(bits: u8) -> Self {
         Self {
-            length: 256,
+            length: 1usize << bits,
             columns: LookupTableColumns::KeyOnly,
         }
     }
@@ -3517,7 +3524,7 @@ fn generate_spread_lookup_function(
     // flag is 0 or 1 by construction; sanity-check its high BigInt limbs.
     // `key`'s high limbs and `key < length` are validated only when
     // `flag != 0` (see post-merge tape emission below), matching the VM's
-    // `forward_kv_lookup_emit` shape and `__rngchk_8`.
+    // `forward_kv_lookup_emit` shape and `__rngchk_<bits>`.
     for high in [flag_l1, flag_l2, flag_l3] {
         let ok = e.int_eq(high, zero_i64);
         assert(&mut e, ok);
@@ -3555,29 +3562,29 @@ fn generate_spread_lookup_function(
     func
 }
 
-/// Generate __rngchk_8(val: FieldElem, flag: FieldElem):
+/// Generate __rngchk_<bits>(val: FieldElem, flag: FieldElem):
 ///
-/// Emits one entry into the LogUp lookup argument for the 8-bit rangecheck
+/// Emits one entry into the LogUp lookup argument for the `bits`-bit rangecheck
 /// table. Extracts the raw low u64 limb of both `val` and `flag`, asserts
-/// upper limbs are zero and `val < 256`, then lazily allocates a runtime
-/// table id for rangecheck-8. On first use it appends one `TableInfoSlot`
+/// upper limbs are zero and `val < (1 << bits)`, then lazily allocates a runtime
+/// table id for the rangecheck. On first use it appends one `TableInfoSlot`
 /// at `tables[tables_len]`, stores that id in the rangecheck sentinel, and
 /// bumps the table-region cursors. On every call it bumps the multiplicity
 /// slot at `mults_base[key]` and writes `(table_id, key, flag)` into the
 /// forward lookup tape.
 ///
-/// Mirrors `rngchk_8_field` in `vm/src/bytecode.rs`: the table id and
+/// Mirrors `rngchk_field` in `vm/src/bytecode.rs`: the table id and
 /// multiplicities-base pointer come from runtime cursors, not compile-time
 /// constants, so adding other lookup kinds (which will allocate their own
-/// table regions before or after this one) doesn't break the rangecheck-8
+/// table regions before or after this one) doesn't break the rangecheck
 /// path.
 ///
 /// Phase 2 — which runs on the host after WASM returns — fixes the raw-u64
 /// multiplicity slots into Montgomery form and materializes the per-slot
 /// inverses + sum constraint.
-fn generate_rngchk_8_function(llssa: &mut LLSSA, table_idx_global: usize) -> LLFunction {
-    let lookup = LookupTableSpec::rangecheck8();
-    let mut func = new_ll_function(llssa, "__rngchk_8".to_string());
+fn generate_rngchk_function(llssa: &mut LLSSA, bits: u8, table_idx_global: usize) -> LLFunction {
+    let lookup = LookupTableSpec::rangecheck(bits);
+    let mut func = new_ll_function(llssa, format!("__rngchk_{}", bits));
     let entry = func.get_entry_id();
 
     let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
@@ -3768,38 +3775,39 @@ fn emit_key_value_ad_lookup_call_body(
     e.ad_write_witness(DMatrix::C, y_wit_off, inv_sum_coeff);
 }
 
-/// Emit the per-element AD bumps that allocate the rangecheck-8 table region.
+/// Emit the per-element AD bumps that allocate the rangecheck table region.
 ///
-/// Mirrors the first-call branch of `drngchk_8_field` in `vm/src/bytecode.rs`:
+/// Mirrors the first-call branch of `drngchk_field` in `vm/src/bytecode.rs`:
 /// snapshots the three table-region cursors out of the AD VM struct, advances
-/// them by the rangecheck-8 footprint (256 / 256 / 257), and runs the loop
-/// that bumps `out_da`, `out_db`, `out_dc` for each of the 256 entries plus
-/// the post-loop `out_db[0] += inv_sum_coeff`. Stores `inv_cnst_off` in the
-/// AD rangecheck sentinel so subsequent calls find the same region. Returns
-/// `inv_cnst_off` so the caller can immediately read `inv_sum_coeff` from it
-/// without reloading.
+/// them by the rangecheck footprint, and runs the loop that bumps `out_da`,
+/// `out_db`, `out_dc` for each entry plus the post-loop
+/// `out_db[0] += inv_sum_coeff`. Stores `inv_cnst_off` in the AD rangecheck
+/// sentinel so subsequent calls find the same region. Returns `inv_cnst_off`
+/// so the caller can immediately read `inv_sum_coeff` from it without
+/// reloading.
 ///
 /// Reads `logup_challenge_off` from `witness_layout` because it's a structural
 /// constant of the layout (always at `challenges_start`), not a
 /// dynamically-allocated region.
-fn emit_rngchk_8_ad_init_body(
+fn emit_rngchk_ad_init_body(
     e: &mut LLBlockEmitter<'_>,
+    bits: u8,
     inv_cnst_off_global: usize,
     witness_layout: WitnessLayout,
 ) -> ValueId {
-    let lookup = LookupTableSpec::rangecheck8();
+    let lookup = LookupTableSpec::rangecheck(bits);
     let (inv_cnst_off, inv_wit_off, mults_wit_off) = claim_ad_lookup_table_region(e, lookup);
     store_ad_global_snapshot(e, inv_cnst_off_global, inv_cnst_off);
 
     // inv_sum_coeff sits at the sum-constraint AD coefficient (one past the
-    // 256 per-element coefficients for this table).
-    let two_fifty_six_i32 = e.emit_int_const(32, 256);
-    let sum_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, two_fifty_six_i32);
+    // per-element coefficients for this table).
+    let sum_offset_i32 = e.emit_int_const(32, lookup.sum_constraint_offset() as u64);
+    let sum_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, sum_offset_i32);
     let inv_sum_coeff = ad_read_coeff_at_dyn(e, sum_idx);
 
     let logup_challenge_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64);
 
-    let length = e.emit_int_const(64, 256);
+    let length = e.emit_int_const(64, lookup.length as u64);
     e.build_counted_loop(length, vec![], |e, i_i64, _| {
         let i_i32 = e.truncate(i_i64, 32);
         // coeff = ad_coeffs[inv_cnst_off + i] — random access, does NOT
@@ -4097,10 +4105,10 @@ fn generate_dspread_ad_call(
     func
 }
 
-/// Generate __drngchk_8_ad_call(val: AdNode*, flag: AdNode*):
+/// Generate __drngchk_<bits>_ad_call(val: AdNode*, flag: AdNode*):
 ///
 /// On first call (private zero-initialized helper state still 0) allocates
-/// the rangecheck-8 table region from the AD VM cursors and runs the
+/// the rangecheck table region from the AD VM cursors and runs the
 /// per-element init bumps. On every call (first and subsequent) does the
 /// per-lookup AD work: reads `inv_sum_coeff` and `inv_coeff`, allocates the
 /// next lookup-witness offset via `AdCurrentLookupWitOff`, and bumps:
@@ -4110,18 +4118,20 @@ fn generate_dspread_ad_call(
 ///   val.bump_db(-inv_coeff)
 ///   flag.bump_dc(inv_coeff)
 ///
-/// Matches `drngchk_8_field` in `vm/src/bytecode.rs` end-to-end. The init
+/// Matches `drngchk_field` in `vm/src/bytecode.rs` end-to-end. The init
 /// branch reads the table region's start from runtime cursors rather than
 /// baking `tables_data_start` constants.
-fn generate_drngchk_8_ad_call(
+fn generate_drngchk_ad_call(
     llssa: &mut LLSSA,
+    bits: u8,
     inv_cnst_off_global: usize,
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
     bump_db_fn: FunctionId,
     bump_dc_fn: FunctionId,
 ) -> LLFunction {
-    let mut func = new_ll_function(llssa, "__drngchk_8_ad_call".to_string());
+    let lookup = LookupTableSpec::rangecheck(bits);
+    let mut func = new_ll_function(llssa, format!("__drngchk_{}_ad_call", bits));
     let entry = func.get_entry_id();
 
     let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
@@ -4138,7 +4148,8 @@ fn generate_drngchk_8_ad_call(
         is_unalloc,
         vec![LLType::Int(32)],
         |e| {
-            let inv_cnst_off = emit_rngchk_8_ad_init_body(e, inv_cnst_off_global, witness_layout);
+            let inv_cnst_off =
+                emit_rngchk_ad_init_body(e, bits, inv_cnst_off_global, witness_layout);
             vec![inv_cnst_off]
         },
         |e| {
@@ -4152,9 +4163,9 @@ fn generate_drngchk_8_ad_call(
     );
     let inv_cnst_off = merge[0];
 
-    // inv_sum_coeff = ad_coeffs[inv_cnst_off + 256]
-    let two_fifty_six_i32 = e.emit_int_const(32, 256);
-    let sum_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, two_fifty_six_i32);
+    // inv_sum_coeff = ad_coeffs[inv_cnst_off + sum_constraint_offset]
+    let sum_offset_i32 = e.emit_int_const(32, lookup.sum_constraint_offset() as u64);
+    let sum_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, sum_offset_i32);
     let inv_sum_coeff = ad_read_coeff_at_dyn(&mut e, sum_idx);
 
     let inv_wit_off = ad_next_lookup_wit_off(&mut e);

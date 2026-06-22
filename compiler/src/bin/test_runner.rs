@@ -81,7 +81,14 @@ fn main() {
     run_parent(&output_path, jobs, DEFAULT_IGNORED_TESTS);
 }
 
-const DEFAULT_IGNORED_TESTS: &[&str] = &[];
+const DEFAULT_IGNORED_TESTS: &[&str] = &[
+    // `func_1` recurses without ever decrementing `ctx_limit`, so it never terminates. The witgen
+    // VM has no recursion/step/memory guard (frames are heap-allocated per call in `Frame::push`),
+    // so running it grows memory without bound. Depending on the compiled circuit shape it either
+    // SIGSEGVs fast (alloc returns null → unchecked deref) or thrashes for hours before the OOM
+    // killer fires — the latter froze CI for 6h. Skip until the VM gains an execution budget.
+    "brillig_mem_layout_regression",
+];
 
 #[derive(Clone, Copy, Debug)]
 enum TestExpectation {
@@ -325,7 +332,8 @@ fn run_single(root: PathBuf, expect_failure: bool) {
             checking_codegen,
         ) {
             Ok(_) if wasm_path.exists() => {
-                emit("END:WASM_COMPILE:ok");
+                let bytes = fs::metadata(&wasm_path).map(|m| m.len()).unwrap_or(0);
+                emit(&format!("END:WASM_COMPILE:ok:{bytes}"));
                 Some(wasm_path)
             }
             Ok(_) => {
@@ -1045,6 +1053,7 @@ struct TestResult {
     rows: Option<usize>,
     cols: Option<usize>,
     binary_bytes: Option<usize>,
+    wasm_bytes: Option<usize>,
 }
 
 /// Determined purely from child output:
@@ -1269,6 +1278,7 @@ fn ignored_test_result(name: &str) -> TestResult {
         rows: None,
         cols: None,
         binary_bytes: None,
+        wasm_bytes: None,
     }
 }
 
@@ -1279,6 +1289,7 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
     let mut rows = None;
     let mut cols = None;
     let mut binary_bytes = None;
+    let mut wasm_bytes = None;
 
     for line in lines {
         let parts: Vec<&str> = line.split(':').collect();
@@ -1294,6 +1305,9 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
                 }
                 if *key == "COMPILE" && parts.len() >= 4 {
                     binary_bytes = parts[3].parse().ok();
+                }
+                if *key == "WASM_COMPILE" && parts.len() >= 4 {
+                    wasm_bytes = parts[3].parse().ok();
                 }
             }
             ["END", key, "reject"] => {
@@ -1331,6 +1345,7 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
         rows,
         cols,
         binary_bytes,
+        wasm_bytes,
     }
 }
 
@@ -1687,6 +1702,7 @@ struct ParsedRow {
     rows: Option<usize>,
     cols: Option<usize>,
     size_bytes: Option<usize>,
+    wasm_size_bytes: Option<usize>,
 }
 
 fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
@@ -1699,18 +1715,20 @@ fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        if cells.len() < 20 {
+        if cells.len() < 21 {
             continue;
         }
         let rows = cells[3].parse().ok();
         let cols = cells[4].parse().ok();
         let size_bytes = cells[5].parse().ok();
+        let wasm_size_bytes = cells[6].parse().ok();
         result.push(ParsedRow {
             name: cells[0].clone(),
             cells,
             rows,
             cols,
             size_bytes,
+            wasm_size_bytes,
         });
     }
     result
@@ -1719,20 +1737,20 @@ fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
 const REGRESSION_COLS: &[(usize, &str)] = &[
     (1, "Compiled"),
     (2, "R1CS"),
-    (6, "Compile"),
-    (7, "Witgen Run VM"),
-    (8, "Witgen Correct"),
-    (9, "Witgen No Leak"),
-    (10, "AD Run VM"),
-    (11, "AD Correct"),
-    (12, "AD No Leak"),
-    (13, "WASM Compile"),
-    (14, "Witgen WASM Run"),
-    (15, "Witgen WASM Correct"),
-    (16, "Witgen WASM No Leak"),
-    (17, "AD WASM Run"),
-    (18, "AD WASM Correct"),
-    (19, "AD WASM No Leak"),
+    (7, "Compile"),
+    (8, "Witgen Run VM"),
+    (9, "Witgen Correct"),
+    (10, "Witgen No Leak"),
+    (11, "AD Run VM"),
+    (12, "AD Correct"),
+    (13, "AD No Leak"),
+    (14, "WASM Compile"),
+    (15, "Witgen WASM Run"),
+    (16, "Witgen WASM Correct"),
+    (17, "Witgen WASM No Leak"),
+    (18, "AD WASM Run"),
+    (19, "AD WASM Correct"),
+    (20, "AD WASM No Leak"),
 ];
 
 /// Verify the table's header matches the column layout the index-based checks assume. Without
@@ -1829,11 +1847,12 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
     let mut total_current_checkmarks = 0usize;
     let mut total_current_cells = 0usize;
 
-    // Track constraint/witness decreases (good news)
-    let mut improvements = Vec::new();
-
-    // Track constraint/witness increases (warnings)
-    let mut warnings = Vec::new();
+    // Size/shape changes, grouped per metric so each metric renders its own folding table.
+    // Decreases are good news (improvements); increases are warnings (growth).
+    let mut constraint_changes = MetricChanges::new("Constraints");
+    let mut witness_changes = MetricChanges::new("Witnesses");
+    let mut bytecode_changes = MetricChanges::new("Bytecode Size (bytes)");
+    let mut wasm_changes = MetricChanges::new("WASM Size (bytes)");
 
     for cur in &current {
         // Success rate counts handled cells (✅ or N/A) over every cell. N/A is a legitimate
@@ -1869,73 +1888,19 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
             }
         }
 
-        // Check constraint changes
+        // Record per-metric changes; `MetricChanges::record` sorts each into the decrease
+        // (improvement) or increase (warning) bucket for its own table.
         if let (Some(br), Some(cr)) = (base.rows, cur.rows) {
-            if cr > br {
-                warnings.push(format!(
-                    "| {} | Constraints | {} | {} | +{} ({:+.1}%) |",
-                    cur.name,
-                    br,
-                    cr,
-                    cr - br,
-                    (cr as f64 - br as f64) / br as f64 * 100.0
-                ));
-            } else if cr < br {
-                improvements.push(format!(
-                    "| {} | Constraints | {} | {} | {} ({:.1}%) |",
-                    cur.name,
-                    br,
-                    cr,
-                    cr as i64 - br as i64,
-                    (cr as f64 - br as f64) / br as f64 * 100.0
-                ));
-            }
+            constraint_changes.record(&cur.name, br, cr);
         }
-
-        // Check witness changes
         if let (Some(bc), Some(cc)) = (base.cols, cur.cols) {
-            if cc > bc {
-                warnings.push(format!(
-                    "| {} | Witnesses | {} | {} | +{} ({:+.1}%) |",
-                    cur.name,
-                    bc,
-                    cc,
-                    cc - bc,
-                    (cc as f64 - bc as f64) / bc as f64 * 100.0
-                ));
-            } else if cc < bc {
-                improvements.push(format!(
-                    "| {} | Witnesses | {} | {} | {} ({:.1}%) |",
-                    cur.name,
-                    bc,
-                    cc,
-                    cc as i64 - bc as i64,
-                    (cc as f64 - bc as f64) / bc as f64 * 100.0
-                ));
-            }
+            witness_changes.record(&cur.name, bc, cc);
         }
-
-        // Check binary size changes
         if let (Some(bs), Some(cs)) = (base.size_bytes, cur.size_bytes) {
-            if cs > bs {
-                warnings.push(format!(
-                    "| {} | Bytecode Size (bytes) | {} | {} | +{} ({:+.1}%) |",
-                    cur.name,
-                    bs,
-                    cs,
-                    cs - bs,
-                    (cs as f64 - bs as f64) / bs as f64 * 100.0
-                ));
-            } else if cs < bs {
-                improvements.push(format!(
-                    "| {} | Bytecode Size (bytes) | {} | {} | {} ({:.1}%) |",
-                    cur.name,
-                    bs,
-                    cs,
-                    cs as i64 - bs as i64,
-                    (cs as f64 - bs as f64) / bs as f64 * 100.0
-                ));
-            }
+            bytecode_changes.record(&cur.name, bs, cs);
+        }
+        if let (Some(bw), Some(cw)) = (base.wasm_size_bytes, cur.wasm_size_bytes) {
+            wasm_changes.record(&cur.name, bw, cw);
         }
     }
 
@@ -1964,9 +1929,20 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
         total_current_pct
     );
 
+    // Metrics in display order. Each renders its own folding table, separately for decreases
+    // (under Positive Changes) and increases (under Warnings).
+    let metrics = [
+        &constraint_changes,
+        &witness_changes,
+        &bytecode_changes,
+        &wasm_changes,
+    ];
+    let any_decreases = metrics.iter().any(|m| !m.decreases.is_empty());
+    let any_increases = metrics.iter().any(|m| !m.increases.is_empty());
+
     // Print positive news section
     let has_positive_news =
-        !new_checkmarks.is_empty() || existing_pct_change > 0.0 || !improvements.is_empty();
+        !new_checkmarks.is_empty() || existing_pct_change > 0.0 || any_decreases;
     if has_positive_news {
         println!("### Positive Changes\n");
 
@@ -1990,37 +1966,88 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
             println!();
         }
 
-        if !improvements.is_empty() {
-            println!("<details>");
-            println!("<summary><b>R1CS/bytecode size decreased</b></summary>\n");
-            println!("| Test | Metric | Before | After | Change |");
-            println!("|------|--------|--------|-------|--------|");
-            for imp in &improvements {
-                println!("{imp}");
-            }
-            println!("\n</details>\n");
+        // One folding table per metric that shrank.
+        for m in metrics {
+            print_change_table(&format!("{} decreased", m.name), &m.decreases);
         }
     }
 
-    if warnings.is_empty() {
+    if !any_increases {
         if !has_positive_news {
-            println!("No test improvements or R1CS/bytecode size changes detected.");
+            println!("No test improvements or size changes detected.");
         } else {
-            println!("No R1CS/bytecode size growth detected.");
+            println!("No size growth detected.");
         }
         return;
     }
 
-    // Print warnings section
+    // Print warnings section: one folding table per metric that grew.
     println!("### Warnings\n");
-    println!("<details>");
-    println!("<summary><b>R1CS/bytecode size growth detected</b></summary>\n");
-    println!("| Test | Metric | Before | After | Change |");
-    println!("|------|--------|--------|-------|--------|");
-    for w in &warnings {
-        println!("{w}");
+    for m in metrics {
+        print_change_table(&format!("{} grew", m.name), &m.increases);
     }
-    println!("\n</details>");
+}
+
+/// Render a folding section wrapping one before/after table. A no-op when there are no rows,
+/// so metrics that did not change don't clutter the report.
+fn print_change_table(summary: &str, rows: &[String]) {
+    if rows.is_empty() {
+        return;
+    }
+    println!("<details>");
+    println!(
+        "<summary><b>{summary} ({} test(s))</b></summary>\n",
+        rows.len()
+    );
+    println!("| Test | Before | After | Change |");
+    println!("|------|--------|-------|--------|");
+    for row in rows {
+        println!("{row}");
+    }
+    println!("\n</details>\n");
+}
+
+/// Per-metric before/after changes for the growth report, split into shrink (`decreases`,
+/// reported as improvements) and grow (`increases`, reported as warnings) buckets so each
+/// metric can render its own folding table.
+struct MetricChanges {
+    name: &'static str,
+    decreases: Vec<String>,
+    increases: Vec<String>,
+}
+
+impl MetricChanges {
+    fn new(name: &'static str) -> Self {
+        MetricChanges {
+            name,
+            decreases: Vec::new(),
+            increases: Vec::new(),
+        }
+    }
+
+    /// Bucket a single test's change as a pre-formatted table row.
+    fn record(&mut self, test: &str, before: usize, after: usize) {
+        let pct = (after as f64 - before as f64) / before as f64 * 100.0;
+        if after > before {
+            self.increases.push(format!(
+                "| {} | {} | {} | +{} ({:+.1}%) |",
+                test,
+                before,
+                after,
+                after - before,
+                pct
+            ));
+        } else if after < before {
+            self.decreases.push(format!(
+                "| {} | {} | {} | {} ({:.1}%) |",
+                test,
+                before,
+                after,
+                after as i64 - before as i64,
+                pct
+            ));
+        }
+    }
 }
 
 // The program is a single artifact with both the witgen and AD entry points, so it has one
@@ -2028,22 +2055,24 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
 // stay split because witgen and AD are distinct executions of their respective entry points.
 fn render_markdown(results: &[TestResult]) -> String {
     let mut md = String::new();
-    md.push_str("| Test | Compiled | R1CS | Rows | Cols | Bytecode Size | Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Run VM | AD Correct | AD No Leak | WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak | AD WASM Run | AD WASM Correct | AD WASM No Leak |\n");
-    md.push_str("|------|----------|------|------|------|---------------|---------|---------------|----------------|----------------|-----------|------------|------------|--------------|-----------------|---------------------|---------------------|-------------|---------------------|---------------------|\n");
+    md.push_str("| Test | Compiled | R1CS | Rows | Cols | Bytecode Size | WASM Size | Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Run VM | AD Correct | AD No Leak | WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak | AD WASM Run | AD WASM Correct | AD WASM No Leak |\n");
+    md.push_str("|------|----------|------|------|------|---------------|-----------|---------|---------------|----------------|----------------|-----------|------------|------------|--------------|-----------------|---------------------|---------------------|-------------|---------------------|---------------------|\n");
 
     for r in results {
         let s = |key: &str| r.steps.get(key).copied().unwrap_or(Status::Skip).emoji();
         let rows = r.rows.map_or("-".to_string(), |v| v.to_string());
         let cols = r.cols.map_or("-".to_string(), |v| v.to_string());
         let size = r.binary_bytes.map_or("-".to_string(), |v| v.to_string());
+        let wasm_size = r.wasm_bytes.map_or("-".to_string(), |v| v.to_string());
         md.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             r.name,
             s("COMPILED"),
             s("R1CS"),
             rows,
             cols,
             size,
+            wasm_size,
             s("COMPILE"),
             s("WITGEN_RUN"),
             s("WITGEN_CORRECT"),

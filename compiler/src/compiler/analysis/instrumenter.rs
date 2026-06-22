@@ -1425,7 +1425,9 @@ impl FunctionSignature {
 trait OpInstrumenter {
     fn record_constrain(&mut self);
     fn record_high_degree_mul(&mut self);
-    fn record_lookup(&mut self, target: &LookupTarget<Value>);
+    /// `unconditional` is true when the lookup's flag is the literal constant `1`; such lookups
+    /// spill bit chunks to the free `b·(b−1) = 0` form (no gating witness).
+    fn record_lookup(&mut self, target: &LookupTarget<Value>, unconditional: bool);
 }
 
 trait FunctionInstrumenter {
@@ -1443,10 +1445,11 @@ struct Instrumenter {
     constrains: usize,
     high_degree_muls: usize,
 
-    /// Rangecheck lookup requests by width.
-    rangecheck_lookups: HashMap<u8, usize>,
-    /// Spread lookup requests by width.
-    spread_lookups: HashMap<u8, usize>,
+    /// Rangecheck lookup requests by `(width, is_unconditional)` — `true` when the lookup's flag is
+    /// the literal constant `1`, which lets its bit chunks spill to the free `b·(b−1)=0` form.
+    rangecheck_lookups: HashMap<(u8, bool), usize>,
+    /// Spread lookup requests by `(width, is_unconditional)`; see `rangecheck_lookups`.
+    spread_lookups: HashMap<(u8, bool), usize>,
     array_lookups: usize,
 }
 
@@ -1459,15 +1462,22 @@ impl OpInstrumenter for Instrumenter {
         self.high_degree_muls += 1;
     }
 
-    fn record_lookup(&mut self, target: &LookupTarget<Value>) {
+    fn record_lookup(&mut self, target: &LookupTarget<Value>, unconditional: bool) {
         match target {
-            LookupTarget::Rangecheck(bits) => self.record_rangecheck_lookup(*bits),
-            LookupTarget::DynRangecheck(bound) => {
-                self.record_rangecheck_lookup(dynamic_rangecheck_bits(bound))
+            LookupTarget::Rangecheck(bits) => self.record_rangecheck_lookup(*bits, unconditional),
+            LookupTarget::DynRangecheck(_) => {
+                // `to_radix` lowers its (asserted radix-256) digit checks to static 8-bit
+                // rangechecks, so none survive to cost analysis.
+                unreachable!(
+                    "DynRangecheck is lowered to a static 8-bit rangecheck before spilling"
+                )
             }
             LookupTarget::Spread(bits) => {
                 assert!(*bits >= 1, "spread width must be at least 1 bit");
-                *self.spread_lookups.entry(*bits).or_insert(0) += 1;
+                *self
+                    .spread_lookups
+                    .entry((*bits, unconditional))
+                    .or_insert(0) += 1;
             }
             LookupTarget::Array(_) => self.array_lookups += 1,
         }
@@ -1477,9 +1487,12 @@ impl OpInstrumenter for Instrumenter {
 /// Interpretation of the raw events, mirroring the lookup-spilling expansion that runs before
 /// R1CS generation. Everything here is derived; the struct stores no interpreted state.
 impl Instrumenter {
-    fn record_rangecheck_lookup(&mut self, bits: u8) {
+    fn record_rangecheck_lookup(&mut self, bits: u8, unconditional: bool) {
         assert!(bits >= 1, "rangecheck width must be at least 1 bit");
-        *self.rangecheck_lookups.entry(bits).or_insert(0) += 1;
+        *self
+            .rangecheck_lookups
+            .entry((bits, unconditional))
+            .or_insert(0) += 1;
     }
 
     /// 8-bit rangecheck table lookups after spilling: a w-bit rangecheck (w >= 2) becomes one
@@ -1488,7 +1501,7 @@ impl Instrumenter {
     fn final_rangecheck8_lookups(&self) -> usize {
         self.rangecheck_lookups
             .iter()
-            .map(|(&bits, &count)| {
+            .map(|(&(bits, _), &count)| {
                 let bits = bits as usize;
                 let per_lookup = match bits {
                     1 => 0,
@@ -1503,14 +1516,18 @@ impl Instrumenter {
     /// 1-bit rangechecks spill to the algebraic b*(b-1) = 0. (Guarded checks spend one more
     /// constraint to gate that, but the estimate doesn't track lookup flags.)
     fn rangecheck_one_constraints(&self) -> usize {
-        self.rangecheck_lookups.get(&1).copied().unwrap_or(0)
+        self.rangecheck_lookups
+            .iter()
+            .filter(|((bits, _), _)| *bits == 1)
+            .map(|(_, &count)| count)
+            .sum()
     }
 
     /// Spread table lookups after spilling: widths >= 16 are split into chunks of at most
     /// 8 bits each.
     fn final_spread_lookups(&self) -> HashMap<u8, usize> {
         let mut r: HashMap<u8, usize> = HashMap::default();
-        for (&bits, &count) in self.spread_lookups.iter() {
+        for (&(bits, _), &count) in self.spread_lookups.iter() {
             if bits >= 16 {
                 assert!(
                     bits <= 128,
@@ -1534,7 +1551,7 @@ impl Instrumenter {
     fn spilled_wide_spread_constraints(&self) -> usize {
         self.spread_lookups
             .iter()
-            .filter(|(bits, _)| **bits >= 16)
+            .filter(|((bits, _), _)| *bits >= 16)
             .map(|(_, count)| *count)
             .sum()
     }
@@ -1546,7 +1563,7 @@ impl Instrumenter {
     }
 
     fn uses_rangecheck_table(&self) -> bool {
-        self.rangecheck_lookups.keys().any(|bits| *bits >= 2)
+        self.rangecheck_lookups.keys().any(|(bits, _)| *bits >= 2)
     }
 
     // Array table *allocation* is deliberately not costed anywhere below: tables are
@@ -1621,20 +1638,6 @@ impl Instrumenter {
     }
 }
 
-fn dynamic_rangecheck_bits(bound: &Value) -> u8 {
-    let bound = match bound {
-        Value::U(_, v) | Value::I(_, v) => *v,
-        Value::Field(f) => {
-            let bigint = f.into_bigint();
-            bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)
-        }
-        Value::WitnessOf(inner) => return dynamic_rangecheck_bits(inner),
-        other => panic!("dynamic rangecheck bound must be constant, got {:?}", other),
-    };
-    assert_eq!(bound, 256, "TODO: support dynamic rangecheck bound {bound}");
-    8
-}
-
 #[derive(Debug, Clone)]
 pub struct FunctionCost {
     calls: HashMap<FunctionSignature, usize>,
@@ -1681,7 +1684,7 @@ impl FunctionInstrumenter for DummyInstrumenter {
 impl OpInstrumenter for DummyInstrumenter {
     fn record_constrain(&mut self) {}
     fn record_high_degree_mul(&mut self) {}
-    fn record_lookup(&mut self, _: &LookupTarget<Value>) {}
+    fn record_lookup(&mut self, _: &LookupTarget<Value>, _: bool) {}
 }
 
 pub struct CostAnalysis {
@@ -1801,14 +1804,22 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         &mut self,
         target: LookupTarget<SpecSplitValue>,
         _args: Vec<SpecSplitValue>,
-        _flag: SpecSplitValue,
+        flag: SpecSplitValue,
     ) {
+        // A flag that folds to the constant 1 means the lookup is unconditional, so its spilled bit
+        // chunks take the free algebraic form. `as_field_const` treats `U(_,1)`/`Field(1)` alike.
+        let one = Some(Field::from(1u64));
         let unspecialized_target = target.map(|v| v.unspecialized.clone());
-        self.get_unspecialized()
-            .record_lookup(&unspecialized_target);
+        self.get_unspecialized().record_lookup(
+            &unspecialized_target,
+            flag.unspecialized.as_field_const() == one,
+        );
 
         let specialized_target = target.map(|v| v.specialized.clone());
-        self.get_specialized().record_lookup(&specialized_target);
+        self.get_specialized().record_lookup(
+            &specialized_target,
+            flag.specialized.as_field_const() == one,
+        );
     }
 
     fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<SpecSplitValue> {
@@ -1922,6 +1933,12 @@ pub struct Summary {
     total_constraints: usize,
     total_savings_to_make: usize,
     pub functions: HashMap<FunctionSignature, SpecializationSummary>,
+    /// Whole-program rangecheck lookup requests by `(original width, is_unconditional)`
+    /// (call-multiplicity weighted, before any spilling into chunks). Consumed by `LookupSizing`,
+    /// which prices unconditional lookups' width-1 chunks at zero (their bit-bounds are free).
+    pub global_rangecheck_lookups: HashMap<(u8, bool), usize>,
+    /// Whole-program spread lookup requests by `(original width, is_unconditional)`.
+    pub global_spread_lookups: HashMap<(u8, bool), usize>,
 }
 
 #[derive(Default)]
@@ -1937,7 +1954,7 @@ impl AggregatedConstraintCost {
             return;
         }
         self.recurring_constraints += cost.recurring_constraints() * calls;
-        for (&bits, &count) in cost.rangecheck_lookups.iter() {
+        for (&(bits, _), &count) in cost.rangecheck_lookups.iter() {
             *self.rangecheck_lookups.entry(bits).or_insert(0) += count * calls;
         }
         for (bits, count) in cost.final_spread_lookups() {
@@ -2079,6 +2096,8 @@ impl CostAnalysis {
             functions: HashMap::default(),
             total_constraints: 0,
             total_savings_to_make: 0,
+            global_rangecheck_lookups: HashMap::default(),
+            global_spread_lookups: HashMap::default(),
         };
         for (sig, cost) in self.functions.iter() {
             r.functions.insert(
@@ -2100,7 +2119,17 @@ impl CostAnalysis {
                 .saturating_sub(summary.specialized_constraints)
                 * summary.calls;
             r.total_savings_to_make += summary.specialization_total_savings;
-            aggregate.add(&self.functions[sig].raw, summary.calls);
+            let raw = &self.functions[sig].raw;
+            aggregate.add(raw, summary.calls);
+            // Aggregate the *raw* (un-spilled) lookup widths for the table-size optimizer.
+            // Note `AggregatedConstraintCost` pre-splits spreads into bytes via
+            // `final_spread_lookups()`; the optimizer needs the original widths instead.
+            for (&key, &count) in raw.rangecheck_lookups.iter() {
+                *r.global_rangecheck_lookups.entry(key).or_insert(0) += count * summary.calls;
+            }
+            for (&key, &count) in raw.spread_lookups.iter() {
+                *r.global_spread_lookups.entry(key).or_insert(0) += count * summary.calls;
+            }
         }
         r.total_constraints = aggregate.total_constraints();
         r
