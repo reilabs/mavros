@@ -192,23 +192,45 @@ impl<Kind> TypeFnEntry<Kind> {
 type DropFnEntry = TypeFnEntry<DropFn>;
 type ArrayLookupFnEntry<Kind> = TypeFnEntry<Kind>;
 
+/// Canonicalize a type for drop-function keying.
+///
+/// A drop function depends only on the *kind* of each level (sequence vs ref)
+/// and the element/inner type, never on a static array length: the length lives
+/// in the RC header and the drop loop reads it dynamically. So `Array<T, N>` for
+/// every `N` — and `Slice<T>` — collapse to a single canonical `Slice<T>` key,
+/// recursing through nested sequences and refs. This lets one drop helper be
+/// shared across all lengths instead of emitting a near-identical copy per size.
+fn drop_fn_key(ty: &HLType) -> HLType {
+    match &ty.expr {
+        HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice(inner) => drop_fn_key(inner).slice_of(),
+        HLTypeExpr::Ref(inner) => drop_fn_key(inner).ref_of(),
+        _ => ty.clone(),
+    }
+}
+
 /// Get or create a drop function for a type that needs dropping (currently Array or WitnessOf).
 /// For arrays, recursively creates drop functions for inner elements that need dropping.
+///
+/// Keyed by [`drop_fn_key`], so all array lengths of the same element type share
+/// one helper; the generated loop iterates over the runtime length.
 fn get_or_create_drop_fn(
     ty: &HLType,
     llssa: &mut LLSSA,
     drop_fns: &mut Vec<DropFnEntry>,
     ad_fns: &mut AdFunctions,
 ) -> FunctionId {
+    let key = drop_fn_key(ty);
+
     // Check if already exists
     for entry in drop_fns.iter() {
-        if entry.ty == *ty {
+        if entry.ty == key {
             return entry.fn_id;
         }
     }
 
-    // Recursively create drop fns for inner heap-allocated elements first
-    match &ty.expr {
+    // Recursively create drop fns for inner heap-allocated elements first.
+    // `key` is already canonical, so its inner types are too.
+    match &key.expr {
         HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice(inner) => {
             if needs_drop(&inner.expr) {
                 get_or_create_drop_fn(inner, llssa, drop_fns, ad_fns);
@@ -224,16 +246,16 @@ fn get_or_create_drop_fn(
     }
 
     // Resolve or create the drop function ID
-    let fn_id = match &ty.expr {
+    let fn_id = match &key.expr {
         HLTypeExpr::WitnessOf(_) => ad_fns.get_drop_fn(llssa),
         HLTypeExpr::Array(_inner, _) | HLTypeExpr::Slice(_inner) => {
-            llssa.add_function(format!("drop_{}", ty))
+            llssa.add_function(format!("drop_{}", key))
         }
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
-        HLTypeExpr::Ref(_) => llssa.add_function(format!("drop_{}", ty)),
-        _ => panic!("{} is not supported yet", ty),
+        HLTypeExpr::Ref(_) => llssa.add_function(format!("drop_{}", key)),
+        _ => panic!("{} is not supported yet", key),
     };
-    drop_fns.push(DropFnEntry::new(ty.clone(), fn_id));
+    drop_fns.push(DropFnEntry::new(key, fn_id));
     fn_id
 }
 
@@ -2686,9 +2708,10 @@ fn generate_drop_function_for_array(
         vec![],
         |e| {
             if elem_is_rc {
+                let et_key = drop_fn_key(et);
                 let inner_drop_fn = drop_fns
                     .iter()
-                    .find(|entry| entry.ty == *et)
+                    .find(|entry| entry.ty == et_key)
                     .expect("inner drop fn should exist")
                     .fn_id;
 
@@ -2752,9 +2775,10 @@ fn generate_drop_function_for_ref(
         vec![],
         |e| {
             if inner_is_rc {
+                let inner_key = drop_fn_key(inner_type);
                 let inner_drop_fn = drop_fns
                     .iter()
-                    .find(|entry| entry.ty == *inner_type)
+                    .find(|entry| entry.ty == inner_key)
                     .expect("inner drop fn should exist for ref")
                     .fn_id;
 
