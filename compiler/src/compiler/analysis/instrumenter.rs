@@ -1296,6 +1296,19 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         specialized
     }
 
+    fn expect_constant_len(&self, _ctx: &mut CostAnalysis) -> u32 {
+        let specialized = match &self.specialized {
+            Value::U(_, v) => *v as u32,
+            other => panic!("Expected constant length, got specialized={:?}", other),
+        };
+        let unspecialized = match &self.unspecialized {
+            Value::U(_, v) => *v as u32,
+            other => panic!("Expected constant length, got unspecialized={:?}", other),
+        };
+        assert_eq!(specialized, unspecialized);
+        specialized
+    }
+
     fn of_u(s: usize, v: u128, _ctx: &mut CostAnalysis) -> Self {
         Self {
             unspecialized: Value::U(s, v),

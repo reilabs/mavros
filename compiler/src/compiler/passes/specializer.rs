@@ -676,6 +676,13 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         }
     }
 
+    fn expect_constant_len(&self, ctx: &mut SpecializationState) -> u32 {
+        match ctx.const_vals.get(&self.0).unwrap() {
+            ConstVal::U(_, v) => *v as u32,
+            other => panic!("expected constant length, got {:?}", other),
+        }
+    }
+
     fn select(
         &self,
         if_t: &Self,

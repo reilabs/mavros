@@ -782,6 +782,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
         self.expect_constant() == ark_bn254::Fr::ONE
     }
 
+    fn expect_constant_len(&self, _ctx: &mut R1CGen) -> u32 {
+        self.expect_u32()
+    }
+
     fn select(&self, if_t: &Self, if_f: &Self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         self.mul(if_t)
             .add(&Value::Const(ark_bn254::Fr::ONE).sub(self).mul(if_f))

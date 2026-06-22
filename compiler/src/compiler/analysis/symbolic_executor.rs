@@ -110,6 +110,9 @@ where
     fn ptr_write(&self, val: &Self, ctx: &mut Context);
     fn ptr_read(&self, out_type: &Type, ctx: &mut Context) -> Self;
     fn expect_constant_bool(&self, ctx: &mut Context) -> bool;
+    /// Extract a constant `u32` length from this value, e.g. the runtime
+    /// element count of a `MkRepeatedDyn`.
+    fn expect_constant_len(&self, ctx: &mut Context) -> u32;
     fn select(&self, if_t: &Self, if_f: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn write_witness(&self, tp: Option<&Type>, ctx: &mut Context) -> Self;
     fn fresh_witness(result_type: &Type, ctx: &mut Context) -> Self;
@@ -365,11 +368,18 @@ impl SymbolicExecutor {
                         let a = vec![elem; *count];
                         scope.insert(*r, V::mk_array(a, ctx, *seq_type, elem_type));
                     }
-                    OpCode::MkRepeatedDyn { .. } => {
-                        // Introduced after R1CS generation by `LowerMapCasts`; the
-                        // dynamic length has no symbolic (static) array form here.
-                        panic!(
-                            "MkRepeatedDyn must not reach the symbolic executor (R1CS path)"
+                    OpCode::MkRepeatedDyn {
+                        result: r,
+                        element,
+                        count,
+                        elem_type,
+                    } => {
+                        let len = scope[count].expect_constant_len(ctx);
+                        let elem = scope[element].clone();
+                        let a = vec![elem; len as usize];
+                        scope.insert(
+                            *r,
+                            V::mk_array(a, ctx, SequenceTargetType::Slice, elem_type),
                         );
                     }
                     OpCode::Alloc { result: r, value } => {
