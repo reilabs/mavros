@@ -733,6 +733,13 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
         self.entry_block
     }
 
+    /// Sets the block that the function starts executing from. The block must already exist in the
+    /// function; this only rewrites the recorded entry id (e.g. when canonically renumbering
+    /// blocks).
+    pub fn set_entry_block(&mut self, id: BlockId) {
+        self.entry_block = id;
+    }
+
     pub fn get_block(&self, id: BlockId) -> &Block<Op, Ty> {
         self.blocks.get(&id).expect("Block should exist")
     }

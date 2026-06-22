@@ -34,6 +34,7 @@ use crate::{
             array_sroa::ArraySroa,
             common_subexpression_elimination::CSE,
             dead_code_elimination::{self, DCE},
+            deduplicate_functions::DeduplicateFunctions,
             deduplicate_phis::DeduplicatePhis,
             defunctionalize::Defunctionalize,
             elide_tuples::ElideTuples,
@@ -527,6 +528,9 @@ impl Driver {
             vec![
                 Box::new(RCInsertion::new()),
                 Box::new(FixDoubleJumps::new()),
+                // Merge structurally-identical functions just before codegen, after CFG cleanup
+                // has exposed the most duplication.
+                Box::new(DeduplicateFunctions::new()),
             ],
         );
         tail_pm.set_debug_output_dir(self.get_debug_output_dir().clone());
