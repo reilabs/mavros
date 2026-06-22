@@ -365,6 +365,13 @@ impl SymbolicExecutor {
                         let a = vec![elem; *count];
                         scope.insert(*r, V::mk_array(a, ctx, *seq_type, elem_type));
                     }
+                    OpCode::MkRepeatedDyn { .. } => {
+                        // Introduced after R1CS generation by `LowerMapCasts`; the
+                        // dynamic length has no symbolic (static) array form here.
+                        panic!(
+                            "MkRepeatedDyn must not reach the symbolic executor (R1CS path)"
+                        );
+                    }
                     OpCode::Alloc { result: r, value } => {
                         let v = scope[value].clone();
                         scope.insert(*r, V::alloc(&v, ctx));

@@ -321,6 +321,9 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
         }
         OpCode::MkRepeated {
             result, element, ..
+        }
+        | OpCode::MkRepeatedDyn {
+            result, element, ..
         } => {
             let element_type = builder
                 .value_type(*result)
@@ -684,6 +687,7 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         | OpCode::Select { .. }
         | OpCode::MkSeq { .. }
         | OpCode::MkRepeated { .. }
+        | OpCode::MkRepeatedDyn { .. }
         | OpCode::ArrayGet { .. }
         | OpCode::SliceLen { .. }
         | OpCode::MkSeqOfBlob { .. }

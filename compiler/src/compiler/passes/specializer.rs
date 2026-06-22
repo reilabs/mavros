@@ -498,7 +498,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                     Self(res_v)
                 }
                 CastTarget::Nop | CastTarget::ArrayToSlice | CastTarget::WitnessOf => *self,
-                CastTarget::ValueOf | CastTarget::Map(_) => {
+                CastTarget::SliceToArray(_) | CastTarget::ValueOf | CastTarget::Map(_) => {
                     let res = ctx.cast_to(cast_target.clone(), self.0);
                     Self(res)
                 }
@@ -515,7 +515,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                 | CastTarget::Nop
                 | CastTarget::ArrayToSlice
                 | CastTarget::WitnessOf => *self,
-                CastTarget::ValueOf | CastTarget::Map(_) => {
+                CastTarget::SliceToArray(_) | CastTarget::ValueOf | CastTarget::Map(_) => {
                     let res = ctx.cast_to(cast_target.clone(), self.0);
                     Self(res)
                 }

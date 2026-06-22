@@ -996,6 +996,7 @@ impl CSE {
                     | OpCode::MkSeq { .. }
                     | OpCode::MkSeqOfBlob { .. }
                     | OpCode::MkRepeated { .. }
+                    | OpCode::MkRepeatedDyn { .. }
                     | OpCode::ArraySet { .. }
                     | OpCode::SlicePush { .. }
                     | OpCode::SliceLen { .. }

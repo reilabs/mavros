@@ -434,6 +434,9 @@ impl FnBuilder<'_> {
             }
             OpCode::MkRepeated {
                 result, element, ..
+            }
+            | OpCode::MkRepeatedDyn {
+                result, element, ..
             } => {
                 // Always a collapse trigger — one source for every cell.
                 let elem_ty = self.array_element(*result);

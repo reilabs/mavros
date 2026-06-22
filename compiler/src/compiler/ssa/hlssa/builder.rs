@@ -377,6 +377,18 @@ pub trait HLEmitter {
         r
     }
 
+    /// Build a `Slice` of `count` (a runtime `u32` value) copies of `element`.
+    fn mk_repeated_dyn(&mut self, element: ValueId, count: ValueId, elem_type: Type) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::MkRepeatedDyn {
+            result: r,
+            element,
+            count,
+            elem_type,
+        });
+        r
+    }
+
     fn select(&mut self, cond: ValueId, if_t: ValueId, if_f: ValueId) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::Select {

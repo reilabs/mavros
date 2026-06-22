@@ -490,6 +490,15 @@ impl Types {
                 function_info.values.insert(*r, top_tp.of(t.clone()));
                 Ok(())
             }
+            OpCode::MkRepeatedDyn {
+                result: r,
+                element: _,
+                count: _,
+                elem_type: t,
+            } => {
+                function_info.values.insert(*r, t.clone().slice_of());
+                Ok(())
+            }
             OpCode::Cast {
                 result,
                 value,

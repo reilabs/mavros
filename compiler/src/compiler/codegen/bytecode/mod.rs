@@ -835,7 +835,9 @@ impl CodeGen {
                     }
                     let is_nop = matches!(
                         tgt,
-                        hlssa::CastTarget::Nop | hlssa::CastTarget::ArrayToSlice
+                        hlssa::CastTarget::Nop
+                            | hlssa::CastTarget::ArrayToSlice
+                            | hlssa::CastTarget::SliceToArray(_)
                     ) || l_type.expr == r_type.expr
                         || (l_type.is_witness_of() && r_type.is_witness_of());
                     if is_nop {
@@ -1120,6 +1122,25 @@ impl CodeGen {
                         item,
                     });
                 }
+                hlssa::OpCode::MkRepeatedDyn {
+                    result: r,
+                    element,
+                    count,
+                    elem_type: eltype,
+                } => {
+                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                    let item = layouter.get_value(*element);
+                    let count_pos = layouter.get_value(*count);
+                    let is_ptr = eltype.is_heap_allocated();
+                    let stride = layouter.type_size(eltype);
+                    emitter.push_op(bytecode::OpCode::ArrayAllocRepeatedDyn {
+                        res,
+                        stride,
+                        has_ptr_elems: is_ptr as u64,
+                        count: count_pos,
+                        item,
+                    });
+                }
                 hlssa::OpCode::MkTuple { .. } => ice_non_elided_tuple(),
                 hlssa::OpCode::Call {
                     results: r,
@@ -1163,13 +1184,13 @@ impl CodeGen {
                     });
                 }
                 hlssa::OpCode::MemOp {
-                    kind: RefCountOp::Bump(size),
+                    kind: RefCountOp::Bump(count),
                     value: r,
                 } => {
                     // assert!(type_info.get_value_type(*r).is_array_or_slice());
                     emitter.push_op(bytecode::OpCode::IncRc {
                         array: layouter.get_value(*r),
-                        amount: *size as u64,
+                        amount: layouter.get_value(*count),
                     });
                 }
                 hlssa::OpCode::AssertCmp { kind, lhs, rhs } => match kind {

@@ -94,6 +94,15 @@ pub enum OpCode {
         count: usize,
         elem_type: Type,
     },
+    /// Build a `Slice` of `count` (runtime length) copies of `element`. The
+    /// dynamic-length counterpart of `MkRepeated`; used by `LowerMapCasts` to
+    /// pre-size a conversion target without `SlicePush`.
+    MkRepeatedDyn {
+        result: ValueId,
+        element: ValueId,
+        count: ValueId,
+        elem_type: Type,
+    },
     Alloc {
         result: ValueId,
         value: ValueId,
@@ -580,6 +589,21 @@ impl Instruction for OpCode {
                     elem_type
                 )
             }
+            OpCode::MkRepeatedDyn {
+                result,
+                element,
+                count,
+                elem_type,
+            } => {
+                format!(
+                    "v{}{} = [v{}; v{}] : Slice of {}",
+                    result.0,
+                    annotate_value(*result),
+                    element.0,
+                    count.0,
+                    elem_type
+                )
+            }
             OpCode::Cast {
                 result,
                 value,
@@ -664,7 +688,7 @@ impl Instruction for OpCode {
             }
             OpCode::MemOp { kind, value } => {
                 let name = match kind {
-                    RefCountOp::Bump(n) => format!("inc_rc[+{}]", n),
+                    RefCountOp::Bump(n) => format!("inc_rc[+v{}]", n.0),
                     RefCountOp::Drop => "drop".to_string(),
                 };
                 format!("{}(v{})", name, value.0)
@@ -912,6 +936,12 @@ impl Instruction for OpCode {
                 count: _,
                 elem_type: _,
             } => vec![element].into_iter(),
+            Self::MkRepeatedDyn {
+                result: _,
+                element,
+                count,
+                elem_type: _,
+            } => vec![element, count].into_iter(),
             Self::Select {
                 result: _,
                 cond: b,
@@ -946,7 +976,14 @@ impl Instruction for OpCode {
                 }
                 ret_vec.into_iter()
             }
-            Self::MemOp { kind: _, value: v } => vec![v].into_iter(),
+            Self::MemOp {
+                kind: RefCountOp::Bump(count),
+                value: v,
+            } => vec![v, count].into_iter(),
+            Self::MemOp {
+                kind: RefCountOp::Drop,
+                value: v,
+            } => vec![v].into_iter(),
             Self::Rangecheck {
                 value: val,
                 max_bits: _,
@@ -1014,6 +1051,7 @@ impl Instruction for OpCode {
             | Self::MkSeq { result: r, .. }
             | Self::MkSeqOfBlob { result: r, .. }
             | Self::MkRepeated { result: r, .. }
+            | Self::MkRepeatedDyn { result: r, .. }
             | Self::Select { result: r, .. }
             | Self::Cast { result: r, .. }
             | Self::SExt { result: r, .. }
@@ -1070,6 +1108,7 @@ impl Instruction for OpCode {
             | Self::MkSeq { result: r, .. }
             | Self::MkSeqOfBlob { result: r, .. }
             | Self::MkRepeated { result: r, .. }
+            | Self::MkRepeatedDyn { result: r, .. }
             | Self::Select { result: r, .. }
             | Self::Cast { result: r, .. }
             | Self::SExt { result: r, .. }
@@ -1239,6 +1278,12 @@ impl Instruction for OpCode {
                 count: _,
                 elem_type: _,
             } => vec![element].into_iter(),
+            Self::MkRepeatedDyn {
+                result: _,
+                element,
+                count,
+                elem_type: _,
+            } => vec![element, count].into_iter(),
             Self::MkTuple {
                 result: _,
                 elems: inputs,
@@ -1278,7 +1323,14 @@ impl Instruction for OpCode {
                 }
                 ret_vec.into_iter()
             }
-            Self::MemOp { kind: _, value: v } => vec![v].into_iter(),
+            Self::MemOp {
+                kind: RefCountOp::Bump(count),
+                value: v,
+            } => vec![v, count].into_iter(),
+            Self::MemOp {
+                kind: RefCountOp::Drop,
+                value: v,
+            } => vec![v].into_iter(),
             Self::Rangecheck {
                 value: val,
                 max_bits: _,
@@ -1333,7 +1385,14 @@ impl Instruction for OpCode {
                 result: r,
                 value: v,
             } => vec![r, v].into_iter(),
-            Self::MemOp { kind: _, value: r }
+            Self::MemOp {
+                kind: RefCountOp::Bump(count),
+                value: r,
+            } => vec![r, count].into_iter(),
+            Self::MemOp {
+                kind: RefCountOp::Drop,
+                value: r,
+            }
             | Self::FreshWitness {
                 result: r,
                 result_type: _,
@@ -1471,6 +1530,12 @@ impl Instruction for OpCode {
                 count: _,
                 elem_type: _,
             } => vec![r, element].into_iter(),
+            Self::MkRepeatedDyn {
+                result: r,
+                element,
+                count,
+                elem_type: _,
+            } => vec![r, element, count].into_iter(),
             Self::Select {
                 result: a,
                 cond: b,
@@ -1644,6 +1709,11 @@ pub enum CastTarget {
     ValueOf,
     Nop,
     ArrayToSlice,
+    /// Reinterprets a slice as a fixed-size array of the given length.
+    /// Arrays and slices share the same heap layout, so this is a pure alias
+    /// at runtime (the inverse of `ArrayToSlice`). Emitted by `LowerMapCasts`
+    /// to convert an array elementwise through the size-independent slice loop.
+    SliceToArray(usize),
     /// Applies the inner cast to every element of an array or slice.
     /// Lowered to an explicit loop late, by `LowerMapCasts`; witness-only maps
     /// never reach codegen in the witgen pipeline (`StripWitnessOf` erases them).
@@ -1736,6 +1806,10 @@ impl CastTarget {
                 TypeExpr::Array(elem, _len) => elem.as_ref().clone().slice_of(),
                 _ => panic!("ArrayToSlice cast on non-array type"),
             },
+            CastTarget::SliceToArray(size) => match &value_type.expr {
+                TypeExpr::Slice(elem) => elem.as_ref().clone().array_of(*size),
+                _ => panic!("SliceToArray cast on non-slice type"),
+            },
             CastTarget::WitnessOf => Type::witness_of(value_type.clone()),
             CastTarget::ValueOf => match &value_type.expr {
                 TypeExpr::WitnessOf(inner) => inner.as_ref().clone(),
@@ -1760,7 +1834,8 @@ impl CastTarget {
             | CastTarget::U(_)
             | CastTarget::I(_)
             | CastTarget::Nop
-            | CastTarget::ArrayToSlice => false,
+            | CastTarget::ArrayToSlice
+            | CastTarget::SliceToArray(_) => false,
         }
     }
 
@@ -1776,7 +1851,8 @@ impl CastTarget {
             | CastTarget::I(_)
             | CastTarget::WitnessOf
             | CastTarget::Nop
-            | CastTarget::ArrayToSlice => false,
+            | CastTarget::ArrayToSlice
+            | CastTarget::SliceToArray(_) => false,
         }
     }
 }
@@ -1791,6 +1867,7 @@ impl Display for CastTarget {
             CastTarget::ValueOf => write!(f, "ValueOf"),
             CastTarget::Nop => write!(f, "Nop"),
             CastTarget::ArrayToSlice => write!(f, "ArrayToSlice"),
+            CastTarget::SliceToArray(size) => write!(f, "SliceToArray({})", size),
             CastTarget::Map(inner) => write!(f, "Map({})", inner),
         }
     }
@@ -1866,8 +1943,11 @@ pub enum Constant {
 
 #[derive(Debug, Clone, Copy)]
 pub enum RefCountOp {
-    /// A reference count increment operation, bumping by the provided amount.
-    Bump(usize),
+    /// A reference count increment operation, bumping by the amount held in the
+    /// given value (a runtime `u32`). Constant bumps reference an interned
+    /// constant; dynamic bumps (e.g. from `MkRepeatedDyn`) reference a computed
+    /// length, so all RC arithmetic is uniformly value-driven.
+    Bump(ValueId),
 
     /// A reference count decrement operation (always by one).
     Drop,

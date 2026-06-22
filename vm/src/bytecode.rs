@@ -1240,6 +1240,33 @@ mod def {
         }
     }
 
+    /// Like `array_alloc_repeated` but the element count is read from the frame
+    /// at runtime; the boxed layout is sized accordingly. Used to build a slice
+    /// of a dynamically-determined length.
+    #[opcode]
+    fn array_alloc_repeated_dyn(
+        #[out] res: *mut BoxedValue,
+        stride: usize,
+        has_ptr_elems: u64,
+        #[frame] count: u64,
+        item: FramePosition,
+        frame: Frame,
+        vm: &mut VM,
+    ) {
+        let count = count as usize;
+        let meta = BoxedLayout::array(count * stride, has_ptr_elems != 0);
+        let array = BoxedValue::alloc(meta, vm);
+        for i in 0..count {
+            let tgt = array.array_idx(i, stride);
+            unsafe {
+                frame.write_to(tgt, item.0 as isize, stride);
+            }
+        }
+        unsafe {
+            *res = array;
+        }
+    }
+
     #[opcode]
     #[inline(never)]
     fn tuple_alloc(
@@ -1408,7 +1435,7 @@ mod def {
     }
 
     #[opcode]
-    fn inc_rc(#[frame] array: BoxedValue, amount: u64) {
+    fn inc_rc(#[frame] array: BoxedValue, #[frame] amount: u64) {
         // println!("inc_array_rc_intro");
         array.inc_rc(amount);
         // println!("inc_array_rc_outro");

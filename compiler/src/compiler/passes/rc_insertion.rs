@@ -18,9 +18,18 @@ use crate::compiler::{
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
         Instruction, Terminator, ValueId,
-        hlssa::{CastTarget, HLFunction, HLSSA, OpCode, RefCountOp, Type, TypeExpr},
+        hlssa::{
+            CastTarget, Constant, HLFunction, HLSSA, OpCode, RefCountOp, Type, TypeExpr,
+            builder::HLSSABuilder,
+        },
     },
 };
+
+/// Build a `Bump` refcount op that increments by `count`, interning `count` as
+/// a `u32` constant so the amount is a runtime value (see [`RefCountOp::Bump`]).
+fn mk_bump(ssa: &HLSSA, count: usize) -> RefCountOp {
+    RefCountOp::Bump(ssa.add_const(Constant::U(32, count as u128)))
+}
 
 pub struct RCInsertion {}
 
@@ -37,12 +46,20 @@ impl Pass for RCInsertion {
         let cfg = store.get::<FlowAnalysis>();
 
         let liveness = LivenessAnalysis::new().run(ssa, cfg);
+        let type_store = store.get::<TypeInfo>();
 
-        for (function_id, function) in ssa.iter_functions_mut() {
-            let cfg = cfg.get_function_cfg(*function_id);
-            let liveness = &liveness.function_liveness[function_id];
-            let type_info = store.get::<TypeInfo>().get_function(*function_id);
-            self.run_function(function, cfg, type_info, &liveness);
+        let fids: Vec<_> = ssa.get_function_ids().collect();
+        let mut sb = HLSSABuilder::new(ssa);
+        for function_id in fids {
+            let fcfg = cfg.get_function_cfg(function_id);
+            let fliveness = &liveness.function_liveness[&function_id];
+            let type_info = type_store.get_function(function_id);
+            sb.modify_function(function_id, |fb| {
+                // `function` and `ssa` are disjoint fields, so a mutable borrow
+                // of one and a shared borrow of the other coexist; the shared
+                // `ssa` is used only to intern constant bump amounts.
+                self.run_function(&mut *fb.function, &*fb.ssa, fcfg, type_info, fliveness);
+            });
         }
     }
 }
@@ -56,6 +73,7 @@ impl RCInsertion {
     fn run_function(
         &self,
         function: &mut HLFunction,
+        ssa: &HLSSA,
         cfg: &CFG,
         type_info: &FunctionTypeInfo,
         liveness: &FunctionLiveness,
@@ -81,7 +99,7 @@ impl RCInsertion {
                         let count = count.count() - 1;
                         if self.needs_rc(type_info, value) && count > 0 {
                             new_instructions.push(OpCode::MemOp {
-                                kind: RefCountOp::Bump(count),
+                                kind: mk_bump(ssa, count),
                                 value: *value,
                             });
                         }
@@ -106,7 +124,7 @@ impl RCInsertion {
                         }
                         if self.needs_rc(type_info, value) && count > 0 {
                             new_instructions.push(OpCode::MemOp {
-                                kind: RefCountOp::Bump(count),
+                                kind: mk_bump(ssa, count),
                                 value: *value,
                             });
                         }
@@ -145,7 +163,7 @@ impl RCInsertion {
                             }
                             if count > 0 {
                                 new_instructions.push(OpCode::MemOp {
-                                    kind: RefCountOp::Bump(count),
+                                    kind: mk_bump(ssa, count),
                                     value: *input,
                                 });
                             }
@@ -164,7 +182,7 @@ impl RCInsertion {
                     } => {
                         if currently_live.contains(v) {
                             new_instructions.push(OpCode::MemOp {
-                                kind: RefCountOp::Bump(1),
+                                kind: mk_bump(ssa, 1),
                                 value: *v,
                             });
                         }
@@ -181,7 +199,12 @@ impl RCInsertion {
                         result: r,
                         value: v,
                         target,
-                    } if matches!(target, CastTarget::Nop | CastTarget::ArrayToSlice)
+                    } if matches!(
+                        target,
+                        CastTarget::Nop
+                            | CastTarget::ArrayToSlice
+                            | CastTarget::SliceToArray(_)
+                    )
                         || (type_info.get_value_type(*v).is_witness_of()
                             && type_info.get_value_type(*r).is_witness_of()) =>
                     {
@@ -196,7 +219,7 @@ impl RCInsertion {
                             if currently_live.contains(v) {
                                 // Both input and output are live — two refs to the same boxed value.
                                 new_instructions.push(OpCode::MemOp {
-                                    kind: RefCountOp::Bump(1),
+                                    kind: mk_bump(ssa, 1),
                                     value: *v,
                                 });
                             }
@@ -331,7 +354,7 @@ impl RCInsertion {
                                 }
                                 if count > 0 {
                                     new_instructions.push(OpCode::MemOp {
-                                        kind: RefCountOp::Bump(count),
+                                        kind: mk_bump(ssa, count),
                                         value: *input,
                                     });
                                 }
@@ -381,7 +404,7 @@ impl RCInsertion {
                             }
                             if bump > 0 {
                                 new_instructions.push(OpCode::MemOp {
-                                    kind: RefCountOp::Bump(bump),
+                                    kind: mk_bump(ssa, bump),
                                     value: *element,
                                 });
                             }
@@ -392,6 +415,39 @@ impl RCInsertion {
                             )
                         }
                         currently_live.insert(*element);
+                    }
+                    OpCode::MkRepeatedDyn {
+                        result,
+                        element,
+                        count,
+                        elem_type,
+                    } => {
+                        // Reverse build order (executes as: bump, op, drop):
+                        // bump the element by the runtime `count` (it is aliased
+                        // into every slot), then — if it dies here — release its
+                        // own remaining reference with an explicit drop. The
+                        // dynamic count rules out folding that drop into a
+                        // `count - 1` bump the way `MkRepeated` does.
+                        if self.type_needs_rc(elem_type) && !currently_live.contains(element) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: RefCountOp::Drop,
+                                value: *element,
+                            });
+                        }
+                        new_instructions.push(instruction.clone());
+                        if self.type_needs_rc(elem_type) {
+                            new_instructions.push(OpCode::MemOp {
+                                kind: RefCountOp::Bump(*count),
+                                value: *element,
+                            });
+                        }
+                        if !currently_live.contains(result) {
+                            panic!(
+                                "ICE: Result of MkRepeatedDyn is immediately dropped. This is a bug."
+                            )
+                        }
+                        currently_live.insert(*element);
+                        currently_live.insert(*count);
                     }
                     OpCode::Alloc { result, value } => {
                         let value = *value;
@@ -404,7 +460,7 @@ impl RCInsertion {
                         new_instructions.push(instruction);
                         if self.needs_rc(type_info, &value) && currently_live.contains(&value) {
                             new_instructions.push(OpCode::MemOp {
-                                kind: RefCountOp::Bump(1),
+                                kind: mk_bump(ssa, 1),
                                 value,
                             });
                         }
@@ -425,7 +481,7 @@ impl RCInsertion {
                         new_instructions.push(instruction);
                         if self.needs_rc(type_info, &value) && currently_live.contains(&value) {
                             new_instructions.push(OpCode::MemOp {
-                                kind: RefCountOp::Bump(1),
+                                kind: mk_bump(ssa, 1),
                                 value,
                             });
                         }
@@ -442,7 +498,7 @@ impl RCInsertion {
                         if self.needs_rc(type_info, result) {
                             if currently_live.contains(result) {
                                 new_instructions.push(OpCode::MemOp {
-                                    kind: RefCountOp::Bump(1),
+                                    kind: mk_bump(ssa, 1),
                                     value: *result,
                                 });
                             } else {
@@ -490,7 +546,7 @@ impl RCInsertion {
                             }
                             if self.needs_rc(type_info, param) && count > 0 {
                                 new_instructions.push(OpCode::MemOp {
-                                    kind: RefCountOp::Bump(count),
+                                    kind: mk_bump(ssa, count),
                                     value: *param,
                                 });
                             }
@@ -515,7 +571,7 @@ impl RCInsertion {
                                 // The result gets a bump to the RC counter, because
                                 // it's now both accessed here and in the array.
                                 new_instructions.push(OpCode::MemOp {
-                                    kind: RefCountOp::Bump(1),
+                                    kind: mk_bump(ssa, 1),
                                     value: *result,
                                 });
                             } else {
@@ -559,7 +615,7 @@ impl RCInsertion {
                                 )
                             }
                             new_instructions.push(OpCode::MemOp {
-                                kind: RefCountOp::Bump(1),
+                                kind: mk_bump(ssa, 1),
                                 value: *r,
                             });
                         }
@@ -578,13 +634,13 @@ impl RCInsertion {
                             // if it notices a refcount of 0. So we need to bump _before_
                             // we enter it.
                             new_instructions.push(OpCode::MemOp {
-                                kind: RefCountOp::Bump(1),
+                                kind: mk_bump(ssa, 1),
                                 value: *array,
                             });
                         }
                         if self.needs_rc(type_info, value) && currently_live.contains(value) {
                             new_instructions.push(OpCode::MemOp {
-                                kind: RefCountOp::Bump(1),
+                                kind: mk_bump(ssa, 1),
                                 value: *value,
                             })
                         }
@@ -608,7 +664,7 @@ impl RCInsertion {
                             // Slice push will decrease the RC and oportunistically reuse the storage,
                             // if it notices a refcount of 0. So we need to bump _before_ we enter it.
                             new_instructions.push(OpCode::MemOp {
-                                kind: RefCountOp::Bump(1),
+                                kind: mk_bump(ssa, 1),
                                 value: *slice,
                             });
                         }
@@ -629,7 +685,7 @@ impl RCInsertion {
                                 }
                                 if count > 0 {
                                     new_instructions.push(OpCode::MemOp {
-                                        kind: RefCountOp::Bump(count),
+                                        kind: mk_bump(ssa, count),
                                         value: *value,
                                     });
                                 }
@@ -653,7 +709,7 @@ impl RCInsertion {
                         let v = *v;
                         if self.needs_rc(type_info, &v) && currently_live.contains(&v) {
                             new_instructions.push(OpCode::MemOp {
-                                kind: RefCountOp::Bump(1),
+                                kind: mk_bump(ssa, 1),
                                 value: v,
                             });
                         }

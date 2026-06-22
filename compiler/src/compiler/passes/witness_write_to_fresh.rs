@@ -61,6 +61,7 @@ impl WitnessWriteToFresh {
                         | OpCode::MkSeq { .. }
                         | OpCode::MkSeqOfBlob { .. }
                         | OpCode::MkRepeated { .. }
+                        | OpCode::MkRepeatedDyn { .. }
                         | OpCode::Alloc { .. }
                         | OpCode::BinaryArithOp { .. }
                         | OpCode::SExt { .. }

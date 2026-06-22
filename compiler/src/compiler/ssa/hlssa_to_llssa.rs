@@ -1023,6 +1023,17 @@ fn lower_instruction(
             }
         },
 
+        OpCode::MkRepeatedDyn {
+            result,
+            element,
+            count,
+            elem_type,
+        } => {
+            let ll_count = val_map[count];
+            let len = e.zext(ll_count, 64);
+            lower_mk_repeated_slice_dyn(e, val_map, *result, *element, elem_type, len);
+        }
+
         OpCode::ArrayGet {
             result,
             array,
@@ -1063,11 +1074,15 @@ fn lower_instruction(
             kind: RefCountOp::Bump(n),
             value,
         } => {
+            // The bump amount is a runtime `u32` value; widen it to the i64 the
+            // refcount is stored as.
+            let ll_count = val_map[n];
+            let count64 = e.zext(ll_count, 64);
             let val_type = fn_type_info.get_value_type(*value);
             if val_type.is_witness_of() {
-                lower_ad_rc_bump(e, val_map, *n, *value);
+                lower_ad_rc_bump(e, val_map, count64, *value);
             } else {
-                lower_rc_bump(e, val_map, fn_type_info, *n, *value);
+                lower_rc_bump(e, val_map, fn_type_info, count64, *value);
             }
         }
 
@@ -1227,9 +1242,9 @@ fn lower_instruction(
                 CastTarget::Nop => {
                     val_map.insert(*result, ll_value);
                 }
-                CastTarget::ArrayToSlice => {
-                    // Arrays and slices share the same heap layout, so this
-                    // cast is a pure alias: ownership of the object transfers
+                CastTarget::ArrayToSlice | CastTarget::SliceToArray(_) => {
+                    // Arrays and slices share the same heap layout, so these
+                    // casts are pure aliases: ownership of the object transfers
                     // to the result, matching the VM backend's nop semantics.
                     val_map.insert(*result, ll_value);
                 }
@@ -1773,9 +1788,23 @@ fn lower_mk_repeated_slice(
     elem_type: &HLType,
     count: usize,
 ) {
+    let len = e.emit_int_const(64, count as u64);
+    lower_mk_repeated_slice_dyn(e, val_map, result, element, elem_type, len);
+}
+
+/// Like `lower_mk_repeated_slice` but with a runtime `len` (an i64 value). The
+/// element is aliased into every slot; the HLSSA-level RC pass has already
+/// bumped its refcount by `len`.
+fn lower_mk_repeated_slice_dyn(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    result: ValueId,
+    element: ValueId,
+    elem_type: &HLType,
+    len: ValueId,
+) {
     let rc_struct = rc_seq_struct(elem_type);
     let es = elem_struct(elem_type);
-    let len = e.emit_int_const(64, count as u64);
 
     let slice = e.heap_alloc(rc_struct.clone(), Some(len));
     init_rc_sequence_header(e, slice, rc_struct.clone(), len);
@@ -2093,6 +2122,25 @@ fn lower_array_set(
     val_map.insert(result, merge_results[0]);
 }
 
+/// Add the runtime i64 `amount` to the refcount at `rc_ptr`, leaving immortal
+/// objects untouched. Used for both static and dynamic refcount bumps (the
+/// amount is always a non-negative count value).
+fn modify_rc_add(e: &mut LLBlockEmitter<'_>, rc_ptr: ValueId, amount: ValueId) {
+    let rc = e.ll_load(rc_ptr, LLType::i64());
+    let immortal = e.emit_int_const(64, RC_IMMORTAL_OBJECT);
+    let is_immortal = e.int_eq(rc, immortal);
+    e.build_if_else(
+        is_immortal,
+        vec![],
+        |_| vec![], // immortal: leave the refcount untouched
+        |e| {
+            let new_rc = e.int_add(rc, amount);
+            e.ll_store(rc_ptr, new_rc);
+            vec![]
+        },
+    );
+}
+
 /// Modify the provided `rc_ptr` by `delta` and store it back.
 ///
 /// The returned value is the effective refcount afterward, allowing the liveness check to proceed
@@ -2119,12 +2167,12 @@ fn modify_rc(e: &mut LLBlockEmitter<'_>, rc_ptr: ValueId, delta: i64) -> ValueId
     results[0]
 }
 
-/// Lower MemOp::Bump(n) -- increment refcount by n.
+/// Lower MemOp::Bump -- increment refcount by the runtime i64 `count`.
 fn lower_rc_bump(
     e: &mut LLBlockEmitter<'_>,
     val_map: &HashMap<ValueId, ValueId>,
     fn_type_info: &FunctionTypeInfo,
-    n: usize,
+    count: ValueId,
     value: ValueId,
 ) {
     let val_type = fn_type_info.get_value_type(value);
@@ -2140,7 +2188,7 @@ fn lower_rc_bump(
 
     let hdr = e.struct_field_ptr(ll_arr, rc_struct, 0);
     let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
-    modify_rc(e, rc_ptr, n as i64);
+    modify_rc_add(e, rc_ptr, count);
 }
 
 /// Lower MemOp::Drop -- call the generated drop function.
@@ -2335,14 +2383,14 @@ fn lower_ad_mul_const(
 fn lower_ad_rc_bump(
     e: &mut LLBlockEmitter<'_>,
     val_map: &HashMap<ValueId, ValueId>,
-    n: usize,
+    count: ValueId,
     value: ValueId,
 ) {
     let ll_node = val_map[&value];
     let base = LLStruct::ad_node_base();
     let hdr = e.struct_field_ptr(ll_node, base, 0);
     let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
-    modify_rc(e, rc_ptr, n as i64);
+    modify_rc_add(e, rc_ptr, count);
 }
 
 /// RC drop for AD nodes: call __ad_drop.

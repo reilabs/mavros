@@ -789,7 +789,9 @@ impl Value {
                     (bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)) & bit_mask(*s),
                 )
             }
-            (_, CastTarget::Nop | CastTarget::ArrayToSlice) => self.clone(),
+            (_, CastTarget::Nop | CastTarget::ArrayToSlice | CastTarget::SliceToArray(_)) => {
+                self.clone()
+            }
             _ => panic!("Cannot cast {:?} to {:?}", self, cast_target),
         }
     }

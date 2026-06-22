@@ -70,6 +70,7 @@ impl LowerSideEffectFreeGuards {
             | OpCode::MkSeq { .. }
             | OpCode::MkSeqOfBlob { .. }
             | OpCode::MkRepeated { .. }
+            | OpCode::MkRepeatedDyn { .. }
             | OpCode::Alloc { .. }
             | OpCode::Load { .. }
             | OpCode::SlicePush { .. }

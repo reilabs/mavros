@@ -120,6 +120,7 @@ impl DCE {
             | OpCode::MkSeq { .. }
             | OpCode::MkSeqOfBlob { .. }
             | OpCode::MkRepeated { .. }
+            | OpCode::MkRepeatedDyn { .. }
             | OpCode::Cast { .. }
             | OpCode::SExt { .. }
             | OpCode::BitRange { .. }

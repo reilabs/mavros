@@ -549,6 +549,7 @@ impl<'f, 'c> FunctionLattice<'f, 'c> {
             OpCode::MkSeq { .. }
             | OpCode::MkSeqOfBlob { .. }
             | OpCode::MkRepeated { .. }
+            | OpCode::MkRepeatedDyn { .. }
             | OpCode::Alloc { .. }
             | OpCode::Store { .. }
             | OpCode::Load { .. }
@@ -854,6 +855,7 @@ fn eval_cast(target: &CastTarget, v: &Constant) -> Option<Constant> {
         // ValueOf/Map operate on witness wrappers and runtime sequences.
         CastTarget::WitnessOf
         | CastTarget::ArrayToSlice
+        | CastTarget::SliceToArray(_)
         | CastTarget::ValueOf
         | CastTarget::Map(_) => None,
         CastTarget::Field => match v {

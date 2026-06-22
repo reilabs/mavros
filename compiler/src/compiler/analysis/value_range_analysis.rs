@@ -589,7 +589,9 @@ impl ValueRangeAnalysis {
                     // ValueOf strips the WitnessOf wrapper: payload unchanged.
                     CastTarget::Nop | CastTarget::WitnessOf | CastTarget::ValueOf => in_r,
                     // Sequence-level casts carry no scalar range.
-                    CastTarget::ArrayToSlice | CastTarget::Map(_) => IntInterval::top(),
+                    CastTarget::ArrayToSlice
+                    | CastTarget::SliceToArray(_)
+                    | CastTarget::Map(_) => IntInterval::top(),
                 };
                 Self::overwrite(bounds, *result, cap_to_type(*result, r), changed);
             }

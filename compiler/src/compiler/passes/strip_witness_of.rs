@@ -100,7 +100,7 @@ impl StripWitnessOf {
             OpCode::MkSeqOfBlob { element_type, .. } => {
                 *element_type = element_type.strip_all_witness();
             }
-            OpCode::MkRepeated { elem_type, .. } => {
+            OpCode::MkRepeated { elem_type, .. } | OpCode::MkRepeatedDyn { elem_type, .. } => {
                 *elem_type = elem_type.strip_all_witness();
             }
             OpCode::Alloc { .. } | OpCode::Cast { .. } => {}
