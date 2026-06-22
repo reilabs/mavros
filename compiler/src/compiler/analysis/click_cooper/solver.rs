@@ -1,0 +1,610 @@
+//! The per-function combined optimistic fixpoint.
+//!
+//! This is the classic Wegman-Zadeck two-worklist algorithm. Every value starts at ⊤, is lowered to
+//! a concrete constant when a transfer function folds it, and bottoms out at ⊥ otherwise; block
+//! reachability and value lattices are computed together so constants propagate through
+//! constant-decided branches.
+
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        analysis::click_cooper::{
+            congruence::Congruence,
+            lattice::{
+                Constness, bool_constness, const_bool, const_join, eval_binary, eval_bit_range,
+                eval_cast, eval_cmp, eval_field_mul, eval_not, eval_sext,
+            },
+        },
+        ssa::{
+            BlockId, Instruction, Terminator, ValueId,
+            hlssa::{Constant, HLFunction, HLSSAConstantsSnapshot, OpCode},
+        },
+    },
+};
+
+// TYPES
+// ================================================================================================
+
+/// Per-block branch predicate facts: a value known true/false on entry to the block, recorded only
+/// when every executable incoming edge proves the same boolean.
+pub(crate) type BoolFacts = HashMap<ValueId, bool>;
+
+// FUNCTION FACTS
+// ================================================================================================
+
+/// The converged per-function analysis state.
+#[derive(Debug, Default)]
+pub(crate) struct FunctionFacts {
+    /// Each value's converged constness (`⊤` / `Const` / `⊥`).
+    ///
+    /// A value absent from the map is implicitly `⊤` (never lowered); already-interned constants
+    /// are resolved from the snapshot, so they are not stored here.
+    pub lattice: HashMap<ValueId, Constness>,
+
+    /// Blocks proven reachable by the combined reachability+constant fixpoint — those whose
+    /// instructions were visited at least once.
+    pub reachable: HashSet<BlockId>,
+
+    /// CFG edges `(from, to)` proven executable. A constant-decided `JmpIf` marks only the taken
+    /// edge, so its untaken successor can stay unreachable.
+    pub exec_edges: HashSet<(BlockId, BlockId)>,
+
+    /// Per-block branch predicate facts: values known true/false on entry to a block, recorded only
+    /// where every executable in-edge agrees on the same boolean (path-sensitive).
+    pub block_facts: HashMap<BlockId, BoolFacts>,
+
+    /// The converged global value-numbering partition (structural congruence classes), built once
+    /// over the final reachability/lattice state.
+    pub congruence: Congruence,
+}
+
+// FUNCTION SOLVER
+// ================================================================================================
+
+/// The fact solver for a single function.
+pub(crate) struct FunctionSolver<'f, 'c> {
+    /// The function being solved.
+    function: &'f HLFunction,
+
+    /// A snapshot of the constants that are currently available.
+    consts: &'c HLSSAConstantsSnapshot,
+
+    /// Each value's constness in the in-progress fixpoint; a value absent from the map is
+    /// implicitly `⊤` (not yet lowered).
+    lattice: HashMap<ValueId, Constness>,
+
+    /// CFG edges `(from, to)` proven executable so far.
+    exec_edges: HashSet<(BlockId, BlockId)>,
+
+    /// Executable predecessors per block — the inverse of `exec_edges`, kept in step with it (and
+    /// so deduplicated by that edge set) so a block's live in-edges can be iterated directly.
+    exec_preds: HashMap<BlockId, Vec<BlockId>>,
+
+    /// Blocks whose instructions have been visited at least once.
+    reachable: HashSet<BlockId>,
+
+    /// Predicate facts known at block entry (intersected over executable in-edges).
+    block_facts: HashMap<BlockId, BoolFacts>,
+
+    /// Newly-executable CFG edges awaiting processing — the flow (reachability) worklist.
+    edge_worklist: Vec<(BlockId, BlockId)>,
+
+    /// Values whose lattice cell just changed, awaiting re-evaluation of their uses — the SSA
+    /// worklist.
+    value_worklist: Vec<ValueId>,
+
+    /// For each value: the sites that read it. `None` marks the block's terminator.
+    uses: HashMap<ValueId, Vec<(BlockId, Option<usize>)>>,
+}
+
+impl<'f, 'c> FunctionSolver<'f, 'c> {
+    pub(crate) fn new(function: &'f HLFunction, consts: &'c HLSSAConstantsSnapshot) -> Self {
+        let mut uses: HashMap<ValueId, Vec<(BlockId, Option<usize>)>> = HashMap::default();
+        for (bid, block) in function.get_blocks() {
+            for (idx, instr) in block.get_instructions().enumerate() {
+                for input in instr.get_inputs() {
+                    uses.entry(*input).or_default().push((*bid, Some(idx)));
+                }
+            }
+            if let Some(term) = block.get_terminator() {
+                let inputs: Vec<ValueId> = match term {
+                    Terminator::Jmp(_, args) => args.clone(),
+                    Terminator::JmpIf(cond, _, _) => vec![*cond],
+                    Terminator::Return(vals) => vals.clone(),
+                };
+                for v in inputs {
+                    uses.entry(v).or_default().push((*bid, None));
+                }
+            }
+        }
+
+        Self {
+            function,
+            consts,
+            lattice: HashMap::default(),
+            exec_edges: HashSet::default(),
+            exec_preds: HashMap::default(),
+            reachable: HashSet::default(),
+            block_facts: HashMap::default(),
+            edge_worklist: Vec::new(),
+            value_worklist: Vec::new(),
+            uses,
+        }
+    }
+
+    pub(crate) fn run(&mut self) {
+        let entry = self.function.get_entry_id();
+
+        // Entry parameters are the function's arguments — unknown (`Bottom`) intraprocedurally.
+        for (p, _) in self.function.get_entry().get_parameters() {
+            self.lattice.insert(*p, Constness::Bottom);
+        }
+        self.reachable.insert(entry);
+        self.block_facts.insert(entry, BoolFacts::default());
+        self.visit_block(entry);
+
+        loop {
+            if let Some((p, b)) = self.edge_worklist.pop() {
+                self.process_edge(p, b);
+                continue;
+            }
+            if let Some(v) = self.value_worklist.pop() {
+                self.process_value(v);
+                continue;
+            }
+            break;
+        }
+        self.assert_no_stuck_conditions();
+    }
+
+    /// Convert the solver into facts.
+    pub(crate) fn into_facts(self) -> FunctionFacts {
+        let congruence =
+            Congruence::build(
+                self.function,
+                &self.reachable,
+                &self.exec_edges,
+                |v| match self.lattice_of(v) {
+                    Constness::Const(c) => Some(c),
+                    Constness::Top | Constness::Bottom => None,
+                },
+            );
+
+        FunctionFacts {
+            lattice: self.lattice,
+            reachable: self.reachable,
+            exec_edges: self.exec_edges,
+            block_facts: self.block_facts,
+            congruence,
+        }
+    }
+
+    /// A `JmpIf` condition can converge at ⊤ only if it (transitively) bottoms out at a block
+    /// parameter fed solely by itself along executable edges, so we sanity check.
+    fn assert_no_stuck_conditions(&self) {
+        for bid in &self.reachable {
+            if let Some(Terminator::JmpIf(cond, _, _)) =
+                self.function.get_block(*bid).get_terminator()
+            {
+                assert!(
+                    self.lattice_of(*cond) != Constness::Top,
+                    "ICE: ClickCooper converged with JmpIf condition v{} in `{}` stuck at ⊤; \
+                     the condition is only defined through a self-referential block-parameter \
+                     cycle, so a use is not dominated by its definition (malformed SSA)",
+                    cond.0,
+                    self.function.get_name(),
+                );
+            }
+        }
+    }
+
+    fn lattice_of(&self, v: ValueId) -> Constness {
+        if let Some(c) = self.consts.get(&v) {
+            return Constness::Const(c.clone());
+        }
+        self.lattice.get(&v).cloned().unwrap_or(Constness::Top)
+    }
+
+    fn lattice_in_block(&self, bid: BlockId, v: ValueId) -> Constness {
+        if let Some(c) = self.consts.get(&v) {
+            return Constness::Const(c.clone());
+        }
+        if let Some(value) = self.block_facts.get(&bid).and_then(|facts| facts.get(&v)) {
+            return bool_constness(*value);
+        }
+        self.lattice.get(&v).cloned().unwrap_or(Constness::Top)
+    }
+
+    /// Lower `v` to `join(current, new)`, scheduling its users if the value changed.
+    fn set_lattice(&mut self, v: ValueId, new: Constness) {
+        let old = self.lattice_of(v);
+        let joined = const_join(old.clone(), new);
+        if joined != old {
+            self.lattice.insert(v, joined);
+            self.value_worklist.push(v);
+        }
+    }
+
+    fn process_edge(&mut self, p: BlockId, b: BlockId) {
+        if !self.exec_edges.insert((p, b)) {
+            return;
+        }
+        self.exec_preds.entry(b).or_default().push(p);
+
+        // Snapshot the executable predecessors once and share it across both recomputations: both
+        // helpers take `&mut self`, so they need an owned copy detached from `self.exec_preds`.
+        let preds = self.exec_preds.get(&b).cloned().unwrap_or_default();
+        self.recompute_params_at(b, &preds, None);
+
+        let facts_changed = self.recompute_facts(b, &preds);
+        let first_visit = self.reachable.insert(b);
+        if first_visit || facts_changed {
+            self.visit_block(b);
+        }
+    }
+
+    fn process_value(&mut self, v: ValueId) {
+        let sites = self.uses.get(&v).cloned().unwrap_or_default();
+        for (bid, site) in sites {
+            if !self.reachable.contains(&bid) {
+                continue;
+            }
+            match site {
+                Some(idx) => self.visit_instruction(bid, idx),
+                None => self.revisit_terminator_for(bid, v),
+            }
+        }
+    }
+
+    /// Re-examine `bid`'s terminator because its operand `v` changed.
+    ///
+    /// A `Jmp` along an already-executable edge re-joins only the target parameters that actually
+    /// consume `v`.
+    fn revisit_terminator_for(&mut self, bid: BlockId, v: ValueId) {
+        match self.function.get_block(bid).get_terminator() {
+            Some(Terminator::Jmp(t, args)) => {
+                let t = *t;
+                if self.exec_edges.contains(&(bid, t)) {
+                    let indices: Vec<usize> = args
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, a)| (*a == v).then_some(i))
+                        .collect();
+                    let preds = self.exec_preds.get(&t).cloned().unwrap_or_default();
+                    self.recompute_params_at(t, &preds, Some(&indices));
+                }
+            }
+            Some(Terminator::JmpIf(..)) | Some(Terminator::Return(..)) | None => {
+                self.visit_terminator(bid)
+            }
+        }
+    }
+
+    fn visit_block(&mut self, bid: BlockId) {
+        let n = self.function.get_block(bid).get_instructions().count();
+        for idx in 0..n {
+            self.visit_instruction(bid, idx);
+        }
+        self.visit_terminator(bid);
+    }
+
+    fn visit_instruction(&mut self, bid: BlockId, idx: usize) {
+        let updates = self.transfer(bid, self.function.get_block(bid).get_instruction(idx));
+        for (v, lat) in updates {
+            self.set_lattice(v, lat);
+        }
+    }
+
+    fn visit_terminator(&mut self, bid: BlockId) {
+        let Some(term) = self.function.get_block(bid).get_terminator().cloned() else {
+            return;
+        };
+        match term {
+            Terminator::Jmp(t, _) => self.notify_edge(bid, t),
+            Terminator::JmpIf(cond, t, f) => match self.lattice_in_block(bid, cond) {
+                Constness::Top => {}
+                Constness::Const(c) => match const_bool(&c) {
+                    Some(true) => self.notify_edge(bid, t),
+                    Some(false) => self.notify_edge(bid, f),
+                    None => {
+                        self.notify_edge(bid, t);
+                        self.notify_edge(bid, f);
+                    }
+                },
+                Constness::Bottom => {
+                    self.notify_edge(bid, t);
+                    self.notify_edge(bid, f);
+                }
+            },
+            Terminator::Return(_) => {}
+        }
+    }
+
+    /// Mark edge `(p, t)` executable; if it already is, the jump arguments may have changed, so
+    /// re-join the target's parameters.
+    fn notify_edge(&mut self, p: BlockId, t: BlockId) {
+        if self.exec_edges.contains(&(p, t)) {
+            let preds = self.exec_preds.get(&t).cloned().unwrap_or_default();
+            self.recompute_params_at(t, &preds, None);
+            if self.recompute_facts(t, &preds) {
+                self.visit_block(t);
+            }
+        } else {
+            self.edge_worklist.push((p, t));
+        }
+    }
+
+    /// Re-join target parameters from `preds`.
+    ///
+    /// `indices` selects which parameters to recompute; `None` recomputes them all (the common
+    /// full-recompute path) without materialising a `0..n` index vector. `preds` is the caller's
+    /// executable-predecessor snapshot for `b`.
+    fn recompute_params_at(&mut self, b: BlockId, preds: &[BlockId], indices: Option<&[usize]>) {
+        if b == self.function.get_entry_id() {
+            return;
+        }
+
+        let block = self.function.get_block(b);
+        if !block.has_parameters() {
+            return;
+        }
+
+        let params: Vec<ValueId> = block.get_parameter_values().copied().collect();
+        let mut updates = Vec::with_capacity(indices.map_or(params.len(), <[usize]>::len));
+
+        match indices {
+            Some(indices) => {
+                for &i in indices {
+                    updates.push((params[i], self.join_param(b, preds, i)));
+                }
+            }
+            None => {
+                for i in 0..params.len() {
+                    updates.push((params[i], self.join_param(b, preds, i)));
+                }
+            }
+        }
+        for (p, lat) in updates {
+            self.set_lattice(p, lat);
+        }
+    }
+
+    /// The constness contributed to block `b`'s `i`-th parameter, joined over the `i`-th jump
+    /// argument of every executable predecessor in `preds`.
+    fn join_param(&self, b: BlockId, preds: &[BlockId], i: usize) -> Constness {
+        let mut acc = Constness::Top;
+        for pred in preds {
+            match self.function.get_block(*pred).get_terminator() {
+                Some(Terminator::Jmp(t, args)) if *t == b => {
+                    acc = const_join(acc, self.lattice_in_block(*pred, args[i]));
+                }
+                // A parameterized block is only ever entered via `Jmp`; treat anything else
+                // (including a `Jmp` to a different target) as unknown rather than trusting the
+                // invariant.
+                Some(Terminator::Jmp(..))
+                | Some(Terminator::JmpIf(..))
+                | Some(Terminator::Return(..))
+                | None => acc = Constness::Bottom,
+            }
+        }
+        acc
+    }
+
+    fn recompute_facts(&mut self, b: BlockId, preds: &[BlockId]) -> bool {
+        if b == self.function.get_entry_id() {
+            return false;
+        }
+        let mut iter = preds.iter().copied();
+        let Some(first_pred) = iter.next() else {
+            return false;
+        };
+
+        let mut facts = self.edge_facts(first_pred, b);
+        for pred in iter {
+            let next = self.edge_facts(pred, b);
+            facts.retain(|value, known| next.get(value) == Some(known));
+            if facts.is_empty() {
+                break;
+            }
+        }
+
+        let old = self.block_facts.get(&b).cloned().unwrap_or_default();
+        if old == facts {
+            return false;
+        }
+
+        if facts.is_empty() {
+            self.block_facts.remove(&b);
+        } else {
+            self.block_facts.insert(b, facts);
+        }
+        true
+    }
+
+    fn edge_facts(&self, pred: BlockId, target: BlockId) -> BoolFacts {
+        let mut facts = self.block_facts.get(&pred).cloned().unwrap_or_default();
+        if let Some((cond, value)) = self.branch_fact_for_edge(pred, target) {
+            facts.insert(cond, value);
+        }
+        facts
+    }
+
+    fn branch_fact_for_edge(&self, pred: BlockId, target: BlockId) -> Option<(ValueId, bool)> {
+        let Some(Terminator::JmpIf(cond, then_b, else_b)) =
+            self.function.get_block(pred).get_terminator()
+        else {
+            return None;
+        };
+        if then_b == else_b {
+            return None;
+        }
+        if *then_b == target {
+            Some((*cond, true))
+        } else if *else_b == target {
+            Some((*cond, false))
+        } else {
+            None
+        }
+    }
+
+    /// The transfer function: new lattice values for the instruction's results.
+    fn transfer(&self, bid: BlockId, instr: &OpCode) -> Vec<(ValueId, Constness)> {
+        match instr {
+            OpCode::BinaryArithOp {
+                kind,
+                result,
+                lhs,
+                rhs,
+            } => vec![(
+                *result,
+                self.eval2(bid, *lhs, *rhs, |a, b| eval_binary(*kind, a, b)),
+            )],
+            OpCode::Cmp {
+                kind,
+                result,
+                lhs,
+                rhs,
+            } => vec![(
+                *result,
+                self.eval2(bid, *lhs, *rhs, |a, b| eval_cmp(*kind, a, b)),
+            )],
+            OpCode::MulConst {
+                result,
+                const_val,
+                var,
+            } => vec![(*result, self.eval2(bid, *const_val, *var, eval_field_mul))],
+            OpCode::Cast {
+                result,
+                value,
+                target,
+            } => vec![(*result, self.eval1(bid, *value, |v| eval_cast(target, v)))],
+            OpCode::SExt {
+                result,
+                value,
+                from_bits,
+                to_bits,
+            } => vec![(
+                *result,
+                self.eval1(bid, *value, |v| eval_sext(v, *from_bits, *to_bits)),
+            )],
+            OpCode::BitRange {
+                result,
+                value,
+                offset,
+                width,
+            } => vec![(
+                *result,
+                self.eval1(bid, *value, |v| eval_bit_range(v, *offset, *width)),
+            )],
+            OpCode::Not { result, value } => vec![(*result, self.eval1(bid, *value, eval_not))],
+            OpCode::Select {
+                result,
+                cond,
+                if_t,
+                if_f,
+            } => vec![(*result, self.eval_select(bid, *cond, *if_t, *if_f))],
+
+            // Everything else — including `Call`, whose result is unknown intraprocedurally, is
+            // overdefined. The rewrite relies on this: a constant-valued instruction result is
+            // always the output of one of the pure scalar ops above. Spelled out variant by variant
+            // (no catch-all) so that adding an opcode forces a decision here.
+            OpCode::Call { .. }
+            | OpCode::MkSeq { .. }
+            | OpCode::MkSeqOfBlob { .. }
+            | OpCode::MkRepeated { .. }
+            | OpCode::Alloc { .. }
+            | OpCode::Store { .. }
+            | OpCode::Load { .. }
+            | OpCode::Assert { .. }
+            | OpCode::AssertCmp { .. }
+            | OpCode::AssertR1C { .. }
+            | OpCode::ArrayGet { .. }
+            | OpCode::ArraySet { .. }
+            | OpCode::SlicePush { .. }
+            | OpCode::SliceLen { .. }
+            | OpCode::ToBits { .. }
+            | OpCode::ToRadix { .. }
+            | OpCode::MemOp { .. }
+            | OpCode::WriteWitness { .. }
+            | OpCode::FreshWitness { .. }
+            | OpCode::NextDCoeff { .. }
+            | OpCode::BumpD { .. }
+            | OpCode::Constrain { .. }
+            | OpCode::Lookup { .. }
+            | OpCode::DLookup { .. }
+            | OpCode::Rangecheck { .. }
+            | OpCode::ReadGlobal { .. }
+            | OpCode::TupleProj { .. }
+            | OpCode::TupleRefProj { .. }
+            | OpCode::MkTuple { .. }
+            | OpCode::Todo { .. }
+            | OpCode::InitGlobal { .. }
+            | OpCode::DropGlobal { .. }
+            | OpCode::Spread { .. }
+            | OpCode::Unspread { .. }
+            | OpCode::Guard { .. } => {
+                // Single source of truth: anything overdefined here must not be classified as a
+                // deletable pure scalar fold, or SCCP would drop a side-effecting / constrained
+                // instruction whose result it aliased to a constant. The reverse direction (a fold
+                // wrongly marked non-foldable) is caught by the byte-identical corpus gate.
+                debug_assert!(
+                    !instr.is_pure_scalar_fold(),
+                    "transfer treats {instr:?} as overdefined but OpCode::is_pure_scalar_fold \
+                     classifies it as a deletable fold; the two must agree"
+                );
+                instr
+                    .get_results()
+                    .map(|r| (*r, Constness::Bottom))
+                    .collect()
+            }
+        }
+    }
+
+    /// Evaluate a 1-argument function `f` on `v` in the context of `bid`.
+    fn eval1(
+        &self,
+        bid: BlockId,
+        v: ValueId,
+        f: impl FnOnce(&Constant) -> Option<Constant>,
+    ) -> Constness {
+        match self.lattice_in_block(bid, v) {
+            Constness::Top => Constness::Top,
+            Constness::Const(c) => f(&c)
+                .map(|c| Constness::Const(std::sync::Arc::new(c)))
+                .unwrap_or(Constness::Bottom),
+            Constness::Bottom => Constness::Bottom,
+        }
+    }
+
+    /// Evaluate a 2-argument function `f` on `l, r` in the context of `bid`.
+    fn eval2(
+        &self,
+        bid: BlockId,
+        l: ValueId,
+        r: ValueId,
+        f: impl FnOnce(&Constant, &Constant) -> Option<Constant>,
+    ) -> Constness {
+        match (self.lattice_in_block(bid, l), self.lattice_in_block(bid, r)) {
+            (Constness::Top, _) | (_, Constness::Top) => Constness::Top,
+            (Constness::Const(a), Constness::Const(b)) => f(&a, &b)
+                .map(|c| Constness::Const(std::sync::Arc::new(c)))
+                .unwrap_or(Constness::Bottom),
+            (Constness::Bottom, _) | (_, Constness::Bottom) => Constness::Bottom,
+        }
+    }
+
+    fn eval_select(&self, bid: BlockId, cond: ValueId, if_t: ValueId, if_f: ValueId) -> Constness {
+        match self.lattice_in_block(bid, cond) {
+            Constness::Top => Constness::Top,
+            Constness::Const(c) => match const_bool(&c) {
+                Some(true) => self.lattice_in_block(bid, if_t),
+                Some(false) => self.lattice_in_block(bid, if_f),
+                None => Constness::Bottom,
+            },
+            Constness::Bottom => const_join(
+                self.lattice_in_block(bid, if_t),
+                self.lattice_in_block(bid, if_f),
+            ),
+        }
+    }
+}

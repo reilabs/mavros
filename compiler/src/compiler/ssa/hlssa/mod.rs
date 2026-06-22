@@ -261,6 +261,62 @@ pub enum OpCode {
     },
 }
 
+impl OpCode {
+    /// `true` if `self` is capable of being a pure, side-effect-free, single-result scalar op that
+    /// can be folded to a constant and have the defining instruction deleted.
+    ///
+    /// Note that this requires the caller to verify that the operation's lack of side effects holds
+    /// in context (e.g. a given multiplication cannot overflow).
+    pub fn is_pure_scalar_fold(&self) -> bool {
+        match self {
+            OpCode::Cmp { .. }
+            | OpCode::BinaryArithOp { .. }
+            | OpCode::Cast { .. }
+            | OpCode::SExt { .. }
+            | OpCode::BitRange { .. }
+            | OpCode::Not { .. }
+            | OpCode::Select { .. }
+            | OpCode::MulConst { .. } => true,
+
+            OpCode::MkSeq { .. }
+            | OpCode::MkSeqOfBlob { .. }
+            | OpCode::MkRepeated { .. }
+            | OpCode::Alloc { .. }
+            | OpCode::Store { .. }
+            | OpCode::Load { .. }
+            | OpCode::Assert { .. }
+            | OpCode::AssertCmp { .. }
+            | OpCode::AssertR1C { .. }
+            | OpCode::Call { .. }
+            | OpCode::ArrayGet { .. }
+            | OpCode::ArraySet { .. }
+            | OpCode::SlicePush { .. }
+            | OpCode::SliceLen { .. }
+            | OpCode::ToBits { .. }
+            | OpCode::ToRadix { .. }
+            | OpCode::MemOp { .. }
+            | OpCode::WriteWitness { .. }
+            | OpCode::FreshWitness { .. }
+            | OpCode::NextDCoeff { .. }
+            | OpCode::BumpD { .. }
+            | OpCode::Constrain { .. }
+            | OpCode::Lookup { .. }
+            | OpCode::DLookup { .. }
+            | OpCode::Rangecheck { .. }
+            | OpCode::ReadGlobal { .. }
+            | OpCode::TupleProj { .. }
+            | OpCode::TupleRefProj { .. }
+            | OpCode::MkTuple { .. }
+            | OpCode::Todo { .. }
+            | OpCode::InitGlobal { .. }
+            | OpCode::DropGlobal { .. }
+            | OpCode::Spread { .. }
+            | OpCode::Unspread { .. }
+            | OpCode::Guard { .. } => false,
+        }
+    }
+}
+
 impl Instruction for OpCode {
     fn get_static_call_targets(&self) -> Vec<FunctionId> {
         match self {
