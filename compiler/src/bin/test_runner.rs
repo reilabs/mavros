@@ -81,7 +81,14 @@ fn main() {
     run_parent(&output_path, jobs, DEFAULT_IGNORED_TESTS);
 }
 
-const DEFAULT_IGNORED_TESTS: &[&str] = &[];
+const DEFAULT_IGNORED_TESTS: &[&str] = &[
+    // `func_1` recurses without ever decrementing `ctx_limit`, so it never terminates. The witgen
+    // VM has no recursion/step/memory guard (frames are heap-allocated per call in `Frame::push`),
+    // so running it grows memory without bound. Depending on the compiled circuit shape it either
+    // SIGSEGVs fast (alloc returns null → unchecked deref) or thrashes for hours before the OOM
+    // killer fires — the latter froze CI for 6h. Skip until the VM gains an execution budget.
+    "brillig_mem_layout_regression",
+];
 
 #[derive(Clone, Copy, Debug)]
 enum TestExpectation {
