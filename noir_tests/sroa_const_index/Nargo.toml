@@ -1,0 +1,6 @@
+[package]
+name = "sroa_const_index"
+type = "bin"
+authors = [""]
+
+[dependencies]

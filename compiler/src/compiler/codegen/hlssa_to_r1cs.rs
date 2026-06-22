@@ -2,7 +2,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::compiler::{
     analysis::{
-        symbolic_executor::{self, SymbolicExecutor},
+        symbolic_executor::{self, AssertionFailure, SymbolicExecutor},
         types::TypeInfo,
     },
     ssa::{
@@ -568,18 +568,30 @@ impl symbolic_executor::Value<R1CGen> for Value {
         }
     }
 
-    fn assert_bool(&self, _ctx: &mut R1CGen) {
+    fn assert_bool(&self, _ctx: &mut R1CGen) -> Result<(), AssertionFailure> {
         let v = self.expect_constant();
-        assert!(
-            v != ark_bn254::Fr::from(0u64),
-            "assert failed: value is zero"
-        );
+        if v == ark_bn254::Fr::from(0u64) {
+            return Err(AssertionFailure::new("assert failed: value is zero"));
+        }
+        Ok(())
     }
 
-    fn assert_cmp(kind: CmpKind, a: &Self, b: &Self, lhs_type: &Type, _ctx: &mut R1CGen) {
+    fn assert_cmp(
+        kind: CmpKind,
+        a: &Self,
+        b: &Self,
+        lhs_type: &Type,
+        _ctx: &mut R1CGen,
+    ) -> Result<(), AssertionFailure> {
         match kind {
             CmpKind::Eq => {
-                assert_eq!(a.expect_constant(), b.expect_constant());
+                let a_val = a.expect_constant();
+                let b_val = b.expect_constant();
+                if a_val != b_val {
+                    return Err(AssertionFailure::new(format!(
+                        "assert_cmp eq failed: {a_val:?} != {b_val:?}"
+                    )));
+                }
             }
             CmpKind::Lt => {
                 let a_val = a.expect_constant();
@@ -597,30 +609,35 @@ impl symbolic_executor::Value<R1CGen> for Value {
                             (false, true) => false, // positive >= negative
                             _ => a_int < b_int,     // same sign: compare directly
                         };
-                        assert!(
-                            result,
-                            "assert_cmp lt (signed) failed: {:?} >= {:?}",
-                            a_val, b_val
-                        );
+                        if !result {
+                            return Err(AssertionFailure::new(format!(
+                                "assert_cmp lt (signed) failed: {a_val:?} >= {b_val:?}"
+                            )));
+                        }
                     }
                     _ => {
-                        assert!(
-                            a_val < b_val,
-                            "assert_cmp lt failed: {:?} >= {:?}",
-                            a_val,
-                            b_val
-                        );
+                        if a_val >= b_val {
+                            return Err(AssertionFailure::new(format!(
+                                "assert_cmp lt failed: {a_val:?} >= {b_val:?}"
+                            )));
+                        }
                     }
                 }
             }
         }
+        Ok(())
     }
 
-    fn assert_r1c(a: &Self, b: &Self, c: &Self, _ctx: &mut R1CGen) {
+    fn assert_r1c(a: &Self, b: &Self, c: &Self, _ctx: &mut R1CGen) -> Result<(), AssertionFailure> {
         let a = a.expect_constant();
         let b = b.expect_constant();
         let c = c.expect_constant();
-        assert!(a * b == c);
+        if a * b != c {
+            return Err(AssertionFailure::new(format!(
+                "assert_r1c failed: {a:?} * {b:?} != {c:?}"
+            )));
+        }
+        Ok(())
     }
 
     fn array_get(&self, index: &Self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
@@ -678,11 +695,12 @@ impl symbolic_executor::Value<R1CGen> for Value {
         self.clone()
     }
 
-    fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut R1CGen) {
+    fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut R1CGen) -> Result<(), AssertionFailure> {
         let a = a.expect_linear_combination();
         let b = b.expect_linear_combination();
         let c = c.expect_linear_combination();
         ctx.constraints.push(R1C { a, b, c });
+        Ok(())
     }
 
     fn to_bits(
@@ -765,8 +783,8 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::mk_array(a)
     }
 
-    fn alloc(_elem_type: &Type, _ctx: &mut R1CGen) -> Self {
-        Value::Ptr(Rc::new(RefCell::new(Value::Invalid)))
+    fn alloc(value: &Self, _ctx: &mut R1CGen) -> Self {
+        Value::Ptr(Rc::new(RefCell::new(value.clone())))
     }
 
     fn ptr_write(&self, value: &Self, _ctx: &mut R1CGen) {
@@ -800,7 +818,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
 
     fn mem_op(&self, _kind: RefCountOp, _ctx: &mut R1CGen) {}
 
-    fn rangecheck(&self, max_bits: usize, _ctx: &mut R1CGen) {
+    fn rangecheck(&self, max_bits: usize, _ctx: &mut R1CGen) -> Result<(), AssertionFailure> {
         let self_const = self.expect_constant();
         let check = self_const
             .into_bigint()
@@ -808,7 +826,12 @@ impl symbolic_executor::Value<R1CGen> for Value {
             .iter()
             .skip(max_bits)
             .all(|b| !b);
-        assert!(check);
+        if !check {
+            return Err(AssertionFailure::new(format!(
+                "rangecheck failed: {self_const:?} does not fit in {max_bits} bits"
+            )));
+        }
+        Ok(())
     }
 
     fn to_radix(
@@ -895,15 +918,15 @@ impl R1CGen {
     }
 
     #[instrument(skip_all, name = "R1CGen::run")]
-    pub fn run(&mut self, ssa: &HLSSA, type_info: &TypeInfo) {
-        let entry_point = ssa.get_main_id();
+    pub fn run(&mut self, ssa: &HLSSA, type_info: &TypeInfo) -> Result<(), AssertionFailure> {
+        let entry_point = ssa.get_unique_entrypoint_id();
         assert!(
             ssa.get_function(entry_point).get_param_types().len() == 0,
             "Main should not have parameters as WitnessWriteToFresh pass should remove them"
         );
         let main_params = vec![];
         let executor = SymbolicExecutor::new();
-        executor.run(ssa, type_info, entry_point, main_params, self);
+        executor.run(ssa, type_info, entry_point, main_params, self)
     }
 
     pub fn get_r1cs(self) -> Vec<R1C> {
@@ -1062,27 +1085,26 @@ impl R1CGen {
                     table_info.sum_constraint_idx = result.len() - 1;
                 }
                 Table::Spread(bits) => {
-                    // Spread table: for each entry i in 0..2^bits, value = spread(i)
-                    // Width = 2 (key=i, value=spread(i)), same structure as OfElems
+                    // Spread table: for each entry i in 0..2^bits, value = spread(i).
+                    // Both operands (key=i, value=spread(i)) are compile-time
+                    // constants, so the `x = β·spread(i)` intermediate of the
+                    // generic key-value table (`OfElems`) collapses: β·spread(i)
+                    // is linear in the witness and folds directly into the
+                    // denominator. One witness/constraint per entry instead of two:
+                    // -> y = mᵢ / (α - i + β·spread(i)),
+                    //    constraint `y · (α - i + β·spread(i)) - mᵢ = 0`
                     let len = 1usize << bits;
                     let mut sum_lhs: LC = vec![];
                     for i in 0..len {
                         let spread_val = spread_bits(i as u128, 32);
-                        let v: LC = vec![(0, crate::compiler::Field::from(spread_val))];
-                        let x = witness_layout.next_table_data();
                         let y = witness_layout.next_table_data();
                         let m = table_info.multiplicities_witness_off + i;
-                        result.push(R1C {
-                            a: vec![(beta, crate::compiler::Field::ONE)],
-                            b: v,
-                            c: vec![(x, -crate::compiler::Field::ONE)],
-                        });
                         result.push(R1C {
                             a: vec![(y, ark_bn254::Fr::ONE)],
                             b: vec![
                                 (alpha, ark_bn254::Fr::ONE),
                                 (0, -crate::compiler::Field::from(i as u64)),
-                                (x, -crate::compiler::Field::ONE),
+                                (beta, crate::compiler::Field::from(spread_val)),
                             ],
                             c: vec![(m, crate::compiler::Field::ONE)],
                         });

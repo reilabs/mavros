@@ -7,7 +7,8 @@ use itertools::Itertools;
 use std::fmt::Display;
 
 use crate::compiler::ssa::{
-    Block, Function, FunctionId, Instruction, SSA, SSAConstants, SSAConstantsSnapshot, ValueId,
+    Block, Function, FunctionId, Instruction, Located, SSA, SSAConstants, SSAConstantsSnapshot,
+    ValueId,
 };
 pub use type_system::{MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type, TypeExpr};
 
@@ -16,6 +17,9 @@ pub use type_system::{MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Ty
 
 /// The high-level SSA is designed for domain-level analysis without concretizing runtime details.
 pub type HLSSA = SSA<OpCode, Type, Constant>;
+
+/// Opcodes for HLSSA with attached location metadata.
+pub type LocatedOpCode = Located<OpCode>;
 
 impl HLSSA {
     pub fn new() -> Self {
@@ -92,7 +96,7 @@ pub enum OpCode {
     },
     Alloc {
         result: ValueId,
-        elem_type: Type,
+        value: ValueId,
     },
     Store {
         ptr: ValueId,
@@ -269,6 +273,17 @@ impl Instruction for OpCode {
         }
     }
 
+    fn map_call_targets(&mut self, f: &mut dyn FnMut(FunctionId) -> FunctionId) {
+        match self {
+            OpCode::Call {
+                function: CallTarget::Static(id),
+                ..
+            } => *id = f(*id),
+            OpCode::Guard { inner, .. } => inner.map_call_targets(f),
+            _ => {}
+        }
+    }
+
     fn display_instruction(
         &self,
         func_name: &dyn Fn(FunctionId) -> String,
@@ -321,10 +336,12 @@ impl Instruction for OpCode {
                     rhs.0
                 )
             }
-            OpCode::Alloc {
-                result,
-                elem_type: typ,
-            } => format!("v{}{} = alloc({})", result.0, annotate_value(*result), typ),
+            OpCode::Alloc { result, value } => format!(
+                "v{}{} = alloc(v{})",
+                result.0,
+                annotate_value(*result),
+                value.0
+            ),
             OpCode::Store { ptr, value } => {
                 format!("*v{}{} = v{}", ptr.0, annotate_value(*ptr), value.0)
             }
@@ -773,9 +790,9 @@ impl Instruction for OpCode {
         match self {
             Self::Alloc {
                 result: _,
-                elem_type: _,
-            }
-            | Self::FreshWitness {
+                value: v,
+            } => vec![v].into_iter(),
+            Self::FreshWitness {
                 result: _,
                 result_type: _,
             }
@@ -1099,9 +1116,9 @@ impl Instruction for OpCode {
         match self {
             Self::Alloc {
                 result: _,
-                elem_type: _,
-            }
-            | Self::FreshWitness {
+                value: v,
+            } => vec![v].into_iter(),
+            Self::FreshWitness {
                 result: _,
                 result_type: _,
             }
@@ -1314,9 +1331,9 @@ impl Instruction for OpCode {
         match self {
             Self::Alloc {
                 result: r,
-                elem_type: _,
-            }
-            | Self::MemOp { kind: _, value: r }
+                value: v,
+            } => vec![r, v].into_iter(),
+            Self::MemOp { kind: _, value: r }
             | Self::FreshWitness {
                 result: r,
                 result_type: _,

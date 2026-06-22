@@ -100,6 +100,17 @@ pub struct LLVMCodeGen<'ctx> {
     // Globals
     globals: Vec<inkwell::values::GlobalValue<'ctx>>,
     const_data_counter: usize,
+    /// Exported symbol names of the program's entry points, in entry order.
+    entry_symbols: Vec<String>,
+}
+
+/// The exported symbol name of the entry point at `index` in the SSA's entry-point list.
+pub fn entry_export_symbol(index: usize) -> String {
+    match index {
+        0 => "mavros_main".to_string(),
+        1 => "mavros_ad_main".to_string(),
+        i => format!("mavros_entry_{i}"),
+    }
 }
 
 impl<'ctx> LLVMCodeGen<'ctx> {
@@ -127,6 +138,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             field_to_limbs_fn: None,
             globals: Vec::new(),
             const_data_counter: 0,
+            entry_symbols: Vec::new(),
         };
 
         codegen.declare_runtime_functions();
@@ -496,7 +508,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
     /// Compile LLSSA to LLVM IR.
     pub fn compile(&mut self, llssa: &LLSSA, flow_analysis: &FlowAnalysis) {
-        let main_id = llssa.get_main_id();
+        let entry_points: Vec<FunctionId> = llssa.get_entry_points().to_vec();
 
         // Declare globals
         for (i, ty) in llssa.get_global_types().iter().enumerate() {
@@ -512,26 +524,34 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         self.constants = llssa.const_snapshot();
 
+        self.entry_symbols = (0..entry_points.len()).map(entry_export_symbol).collect();
+
         // First pass: declare all functions
         for (fn_id, function) in llssa.iter_functions() {
-            self.declare_function(*fn_id, function, main_id);
+            self.declare_function(*fn_id, function, &entry_points);
         }
 
         // Second pass: generate function bodies
         for (fn_id, function) in llssa.iter_functions() {
             let cfg = flow_analysis.get_function_cfg(*fn_id);
-            self.compile_function(*fn_id, function, cfg, main_id);
+            self.compile_function(*fn_id, function, cfg, &entry_points);
         }
     }
 
-    fn declare_function(&mut self, fn_id: FunctionId, function: &LLFunction, main_id: FunctionId) {
+    fn declare_function(
+        &mut self,
+        fn_id: FunctionId,
+        function: &LLFunction,
+        entry_points: &[FunctionId],
+    ) {
         let entry = function.get_entry();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let entry_index = entry_points.iter().position(|e| *e == fn_id);
 
         // First parameter is always VM*
         let mut param_types: Vec<BasicMetadataTypeEnum> = vec![ptr_type.into()];
 
-        if fn_id != main_id {
+        if entry_index.is_none() {
             for (_, tp) in entry.get_parameters().skip(1) {
                 param_types.push(self.convert_type(tp).into());
             }
@@ -552,13 +572,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             return_struct.fn_type(&param_types, false)
         };
 
-        let name = if fn_id == main_id {
-            "mavros_main"
-        } else {
-            function.get_name()
+        let name = match entry_index {
+            Some(i) => self.entry_symbols[i].clone(),
+            None => function.get_name().to_string(),
         };
 
-        let fn_value = self.module.add_function(name, fn_type, None);
+        let fn_value = self.module.add_function(&name, fn_type, None);
         self.function_map.insert(fn_id, fn_value);
     }
 
@@ -567,7 +586,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         fn_id: FunctionId,
         function: &LLFunction,
         cfg: &flow_analysis::CFG,
-        main_id: FunctionId,
+        entry_points: &[FunctionId],
     ) {
         self.value_map.clear();
         for (vid, constant) in &self.constants {
@@ -602,7 +621,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.vm_ptr = Some(fn_value.get_nth_param(0).unwrap().into_pointer_value());
 
         let entry = function.get_entry();
-        if fn_id == main_id {
+        if entry_points.contains(&fn_id) {
             self.load_main_params_from_memory(entry.get_parameters());
         } else {
             for (i, (param_id, _)) in entry.get_parameters().enumerate() {
@@ -1389,9 +1408,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .unwrap_or_else(|_| "wasm-ld".to_string());
 
         let output = Command::new(&wasm_ld)
+            .arg("--no-entry")
+            .args(
+                self.entry_symbols
+                    .iter()
+                    .map(|symbol| format!("--export={symbol}")),
+            )
             .args([
-                "--no-entry",
-                "--export=mavros_main",
                 "--import-memory",
                 "--allow-undefined",
                 "--stack-first",

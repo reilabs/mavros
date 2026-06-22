@@ -1,0 +1,6 @@
+[package]
+name = "argpromo_alias_args"
+type = "bin"
+authors = [""]
+
+[dependencies]

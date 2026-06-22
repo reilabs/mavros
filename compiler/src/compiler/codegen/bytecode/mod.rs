@@ -9,8 +9,11 @@ use crate::{
             flow_analysis::{CFG, FlowAnalysis},
             types::{FunctionTypeInfo, TypeInfo},
         },
-        codegen::bytecode::layout::{
-            FrameLayouter, GlobalFrameLayouter, StructLayoutInterner, int_cell_count,
+        codegen::{
+            CodeGenOptions,
+            bytecode::layout::{
+                FrameLayouter, GlobalFrameLayouter, StructLayoutInterner, int_cell_count,
+            },
         },
         ssa::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
@@ -158,11 +161,13 @@ fn spill_constant_to_frame(
 // ================================================================================================
 
 /// The code generator that lowers HLSSA to Mavros bytecode.
-pub struct CodeGen {}
+pub struct CodeGen {
+    options: CodeGenOptions,
+}
 
 impl CodeGen {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(options: CodeGenOptions) -> Self {
+        Self { options }
     }
 
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
@@ -170,34 +175,27 @@ impl CodeGen {
         let struct_interner = StructLayoutInterner::new();
         let constants = ssa.const_snapshot();
 
-        let function = ssa.get_main();
-        let function = self.run_function(
-            function,
-            cfg.get_function_cfg(ssa.get_main_id()),
-            type_info.get_function(ssa.get_main_id()),
-            &global_layouter,
-            &constants,
-        );
+        // Entry points are emitted first, in entry-table order; the remaining functions follow.
+        let entry_ids: Vec<FunctionId> = ssa.get_entry_points().to_vec();
+        let function_order: Vec<FunctionId> = entry_ids
+            .iter()
+            .copied()
+            .chain(ssa.get_function_ids().filter(|id| !entry_ids.contains(id)))
+            .collect();
 
-        let mut functions = vec![function];
-
+        let mut functions = Vec::new();
         let mut function_ids = HashMap::default();
-        function_ids.insert(ssa.get_main_id(), 0);
+        let mut cur_fn_begin = 0;
 
-        let mut cur_fn_begin = functions[0].code.len();
-
-        for (function_id, function) in ssa.iter_functions() {
-            if *function_id == ssa.get_main_id() {
-                continue;
-            }
+        for function_id in function_order {
             let function = self.run_function(
-                function,
-                cfg.get_function_cfg(*function_id),
-                type_info.get_function(*function_id),
+                ssa.get_function(function_id),
+                cfg.get_function_cfg(function_id),
+                type_info.get_function(function_id),
                 &global_layouter,
                 &constants,
             );
-            function_ids.insert(*function_id, cur_fn_begin);
+            function_ids.insert(function_id, cur_fn_begin);
             cur_fn_begin += function.code.len();
             functions.push(function);
         }
@@ -224,6 +222,7 @@ impl CodeGen {
 
         bytecode::Program {
             functions,
+            entry_points: (0..entry_ids.len()).collect(),
             global_frame_size: global_layouter.total_size,
             struct_layouts: struct_interner.into_table(),
         }
@@ -970,6 +969,9 @@ impl CodeGen {
                             a_type, b_type, c_type
                         );
                     }
+                    if self.options.check_constraints {
+                        emit_assert_r1c(layouter, emitter, *a, *b, *c);
+                    }
                     emitter.push_op(bytecode::OpCode::R1C {
                         a: layouter.get_value(*a),
                         b: layouter.get_value(*b),
@@ -1263,16 +1265,7 @@ impl CodeGen {
                     });
                 }
                 hlssa::OpCode::AssertR1C { a, b, c } => {
-                    let tmp = layouter.alloc_scratch(4);
-                    emitter.push_op(bytecode::OpCode::MulField {
-                        res: tmp,
-                        a: layouter.get_value(*a),
-                        b: layouter.get_value(*b),
-                    });
-                    emitter.push_op(bytecode::OpCode::AssertEqField {
-                        a: tmp,
-                        b: layouter.get_value(*c),
-                    });
+                    emit_assert_r1c(layouter, emitter, *a, *b, *c);
                 }
                 hlssa::OpCode::ToBits {
                     result: r,
@@ -1579,12 +1572,19 @@ impl CodeGen {
                         size: global_layouter.get_size(global_idx),
                     });
                 }
-                hlssa::OpCode::Alloc { result, elem_type } => {
+                hlssa::OpCode::Alloc { result, value } => {
+                    let elem_type = type_info.get_value_type(*value);
                     let res = layouter.alloc_ptr(*result);
                     let elem_size = layouter.type_size(elem_type);
                     let elem_rc = elem_type.is_heap_allocated();
                     let meta = vm::array::BoxedLayout::ref_cell(elem_size, elem_rc);
                     emitter.push_op(bytecode::OpCode::RefAlloc { res, meta });
+                    emitter.push_op(bytecode::OpCode::RefStore {
+                        cell: layouter.get_value(*result),
+                        source: layouter.get_value(*value),
+                        stride: elem_size,
+                        elem_rc: 0,
+                    });
                 }
                 hlssa::OpCode::Store { ptr, value } => {
                     let ptr_type = type_info.get_value_type(*ptr);
@@ -1681,6 +1681,25 @@ impl EmitterState {
     fn exit_block(&mut self, block: BlockId) {
         self.block_exits.insert(block, self.code.len());
     }
+}
+
+fn emit_assert_r1c(
+    layouter: &mut FrameLayouter,
+    emitter: &mut EmitterState,
+    a: ValueId,
+    b: ValueId,
+    c: ValueId,
+) {
+    let product = layouter.alloc_temp_field();
+    emitter.push_op(bytecode::OpCode::MulField {
+        res: product,
+        a: layouter.get_value(a),
+        b: layouter.get_value(b),
+    });
+    emitter.push_op(bytecode::OpCode::AssertEqField {
+        a: product,
+        b: layouter.get_value(c),
+    });
 }
 
 // UTILITY FUNCTIONS

@@ -1,0 +1,6 @@
+[package]
+name = "argpromo_readwrite"
+type = "bin"
+authors = [""]
+
+[dependencies]

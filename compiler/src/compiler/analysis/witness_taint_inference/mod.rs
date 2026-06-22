@@ -303,7 +303,7 @@ mod tests {
     /// Run the pass and return the (cloned) entry function's witness type.
     fn run(ssa: &mut HLSSA) -> FunctionWitnessType {
         let wti = run_wti(ssa);
-        wti.try_get_function_witness_type(ssa.get_main_id())
+        wti.try_get_function_witness_type(ssa.get_unique_entrypoint_id())
             .expect("entry should have a witness type")
             .clone()
     }
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn write_witness_is_witness_pure_stays_pure() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn witness_of_cast_is_witness() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::witness_of(Type::field()));
@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn store_is_covariant_load_reads_pointee() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
@@ -394,9 +394,8 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.block(entry);
             let x = e.add_parameter(Type::field());
-            let p = e.alloc(Type::field());
             let c = e.field_const(fr(5));
-            e.store(p, c); // pure store
+            let p = e.alloc(c); // pure init store
             let w = e.write_witness(x); // Witness
             e.store(p, w); // witness store → pointee becomes Witness
             let r = e.load(p); // reads the (now Witness) pointee
@@ -411,7 +410,7 @@ mod tests {
     #[test]
     fn arithmetic_joins_operand_taint() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
@@ -437,7 +436,7 @@ mod tests {
         use crate::compiler::ssa::hlssa::{BinaryArithOpKind, OpCode};
 
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
@@ -470,7 +469,7 @@ mod tests {
     #[test]
     fn call_arg_out_back_taints_caller_ref() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let helper_id = sb.ssa().add_function("helper".to_string());
         // helper(p: Ref<Field>): *p = write_witness(7); return
@@ -489,9 +488,8 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.block(entry);
             let _x = e.add_parameter(Type::field());
-            let q = e.alloc(Type::field());
             let c0 = e.field_const(fr(0));
-            e.store(q, c0);
+            let q = e.alloc(c0);
             e.call(helper_id, vec![q], 0);
             let r = e.load(q);
             e.terminate_return(vec![r]);
@@ -505,7 +503,7 @@ mod tests {
     #[test]
     fn recursion_converges_with_arg_out() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let rec_id = sb.ssa().add_function("rec".to_string());
         // rec(p: Ref<Field>): *p = write_witness(1); rec(p); return
@@ -524,9 +522,8 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.block(entry);
             let _x = e.add_parameter(Type::field());
-            let q = e.alloc(Type::field());
             let c0 = e.field_const(fr(0));
-            e.store(q, c0);
+            let q = e.alloc(c0);
             e.call(rec_id, vec![q], 0);
             let r = e.load(q);
             e.terminate_return(vec![r]);
@@ -542,7 +539,7 @@ mod tests {
     #[test]
     fn nested_ref_aliases_unify() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
@@ -550,13 +547,12 @@ mod tests {
             let mut e = b.block(entry);
             let _x = e.add_parameter(Type::field());
             // inner: Ref<Field>, with a witness stored into its pointee.
-            let inner = e.alloc(Type::field());
             let c = e.field_const(fr(9));
+            let inner = e.alloc(c);
             let w = e.write_witness(c);
             e.store(inner, w);
             // outer: Ref<Ref<Field>>, holding `inner`.
-            let outer = e.alloc(Type::field().ref_of());
-            e.store(outer, inner);
+            let outer = e.alloc(inner);
             // Read the ref back out and deref it: aliases `inner`'s (witness) pointee.
             let loaded = e.load(outer);
             let final_val = e.load(loaded);
@@ -564,6 +560,50 @@ mod tests {
         });
         let fwt = run(&mut ssa);
         assert_eq!(fwt.returns_witness, vec![witness()]);
+    }
+
+    /// Nested-ref `alloc` (`alloc` of a `Ref<Field>`, giving `Ref<Ref<Field>>`): two-way `Deref`
+    /// unification welds the stored ref's pointee to the cell's inner pointee, so a witness stored
+    /// through `inner` makes `outer`'s inferred shape `Ref<Ref<WitnessOf<Field>>>`.
+    #[test]
+    fn nested_ref_alloc_infers_witness_pointee() {
+        use crate::compiler::ssa::hlssa::OpCode;
+
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |b| {
+            b.function.add_return_type(Type::field());
+            let entry = b.function.get_entry_id();
+            let mut e = b.block(entry);
+            let x = e.add_parameter(Type::field());
+            let c0 = e.field_const(fr(0));
+            let inner = e.alloc(c0);
+            let outer = e.alloc(inner); // the nested-ref alloc under test
+            let w = e.write_witness(x);
+            e.store(inner, w);
+            let loaded = e.load(outer);
+            let final_val = e.load(loaded);
+            e.terminate_return(vec![final_val]);
+        });
+        let wti = run_wti(&mut ssa);
+        let (clone_id, fwt) = clone_fwt(&ssa, &wti, "main");
+
+        assert_eq!(fwt.returns_witness, vec![witness()]);
+
+        // Pick the nested-ref alloc (pointee is itself a `Ref`) and check its inferred shape.
+        // Value ids are remapped onto the clone, so the alloc is found by scanning.
+        let outer_shape = ssa
+            .get_function(clone_id)
+            .get_blocks()
+            .flat_map(|(_, block)| block.get_instructions())
+            .filter_map(|instr| match instr {
+                OpCode::Alloc { result, .. } => fwt.value_witness_types.get(result),
+                _ => None,
+            })
+            .find(|s| matches!(s.child_witness_type(), Some(WitnessShape::Ref(..))))
+            .expect("nested-ref alloc shape");
+        assert_eq!(*outer_shape, ref_of_shape(ref_of_shape(witness())));
     }
 
     /// Characterization of the accepted unification imprecision: a phi over refs to two distinct
@@ -575,18 +615,16 @@ mod tests {
     #[test]
     fn merged_refs_unify_taint() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
             let mut e = b.block(entry);
             let x = e.add_parameter(Type::field());
-            let ra = e.alloc(Type::field());
-            let rb = e.alloc(Type::field());
             let c0 = e.field_const(fr(0));
-            e.store(ra, c0);
-            e.store(rb, c0);
+            let ra = e.alloc(c0);
+            let rb = e.alloc(c0);
             let cond = e.eq(x, c0); // a pure condition
             // The merge phi unifies ra/rb pointees.
             let _merged = e.build_if_else(
@@ -610,21 +648,18 @@ mod tests {
     #[test]
     fn conditional_ref_store_taints_loaded_handle() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
             let mut e = b.block(entry);
             let x = e.add_parameter(Type::field());
-            let r1 = e.alloc(Type::field());
-            let r2 = e.alloc(Type::field());
             let c1 = e.field_const(fr(1));
             let c2 = e.field_const(fr(2));
-            e.store(r1, c1);
-            e.store(r2, c2);
-            let p = e.alloc(Type::field().ref_of());
-            e.store(p, r1);
+            let r1 = e.alloc(c1);
+            let r2 = e.alloc(c2);
+            let p = e.alloc(r1);
             let w = e.write_witness(x);
             let zero = e.field_const(fr(0));
             let cond = e.eq(w, zero); // witness condition
@@ -654,21 +689,18 @@ mod tests {
     #[test]
     fn store_through_witness_selected_ref_taints_original() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
             let mut e = b.block(entry);
             let x = e.add_parameter(Type::field());
-            let r1 = e.alloc(Type::field());
-            let r2 = e.alloc(Type::field());
             let c1 = e.field_const(fr(1));
             let c2 = e.field_const(fr(2));
-            e.store(r1, c1);
-            e.store(r2, c2);
-            let p = e.alloc(Type::field().ref_of());
-            e.store(p, r1);
+            let r1 = e.alloc(c1);
+            let r2 = e.alloc(c2);
+            let p = e.alloc(r1);
             let w = e.write_witness(x);
             let zero = e.field_const(fr(0));
             let cond = e.eq(w, zero); // witness condition
@@ -697,21 +729,18 @@ mod tests {
     #[test]
     fn unconditional_ref_store_stays_pure() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
             let mut e = b.block(entry);
             let _x = e.add_parameter(Type::field());
-            let r1 = e.alloc(Type::field());
-            let r2 = e.alloc(Type::field());
             let c1 = e.field_const(fr(1));
             let c2 = e.field_const(fr(2));
-            e.store(r1, c1);
-            e.store(r2, c2);
-            let p = e.alloc(Type::field().ref_of());
-            e.store(p, r1);
+            let r1 = e.alloc(c1);
+            let r2 = e.alloc(c2);
+            let p = e.alloc(r1);
             e.store(p, r2);
             let q = e.load(p);
             let v = e.load(q);
@@ -726,18 +755,16 @@ mod tests {
     #[test]
     fn unmerged_refs_stay_separate() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
             let mut e = b.block(entry);
             let x = e.add_parameter(Type::field());
-            let ra = e.alloc(Type::field());
-            let rb = e.alloc(Type::field());
             let c0 = e.field_const(fr(0));
-            e.store(ra, c0);
-            e.store(rb, c0);
+            let ra = e.alloc(c0);
+            let rb = e.alloc(c0);
             let w = e.write_witness(x);
             e.store(rb, w); // witness store through rb
             let v = e.load(ra); // ra was never merged with rb: stays Pure
@@ -755,7 +782,7 @@ mod tests {
         use crate::compiler::ssa::hlssa::OpCode;
 
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field()); // the merge phi
@@ -766,7 +793,8 @@ mod tests {
             let w = e.write_witness(x);
             let zero = e.field_const(fr(0));
             let cond = e.eq(w, zero); // a witness-dependent condition
-            let p = e.alloc(Type::field());
+            let init = e.field_const(fr(0)); // pure initializer, leaves the slot Pure until the conditional store
+            let p = e.alloc(init);
             let merge = e.build_if_else(
                 cond,
                 vec![Type::field()],
@@ -793,7 +821,7 @@ mod tests {
 
         // The pure arithmetic computed under the witness branch is still a Pure value. Read it off the
         // clone (phase 2 remaps value ids), finding the sole `BinaryArithOp` result.
-        let clone_id = ssa.get_main_id();
+        let clone_id = ssa.get_unique_entrypoint_id();
         let add_result = ssa
             .get_function(clone_id)
             .get_blocks()
@@ -818,7 +846,7 @@ mod tests {
         use crate::compiler::ssa::hlssa::OpCode;
 
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let helper_id = sb.ssa().add_function("make_ref".to_string());
         // make_ref() -> Ref<Field>: p = alloc; *p = 17; return p
@@ -826,9 +854,8 @@ mod tests {
             b.function.add_return_type(Type::field().ref_of());
             let entry = b.function.get_entry_id();
             let mut e = b.block(entry);
-            let p = e.alloc(Type::field());
             let c = e.field_const(fr(17));
-            e.store(p, c);
+            let p = e.alloc(c);
             e.terminate_return(vec![p]);
         });
         // main(x): z = make_ref(); *z = write_witness(x); return *z
@@ -845,7 +872,7 @@ mod tests {
         });
         let wti = run_wti(&mut ssa);
         let main_fwt = wti
-            .try_get_function_witness_type(ssa.get_main_id())
+            .try_get_function_witness_type(ssa.get_unique_entrypoint_id())
             .unwrap();
         assert_eq!(main_fwt.returns_witness, vec![witness()]);
 
@@ -876,7 +903,7 @@ mod tests {
     #[test]
     fn returned_ref_two_level_pass_through() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let inner_id = sb.ssa().add_function("inner".to_string());
         let mid_id = sb.ssa().add_function("mid".to_string());
@@ -884,9 +911,8 @@ mod tests {
             b.function.add_return_type(Type::field().ref_of());
             let entry = b.function.get_entry_id();
             let mut e = b.block(entry);
-            let p = e.alloc(Type::field());
             let c = e.field_const(fr(17));
-            e.store(p, c);
+            let p = e.alloc(c);
             e.terminate_return(vec![p]);
         });
         // mid() -> Ref<Field>: just forwards inner()'s ref.
@@ -910,7 +936,7 @@ mod tests {
         });
         let wti = run_wti(&mut ssa);
         let main_fwt = wti
-            .try_get_function_witness_type(ssa.get_main_id())
+            .try_get_function_witness_type(ssa.get_unique_entrypoint_id())
             .unwrap();
         assert_eq!(main_fwt.returns_witness, vec![witness()]);
         let (_, mid_fwt) = clone_fwt(&ssa, &wti, "mid");
@@ -925,7 +951,7 @@ mod tests {
     #[test]
     fn returned_ref_recursion_terminates() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let rec_id = sb.ssa().add_function("rec".to_string());
         // rec() -> Ref<Field>: return rec()
@@ -949,7 +975,7 @@ mod tests {
         });
         let wti = run_wti(&mut ssa);
         let main_fwt = wti
-            .try_get_function_witness_type(ssa.get_main_id())
+            .try_get_function_witness_type(ssa.get_unique_entrypoint_id())
             .unwrap();
         assert_eq!(main_fwt.returns_witness, vec![witness()]);
         // clone_fwt asserts there is exactly one `rec` clone.
@@ -963,7 +989,7 @@ mod tests {
     #[test]
     fn returned_ref_alias_of_param_back_taints_arg() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let id_id = sb.ssa().add_function("id".to_string());
         // id(p: Ref<Field>) -> Ref<Field>: return p
@@ -980,9 +1006,8 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.block(entry);
             let x = e.add_parameter(Type::field());
-            let q = e.alloc(Type::field());
             let c0 = e.field_const(fr(0));
-            e.store(q, c0);
+            let q = e.alloc(c0);
             let r = e.call(id_id, vec![q], 1)[0];
             let w = e.write_witness(x);
             e.store(r, w);
@@ -998,16 +1023,15 @@ mod tests {
     #[test]
     fn returned_ref_stays_pure_without_caller_write() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_main_id();
+        let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let helper_id = sb.ssa().add_function("make_ref".to_string());
         sb.modify_function(helper_id, |b| {
             b.function.add_return_type(Type::field().ref_of());
             let entry = b.function.get_entry_id();
             let mut e = b.block(entry);
-            let p = e.alloc(Type::field());
             let c = e.field_const(fr(17));
-            e.store(p, c);
+            let p = e.alloc(c);
             e.terminate_return(vec![p]);
         });
         sb.modify_function(main_id, |b| {
@@ -1023,7 +1047,7 @@ mod tests {
         });
         let wti = run_wti(&mut ssa);
         let main_fwt = wti
-            .try_get_function_witness_type(ssa.get_main_id())
+            .try_get_function_witness_type(ssa.get_unique_entrypoint_id())
             .unwrap();
         assert_eq!(main_fwt.returns_witness, vec![pure()]);
         let (_, helper_fwt) = clone_fwt(&ssa, &wti, "make_ref");

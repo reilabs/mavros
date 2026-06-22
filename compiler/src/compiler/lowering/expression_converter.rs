@@ -61,6 +61,10 @@ pub struct ExpressionConverter<'a> {
     /// Maps GlobalId to global slot index
     global_slots: &'a HashMap<GlobalId, usize>,
 
+    /// Maps GlobalId to an interned constant ValueId when the global initializer lowered to a
+    /// constant.
+    global_constants: &'a HashMap<GlobalId, ValueId>,
+
     /// Current block being emitted into
     current_block: BlockId,
 }
@@ -71,6 +75,7 @@ impl<'a> ExpressionConverter<'a> {
         natively_unconstrained: &'a HashSet<AstFuncId>,
         in_unconstrained: bool,
         global_slots: &'a HashMap<GlobalId, usize>,
+        global_constants: &'a HashMap<GlobalId, ValueId>,
         entry_block: BlockId,
     ) -> Self {
         Self {
@@ -82,6 +87,7 @@ impl<'a> ExpressionConverter<'a> {
             loop_stack: Vec::new(),
             in_unconstrained,
             global_slots,
+            global_constants,
             current_block: entry_block,
         }
     }
@@ -100,12 +106,10 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         local_id: LocalId,
         value_id: ValueId,
-        typ: Type,
         b: &mut HLFunctionBuilder<'_>,
     ) {
         let mut e = b.block(self.current_block);
-        let ptr = e.alloc(typ);
-        e.store(ptr, value_id);
+        let ptr = e.alloc(value_id);
         drop(e);
         self.bindings.insert(local_id, ptr);
         self.mutable_locals.insert(local_id);
@@ -228,6 +232,9 @@ impl<'a> ExpressionConverter<'a> {
                 todo!("Oracle function not yet supported: {}", name)
             }
             Definition::Global(global_id) => {
+                if let Some(value) = self.global_constants.get(global_id) {
+                    return Some(*value);
+                }
                 let slot = *self
                     .global_slots
                     .get(global_id)
@@ -290,14 +297,8 @@ impl<'a> ExpressionConverter<'a> {
             // Use a single pointer for the whole value.
             // Nested field/index updates are handled by the descend-modify-ascend
             // pattern in convert_assign.
-            let ast_type = let_expr
-                .expression
-                .return_type()
-                .expect("Mutable let binding must have a typed expression");
-            let typ = self.type_converter.convert_type(&ast_type);
             let mut e = b.block(self.current_block);
-            let ptr = e.alloc(typ);
-            e.store(ptr, value);
+            let ptr = e.alloc(value);
             drop(e);
             self.bindings.insert(let_expr.id, ptr);
             self.mutable_locals.insert(let_expr.id);
@@ -367,18 +368,15 @@ impl<'a> ExpressionConverter<'a> {
             LValue::Index {
                 array,
                 index,
-                element_type,
+                element_type: _,
                 ..
             } => {
                 let array_value = self.read_lvalue(array, b);
                 let idx = self.convert_expression(index, b).unwrap();
                 let element = b.block(self.current_block).array_get(array_value, idx);
-                let element_type = self.type_converter.convert_type(element_type);
                 let element_ref = {
                     let mut e = b.block(self.current_block);
-                    let element_ref = e.alloc(element_type);
-                    e.store(element_ref, element);
-                    element_ref
+                    e.alloc(element)
                 };
 
                 f(self, element_ref, b);
@@ -725,15 +723,8 @@ impl<'a> ExpressionConverter<'a> {
 
                 // General case: evaluate the expression, alloc a fresh Ref, store into it.
                 let value = self.convert_expression(&unary.rhs, b).unwrap();
-                let inner_type = self.type_converter.convert_type(
-                    &unary
-                        .rhs
-                        .return_type()
-                        .expect("Reference operand must have a type"),
-                );
                 let mut e = b.block(self.current_block);
-                let ptr = e.alloc(inner_type);
-                e.store(ptr, value);
+                let ptr = e.alloc(value);
                 Some(ptr)
             }
             noirc_frontend::ast::UnaryOp::Dereference { .. } => {

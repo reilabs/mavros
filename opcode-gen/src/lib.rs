@@ -429,8 +429,8 @@ pub fn interpreter(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    for code in &codes {
-        result.extend(gen_handler(code));
+    for (idx, code) in codes.iter().enumerate() {
+        result.extend(gen_handler(idx, code));
     }
 
     result.extend(gen_opcode_enum(&codes));
@@ -603,7 +603,8 @@ fn parse_host_type(ty: &syn::Type) -> HostType {
     }
 }
 
-fn gen_handler(def: &OpCodeDef) -> proc_macro2::TokenStream {
+fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
+    let prof_idx = idx;
     let mut getters = proc_macro2::TokenStream::new();
     for input in &def.inputs {
         match input {
@@ -717,6 +718,7 @@ fn gen_handler(def: &OpCodeDef) -> proc_macro2::TokenStream {
     };
 
     let handler_name = format_ident!("{}_handler", def.name);
+    let prof_idx = prof_idx;
     quote! {
         #[allow(clippy::not_unsafe_ptr_arg_deref)]
         pub fn #handler_name(
@@ -727,11 +729,20 @@ fn gen_handler(def: &OpCodeDef) -> proc_macro2::TokenStream {
             // unsafe {
             //     println!("opcode: {:?}", *(pc as *mut (*mut usize)));
             // }
+            #[cfg(feature = "vm-profile")]
+            let __prof_start = read_cycles();
             let mut current_field_offset = 1isize;
             #getters
             #call_and_finish
 
-            #return_call
+            let __prof_ret = { #return_call };
+            #[cfg(feature = "vm-profile")]
+            {
+                let __prof_elapsed = read_cycles().wrapping_sub(__prof_start);
+                vm.opcode_profile[#prof_idx].0 += 1;
+                vm.opcode_profile[#prof_idx].1 += __prof_elapsed;
+            }
+            __prof_ret
         }
     }
 }
@@ -872,7 +883,17 @@ fn gen_opcode_helpers(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
         }
     });
 
+    let opcode_name_strs = codes.iter().map(|code| code.name.clone());
+
     quote! {
+        /// The number of distinct opcodes — i.e. the size of the dispatch table
+        /// and of the VM's per-opcode profiling buffer.
+        pub const NUM_OPCODES: usize = #dsp_size;
+
+        /// Opcode names indexed by discriminant. Used by the profiling report.
+        #[cfg(feature = "vm-profile")]
+        pub static OPCODE_NAMES: [&str; #dsp_size] = [ #(#opcode_name_strs),* ];
+
         impl OpCode {
             pub fn to_binary(&self, binary: &mut Vec<u64>, jumps_to_fix: &mut Vec<(usize, isize)>) {
                 match self {

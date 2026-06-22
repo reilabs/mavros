@@ -14,7 +14,7 @@ use crate::{
         Field,
         analysis::{
             instrumenter::{FunctionSignature, SpecializationSummary, Summary, ValueSignature},
-            symbolic_executor::{self, SymbolicExecutor},
+            symbolic_executor::{self, AssertionFailure, SymbolicExecutor},
             types::TypeInfo,
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
@@ -22,8 +22,8 @@ use crate::{
             BlockId, FunctionId, ValueId,
             hlssa::{
                 BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness, HLFunction,
-                HLSSA, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, RefCountOp,
-                SequenceTargetType, Type, TypeExpr,
+                HLSSA, LocatedOpCode, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix,
+                RefCountOp, SequenceTargetType, Type, TypeExpr,
                 builder::{HLEmitter, HLFunctionBuilder},
             },
         },
@@ -96,9 +96,11 @@ impl HLEmitter for SpecializationState<'_> {
         self.ssa.fresh_value()
     }
 
-    fn emit(&mut self, op: OpCode) {
+    fn emit(&mut self, instruction: impl Into<LocatedOpCode>) {
         let entry = self.body.get_entry_id();
-        self.body.get_block_mut(entry).push_instruction(op);
+        self.body
+            .get_block_mut(entry)
+            .push_located_instruction(instruction.into());
     }
 
     fn emit_constant(&mut self, value: Constant) -> ValueId {
@@ -298,17 +300,20 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         }
     }
 
-    fn assert_bool(&self, ctx: &mut SpecializationState) {
+    fn assert_bool(&self, ctx: &mut SpecializationState) -> Result<(), AssertionFailure> {
         let v_const = ctx.const_vals.get(&self.0);
         match v_const {
             Some(ConstVal::U(_, val)) => {
-                assert!(*val != 0, "assert failed: value is zero");
+                if *val == 0 {
+                    return Err(AssertionFailure::new("assert failed: value is zero"));
+                }
             }
             None => {
                 HLEmitter::assert_bool(ctx, self.0);
             }
             _ => panic!("Not yet implemented {:?}", v_const),
         }
+        Ok(())
     }
 
     fn assert_cmp(
@@ -317,13 +322,17 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         b: &Self,
         _lhs_type: &Type,
         ctx: &mut SpecializationState,
-    ) {
+    ) -> Result<(), AssertionFailure> {
         let l_const = ctx.const_vals.get(&a.0);
         let r_const = ctx.const_vals.get(&b.0);
         match kind {
             CmpKind::Eq => match (l_const, r_const) {
                 (Some(ConstVal::U(_, l_val)), Some(ConstVal::U(_, r_val))) => {
-                    assert_eq!(l_val, r_val);
+                    if l_val != r_val {
+                        return Err(AssertionFailure::new(format!(
+                            "assert_cmp eq failed: {l_val} != {r_val}"
+                        )));
+                    }
                 }
                 (None, _) | (_, None) => {
                     HLEmitter::assert_cmp(ctx, kind, a.0, b.0);
@@ -334,17 +343,30 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                 HLEmitter::assert_cmp(ctx, kind, a.0, b.0);
             }
         }
+        Ok(())
     }
 
-    fn assert_r1c(a: &Self, b: &Self, c: &Self, ctx: &mut SpecializationState) {
+    fn assert_r1c(
+        a: &Self,
+        b: &Self,
+        c: &Self,
+        ctx: &mut SpecializationState,
+    ) -> Result<(), AssertionFailure> {
         match r1c_consts(ctx, a, b, c) {
-            Some((a, b, c)) => assert_eq!(a * b, c),
+            Some((a, b, c)) => {
+                if a * b != c {
+                    return Err(AssertionFailure::new(format!(
+                        "assert_r1c failed: {a:?} * {b:?} != {c:?}"
+                    )));
+                }
+            }
             None => ctx.emit(OpCode::AssertR1C {
                 a: a.0,
                 b: b.0,
                 c: c.0,
             }),
         }
+        Ok(())
     }
 
     fn array_get(&self, index: &Self, _out_type: &Type, ctx: &mut SpecializationState) -> Self {
@@ -509,11 +531,23 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         }
     }
 
-    fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut SpecializationState) {
+    fn constrain(
+        a: &Self,
+        b: &Self,
+        c: &Self,
+        ctx: &mut SpecializationState,
+    ) -> Result<(), AssertionFailure> {
         match r1c_consts(ctx, a, b, c) {
-            Some((a, b, c)) => assert_eq!(a * b, c),
+            Some((a, b, c)) => {
+                if a * b != c {
+                    return Err(AssertionFailure::new(format!(
+                        "constrain failed: {a:?} * {b:?} != {c:?}"
+                    )));
+                }
+            }
             None => HLEmitter::constrain(ctx, a.0, b.0, c.0),
         }
+        Ok(())
     }
 
     fn to_bits(
@@ -620,8 +654,8 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         Self(val)
     }
 
-    fn alloc(elem_type: &Type, ctx: &mut SpecializationState) -> Self {
-        let val = ctx.alloc(elem_type.clone());
+    fn alloc(value: &Self, ctx: &mut SpecializationState) -> Self {
+        let val = ctx.alloc(value.0);
         Self(val)
     }
 
@@ -694,8 +728,13 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         HLEmitter::mem_op(ctx, self.0, kind);
     }
 
-    fn rangecheck(&self, max_bits: usize, ctx: &mut SpecializationState) {
+    fn rangecheck(
+        &self,
+        max_bits: usize,
+        ctx: &mut SpecializationState,
+    ) -> Result<(), AssertionFailure> {
         HLEmitter::rangecheck(ctx, self.0, max_bits);
+        Ok(())
     }
 
     fn spread(&self, bits: u8, ctx: &mut SpecializationState) -> Self {
@@ -1023,13 +1062,27 @@ impl Specializer {
                 const_vals,
             };
 
-            SymbolicExecutor::new().run(
+            // Specialization is speculative: this candidate may sit behind a branch that never
+            // executes at runtime. A statically-violated assertion encountered while folding
+            // these constant arguments therefore does NOT mean the whole program fails — it
+            // only means this particular specialization is invalid. Abort the candidate (it is
+            // cleaned up by the end-of-pass `retain_functions`) and leave the unspecialized
+            // function in place; if the assertion is genuinely unreachable-free, R1CS
+            // generation will rediscover and report it.
+            if let Err(failure) = SymbolicExecutor::new().run(
                 &*ssa,
                 type_info,
                 signature.get_fun_id(),
                 call_params,
                 &mut state,
-            );
+            ) {
+                info!(
+                    message = %"Aborting specialization: assertion is statically violated for these arguments",
+                    specialization = %name,
+                    failure = %failure
+                );
+                return;
+            }
 
             state.body
         };

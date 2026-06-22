@@ -21,6 +21,35 @@ use crate::{
     },
 };
 
+/// A program-level failure discovered during symbolic execution.
+///
+/// When the executor evaluates an assertion (`assert`, `assert_cmp`, `assert_r1c`, a
+/// `constrain`, or a `rangecheck`) whose operands are all compile-time constants and the
+/// condition does not hold, the program can never execute. This is NOT a compiler bug
+/// (ICE): it means the input program is statically unsatisfiable and should be rejected.
+/// Backends surface this to their caller as an `Err` instead of panicking, so the caller
+/// can report "this program will never execute" rather than crashing the compiler.
+#[derive(Debug, Clone)]
+pub struct AssertionFailure {
+    pub message: String,
+}
+
+impl AssertionFailure {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for AssertionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "static assertion failure: {}", self.message)
+    }
+}
+
+impl std::error::Error for AssertionFailure {}
+
 pub trait Value<Context>
 where
     Self: Sized + Clone,
@@ -35,15 +64,21 @@ where
         out_type: &Type,
         ctx: &mut Context,
     ) -> Self;
-    fn assert_bool(&self, ctx: &mut Context);
-    fn assert_cmp(kind: CmpKind, a: &Self, b: &Self, lhs_type: &Type, ctx: &mut Context);
-    fn assert_r1c(a: &Self, b: &Self, c: &Self, ctx: &mut Context);
+    fn assert_bool(&self, ctx: &mut Context) -> Result<(), AssertionFailure>;
+    fn assert_cmp(
+        kind: CmpKind,
+        a: &Self,
+        b: &Self,
+        lhs_type: &Type,
+        ctx: &mut Context,
+    ) -> Result<(), AssertionFailure>;
+    fn assert_r1c(a: &Self, b: &Self, c: &Self, ctx: &mut Context) -> Result<(), AssertionFailure>;
     fn array_get(&self, index: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn array_set(&self, index: &Self, value: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn sext(&self, from: usize, to: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn bit_range(&self, offset: usize, width: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn cast(&self, cast_target: &CastTarget, out_type: &Type, ctx: &mut Context) -> Self;
-    fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut Context);
+    fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut Context) -> Result<(), AssertionFailure>;
     fn to_bits(
         &self,
         endianness: Endianness,
@@ -71,7 +106,7 @@ where
         seq_type: SequenceTargetType,
         elem_type: &Type,
     ) -> Self;
-    fn alloc(elem_type: &Type, ctx: &mut Context) -> Self;
+    fn alloc(value: &Self, ctx: &mut Context) -> Self;
     fn ptr_write(&self, val: &Self, ctx: &mut Context);
     fn ptr_read(&self, out_type: &Type, ctx: &mut Context) -> Self;
     fn expect_constant_bool(&self, ctx: &mut Context) -> bool;
@@ -79,7 +114,7 @@ where
     fn write_witness(&self, tp: Option<&Type>, ctx: &mut Context) -> Self;
     fn fresh_witness(result_type: &Type, ctx: &mut Context) -> Self;
     fn mem_op(&self, kind: RefCountOp, ctx: &mut Context);
-    fn rangecheck(&self, max_bits: usize, ctx: &mut Context);
+    fn rangecheck(&self, max_bits: usize, ctx: &mut Context) -> Result<(), AssertionFailure>;
     fn spread(&self, bits: u8, ctx: &mut Context) -> Self;
     fn unspread(&self, bits: u8, ctx: &mut Context) -> (Self, Self);
 }
@@ -150,7 +185,8 @@ impl SymbolicExecutor {
         entry_point: FunctionId,
         params: Vec<V>,
         context: &mut Ctx,
-    ) where
+    ) -> Result<(), AssertionFailure>
+    where
         V: Value<Ctx>,
         Ctx: Context<V>,
     {
@@ -170,7 +206,8 @@ impl SymbolicExecutor {
             &mut globals,
             &consts,
             context,
-        );
+        )?;
+        Ok(())
     }
 
     #[instrument(skip_all, name="SymbolicExecutor::run_fn", level = Level::TRACE, fields(function = %ssa.get_function(fn_id).get_name()))]
@@ -183,7 +220,7 @@ impl SymbolicExecutor {
         globals: &mut Vec<Option<V>>,
         consts: &HashMap<ValueId, V>,
         ctx: &mut Ctx,
-    ) -> Vec<V>
+    ) -> Result<Vec<V>, AssertionFailure>
     where
         V: Value<Ctx>,
         Ctx: Context<V>,
@@ -203,7 +240,7 @@ impl SymbolicExecutor {
         );
 
         if let Some(call_result) = call_result {
-            return call_result;
+            return Ok(call_result);
         }
 
         for (pval, ppos) in inputs.iter_mut().zip(entry.get_parameter_values()) {
@@ -328,11 +365,9 @@ impl SymbolicExecutor {
                         let a = vec![elem; *count];
                         scope.insert(*r, V::mk_array(a, ctx, *seq_type, elem_type));
                     }
-                    OpCode::Alloc {
-                        result: r,
-                        elem_type,
-                    } => {
-                        scope.insert(*r, V::alloc(elem_type, ctx));
+                    OpCode::Alloc { result: r, value } => {
+                        let v = scope[value].clone();
+                        scope.insert(*r, V::alloc(&v, ctx));
                     }
                     OpCode::Store { ptr, value: val } => {
                         let ptr = &scope[ptr];
@@ -347,7 +382,7 @@ impl SymbolicExecutor {
                         let a = &scope[a];
                         let b = &scope[b];
                         let c = &scope[c];
-                        V::assert_r1c(a, b, c, ctx);
+                        V::assert_r1c(a, b, c, ctx)?;
                     }
                     OpCode::Call {
                         results: returns,
@@ -375,7 +410,7 @@ impl SymbolicExecutor {
                             .expect("ICE: on_call must return Some for unconstrained calls")
                         } else {
                             // For constrained calls, run_fn handles on_call internally
-                            self.run_fn(ssa, type_info, *function_id, params, globals, consts, ctx)
+                            self.run_fn(ssa, type_info, *function_id, params, globals, consts, ctx)?
                         };
                         for (i, val) in returns.iter().enumerate() {
                             scope.insert(*val, outputs[i].clone());
@@ -498,11 +533,11 @@ impl SymbolicExecutor {
                         let a = &scope[a];
                         let b = &scope[b];
                         let c = &scope[c];
-                        V::constrain(a, b, c, ctx);
+                        V::constrain(a, b, c, ctx)?;
                     }
                     OpCode::Assert { value } => {
                         let v = &scope[value];
-                        V::assert_bool(v, ctx);
+                        V::assert_bool(v, ctx)?;
                     }
                     OpCode::AssertCmp {
                         kind,
@@ -512,7 +547,7 @@ impl SymbolicExecutor {
                         let lhs_type = fn_type_info.get_value_type(*a);
                         let a = &scope[a];
                         let b = &scope[b];
-                        V::assert_cmp(*kind, a, b, lhs_type, ctx);
+                        V::assert_cmp(*kind, a, b, lhs_type, ctx)?;
                     }
                     OpCode::MemOp { kind, value } => {
                         let value = &scope[value];
@@ -537,7 +572,7 @@ impl SymbolicExecutor {
                     }
                     OpCode::Rangecheck { value: v, max_bits } => {
                         let v = &scope[v];
-                        v.rangecheck(*max_bits, ctx);
+                        v.rangecheck(*max_bits, ctx)?;
                     }
                     OpCode::ReadGlobal {
                         result,
@@ -645,7 +680,7 @@ impl SymbolicExecutor {
                         .map(|id| scope[id].clone())
                         .collect::<Vec<_>>();
                     ctx.on_return(&mut outputs, &fn_body.get_returns());
-                    return outputs;
+                    return Ok(outputs);
                 }
                 Terminator::Jmp(target, params) => {
                     let mut params = params

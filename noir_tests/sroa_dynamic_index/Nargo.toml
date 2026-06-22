@@ -1,0 +1,6 @@
+[package]
+name = "sroa_dynamic_index"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -8,7 +8,11 @@ edition.workspace = true
 # tail-call-recursive dispatch. This makes debug builds (where the tail-call
 # optimizer is not reliably applied) work without overflowing the stack.
 branching-interpreter = []
-
+# When enabled, every opcode handler records an invocation count and an
+# accumulated cycle total (read from the architectural cycle counter). The
+# interpreter prints a sorted per-opcode report after each VM dispatch run.
+# Purely for profiling; adds two timer reads + two atomic adds per opcode.
+vm-profile = []
 [dependencies]
 # Dependencies within the Mavros project
 mavros-artifacts.workspace = true

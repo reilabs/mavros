@@ -1,0 +1,6 @@
+[package]
+name = "argpromo_array_deferred"
+type = "bin"
+authors = [""]
+
+[dependencies]

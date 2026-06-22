@@ -22,6 +22,7 @@ use std::{
 
 use crate::collections::HashMap;
 
+pub use super::located::{Located, Location, SourceLocation, SourcePosition};
 pub use id::{BlockId, FunctionId, ValueId};
 pub use traits::{Instruction, SSAAnotator, SSAType};
 
@@ -78,12 +79,9 @@ pub struct SSA<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> {
     /// The function used to de-initialize/drop the global values.
     globals_deinit_fn: Option<FunctionId>,
 
-    /// The identifier of the main function.
-    ///
-    /// This may be the true program main as provided by Noir, or the identifier of the synthetic
-    /// main created during the compilation process. While the exact details depend on the stage of
-    /// the pipeline, this will always point to the entry point.
-    main_id: FunctionId,
+    /// The identifiers of the program's entry points. Each one serves as a reachability root and
+    /// is emitted as a separately callable entry in the generated artifacts.
+    entry_points: Vec<FunctionId>,
 
     /// A monotonic counter for function identifiers, used to ensure uniqueness.
     next_function_id: u64,
@@ -108,7 +106,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Clone for SSA<O
             global_types: self.global_types.clone(),
             globals_init_fn: self.globals_init_fn,
             globals_deinit_fn: self.globals_deinit_fn,
-            main_id: self.main_id,
+            entry_points: self.entry_points.clone(),
             next_function_id: self.next_function_id,
             next_value_id: AtomicU64::new(self.next_value_id.load(Ordering::Relaxed)),
             constants: RwLock::new(self.constants.read().unwrap().clone()),
@@ -117,21 +115,27 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Clone for SSA<O
 }
 
 impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> {
-    pub fn with_main(name: String) -> Self {
-        let main_function = Function::<Op, Ty>::empty(name);
-        let main_id = FunctionId(0);
-        let mut functions = HashMap::default();
-        functions.insert(main_id, main_function);
+    /// Constructs an empty SSA: no functions and no entry points. Functions are added with
+    /// [`Self::add_function`] / [`Self::insert_function`] and registered as entry points with
+    /// [`Self::add_entry_point`].
+    pub fn empty() -> Self {
         SSA {
-            functions,
+            functions: HashMap::default(),
             global_types: Vec::new(),
             globals_init_fn: None,
             globals_deinit_fn: None,
-            main_id,
-            next_function_id: 1,
+            entry_points: Vec::new(),
+            next_function_id: 0,
             next_value_id: AtomicU64::new(0),
             constants: RwLock::new(BiHashMap::default()),
         }
+    }
+
+    pub fn with_main(name: String) -> Self {
+        let mut ssa = Self::empty();
+        let main_id = ssa.add_function(name);
+        ssa.add_entry_point(main_id);
+        ssa
     }
 }
 
@@ -149,7 +153,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
                 global_types: Vec::new(),
                 globals_init_fn: self.globals_init_fn,
                 globals_deinit_fn: self.globals_deinit_fn,
-                main_id: self.main_id,
+                entry_points: self.entry_points.clone(),
                 next_function_id: self.next_function_id,
                 next_value_id: self.next_value_id,
                 constants: self.constants,
@@ -177,26 +181,63 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
         self.functions.retain(|id, fun| f(*id, fun));
     }
 
-    pub fn set_entry_point(&mut self, id: FunctionId) {
-        self.main_id = id;
+    /// Replaces the program's sole entry point. Panics unless there is exactly one entry point —
+    /// callers that work with a multi-entry program must go through [`Self::get_entry_points`].
+    pub fn set_unique_entrypoint(&mut self, id: FunctionId) {
+        assert_eq!(
+            self.entry_points.len(),
+            1,
+            "set_unique_entrypoint called on an SSA with {} entry points",
+            self.entry_points.len()
+        );
+        self.entry_points[0] = id;
     }
 
-    pub fn get_main_id(&self) -> FunctionId {
-        self.main_id
+    /// Registers an additional entry point for the program.
+    pub fn add_entry_point(&mut self, id: FunctionId) {
+        assert!(
+            !self.entry_points.contains(&id),
+            "Function {id:?} is already an entry point"
+        );
+        self.entry_points.push(id);
     }
 
-    /// Gets a mutable reference to the main function or panics if no main function exists.
-    pub fn get_main_mut(&mut self) -> &mut Function<Op, Ty> {
+    /// All entry points of the program.
+    pub fn get_entry_points(&self) -> &[FunctionId] {
+        &self.entry_points
+    }
+
+    /// Whether `id` names one of the program's entry points.
+    pub fn is_entry_point(&self, id: FunctionId) -> bool {
+        self.entry_points.contains(&id)
+    }
+
+    /// The program's sole entry point. Panics unless there is exactly one entry point — callers
+    /// that work with a multi-entry program must go through [`Self::get_entry_points`].
+    pub fn get_unique_entrypoint_id(&self) -> FunctionId {
+        assert_eq!(
+            self.entry_points.len(),
+            1,
+            "get_unique_entrypoint_id called on an SSA with {} entry points",
+            self.entry_points.len()
+        );
+        self.entry_points[0]
+    }
+
+    /// Gets a mutable reference to the program's sole entry point function. Panics unless there is
+    /// exactly one entry point.
+    pub fn get_unique_entrypoint_mut(&mut self) -> &mut Function<Op, Ty> {
         self.functions
-            .get_mut(&self.main_id)
-            .expect("Main function should exist")
+            .get_mut(&self.get_unique_entrypoint_id())
+            .expect("Entry point function should exist")
     }
 
-    /// Gets a reference to the main function or panics if no main function exists.
-    pub fn get_main(&self) -> &Function<Op, Ty> {
+    /// Gets a reference to the program's sole entry point function. Panics unless there is exactly
+    /// one entry point.
+    pub fn get_unique_entrypoint(&self) -> &Function<Op, Ty> {
         self.functions
-            .get(&self.main_id)
-            .expect("Main function should exist")
+            .get(&self.get_unique_entrypoint_id())
+            .expect("Entry point function should exist")
     }
 
     pub fn get_function(&self, id: FunctionId) -> &Function<Op, Ty> {
@@ -318,12 +359,133 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
         (self.insert_function(cloned), remap)
     }
 
+    /// Merges another SSA into this one, returning the `other FunctionId -> new FunctionId`
+    /// remap.
+    ///
+    /// Every function of `other` is inserted under a fresh `FunctionId`, with all of its
+    /// non-constant `ValueId`s freshened (the two SSAs may descend from a common ancestor, so
+    /// their value identifiers can collide) and its constants re-interned by value into this
+    /// SSA's constants table. Static call targets are rewritten to the remapped identifiers.
+    ///
+    /// Both SSAs must agree on the global value layout: globals are shared state addressed by
+    /// offset, so diverging global types would silently corrupt the global frame.
+    ///
+    /// `other`'s entry points and globals init/deinit functions are NOT transferred; the caller
+    /// decides which of the merged functions (if any) become entry points via
+    /// [`SSA::add_entry_point`].
+    pub fn merge(&mut self, other: Self) -> HashMap<FunctionId, FunctionId> {
+        assert_eq!(
+            self.global_types, other.global_types,
+            "Cannot merge SSAs with diverging global types"
+        );
+
+        let mut other_fn_ids: Vec<FunctionId> = other.functions.keys().copied().collect();
+        other_fn_ids.sort_by_key(|id| id.0);
+
+        let mut fn_remap: HashMap<FunctionId, FunctionId> = HashMap::default();
+        for old_id in &other_fn_ids {
+            let new_id = FunctionId(self.next_function_id);
+            self.next_function_id += 1;
+            fn_remap.insert(*old_id, new_id);
+        }
+
+        // Re-intern all of `other`'s constants by value; identical values collapse onto this
+        // SSA's existing ids. Sorted for deterministic fresh-id allocation.
+        let mut value_remap: HashMap<ValueId, ValueId> = HashMap::default();
+        let other_constants = other.const_snapshot();
+        let mut const_ids: Vec<ValueId> = other_constants.keys().copied().collect();
+        const_ids.sort_by_key(|v| v.0);
+        for vid in const_ids {
+            let new_id = self.add_const(other_constants[&vid].as_ref().clone());
+            value_remap.insert(vid, new_id);
+        }
+
+        let mut other = other;
+        for old_id in other_fn_ids {
+            let mut function = other.take_function(old_id);
+
+            // Freshen every non-constant ValueId. Walk blocks sorted by id so fresh-id
+            // allocation (and thus the emitted program) is deterministic.
+            let mut block_ids: Vec<BlockId> = function.blocks.keys().copied().collect();
+            block_ids.sort_by_key(|b| b.0);
+            for block_id in &block_ids {
+                let block = function.get_block(*block_id);
+                let mut ids: Vec<ValueId> = Vec::new();
+                for (v, _) in block.get_parameters() {
+                    ids.push(*v);
+                }
+                for instr in block.get_instructions() {
+                    ids.extend(instr.get_inputs().copied());
+                    ids.extend(instr.get_results().copied());
+                }
+                if let Some(term) = block.get_terminator() {
+                    match term {
+                        Terminator::Jmp(_, args) | Terminator::Return(args) => {
+                            ids.extend(args.iter().copied())
+                        }
+                        Terminator::JmpIf(cond, _, _) => ids.push(*cond),
+                    }
+                }
+                for v in ids {
+                    if !value_remap.contains_key(&v) {
+                        value_remap.insert(v, self.fresh_value());
+                    }
+                }
+            }
+
+            // Apply the value remap and rewrite call targets to the new function ids.
+            for (_, block) in function.get_blocks_mut() {
+                for (v, _) in block.get_parameters_mut() {
+                    *v = value_remap[v];
+                }
+                for instr in block.get_instructions_mut() {
+                    for op in instr.get_operands_mut() {
+                        *op = value_remap[op];
+                    }
+                    instr.map_call_targets(&mut |callee| {
+                        *fn_remap
+                            .get(&callee)
+                            .expect("Merged function calls a function missing from the merged SSA")
+                    });
+                }
+                if block.get_terminator().is_some() {
+                    match block.get_terminator_mut() {
+                        Terminator::Jmp(_, args) | Terminator::Return(args) => {
+                            for v in args.iter_mut() {
+                                *v = value_remap[v];
+                            }
+                        }
+                        Terminator::JmpIf(cond, _, _) => {
+                            *cond = value_remap[cond];
+                        }
+                    }
+                }
+            }
+
+            self.functions.insert(fn_remap[&old_id], function);
+        }
+
+        fn_remap
+    }
+
     /// Allocate a fresh `ValueId` from the SSA-wide counter.
     ///
     /// Takes `&self` so passes that hold a shared `&HLSSA` (e.g. the specializer, while the
     /// symbolic executor borrows the SSA) can still mint ids. The counter is atomic.
+    ///
+    /// For minting a known number of values, see [`Self::fresh_values`].
     pub fn fresh_value(&self) -> ValueId {
         ValueId(self.next_value_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Allocate `n` fresh `ValueId`s from the SSA-wide counter.
+    ///
+    /// Takes `&self` so passes that hold a shared `&HLSSA` (e.g. the specializer, while the
+    /// symbolic executor borrows the SSA) can still mint ids. The counter is atomic.
+    ///
+    /// For minting single values, see [`Self::fresh_value`].
+    pub fn fresh_values(&self, n: usize) -> Vec<ValueId> {
+        (0..n).map(|_| self.fresh_value()).collect()
     }
 
     /// Upper bound on `ValueId`s issued so far. Useful for sizing dense per-value tables.
@@ -710,7 +872,7 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
 #[derive(Clone)]
 pub struct Block<Op: Instruction, Ty: SSAType> {
     parameters: Vec<(ValueId, Ty)>,
-    instructions: Vec<Op>,
+    instructions: Vec<Located<Op>>,
     terminator: Option<Terminator>,
 }
 
@@ -746,7 +908,13 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
         let instructions = self
             .instructions
             .iter()
-            .map(|i| format!("    {}", i.display_instruction(func_name, &annotate_value)))
+            .map(|i| {
+                let instruction = i.display_instruction(func_name, &annotate_value);
+                match i.get_location() {
+                    Some(source_location) => format!("    {} @ {}", instruction, source_location),
+                    None => format!("    {}", instruction),
+                }
+            })
             .join("\n");
         let terminator = match &self.terminator {
             Some(t) => format!("    {}", t.to_string()),
@@ -774,15 +942,41 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
         }
     }
 
+    // TODO: Once locations become non-optional, make the plain instruction APIs traffic in
+    // Located<Op> and remove the separate located instruction variants below.
     pub fn take_instructions(&mut self) -> Vec<Op> {
         std::mem::take(&mut self.instructions)
+            .into_iter()
+            .map(|instruction| instruction.payload())
+            .collect()
     }
 
     pub fn put_instructions(&mut self, instructions: Vec<Op>) {
+        self.instructions = instructions.into_iter().map(Located::without).collect();
+    }
+
+    pub fn take_located_instructions(&mut self) -> Vec<Located<Op>> {
+        std::mem::take(&mut self.instructions)
+    }
+
+    pub fn put_located_instructions(&mut self, instructions: Vec<Located<Op>>) {
         self.instructions = instructions;
     }
 
     pub fn push_instruction(&mut self, instruction: Op) {
+        self.instructions.push(Located::without(instruction));
+    }
+
+    pub fn push_instruction_with_source_location(
+        &mut self,
+        instruction: Op,
+        source_location: SourceLocation,
+    ) {
+        self.instructions
+            .push(Located::with(instruction, source_location));
+    }
+
+    pub fn push_located_instruction(&mut self, instruction: Located<Op>) {
         self.instructions.push(instruction);
     }
 
@@ -814,16 +1008,46 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
         self.parameters.iter().map(|(id, _)| id)
     }
 
-    pub fn get_instruction(&self, i: usize) -> &Op {
+    pub fn get_instruction(&self, i: usize) -> &Located<Op> {
         &self.instructions[i]
     }
 
+    pub fn get_instruction_source_location(&self, i: usize) -> Option<&SourceLocation> {
+        self.instructions[i].get_location()
+    }
+
+    pub fn set_instruction_source_location(
+        &mut self,
+        i: usize,
+        source_location: Option<SourceLocation>,
+    ) {
+        *self.instructions[i].location_mut() = source_location;
+    }
+
     pub fn get_instructions(&self) -> impl DoubleEndedIterator<Item = &Op> {
-        self.instructions.iter()
+        self.instructions.iter().map(|instruction| &**instruction)
+    }
+
+    pub fn get_instructions_with_source_locations(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = (&Op, Option<&SourceLocation>)> {
+        self.instructions
+            .iter()
+            .map(|instruction| (&**instruction, instruction.get_location()))
     }
 
     pub fn get_instructions_mut(&mut self) -> impl Iterator<Item = &mut Op> {
-        self.instructions.iter_mut()
+        self.instructions
+            .iter_mut()
+            .map(|instruction| &mut **instruction)
+    }
+
+    pub fn get_instruction_source_locations_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &mut Option<SourceLocation>> {
+        self.instructions
+            .iter_mut()
+            .map(|instruction| instruction.location_mut())
     }
 
     pub fn get_terminator(&self) -> Option<&Terminator> {
@@ -887,7 +1111,18 @@ impl SSAAnotator for DefaultSSAAnnotator {}
 mod tests {
     use crate::collections::HashMap;
 
-    use crate::compiler::ssa::hlssa::{Constant, HLSSA};
+    use crate::compiler::ssa::{
+        DefaultSSAAnnotator, Located, SourceLocation, SourcePosition, ValueId,
+        hlssa::{Constant, HLSSA, OpCode},
+    };
+
+    fn test_location() -> SourceLocation {
+        SourceLocation::new(
+            "src/main.nr".to_string(),
+            SourcePosition::new(3, 5),
+            SourcePosition::new(3, 10),
+        )
+    }
 
     /// `for_each_const` visits every interned constant exactly once, in place.
     #[test]
@@ -904,5 +1139,102 @@ mod tests {
         assert_eq!(seen.len(), 2);
         assert_eq!(seen.get(&a), Some(&Constant::U(8, 1)));
         assert_eq!(seen.get(&b), Some(&Constant::U(8, 2)));
+    }
+
+    #[test]
+    fn block_instructions_default_to_no_source_location() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+
+        entry.push_instruction(OpCode::Not {
+            result: ValueId(0),
+            value: ValueId(1),
+        });
+
+        assert_eq!(entry.get_instruction_source_location(0), None);
+        assert_eq!(
+            entry
+                .get_instructions_with_source_locations()
+                .map(|(_, location)| location)
+                .collect::<Vec<_>>(),
+            vec![None]
+        );
+    }
+
+    #[test]
+    fn located_exposes_location_ref_and_take() {
+        let location = test_location();
+        let mut located = Located::with(ValueId(1), location.clone());
+
+        assert_eq!(located.location(), &Some(location.clone()));
+        assert_eq!(located.get_location(), Some(&location));
+        *located.location_mut() = Some(location.clone());
+        assert_eq!(AsRef::<ValueId>::as_ref(&located), &ValueId(1));
+
+        let located_ref = located.to_ref();
+        assert_eq!(*located_ref, &ValueId(1));
+        assert_eq!(located_ref.get_location(), Some(&location));
+
+        assert_eq!(located.take(), (ValueId(1), Some(location)));
+    }
+
+    #[test]
+    fn block_can_store_source_location_for_instruction() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let location = test_location();
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+
+        entry.push_instruction_with_source_location(
+            OpCode::Not {
+                result: ValueId(0),
+                value: ValueId(1),
+            },
+            location.clone(),
+        );
+
+        assert_eq!(entry.get_instruction_source_location(0), Some(&location));
+        assert!(
+            ssa.to_string(&DefaultSSAAnnotator)
+                .contains("@ src/main.nr:3:5")
+        );
+    }
+
+    #[test]
+    fn plain_instruction_replacement_clears_source_locations() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+
+        entry.push_instruction_with_source_location(
+            OpCode::Not {
+                result: ValueId(0),
+                value: ValueId(1),
+            },
+            test_location(),
+        );
+
+        let instructions = entry.take_instructions();
+        entry.put_instructions(instructions);
+
+        assert_eq!(entry.get_instruction_source_location(0), None);
+    }
+
+    #[test]
+    fn located_instruction_replacement_preserves_source_locations() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let location = test_location();
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+
+        entry.push_located_instruction(Located::with(
+            OpCode::Not {
+                result: ValueId(0),
+                value: ValueId(1),
+            },
+            location.clone(),
+        ));
+
+        let located = entry.take_located_instructions();
+        entry.put_located_instructions(located);
+
+        assert_eq!(entry.get_instruction_source_location(0), Some(&location));
     }
 }
