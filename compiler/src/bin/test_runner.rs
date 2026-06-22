@@ -1995,7 +1995,10 @@ fn print_change_table(summary: &str, rows: &[String]) {
         return;
     }
     println!("<details>");
-    println!("<summary><b>{summary} ({} test(s))</b></summary>\n", rows.len());
+    println!(
+        "<summary><b>{summary} ({} test(s))</b></summary>\n",
+        rows.len()
+    );
     println!("| Test | Before | After | Change |");
     println!("|------|--------|-------|--------|");
     for row in rows {
