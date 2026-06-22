@@ -192,17 +192,35 @@ impl<Kind> TypeFnEntry<Kind> {
 type DropFnEntry = TypeFnEntry<DropFn>;
 type ArrayLookupFnEntry<Kind> = TypeFnEntry<Kind>;
 
-/// Canonicalize a type for drop-function keying.
+/// Canonicalize a type for drop-function keying, collapsing array lengths where
+/// it is free to do so.
 ///
-/// A drop function depends only on the *kind* of each level (sequence vs ref)
-/// and the element/inner type, never on a static array length: the length lives
-/// in the RC header and the drop loop reads it dynamically. So `Array<T, N>` for
-/// every `N` — and `Slice<T>` — collapse to a single canonical `Slice<T>` key,
-/// recursing through nested sequences and refs. This lets one drop helper be
-/// shared across all lengths instead of emitting a near-identical copy per size.
+/// An array whose elements need no drop emits no loop: its drop body is just
+/// `rc-- ; if dead { free }`, independent of the length. So every length — and
+/// `Slice<T>` — collapses to a single `Slice<T>` key, sharing one helper instead
+/// of an identical copy per size (and per array-vs-slice).
+///
+/// An array whose elements *do* need dropping emits a counted loop. There we
+/// keep the static length in the key so the loop bound stays a compile-time
+/// constant that LLVM can unroll. Sharing across lengths would force the loop to
+/// read the length from the RC header at runtime, defeating unrolling and
+/// growing the emitted WASM — the dedup rarely recoups it, since programs use
+/// few distinct sizes per RC'd element type.
+///
+/// Recurses through nested sequences and refs; normalizing the inner type is
+/// always sound (it never changes a level's struct layout or whether it needs a
+/// drop) and lets scalar-element arrays nested inside larger types dedup too.
 fn drop_fn_key(ty: &HLType) -> HLType {
     match &ty.expr {
-        HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice(inner) => drop_fn_key(inner).slice_of(),
+        HLTypeExpr::Array(inner, n) => {
+            let inner_key = drop_fn_key(inner);
+            if needs_drop(&inner.expr) {
+                inner_key.array_of(*n)
+            } else {
+                inner_key.slice_of()
+            }
+        }
+        HLTypeExpr::Slice(inner) => drop_fn_key(inner).slice_of(),
         HLTypeExpr::Ref(inner) => drop_fn_key(inner).ref_of(),
         _ => ty.clone(),
     }
@@ -211,8 +229,9 @@ fn drop_fn_key(ty: &HLType) -> HLType {
 /// Get or create a drop function for a type that needs dropping (currently Array or WitnessOf).
 /// For arrays, recursively creates drop functions for inner elements that need dropping.
 ///
-/// Keyed by [`drop_fn_key`], so all array lengths of the same element type share
-/// one helper; the generated loop iterates over the runtime length.
+/// Keyed by [`drop_fn_key`]: scalar-element arrays of every length share one
+/// (loop-free) helper, while arrays whose elements need dropping stay keyed by
+/// length so their drop loop keeps a static, unrollable bound.
 fn get_or_create_drop_fn(
     ty: &HLType,
     llssa: &mut LLSSA,
