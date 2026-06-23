@@ -1,8 +1,8 @@
 //! Converts monomorphized AST expressions to SSA instructions.
 
+use acvm::AcirField;
 use fm::FileManager;
 use noirc_errors::Location as NoirLocation;
-use acvm::AcirField;
 use noirc_frontend::{
     ast::BinaryOpKind,
     monomorphization::ast::{
@@ -1441,12 +1441,7 @@ impl<'a> ExpressionConverter<'a> {
                 };
                 let mut e = b.block(self.current_block);
                 let start = e.instruction_count();
-                let result = e.to_radix(
-                    input,
-                    Radix::Dyn(radix),
-                    Endianness::Little,
-                    output_size,
-                );
+                let result = e.to_radix(input, Radix::Dyn(radix), Endianness::Little, output_size);
                 self.stamp_new_instructions(&mut e, start, Some(call.location));
                 Some(result)
             }
@@ -1463,12 +1458,7 @@ impl<'a> ExpressionConverter<'a> {
                 };
                 let mut e = b.block(self.current_block);
                 let start = e.instruction_count();
-                let result = e.to_radix(
-                    input,
-                    Radix::Dyn(radix),
-                    Endianness::Big,
-                    output_size,
-                );
+                let result = e.to_radix(input, Radix::Dyn(radix), Endianness::Big, output_size);
                 self.stamp_new_instructions(&mut e, start, Some(call.location));
                 Some(result)
             }

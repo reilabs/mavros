@@ -92,8 +92,8 @@ use crate::{
         ssa::{
             BlockId, FunctionId, Terminator, ValueId,
             hlssa::{
-                CallTarget, Constant, HLFunction, HLSSA, LocatedOpCode, OpCode,
-                SequenceTargetType, Type, TypeExpr,
+                CallTarget, Constant, HLFunction, HLSSA, LocatedOpCode, OpCode, SequenceTargetType,
+                Type, TypeExpr,
             },
         },
     },

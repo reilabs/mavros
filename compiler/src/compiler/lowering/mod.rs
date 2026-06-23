@@ -21,8 +21,8 @@ use crate::{
     },
 };
 
-use fm::FileManager;
 use expression_converter::ExpressionConverter;
+use fm::FileManager;
 use type_converter::TypeConverter;
 
 /// Converts a monomorphized Program to SSA.
