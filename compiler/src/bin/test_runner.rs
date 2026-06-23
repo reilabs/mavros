@@ -1474,6 +1474,7 @@ fn determinism_run(exe: &Path, wasm_runtime_lib: &Path, root: &Path) -> RunFinge
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "txt") {
                 let contents = fs::read(&path).expect("Cannot read dump file");
+                let contents = normalize_determinism_dump(&contents, root);
                 let mut hasher = DefaultHasher::new();
                 contents.hash(&mut hasher);
                 dump_hashes.insert(
@@ -1488,6 +1489,26 @@ fn determinism_run(exe: &Path, wasm_runtime_lib: &Path, root: &Path) -> RunFinge
         dump_hashes,
         output_lines,
     }
+}
+
+/// Normalize run-local paths before hashing debug dumps.
+///
+/// Determinism mode compiles a fresh copy of each test under `*-runN` directories. Source-location
+/// annotations in SSA dumps therefore legitimately contain different absolute roots per run, even
+/// when the compiler output is otherwise identical.
+fn normalize_determinism_dump(contents: &[u8], root: &Path) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(contents) else {
+        return contents.to_vec();
+    };
+
+    let mut normalized = text.to_string();
+    let root = root.to_string_lossy();
+    normalized = normalized.replace(root.as_ref(), "$TEST_ROOT");
+    if let Ok(canonical_root) = fs::canonicalize(root.as_ref()) {
+        let canonical_root = canonical_root.to_string_lossy();
+        normalized = normalized.replace(canonical_root.as_ref(), "$TEST_ROOT");
+    }
+    normalized.into_bytes()
 }
 
 /// Compare `fp` against the reference run and name what diverged, in stage order.
