@@ -343,40 +343,21 @@ impl symbolic_executor::Context<Value> for R1CGen {
             .collect();
         match target {
             hlssa::LookupTarget::Rangecheck(i) => {
-                // TODO this will become table resolution logic eventually
-                assert!(i == 8, "TODO: support other rangecheck sizes");
-                if self.tables.is_empty() {
-                    self.tables.push(Table::Range(i as u64))
-                } else {
-                    match self.tables[0] {
-                        Table::Range(i1) => assert_eq!(i1, i as u64, "unsupported"),
-                        Table::OfElems(_) | Table::Spread(_) => panic!("unsupported"),
-                    }
-                }
+                // Find or create the rangecheck table of this size. The lookup-sizing analysis
+                // may select several distinct sizes, so multiple range tables can coexist.
+                let table_id = self.find_or_create_range_table(i as u64);
                 self.lookups.push(LookupConstraint {
-                    table_id: 0,
+                    table_id,
                     elements: els,
                     flag: flag_lc.clone(),
                 });
             }
-            hlssa::LookupTarget::DynRangecheck(v) => {
-                // TODO this will become table resolution logic eventually
-                let v = v.expect_u32();
-                assert!(v == 256, "TODO: support other rangecheck sizes");
-                let i = 8;
-                if self.tables.is_empty() {
-                    self.tables.push(Table::Range(i as u64))
-                } else {
-                    match self.tables[0] {
-                        Table::Range(i1) => assert_eq!(i1, i as u64, "unsupported"),
-                        Table::OfElems(_) | Table::Spread(_) => panic!("unsupported"),
-                    }
-                }
-                self.lookups.push(LookupConstraint {
-                    table_id: 0,
-                    elements: els,
-                    flag: flag_lc.clone(),
-                });
+            hlssa::LookupTarget::DynRangecheck(_) => {
+                // `to_radix` lowers its (asserted radix-256) digit checks to static 8-bit
+                // rangechecks, so no `DynRangecheck` survives to R1CS generation.
+                unreachable!(
+                    "DynRangecheck is lowered to a static 8-bit rangecheck before R1CS gen"
+                )
             }
             hlssa::LookupTarget::Spread(bits) => {
                 let table_id = {
@@ -889,6 +870,21 @@ impl R1CGen {
             next_witness: 0,
             tables: vec![],
             lookups: vec![],
+        }
+    }
+
+    /// Return the id of the rangecheck table for `bits`-bit values (i.e. `2^bits` rows), creating
+    /// it if absent.
+    fn find_or_create_range_table(&mut self, bits: u64) -> usize {
+        if let Some(idx) = self
+            .tables
+            .iter()
+            .position(|t| matches!(t, Table::Range(b) if *b == bits))
+        {
+            idx
+        } else {
+            self.tables.push(Table::Range(bits));
+            self.tables.len() - 1
         }
     }
 

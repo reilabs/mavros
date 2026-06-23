@@ -39,6 +39,7 @@ use crate::{
             elide_tuples::ElideTuples,
             fix_double_jumps::FixDoubleJumps,
             instruction_lowering::InstructionLowering,
+            lookup_spilling::LookupSpilling,
             lower_guards::LowerGuards,
             lower_map_casts::LowerMapCasts,
             mem2reg::Mem2Reg,
@@ -153,7 +154,7 @@ impl Driver {
         let debug_type_tracker =
             DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
         let mut monomorphizer =
-            Monomorphizer::new(&mut context.def_interner, debug_type_tracker, false);
+            Monomorphizer::new(&mut context.def_interner, debug_type_tracker, None, false);
         monomorphizer.compile_main(main).unwrap();
         monomorphizer.process_queue().unwrap();
         let program = monomorphizer.into_program();
@@ -352,7 +353,7 @@ impl Driver {
                 Box::new(Simplifier::new()),
                 Box::new(CSE::pre_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
-                Box::new(InstructionLowering::lookup_spilling()),
+                Box::new(LookupSpilling::new()),
                 Box::new(InstructionLowering::degree_spilling()),
                 Box::new(Simplifier::new()),
                 Box::new(CSE::pre_r1c()),

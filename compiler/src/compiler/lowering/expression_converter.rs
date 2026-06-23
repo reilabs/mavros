@@ -2,6 +2,7 @@
 
 use fm::FileManager;
 use noirc_errors::Location as NoirLocation;
+use acvm::AcirField;
 use noirc_frontend::{
     ast::BinaryOpKind,
     monomorphization::ast::{
@@ -9,6 +10,7 @@ use noirc_frontend::{
         Index, LValue, Let, LocalId, Type as AstType, While,
     },
 };
+use std::rc::Rc;
 
 use crate::{
     collections::{HashMap, HashSet},
@@ -890,7 +892,7 @@ impl<'a> ExpressionConverter<'a> {
 
     fn reference_pointee_type(typ: &AstType) -> Option<AstType> {
         match typ {
-            AstType::Reference(inner, _) => Some(*inner.clone()),
+            AstType::Reference(inner, _) => Some(inner.as_ref().clone()),
             _ => None,
         }
     }
@@ -908,7 +910,7 @@ impl<'a> ExpressionConverter<'a> {
                 match Self::expression_type(tuple_expr.as_ref())? {
                     AstType::Reference(inner, mutable) => match inner.as_ref() {
                         AstType::Tuple(fields) => {
-                            Some(AstType::Reference(Box::new(fields[*idx].clone()), mutable))
+                            Some(AstType::Reference(Rc::new(fields[*idx].clone()), mutable))
                         }
                         _ => None,
                     },
@@ -1203,9 +1205,8 @@ impl<'a> ExpressionConverter<'a> {
                 let value = if *bv { 1 } else { 0 };
                 Some(Constant::U(1, value))
             }
-            Literal::Integer(signed_field, typ, _location) => match typ {
+            Literal::Integer(field_element, typ, _location) => match typ {
                 AstType::Field => {
-                    let field_element = signed_field.to_field_element();
                     let field_val = field_element.into_repr();
                     Some(Constant::Field(field_val))
                 }
@@ -1217,16 +1218,16 @@ impl<'a> ExpressionConverter<'a> {
                             bits <= MAX_SUPPORTED_SIGNED_BITS,
                             "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
                         );
-                        let signed_val = signed_field.to_i128();
-                        let twos_complement = (signed_val as u128) & ((1u128 << bits) - 1);
+                        let val = field_element.to_i128();
+                        let twos_complement = (val as u128) & ((1u128 << bits) - 1);
                         Some(Constant::I(bits, twos_complement))
                     } else {
-                        let value = signed_field.to_u128();
+                        let value = field_element.to_u128();
                         Some(Constant::U(bits, value))
                     }
                 }
                 AstType::Bool => {
-                    let value = signed_field.to_u128();
+                    let value = field_element.to_u128();
                     Some(Constant::U(1, value))
                 }
                 _ => panic!("Unexpected type for integer literal: {:?}", typ),
