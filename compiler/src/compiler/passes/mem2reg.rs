@@ -32,7 +32,7 @@ use crate::{
         ssa::{
             BlockId, FunctionId, Terminator, ValueId,
             hlssa::{
-                HLFunction, HLSSA, OpCode,
+                HLFunction, HLSSA, LocatedOpCode, OpCode,
                 builder::{HLFunctionBuilder, HLSSABuilder},
             },
         },
@@ -191,14 +191,14 @@ impl Mem2Reg {
                     values.insert(*alloc, *param);
                 }
 
-                let instructions = function.get_block_mut(block_id).take_instructions();
-                let mut new_instructions = Vec::new();
+                let instructions = function.get_block_mut(block_id).take_located_instructions();
+                let mut new_instructions = Vec::<LocatedOpCode>::new();
 
                 for mut instruction in instructions {
                     // `&instruction` is borrowed only for this match; the borrow ends before the
                     // fall-through keep path rewrites and pushes the instruction. Each promoted
                     // Store/Load resolves its alloc exactly once.
-                    match &instruction {
+                    match instruction.as_ref() {
                         // A promoted alloc's defining instruction is dropped; a non-promoted alloc
                         // (escaping, ref-pointee, or aliased) falls through and is kept verbatim.
                         OpCode::Alloc { result, value } if promotable.contains(result) => {
@@ -240,7 +240,7 @@ impl Mem2Reg {
 
                 function
                     .get_block_mut(block_id)
-                    .put_instructions(new_instructions);
+                    .put_located_instructions(new_instructions);
 
                 let mut terminator = function.get_block_mut(block_id).take_terminator().unwrap();
                 value_replacements.replace_terminator(&mut terminator);

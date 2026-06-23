@@ -94,7 +94,9 @@ use crate::{
         passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
         ssa::{
             BlockId, FunctionId, Terminator, ValueId,
-            hlssa::{CallTarget, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr},
+            hlssa::{
+                CallTarget, Constant, HLFunction, HLSSA, LocatedOpCode, OpCode, Type, TypeExpr,
+            },
         },
     },
 };
@@ -572,18 +574,18 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan) {
         entry.put_parameters(new_params);
 
         // 2. Materialize one local alloc per promoted parameter, seeded from the value-parameter.
-        let old_instrs = entry.take_instructions();
+        let old_instrs = entry.take_located_instructions();
         let mut new_instrs = Vec::with_capacity(old_instrs.len() + cp.params.len() * 2);
         for pp in &cp.params {
             // The alloc carries its initial value, so seed it directly from the by-value parameter
             // with no follow-up store needed.
-            new_instrs.push(OpCode::Alloc {
+            new_instrs.push(LocatedOpCode::without(OpCode::Alloc {
                 result: pp.alloc,
                 value: pp.new_param,
-            });
+            }));
         }
         new_instrs.extend(old_instrs);
-        entry.put_instructions(new_instrs);
+        entry.put_located_instructions(new_instrs);
     }
 
     // 3. Repoint every use of the old ref parameters at their materialized allocs.
@@ -620,18 +622,25 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan) {
 /// Phase 2: rewrite the promoted-callee call sites in one caller block, in instruction order.
 fn rewrite_caller_block(func: &mut HLFunction, bid: BlockId, rewrites: &[CallRewrite]) {
     let block = func.get_block_mut(bid);
-    let old = block.take_instructions();
+    let old = block.take_located_instructions();
     let mut new_instrs = Vec::with_capacity(old.len());
     let mut next = 0;
     for instr in old {
         if let OpCode::Call {
             function: CallTarget::Static(g),
             ..
-        } = &instr
+        } = instr.as_ref()
         {
             // The recorded rewrites cover exactly the promoted-callee calls, in this order.
             if next < rewrites.len() && rewrites[next].callee == *g {
-                apply_call_rewrite(instr, &rewrites[next], &mut new_instrs);
+                let (instr, location) = instr.take();
+                let mut rewritten = Vec::new();
+                apply_call_rewrite(instr, &rewrites[next], &mut rewritten);
+                new_instrs.extend(
+                    rewritten
+                        .into_iter()
+                        .map(|instruction| LocatedOpCode::new(instruction, location.clone())),
+                );
                 next += 1;
                 continue;
             }
@@ -639,7 +648,7 @@ fn rewrite_caller_block(func: &mut HLFunction, bid: BlockId, rewrites: &[CallRew
         new_instrs.push(instr);
     }
     debug_assert_eq!(next, rewrites.len(), "all recorded call rewrites consumed");
-    block.put_instructions(new_instrs);
+    block.put_located_instructions(new_instrs);
 }
 
 /// Emit `Load`-before / (modified) `Call` / `Store`-after for one promoted-callee call.

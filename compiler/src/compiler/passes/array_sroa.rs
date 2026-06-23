@@ -60,7 +60,7 @@ use crate::{
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
         ssa::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
-            hlssa::{Constant, HLSSA, OpCode, Type, TypeExpr},
+            hlssa::{Constant, HLSSA, LocatedOpCode, OpCode, Type, TypeExpr},
         },
     },
 };
@@ -277,12 +277,19 @@ impl ArraySroa {
             }
             block.put_parameters(new_params);
 
-            let old_instructions = block.take_instructions();
+            let old_instructions = block.take_located_instructions();
             let mut new_instructions = Vec::with_capacity(old_instructions.len());
-            for instr in &old_instructions {
-                lower_instruction(instr, plan, &mut new_instructions);
+            for instr in old_instructions {
+                let location = instr.location().clone();
+                let mut lowered = Vec::new();
+                lower_instruction(&instr, plan, &mut lowered);
+                new_instructions.extend(
+                    lowered
+                        .into_iter()
+                        .map(|instruction| LocatedOpCode::new(instruction, location.clone())),
+                );
             }
-            block.put_instructions(new_instructions);
+            block.put_located_instructions(new_instructions);
 
             let new_terminator = match block.take_terminator().unwrap() {
                 // A split-array `Jmp` arg expands into its `N` cell components, aligned by index

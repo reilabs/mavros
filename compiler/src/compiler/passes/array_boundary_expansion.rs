@@ -92,7 +92,8 @@ use crate::{
         ssa::{
             BlockId, FunctionId, Terminator, ValueId,
             hlssa::{
-                CallTarget, Constant, HLFunction, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
+                CallTarget, Constant, HLFunction, HLSSA, LocatedOpCode, OpCode,
+                SequenceTargetType, Type, TypeExpr,
             },
         },
     },
@@ -582,29 +583,29 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan, index_consts: &[ValueI
         let entry = func.get_block_mut(entry_id);
         let old_params = entry.take_parameters();
         let mut new_params = Vec::with_capacity(old_params.len());
-        let mut reconstructs: Vec<OpCode> = Vec::with_capacity(cp.params.len());
+        let mut reconstructs: Vec<LocatedOpCode> = Vec::with_capacity(cp.params.len());
         for (idx, (pid, ty)) in old_params.into_iter().enumerate() {
             if let Some(pe) = cp.params.iter().find(|p| p.index == idx) {
                 for cell in &pe.cells {
                     new_params.push((*cell, pe.elem.clone()));
                 }
-                reconstructs.push(OpCode::MkSeq {
+                reconstructs.push(LocatedOpCode::without(OpCode::MkSeq {
                     result: pid,
                     elems: pe.cells.clone(),
                     seq_type: SequenceTargetType::Array(pe.n),
                     elem_type: pe.elem.clone(),
-                });
+                }));
             } else {
                 new_params.push((pid, ty));
             }
         }
         entry.put_parameters(new_params);
 
-        let old_instrs = entry.take_instructions();
+        let old_instrs = entry.take_located_instructions();
         let mut new_instrs = Vec::with_capacity(old_instrs.len() + reconstructs.len());
         new_instrs.extend(reconstructs);
         new_instrs.extend(old_instrs);
-        entry.put_instructions(new_instrs);
+        entry.put_located_instructions(new_instrs);
     }
 
     // 2. Returns: at every `Return` block, load each cell of every expanded returned array and
@@ -671,21 +672,28 @@ fn rewrite_caller_block(
     index_consts: &[ValueId],
 ) {
     let block = func.get_block_mut(bid);
-    let old = block.take_instructions();
+    let old = block.take_located_instructions();
     let mut new_instrs = Vec::with_capacity(old.len());
     let mut next = 0;
     for instr in old {
         if let OpCode::Call {
             function: CallTarget::Static(g),
             ..
-        } = &instr
+        } = instr.as_ref()
         {
             // The recorded rewrites cover exactly the expanded-callee calls, in this order. Order
             // matching is sound because the callee-rewrite phase (run before any caller rewrite in
             // `apply`) only ever *inserts* `MkSeq`/`ArrayGet`, never a `Call`, so the `Call`
             // subsequence of every block is identical to the one `build_plan` recorded against.
             if next < rewrites.len() && rewrites[next].callee == *g {
-                apply_call_rewrite(instr, &rewrites[next], index_consts, &mut new_instrs);
+                let (instr, location) = instr.take();
+                let mut rewritten = Vec::new();
+                apply_call_rewrite(instr, &rewrites[next], index_consts, &mut rewritten);
+                new_instrs.extend(
+                    rewritten
+                        .into_iter()
+                        .map(|instruction| LocatedOpCode::new(instruction, location.clone())),
+                );
                 next += 1;
                 continue;
             }
@@ -697,7 +705,7 @@ fn rewrite_caller_block(
         rewrites.len(),
         "all recorded array-expansion call rewrites consumed"
     );
-    block.put_instructions(new_instrs);
+    block.put_located_instructions(new_instrs);
 }
 
 /// Emit pre-call `ArrayGet`s / the spliced `Call` / post-call `MkSeq`s for one expanded call.

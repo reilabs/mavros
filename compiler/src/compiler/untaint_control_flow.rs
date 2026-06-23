@@ -225,11 +225,12 @@ impl UntaintControlFlow {
 
             let block_ids: Vec<BlockId> = function.get_blocks().map(|(bid, _)| *bid).collect();
             for block_id in block_ids {
-                let instructions = function.get_block_mut(block_id).take_instructions();
+                let instructions = function.get_block_mut(block_id).take_located_instructions();
                 let mut new_instructions = Vec::new();
                 for instruction in instructions {
+                    let (instruction, location) = instruction.take();
                     let OpCode::Alloc { result, value } = instruction else {
-                        new_instructions.push(instruction);
+                        new_instructions.push(LocatedOpCode::new(instruction, location));
                         continue;
                     };
                     let cell_shape = function_wt
@@ -247,15 +248,23 @@ impl UntaintControlFlow {
                             HLInstrBuilder::new(&mut function, ssa, &mut cast_instructions);
                         convert_if_needed(value, &cell_type, func_type_info, &mut builder)
                     };
-                    new_instructions.extend(cast_instructions.into_iter().map(|i| i.payload()));
-                    new_instructions.push(OpCode::Alloc {
-                        result,
-                        value: converted,
-                    });
+                    for mut cast_instruction in cast_instructions {
+                        if cast_instruction.get_location().is_none() {
+                            *cast_instruction.location_mut() = location.clone();
+                        }
+                        new_instructions.push(cast_instruction);
+                    }
+                    new_instructions.push(LocatedOpCode::new(
+                        OpCode::Alloc {
+                            result,
+                            value: converted,
+                        },
+                        location,
+                    ));
                 }
                 function
                     .get_block_mut(block_id)
-                    .put_instructions(new_instructions);
+                    .put_located_instructions(new_instructions);
             }
 
             ssa.put_function(function_id, function);
@@ -385,17 +394,24 @@ impl UntaintControlFlow {
         let mut block = function.take_block(block_id);
         let block_taint = *block_taint_vars.get(&block_id).unwrap();
 
-        let old_instructions = block.take_instructions();
+        let old_instructions = block.take_located_instructions();
         let mut new_instructions = Vec::new();
 
         for instruction in old_instructions {
+            let (instruction, location) = instruction.take();
+            let mut processed_instructions = Vec::new();
             self.process_instruction(
                 instruction,
                 function,
                 ssa,
                 type_info,
                 block_taint,
-                &mut new_instructions,
+                &mut processed_instructions,
+            );
+            new_instructions.extend(
+                processed_instructions
+                    .into_iter()
+                    .map(|instruction| LocatedOpCode::new(instruction, location.clone())),
             );
         }
 
@@ -431,33 +447,37 @@ impl UntaintControlFlow {
                         let then_taint = match block_taint {
                             Some(tnt) => {
                                 let result_val = ssa.fresh_value();
-                                new_instructions.push(OpCode::BinaryArithOp {
-                                    kind: BinaryArithOpKind::And,
-                                    result: result_val,
-                                    lhs: tnt,
-                                    rhs: cond,
-                                });
+                                new_instructions.push(LocatedOpCode::without(
+                                    OpCode::BinaryArithOp {
+                                        kind: BinaryArithOpKind::And,
+                                        result: result_val,
+                                        lhs: tnt,
+                                        rhs: cond,
+                                    },
+                                ));
                                 result_val
                             }
                             None => cond,
                         };
                         let not_cond = {
                             let nv = ssa.fresh_value();
-                            new_instructions.push(OpCode::Not {
+                            new_instructions.push(LocatedOpCode::without(OpCode::Not {
                                 result: nv,
                                 value: cond,
-                            });
+                            }));
                             nv
                         };
                         let else_taint = match block_taint {
                             Some(tnt) => {
                                 let result_val = ssa.fresh_value();
-                                new_instructions.push(OpCode::BinaryArithOp {
-                                    kind: BinaryArithOpKind::And,
-                                    result: result_val,
-                                    lhs: tnt,
-                                    rhs: not_cond,
-                                });
+                                new_instructions.push(LocatedOpCode::without(
+                                    OpCode::BinaryArithOp {
+                                        kind: BinaryArithOpKind::And,
+                                        result: result_val,
+                                        lhs: tnt,
+                                        rhs: not_cond,
+                                    },
+                                ));
                                 result_val
                             }
                             None => not_cond,
@@ -595,7 +615,11 @@ impl UntaintControlFlow {
                             })
                             .collect()
                     };
-                    flush_conversion_instrs(&mut new_instructions, block_taint, cast_instrs);
+                    flush_conversion_instrs_located(
+                        &mut new_instructions,
+                        block_taint,
+                        cast_instrs,
+                    );
                     block.set_terminator(Terminator::Jmp(target, new_args));
                 }
             }
@@ -612,14 +636,18 @@ impl UntaintControlFlow {
                             })
                             .collect()
                     };
-                    flush_conversion_instrs(&mut new_instructions, block_taint, cast_instrs);
+                    flush_conversion_instrs_located(
+                        &mut new_instructions,
+                        block_taint,
+                        cast_instrs,
+                    );
                     block.set_terminator(Terminator::Return(new_values));
                 }
             }
             None => {}
         };
 
-        block.put_instructions(new_instructions);
+        block.put_located_instructions(new_instructions);
         function.put_block(block_id, block);
     }
 
@@ -939,6 +967,23 @@ fn flush_conversion_instrs(
 ) {
     for instr in cast_instrs {
         maybe_guard(instrs, taint, instr.payload());
+    }
+}
+
+fn flush_conversion_instrs_located(
+    instrs: &mut Vec<LocatedOpCode>,
+    taint: Option<ValueId>,
+    cast_instrs: Vec<LocatedOpCode>,
+) {
+    for instr in cast_instrs {
+        let (instr, location) = instr.take();
+        let mut guarded = Vec::new();
+        maybe_guard(&mut guarded, taint, instr);
+        instrs.extend(
+            guarded
+                .into_iter()
+                .map(|instruction| LocatedOpCode::new(instruction, location.clone())),
+        );
     }
 }
 
