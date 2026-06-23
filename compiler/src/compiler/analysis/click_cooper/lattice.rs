@@ -232,7 +232,11 @@ pub(crate) fn eval_cmp(kind: CmpKind, a: &Constant, b: &Constant) -> Option<Cons
     }
 }
 
-/// Folds a field multiplication operation.
+/// Folds a field multiplication operation (the transfer for `MulConst`).
+///
+/// This is deliberately *not* `eval_binary(Mul, ..)`: `MulConst` is field-domain, where
+/// multiplication is modular and total, so it must not inherit the integer width/overflow rules
+/// `eval_binary` applies to `U`/`I` operands. Non-field operands therefore do not fold.
 pub(crate) fn eval_field_mul(a: &Constant, b: &Constant) -> Option<Constant> {
     match (a, b) {
         (Constant::Field(x), Constant::Field(y)) => Some(Constant::Field(*x * *y)),

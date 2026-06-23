@@ -1,20 +1,24 @@
 //! A Click–Cooper-style combined optimistic analysis.
 //!
 //! An analysis that handles **constants**, **reachability** and **congruence** (using optimistic
-//! AWZ value numbering). It is designed to drive constant/condition propagation and PRE; a
-//! context-sensitive interprocedural layer is planned (see
-//! [Deferred Improvements](#deferred-improvements)). The combination is _at least_ as precise as
+//! AWZ value numbering), plus a context-sensitive **interprocedural** (1-CFA) layer. It is designed
+//! to drive constant/condition propagation and PRE. The combination is _at least_ as precise as
 //! running the factors separately and alternating to a fixpoint (Click & Cooper, _Combining
 //! Analyses, Combining Optimizations_, TOPLAS 1995).
 //!
-//! It operates over two kinds of facts:
+//! It operates over three kinds of facts:
 //!
 //! - **Intraprocedural facts** are those within a given function and are derived from a
 //!   Wegman-Zadeck constants and reachability fixpoint with a structural-congruence partition over
 //!   the reachability state.
+//! - **Interprocedural facts** refine the intraprocedural view across calls: polymorphic
+//!   jump-function summaries (a `return_const` holding for any arguments, a `return Param(i)`
+//!   pass-through) and 1-CFA per-`(function, context)` specialization seeding callee parameters
+//!   with the caller's argument constants, plus determinism-gated *cross-call congruence* (two
+//!   constrained static calls to one callee with congruent arguments yield congruent results).
 //! - **Conditional facts** are ones derived from asserts, equalities, disequalities, and unpinned
 //!   witness forwarding. They are computed post-convergence over the same reachability state plus
-//!   GFG dominance, and are intentionally disjoint from the unconditional view.
+//!   CFG dominance, and are intentionally disjoint from the unconditional view.
 //!
 //! **Unconditional facts** are those which hold on any path so that any use (replacing a use,
 //! deleting a pure definition, or pruning an unreachable block) maintains soundness. **Conditional
@@ -33,6 +37,14 @@
 //! - **Congruence:** Two values are congruent iff computed by the same operator from operand-wise
 //!   congruent inputs, hence equal in all runs. Congruence never asserts an equality an adversarial
 //!   witness could validate.
+//! - **Interprocedural Constants:** A `return_const` jump function holds for any arguments; a
+//!   `return Param(i)` pass-through equals argument `i` exactly. Per-context parameter seeds are
+//!   the meet of the argument constants over *every* static call path mapped to that context, so a
+//!   per-context constant holds on every concrete invocation in that context.
+//! - **Cross-Call Congruence:** A constrained static call's result is value-numbered by
+//!   `(callee, return-index)` over its argument classes only when the callee's return is a
+//!   deterministic function of its arguments; equal arguments then force an equal result. A
+//!   non-deterministic return (e.g. one carrying a fresh witness) stays opaque.
 //! - **Conditional Facts:** Assert-derived constants, equalities, and disequalities hold only on
 //!   accepting runs that preserve their establishing constraint, so they are exposed only through
 //!   dedicated queries. An assert, being a global constraint that holds at every point of an
@@ -54,6 +66,12 @@
 //!   of edge/value events.
 //! - **Congruence:** Partition refinement only ever *splits* classes, and the class count is
 //!   bounded by the value count, so it stabilises in at most `|values|` rounds.
+//! - **Determinism / Interprocedural Summaries:** The determinism bits and the `ReturnJump` lattice
+//!   are finite, and a caller is re-queued only when a callee's summary strictly changed, so each
+//!   call-graph worklist reaches a fixpoint.
+//! - **1-CFA Specialization:** Contexts are `K`-limited call strings over finitely many call sites,
+//!   hence finite. Per-context parameter seeds move monotonically down the finite-height constant
+//!   lattice, and a context is re-queued only when newly discovered or its seed lowered.
 //!
 //! # Deferred Improvements
 //!
@@ -70,24 +88,26 @@
 //!   granularity via *strict* dominance/post-dominance, so a use in the asserting block itself
 //!   (after the assert) is not yet claimed. Index-precise program points would recover it; soundness
 //!   is unaffected.
-//! - **Dominance-Aware Congruence Leader:** [`ClickCooper::leader`] returns the smallest-id class
-//!   member, which is not necessarily a dominating definition; a redirecting consumer (CSE/PRE)
-//!   needs the dominating member, which requires threading `FlowAnalysis` dominance into the
-//!   congruence partition.
-//! - **Interprocedural (1-CFA) Layer:** A context-sensitive interprocedural layer — polymorphic
-//!   jump-function summaries (a `return_const` jump function holding for any arguments, a
-//!   `return Param(i)` pass-through equal to argument `i`) plus 1-CFA per-`(function, k-limited
-//!   call-string)` specialization, mirroring the two-phase structure of `analysis/points_to` — was
-//!   prototyped and then removed pending a consumer that exploits it. SCCP, the only current
-//!   consumer, reads intraprocedural facts only, so the layer was deferred to keep the analysis
-//!   lean; it can be reinstated (along with its `*_in` context-keyed queries) with its first
-//!   interprocedural consumer. The deferred layer also did not propagate cross-call structural
-//!   congruence (e.g. `f(x); f(y)` with `x ≡ y` yielding congruent results).
+//! - **Symbolic Interprocedural Congruence:** Cross-call congruence currently requires that *all*
+//!   arguments are congruent and is gated on a whole-return determinism bit; it does not graft a
+//!   callee's return expression into the caller, so it cannot relate `f(x)` to an open expression
+//!   over `x`, nor see that a return ignores some argument. A symbolic return jump function would
+//!   recover both.
+//! - **Per-context Conditional Facts:** The assert/disequality/witness-forwarding conditional facts
+//!   are computed once per function and not refined per 1-CFA context, so they have no `_in(f, ctx,
+//!   …)` query: a caller reads them through the intraprocedural methods, whose (sound,
+//!   context-independent) answer is a per-context under-approximation. Recomputing the conditional
+//!   pass per `(function, context)` — as `specialize` already does for the unconditional facts —
+//!   would let a context-specialized assert or branch expose more facts, and would warrant adding
+//!   the `_in` variants.
 
 mod conditional;
 mod congruence;
 mod lattice;
 mod solver;
+mod summary;
+
+pub use crate::compiler::analysis::call_string::Context;
 
 use std::sync::Arc;
 
@@ -99,6 +119,7 @@ use crate::{
                 conditional::ConditionalFacts,
                 lattice::{Constness, bool_constant},
                 solver::{FunctionFacts, FunctionSolver},
+                summary::{compute_determinism, compute_summaries, specialize},
             },
             flow_analysis::FlowAnalysis,
             types::TypeInfo,
@@ -125,11 +146,13 @@ pub struct ClickCooper {
     /// Per-function **intraprocedural** converged facts (parameters and call results `Bottom`).
     functions: HashMap<FunctionId, FunctionFacts>,
 
-    /// Per-function **conditional** side facts (assert-derived constants/equalities, branch
-    /// disequalities, unpinned-witness forwarding).
+    /// Per-`(function, context)` interprocedurally-refined facts (1-CFA), built from the
+    /// polymorphic jump-function summaries.
+    contexts: HashMap<(FunctionId, Context), FunctionFacts>,
+
+    /// Per-function **conditional** facts.
     ///
-    /// Held in their own fields read by their own queries, entirely disjoint from the unconditional
-    /// view above.
+    /// They are intentionally disjoint from the unconditional views above.
     conditional: HashMap<FunctionId, ConditionalFacts>,
 }
 
@@ -149,16 +172,33 @@ impl ClickCooper {
         // interned program-wide.
         let consts = ssa.const_snapshot();
 
-        // Per-function intraprocedural facts: parameters and call results `Bottom`. The conditional
-        // side facts are computed from the same converged state plus CFG dominance, kept in a
-        // disjoint map so the unconditional view is untouched.
+        // Phase 0: per-`(callee, return)` determinism, used below to value-number deterministic
+        // static-call results cross-call. It only refines congruence (never the constant lattice or
+        // reachability), so it leaves the SCCP-visible facts byte-identical.
+        let det = compute_determinism(ssa, flow);
+
+        // Per-function intraprocedural facts: parameters and call results `Bottom` (no summaries
+        // here). The conditional side facts are computed from the same converged state plus CFG
+        // dominance, kept in a disjoint map so the unconditional view is untouched.
+        //
+        // This solve MUST stay summary-free: SCCP reads `functions` (via `const_of`/
+        // `new_const_values`/`is_reachable`) and relies on `Call` staying `Bottom`, so that every
+        // constant-valued result it aliases or deletes is a pure scalar fold. Wiring summaries in
+        // here would let a constrained `Call` result become `Const` and break that contract (an
+        // `assert!` in SCCP's `rewrite` guards against it).
         let mut functions = HashMap::default();
         let mut conditional = HashMap::default();
         for fid in ssa.get_function_ids() {
             let function = ssa.get_function(fid);
-            let mut solver = FunctionSolver::new(function, &consts);
+            let mut solver = FunctionSolver::new(function, &consts).with_determinism(&det);
             solver.run();
-            let facts = solver.into_facts();
+            let mut facts = solver.into_facts();
+
+            // Finalize dominance-aware congruence leaders against the function's CFG, so `leader`
+            // returns a legal redirect target.
+            facts
+                .congruence
+                .compute_leaders(function, flow.get_function_cfg(fid));
             let cond = conditional::build(
                 function,
                 &facts,
@@ -170,38 +210,71 @@ impl ClickCooper {
             functions.insert(fid, facts);
         }
 
+        // Handle the interprocedural layer using polymorphic jump-function summaries then
+        // contextual facts on the 1-CFA.
+        let summaries = compute_summaries(ssa, flow, &consts, &det);
+        let contexts = specialize(ssa, flow, &consts, &summaries, &det);
+
         ClickCooper {
             consts,
             functions,
+            contexts,
             conditional,
         }
     }
 }
 
-/// Unconditional queries — facts that hold in **every** run.
+/// Private query helpers shared by the public query impls.
+impl ClickCooper {
+    /// The intraprocedural facts of `f`, or `None` if `f` was not analyzed.
+    fn facts(&self, f: FunctionId) -> Option<&FunctionFacts> {
+        self.functions.get(&f)
+    }
+
+    /// The context-specialized (1-CFA) facts of `f` under `ctx`, or `None`.
+    fn facts_in(&self, f: FunctionId, ctx: &Context) -> Option<&FunctionFacts> {
+        self.contexts.get(&(f, ctx.clone()))
+    }
+
+    /// The constant `v` holds in `facts`, or `None`: interned constants first, then the constant
+    /// lattice.
+    fn const_in_facts(
+        consts: &HLSSAConstantsSnapshot,
+        facts: Option<&FunctionFacts>,
+        v: ValueId,
+    ) -> Option<Arc<Constant>> {
+        if let Some(c) = consts.get(&v) {
+            return Some(c.clone());
+        }
+        match facts?.lattice.get(&v) {
+            Some(Constness::Const(c)) => Some(c.clone()),
+            Some(Constness::Top) | Some(Constness::Bottom) | None => None,
+        }
+    }
+}
+
+/// Unconditional intraprocedural queries — facts that hold in **every** run.
 ///
-/// Using them to replace uses, delete pure defs, or prune unreachable blocks is accept-set
-/// preserving. This impl block contains both the intraprocedural and interprocedural queries.
+/// Using them to replace uses, delete pure defs, or prune unreachable blocks is always correctness
+/// preserving.
 impl ClickCooper {
     /// The constant `v` provably holds in `f` in *every* run, or `None`.
     ///
     /// Interned constants and the global constant lattice only; path-sensitive branch facts are
     /// excluded.
     pub fn const_of(&self, f: FunctionId, v: ValueId) -> Option<Arc<Constant>> {
-        Self::const_in_facts(&self.consts, self.functions.get(&f), v)
+        Self::const_in_facts(&self.consts, self.facts(f), v)
     }
 
     /// `true` if `bid` reachable in `f`.
     pub fn is_reachable(&self, f: FunctionId, bid: BlockId) -> bool {
-        self.functions
-            .get(&f)
+        self.facts(f)
             .is_some_and(|facts| facts.reachable.contains(&bid))
     }
 
     /// `true` if the CFG edge `from -> to` proven executable in `f`.
     pub fn is_executable_edge(&self, f: FunctionId, from: BlockId, to: BlockId) -> bool {
-        self.functions
-            .get(&f)
+        self.facts(f)
             .is_some_and(|facts| facts.exec_edges.contains(&(from, to)))
     }
 
@@ -209,7 +282,7 @@ impl ClickCooper {
     ///
     /// Excludes already-interned constant values and conditional branch facts.
     pub fn new_const_values(&self, f: FunctionId) -> Vec<(ValueId, Arc<Constant>)> {
-        let Some(facts) = self.functions.get(&f) else {
+        let Some(facts) = self.facts(f) else {
             return Vec::new();
         };
         facts
@@ -224,45 +297,88 @@ impl ClickCooper {
 
     /// `true` if `a` and `b` are proven *structurally* congruent in `f`.
     pub fn known_equal(&self, f: FunctionId, a: ValueId, b: ValueId) -> bool {
-        self.functions
-            .get(&f)
+        self.facts(f)
             .is_some_and(|facts| facts.congruence.known_equal(a, b))
     }
 
     /// Every value structurally congruent to `v` in `f` (including `v`), sorted by value id.
     pub fn congruence_class(&self, f: FunctionId, v: ValueId) -> Vec<ValueId> {
-        self.functions
-            .get(&f)
+        self.facts(f)
             .map(|facts| facts.congruence.class_members(v))
             .unwrap_or_default()
     }
 
-    /// A deterministic representative of `v`'s congruence class in `f` (smallest member by value
-    /// id).
-    ///
-    /// Not yet guaranteed to dominate the class, so it is not a legal redirect target on its own;
-    /// the dominance-aware leader requires threading the (already-available) `FlowAnalysis`
-    /// dominance into the congruence partition.
+    /// The leader of `v`'s congruence class in `f`: the root-most congruent member whose definition
+    /// dominates `v`'s definition (`v` itself when no other member does).
     pub fn leader(&self, f: FunctionId, v: ValueId) -> Option<ValueId> {
-        self.functions
-            .get(&f)
-            .and_then(|facts| facts.congruence.leader(v))
+        self.facts(f).and_then(|facts| facts.congruence.leader(v))
     }
 }
 
-/// Conditional queries — facts established by a branch or assert that hold only downstream of the
-/// establishing control flow.
+/// Unconditional interprocedural queries — the 1-CFA per-`(function, context)` refinement.
 ///
-/// These let Mavros be stricter on adversarial inputs, so they are sound *only* under
-/// constraint-preserving use: a local, structure-preserving rewrite that keeps the establishing
-/// branch/assert (never folding away the constraint that proves the fact).
+/// These read the specialized `contexts` map (never the SCCP-visible `functions` view), so they are
+/// disjoint from the intraprocedural queries above. They are unconditional facts *within* their
+/// context: a caller's argument constants seed the callee's parameters, and constant-returning
+/// calls fold.
+impl ClickCooper {
+    /// The constant `v` provably holds in `f` under calling context `ctx`, or `None`.
+    pub fn const_of_in(&self, f: FunctionId, ctx: &Context, v: ValueId) -> Option<Arc<Constant>> {
+        Self::const_in_facts(&self.consts, self.facts_in(f, ctx), v)
+    }
+
+    /// `true` if `a` and `b` are proven structurally congruent in `f` under context `ctx`.
+    pub fn known_equal_in(&self, f: FunctionId, ctx: &Context, a: ValueId, b: ValueId) -> bool {
+        self.facts_in(f, ctx)
+            .is_some_and(|facts| facts.congruence.known_equal(a, b))
+    }
+
+    /// Every value congruent to `v` in `f` under context `ctx` (including `v`), sorted by value id.
+    pub fn congruence_class_in(&self, f: FunctionId, ctx: &Context, v: ValueId) -> Vec<ValueId> {
+        self.facts_in(f, ctx)
+            .map(|facts| facts.congruence.class_members(v))
+            .unwrap_or_default()
+    }
+
+    /// The leader of `v`'s congruence class in `f` under context `ctx` (a legal redirect target, as
+    /// in [`Self::leader`]).
+    pub fn leader_in(&self, f: FunctionId, ctx: &Context, v: ValueId) -> Option<ValueId> {
+        self.facts_in(f, ctx)
+            .and_then(|facts| facts.congruence.leader(v))
+    }
+
+    /// The contexts `f` was specialized in (sorted), for enumerating its per-context facts.
+    pub fn contexts_of(&self, f: FunctionId) -> Vec<Context> {
+        let mut out: Vec<Context> = self
+            .contexts
+            .keys()
+            .filter(|(g, _)| *g == f)
+            .map(|(_, ctx)| ctx.clone())
+            .collect();
+        out.sort();
+        out
+    }
+}
+
+/// Intraprocedural conditional queries — facts established by a branch or assert.
+///
+/// They are sound *only* under constraint-preserving use: a local, structure-preserving rewrite
+/// that keeps the establishing branch/assert (never folding away the constraint that proves the
+/// fact).
+///
+/// These are **intraprocedural** and hence have no context. A conditional fact is established by
+/// control flow *internal to `f`* (a dominating assert, a branch predicate, a witness write), so it
+/// holds in *every* calling context. A context only adds parameter constants and prunes blocks, so
+/// it can make a block unreachable but can never invalidate a fact on a block that remains
+/// reachable. The intraprocedural answer is thus a sound **under-approximation** of the per-context
+/// one.
 impl ClickCooper {
     /// The constant `v` holds on entry to `bid` in `f`, honoring path-sensitive branch facts.
     pub fn const_in_block(&self, f: FunctionId, bid: BlockId, v: ValueId) -> Option<Arc<Constant>> {
         if let Some(c) = self.consts.get(&v) {
             return Some(c.clone());
         }
-        let facts = self.functions.get(&f)?;
+        let facts = self.facts(f)?;
         if let Some(known) = facts.block_facts.get(&bid).and_then(|m| m.get(&v)) {
             return Some(bool_constant(*known));
         }
@@ -271,12 +387,7 @@ impl ClickCooper {
 
     /// `Some(...)` if `v` known true/false on entry to `bid` in `f` (a branch predicate fact).
     pub fn bool_fact(&self, f: FunctionId, bid: BlockId, v: ValueId) -> Option<bool> {
-        self.functions
-            .get(&f)?
-            .block_facts
-            .get(&bid)?
-            .get(&v)
-            .copied()
+        self.facts(f)?.block_facts.get(&bid)?.get(&v).copied()
     }
 
     /// If `v` is an (in-block) constant boolean, get its value, honoring branch facts, or `None`
@@ -289,7 +400,7 @@ impl ClickCooper {
     /// The branch predicate facts at entry to `bid` in `f`, as `(value, bool-constant)` pairs
     /// sorted by value id.
     pub fn block_bool_facts(&self, f: FunctionId, bid: BlockId) -> Vec<(ValueId, Arc<Constant>)> {
-        let Some(facts) = self.functions.get(&f) else {
+        let Some(facts) = self.facts(f) else {
             return Vec::new();
         };
         let Some(m) = facts.block_facts.get(&bid) else {
@@ -349,33 +460,92 @@ impl ClickCooper {
     }
 }
 
-/// Private query helper shared by [`Self::const_of`] and [`Self::const_in_block`].
+/// Interprocedural conditional queries — the per-context analogs of the *branch-fact*
+/// intraprocedural conditional queries above (e.g. for a clone of `f` specialized to `ctx`).
+///
+/// They are sound *only* under constraint-preserving use: a local, structure-preserving rewrite
+/// that keeps the establishing branch (never folding away the constraint that proves the fact).
 impl ClickCooper {
-    /// The constant `v` holds in `facts`, or `None`: interned constants first, then the constant
-    /// lattice.
-    fn const_in_facts(
-        consts: &HLSSAConstantsSnapshot,
-        facts: Option<&FunctionFacts>,
+    /// [`Self::const_in_block`] under calling context `ctx`.
+    ///
+    /// Honors the context-specialized branch facts, so a context that folds more branches is more
+    /// precise.
+    pub fn const_in_block_in(
+        &self,
+        f: FunctionId,
+        ctx: &Context,
+        bid: BlockId,
         v: ValueId,
     ) -> Option<Arc<Constant>> {
-        if let Some(c) = consts.get(&v) {
+        if let Some(c) = self.consts.get(&v) {
             return Some(c.clone());
         }
-        match facts?.lattice.get(&v) {
-            Some(Constness::Const(c)) => Some(c.clone()),
-            Some(Constness::Top) | Some(Constness::Bottom) | None => None,
+        let facts = self.facts_in(f, ctx)?;
+        if let Some(known) = facts.block_facts.get(&bid).and_then(|m| m.get(&v)) {
+            return Some(bool_constant(*known));
         }
+        Self::const_in_facts(&self.consts, Some(facts), v)
+    }
+
+    /// [`Self::bool_fact`] under calling context `ctx`.
+    pub fn bool_fact_in(
+        &self,
+        f: FunctionId,
+        ctx: &Context,
+        bid: BlockId,
+        v: ValueId,
+    ) -> Option<bool> {
+        self.facts_in(f, ctx)?
+            .block_facts
+            .get(&bid)?
+            .get(&v)
+            .copied()
+    }
+
+    /// [`Self::const_bool_in_block`] under calling context `ctx`.
+    pub fn const_bool_in_block_in(
+        &self,
+        f: FunctionId,
+        ctx: &Context,
+        bid: BlockId,
+        v: ValueId,
+    ) -> Option<bool> {
+        self.const_in_block_in(f, ctx, bid, v)
+            .and_then(|c| lattice::const_bool(&c))
+    }
+
+    /// [`Self::block_bool_facts`] under calling context `ctx`.
+    pub fn block_bool_facts_in(
+        &self,
+        f: FunctionId,
+        ctx: &Context,
+        bid: BlockId,
+    ) -> Vec<(ValueId, Arc<Constant>)> {
+        let Some(facts) = self.facts_in(f, ctx) else {
+            return Vec::new();
+        };
+        let Some(m) = facts.block_facts.get(&bid) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(ValueId, Arc<Constant>)> =
+            m.iter().map(|(v, b)| (*v, bool_constant(*b))).collect();
+        out.sort_by_key(|(v, _)| v.0);
+        out
     }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{ClickCooper, FlowAnalysis};
+    use super::{ClickCooper, Context, FlowAnalysis};
     use crate::compiler::{
+        Field,
         analysis::types::Types,
         ssa::{
             Terminator,
-            hlssa::{BinaryArithOpKind, CastTarget, CmpKind, Constant, HLSSA, OpCode, Type},
+            hlssa::{
+                BinaryArithOpKind, CallTarget, CastTarget, CmpKind, Constant, HLSSA, OpCode,
+                ScalarFold, Type,
+            },
         },
     };
 
@@ -384,6 +554,125 @@ pub(crate) mod tests {
         let flow = FlowAnalysis::run(ssa);
         let types = Types::new().run(ssa, &flow);
         ClickCooper::run(ssa, &flow, &types)
+    }
+
+    /// `OpCode::scalar_fold` is the single source of truth for "foldable scalar op". This locks the
+    /// three projections that read it: `is_pure_scalar_fold` agrees with `scalar_fold().is_some()`,
+    /// and value numbering (`pure_op_operands`, backed by `op_signature`) only ever fires on a
+    /// foldable op. The one deliberate asymmetry — a witness cast is foldable but never
+    /// value-numbered — is asserted explicitly so it cannot be silently dropped.
+    #[test]
+    fn scalar_fold_is_the_single_classifier() {
+        use super::congruence::pure_op_operands;
+
+        let ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let v = || ssa.fresh_value();
+
+        // One instance of every foldable scalar op, each paired with the `ScalarFold` variant it
+        // must decompose to.
+        let foldable: Vec<OpCode> = vec![
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: v(),
+                lhs: v(),
+                rhs: v(),
+            },
+            OpCode::Cmp {
+                kind: CmpKind::Eq,
+                result: v(),
+                lhs: v(),
+                rhs: v(),
+            },
+            OpCode::MulConst {
+                result: v(),
+                const_val: v(),
+                var: v(),
+            },
+            OpCode::Cast {
+                result: v(),
+                value: v(),
+                target: CastTarget::Field,
+            },
+            OpCode::SExt {
+                result: v(),
+                value: v(),
+                from_bits: 8,
+                to_bits: 32,
+            },
+            OpCode::BitRange {
+                result: v(),
+                value: v(),
+                offset: 0,
+                width: 8,
+            },
+            OpCode::Not {
+                result: v(),
+                value: v(),
+            },
+            OpCode::Select {
+                result: v(),
+                cond: v(),
+                if_t: v(),
+                if_f: v(),
+            },
+        ];
+        for instr in &foldable {
+            assert!(instr.is_pure_scalar_fold(), "{instr:?} should be foldable");
+            assert_eq!(
+                instr.is_pure_scalar_fold(),
+                instr.scalar_fold().is_some(),
+                "is_pure_scalar_fold must equal scalar_fold().is_some() for {instr:?}"
+            );
+            // Every foldable op except a witness cast is value-numbered.
+            assert!(
+                pure_op_operands(instr).is_some(),
+                "{instr:?} should be value-numbered"
+            );
+        }
+
+        // The deliberate asymmetry: a witness cast IS a scalar fold but is NOT value-numbered.
+        let witness_cast = OpCode::Cast {
+            result: v(),
+            value: v(),
+            target: CastTarget::WitnessOf,
+        };
+        assert!(witness_cast.is_pure_scalar_fold());
+        assert!(matches!(
+            witness_cast.scalar_fold(),
+            Some(ScalarFold::Cast { .. })
+        ));
+        assert!(pure_op_operands(&witness_cast).is_none());
+
+        // Representative non-folds: not foldable, not value-numbered, no `ScalarFold`.
+        let non_folds: Vec<OpCode> = vec![
+            OpCode::Assert { value: v() },
+            OpCode::Store {
+                ptr: v(),
+                value: v(),
+            },
+            OpCode::Load {
+                result: v(),
+                ptr: v(),
+            },
+            OpCode::Call {
+                results: vec![v()],
+                function: CallTarget::Static(main),
+                args: vec![v()],
+                unconstrained: false,
+            },
+        ];
+        for instr in &non_folds {
+            assert!(
+                !instr.is_pure_scalar_fold(),
+                "{instr:?} should not be foldable"
+            );
+            assert!(instr.scalar_fold().is_none());
+            assert!(
+                pure_op_operands(instr).is_none(),
+                "{instr:?} should not be value-numbered"
+            );
+        }
     }
 
     /// Two values that fold to the *same* constant are congruent, even when computed differently —
@@ -602,6 +891,180 @@ pub(crate) mod tests {
         let cc = run_in_test(&ssa);
         assert!(cc.known_equal(fid, i, j)); // loop-carried congruence
         assert!(cc.known_equal(fid, i2, j2)); // and their parallel updates
+
+        // The dominance-aware leader is the member at the dominating definition: the two header
+        // parameters share a definition site (block entry), so the lower-id one leads; in the body,
+        // the earlier `i2` leads the later `j2`.
+        assert_eq!(cc.leader(fid, i), Some(i));
+        assert_eq!(cc.leader(fid, j), Some(i));
+        assert_eq!(cc.leader(fid, i2), Some(i2));
+        assert_eq!(cc.leader(fid, j2), Some(i2));
+    }
+
+    /// A congruent definition that dominates another is its leader (a legal redirect target); the
+    /// dominated occurrence redirects to the dominating one, and the dominating one leads itself.
+    #[test]
+    fn leader_is_dominating_definition() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let (x, y, a, b) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
+
+        let f = ssa.get_unique_entrypoint_mut();
+        let next = f.add_block();
+        f.get_entry_mut().push_parameter(x, Type::field());
+        f.get_entry_mut().push_parameter(y, Type::field());
+        // `a = x + y` in the entry, recomputed as `b = x + y` in a strictly dominated block.
+        f.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: a,
+            lhs: x,
+            rhs: y,
+        });
+        f.get_entry_mut()
+            .set_terminator(Terminator::Jmp(next, vec![]));
+        let next_block = f.get_block_mut(next);
+        next_block.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: b,
+            lhs: x,
+            rhs: y,
+        });
+        next_block.set_terminator(Terminator::Return(vec![a, b]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+        assert!(cc.known_equal(fid, a, b));
+        assert_eq!(cc.leader(fid, a), Some(a)); // dominating definition leads itself
+        assert_eq!(cc.leader(fid, b), Some(a)); // dominated occurrence redirects to it
+    }
+
+    /// Two congruent ops in one block: the earlier one (by instruction index) leads the later.
+    #[test]
+    fn leader_is_earlier_in_block() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let (x, y, a, b) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
+
+        let f = ssa.get_unique_entrypoint_mut();
+        f.get_entry_mut().push_parameter(x, Type::field());
+        f.get_entry_mut().push_parameter(y, Type::field());
+        let entry = f.get_entry_mut();
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: a,
+            lhs: x,
+            rhs: y,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: b,
+            lhs: x,
+            rhs: y,
+        });
+        entry.set_terminator(Terminator::Return(vec![a, b]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+        assert!(cc.known_equal(fid, a, b));
+        assert_eq!(cc.leader(fid, a), Some(a));
+        assert_eq!(cc.leader(fid, b), Some(a));
+    }
+
+    /// Congruent occurrences in two incomparable branches (and one at the merge) have no single
+    /// dominating member, so each is its own leader — the leader is never a non-dominating member,
+    /// so no illegal cross-branch redirect is offered.
+    #[test]
+    fn leader_never_crosses_incomparable_branches() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let (cond, x, y, a, b, c) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
+
+        let f = ssa.get_unique_entrypoint_mut();
+        let e1 = f.add_block();
+        let e2 = f.add_block();
+        let merge = f.add_block();
+        f.get_entry_mut().push_parameter(cond, Type::u(1));
+        f.get_entry_mut().push_parameter(x, Type::field());
+        f.get_entry_mut().push_parameter(y, Type::field());
+        f.get_entry_mut()
+            .set_terminator(Terminator::JmpIf(cond, e1, e2));
+        // `x + y` recomputed in both incomparable branches and again at the merge.
+        let e1_block = f.get_block_mut(e1);
+        e1_block.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: a,
+            lhs: x,
+            rhs: y,
+        });
+        e1_block.set_terminator(Terminator::Jmp(merge, vec![]));
+        let e2_block = f.get_block_mut(e2);
+        e2_block.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: b,
+            lhs: x,
+            rhs: y,
+        });
+        e2_block.set_terminator(Terminator::Jmp(merge, vec![]));
+        let merge_block = f.get_block_mut(merge);
+        merge_block.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: c,
+            lhs: x,
+            rhs: y,
+        });
+        merge_block.set_terminator(Terminator::Return(vec![a, b, c]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+        // All three are congruent...
+        assert!(cc.known_equal(fid, a, b));
+        assert!(cc.known_equal(fid, a, c));
+        // ...but none dominates another, so each leads itself (no cross-branch redirect).
+        assert_eq!(cc.leader(fid, a), Some(a));
+        assert_eq!(cc.leader(fid, b), Some(b));
+        assert_eq!(cc.leader(fid, c), Some(c));
+    }
+
+    /// A computed value proven constant is congruent to the interned constant of the same value, and
+    /// that constant — available throughout the function — is its leader.
+    #[test]
+    fn leader_of_constant_class_is_the_interned_constant() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let c2 = ssa.add_const(Constant::U(32, 2));
+        let c3 = ssa.add_const(Constant::U(32, 3));
+        let c5 = ssa.add_const(Constant::U(32, 5));
+        let a = ssa.fresh_value();
+
+        let f = ssa.get_unique_entrypoint_mut();
+        let entry = f.get_entry_mut();
+        // `a = 2 + 3` folds to 5, congruent to the interned constant `c5`.
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: a,
+            lhs: c2,
+            rhs: c3,
+        });
+        entry.set_terminator(Terminator::Return(vec![a, c5]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+        assert!(cc.known_equal(fid, a, c5));
+        assert_eq!(cc.leader(fid, a), Some(c5)); // the constant dominates everywhere
+        assert_eq!(cc.leader(fid, c5), Some(c5));
     }
 
     /// Assert-vacuum soundness: `assert(x == 5)` pins `x` to 5 *conditionally* in dominated blocks,
@@ -999,5 +1462,439 @@ pub(crate) mod tests {
         assert!(cc.asserted_equal(fid, mid, y, x));
         // `y` is undefined at `entry`, so the equality is withheld there.
         assert!(!cc.asserted_equal(fid, entry_id, x, y));
+    }
+
+    /// A callee that returns a constant: the call result folds interprocedurally in the caller's
+    /// context, while the SCCP-visible intraprocedural view leaves it `Bottom`.
+    #[test]
+    fn interproc_constant_return_folds_at_call_site() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let helper = ssa.add_function("helper".to_string());
+        let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+        let r = ssa.fresh_value();
+
+        {
+            let hf = ssa.get_function_mut(helper);
+            hf.add_return_type(Type::field());
+            hf.get_entry_mut()
+                .set_terminator(Terminator::Return(vec![c5]));
+        }
+        {
+            let mf = ssa.get_function_mut(main_id);
+            mf.add_return_type(Type::field());
+            let entry = mf.get_entry_mut();
+            entry.push_instruction(OpCode::Call {
+                results: vec![r],
+                function: CallTarget::Static(helper),
+                args: vec![],
+                unconstrained: false,
+            });
+            entry.set_terminator(Terminator::Return(vec![r]));
+        }
+
+        let cc = run_in_test(&ssa);
+        assert_eq!(
+            cc.const_of_in(main_id, &Context::empty(), r).as_deref(),
+            Some(&Constant::Field(Field::from(5u64)))
+        );
+        // The intraprocedural view (what SCCP reads) never folds a call result.
+        assert_eq!(cc.const_of(main_id, r), None);
+    }
+
+    /// A pass-through callee (returns its parameter): the result takes the argument's constant at
+    /// the call site, and the callee's parameter is seeded to it per context.
+    #[test]
+    fn interproc_passthrough_seeds_param_and_result() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let id = ssa.add_function("id".to_string());
+        let p = ssa.fresh_value();
+        let c7 = ssa.add_const(Constant::Field(Field::from(7u64)));
+        let r = ssa.fresh_value();
+
+        {
+            let hf = ssa.get_function_mut(id);
+            hf.add_return_type(Type::field());
+            hf.get_entry_mut().push_parameter(p, Type::field());
+            hf.get_entry_mut()
+                .set_terminator(Terminator::Return(vec![p]));
+        }
+        {
+            let mf = ssa.get_function_mut(main_id);
+            mf.add_return_type(Type::field());
+            let entry = mf.get_entry_mut();
+            entry.push_instruction(OpCode::Call {
+                results: vec![r],
+                function: CallTarget::Static(id),
+                args: vec![c7],
+                unconstrained: false,
+            });
+            entry.set_terminator(Terminator::Return(vec![r]));
+        }
+
+        let cc = run_in_test(&ssa);
+        assert_eq!(
+            cc.const_of_in(main_id, &Context::empty(), r).as_deref(),
+            Some(&Constant::Field(Field::from(7u64)))
+        );
+        let ctxs = cc.contexts_of(id);
+        assert_eq!(ctxs.len(), 1);
+        assert_eq!(
+            cc.const_of_in(id, &ctxs[0], p).as_deref(),
+            Some(&Constant::Field(Field::from(7u64)))
+        );
+    }
+
+    /// The context-parameterized conditional queries. The branch-fact family
+    /// (`const_in_block_in`) is context-*precise* — it sees the per-context parameter constant the
+    /// intraprocedural query cannot — while the assert/witness family forwards to the (sound,
+    /// context-independent) intraprocedural facts.
+    #[test]
+    fn context_parameterized_conditional_queries() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let id = ssa.add_function("id".to_string());
+        let p = ssa.fresh_value();
+        let c7 = ssa.add_const(Constant::Field(Field::from(7u64)));
+        let r = ssa.fresh_value();
+
+        {
+            let hf = ssa.get_function_mut(id);
+            hf.add_return_type(Type::field());
+            hf.get_entry_mut().push_parameter(p, Type::field());
+            hf.get_entry_mut()
+                .set_terminator(Terminator::Return(vec![p]));
+        }
+        {
+            let mf = ssa.get_function_mut(main_id);
+            mf.add_return_type(Type::field());
+            let entry = mf.get_entry_mut();
+            entry.push_instruction(OpCode::Call {
+                results: vec![r],
+                function: CallTarget::Static(id),
+                args: vec![c7],
+                unconstrained: false,
+            });
+            entry.set_terminator(Terminator::Return(vec![r]));
+        }
+
+        let entry_id = ssa.get_function(id).get_entry_id();
+        let cc = run_in_test(&ssa);
+        let ctxs = cc.contexts_of(id);
+        assert_eq!(ctxs.len(), 1);
+        let ctx = &ctxs[0];
+
+        // Intraprocedurally `p` is unconstrained; under the single call context it is the constant 7.
+        assert_eq!(cc.const_in_block(id, entry_id, p), None);
+        assert_eq!(
+            cc.const_in_block_in(id, ctx, entry_id, p).as_deref(),
+            Some(&Constant::Field(Field::from(7u64)))
+        );
+    }
+
+    /// Two call sites of one helper get distinct contexts with distinct per-context parameter
+    /// constants — the 1-CFA win.
+    #[test]
+    fn interproc_two_call_sites_are_distinguished() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let id = ssa.add_function("id".to_string());
+        let p = ssa.fresh_value();
+        let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+        let c7 = ssa.add_const(Constant::Field(Field::from(7u64)));
+        let (r5, r7) = (ssa.fresh_value(), ssa.fresh_value());
+
+        {
+            let hf = ssa.get_function_mut(id);
+            hf.add_return_type(Type::field());
+            hf.get_entry_mut().push_parameter(p, Type::field());
+            hf.get_entry_mut()
+                .set_terminator(Terminator::Return(vec![p]));
+        }
+        {
+            let mf = ssa.get_function_mut(main_id);
+            mf.add_return_type(Type::field());
+            let entry = mf.get_entry_mut();
+            entry.push_instruction(OpCode::Call {
+                results: vec![r5],
+                function: CallTarget::Static(id),
+                args: vec![c5],
+                unconstrained: false,
+            });
+            entry.push_instruction(OpCode::Call {
+                results: vec![r7],
+                function: CallTarget::Static(id),
+                args: vec![c7],
+                unconstrained: false,
+            });
+            entry.set_terminator(Terminator::Return(vec![r5, r7]));
+        }
+
+        let cc = run_in_test(&ssa);
+        assert_eq!(
+            cc.const_of_in(main_id, &Context::empty(), r5).as_deref(),
+            Some(&Constant::Field(Field::from(5u64)))
+        );
+        assert_eq!(
+            cc.const_of_in(main_id, &Context::empty(), r7).as_deref(),
+            Some(&Constant::Field(Field::from(7u64)))
+        );
+        let ctxs = cc.contexts_of(id);
+        assert_eq!(ctxs.len(), 2, "two call sites → two contexts");
+        let seen: Vec<Constant> = ctxs
+            .iter()
+            .filter_map(|ctx| cc.const_of_in(id, ctx, p).map(|c| (*c).clone()))
+            .collect();
+        assert_eq!(seen.len(), 2);
+        assert!(seen.contains(&Constant::Field(Field::from(5u64))));
+        assert!(seen.contains(&Constant::Field(Field::from(7u64))));
+    }
+
+    /// An unconstrained call's result is advice, not circuit-constrained: it never folds (even when
+    /// the callee returns a constant) and stays an opaque singleton.
+    #[test]
+    fn unconstrained_call_result_is_opaque() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let helper = ssa.add_function("helper".to_string());
+        let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+        let (r1, r2) = (ssa.fresh_value(), ssa.fresh_value());
+
+        {
+            let hf = ssa.get_function_mut(helper);
+            hf.add_return_type(Type::field());
+            hf.get_entry_mut()
+                .set_terminator(Terminator::Return(vec![c5]));
+        }
+        {
+            let mf = ssa.get_function_mut(main_id);
+            mf.add_return_type(Type::field());
+            mf.add_return_type(Type::field());
+            let entry = mf.get_entry_mut();
+            entry.push_instruction(OpCode::Call {
+                results: vec![r1],
+                function: CallTarget::Static(helper),
+                args: vec![],
+                unconstrained: true,
+            });
+            entry.push_instruction(OpCode::Call {
+                results: vec![r2],
+                function: CallTarget::Static(helper),
+                args: vec![],
+                unconstrained: true,
+            });
+            entry.set_terminator(Terminator::Return(vec![r1, r2]));
+        }
+
+        let cc = run_in_test(&ssa);
+        // Even interprocedurally, an unconstrained result is never folded ...
+        assert_eq!(cc.const_of_in(main_id, &Context::empty(), r1), None);
+        assert_eq!(cc.const_of(main_id, r1), None);
+        // ... and two such results are not merged.
+        assert!(!cc.known_equal(main_id, r1, r2));
+    }
+
+    /// Cross-call congruence: a callee whose return is a deterministic function of its arguments is
+    /// value-numbered cross-call, so two calls with congruent arguments yield congruent results —
+    /// and a call with a non-congruent argument does not.
+    #[test]
+    fn cross_call_congruence_for_deterministic_callee() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let dbl = ssa.add_function("dbl".to_string());
+        let p = ssa.fresh_value();
+        let psum = ssa.fresh_value();
+
+        // dbl(p) = p + p — deterministic in its argument.
+        {
+            let hf = ssa.get_function_mut(dbl);
+            hf.add_return_type(Type::field());
+            hf.get_entry_mut().push_parameter(p, Type::field());
+            hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: psum,
+                lhs: p,
+                rhs: p,
+            });
+            hf.get_entry_mut()
+                .set_terminator(Terminator::Return(vec![psum]));
+        }
+
+        let c1 = ssa.add_const(Constant::Field(Field::from(1u64)));
+        let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
+        let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
+        let (r1, r2, r3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        {
+            let mf = ssa.get_function_mut(main_id);
+            mf.add_return_type(Type::field());
+            mf.add_return_type(Type::field());
+            mf.add_return_type(Type::field());
+            mf.get_entry_mut().push_parameter(x, Type::field());
+            mf.get_entry_mut().push_parameter(y, Type::field());
+            let entry = mf.get_entry_mut();
+            // `a` and `b` are structurally congruent (both `x + 1`); `y` is distinct.
+            entry.push_instruction(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: a,
+                lhs: x,
+                rhs: c1,
+            });
+            entry.push_instruction(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: b,
+                lhs: x,
+                rhs: c1,
+            });
+            entry.push_instruction(OpCode::Call {
+                results: vec![r1],
+                function: CallTarget::Static(dbl),
+                args: vec![a],
+                unconstrained: false,
+            });
+            entry.push_instruction(OpCode::Call {
+                results: vec![r2],
+                function: CallTarget::Static(dbl),
+                args: vec![b],
+                unconstrained: false,
+            });
+            entry.push_instruction(OpCode::Call {
+                results: vec![r3],
+                function: CallTarget::Static(dbl),
+                args: vec![y],
+                unconstrained: false,
+            });
+            entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
+        }
+
+        let cc = run_in_test(&ssa);
+        assert!(cc.known_equal(main_id, r1, r2)); // congruent args ⇒ congruent results
+        assert!(!cc.known_equal(main_id, r1, r3)); // distinct arg ⇒ distinct result
+    }
+
+    /// A callee whose return carries a fresh witness is *not* a deterministic function of its
+    /// arguments, so its results are never numbered cross-call — two such calls stay distinct (the
+    /// determinism gate that protects the free-witness non-merge prohibition).
+    #[test]
+    fn cross_call_no_congruence_for_nondeterministic_callee() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let rnd = ssa.add_function("rnd".to_string());
+        let w = ssa.fresh_value();
+
+        {
+            let hf = ssa.get_function_mut(rnd);
+            hf.add_return_type(Type::field());
+            hf.get_entry_mut().push_instruction(OpCode::FreshWitness {
+                result: w,
+                result_type: Type::field(),
+            });
+            hf.get_entry_mut()
+                .set_terminator(Terminator::Return(vec![w]));
+        }
+        let (r1, r2) = (ssa.fresh_value(), ssa.fresh_value());
+        {
+            let mf = ssa.get_function_mut(main_id);
+            mf.add_return_type(Type::field());
+            mf.add_return_type(Type::field());
+            let entry = mf.get_entry_mut();
+            entry.push_instruction(OpCode::Call {
+                results: vec![r1],
+                function: CallTarget::Static(rnd),
+                args: vec![],
+                unconstrained: false,
+            });
+            entry.push_instruction(OpCode::Call {
+                results: vec![r2],
+                function: CallTarget::Static(rnd),
+                args: vec![],
+                unconstrained: false,
+            });
+            entry.set_terminator(Terminator::Return(vec![r1, r2]));
+        }
+
+        let cc = run_in_test(&ssa);
+        assert!(!cc.known_equal(main_id, r1, r2));
+    }
+
+    /// Determinism is interprocedural: `outer` is deterministic because the `inner` it calls is, so
+    /// its results are numbered cross-call too.
+    #[test]
+    fn cross_call_congruence_is_transitive() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let inner = ssa.add_function("inner".to_string());
+        let outer = ssa.add_function("outer".to_string());
+
+        let ip = ssa.fresh_value();
+        let isum = ssa.fresh_value();
+        {
+            let hf = ssa.get_function_mut(inner);
+            hf.add_return_type(Type::field());
+            hf.get_entry_mut().push_parameter(ip, Type::field());
+            hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: isum,
+                lhs: ip,
+                rhs: ip,
+            });
+            hf.get_entry_mut()
+                .set_terminator(Terminator::Return(vec![isum]));
+        }
+        let op = ssa.fresh_value();
+        let ores = ssa.fresh_value();
+        {
+            let hf = ssa.get_function_mut(outer);
+            hf.add_return_type(Type::field());
+            hf.get_entry_mut().push_parameter(op, Type::field());
+            hf.get_entry_mut().push_instruction(OpCode::Call {
+                results: vec![ores],
+                function: CallTarget::Static(inner),
+                args: vec![op],
+                unconstrained: false,
+            });
+            hf.get_entry_mut()
+                .set_terminator(Terminator::Return(vec![ores]));
+        }
+
+        let c1 = ssa.add_const(Constant::Field(Field::from(1u64)));
+        let x = ssa.fresh_value();
+        let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
+        let (r1, r2) = (ssa.fresh_value(), ssa.fresh_value());
+        {
+            let mf = ssa.get_function_mut(main_id);
+            mf.add_return_type(Type::field());
+            mf.add_return_type(Type::field());
+            mf.get_entry_mut().push_parameter(x, Type::field());
+            let entry = mf.get_entry_mut();
+            entry.push_instruction(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: a,
+                lhs: x,
+                rhs: c1,
+            });
+            entry.push_instruction(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: b,
+                lhs: x,
+                rhs: c1,
+            });
+            entry.push_instruction(OpCode::Call {
+                results: vec![r1],
+                function: CallTarget::Static(outer),
+                args: vec![a],
+                unconstrained: false,
+            });
+            entry.push_instruction(OpCode::Call {
+                results: vec![r2],
+                function: CallTarget::Static(outer),
+                args: vec![b],
+                unconstrained: false,
+            });
+            entry.set_terminator(Terminator::Return(vec![r1, r2]));
+        }
+
+        let cc = run_in_test(&ssa);
+        assert!(cc.known_equal(main_id, r1, r2));
     }
 }

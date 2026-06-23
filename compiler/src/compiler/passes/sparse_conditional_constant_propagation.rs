@@ -95,7 +95,15 @@ fn rewrite(function: &mut HLFunction, ssa: &HLSSA, cc: &ClickCooper, fid: Functi
             {
                 let mut results = instr.get_results();
                 if let (Some(r), None) = (results.next(), results.next()) {
-                    if const_set.contains(r) && instr.is_pure_scalar_fold() {
+                    let is_const = const_set.contains(r);
+                    assert!(
+                        !is_const || instr.is_pure_scalar_fold(),
+                        "ICE::SCCP: result {r:?} of non-pure-scalar instruction {instr:?} is in the \
+                         constant set; the intraprocedural ClickCooper facts must never fold a \
+                         non-pure-scalar op to a constant"
+                    );
+
+                    if is_const && instr.is_pure_scalar_fold() {
                         continue;
                     }
                 }
