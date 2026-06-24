@@ -5,6 +5,8 @@
 //! reachability and value lattices are computed together so constants propagate through
 //! constant-decided branches.
 
+use std::sync::Arc;
+
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
@@ -418,12 +420,18 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
         let mut acc = Constness::Top;
         for pred in preds {
             match self.function.get_block(*pred).get_terminator() {
+                // A well-formed `Jmp` to `b` supplies one arg per parameter; a missing operand (an
+                // ill-formed jump) is defensively treated as unknown rather than panicking.
                 Some(Terminator::Jmp(t, args)) if *t == b => {
-                    acc = const_join(acc, self.lattice_in_block(*pred, args[i]));
+                    acc = match args.get(i) {
+                        Some(arg) => const_join(acc, self.lattice_in_block(*pred, *arg)),
+                        None => Constness::Bottom,
+                    };
                 }
+
                 // A parameterized block is only ever entered via `Jmp`; treat anything else
-                // (including a `Jmp` to a different target) as unknown rather than trusting the
-                // invariant.
+                // (including a `Jmp` to a different target) as unknown in case the invariant ever
+                // fails.
                 Some(Terminator::Jmp(..))
                 | Some(Terminator::JmpIf(..))
                 | Some(Terminator::Return(..))
@@ -598,7 +606,7 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
         match self.lattice_in_block(bid, v) {
             Constness::Top => Constness::Top,
             Constness::Const(c) => f(&c)
-                .map(|c| Constness::Const(std::sync::Arc::new(c)))
+                .map(|c| Constness::Const(Arc::new(c)))
                 .unwrap_or(Constness::Bottom),
             Constness::Bottom => Constness::Bottom,
         }
@@ -615,7 +623,7 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
         match (self.lattice_in_block(bid, l), self.lattice_in_block(bid, r)) {
             (Constness::Top, _) | (_, Constness::Top) => Constness::Top,
             (Constness::Const(a), Constness::Const(b)) => f(&a, &b)
-                .map(|c| Constness::Const(std::sync::Arc::new(c)))
+                .map(|c| Constness::Const(Arc::new(c)))
                 .unwrap_or(Constness::Bottom),
             (Constness::Bottom, _) | (_, Constness::Bottom) => Constness::Bottom,
         }

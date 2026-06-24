@@ -21,10 +21,8 @@ use crate::{
     compiler::{
         analysis::{
             flow_analysis::{CFG, FlowAnalysis},
-            points_to::{
-                PointerUse, PointsTo,
-                object::{AbstractObject, Context},
-            },
+            points_to::{PointerUse, PointsTo, object::AbstractObject},
+            shared::call_string::Context,
             types::{FunctionTypeInfo, TypeInfo},
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},

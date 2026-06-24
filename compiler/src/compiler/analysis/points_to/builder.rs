@@ -37,10 +37,11 @@ use crate::{
         analysis::{
             points_to::{
                 array_cells::ArrayCells,
-                object::{AbstractObject, Cell, Context, Descent, NodeKey, Owner, Path},
+                object::{AbstractObject, Cell, Descent, NodeKey, Owner, Path},
                 solver::ConstraintSet,
                 summary::PointsToSummary,
             },
+            shared::call_string::Context,
             types::FunctionTypeInfo,
         },
         ssa::{
