@@ -1,0 +1,6 @@
+[package]
+name = "congruent_witness_comparison"
+type = "bin"
+authors = [""]
+
+[dependencies]

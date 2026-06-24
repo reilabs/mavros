@@ -7,18 +7,29 @@
 //!
 //! # Folding Semantics
 //!
-//! Only *pure scalar* values are folded, and only when every operand is a pure interned constant —
-//! a `WitnessOf`-typed value is never an interned constant, so witness arithmetic is never touched.
+//! Folding is driven by Click-Cooper's `new_const_values`, which reports every value proven
+//! unconditionally constant — including congruence-derived must-equal facts, i.e. a comparison of
+//! congruent operands (`x == x → true`, `x < x → false`) even when neither operand is itself
+//! constant. A pure scalar fold whose result is constant is dropped and its uses aliased to the
+//! bare interned constant.
+//!
+//! The **exception** is a `WitnessOf`-typed folded constant (a witnessed comparison of congruent
+//! operands): aliasing it to a bare constant would drop the wrapper and mistype the IR, so it is
+//! instead redefined in place as `cast <const> to WitnessOf`, keeping the value witness-typed.
 
 use crate::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     compiler::{
-        analysis::click_cooper::ClickCooper,
+        analysis::{
+            click_cooper::ClickCooper,
+            flow_analysis::FlowAnalysis,
+            types::{TypeInfo, Types},
+        },
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
         passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
         ssa::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
-            hlssa::{HLFunction, HLSSA, OpCode},
+            hlssa::{CastTarget, HLFunction, HLSSA, OpCode},
         },
     },
 };
@@ -35,11 +46,11 @@ impl Pass for SCCP {
     }
 
     fn needs(&self) -> Vec<AnalysisId> {
-        vec![ClickCooper::id()]
+        vec![ClickCooper::id(), TypeInfo::id()]
     }
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        self.do_run(ssa, store.get::<ClickCooper>());
+        rewrite_all(ssa, store.get::<ClickCooper>(), store.get::<TypeInfo>());
     }
 }
 
@@ -48,20 +59,36 @@ impl SCCP {
         Self {}
     }
 
+    /// Standalone entry (tests / callers without an `AnalysisStore`): recomputes `TypeInfo` from
+    /// the current SSA, then rewrites. The pass-manager `run` path uses the cached `TypeInfo`
+    /// instead.
     pub fn do_run(&self, ssa: &mut HLSSA, cc: &ClickCooper) {
-        let fids: Vec<_> = ssa.get_function_ids().collect();
-        for fid in fids {
-            let mut function = ssa.take_function(fid);
-            rewrite(&mut function, ssa, cc, fid);
-            ssa.put_function(fid, function);
-        }
+        let flow = FlowAnalysis::run(ssa);
+        let type_info = Types::new().run(ssa, &flow);
+        rewrite_all(ssa, cc, &type_info);
+    }
+}
+
+fn rewrite_all(ssa: &mut HLSSA, cc: &ClickCooper, type_info: &TypeInfo) {
+    let fids: Vec<_> = ssa.get_function_ids().collect();
+    for fid in fids {
+        let mut function = ssa.take_function(fid);
+        rewrite(&mut function, ssa, cc, type_info, fid);
+        ssa.put_function(fid, function);
     }
 }
 
 // REWRITING FUNCTIONALITY
 // ================================================================================================
 
-fn rewrite(function: &mut HLFunction, ssa: &HLSSA, cc: &ClickCooper, fid: FunctionId) {
+fn rewrite(
+    function: &mut HLFunction,
+    ssa: &HLSSA,
+    cc: &ClickCooper,
+    type_info: &TypeInfo,
+    fid: FunctionId,
+) {
+    let fn_type_info = type_info.get_function(fid);
     // Drop blocks the analysis never reached. Every kept terminator only targets reachable blocks:
     // a JmpIf with a constant condition is rewritten to a Jmp to its (reachable) live successor
     // below, and all other terminators had all successor edges marked executable.
@@ -73,13 +100,28 @@ fn rewrite(function: &mut HLFunction, ssa: &HLSSA, cc: &ClickCooper, fid: Functi
     }
 
     // Alias every constant-valued value (instruction results and block parameters) to the interned
-    // constant. `const_values` is sorted by value id, so interning a missing constant (which
-    // allocates a fresh value id) is deterministic across runs.
+    // constant. `const_values` comes from a deterministic `FxHashMap` iteration (the hasher has no
+    // per-run seed), so interning a missing constant (which allocates a fresh value id) is
+    // deterministic across runs.
+    //
+    // A `WitnessOf`-typed constant is the exception: it cannot be aliased to a bare interned
+    // constant (that would drop the wrapper and mistype the IR — e.g. a witnessed comparison of
+    // congruent operands folds to a provably-true witness). Those are collected here and redefined
+    // in place as a `cast <const> to WitnessOf` in the instruction loop below, preserving the
+    // witness type.
     let mut replacements = ValueReplacements::new();
     let const_values = cc.new_const_values(fid);
     let const_set: HashSet<ValueId> = const_values.iter().map(|(v, _)| *v).collect();
+
+    // In practice `witness_consts` only ever holds `Cmp` instruction *results* — the sole witnessed
+    // constants the analysis produces (a vacuous witnessed comparison).
+    let mut witness_consts = HashMap::default();
     for (v, c) in &const_values {
-        replacements.insert(*v, ssa.add_const((**c).clone()));
+        if fn_type_info.get_value_type(*v).is_witness_of() {
+            witness_consts.insert(*v, c.clone());
+        } else {
+            replacements.insert(*v, ssa.add_const((**c).clone()));
+        }
     }
 
     let kept_blocks: Vec<BlockId> = function.get_blocks().map(|(id, _)| *id).collect();
@@ -92,6 +134,10 @@ fn rewrite(function: &mut HLFunction, ssa: &HLSSA, cc: &ClickCooper, fid: Functi
         for instr in instructions {
             // Purity gate: a single-result instruction whose result the analysis proved constant is
             // dropped only when it is a pure scalar fold; its uses are aliased above either way.
+            //
+            // A `WitnessOf`-typed constant keeps its value id, redefined as a cast of the interned
+            // constant to `WitnessOf`, so the value's witness type is preserved for its (possibly
+            // witnessed) uses and return slots, rather than being aliased to a bare constant.
             {
                 let mut results = instr.get_results();
                 if let (Some(r), None) = (results.next(), results.next()) {
@@ -104,6 +150,14 @@ fn rewrite(function: &mut HLFunction, ssa: &HLSSA, cc: &ClickCooper, fid: Functi
                     );
 
                     if is_const && instr.is_pure_scalar_fold() {
+                        if let Some(c) = witness_consts.get(r) {
+                            let bare = ssa.add_const((**c).clone());
+                            kept.push(OpCode::Cast {
+                                result: *r,
+                                value: bare,
+                                target: CastTarget::WitnessOf,
+                            });
+                        }
                         continue;
                     }
                 }
@@ -613,6 +667,111 @@ mod tests {
         assert!(matches!(
             f.get_block(merge).get_terminator(),
             Some(Terminator::Return(vals)) if *vals == vec![c_true]
+        ));
+    }
+
+    /// A branch decided by *congruence* — `CmpEq(a, b)` with `a` and `b` structurally equal but not
+    /// constant — folds away through the combined-fixpoint writeback: the comparison is dropped,
+    /// the `JmpIf` becomes a `Jmp` to the then-block, and the dead else-block is deleted. The two
+    /// (non-constant) adds survive, and the purity assert does not trip on the folded `Cmp`.
+    #[test]
+    fn folds_congruence_decided_branch() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let c1 = ssa.add_const(Constant::U(32, 1));
+        let (x, a, b, eq) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
+
+        let f = ssa.get_unique_entrypoint_mut();
+        let then_b = f.add_block();
+        let else_b = f.add_block();
+        f.get_entry_mut().push_parameter(x, Type::u(32));
+        let entry = f.get_entry_mut();
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: a,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: b,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: eq,
+            lhs: a,
+            rhs: b,
+        });
+        entry.set_terminator(Terminator::JmpIf(eq, then_b, else_b));
+        f.get_block_mut(then_b)
+            .set_terminator(Terminator::Return(vec![a]));
+        f.get_block_mut(else_b)
+            .set_terminator(Terminator::Return(vec![b]));
+
+        let cc = run_in_test(&ssa);
+        SCCP::new().do_run(&mut ssa, &cc);
+
+        let f = ssa.get_unique_entrypoint();
+        // The two adds survive (not constant); only the `Cmp` folded away.
+        assert_eq!(f.get_entry().get_instructions().count(), 2);
+        // The branch is decided and the dead else-block is gone.
+        assert!(matches!(
+            f.get_entry().get_terminator(),
+            Some(Terminator::Jmp(t, args)) if *t == then_b && args.is_empty()
+        ));
+        assert_eq!(f.get_blocks().count(), 2);
+    }
+
+    /// A *witnessed* comparison of congruent operands folds to a constant, but — unlike a plain
+    /// scalar fold, which is dropped and aliased to the bare interned constant — the value keeps
+    /// its `WitnessOf` type: it is redefined in place as a `cast <const> to WitnessOf`, so the
+    /// (witnessed) return slot stays correctly typed.
+    #[test]
+    fn witnessed_constant_is_cast_to_witness_of() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let (w, ww) = (ssa.fresh_value(), ssa.fresh_value());
+
+        let f = ssa.get_unique_entrypoint_mut();
+        let entry = f.get_entry_mut();
+        // An operand is `WitnessOf`, so the comparison result is `WitnessOf(u1)`.
+        entry.push_parameter(w, Type::witness_of(Type::u(32)));
+        entry.push_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: ww,
+            lhs: w,
+            rhs: w,
+        });
+        entry.set_terminator(Terminator::Return(vec![ww]));
+
+        let cc = run_in_test(&ssa);
+        SCCP::new().do_run(&mut ssa, &cc);
+
+        let f = ssa.get_unique_entrypoint();
+        // The witnessed comparison is gone, replaced by a cast of the folded constant to `WitnessOf`
+        // (keeping `ww` witness-typed) rather than aliased to a bare constant.
+        assert!(
+            !f.get_entry()
+                .get_instructions()
+                .any(|i| matches!(i, OpCode::Cmp { .. })),
+            "the witnessed comparison should have folded away"
+        );
+        assert!(
+            f.get_entry().get_instructions().any(|i| matches!(
+                i,
+                OpCode::Cast { result, target: CastTarget::WitnessOf, .. } if *result == ww
+            )),
+            "ww should be redefined as a cast to WitnessOf"
+        );
+        // The return still references `ww`, now witness-typed, matching its WitnessOf return slot.
+        assert!(matches!(
+            f.get_entry().get_terminator(),
+            Some(Terminator::Return(vals)) if vals.as_slice() == [ww]
         ));
     }
 }
