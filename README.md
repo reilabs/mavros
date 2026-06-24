@@ -7,7 +7,7 @@ workflows in mind.
 
 ## Building
 
-This project uses [Nix](https://lix.system) [flakes](https://nixos.wiki/wiki/Flakes) to provide a
+This project uses [Nix](https://lix.systems) [flakes](https://nixos.wiki/wiki/Flakes) to provide a
 pinned build environment with all the tools you need to build the project. Assuming you have nix
 installed, simply `make shell` to drop into your user shell inside the build environment, or run
 `nix develop --command <your-command-here>` to run a specific command in the build environment.

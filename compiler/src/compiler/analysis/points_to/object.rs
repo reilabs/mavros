@@ -47,44 +47,9 @@ pub type Path = Vec<Descent>;
 // CALL CONTEXT
 // ================================================================================================
 
-/// A bounded call-string identifying the context an abstract object was created in.
-///
-/// Context sensitivity keeps two call sites of the same helper from conflating their local
-/// allocations. The string is k-limited (see [`Context::push`]) so the object universe stays
-/// finite; recursion folds onto the recursion head. The empty context is the polymorphic (phase-1,
-/// summary) context.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord, Default)]
-pub struct Context(Vec<CallSite>);
-
-/// A call site, identified by the caller function and the first result value of the `Call`
-/// instruction (a stable per-call id within a polymorphic body).
-pub type CallSite = (FunctionId, ValueId);
-
-impl Context {
-    /// The empty (polymorphic / summary) context.
-    pub fn empty() -> Self {
-        Context(Vec::new())
-    }
-
-    /// Whether this is the empty context.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// This context extended by `site`, truncated to the most-recent `k` sites (k-CFA).
-    pub fn push(&self, site: CallSite, k: usize) -> Self {
-        if k == 0 {
-            return Context::empty();
-        }
-        let mut sites = self.0.clone();
-        sites.push(site);
-        if sites.len() > k {
-            let drop = sites.len() - k;
-            sites.drain(0..drop);
-        }
-        Context(sites)
-    }
-}
+/// The bounded call-string identifying the context an abstract object was created in: context
+/// sensitivity keeps two call sites of the same helper from conflating their local allocations.
+pub use crate::compiler::analysis::call_string::{CallSite, Context};
 
 // ABSTRACT OBJECTS
 // ================================================================================================
