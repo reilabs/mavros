@@ -10,6 +10,7 @@ use crate::compiler::ssa::{
     Block, Function, FunctionId, Instruction, Located, SSA, SSAConstants, SSAConstantsSnapshot,
     ValueId,
 };
+
 pub use type_system::{MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type, TypeExpr};
 
 // HLSSA
@@ -262,21 +263,56 @@ pub enum OpCode {
 }
 
 impl OpCode {
-    /// `true` if `self` is capable of being a pure, side-effect-free, single-result scalar op that
-    /// can be folded to a constant and have the defining instruction deleted.
-    ///
-    /// Note that this requires the caller to verify that the operation's lack of side effects holds
-    /// in context (e.g. a given multiplication cannot overflow).
-    pub fn is_pure_scalar_fold(&self) -> bool {
+    /// The [`ScalarFold`] decomposition of `self`, or `None` for any op that is not a pure
+    /// single-result scalar fold (memory, witness ops, asserts, sequences, calls, ...).
+    pub fn scalar_fold(&self) -> Option<ScalarFold<'_>> {
         match self {
-            OpCode::Cmp { .. }
-            | OpCode::BinaryArithOp { .. }
-            | OpCode::Cast { .. }
-            | OpCode::SExt { .. }
-            | OpCode::BitRange { .. }
-            | OpCode::Not { .. }
-            | OpCode::Select { .. }
-            | OpCode::MulConst { .. } => true,
+            OpCode::BinaryArithOp { kind, lhs, rhs, .. } => Some(ScalarFold::Bin {
+                kind: *kind,
+                lhs: *lhs,
+                rhs: *rhs,
+            }),
+            OpCode::Cmp { kind, lhs, rhs, .. } => Some(ScalarFold::Cmp {
+                kind: *kind,
+                lhs: *lhs,
+                rhs: *rhs,
+            }),
+            OpCode::MulConst { const_val, var, .. } => Some(ScalarFold::MulConst {
+                const_val: *const_val,
+                var: *var,
+            }),
+            OpCode::Cast { value, target, .. } => Some(ScalarFold::Cast {
+                target,
+                value: *value,
+            }),
+            OpCode::SExt {
+                value,
+                from_bits,
+                to_bits,
+                ..
+            } => Some(ScalarFold::SExt {
+                value: *value,
+                from_bits: *from_bits,
+                to_bits: *to_bits,
+            }),
+            OpCode::BitRange {
+                value,
+                offset,
+                width,
+                ..
+            } => Some(ScalarFold::BitRange {
+                value: *value,
+                offset: *offset,
+                width: *width,
+            }),
+            OpCode::Not { value, .. } => Some(ScalarFold::Not { value: *value }),
+            OpCode::Select {
+                cond, if_t, if_f, ..
+            } => Some(ScalarFold::Select {
+                cond: *cond,
+                if_t: *if_t,
+                if_f: *if_f,
+            }),
 
             OpCode::MkSeq { .. }
             | OpCode::MkSeqOfBlob { .. }
@@ -312,8 +348,17 @@ impl OpCode {
             | OpCode::DropGlobal { .. }
             | OpCode::Spread { .. }
             | OpCode::Unspread { .. }
-            | OpCode::Guard { .. } => false,
+            | OpCode::Guard { .. } => None,
         }
+    }
+
+    /// `true` if `self` is a pure, side-effect-free, single-result scalar op that can be folded to
+    /// a constant and have the defining instruction deleted. See [`ScalarFold`].
+    ///
+    /// Note that this requires the caller to verify that the operation's lack of side effects holds
+    /// in context (e.g. a given multiplication cannot overflow).
+    pub fn is_pure_scalar_fold(&self) -> bool {
+        self.scalar_fold().is_some()
     }
 }
 
@@ -1622,6 +1667,24 @@ impl Instruction for OpCode {
 pub type HLFunction = Function<OpCode, Type>;
 pub type HLBlock = Block<OpCode, Type>;
 
+// SCALAR FOLD
+// ================================================================================================
+
+/// A pure, side-effect-free, single-result scalar op that may fold to a constant, decomposed into
+/// its operation and operands.
+///
+/// This is the **single source of truth** that defines which opcodes are foldable scalar ops.
+pub enum ScalarFold<'a> {
+    Bin { kind: BinaryArithOpKind, lhs: ValueId, rhs: ValueId },
+    Cmp { kind: CmpKind, lhs: ValueId, rhs: ValueId },
+    MulConst { const_val: ValueId, var: ValueId },
+    Cast { target: &'a CastTarget, value: ValueId },
+    SExt { value: ValueId, from_bits: usize, to_bits: usize },
+    BitRange { value: ValueId, offset: usize, width: usize },
+    Not { value: ValueId },
+    Select { cond: ValueId, if_t: ValueId, if_f: ValueId },
+}
+
 // CALL TARGET
 // ================================================================================================
 
@@ -1660,7 +1723,7 @@ pub enum CmpKind {
 // SEQUENCE TYPE
 // ================================================================================================
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SequenceTargetType {
     Array(usize),
     Slice,
@@ -1873,7 +1936,7 @@ impl Display for Endianness {
 // SLICE OPERAND DIRECTION
 // ================================================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SliceOpDir {
     Front,
     Back,

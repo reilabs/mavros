@@ -232,25 +232,6 @@ pub(crate) fn eval_cmp(kind: CmpKind, a: &Constant, b: &Constant) -> Option<Cons
     }
 }
 
-/// Folds a field multiplication operation.
-pub(crate) fn eval_field_mul(a: &Constant, b: &Constant) -> Option<Constant> {
-    match (a, b) {
-        (Constant::Field(x), Constant::Field(y)) => Some(Constant::Field(*x * *y)),
-        (
-            Constant::U(..)
-            | Constant::I(..)
-            | Constant::Field(_)
-            | Constant::FnPtr(_)
-            | Constant::Blob(_),
-            Constant::U(..)
-            | Constant::I(..)
-            | Constant::Field(_)
-            | Constant::FnPtr(_)
-            | Constant::Blob(_),
-        ) => None,
-    }
-}
-
 /// Folds a constant cast operation.
 ///
 /// HLSSA casts are raw-bits conversions (sign extension is the separate `SExt` op). Integers

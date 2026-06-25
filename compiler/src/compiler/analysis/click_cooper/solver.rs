@@ -12,12 +12,13 @@ use crate::{
             congruence::Congruence,
             lattice::{
                 Constness, bool_constness, const_bool, const_join, eval_binary, eval_bit_range,
-                eval_cast, eval_cmp, eval_field_mul, eval_not, eval_sext,
+                eval_cast, eval_cmp, eval_not, eval_sext,
             },
+            summary::{DetSummaries, FnSummary, ReturnJump},
         },
         ssa::{
-            BlockId, Instruction, Terminator, ValueId,
-            hlssa::{Constant, HLFunction, HLSSAConstantsSnapshot, OpCode},
+            BlockId, FunctionId, Instruction, Terminator, ValueId,
+            hlssa::{CallTarget, Constant, HLFunction, HLSSAConstantsSnapshot, OpCode, ScalarFold},
         },
     },
 };
@@ -62,7 +63,7 @@ pub(crate) struct FunctionFacts {
 // ================================================================================================
 
 /// The fact solver for a single function.
-pub(crate) struct FunctionSolver<'f, 'c> {
+pub(crate) struct FunctionSolver<'f, 'c, 's> {
     /// The function being solved.
     function: &'f HLFunction,
 
@@ -95,9 +96,26 @@ pub(crate) struct FunctionSolver<'f, 'c> {
 
     /// For each value: the sites that read it. `None` marks the block's terminator.
     uses: HashMap<ValueId, Vec<(BlockId, Option<usize>)>>,
+
+    /// Interprocedural jump-function summaries, used to fold the results of constrained static
+    /// `Call`s into the constant lattice.
+    ///
+    /// `None` (the default) is the intraprocedural mode the SCCP-visible facts use: every `Call`
+    /// result is `Bottom`.
+    summaries: Option<&'s HashMap<FunctionId, FnSummary>>,
+
+    /// Per-`(callee, return-index)` determinism bits, used when building the congruence partition
+    /// to number deterministic static-call results cross-call.
+    ///
+    /// `None` (the default) leaves every call result opaque, identical to the prior behavior.
+    det: Option<&'s DetSummaries>,
+
+    /// Entry-parameter seeds for a context-sensitive solve: an entry parameter maps to the constant
+    /// the calling context proved for the matching argument. Absent params default to `Bottom`.
+    param_seeds: HashMap<ValueId, Constness>,
 }
 
-impl<'f, 'c> FunctionSolver<'f, 'c> {
+impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
     pub(crate) fn new(function: &'f HLFunction, consts: &'c HLSSAConstantsSnapshot) -> Self {
         let mut uses: HashMap<ValueId, Vec<(BlockId, Option<usize>)>> = HashMap::default();
         for (bid, block) in function.get_blocks() {
@@ -129,15 +147,43 @@ impl<'f, 'c> FunctionSolver<'f, 'c> {
             edge_worklist: Vec::new(),
             value_worklist: Vec::new(),
             uses,
+            summaries: None,
+            det: None,
+            param_seeds: HashMap::default(),
         }
+    }
+
+    /// Fold constrained static `Call` results via these interprocedural summaries.
+    pub(crate) fn with_summaries(mut self, summaries: &'s HashMap<FunctionId, FnSummary>) -> Self {
+        self.summaries = Some(summaries);
+        self
+    }
+
+    /// Number deterministic static-call results cross-call using these determinism bits.
+    pub(crate) fn with_determinism(mut self, det: &'s DetSummaries) -> Self {
+        self.det = Some(det);
+        self
+    }
+
+    /// Seed entry parameters with the calling context's argument constants.
+    pub(crate) fn with_param_seeds(mut self, seeds: HashMap<ValueId, Constness>) -> Self {
+        self.param_seeds = seeds;
+        self
     }
 
     pub(crate) fn run(&mut self) {
         let entry = self.function.get_entry_id();
 
-        // Entry parameters are the function's arguments — unknown (`Bottom`) intraprocedurally.
+        // Entry parameters are the function's arguments. Intraprocedurally they are unknown
+        // (`Bottom`); a context-sensitive solve seeds them with the calling context's argument
+        // constants via `param_seeds`.
         for (p, _) in self.function.get_entry().get_parameters() {
-            self.lattice.insert(*p, Constness::Bottom);
+            let seed = self
+                .param_seeds
+                .get(p)
+                .cloned()
+                .unwrap_or(Constness::Bottom);
+            self.lattice.insert(*p, seed);
         }
         self.reachable.insert(entry);
         self.block_facts.insert(entry, BoolFacts::default());
@@ -159,16 +205,19 @@ impl<'f, 'c> FunctionSolver<'f, 'c> {
 
     /// Convert the solver into facts.
     pub(crate) fn into_facts(self) -> FunctionFacts {
-        let congruence =
-            Congruence::build(
-                self.function,
-                &self.reachable,
-                &self.exec_edges,
-                |v| match self.lattice_of(v) {
-                    Constness::Const(c) => Some(c),
-                    Constness::Top | Constness::Bottom => None,
-                },
-            );
+        let det = self.det;
+        let congruence = Congruence::build(
+            self.function,
+            &self.reachable,
+            &self.exec_edges,
+            |v| match self.lattice_of(v) {
+                Constness::Const(c) => Some(c),
+                Constness::Top | Constness::Bottom => None,
+            },
+            |g, j| {
+                det.is_some_and(|d| d.get(&g).and_then(|rets| rets.get(j)).copied() == Some(true))
+            },
+        );
 
         FunctionFacts {
             lattice: self.lattice,
@@ -350,22 +399,16 @@ impl<'f, 'c> FunctionSolver<'f, 'c> {
         }
 
         let params: Vec<ValueId> = block.get_parameter_values().copied().collect();
-        let mut updates = Vec::with_capacity(indices.map_or(params.len(), <[usize]>::len));
 
+        // Recompute the chosen parameters in place: `indices` selects which, and `None` recomputes
+        // them all (the common full-recompute path).
+        let recompute = |this: &mut Self, i: usize| {
+            let lat = this.join_param(b, preds, i);
+            this.set_lattice(params[i], lat);
+        };
         match indices {
-            Some(indices) => {
-                for &i in indices {
-                    updates.push((params[i], self.join_param(b, preds, i)));
-                }
-            }
-            None => {
-                for i in 0..params.len() {
-                    updates.push((params[i], self.join_param(b, preds, i)));
-                }
-            }
-        }
-        for (p, lat) in updates {
-            self.set_lattice(p, lat);
+            Some(indices) => indices.iter().for_each(|&i| recompute(self, i)),
+            None => (0..params.len()).for_each(|i| recompute(self, i)),
         }
     }
 
@@ -449,115 +492,100 @@ impl<'f, 'c> FunctionSolver<'f, 'c> {
 
     /// The transfer function: new lattice values for the instruction's results.
     fn transfer(&self, bid: BlockId, instr: &OpCode) -> Vec<(ValueId, Constness)> {
-        match instr {
-            OpCode::BinaryArithOp {
-                kind,
-                result,
-                lhs,
-                rhs,
-            } => vec![(
-                *result,
-                self.eval2(bid, *lhs, *rhs, |a, b| eval_binary(*kind, a, b)),
-            )],
-            OpCode::Cmp {
-                kind,
-                result,
-                lhs,
-                rhs,
-            } => vec![(
-                *result,
-                self.eval2(bid, *lhs, *rhs, |a, b| eval_cmp(*kind, a, b)),
-            )],
-            OpCode::MulConst {
-                result,
-                const_val,
-                var,
-            } => vec![(*result, self.eval2(bid, *const_val, *var, eval_field_mul))],
-            OpCode::Cast {
-                result,
-                value,
-                target,
-            } => vec![(*result, self.eval1(bid, *value, |v| eval_cast(target, v)))],
-            OpCode::SExt {
-                result,
+        // A constrained static `Call` folds its results via the callee's interprocedural
+        // jump-function summary (when summaries are supplied). Without summaries every result is
+        // `Bottom`. It is not a scalar fold, so it is handled before the `scalar_fold` projection.
+        if let OpCode::Call {
+            results,
+            function,
+            args,
+            unconstrained,
+        } = instr
+        {
+            return self.eval_call(bid, function, args, results, *unconstrained);
+        }
+
+        // Foldable scalar ops are evaluated; everything else (memory, witness ops, asserts,
+        // sequences, ...) is overdefined. `scalar_fold` is the single source of truth for which
+        // opcodes are foldable, so this can never disagree with `OpCode::is_pure_scalar_fold` or
+        // `op_signature` — no cross-classifier assertion is needed.
+        let Some(fold) = instr.scalar_fold() else {
+            return instr
+                .get_results()
+                .map(|r| (*r, Constness::Bottom))
+                .collect();
+        };
+
+        let value = match fold {
+            ScalarFold::Bin { kind, lhs, rhs } => {
+                self.eval2(bid, lhs, rhs, |a, b| eval_binary(kind, a, b))
+            }
+            ScalarFold::Cmp { kind, lhs, rhs } => {
+                self.eval2(bid, lhs, rhs, |a, b| eval_cmp(kind, a, b))
+            }
+
+            // `MulConst` is `const_val(field) * var(WitnessOf<…>)`. `var` is always a witness, so
+            // it is never a lattice `Const` — the fold could never fire (and field-domain
+            // multiplication must never inherit integer `Mul` width/overflow rules).
+            ScalarFold::MulConst { .. } => Constness::Bottom,
+            ScalarFold::Cast { target, value } => self.eval1(bid, value, |v| eval_cast(target, v)),
+            ScalarFold::SExt {
                 value,
                 from_bits,
                 to_bits,
-            } => vec![(
-                *result,
-                self.eval1(bid, *value, |v| eval_sext(v, *from_bits, *to_bits)),
-            )],
-            OpCode::BitRange {
-                result,
+            } => self.eval1(bid, value, |v| eval_sext(v, from_bits, to_bits)),
+            ScalarFold::BitRange {
                 value,
                 offset,
                 width,
-            } => vec![(
-                *result,
-                self.eval1(bid, *value, |v| eval_bit_range(v, *offset, *width)),
-            )],
-            OpCode::Not { result, value } => vec![(*result, self.eval1(bid, *value, eval_not))],
-            OpCode::Select {
-                result,
-                cond,
-                if_t,
-                if_f,
-            } => vec![(*result, self.eval_select(bid, *cond, *if_t, *if_f))],
+            } => self.eval1(bid, value, |v| eval_bit_range(v, offset, width)),
+            ScalarFold::Not { value } => self.eval1(bid, value, eval_not),
+            ScalarFold::Select { cond, if_t, if_f } => self.eval_select(bid, cond, if_t, if_f),
+        };
 
-            // Everything else — including `Call`, whose result is unknown intraprocedurally, is
-            // overdefined. The rewrite relies on this: a constant-valued instruction result is
-            // always the output of one of the pure scalar ops above. Spelled out variant by variant
-            // (no catch-all) so that adding an opcode forces a decision here.
-            OpCode::Call { .. }
-            | OpCode::MkSeq { .. }
-            | OpCode::MkSeqOfBlob { .. }
-            | OpCode::MkRepeated { .. }
-            | OpCode::Alloc { .. }
-            | OpCode::Store { .. }
-            | OpCode::Load { .. }
-            | OpCode::Assert { .. }
-            | OpCode::AssertCmp { .. }
-            | OpCode::AssertR1C { .. }
-            | OpCode::ArrayGet { .. }
-            | OpCode::ArraySet { .. }
-            | OpCode::SlicePush { .. }
-            | OpCode::SliceLen { .. }
-            | OpCode::ToBits { .. }
-            | OpCode::ToRadix { .. }
-            | OpCode::MemOp { .. }
-            | OpCode::WriteWitness { .. }
-            | OpCode::FreshWitness { .. }
-            | OpCode::NextDCoeff { .. }
-            | OpCode::BumpD { .. }
-            | OpCode::Constrain { .. }
-            | OpCode::Lookup { .. }
-            | OpCode::DLookup { .. }
-            | OpCode::Rangecheck { .. }
-            | OpCode::ReadGlobal { .. }
-            | OpCode::TupleProj { .. }
-            | OpCode::TupleRefProj { .. }
-            | OpCode::MkTuple { .. }
-            | OpCode::Todo { .. }
-            | OpCode::InitGlobal { .. }
-            | OpCode::DropGlobal { .. }
-            | OpCode::Spread { .. }
-            | OpCode::Unspread { .. }
-            | OpCode::Guard { .. } => {
-                // Single source of truth: anything overdefined here must not be classified as a
-                // deletable pure scalar fold, or SCCP would drop a side-effecting / constrained
-                // instruction whose result it aliased to a constant. The reverse direction (a fold
-                // wrongly marked non-foldable) is caught by the byte-identical corpus gate.
-                debug_assert!(
-                    !instr.is_pure_scalar_fold(),
-                    "transfer treats {instr:?} as overdefined but OpCode::is_pure_scalar_fold \
-                     classifies it as a deletable fold; the two must agree"
-                );
-                instr
-                    .get_results()
-                    .map(|r| (*r, Constness::Bottom))
-                    .collect()
-            }
+        // Every scalar fold is single-result; map keeps that contract without an `unwrap`.
+        instr.get_results().map(|r| (*r, value.clone())).collect()
+    }
+
+    /// Fold a `Call`'s results through the callee's jump-function summary.
+    ///
+    /// Only constrained static calls to a summarized function fold; an unconstrained call (results
+    /// are advice, not circuit-constrained), a dynamic call (unknown target), or a summary-less /
+    /// non-interprocedural solve leaves every result `Bottom`. A `Param(i)` jump function resolves
+    /// to the *in-context* constant of argument `i`, so a passthrough callee yields per-call-site
+    /// constant results without re-solving the callee.
+    fn eval_call(
+        &self,
+        bid: BlockId,
+        function: &CallTarget,
+        args: &[ValueId],
+        results: &[ValueId],
+        unconstrained: bool,
+    ) -> Vec<(ValueId, Constness)> {
+        let all_bottom = || results.iter().map(|r| (*r, Constness::Bottom)).collect();
+        if unconstrained {
+            return all_bottom();
         }
+        let (Some(summaries), CallTarget::Static(g)) = (self.summaries, function) else {
+            return all_bottom();
+        };
+        let Some(summary) = summaries.get(g) else {
+            return all_bottom();
+        };
+        results
+            .iter()
+            .enumerate()
+            .map(|(j, r)| {
+                let c = match summary.returns.get(j) {
+                    Some(ReturnJump::Const(c)) => Constness::Const(c.clone()),
+                    Some(ReturnJump::Param(i)) if *i < args.len() => {
+                        self.lattice_in_block(bid, args[*i])
+                    }
+                    _ => Constness::Bottom,
+                };
+                (*r, c)
+            })
+            .collect()
     }
 
     /// Evaluate a 1-argument function `f` on `v` in the context of `bid`.
