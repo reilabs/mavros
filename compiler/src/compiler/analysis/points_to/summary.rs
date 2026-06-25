@@ -40,9 +40,10 @@ use crate::{
             points_to::{
                 array_cells::ArrayCells,
                 builder::{build_function, ref_levels},
-                object::{AbstractObject, Context, NodeKey, Owner, Path},
+                object::{AbstractObject, NodeKey, Owner, Path},
                 solver::PointsToSolution,
             },
+            shared::{call_string::Context, fixpoint::call_graph_fixpoint},
             types::TypeInfo,
         },
         ssa::{FunctionId, hlssa::HLSSA},
@@ -92,40 +93,13 @@ pub fn compute_summaries(
         .filter(|f| types.has_function(*f))
         .collect();
 
-    let mut summaries: HashMap<FunctionId, PointsToSummary> = fids
-        .iter()
-        .map(|f| (*f, PointsToSummary::default()))
-        .collect();
-
-    // Seed callee-first (post-order from main) so summaries are ready before their callers consume
-    // them; append any analyzed function unreachable from main so none are dropped.
-    let call_graph = flow.get_call_graph();
-    let mut order: Vec<FunctionId> = call_graph
-        .get_post_order(main)
-        .filter(|f| summaries.contains_key(f))
-        .collect();
-    let mut queued: HashSet<FunctionId> = order.iter().copied().collect();
-    for f in &fids {
-        if queued.insert(*f) {
-            order.push(*f);
-        }
-    }
-    let mut worklist: VecDeque<FunctionId> = order.into();
-
-    while let Some(f) = worklist.pop_front() {
-        queued.remove(&f);
-        let new = analyze_function(ssa, types, f, &summaries, main, array_cells);
-        if summaries[&f] != new {
-            summaries.insert(f, new);
-            for c in call_graph.get_callers(f) {
-                if summaries.contains_key(&c) && queued.insert(c) {
-                    worklist.push_back(c);
-                }
-            }
-        }
-    }
-
-    summaries
+    call_graph_fixpoint(
+        ssa,
+        flow,
+        &fids,
+        |_| PointsToSummary::default(),
+        |f, summaries| analyze_function(ssa, types, f, summaries, main, array_cells),
+    )
 }
 
 /// Analyze one function against the current callee summaries and project out its summary.

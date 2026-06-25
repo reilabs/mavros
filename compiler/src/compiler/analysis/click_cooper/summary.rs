@@ -41,13 +41,13 @@ use crate::{
     collections::{HashMap, HashSet},
     compiler::{
         analysis::{
-            call_string::Context,
             click_cooper::{
                 congruence::pure_op_operands,
                 lattice::{Constness, const_join},
                 solver::{FunctionFacts, FunctionSolver},
             },
             flow_analysis::FlowAnalysis,
+            shared::{call_string::Context, fixpoint::call_graph_fixpoint},
         },
         ssa::{
             FunctionId, Instruction, Terminator, ValueId,
@@ -74,9 +74,11 @@ pub(crate) fn compute_determinism(ssa: &HLSSA, flow: &FlowAnalysis) -> DetSummar
     // Optimistic: every return position starts deterministic; the worklist only ever lowers a bit to
     // false. A return is deterministic if its body's non-deterministic sources never reach it, which
     // (for a recursive function) holds at the greatest fixpoint started from "all true".
+    let fids: Vec<FunctionId> = ssa.get_function_ids().collect();
     call_graph_fixpoint(
         ssa,
         flow,
+        &fids,
         |f| vec![true; ssa.get_function(f).get_returns().len()],
         |f, det| analyze_determinism(ssa, det, f),
     )
@@ -203,9 +205,11 @@ pub(crate) fn compute_summaries(
     det: &DetSummaries,
 ) -> HashMap<FunctionId, FnSummary> {
     // Polymorphic over call sites: callees folded via their current summaries, parameters `Bottom`.
+    let fids: Vec<FunctionId> = ssa.get_function_ids().collect();
     call_graph_fixpoint(
         ssa,
         flow,
+        &fids,
         |_| FnSummary::default(),
         |f, summaries| analyze_function(ssa, consts, det, f, summaries),
     )
@@ -432,50 +436,6 @@ pub(crate) fn specialize(
 
 // HELPERS
 // ================================================================================================
-
-/// Solve a per-function fact to a fixpoint over the call graph.
-///
-/// Every function starts at `init(f)`. The worklist is seeded callee-first (post-order from `main`,
-/// then any function unreachable from `main` so none is dropped) and `analyze(f, &map)` re-runs
-/// whenever a callee's fact changed, until nothing moves. The accumulator is passed to `analyze`, so
-/// a function is solved against its callees' current facts.
-fn call_graph_fixpoint<T: PartialEq>(
-    ssa: &HLSSA,
-    flow: &FlowAnalysis,
-    init: impl Fn(FunctionId) -> T,
-    analyze: impl Fn(FunctionId, &HashMap<FunctionId, T>) -> T,
-) -> HashMap<FunctionId, T> {
-    let main = ssa.get_unique_entrypoint_id();
-    let fids: Vec<FunctionId> = ssa.get_function_ids().collect();
-    let mut map: HashMap<FunctionId, T> = fids.iter().map(|f| (*f, init(*f))).collect();
-
-    let call_graph = flow.get_call_graph();
-    let mut order: Vec<FunctionId> = call_graph
-        .get_post_order(main)
-        .filter(|f| map.contains_key(f))
-        .collect();
-    let mut queued: HashSet<FunctionId> = order.iter().copied().collect();
-    for f in &fids {
-        if queued.insert(*f) {
-            order.push(*f);
-        }
-    }
-    let mut worklist: VecDeque<FunctionId> = order.into();
-
-    while let Some(f) = worklist.pop_front() {
-        queued.remove(&f);
-        let new = analyze(f, &map);
-        if map[&f] != new {
-            map.insert(f, new);
-            for c in call_graph.get_callers(f) {
-                if map.contains_key(&c) && queued.insert(c) {
-                    worklist.push_back(c);
-                }
-            }
-        }
-    }
-    map
-}
 
 /// The entry-parameter values of `f`, in order.
 fn param_values(ssa: &HLSSA, f: FunctionId) -> Vec<ValueId> {

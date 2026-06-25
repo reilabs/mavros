@@ -10,7 +10,10 @@
 //! coordinate so that statically-constant array indices can be tracked separately (the enabler for
 //! array-cell splitting).
 
-use crate::compiler::ssa::{FunctionId, ValueId};
+use crate::compiler::{
+    analysis::shared::call_string::Context,
+    ssa::{FunctionId, ValueId},
+};
 
 // DESCENT AND PATHS
 // ================================================================================================
@@ -43,13 +46,6 @@ pub enum Cell {
 
 /// A path from a node's root down through `Deref`/`Elem` steps to one level of its type.
 pub type Path = Vec<Descent>;
-
-// CALL CONTEXT
-// ================================================================================================
-
-/// The bounded call-string identifying the context an abstract object was created in: context
-/// sensitivity keeps two call sites of the same helper from conflating their local allocations.
-pub use crate::compiler::analysis::call_string::{CallSite, Context};
 
 // ABSTRACT OBJECTS
 // ================================================================================================

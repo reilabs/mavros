@@ -113,8 +113,6 @@ mod lattice;
 mod solver;
 mod summary;
 
-pub use crate::compiler::analysis::call_string::Context;
-
 use std::sync::Arc;
 
 use crate::{
@@ -128,6 +126,7 @@ use crate::{
                 summary::{compute_determinism, compute_summaries, specialize},
             },
             flow_analysis::FlowAnalysis,
+            shared::call_string::Context,
             types::TypeInfo,
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore},
