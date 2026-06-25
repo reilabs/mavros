@@ -379,12 +379,18 @@ impl WitnessLowering {
                             slice,
                             values,
                         } => {
-                            let slice_type = type_info.get_value_type(slice);
-                            let new_slice_type = self.witness_lowering_in_type(&slice_type);
-                            let expected_elem_type = match &new_slice_type.expr {
+                            let result_slice_type = type_info.get_value_type(result);
+                            let new_result_slice_type = self.witness_lowering_in_type(result_slice_type);
+                            let expected_elem_type = match &result_slice_type.expr {
                                 TypeExpr::Slice(inner) => inner.as_ref().clone(),
                                 _ => panic!("SlicePush on non-slice type"),
                             };
+                            let new_slice = self.convert_if_needed(
+                                slice,
+                                &result_slice_type,
+                                type_info,
+                                &mut emitter,
+                            );
                             let new_values = values
                                 .iter()
                                 .map(|v| {
@@ -399,7 +405,7 @@ impl WitnessLowering {
                             emitter.emit(OpCode::SlicePush {
                                 dir,
                                 result,
-                                slice,
+                                slice: new_slice,
                                 values: new_values,
                             });
                         }

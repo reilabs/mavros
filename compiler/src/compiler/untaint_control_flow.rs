@@ -792,18 +792,20 @@ impl UntaintControlFlow {
                 values,
             } if type_info.is_some() => {
                 let ti = type_info.unwrap();
-                let slice_type = ti.get_value_type(slice);
-                let expected_elem_type = match &slice_type.expr {
+                let result_slice_type = ti.get_value_type(result);
+                let expected_elem_type = match &result_slice_type.expr {
                     TypeExpr::Slice(inner) => inner.as_ref().clone(),
                     _ => panic!("SlicePush on non-slice type"),
                 };
                 let mut cast_instrs = Vec::new();
-                let new_values: Vec<_> = {
+                let (new_slice, new_values) = {
                     let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
-                    values
+                    let new_slice = convert_if_needed(slice, result_slice_type, ti, &mut builder);
+                    let new_values: Vec<_> = values
                         .iter()
                         .map(|v| convert_if_needed(*v, &expected_elem_type, ti, &mut builder))
-                        .collect()
+                        .collect();
+                    (new_slice, new_values)
                 };
                 flush_conversion_instrs(new_instructions, block_taint, cast_instrs);
                 maybe_guard(
@@ -812,7 +814,7 @@ impl UntaintControlFlow {
                     OpCode::SlicePush {
                         dir,
                         result,
-                        slice,
+                        slice: new_slice,
                         values: new_values,
                     },
                 );

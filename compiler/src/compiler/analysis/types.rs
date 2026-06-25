@@ -378,14 +378,28 @@ impl Types {
             OpCode::SlicePush {
                 result,
                 slice,
-                values: _,
+                values,
                 dir: _,
             } => {
                 let slice_type = function_info.values.get(slice).ok_or_else(|| {
                     format!("Slice value {:?} not found in type assignments", slice)
                 })?;
 
-                function_info.values.insert(*result, slice_type.clone());
+                let elem_type = slice_type.get_array_element();
+                let mut result_elem_type = elem_type.clone();
+                for v in values {
+                    let value_type = function_info
+                        .values
+                        .get(v)
+                        .ok_or_else(|| format!("Value {:?} not found in type assignments", v))?;
+                    result_elem_type = Type::join(&result_elem_type, value_type);
+                }
+                let result_type = if result_elem_type == elem_type {
+                    slice_type.clone()
+                } else {
+                    replace_array_element_type(slice_type, result_elem_type)
+                };
+                function_info.values.insert(*result, result_type);
                 Ok(())
             }
             OpCode::SliceLen { result, slice: _ } => {
