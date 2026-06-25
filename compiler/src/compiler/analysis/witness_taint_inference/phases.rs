@@ -10,6 +10,7 @@ use crate::collections::{HashMap, HashSet};
 use crate::compiler::{
     analysis::{
         flow_analysis::FlowAnalysis,
+        shared::fixpoint::call_graph_fixpoint,
         types::{FunctionTypeInfo, TypeInfo, Types},
         witness_info::{FunctionWitnessType, WitnessShape, WitnessType},
         witness_taint_inference::{
@@ -51,11 +52,6 @@ fn compute_summaries(
     HashMap<FunctionId, FunctionSummary>,
     HashMap<FunctionId, WitnessTaint>,
 ) {
-    let mut summaries: HashMap<FunctionId, FunctionSummary> = fids
-        .iter()
-        .map(|f| (*f, FunctionSummary::default()))
-        .collect();
-
     // The formal input/output skeleton is summary-independent (the transitive read-globals depend
     // only on the call graph, not the evolving summaries): compute it once per function rather
     // than on every worklist pop.
@@ -71,44 +67,29 @@ fn compute_summaries(
         })
         .collect();
 
-    // Seed the worklist callee-first (post-order from main), so summaries are computed before
-    // their callers consume them and non-recursive call graphs converge in a single pass. Append
-    // any analyzed function unreachable from main so none are dropped.
-    let mut order: Vec<FunctionId> = flow
-        .get_call_graph()
-        .get_post_order(ssa.get_unique_entrypoint_id())
-        .filter(|f| summaries.contains_key(f))
-        .collect();
-    let mut queued: HashSet<FunctionId> = order.iter().copied().collect();
-    for f in fids {
-        if queued.insert(*f) {
-            order.push(*f);
-        }
-    }
-    let mut worklist: VecDeque<FunctionId> = order.into();
-
+    // The call-graph summary fixpoint, capturing each function's last-pop graph as an additional
+    // output. Those are the final-summary graphs (a callee change always re-queues its callers, so
+    // when the worklist drains each function was last rebuilt after its callees' final change);
+    // returning them saves phase 2 a full rebuild pass.
     let mut graphs: HashMap<FunctionId, WitnessTaint> = HashMap::default();
-    while let Some(f) = worklist.pop_front() {
-        queued.remove(&f);
-        let func = ssa.get_function(f);
-        let g = build_graph(
-            func,
-            types.get_function(f),
-            flow.get_function_cfg(f),
-            &block_conds[&f],
-            &summaries,
-        );
-        let new = extract_summary(&g, &skeletons[&f]);
-        graphs.insert(f, g);
-        if summaries[&f] != new {
-            summaries.insert(f, new);
-            for c in flow.get_call_graph().get_callers(f) {
-                if summaries.contains_key(&c) && queued.insert(c) {
-                    worklist.push_back(c);
-                }
-            }
-        }
-    }
+    let summaries = call_graph_fixpoint(
+        ssa,
+        flow,
+        fids,
+        |_| FunctionSummary::default(),
+        |f, summaries| {
+            let g = build_graph(
+                ssa.get_function(f),
+                types.get_function(f),
+                flow.get_function_cfg(f),
+                &block_conds[&f],
+                summaries,
+            );
+            let new = extract_summary(&g, &skeletons[&f]);
+            graphs.insert(f, g);
+            new
+        },
+    );
 
     (summaries, graphs)
 }

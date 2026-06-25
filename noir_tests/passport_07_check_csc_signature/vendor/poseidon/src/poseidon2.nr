@@ -1,7 +1,7 @@
 use std::default::Default;
 use std::hash::Hasher;
 
-comptime global RATE: u32 = 3;
+global RATE: u32 = 3;
 
 pub struct Poseidon2 {
     cache: [Field; 3],
@@ -32,7 +32,7 @@ impl Poseidon2 {
                 self.state[i] += self.cache[i];
             }
         }
-        self.state = crate::poseidon2_permutation(self.state, 4);
+        self.state = crate::poseidon2_permutation(self.state);
     }
 
     fn absorb(&mut self, input: Field) {
@@ -89,6 +89,10 @@ pub struct Poseidon2Hasher {
 
 impl Hasher for Poseidon2Hasher {
     fn finish(self) -> Field {
+        self.finish_ref()
+    }
+
+    fn finish_ref(&self) -> Field {
         let iv: Field = (self._state.len() as Field) * 18446744073709551616; // iv = (self._state.len() << 64)
         let mut sponge = Poseidon2::new(iv);
         for i in 0..self._state.len() {
@@ -104,6 +108,6 @@ impl Hasher for Poseidon2Hasher {
 
 impl Default for Poseidon2Hasher {
     fn default() -> Self {
-        Poseidon2Hasher { _state: &[] }
+        Poseidon2Hasher { _state: [].as_vector()}
     }
 }

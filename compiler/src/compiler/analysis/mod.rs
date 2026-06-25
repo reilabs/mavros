@@ -1,8 +1,10 @@
+pub mod click_cooper;
 pub mod flow_analysis;
 pub mod instrumenter;
 pub mod liveness;
 pub mod lookup_sizing;
 pub mod points_to;
+pub mod shared;
 pub mod symbolic_executor;
 pub mod types;
 pub mod value_definitions;
