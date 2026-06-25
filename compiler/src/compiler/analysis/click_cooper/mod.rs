@@ -100,6 +100,12 @@
 //!   pass per `(function, context)` — as `specialize` already does for the unconditional facts —
 //!   would let a context-specialized assert or branch expose more facts, and would warrant adding
 //!   the `_in` variants.
+//! - **Aggregate Constant Folding:** The pure, value-semantic sequence ops (`MkSeq`, `MkRepeated`,
+//!   `MkSeqOfBlob`, `ArrayGet`, `ArraySet`, `SlicePush`, `SliceLen`) are value-numbered (see
+//!   `congruence::op_signature`) but never constant-folded. The `Constness` lattice carries only a
+//!   scalar `Arc<Constant>` and the fold functions are scalar, so it cannot represent an aggregate
+//!   constant. Future work can widen the lattice to handle aggregate constants and transfer
+//!   functions.
 
 mod conditional;
 mod congruence;
@@ -544,7 +550,7 @@ pub(crate) mod tests {
             Terminator,
             hlssa::{
                 BinaryArithOpKind, CallTarget, CastTarget, CmpKind, Constant, HLSSA, OpCode,
-                ScalarFold, Type,
+                ScalarFold, SequenceTargetType, SliceOpDir, Type,
             },
         },
     };
@@ -556,11 +562,14 @@ pub(crate) mod tests {
         ClickCooper::run(ssa, &flow, &types)
     }
 
-    /// `OpCode::scalar_fold` is the single source of truth for "foldable scalar op". This locks the
-    /// three projections that read it: `is_pure_scalar_fold` agrees with `scalar_fold().is_some()`,
-    /// and value numbering (`pure_op_operands`, backed by `op_signature`) only ever fires on a
-    /// foldable op. The one deliberate asymmetry — a witness cast is foldable but never
-    /// value-numbered — is asserted explicitly so it cannot be silently dropped.
+    /// `OpCode::scalar_fold` is the single source of truth for "foldable *scalar* op", and value
+    /// numbering is a strict superset of it.
+    ///
+    /// This locks the projections that read both: `is_pure_scalar_fold` agrees with
+    /// `scalar_fold().is_some()`; value numbering (`pure_op_operands`, backed by `op_signature`)
+    /// fires on every foldable scalar op *except* witness casts, **and additionally** on the pure
+    /// sequence ops, which are not scalar-foldable. Both deliberate asymmetries are asserted below
+    /// so neither can be silently dropped.
     #[test]
     fn scalar_fold_is_the_single_classifier() {
         use super::congruence::pure_op_operands;
@@ -643,6 +652,62 @@ pub(crate) mod tests {
             Some(ScalarFold::Cast { .. })
         ));
         assert!(pure_op_operands(&witness_cast).is_none());
+
+        // The other deliberate asymmetry: pure sequence ops ARE value-numbered but are NOT
+        // scalar-foldable (their aggregate results never enter the constant lattice).
+        let elem = Type::field();
+        let sequence_ops: Vec<OpCode> = vec![
+            OpCode::ArrayGet {
+                result: v(),
+                array: v(),
+                index: v(),
+            },
+            OpCode::ArraySet {
+                result: v(),
+                array: v(),
+                index: v(),
+                value: v(),
+            },
+            OpCode::SliceLen {
+                result: v(),
+                slice: v(),
+            },
+            OpCode::MkSeq {
+                result: v(),
+                elems: vec![v(), v()],
+                seq_type: SequenceTargetType::Array(2),
+                elem_type: elem.clone(),
+            },
+            OpCode::MkRepeated {
+                result: v(),
+                element: v(),
+                seq_type: SequenceTargetType::Slice,
+                count: 3,
+                elem_type: elem.clone(),
+            },
+            OpCode::MkSeqOfBlob {
+                result: v(),
+                element_type: elem.clone(),
+                blob: v(),
+            },
+            OpCode::SlicePush {
+                dir: SliceOpDir::Back,
+                result: v(),
+                slice: v(),
+                values: vec![v()],
+            },
+        ];
+        for instr in &sequence_ops {
+            assert!(
+                !instr.is_pure_scalar_fold(),
+                "{instr:?} should not be scalar-foldable"
+            );
+            assert!(instr.scalar_fold().is_none());
+            assert!(
+                pure_op_operands(instr).is_some(),
+                "{instr:?} should be value-numbered"
+            );
+        }
 
         // Representative non-folds: not foldable, not value-numbered, no `ScalarFold`.
         let non_folds: Vec<OpCode> = vec![
@@ -763,6 +828,81 @@ pub(crate) mod tests {
         let mut expected = vec![a, b, c];
         expected.sort();
         assert_eq!(cc.congruence_class(fid, a), expected);
+    }
+
+    /// Pure sequence ops are value-numbered: two `ArrayGet`s of the same array at the same index
+    /// are congruent (a different index is not), `MkSeq`s congruent elementwise are congruent, and
+    /// the sequence shape (`seq_type`, `elem_type`) carried in the key keeps differently-shaped
+    /// `MkSeq`s apart.
+    #[test]
+    fn array_ops_are_value_numbered() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let (arr, i, j) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        let (g1, g2, g3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        let (s1, s2, s3, s4) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
+
+        let f = ssa.get_unique_entrypoint_mut();
+        f.get_entry_mut()
+            .push_parameter(arr, Type::field().array_of(4));
+        f.get_entry_mut().push_parameter(i, Type::u(32));
+        f.get_entry_mut().push_parameter(j, Type::u(32));
+        let entry = f.get_entry_mut();
+        // g1, g2 are arr[i]; g3 is arr[j].
+        entry.push_instruction(OpCode::ArrayGet {
+            result: g1,
+            array: arr,
+            index: i,
+        });
+        entry.push_instruction(OpCode::ArrayGet {
+            result: g2,
+            array: arr,
+            index: i,
+        });
+        entry.push_instruction(OpCode::ArrayGet {
+            result: g3,
+            array: arr,
+            index: j,
+        });
+        // s1 and s2 are the same array `[arr[i], arr[j]]` built twice — congruent elementwise.
+        entry.push_instruction(OpCode::MkSeq {
+            result: s1,
+            elems: vec![g1, g3],
+            seq_type: SequenceTargetType::Array(2),
+            elem_type: Type::field(),
+        });
+        entry.push_instruction(OpCode::MkSeq {
+            result: s2,
+            elems: vec![g2, g3],
+            seq_type: SequenceTargetType::Array(2),
+            elem_type: Type::field(),
+        });
+        // s3 differs only in sequence kind (Slice), s4 only in element type (u32): neither merges.
+        entry.push_instruction(OpCode::MkSeq {
+            result: s3,
+            elems: vec![g1, g3],
+            seq_type: SequenceTargetType::Slice,
+            elem_type: Type::field(),
+        });
+        entry.push_instruction(OpCode::MkSeq {
+            result: s4,
+            elems: vec![g1, g3],
+            seq_type: SequenceTargetType::Array(2),
+            elem_type: Type::u(32),
+        });
+        entry.set_terminator(Terminator::Return(vec![g1, g2, g3, s1, s2, s3, s4]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+        assert!(cc.known_equal(fid, g1, g2)); // arr[i] ≡ arr[i]
+        assert!(!cc.known_equal(fid, g1, g3)); // arr[i] ≢ arr[j]
+        assert!(cc.known_equal(fid, s1, s2)); // elementwise-congruent arrays
+        assert!(!cc.known_equal(fid, s1, s3)); // different seq_type
+        assert!(!cc.known_equal(fid, s1, s4)); // different elem_type
     }
 
     /// φ-operands come from *executable* edges only: a parameter whose value differs solely on a
@@ -1896,5 +2036,89 @@ pub(crate) mod tests {
 
         let cc = run_in_test(&ssa);
         assert!(cc.known_equal(main_id, r1, r2));
+    }
+
+    /// A callee that returns a pure transform of an array parameter (`p[0]`) is a deterministic
+    /// function of its argument now that sequence ops are value-numbered, so two calls with
+    /// congruent array arguments yield congruent results. Before this change the `ArrayGet` tainted
+    /// the return as non-deterministic and the calls stayed distinct.
+    #[test]
+    fn cross_call_congruence_for_array_returning_callee() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let pick = ssa.add_function("pick".to_string());
+        let p = ssa.fresh_value();
+        let elem = ssa.fresh_value();
+        let c0 = ssa.add_const(Constant::U(32, 0));
+
+        // pick(p) = p[0] — deterministic in its array argument.
+        {
+            let hf = ssa.get_function_mut(pick);
+            hf.add_return_type(Type::field());
+            hf.get_entry_mut()
+                .push_parameter(p, Type::field().array_of(1));
+            hf.get_entry_mut().push_instruction(OpCode::ArrayGet {
+                result: elem,
+                array: p,
+                index: c0,
+            });
+            hf.get_entry_mut()
+                .set_terminator(Terminator::Return(vec![elem]));
+        }
+
+        let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
+        let (a, b, d) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        let (r1, r2, r3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        {
+            let mf = ssa.get_function_mut(main_id);
+            mf.add_return_type(Type::field());
+            mf.add_return_type(Type::field());
+            mf.add_return_type(Type::field());
+            mf.get_entry_mut().push_parameter(x, Type::field());
+            mf.get_entry_mut().push_parameter(y, Type::field());
+            let entry = mf.get_entry_mut();
+            // `a` and `b` are congruent single-element arrays (`[x]`); `d` is `[y]`.
+            entry.push_instruction(OpCode::MkSeq {
+                result: a,
+                elems: vec![x],
+                seq_type: SequenceTargetType::Array(1),
+                elem_type: Type::field(),
+            });
+            entry.push_instruction(OpCode::MkSeq {
+                result: b,
+                elems: vec![x],
+                seq_type: SequenceTargetType::Array(1),
+                elem_type: Type::field(),
+            });
+            entry.push_instruction(OpCode::MkSeq {
+                result: d,
+                elems: vec![y],
+                seq_type: SequenceTargetType::Array(1),
+                elem_type: Type::field(),
+            });
+            entry.push_instruction(OpCode::Call {
+                results: vec![r1],
+                function: CallTarget::Static(pick),
+                args: vec![a],
+                unconstrained: false,
+            });
+            entry.push_instruction(OpCode::Call {
+                results: vec![r2],
+                function: CallTarget::Static(pick),
+                args: vec![b],
+                unconstrained: false,
+            });
+            entry.push_instruction(OpCode::Call {
+                results: vec![r3],
+                function: CallTarget::Static(pick),
+                args: vec![d],
+                unconstrained: false,
+            });
+            entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
+        }
+
+        let cc = run_in_test(&ssa);
+        assert!(cc.known_equal(main_id, r1, r2)); // congruent array args ⇒ congruent results
+        assert!(!cc.known_equal(main_id, r1, r3)); // distinct array arg ⇒ distinct result
     }
 }

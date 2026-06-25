@@ -12,7 +12,7 @@ use crate::{
             congruence::Congruence,
             lattice::{
                 Constness, bool_constness, const_bool, const_join, eval_binary, eval_bit_range,
-                eval_cast, eval_cmp, eval_field_mul, eval_not, eval_sext,
+                eval_cast, eval_cmp, eval_not, eval_sext,
             },
             summary::{DetSummaries, FnSummary, ReturnJump},
         },
@@ -523,9 +523,11 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
             ScalarFold::Cmp { kind, lhs, rhs } => {
                 self.eval2(bid, lhs, rhs, |a, b| eval_cmp(kind, a, b))
             }
-            ScalarFold::MulConst { const_val, var } => {
-                self.eval2(bid, const_val, var, eval_field_mul)
-            }
+
+            // `MulConst` is `const_val(field) * var(WitnessOf<…>)`. `var` is always a witness, so
+            // it is never a lattice `Const` — the fold could never fire (and field-domain
+            // multiplication must never inherit integer `Mul` width/overflow rules).
+            ScalarFold::MulConst { .. } => Constness::Bottom,
             ScalarFold::Cast { target, value } => self.eval1(bid, value, |v| eval_cast(target, v)),
             ScalarFold::SExt {
                 value,

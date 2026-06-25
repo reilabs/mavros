@@ -126,8 +126,9 @@ fn analyze_determinism(ssa: &HLSSA, det: &DetSummaries, fid: FunctionId) -> Vec<
                         })
                         .collect()
                 } else {
-                    // A non-deterministic source: witnesses, memory, globals, lookups, unconstrained
-                    // / dynamic calls, and anything else not a deterministic function of operands.
+                    // A non-deterministic source: witnesses, memory, globals, lookups, dynamic or
+                    // unconstrained calls, and anything else not a deterministic function of its
+                    // operands.
                     vec![true; results.len()]
                 };
                 for (r, t) in results.iter().zip(taints) {

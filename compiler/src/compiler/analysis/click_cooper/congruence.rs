@@ -26,7 +26,7 @@ use crate::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
             hlssa::{
                 BinaryArithOpKind, CallTarget, CastTarget, CmpKind, Constant, HLFunction, OpCode,
-                ScalarFold,
+                ScalarFold, SequenceTargetType, SliceOpDir, Type,
             },
         },
     },
@@ -222,6 +222,15 @@ impl Congruence {
                 // value classes. Thus, two such calls with operandwise-congruent arguments yield
                 // congruent results (cross-call value numbering). Any other call result stays an
                 // opaque singleton.
+                //
+                // An *unconstrained* call is excluded (it stays opaque) for soundness, not just
+                // conservatism: its result is prover advice, not pinned by any constraint, so two
+                // such calls with congruent arguments are equal only in honest witness generation,
+                // never forced equal in-circuit. Congruence here means equal in *every* admissible
+                // witness, so numbering unconstrained results congruent would underconstrain the
+                // circuit. Such results are already tainted non-deterministic by
+                // `analyze_determinism`, so `call_det` returns `false` for them regardless; this
+                // guard makes the reason explicit.
                 if let OpCode::Call {
                     results,
                     function: CallTarget::Static(g),
@@ -427,6 +436,18 @@ enum OpKey {
     Not,
     Select,
 
+    // Pure, value-semantic sequence ops. These are *not* scalar-foldable for now, so they are
+    // value-numbered but never constant-folded. The non-value attributes (`seq_type`, `elem_type`,
+    // repeat count, push direction) ride in the key so differently-shaped sequences never share a
+    // class.
+    ArrayGet,
+    ArraySet,
+    SliceLen,
+    MkSeq(SequenceTargetType, Type),
+    MkRepeated(SequenceTargetType, usize, Type),
+    MkSeqOfBlob(Type),
+    SlicePush(SliceOpDir),
+
     /// Return position `usize` of a constrained static call to `FunctionId` whose result is a
     /// deterministic function of the call's arguments (its operands). Two such calls to the same
     /// callee with operandwise-congruent arguments are congruent.
@@ -471,10 +492,69 @@ pub(crate) fn pure_op_operands(instr: &OpCode) -> Option<Vec<ValueId>> {
 /// The pure, deterministic ops eligible for value numbering, paired with their operands and
 /// commutativity.
 ///
-/// Projects from [`OpCode::scalar_fold`] (the single source of truth for foldable scalar ops), so
-/// it cannot disagree with `is_pure_scalar_fold` / `solver::transfer` on the opcode set. The only
-/// ops it further excludes are witness casts, which are foldable in name but never value-numbered.
+/// Value numbering is a strict *superset* of [`OpCode::scalar_fold`]: it covers every foldable
+/// scalar op (minus witness casts, which are foldable in name but never value-numbered) **plus**
+/// the pure, value-semantic sequence ops, which are value-numbered here yet are not scalar-foldable
+/// (their aggregate results never enter the constant lattice). So it may disagree with
+/// `is_pure_scalar_fold` / `solver::transfer` on the sequence ops by design, but never on a scalar
+/// op.
 fn op_signature(instr: &OpCode) -> Option<(OpKey, Vec<ValueId>, bool)> {
+    // Sequence ops are pure and deterministic but not scalar-foldable, so they are matched directly
+    // rather than via `scalar_fold`. Sequence order is significant, so none are commutative.
+    match instr {
+        OpCode::ArrayGet { array, index, .. } => {
+            return Some((OpKey::ArrayGet, vec![*array, *index], false));
+        }
+        OpCode::ArraySet {
+            array,
+            index,
+            value,
+            ..
+        } => {
+            return Some((OpKey::ArraySet, vec![*array, *index, *value], false));
+        }
+        OpCode::SliceLen { slice, .. } => return Some((OpKey::SliceLen, vec![*slice], false)),
+        OpCode::MkSeq {
+            elems,
+            seq_type,
+            elem_type,
+            ..
+        } => {
+            return Some((
+                OpKey::MkSeq(*seq_type, elem_type.clone()),
+                elems.clone(),
+                false,
+            ));
+        }
+        OpCode::MkRepeated {
+            element,
+            seq_type,
+            count,
+            elem_type,
+            ..
+        } => {
+            return Some((
+                OpKey::MkRepeated(*seq_type, *count, elem_type.clone()),
+                vec![*element],
+                false,
+            ));
+        }
+        OpCode::MkSeqOfBlob {
+            element_type, blob, ..
+        } => {
+            return Some((OpKey::MkSeqOfBlob(element_type.clone()), vec![*blob], false));
+        }
+        OpCode::SlicePush {
+            dir, slice, values, ..
+        } => {
+            let mut operands = Vec::with_capacity(values.len() + 1);
+            operands.push(*slice);
+            operands.extend(values.iter().copied());
+            return Some((OpKey::SlicePush(*dir), operands, false));
+        }
+        _ => {}
+    }
+
     use BinaryArithOpKind::*;
     Some(match instr.scalar_fold()? {
         ScalarFold::Bin { kind, lhs, rhs } => {

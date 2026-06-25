@@ -1723,7 +1723,7 @@ pub enum CmpKind {
 // SEQUENCE TYPE
 // ================================================================================================
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SequenceTargetType {
     Array(usize),
     Slice,
@@ -1936,7 +1936,7 @@ impl Display for Endianness {
 // SLICE OPERAND DIRECTION
 // ================================================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SliceOpDir {
     Front,
     Back,
