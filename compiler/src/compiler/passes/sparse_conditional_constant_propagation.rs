@@ -154,7 +154,7 @@ fn rewrite(
                     // single-result reads, so the definition is dropped and its uses are aliased to
                     // the interned constant; any other constant-producing op is an analysis bug.
                     let foldable = instr.is_pure_scalar_fold()
-                        || matches!(instr, OpCode::ArrayGet { .. } | OpCode::SliceLen { .. });
+                        || matches!(&*instr, OpCode::ArrayGet { .. } | OpCode::SliceLen { .. });
                     assert!(
                         !is_const || foldable,
                         "ICE: Result {r:?} of non-foldable instruction {instr:?} is in the \
