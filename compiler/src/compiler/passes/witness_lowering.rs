@@ -381,13 +381,13 @@ impl WitnessLowering {
                         } => {
                             let result_slice_type = type_info.get_value_type(result);
                             let new_result_slice_type = self.witness_lowering_in_type(result_slice_type);
-                            let expected_elem_type = match &result_slice_type.expr {
+                            let expected_elem_type = match &new_result_slice_type.expr {
                                 TypeExpr::Slice(inner) => inner.as_ref().clone(),
                                 _ => panic!("SlicePush on non-slice type"),
                             };
                             let new_slice = self.convert_if_needed(
                                 slice,
-                                &result_slice_type,
+                                &new_result_slice_type,
                                 type_info,
                                 &mut emitter,
                             );
