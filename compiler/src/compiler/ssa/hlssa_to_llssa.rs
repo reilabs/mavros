@@ -741,7 +741,7 @@ fn lower_function(
 
         // Lower instructions
         for (instruction, source_location) in block.get_instructions_with_source_locations() {
-            let start = emitter.instruction_count();
+            let before = emitter.instruction_count_snapshot();
             lower_instruction(
                 instruction,
                 &mut emitter,
@@ -754,7 +754,7 @@ fn lower_function(
                 hlssa_global_types,
                 options,
             );
-            emitter.set_instruction_source_locations_from(start, source_location.cloned());
+            emitter.set_instruction_source_locations_since(&before, source_location.cloned());
         }
 
         // Lower terminator (into current block, which may have changed due to block splits)

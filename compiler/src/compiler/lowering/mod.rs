@@ -94,7 +94,7 @@ impl SSAConverter {
 
         // Phase 2: Convert globals (must be before function conversion so global_slots are available)
         if !program.globals.is_empty() {
-            self.convert_globals(program, &mut ssa);
+            self.convert_globals(program, &mut ssa, file_manager);
         }
 
         // Phase 3: Convert each function
@@ -215,7 +215,12 @@ impl SSAConverter {
     }
 
     /// Convert globals: assign slot indices, build init/deinit functions.
-    fn convert_globals(&mut self, program: &Program, ssa: &mut HLSSA) {
+    fn convert_globals(
+        &mut self,
+        program: &Program,
+        ssa: &mut HLSSA,
+        file_manager: Option<&FileManager>,
+    ) {
         // Assign slot indices
         let mut global_types = Vec::new();
         let mut ordered_ids: Vec<GlobalId> = Vec::new();
@@ -287,7 +292,7 @@ impl SSAConverter {
                     &self.global_slots,
                     &self.global_constants,
                     current_block,
-                    None,
+                    file_manager,
                 );
                 let (_name, _typ, init_expr) = &program.globals[gid];
                 let value = expr_converter.convert_expression(init_expr, b).unwrap();

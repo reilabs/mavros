@@ -145,6 +145,16 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         self.block.instruction_count()
     }
 
+    pub fn instruction_count_snapshot(&self) -> Vec<(BlockId, usize)> {
+        let mut counts: Vec<_> = self
+            .function
+            .get_blocks()
+            .map(|(id, block)| (*id, block.instruction_count()))
+            .collect();
+        counts.push((self.block_id, self.block.instruction_count()));
+        counts
+    }
+
     pub fn set_instruction_source_locations_from(
         &mut self,
         start: usize,
@@ -152,6 +162,33 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
     ) {
         self.block
             .set_instruction_source_locations_from(start, source_location);
+    }
+
+    pub fn set_instruction_source_locations_since(
+        &mut self,
+        before: &[(BlockId, usize)],
+        source_location: Option<crate::compiler::ssa::SourceLocation>,
+    ) {
+        let Some(source_location) = source_location else {
+            return;
+        };
+
+        for (block_id, block) in self.function.get_blocks_mut() {
+            let start = before
+                .iter()
+                .find(|(id, _)| id == block_id)
+                .map(|(_, count)| *count)
+                .unwrap_or(0);
+            block.set_instruction_source_locations_from(start, Some(source_location.clone()));
+        }
+
+        let start = before
+            .iter()
+            .find(|(id, _)| *id == self.block_id)
+            .map(|(_, count)| *count)
+            .unwrap_or(0);
+        self.block
+            .set_instruction_source_locations_from(start, Some(source_location));
     }
 
     pub fn add_block(&mut self) -> (BlockId, &mut Block<Op, Ty>) {
@@ -516,5 +553,47 @@ mod tests {
 
         assert_eq!(instructions.len(), 1);
         assert_eq!(instructions[0].get_location(), Some(&loc));
+    }
+
+    #[test]
+    fn block_emitter_stamps_new_instructions_across_block_splits() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let loc = test_location();
+
+        {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(main_id, |fb| {
+                let entry_id = fb.function.get_entry_id();
+                let mut block = fb.block(entry_id);
+                let before = block.instruction_count_snapshot();
+                let cond = block.not(ValueId(0));
+                block.build_if_else(
+                    cond,
+                    vec![],
+                    |then_block| {
+                        then_block.not(ValueId(0));
+                        vec![]
+                    },
+                    |else_block| {
+                        else_block.not(ValueId(0));
+                        vec![]
+                    },
+                );
+                block.set_instruction_source_locations_since(&before, Some(loc.clone()));
+            });
+        }
+
+        let function = ssa.get_function(main_id);
+        let located_instruction_count: usize = function
+            .get_blocks()
+            .map(|(_, block)| {
+                block
+                    .get_instructions_with_source_locations()
+                    .inspect(|(_, location)| assert_eq!(*location, Some(&loc)))
+                    .count()
+            })
+            .sum();
+        assert_eq!(located_instruction_count, 3);
     }
 }
