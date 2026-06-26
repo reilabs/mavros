@@ -9,7 +9,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, PrimeField};
 use itertools::Itertools;
-use tracing::instrument;
+use tracing::{debug, instrument};
 
 use crate::{
     collections::HashMap,
@@ -794,11 +794,28 @@ impl Value {
         }
     }
 
-    fn constrain(a: &Value, b: &Value, c: &Value, instrumenter: &mut dyn OpInstrumenter) {
+    fn constrain(
+        a: &Value,
+        b: &Value,
+        c: &Value,
+        instrumenter: &mut dyn OpInstrumenter,
+    ) -> Result<(), AssertionFailure> {
         match (a.as_field_const(), b.as_field_const(), c.as_field_const()) {
-            (Some(a), Some(b), Some(c)) => assert_eq!(a * b, c),
+            (Some(a), Some(b), Some(c)) => {
+                if a * b != c {
+                    // A constraint over compile-time constants that does not hold: the program is
+                    // unsatisfiable on every input (e.g. an `execution_failure` test). Surface it
+                    // via the assertion-failure channel instead of panicking as R1CS generation is
+                    // the canonical reporter and rejects the program.
+                    return Err(AssertionFailure::new(format!(
+                        "constraint {a:?} * {b:?} = {c:?} is statically false"
+                    )));
+                }
+                // A trivially-true constant constraint is elided by codegen, so it costs nothing.
+            }
             _ => instrumenter.record_constrain(),
         }
+        Ok(())
     }
 
     fn to_bits(&self, endianness: &crate::compiler::ssa::hlssa::Endianness, size: usize) -> Value {
@@ -813,7 +830,7 @@ impl Value {
                             .map(|b| Value::WitnessOf(Box::new(b)))
                             .collect(),
                     ),
-                    _ => unreachable!(),
+                    _ => unreachable!("to_bits of a WitnessOf expected an Array result"),
                 }
             }
             Value::U(_, v) => {
@@ -858,7 +875,7 @@ impl Value {
                             .map(|d| Value::WitnessOf(Box::new(d)))
                             .collect(),
                     ),
-                    _ => unreachable!(),
+                    _ => unreachable!("to_radix of a WitnessOf expected an Array result"),
                 }
             }
             Value::Unknown(_) => Value::array(vec![Value::Unknown(ScalarKind::U(8)); size]),
@@ -1202,13 +1219,13 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
             &b.unspecialized,
             &c.unspecialized,
             instrumenter.get_unspecialized(),
-        );
+        )?;
         Value::constrain(
             &a.specialized,
             &b.specialized,
             &c.specialized,
             instrumenter.get_specialized(),
-        );
+        )?;
         Ok(())
     }
 
@@ -1290,7 +1307,15 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
                 self.unspecialized
             ),
         };
-        assert_eq!(specialized, unspecialized);
+        // The unspecialized world is a blinding-refinement of the specialized one: both are seeded
+        // identically and every value op is symmetric, with the only asymmetry being
+        // `blind_unspecialized`, which coarsens a concrete leaf to `Unknown` — never to a *different*
+        // concrete. So a branch condition that is a concrete bool in both worlds must agree; a
+        // divergence here is a specializer/writeback miscompilation, not a benign dead path.
+        assert_eq!(
+            specialized, unspecialized,
+            "ICE: branch condition diverged between the specialized and unspecialized cost-analysis worlds"
+        );
         specialized
     }
 
@@ -1329,7 +1354,14 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     fn expect_blob(&self, _ctx: &mut CostAnalysis) -> Vec<Self> {
         match (&self.unspecialized, &self.specialized) {
             (Value::Blob(unspecialized), Value::Blob(specialized)) => {
-                assert_eq!(unspecialized.len(), specialized.len());
+                // The two worlds are structurally identical up to blinding (which only coarsens
+                // leaves to `Unknown`, never changes a blob's shape), so their lengths must match;
+                // a mismatch is a miscompilation, not a recoverable condition.
+                assert_eq!(
+                    unspecialized.len(),
+                    specialized.len(),
+                    "ICE: blob length diverged between the specialized and unspecialized cost-analysis worlds"
+                );
                 unspecialized
                     .iter()
                     .cloned()
@@ -2055,6 +2087,17 @@ impl CostAnalysis {
         sig
     }
 
+    /// Seal any frames left on the stack after a symbolic execution aborted via an
+    /// `AssertionFailure` (so `on_return` never ran). The partial costs are irrelevant — a program
+    /// that statically violates a constraint is rejected by R1CS generation — but the per-function
+    /// maps must stay consistent (the entry point in particular must be present) so
+    /// `summarize`/`walk_call_tree` do not panic on a missing function.
+    fn finalize_aborted(&mut self) {
+        while !self.stack.is_empty() {
+            self.exit_call();
+        }
+    }
+
     fn get_specialized(&mut self) -> &mut dyn OpInstrumenter {
         self.stack.last_mut().unwrap().1.as_mut().get_specialized()
     }
@@ -2183,11 +2226,19 @@ impl CostEstimator {
                 specialized: param.to_value(),
             })
             .collect();
-        // The cost estimator evaluates over fully-symbolic inputs, so assertions never fold to
-        // a failing constant; a static assertion failure here would be a bug in this pass.
-        SymbolicExecutor::new()
-            .run(ssa, type_info, sig.id, inputs, costs)
-            .expect("ICE: cost analysis hit a static assertion failure on symbolic inputs");
+        // Upstream constant folding can make a constraint's operands compile-time constants, so
+        // the cost estimator can reach a statically-violated assertion even on symbolic inputs
+        // (e.g. an `execution_failure` program with an unsatisfiable constraint). That is not a
+        // bug here: the cost accumulated in `costs` so far is kept, and R1CS generation is the
+        // canonical reporter that rejects the program. So we stop costing this function rather
+        // than crashing compilation.
+        if let Err(failure) = SymbolicExecutor::new().run(ssa, type_info, sig.id, inputs, costs) {
+            debug!(
+                message = %"cost analysis: statically-violated assertion; stopping cost estimation for this function",
+                failure = %failure
+            );
+            costs.finalize_aborted();
+        }
     }
 
     fn type_to_unknown_sig(&self, tp: &Type) -> ValueSignature {
@@ -2238,5 +2289,60 @@ impl Analysis for Summary {
         let cost_estimator = CostEstimator::new();
         let cost_analysis = cost_estimator.run(ssa, type_info);
         cost_analysis.summarize()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CostEstimator;
+    use crate::compiler::{
+        Field,
+        analysis::{flow_analysis::FlowAnalysis, types::Types},
+        ssa::{
+            Terminator,
+            hlssa::{Constant, HLSSA, OpCode},
+        },
+    };
+
+    /// Run the cost estimator over `ssa` with freshly-computed dependencies, then `summarize` it —
+    /// exactly the path `Summary::compute` drives. The estimator absorbs static assertion failures
+    /// internally, so the point of these tests is simply that the whole path does not panic (in
+    /// particular `summarize`/`walk_call_tree`, which would trip over a failed function missing
+    /// from the cost map).
+    fn run_cost_estimator(ssa: &HLSSA) {
+        let flow = FlowAnalysis::run(ssa);
+        let type_info = Types::new().run(ssa, &flow);
+        let _ = CostEstimator::new().run(ssa, &type_info).summarize();
+    }
+
+    /// `main` with a single `Constrain { a, b, c }` over compile-time field constants.
+    fn ssa_constraining_constants(a: u64, b: u64, c: u64) -> HLSSA {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let a = ssa.add_const(Constant::Field(Field::from(a)));
+        let b = ssa.add_const(Constant::Field(Field::from(b)));
+        let c = ssa.add_const(Constant::Field(Field::from(c)));
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+        entry.push_instruction(OpCode::Constrain { a, b, c });
+        entry.set_terminator(Terminator::Return(vec![]));
+        ssa
+    }
+
+    /// A `Constrain` over constants whose product does NOT equal the third operand is statically
+    /// unsatisfiable (an `execution_failure`-style program). The cost estimator must surface this
+    /// through the `AssertionFailure` channel and keep going, NOT crash compilation. Regression for
+    /// the `assert_eq!(a * b, c)` panic that the Click-Cooper writebacks exposed on
+    /// `execution_failure/regression_5202`.
+    #[test]
+    fn statically_false_constraint_does_not_crash_cost_estimation() {
+        // 2 * 3 = 6 ≠ 7.
+        run_cost_estimator(&ssa_constraining_constants(2, 3, 7));
+    }
+
+    /// The satisfiable control: a trivially-true constant constraint is elided (costs nothing) and
+    /// the estimator runs cleanly.
+    #[test]
+    fn statically_true_constant_constraint_does_not_crash_cost_estimation() {
+        // 2 * 3 = 6.
+        run_cost_estimator(&ssa_constraining_constants(2, 3, 6));
     }
 }

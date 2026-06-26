@@ -13,14 +13,17 @@ use crate::{
         analysis::click_cooper::{
             congruence::Congruence,
             lattice::{
-                Constness, bool_constness, const_bool, const_join, eval_binary, eval_bit_range,
-                eval_cast, eval_cmp, eval_not, eval_sext,
+                Constness, bool_constant, bool_constness, const_bool, const_join, eval_binary,
+                eval_bit_range, eval_cast, eval_cmp, eval_not, eval_sext,
             },
             summary::{DetSummaries, FnSummary, ReturnJump},
         },
         ssa::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
-            hlssa::{CallTarget, Constant, HLFunction, HLSSAConstantsSnapshot, OpCode, ScalarFold},
+            hlssa::{
+                CallTarget, CmpKind, Constant, HLFunction, HLSSAConstantsSnapshot, OpCode,
+                ScalarFold,
+            },
         },
     },
 };
@@ -31,6 +34,16 @@ use crate::{
 /// Per-block branch predicate facts: a value known true/false on entry to the block, recorded only
 /// when every executable incoming edge proves the same boolean.
 pub(crate) type BoolFacts = HashMap<ValueId, bool>;
+
+// CONSTANTS
+// ================================================================================================
+
+/// The maximum number of per-function solver rounds in the combined-fixpoint writeback (round 0 is
+/// the base solve; the rest refine with congruence-derived promotions).
+///
+/// The writeback is monotone and converges well before this, so it is only a backstop in case of an
+/// algorithmic bug. Real cascades are one or two rounds deep at most.
+const MAX_WRITEBACK_ROUNDS: usize = 8;
 
 // FUNCTION FACTS
 // ================================================================================================
@@ -115,6 +128,15 @@ pub(crate) struct FunctionSolver<'f, 'c, 's> {
     /// Entry-parameter seeds for a context-sensitive solve: an entry parameter maps to the constant
     /// the calling context proved for the matching argument. Absent params default to `Bottom`.
     param_seeds: HashMap<ValueId, Constness>,
+
+    /// Values promoted to a constant by the combined-fixpoint writeback — congruence-derived
+    /// must-equal facts (e.g. `CmpEq(x, y)` with `known_equal(x, y)` folds to `true`).
+    ///
+    /// `None` (the default) is the base solve. When present, a promoted value takes precedence
+    /// over its own (weaker) transfer result in `lattice_of`/`lattice_in_block` — exactly as the
+    /// interned-const snapshot does — and `set_lattice` refuses to lower it, so the value's own
+    /// `Bottom` transfer can never `const_join` the promotion back down.
+    promotions: Option<&'s HashMap<ValueId, Arc<Constant>>>,
 }
 
 impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
@@ -152,6 +174,7 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
             summaries: None,
             det: None,
             param_seeds: HashMap::default(),
+            promotions: None,
         }
     }
 
@@ -170,6 +193,18 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
     /// Seed entry parameters with the calling context's argument constants.
     pub(crate) fn with_param_seeds(mut self, seeds: HashMap<ValueId, Constness>) -> Self {
         self.param_seeds = seeds;
+        self
+    }
+
+    /// Seed congruence-derived must-equal constants (the combined-fixpoint writeback).
+    ///
+    /// A promoted value takes precedence over its own transfer, so the worklist propagates the
+    /// stronger fact.
+    pub(crate) fn with_promotions(
+        mut self,
+        promotions: &'s HashMap<ValueId, Arc<Constant>>,
+    ) -> Self {
+        self.promotions = Some(promotions);
         self
     }
 
@@ -208,6 +243,10 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
     /// Convert the solver into facts.
     pub(crate) fn into_facts(self) -> FunctionFacts {
         let det = self.det;
+        let promotions = self.promotions;
+
+        // `lattice_of` already consults the promotions, so the rebuilt congruence labels a promoted
+        // value by its constant (folding it together with structurally-equal constants).
         let congruence = Congruence::build(
             self.function,
             &self.reachable,
@@ -221,8 +260,19 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
             },
         );
 
+        // Materialise the promotions into the returned lattice: they live in the borrowed
+        // `promotions` map, not in `self.lattice`, so `const_of`/`new_const_values` would not see
+        // them otherwise. A promoted value is an instruction result, never interned, so there is no
+        // collision with the snapshot.
+        let mut lattice = self.lattice;
+        if let Some(promotions) = promotions {
+            for (v, c) in promotions {
+                lattice.insert(*v, Constness::Const(c.clone()));
+            }
+        }
+
         FunctionFacts {
-            lattice: self.lattice,
+            lattice,
             reachable: self.reachable,
             exec_edges: self.exec_edges,
             block_facts: self.block_facts,
@@ -253,11 +303,20 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
         if let Some(c) = self.consts.get(&v) {
             return Constness::Const(c.clone());
         }
+        if let Some(c) = self.promotions.and_then(|p| p.get(&v)) {
+            return Constness::Const(c.clone());
+        }
         self.lattice.get(&v).cloned().unwrap_or(Constness::Top)
     }
 
     fn lattice_in_block(&self, bid: BlockId, v: ValueId) -> Constness {
         if let Some(c) = self.consts.get(&v) {
+            return Constness::Const(c.clone());
+        }
+
+        // A promotion is an *unconditional* must-equal, so it dominates the path-sensitive branch
+        // facts just as the interned constant above does.
+        if let Some(c) = self.promotions.and_then(|p| p.get(&v)) {
             return Constness::Const(c.clone());
         }
         if let Some(value) = self.block_facts.get(&bid).and_then(|facts| facts.get(&v)) {
@@ -268,6 +327,13 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
 
     /// Lower `v` to `join(current, new)`, scheduling its users if the value changed.
     fn set_lattice(&mut self, v: ValueId, new: Constness) {
+        // A promoted value is pinned to its congruence-derived constant: its own transfer (which
+        // does not see the congruence) must never lower it. Interned consts are never instruction
+        // results so never reach here; promoted values are, hence this explicit guard.
+        if self.promotions.is_some_and(|p| p.contains_key(&v)) {
+            return;
+        }
+
         let old = self.lattice_of(v);
         let joined = const_join(old.clone(), new);
         if joined != old {
@@ -643,4 +709,114 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
             ),
         }
     }
+}
+
+// COMBINED-FIXPOINT WRITEBACK
+// ================================================================================================
+
+/// Solve `function` to the combined-fixpoint writeback.
+///
+/// Each round solves the function, then folds every comparison of congruent operands to a constant
+/// (see [`derive_promotions`]) and accumulates the new must-equal facts into `promotions`. If that
+/// set grew, the next round re-solves with them — which prunes branches and cascades through
+/// reachability and congruence — otherwise the combined fixpoint is reached.
+///
+/// The first round runs with an empty `promotions`, so it is a plain base solve. The loop is
+/// monotone (promotions only grow, executable edges only shrink, congruence only coarsens) over
+/// finite domains, so it converges; [`MAX_WRITEBACK_ROUNDS`] is only a backstop.
+///
+/// `summaries`/`param_seeds` select the solve mode and are layered with the accumulating promotions
+/// identically every round:
+///
+/// - **Intraprocedural:** `summaries = None`, empty `param_seeds`.
+/// - **Polymorphic Summary Solve:** `summaries = Some`, empty `param_seeds`;
+/// - **Context-Specialized Solve:** `summaries = Some`, the context's seeds.
+pub(crate) fn solve_with_writeback(
+    function: &HLFunction,
+    consts: &HLSSAConstantsSnapshot,
+    det: &DetSummaries,
+    summaries: Option<&HashMap<FunctionId, FnSummary>>,
+    param_seeds: &HashMap<ValueId, Constness>,
+) -> FunctionFacts {
+    // The accumulator starts empty, so the first iteration is a plain base solve:
+    // `with_promotions(&{})` is byte-identical to passing no promotions (every query short-circuits
+    // to `None`, `set_lattice`'s guard is `false`, and `into_facts` materialises nothing).
+    let mut promotions: HashMap<ValueId, Arc<Constant>> = HashMap::default();
+    let mut facts = None;
+    for _ in 0..MAX_WRITEBACK_ROUNDS {
+        let mut solver = FunctionSolver::new(function, consts)
+            .with_determinism(det)
+            .with_param_seeds(param_seeds.clone())
+            .with_promotions(&promotions);
+        if let Some(summaries) = summaries {
+            solver = solver.with_summaries(summaries);
+        }
+        solver.run();
+        let solved = solver.into_facts();
+
+        // Fold every newly-foldable comparison of congruent operands; re-solve only if the set grew,
+        // otherwise the combined fixpoint is reached.
+        let before = promotions.len();
+        for (v, c) in derive_promotions(function, &solved) {
+            promotions.entry(v).or_insert(c);
+        }
+        let converged = promotions.len() == before;
+        facts = Some(solved);
+        if converged {
+            break;
+        }
+    }
+    facts.expect("the writeback loop always runs at least one round")
+}
+
+/// The congruence-derived must-equal constants in `facts`: a comparison of two provably-congruent
+/// operands folds to a constant the constants lattice alone cannot derive.
+///
+/// - `CmpEq(x, y)` with `known_equal(x, y)` is unconditionally `true` (`x == y` in every run).
+/// - `CmpLt(x, y)` with `known_equal(x, y)` is unconditionally `false` (`x < x` is never true).
+///
+/// Both are *must-equal* facts of the same strength as congruence itself — congruence never unifies
+/// two free witnesses — so feeding them back into the lattice (where they fold branches and
+/// cascade) keeps the analysis sound. Only the comparison *result* is promoted; it is a pure scalar
+/// `Cmp` fold, so a consumer may alias and delete it. Results already proven constant are skipped,
+/// so the outer fixpoint converges once no new fact appears.
+///
+/// A `WitnessOf`-typed comparison result (a witnessed comparison from witness spilling / AD
+/// lowering) is promoted just like any other when vacuous — the must-equal fact holds either way —
+/// but the consumer needs to keep the substituted constant witness-typed.
+fn derive_promotions(
+    function: &HLFunction,
+    facts: &FunctionFacts,
+) -> HashMap<ValueId, Arc<Constant>> {
+    let mut out: HashMap<ValueId, Arc<Constant>> = HashMap::default();
+    for (bid, block) in function.get_blocks() {
+        if !facts.reachable.contains(bid) {
+            continue;
+        }
+        for instr in block.get_instructions() {
+            let folded = match instr.scalar_fold() {
+                Some(ScalarFold::Cmp {
+                    kind: CmpKind::Eq,
+                    lhs,
+                    rhs,
+                }) if facts.congruence.known_equal(lhs, rhs) => true,
+                Some(ScalarFold::Cmp {
+                    kind: CmpKind::Lt,
+                    lhs,
+                    rhs,
+                }) if facts.congruence.known_equal(lhs, rhs) => false,
+                _ => continue,
+            };
+
+            // A `Cmp` is single-result; skip any result the lattice already proved constant so the
+            // promotion set only ever grows with genuinely new facts.
+            for r in instr.get_results() {
+                if matches!(facts.lattice.get(r), Some(Constness::Const(_))) {
+                    continue;
+                }
+                out.insert(*r, bool_constant(folded));
+            }
+        }
+    }
+    out
 }
