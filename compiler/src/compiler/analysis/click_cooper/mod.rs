@@ -47,6 +47,12 @@
 //!
 //! - **Constants:** The transfer functions fold a value only when the result is exact for the
 //!   operand widths so `value == c` holds under any advice.
+//! - **Aggregate Folding:** The pure, value-semantic sequence ops (`MkSeq`, `MkRepeated`,
+//!   `MkSeqOfBlob`, `ArrayGet`, `ArraySet`, `SlicePush`, `SliceLen`) are folded over the same
+//!   exact-constant lattice — a projection at an out-of-bounds constant index is refused rather
+//!   than guessed — so every folded element equals its runtime value. The aggregate (`Blob`)
+//!   constants are never surfaced (only the scalar projections flow out), so a consumer only ever
+//!   sees an ordinary scalar constant and inherits the **Constants** soundness above.
 //! - **Reachability:** An edge is executable only when a predecessor's terminator can take it. A
 //!   block proven unreachable is thus taken in no run.
 //! - **Congruence:** Two values are congruent iff computed by the same operator from operand-wise
@@ -113,12 +119,6 @@
 //!   pass per `(function, context)` — as `specialize` already does for the unconditional facts —
 //!   would let a context-specialized assert or branch expose more facts, and would warrant adding
 //!   the `_in` variants.
-//! - **Aggregate Constant Folding:** The pure, value-semantic sequence ops (`MkSeq`, `MkRepeated`,
-//!   `MkSeqOfBlob`, `ArrayGet`, `ArraySet`, `SlicePush`, `SliceLen`) are value-numbered (see
-//!   `congruence::op_signature`) but never constant-folded. The `Constness` lattice carries only a
-//!   scalar `Arc<Constant>` and the fold functions are scalar, so it cannot represent an aggregate
-//!   constant. Future work can widen the lattice to handle aggregate constants and transfer
-//!   functions.
 
 mod conditional;
 mod congruence;
@@ -270,8 +270,11 @@ impl ClickCooper {
             return Some(c.clone());
         }
         match facts?.lattice.get(&v) {
-            Some(Constness::Const(c)) => Some(c.clone()),
-            Some(Constness::Top) | Some(Constness::Bottom) | None => None,
+            // Aggregate (`Blob`) constants are folded only to drive `ArrayGet`/`SliceLen`
+            // projections *within* the analysis; they are never surfaced, so no consumer is asked
+            // to materialise an aggregate constant value (only the scalar projections flow out).
+            Some(Constness::Const(c)) if c.is_scalar() => Some(c.clone()),
+            Some(Constness::Const(_) | Constness::Top | Constness::Bottom) | None => None,
         }
     }
 }
@@ -312,8 +315,10 @@ impl ClickCooper {
             .lattice
             .iter()
             .filter_map(|(v, e)| match e {
-                Constness::Const(c) => Some((*v, c.clone())),
-                Constness::Top | Constness::Bottom => None,
+                // Surface scalars only; aggregate (`Blob`) constants stay internal to the analysis
+                // (see `const_in_facts`).
+                Constness::Const(c) if c.is_scalar() => Some((*v, c.clone())),
+                Constness::Const(_) | Constness::Top | Constness::Bottom => None,
             })
             .collect()
     }
@@ -571,7 +576,7 @@ pub(crate) mod tests {
         ssa::{
             Terminator,
             hlssa::{
-                BinaryArithOpKind, CallTarget, CastTarget, CmpKind, Constant, HLSSA, OpCode,
+                BinaryArithOpKind, Blob, CallTarget, CastTarget, CmpKind, Constant, HLSSA, OpCode,
                 ScalarFold, SequenceTargetType, SliceOpDir, Type,
             },
         },
@@ -2718,5 +2723,381 @@ pub(crate) mod tests {
 
         assert!(cc.known_equal(fid, i, j));
         assert_eq!(cc.const_of(fid, eq).as_deref(), Some(&Constant::U(1, 1)));
+    }
+
+    // AGGREGATE CONSTANT FOLDING
+    // ============================================================================================
+
+    /// `MkSeq` of constant elements folds to an *internal* aggregate; `ArrayGet` at a constant
+    /// index projects a scalar constant out of it. The aggregate itself is never surfaced to
+    /// consumers.
+    #[test]
+    fn const_array_get_folds_to_scalar() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let c0 = ssa.add_const(Constant::U(32, 10));
+        let c1 = ssa.add_const(Constant::U(32, 20));
+        let c2 = ssa.add_const(Constant::U(32, 30));
+        let idx = ssa.add_const(Constant::U(32, 1));
+        let (seq, got) = (ssa.fresh_value(), ssa.fresh_value());
+
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+        entry.push_instruction(OpCode::MkSeq {
+            result: seq,
+            elems: vec![c0, c1, c2],
+            seq_type: SequenceTargetType::Array(3),
+            elem_type: Type::u(32),
+        });
+        entry.push_instruction(OpCode::ArrayGet {
+            result: got,
+            array: seq,
+            index: idx,
+        });
+        entry.set_terminator(Terminator::Return(vec![got]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+
+        // The projection is a surfaced scalar constant.
+        assert_eq!(cc.const_of(fid, got).as_deref(), Some(&Constant::U(32, 20)));
+        assert!(
+            cc.new_const_values(fid)
+                .iter()
+                .any(|(v, c)| *v == got && **c == Constant::U(32, 20))
+        );
+        // The aggregate stays internal: never surfaced as a constant.
+        assert_eq!(cc.const_of(fid, seq), None);
+        assert!(cc.new_const_values(fid).iter().all(|(v, _)| *v != seq));
+    }
+
+    /// `MkRepeated` of a constant folds, and both `ArrayGet` and `SliceLen` project scalars out of
+    /// the resulting aggregate (the length is always `u32`).
+    #[test]
+    fn const_repeated_array_get_and_slice_len() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let elem = ssa.add_const(Constant::U(32, 7));
+        let idx = ssa.add_const(Constant::U(32, 2));
+        let (seq, got, len) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+        entry.push_instruction(OpCode::MkRepeated {
+            result: seq,
+            element: elem,
+            seq_type: SequenceTargetType::Array(4),
+            count: 4,
+            elem_type: Type::u(32),
+        });
+        entry.push_instruction(OpCode::ArrayGet {
+            result: got,
+            array: seq,
+            index: idx,
+        });
+        entry.push_instruction(OpCode::SliceLen {
+            result: len,
+            slice: seq,
+        });
+        entry.set_terminator(Terminator::Return(vec![got, len]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+
+        assert_eq!(cc.const_of(fid, got).as_deref(), Some(&Constant::U(32, 7)));
+        assert_eq!(cc.const_of(fid, len).as_deref(), Some(&Constant::U(32, 4)));
+    }
+
+    /// `ArraySet` of a constant aggregate is itself a constant aggregate: a later `ArrayGet` sees
+    /// the updated cell at the set index and the original value elsewhere.
+    #[test]
+    fn const_array_set_then_get() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let c0 = ssa.add_const(Constant::U(32, 10));
+        let c1 = ssa.add_const(Constant::U(32, 20));
+        let c2 = ssa.add_const(Constant::U(32, 30));
+        let new_val = ssa.add_const(Constant::U(32, 99));
+        let idx0 = ssa.add_const(Constant::U(32, 0));
+        let idx1 = ssa.add_const(Constant::U(32, 1));
+        let (seq, seq2, at_set, at_orig) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
+
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+        entry.push_instruction(OpCode::MkSeq {
+            result: seq,
+            elems: vec![c0, c1, c2],
+            seq_type: SequenceTargetType::Array(3),
+            elem_type: Type::u(32),
+        });
+        entry.push_instruction(OpCode::ArraySet {
+            result: seq2,
+            array: seq,
+            index: idx1,
+            value: new_val,
+        });
+        entry.push_instruction(OpCode::ArrayGet {
+            result: at_set,
+            array: seq2,
+            index: idx1,
+        });
+        entry.push_instruction(OpCode::ArrayGet {
+            result: at_orig,
+            array: seq2,
+            index: idx0,
+        });
+        entry.set_terminator(Terminator::Return(vec![at_set, at_orig]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+
+        assert_eq!(
+            cc.const_of(fid, at_set).as_deref(),
+            Some(&Constant::U(32, 99))
+        );
+        assert_eq!(
+            cc.const_of(fid, at_orig).as_deref(),
+            Some(&Constant::U(32, 10))
+        );
+    }
+
+    /// `SlicePush` extends a constant aggregate at the front or back, preserving element order.
+    #[test]
+    fn const_slice_push_front_and_back() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let mid = ssa.add_const(Constant::U(32, 1));
+        let front = ssa.add_const(Constant::U(32, 0));
+        let back = ssa.add_const(Constant::U(32, 2));
+        let idx0 = ssa.add_const(Constant::U(32, 0));
+        let idx1 = ssa.add_const(Constant::U(32, 1));
+        let (base, pushed_front, pushed_back, head, tail) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
+
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+        entry.push_instruction(OpCode::MkSeq {
+            result: base,
+            elems: vec![mid],
+            seq_type: SequenceTargetType::Slice,
+            elem_type: Type::u(32),
+        });
+        // Front: [front, mid]; element 0 is the pushed value.
+        entry.push_instruction(OpCode::SlicePush {
+            dir: SliceOpDir::Front,
+            result: pushed_front,
+            slice: base,
+            values: vec![front],
+        });
+        // Back: [mid, back]; element 1 is the pushed value.
+        entry.push_instruction(OpCode::SlicePush {
+            dir: SliceOpDir::Back,
+            result: pushed_back,
+            slice: base,
+            values: vec![back],
+        });
+        entry.push_instruction(OpCode::ArrayGet {
+            result: head,
+            array: pushed_front,
+            index: idx0,
+        });
+        entry.push_instruction(OpCode::ArrayGet {
+            result: tail,
+            array: pushed_back,
+            index: idx1,
+        });
+        entry.set_terminator(Terminator::Return(vec![head, tail]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+
+        assert_eq!(cc.const_of(fid, head).as_deref(), Some(&Constant::U(32, 0)));
+        assert_eq!(cc.const_of(fid, tail).as_deref(), Some(&Constant::U(32, 2)));
+    }
+
+    /// `MkSeqOfBlob` re-views a constant blob as a sequence; projecting a constant index folds.
+    #[test]
+    fn const_mk_seq_of_blob_folds() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let blob = ssa.add_const(Constant::Blob(Blob::new(
+            Type::u(32),
+            vec![Constant::U(32, 100), Constant::U(32, 200)],
+        )));
+        let idx = ssa.add_const(Constant::U(32, 1));
+        let (seq, got) = (ssa.fresh_value(), ssa.fresh_value());
+
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+        entry.push_instruction(OpCode::MkSeqOfBlob {
+            result: seq,
+            element_type: Type::u(32),
+            blob,
+        });
+        entry.push_instruction(OpCode::ArrayGet {
+            result: got,
+            array: seq,
+            index: idx,
+        });
+        entry.set_terminator(Terminator::Return(vec![got]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+
+        assert_eq!(
+            cc.const_of(fid, got).as_deref(),
+            Some(&Constant::U(32, 200))
+        );
+        // The aggregate stays internal.
+        assert_eq!(cc.const_of(fid, seq), None);
+    }
+
+    /// Aggregate folding refuses (stays `Bottom`, i.e. `const_of == None`) on an out-of-bounds
+    /// constant index, a non-constant element, and an over-cap `MkRepeated`.
+    #[test]
+    fn aggregate_folding_negative_cases() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let c0 = ssa.add_const(Constant::U(32, 10));
+        let c1 = ssa.add_const(Constant::U(32, 20));
+        let idx0 = ssa.add_const(Constant::U(32, 0));
+        let idx_oob = ssa.add_const(Constant::U(32, 5));
+        let p = ssa.fresh_value();
+        let (seq, g_oob, seq_nc, g_nc, big, g_big) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
+
+        let f = ssa.get_unique_entrypoint_mut();
+        f.get_entry_mut().push_parameter(p, Type::u(32));
+        let entry = f.get_entry_mut();
+        // Out of bounds: index 5 into a length-2 array.
+        entry.push_instruction(OpCode::MkSeq {
+            result: seq,
+            elems: vec![c0, c1],
+            seq_type: SequenceTargetType::Array(2),
+            elem_type: Type::u(32),
+        });
+        entry.push_instruction(OpCode::ArrayGet {
+            result: g_oob,
+            array: seq,
+            index: idx_oob,
+        });
+        // Non-constant element keeps the whole aggregate non-constant.
+        entry.push_instruction(OpCode::MkSeq {
+            result: seq_nc,
+            elems: vec![c0, p],
+            seq_type: SequenceTargetType::Array(2),
+            elem_type: Type::u(32),
+        });
+        entry.push_instruction(OpCode::ArrayGet {
+            result: g_nc,
+            array: seq_nc,
+            index: idx0,
+        });
+        // Over-cap repeat is refused before materialising the aggregate.
+        entry.push_instruction(OpCode::MkRepeated {
+            result: big,
+            element: c0,
+            seq_type: SequenceTargetType::Array((1 << 16) + 1),
+            count: (1 << 16) + 1,
+            elem_type: Type::u(32),
+        });
+        entry.push_instruction(OpCode::ArrayGet {
+            result: g_big,
+            array: big,
+            index: idx0,
+        });
+        entry.set_terminator(Terminator::Return(vec![g_oob, g_nc, g_big]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+
+        assert_eq!(cc.const_of(fid, g_oob), None);
+        assert_eq!(cc.const_of(fid, g_nc), None);
+        assert_eq!(cc.const_of(fid, g_big), None);
+    }
+
+    /// The remaining refusal paths, complementing `aggregate_folding_negative_cases`: an
+    /// out-of-bounds `ArraySet`, an over-cap `SlicePush`, and an over-cap `MkSeq` all stay
+    /// `Bottom`. Each is observed through a later `ArrayGet`, which bottoms out over the refused
+    /// (non-constant) aggregate.
+    #[test]
+    fn aggregate_folding_refuses_oob_set_and_over_cap_constructors() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let c0 = ssa.add_const(Constant::U(32, 10));
+        let c1 = ssa.add_const(Constant::U(32, 20));
+        let idx0 = ssa.add_const(Constant::U(32, 0));
+        let idx_oob = ssa.add_const(Constant::U(32, 5));
+        let over_cap = (1usize << 12) + 1; // AGGREGATE_FOLD_CAP + 1
+
+        let (base, set_oob, at_set_oob) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        let (one, pushed, at_pushed) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        let (big_seq, at_big) = (ssa.fresh_value(), ssa.fresh_value());
+
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+
+        // Out-of-bounds `ArraySet` (index 5 into a length-2 array): refused, so the get sees Bottom.
+        entry.push_instruction(OpCode::MkSeq {
+            result: base,
+            elems: vec![c0, c1],
+            seq_type: SequenceTargetType::Array(2),
+            elem_type: Type::u(32),
+        });
+        entry.push_instruction(OpCode::ArraySet {
+            result: set_oob,
+            array: base,
+            index: idx_oob,
+            value: c0,
+        });
+        entry.push_instruction(OpCode::ArrayGet {
+            result: at_set_oob,
+            array: set_oob,
+            index: idx0,
+        });
+
+        // `SlicePush` whose result would exceed the cap (1 + CAP values): refused.
+        entry.push_instruction(OpCode::MkSeq {
+            result: one,
+            elems: vec![c0],
+            seq_type: SequenceTargetType::Slice,
+            elem_type: Type::u(32),
+        });
+        entry.push_instruction(OpCode::SlicePush {
+            dir: SliceOpDir::Back,
+            result: pushed,
+            slice: one,
+            values: vec![c0; 1 << 12],
+        });
+        entry.push_instruction(OpCode::ArrayGet {
+            result: at_pushed,
+            array: pushed,
+            index: idx0,
+        });
+
+        // Over-cap `MkSeq`: refused before materialising the aggregate.
+        entry.push_instruction(OpCode::MkSeq {
+            result: big_seq,
+            elems: vec![c0; over_cap],
+            seq_type: SequenceTargetType::Array(over_cap),
+            elem_type: Type::u(32),
+        });
+        entry.push_instruction(OpCode::ArrayGet {
+            result: at_big,
+            array: big_seq,
+            index: idx0,
+        });
+
+        entry.set_terminator(Terminator::Return(vec![at_set_oob, at_pushed, at_big]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+
+        assert_eq!(cc.const_of(fid, at_set_oob), None);
+        assert_eq!(cc.const_of(fid, at_pushed), None);
+        assert_eq!(cc.const_of(fid, at_big), None);
     }
 }

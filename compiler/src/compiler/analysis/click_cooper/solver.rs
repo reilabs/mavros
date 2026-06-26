@@ -13,8 +13,9 @@ use crate::{
         analysis::click_cooper::{
             congruence::Congruence,
             lattice::{
-                Constness, bool_constant, bool_constness, const_bool, const_join, eval_binary,
-                eval_bit_range, eval_cast, eval_cmp, eval_not, eval_sext,
+                Constness, bool_constant, bool_constness, const_bool, const_join, eval_array_get,
+                eval_array_set, eval_binary, eval_bit_range, eval_cast, eval_cmp, eval_mk_repeated,
+                eval_mk_seq, eval_not, eval_sext, eval_slice_len, eval_slice_push,
             },
             summary::{DetSummaries, FnSummary, ReturnJump},
         },
@@ -566,9 +567,9 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
 
     /// The transfer function: new lattice values for the instruction's results.
     fn transfer(&self, bid: BlockId, instr: &OpCode) -> Vec<(ValueId, Constness)> {
-        // A constrained static `Call` folds its results via the callee's interprocedural
-        // jump-function summary (when summaries are supplied). Without summaries every result is
-        // `Bottom`. It is not a scalar fold, so it is handled before the `scalar_fold` projection.
+        // A constrained static `Call` folds its results via the callee's interprocedural jump
+        // summary (when summaries are supplied). Without summaries every result is `Bottom`. It is
+        // not a scalar fold, so it is handled before the `scalar_fold` projection.
         if let OpCode::Call {
             results,
             function,
@@ -577,6 +578,14 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
         } = instr
         {
             return self.eval_call(bid, function, args, results, *unconstrained);
+        }
+
+        // The pure, value-semantic sequence ops are not scalar folds but *are* constant-folded over
+        // the aggregate (`Blob`) constants kept in the lattice — e.g. indexing a constant lookup
+        // table with a constant index yields a scalar constant. Like `Call`, they are handled
+        // before the `scalar_fold` projection (which would otherwise bottom them out).
+        if let Some(value) = self.eval_aggregate(bid, instr) {
+            return instr.get_results().map(|r| (*r, value.clone())).collect();
         }
 
         // Foldable scalar ops are evaluated; everything else (memory, witness ops, asserts,
@@ -693,6 +702,92 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
                 .unwrap_or(Constness::Bottom),
             (Constness::Bottom, _) | (_, Constness::Bottom) => Constness::Bottom,
         }
+    }
+
+    /// Evaluate a variadic aggregate op `f` over `operands` in the context of `bid`.
+    ///
+    /// `f` receives the operands' constants by value (already collected), so a constructor can move
+    /// them into the result blob rather than cloning them a second time. Any number of operands is
+    /// accepted, so this also serves the fixed-arity ops (e.g. `ArraySet`'s three).
+    fn eval_n(
+        &self,
+        bid: BlockId,
+        operands: &[ValueId],
+        f: impl FnOnce(Vec<Constant>) -> Option<Constant>,
+    ) -> Constness {
+        let mut consts = Vec::with_capacity(operands.len());
+        let mut saw_bottom = false;
+        for v in operands {
+            match self.lattice_in_block(bid, *v) {
+                Constness::Top => return Constness::Top,
+                Constness::Bottom => saw_bottom = true,
+                Constness::Const(c) => consts.push((*c).clone()),
+            }
+        }
+        if saw_bottom {
+            return Constness::Bottom;
+        }
+        f(consts)
+            .map(|c| Constness::Const(Arc::new(c)))
+            .unwrap_or(Constness::Bottom)
+    }
+
+    /// The transfer for the pure, value-semantic sequence ops, folded over aggregate (`Blob`)
+    /// constants in the lattice, or `None` if `instr` is not one of those ops.
+    ///
+    /// The result is a single value. An aggregate constructor folds to a `Const(Blob)` only when
+    /// every element is constant; a projection (`ArrayGet`/`SliceLen`) folds to a scalar. Operands
+    /// that are not yet constant propagate `Top`/`Bottom` exactly as the scalar folds do.
+    fn eval_aggregate(&self, bid: BlockId, instr: &OpCode) -> Option<Constness> {
+        let value = match instr {
+            OpCode::MkSeq {
+                elems, elem_type, ..
+            } => self.eval_n(bid, elems, |cs| eval_mk_seq(elem_type, cs)),
+            OpCode::MkRepeated {
+                element,
+                count,
+                elem_type,
+                ..
+            } => self.eval1(bid, *element, |e| eval_mk_repeated(elem_type, e, *count)),
+
+            // `MkSeqOfBlob` views its blob operand as a sequence; the operand already *is* the
+            // aggregate constant so we can share the Arc cheaply.
+            OpCode::MkSeqOfBlob { blob, .. } => match self.lattice_in_block(bid, *blob) {
+                Constness::Const(c) if matches!(&*c, Constant::Blob(_)) => Constness::Const(c),
+                Constness::Const(_) => Constness::Bottom,
+                other => other,
+            },
+            OpCode::ArrayGet { array, index, .. } => {
+                self.eval2(bid, *array, *index, eval_array_get)
+            }
+            OpCode::ArraySet {
+                array,
+                index,
+                value,
+                ..
+            } => self.eval_n(bid, &[*array, *index, *value], |cs| {
+                let [array, index, value]: [Constant; 3] = cs
+                    .try_into()
+                    .expect("ArraySet folds exactly three constant operands");
+                eval_array_set(array, &index, value)
+            }),
+            OpCode::SlicePush {
+                dir, slice, values, ..
+            } => {
+                let operands: Vec<ValueId> = std::iter::once(*slice)
+                    .chain(values.iter().copied())
+                    .collect();
+
+                self.eval_n(bid, &operands, |mut cs| {
+                    let values = cs.split_off(1);
+                    let slice = cs.pop().expect("SlicePush has a slice operand");
+                    eval_slice_push(*dir, slice, values)
+                })
+            }
+            OpCode::SliceLen { slice, .. } => self.eval1(bid, *slice, eval_slice_len),
+            _ => return None,
+        };
+        Some(value)
     }
 
     fn eval_select(&self, bid: BlockId, cond: ValueId, if_t: ValueId, if_f: ValueId) -> Constness {
