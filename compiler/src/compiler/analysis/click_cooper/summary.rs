@@ -44,7 +44,7 @@ use crate::{
             click_cooper::{
                 congruence::pure_op_operands,
                 lattice::{Constness, const_join},
-                solver::{FunctionFacts, FunctionSolver},
+                solver::{FunctionFacts, solve_with_writeback},
             },
             flow_analysis::FlowAnalysis,
             shared::{call_string::Context, fixpoint::call_graph_fixpoint},
@@ -65,15 +65,15 @@ const K: usize = 1;
 // DETERMINISM (PHASE 0)
 // ================================================================================================
 
-/// Per-function return-position determinism: `det[g][j] == true` iff return position `j` of `g` is a
-/// deterministic function of `g`'s arguments.
+/// Per-function return-position determinism: `det[g][j] == true` iff return position `j` of `g` is
+/// a deterministic function of `g`'s arguments.
 pub(crate) type DetSummaries = HashMap<FunctionId, Vec<bool>>;
 
 /// Solve every function's per-return determinism to a fixpoint over the call graph.
 pub(crate) fn compute_determinism(ssa: &HLSSA, flow: &FlowAnalysis) -> DetSummaries {
-    // Optimistic: every return position starts deterministic; the worklist only ever lowers a bit to
-    // false. A return is deterministic if its body's non-deterministic sources never reach it, which
-    // (for a recursive function) holds at the greatest fixpoint started from "all true".
+    // Optimistic: every return position starts deterministic; the worklist only ever lowers a bit
+    // to false. A return is deterministic if its body's non-deterministic sources never reach it,
+    // which (for a recursive function) holds at the greatest fixpoint started from "all true".
     let fids: Vec<FunctionId> = ssa.get_function_ids().collect();
     call_graph_fixpoint(
         ssa,
@@ -230,11 +230,10 @@ fn analyze_function(
         return FnSummary::default();
     }
 
-    let mut solver = FunctionSolver::new(func, consts)
-        .with_summaries(summaries)
-        .with_determinism(det);
-    solver.run();
-    let facts = solver.into_facts();
+    // The polymorphic solve applies the combined-fixpoint writeback (params `Bottom`): a return
+    // that is a comparison of congruent operands folds to a constant, so its summary becomes
+    // `Const`.
+    let facts = solve_with_writeback(func, consts, det, Some(summaries), &HashMap::default());
 
     let params: Vec<ValueId> = param_values(ssa, fid);
     let returns: Vec<&Vec<ValueId>> = func
@@ -362,13 +361,10 @@ pub(crate) fn specialize(
             .zip(seed_vec.into_iter().map(seed_or_bottom))
             .collect();
 
+        // The context-specialized solve applies the combined-fixpoint writeback over the seeded
+        // parameters, so a comparison of operands congruent in this context folds in its facts.
         let func = ssa.get_function(f);
-        let mut solver = FunctionSolver::new(func, consts)
-            .with_summaries(summaries)
-            .with_determinism(det)
-            .with_param_seeds(seed_map);
-        solver.run();
-        let mut facts = solver.into_facts();
+        let mut facts = solve_with_writeback(func, consts, det, Some(summaries), &seed_map);
 
         // Build the dominance-aware congruence leaders so `leader_in` yields a legal redirect
         // target.

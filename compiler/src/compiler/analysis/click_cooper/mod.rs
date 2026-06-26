@@ -25,6 +25,21 @@
 //! facts** are those established through control flow (branches, assertions, witness operations)
 //! that are only correct to use in contexts where the establishing constraints are preserved.
 //!
+//! # Combined-Fixpoint Writeback
+//!
+//! The constant and reachability factors feed congruence (constants seed the partition,
+//! reachability scopes φ-operands), and congruence feeds *back*: a comparison whose operands are
+//! proven congruent is a constant the lattice alone cannot derive — `x == y` is unconditionally
+//! `true` and `x < y` unconditionally `false` when `x` and `y` are congruent.
+//!
+//! Each solve therefore alternates: solve constants/reachability, build congruence, promote those
+//! comparison results to constants, and re-solve so the new constants fold branches and cascade (a
+//! folded branch prunes an edge, which re-scopes φ-operands, which can expose further congruences
+//! and constants). This repeats until no new fact appears. It is monotone — promotions only grow,
+//! executable edges only shrink — so it converges, and it is strictly stronger than running the
+//! constant and congruence factors separately. This is what makes the analysis "combined" rather
+//! than merely "staged".
+//!
 //! # Correctness
 //!
 //! This analysis is **sound** because each fact class is sound, with the reasoning given as
@@ -37,6 +52,11 @@
 //! - **Congruence:** Two values are congruent iff computed by the same operator from operand-wise
 //!   congruent inputs, hence equal in all runs. Congruence never asserts an equality an adversarial
 //!   witness could validate.
+//! - **Combined-Fixpoint Writeback:** A comparison of congruent operands is folded to a constant
+//!   only via `known_equal`, which holds in every run under any advice (two free witnesses are
+//!   never made congruent), so `x == y → true` / `x < y → false` are exact. The resulting edge
+//!   folding reuses the reachability mechanism above; only the (pure, scalar) comparison result is
+//!   promoted, so the fact stays safe to replace, delete, or prune on.
 //! - **Interprocedural Constants:** A `return_const` jump function holds for any arguments; a
 //!   `return Param(i)` pass-through equals argument `i` exactly. Per-context parameter seeds are
 //!   the meet of the argument constants over *every* static call path mapped to that context, so a
@@ -77,13 +97,6 @@
 //!
 //! The following are improvements planned for the future of this analysis.
 //!
-//! - **Combined-Fixpoint Writebacks:** Congruence runs as a single pass over the converged
-//!   reachability rather than interleaved with the constant worklist, because the reverse couplings
-//!   are not wired: a congruence class with a `Const` member does not promote its peers into the
-//!   (SCCP-visible) constant lattice, and a branch condition congruent to a constant does not fold
-//!   an edge. These pay off only in a consumer that exploits the full combined fixpoint; until such
-//!   a consumer exists, omitting them keeps SCCP's output unchanged. A future consumer can recover
-//!   the promotion by composing [`ClickCooper::known_equal`] with [`ClickCooper::const_of`].
 //! - **Assert Facts at Index Granularity:** Assert-derived facts are attributed at block-entry
 //!   granularity via *strict* dominance/post-dominance, so a use in the asserting block itself
 //!   (after the assert) is not yet claimed. Index-precise program points would recover it; soundness
@@ -122,7 +135,7 @@ use crate::{
             click_cooper::{
                 conditional::ConditionalFacts,
                 lattice::{Constness, bool_constant},
-                solver::{FunctionFacts, FunctionSolver},
+                solver::{FunctionFacts, solve_with_writeback},
                 summary::{compute_determinism, compute_summaries, specialize},
             },
             flow_analysis::FlowAnalysis,
@@ -195,9 +208,14 @@ impl ClickCooper {
         let mut conditional = HashMap::default();
         for fid in ssa.get_function_ids() {
             let function = ssa.get_function(fid);
-            let mut solver = FunctionSolver::new(function, &consts).with_determinism(&det);
-            solver.run();
-            let mut facts = solver.into_facts();
+
+            // Combined-fixpoint writeback (intraprocedural, summary-free): solve constants +
+            // reachability, then fold a comparison of congruent operands to a constant and re-solve
+            // until no new fact appears (see `solve_with_writeback`). `summaries = None` keeps every
+            // `Call` result `Bottom` — the contract SCCP reads `functions` under — and round 0 has
+            // empty promotions, so a function with no such comparison is solved once and unchanged.
+            let mut facts =
+                solve_with_writeback(function, &consts, &det, None, &HashMap::default());
 
             // Finalize dominance-aware congruence leaders against the function's CFG, so `leader`
             // returns a legal redirect target.
@@ -324,8 +342,13 @@ impl ClickCooper {
 ///
 /// These read the specialized `contexts` map (never the SCCP-visible `functions` view), so they are
 /// disjoint from the intraprocedural queries above. They are unconditional facts *within* their
-/// context: a caller's argument constants seed the callee's parameters, and constant-returning
-/// calls fold.
+/// context: a caller's argument constants seed the callee's parameters, constant-returning calls
+/// fold, and the combined-fixpoint writeback folds comparisons of congruent operands per context.
+///
+/// A consumer must respect two contracts these facts inherit. First, a `const_of_in` / `leader_in`
+/// answer is conditional on the context `ctx`, so it must drive a context-specialized rewrite only
+/// — never lift it into a context-independent edit. Second, when a writeback-folded constant is a
+/// `WitnessOf`-typed comparison result, the substitution must keep it witness-typed.
 impl ClickCooper {
     /// The constant `v` provably holds in `f` under calling context `ctx`, or `None`.
     pub fn const_of_in(&self, f: FunctionId, ctx: &Context, v: ValueId) -> Option<Arc<Constant>> {
@@ -1685,10 +1708,224 @@ pub(crate) mod tests {
         );
     }
 
-    /// The context-parameterized conditional queries. The branch-fact family
-    /// (`const_in_block_in`) is context-*precise* — it sees the per-context parameter constant the
-    /// intraprocedural query cannot — while the assert/witness family forwards to the (sound,
-    /// context-independent) intraprocedural facts.
+    /// Interprocedural writeback through a summary: a callee that *returns* a comparison of
+    /// congruent operands gets a `Const` summary return-jump (the writeback runs in the polymorphic
+    /// summary solve), so the call result folds in the caller's context. Without it the return jump
+    /// is `Bottom` and the call result is unknown.
+    #[test]
+    fn interproc_writeback_folds_congruent_comparison_return() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let g = ssa.add_function("g".to_string());
+        let c1 = ssa.add_const(Constant::U(32, 1));
+        let (x, a, b, eq) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
+        let (x0, r) = (ssa.fresh_value(), ssa.fresh_value());
+
+        // g(x) = ((x + 1) == (x + 1)) — a vacuous comparison of congruent operands.
+        {
+            let gf = ssa.get_function_mut(g);
+            gf.add_return_type(Type::u(1));
+            gf.get_entry_mut().push_parameter(x, Type::u(32));
+            let entry = gf.get_entry_mut();
+            entry.push_instruction(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: a,
+                lhs: x,
+                rhs: c1,
+            });
+            entry.push_instruction(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: b,
+                lhs: x,
+                rhs: c1,
+            });
+            entry.push_instruction(OpCode::Cmp {
+                kind: CmpKind::Eq,
+                result: eq,
+                lhs: a,
+                rhs: b,
+            });
+            entry.set_terminator(Terminator::Return(vec![eq]));
+        }
+        {
+            let mf = ssa.get_function_mut(main_id);
+            mf.add_return_type(Type::u(1));
+            mf.get_entry_mut().push_parameter(x0, Type::u(32));
+            let entry = mf.get_entry_mut();
+            entry.push_instruction(OpCode::Call {
+                results: vec![r],
+                function: CallTarget::Static(g),
+                args: vec![x0],
+                unconstrained: false,
+            });
+            entry.set_terminator(Terminator::Return(vec![r]));
+        }
+
+        let cc = run_in_test(&ssa);
+        // The summary return-jump is `Const(true)`, so the call result folds in the caller context.
+        assert_eq!(
+            cc.const_of_in(main_id, &Context::empty(), r).as_deref(),
+            Some(&Constant::U(1, 1))
+        );
+        // The intraprocedural view (what SCCP reads) never folds a call result.
+        assert_eq!(cc.const_of(main_id, r), None);
+    }
+
+    /// Interprocedural writeback in a specialized context: a comparison of congruent operands kept
+    /// *internal* to a callee folds in that callee's per-context facts (read via `const_of_in`).
+    /// This exercises the writeback in `specialize`'s per-context solve specifically — the fold is
+    /// observable only through `contexts`, which the summary solve does not populate.
+    #[test]
+    fn interproc_writeback_folds_congruent_comparison_in_context() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let g = ssa.add_function("g".to_string());
+        let c1 = ssa.add_const(Constant::U(32, 1));
+        let (x, a, b, eq) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
+        let (x0, r) = (ssa.fresh_value(), ssa.fresh_value());
+
+        // g(x) computes `eq = (x + 1) == (x + 1)` but returns `x`, so `eq` is observable only
+        // through g's per-context facts.
+        {
+            let gf = ssa.get_function_mut(g);
+            gf.add_return_type(Type::u(32));
+            gf.get_entry_mut().push_parameter(x, Type::u(32));
+            let entry = gf.get_entry_mut();
+            entry.push_instruction(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: a,
+                lhs: x,
+                rhs: c1,
+            });
+            entry.push_instruction(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: b,
+                lhs: x,
+                rhs: c1,
+            });
+            entry.push_instruction(OpCode::Cmp {
+                kind: CmpKind::Eq,
+                result: eq,
+                lhs: a,
+                rhs: b,
+            });
+            entry.set_terminator(Terminator::Return(vec![x]));
+        }
+        {
+            let mf = ssa.get_function_mut(main_id);
+            mf.add_return_type(Type::u(32));
+            mf.get_entry_mut().push_parameter(x0, Type::u(32));
+            let entry = mf.get_entry_mut();
+            entry.push_instruction(OpCode::Call {
+                results: vec![r],
+                function: CallTarget::Static(g),
+                args: vec![x0],
+                unconstrained: false,
+            });
+            entry.set_terminator(Terminator::Return(vec![r]));
+        }
+
+        let cc = run_in_test(&ssa);
+        let ctxs = cc.contexts_of(g);
+        assert_eq!(ctxs.len(), 1);
+        // The internal comparison folds within g's single context.
+        assert_eq!(
+            cc.const_of_in(g, &ctxs[0], eq).as_deref(),
+            Some(&Constant::U(1, 1))
+        );
+        // Intraprocedurally (no context) the call result in main is still not folded.
+        assert_eq!(cc.const_of(main_id, r), None);
+    }
+
+    /// The interprocedural writeback terminates under recursion: a self-recursive callee with a
+    /// vacuous comparison in its body still reaches a fixpoint (the summary solve stays monotone),
+    /// and the comparison folds in every context.
+    #[test]
+    fn interproc_writeback_terminates_under_recursion() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let g = ssa.add_function("g".to_string());
+        let c1 = ssa.add_const(Constant::U(32, 1));
+        let (x, a, b, eq, t) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
+        let (x0, r) = (ssa.fresh_value(), ssa.fresh_value());
+
+        // g(x) = { eq = (x + 1) == (x + 1); let _ = g(x); eq } — self-recursive.
+        {
+            let gf = ssa.get_function_mut(g);
+            gf.add_return_type(Type::u(1));
+            gf.get_entry_mut().push_parameter(x, Type::u(32));
+            let entry = gf.get_entry_mut();
+            entry.push_instruction(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: a,
+                lhs: x,
+                rhs: c1,
+            });
+            entry.push_instruction(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: b,
+                lhs: x,
+                rhs: c1,
+            });
+            entry.push_instruction(OpCode::Cmp {
+                kind: CmpKind::Eq,
+                result: eq,
+                lhs: a,
+                rhs: b,
+            });
+            entry.push_instruction(OpCode::Call {
+                results: vec![t],
+                function: CallTarget::Static(g),
+                args: vec![x],
+                unconstrained: false,
+            });
+            entry.set_terminator(Terminator::Return(vec![eq]));
+        }
+        {
+            let mf = ssa.get_function_mut(main_id);
+            mf.add_return_type(Type::u(1));
+            mf.get_entry_mut().push_parameter(x0, Type::u(32));
+            let entry = mf.get_entry_mut();
+            entry.push_instruction(OpCode::Call {
+                results: vec![r],
+                function: CallTarget::Static(g),
+                args: vec![x0],
+                unconstrained: false,
+            });
+            entry.set_terminator(Terminator::Return(vec![r]));
+        }
+
+        let cc = run_in_test(&ssa);
+        let ctxs = cc.contexts_of(g);
+        assert!(!ctxs.is_empty());
+        for ctx in &ctxs {
+            assert_eq!(
+                cc.const_of_in(g, ctx, eq).as_deref(),
+                Some(&Constant::U(1, 1))
+            );
+        }
+    }
+
+    /// The context-parameterized conditional queries. The branch-fact family (`const_in_block_in`)
+    /// is context-*precise* — it sees the per-context parameter constant the intraprocedural query
+    /// cannot — while the assert/witness family forwards to the (sound, context-independent)
+    /// intraprocedural facts.
     #[test]
     fn context_parameterized_conditional_queries() {
         let mut ssa = HLSSA::with_main("main".to_string());
@@ -2119,5 +2356,367 @@ pub(crate) mod tests {
         let cc = run_in_test(&ssa);
         assert!(cc.known_equal(main_id, r1, r2)); // congruent array args ⇒ congruent results
         assert!(!cc.known_equal(main_id, r1, r3)); // distinct array arg ⇒ distinct result
+    }
+
+    /// The headline combined-fixpoint writeback: `CmpEq(a, b)` with `a` and `b` proven congruent
+    /// folds to `true` even though neither is constant, and the false edge of the branch it decides
+    /// is pruned. Neither SCCP (operands not constant) nor plain GVN (does not fold comparisons)
+    /// reaches this alone.
+    #[test]
+    fn cmp_eq_of_congruent_operands_folds_and_prunes_dead_edge() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let c1 = ssa.add_const(Constant::U(32, 1));
+        let (x, a, b, eq) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
+
+        let f = ssa.get_unique_entrypoint_mut();
+        let then_b = f.add_block();
+        let else_b = f.add_block();
+        f.get_entry_mut().push_parameter(x, Type::u(32));
+        let entry = f.get_entry_mut();
+        // a = x + 1 and b = x + 1 are structurally congruent but not constant.
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: a,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: b,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: eq,
+            lhs: a,
+            rhs: b,
+        });
+        entry.set_terminator(Terminator::JmpIf(eq, then_b, else_b));
+        f.get_block_mut(then_b)
+            .set_terminator(Terminator::Return(vec![a]));
+        f.get_block_mut(else_b)
+            .set_terminator(Terminator::Return(vec![b]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let entry_id = ssa.get_unique_entrypoint().get_entry_id();
+        let cc = run_in_test(&ssa);
+
+        assert!(cc.known_equal(fid, a, b));
+        // The comparison is now an unconditional constant `true`.
+        assert_eq!(cc.const_of(fid, eq).as_deref(), Some(&Constant::U(1, 1)));
+        // ...so the branch is decided: only the then-edge is executable.
+        assert!(cc.is_executable_edge(fid, entry_id, then_b));
+        assert!(!cc.is_executable_edge(fid, entry_id, else_b));
+        assert!(cc.is_reachable(fid, then_b));
+        assert!(!cc.is_reachable(fid, else_b));
+    }
+
+    /// The writeback cascades: deciding a congruence-derived branch prunes an edge, leaving a merge
+    /// parameter with a single constant in-edge — a constant SCCP alone (which sees both edges live)
+    /// cannot derive.
+    #[test]
+    fn writeback_cascades_to_downstream_constant() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let c1 = ssa.add_const(Constant::U(32, 1));
+        let c5 = ssa.add_const(Constant::U(32, 5));
+        let c7 = ssa.add_const(Constant::U(32, 7));
+        let (x, a, b, eq, p) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
+
+        let f = ssa.get_unique_entrypoint_mut();
+        let then_b = f.add_block();
+        let else_b = f.add_block();
+        let merge = f.add_block();
+        f.get_entry_mut().push_parameter(x, Type::u(32));
+        let entry = f.get_entry_mut();
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: a,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: b,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: eq,
+            lhs: a,
+            rhs: b,
+        });
+        entry.set_terminator(Terminator::JmpIf(eq, then_b, else_b));
+        // The dead else-edge would carry a different constant, forcing the merge to ⊥ under SCCP
+        // alone.
+        f.get_block_mut(then_b)
+            .set_terminator(Terminator::Jmp(merge, vec![c5]));
+        f.get_block_mut(else_b)
+            .set_terminator(Terminator::Jmp(merge, vec![c7]));
+        let merge_block = f.get_block_mut(merge);
+        merge_block.push_parameter(p, Type::u(32));
+        merge_block.set_terminator(Terminator::Return(vec![p]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+
+        assert!(!cc.is_reachable(fid, else_b));
+        assert_eq!(cc.const_of(fid, p).as_deref(), Some(&Constant::U(32, 5)));
+    }
+
+    /// Guard: a comparison of values that are *not* congruent stays unfolded and both branch targets
+    /// stay reachable.
+    #[test]
+    fn cmp_eq_of_noncongruent_operands_is_not_folded() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let (x, y, eq) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+        let f = ssa.get_unique_entrypoint_mut();
+        let then_b = f.add_block();
+        let else_b = f.add_block();
+        f.get_entry_mut().push_parameter(x, Type::u(32));
+        f.get_entry_mut().push_parameter(y, Type::u(32));
+        let entry = f.get_entry_mut();
+        entry.push_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: eq,
+            lhs: x,
+            rhs: y,
+        });
+        entry.set_terminator(Terminator::JmpIf(eq, then_b, else_b));
+        f.get_block_mut(then_b)
+            .set_terminator(Terminator::Return(vec![x]));
+        f.get_block_mut(else_b)
+            .set_terminator(Terminator::Return(vec![y]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+
+        assert!(!cc.known_equal(fid, x, y));
+        assert_eq!(cc.const_of(fid, eq), None);
+        assert!(cc.is_reachable(fid, then_b));
+        assert!(cc.is_reachable(fid, else_b));
+    }
+
+    /// Soundness boundary: two free witnesses are never congruent, so a comparison of them is never
+    /// folded — the writeback cannot fabricate an equality an adversarial witness could break.
+    #[test]
+    fn free_witnesses_are_not_congruent_so_comparison_not_folded() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let (w1, w2, eq) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+        let f = ssa.get_unique_entrypoint_mut();
+        let entry = f.get_entry_mut();
+        entry.push_instruction(OpCode::FreshWitness {
+            result: w1,
+            result_type: Type::field(),
+        });
+        entry.push_instruction(OpCode::FreshWitness {
+            result: w2,
+            result_type: Type::field(),
+        });
+        entry.push_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: eq,
+            lhs: w1,
+            rhs: w2,
+        });
+        entry.set_terminator(Terminator::Return(vec![eq]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+
+        assert!(!cc.known_equal(fid, w1, w2));
+        assert_eq!(cc.const_of(fid, eq), None);
+    }
+
+    /// The writeback adds nothing when no comparison has congruent operands: a plain non-constant
+    /// computation yields no new constants (so a function without such a comparison is unchanged).
+    #[test]
+    fn writeback_is_noop_without_congruent_comparison() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let c1 = ssa.add_const(Constant::U(32, 1));
+        let (x, a) = (ssa.fresh_value(), ssa.fresh_value());
+
+        let f = ssa.get_unique_entrypoint_mut();
+        let entry = f.get_entry_mut();
+        entry.push_parameter(x, Type::u(32));
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: a,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.set_terminator(Terminator::Return(vec![a]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+
+        assert_eq!(cc.const_of(fid, a), None);
+        assert!(cc.new_const_values(fid).is_empty());
+    }
+
+    /// `CmpLt(a, b)` with `a` and `b` congruent folds to `false` — `x < x` is never true.
+    #[test]
+    fn cmp_lt_of_congruent_operands_folds_false() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let c1 = ssa.add_const(Constant::U(32, 1));
+        let (x, a, b, lt) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
+
+        let f = ssa.get_unique_entrypoint_mut();
+        f.get_entry_mut().push_parameter(x, Type::u(32));
+        let entry = f.get_entry_mut();
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: a,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: b,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_instruction(OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: lt,
+            lhs: a,
+            rhs: b,
+        });
+        entry.set_terminator(Terminator::Return(vec![lt]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+
+        assert!(cc.known_equal(fid, a, b));
+        assert_eq!(cc.const_of(fid, lt).as_deref(), Some(&Constant::U(1, 0)));
+    }
+
+    /// A comparison of congruent operands folds to a constant `true` even when it is *witnessed*
+    /// (its result is `WitnessOf`-typed, as emitted by witness spilling / AD lowering) — the
+    /// must-equal fact holds either way. Keeping the substituted constant witness-typed is the
+    /// consumer's job; see the SCCP test `witnessed_constant_is_cast_to_witness_of`.
+    #[test]
+    fn witnessed_comparison_of_congruent_operands_is_promoted() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let (w, ww, n, nn) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
+
+        let f = ssa.get_unique_entrypoint_mut();
+        let entry = f.get_entry_mut();
+        entry.push_parameter(w, Type::witness_of(Type::u(32)));
+        entry.push_parameter(n, Type::u(32));
+        // Witnessed comparison: an operand is `WitnessOf`, so the result is `WitnessOf(u1)`.
+        entry.push_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: ww,
+            lhs: w,
+            rhs: w,
+        });
+        // Plain comparison: result is `u1`.
+        entry.push_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: nn,
+            lhs: n,
+            rhs: n,
+        });
+        entry.set_terminator(Terminator::Return(vec![ww, nn]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+
+        // Both compare congruent (identical) operands, so both fold to `true` — the witnessed one
+        // too. (SCCP then keeps `ww` witness-typed via a cast; the analysis fact is the same.)
+        assert!(cc.known_equal(fid, w, w));
+        assert!(cc.known_equal(fid, n, n));
+        assert_eq!(cc.const_of(fid, ww).as_deref(), Some(&Constant::U(1, 1)));
+        assert_eq!(cc.const_of(fid, nn).as_deref(), Some(&Constant::U(1, 1)));
+    }
+
+    /// Combined-analysis win unreachable to either factor alone: two loop-carried parallel induction
+    /// variables are congruent (optimistic GVN), so `i == j` folds to `true` even though neither `i`
+    /// nor `j` is constant.
+    #[test]
+    fn loop_carried_congruent_comparison_folds_true() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let c0 = ssa.add_const(Constant::U(32, 0));
+        let c1 = ssa.add_const(Constant::U(32, 1));
+        let c10 = ssa.add_const(Constant::U(32, 10));
+        let (i, j, lt, eq, i2, j2) = (
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+            ssa.fresh_value(),
+        );
+
+        let f = ssa.get_unique_entrypoint_mut();
+        let header = f.add_block();
+        let body = f.add_block();
+        let exit = f.add_block();
+
+        f.get_entry_mut()
+            .set_terminator(Terminator::Jmp(header, vec![c0, c0]));
+        let header_block = f.get_block_mut(header);
+        header_block.push_parameter(i, Type::u(32));
+        header_block.push_parameter(j, Type::u(32));
+        header_block.push_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: eq,
+            lhs: i,
+            rhs: j,
+        });
+        header_block.push_instruction(OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: lt,
+            lhs: i,
+            rhs: c10,
+        });
+        header_block.set_terminator(Terminator::JmpIf(lt, body, exit));
+        let body_block = f.get_block_mut(body);
+        body_block.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: i2,
+            lhs: i,
+            rhs: c1,
+        });
+        body_block.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: j2,
+            lhs: j,
+            rhs: c1,
+        });
+        body_block.set_terminator(Terminator::Jmp(header, vec![i2, j2]));
+        f.get_block_mut(exit)
+            .set_terminator(Terminator::Return(vec![i, j]));
+
+        let fid = ssa.get_unique_entrypoint_id();
+        let cc = run_in_test(&ssa);
+
+        assert!(cc.known_equal(fid, i, j));
+        assert_eq!(cc.const_of(fid, eq).as_deref(), Some(&Constant::U(1, 1)));
     }
 }
