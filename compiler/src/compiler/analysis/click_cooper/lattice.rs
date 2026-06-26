@@ -6,7 +6,10 @@ use ark_ff::{PrimeField, Zero};
 
 use crate::compiler::{
     Field,
-    ssa::hlssa::{BinaryArithOpKind, CastTarget, CmpKind, Constant, MAX_SUPPORTED_SIGNED_BITS},
+    ssa::hlssa::{
+        BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, MAX_SUPPORTED_SIGNED_BITS,
+        SliceOpDir, Type,
+    },
     util::{bit_mask, decode_signed, encode_signed, fits_signed},
 };
 
@@ -315,4 +318,108 @@ pub(crate) fn eval_not(v: &Constant) -> Option<Constant> {
         Constant::I(s, x) => Some(Constant::I(*s, !x & bit_mask(*s))),
         Constant::Field(_) | Constant::FnPtr(_) | Constant::Blob(_) => None,
     }
+}
+
+// AGGREGATE CONSTANT EVALUATION
+// ================================================================================================
+
+/// The maximum element count of an aggregate the analysis will materialise as a constant.
+///
+/// Aggregate folding keeps the whole `Vec<Constant>` in the lattice, so an unbounded `MkRepeated`
+/// count (or a very long `MkSeq` / `SlicePush`) could blow up memory for no analysis benefit.
+/// Constant lookup tables of interest are far smaller than this, so the cap only rejects
+/// pathological sizes — which stay `Bottom`, hence sound.
+const AGGREGATE_FOLD_CAP: usize = 1 << 12;
+
+/// Reads a constant integer index as a `usize`, or `None` if it is non-integer or too large.
+fn const_index(index: &Constant) -> Option<usize> {
+    match index {
+        Constant::U(_, x) | Constant::I(_, x) => usize::try_from(*x).ok(),
+        Constant::Field(_) | Constant::FnPtr(_) | Constant::Blob(_) => None,
+    }
+}
+
+/// Folds an `ArrayGet`: projects element `index` out of a constant aggregate.
+///
+/// `None` (→ `Bottom`) when the array is not an aggregate constant or the index is out of bounds —
+/// an out-of-bounds constant index is an erroneous program, so refusing the fold is sound.
+pub(crate) fn eval_array_get(array: &Constant, index: &Constant) -> Option<Constant> {
+    let Constant::Blob(blob) = array else {
+        return None;
+    };
+    blob.elements.get(const_index(index)?).cloned()
+}
+
+/// Folds an `ArraySet`: a constant aggregate with element `index` replaced by `value`.
+pub(crate) fn eval_array_set(
+    array: Constant,
+    index: &Constant,
+    value: Constant,
+) -> Option<Constant> {
+    let Constant::Blob(mut blob) = array else {
+        return None;
+    };
+
+    let idx = const_index(index)?;
+    if idx >= blob.elements.len() {
+        return None;
+    }
+
+    blob.elements[idx] = value;
+    Some(Constant::Blob(blob))
+}
+
+/// Folds a `SliceLen`: the element count of a constant aggregate.
+pub(crate) fn eval_slice_len(slice: &Constant) -> Option<Constant> {
+    let Constant::Blob(blob) = slice else {
+        return None;
+    };
+
+    // The result is always a u32 according to the type system.
+    Some(Constant::U(32, blob.len() as u128))
+}
+
+/// Folds a `SlicePush`: a constant aggregate extended by `values` at the front or back.
+///
+/// `Front` prepends the pushed values (in order) before the original elements; `Back` appends them
+/// after — matching the backends' slice-push semantics.
+pub(crate) fn eval_slice_push(
+    dir: SliceOpDir,
+    slice: Constant,
+    values: Vec<Constant>,
+) -> Option<Constant> {
+    let Constant::Blob(blob) = slice else {
+        return None;
+    };
+    if blob.len() + values.len() > AGGREGATE_FOLD_CAP {
+        return None;
+    }
+    let elements: Vec<Constant> = match dir {
+        SliceOpDir::Front => values.into_iter().chain(blob.elements).collect(),
+        SliceOpDir::Back => blob.elements.into_iter().chain(values).collect(),
+    };
+    Some(Constant::Blob(Blob::new(blob.elem_type, elements)))
+}
+
+/// Folds a `MkSeq`: an aggregate constant from constant elements.
+pub(crate) fn eval_mk_seq(elem_type: &Type, elems: Vec<Constant>) -> Option<Constant> {
+    if elems.len() > AGGREGATE_FOLD_CAP {
+        return None;
+    }
+    Some(Constant::Blob(Blob::new(elem_type.clone(), elems)))
+}
+
+/// Folds a `MkRepeated`: an aggregate constant of `count` copies of a constant element.
+pub(crate) fn eval_mk_repeated(
+    elem_type: &Type,
+    element: &Constant,
+    count: usize,
+) -> Option<Constant> {
+    if count > AGGREGATE_FOLD_CAP {
+        return None;
+    }
+    Some(Constant::Blob(Blob::new(
+        elem_type.clone(),
+        vec![element.clone(); count],
+    )))
 }
