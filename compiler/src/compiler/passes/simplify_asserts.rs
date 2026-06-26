@@ -58,7 +58,7 @@ impl SimplifyAsserts {
             let mut new_blocks = HashMap::default();
             for (block_id, mut block) in function.take_blocks() {
                 let mut new_instructions = Vec::new();
-                for instruction in block.take_located_instructions().into_iter() {
+                for instruction in block.take_instructions().into_iter() {
                     let location = instruction.location().clone();
                     match instruction.payload() {
                         OpCode::Assert { value } => {

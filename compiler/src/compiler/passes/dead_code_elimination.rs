@@ -428,7 +428,7 @@ impl DCE {
                     continue;
                 }
 
-                let instructions = block.take_located_instructions();
+                let instructions = block.take_instructions();
                 let mut new_instructions = vec![];
 
                 for (i, mut instruction) in instructions.into_iter().enumerate() {

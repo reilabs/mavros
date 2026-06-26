@@ -425,7 +425,7 @@ impl CSE {
 
             for (block_id, block) in function.get_blocks_mut() {
                 let bid = *block_id;
-                let old_instructions = block.take_located_instructions();
+                let old_instructions = block.take_instructions();
                 let mut new_instructions = Vec::with_capacity(old_instructions.len());
                 for (idx, mut instruction) in old_instructions.into_iter().enumerate() {
                     if to_remove.contains(&(bid, idx)) {

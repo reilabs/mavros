@@ -574,7 +574,7 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan) {
         entry.put_parameters(new_params);
 
         // 2. Materialize one local alloc per promoted parameter, seeded from the value-parameter.
-        let old_instrs = entry.take_located_instructions();
+        let old_instrs = entry.take_instructions();
         let mut new_instrs = Vec::with_capacity(old_instrs.len() + cp.params.len() * 2);
         for pp in &cp.params {
             // The alloc carries its initial value, so seed it directly from the by-value parameter
@@ -622,7 +622,7 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan) {
 /// Phase 2: rewrite the promoted-callee call sites in one caller block, in instruction order.
 fn rewrite_caller_block(func: &mut HLFunction, bid: BlockId, rewrites: &[CallRewrite]) {
     let block = func.get_block_mut(bid);
-    let old = block.take_located_instructions();
+    let old = block.take_instructions();
     let mut new_instrs = Vec::with_capacity(old.len());
     let mut next = 0;
     for instr in old {

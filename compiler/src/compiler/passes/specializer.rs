@@ -100,7 +100,7 @@ impl HLEmitter for SpecializationState<'_> {
         let entry = self.body.get_entry_id();
         self.body
             .get_block_mut(entry)
-            .push_located_instruction(instruction.into());
+            .push_instruction(instruction.into());
     }
 
     fn emit_constant(&mut self, value: Constant) -> ValueId {

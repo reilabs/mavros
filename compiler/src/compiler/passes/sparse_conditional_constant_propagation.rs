@@ -87,7 +87,7 @@ fn rewrite(function: &mut HLFunction, ssa: &HLSSA, cc: &ClickCooper, fid: Functi
         let local_replacements = bool_fact_replacements(ssa, cc, fid, bid);
         let block = function.get_block_mut(bid);
 
-        let instructions = block.take_located_instructions();
+        let instructions = block.take_instructions();
         let mut kept = Vec::with_capacity(instructions.len());
         for mut instr in instructions {
             // Purity gate: a single-result instruction whose result the analysis proved constant is

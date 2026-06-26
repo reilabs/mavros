@@ -189,7 +189,7 @@ impl Mem2Reg {
                     values.insert(*alloc, *param);
                 }
 
-                let instructions = function.get_block_mut(block_id).take_located_instructions();
+                let instructions = function.get_block_mut(block_id).take_instructions();
                 let mut new_instructions = Vec::<LocatedOpCode>::new();
 
                 for mut instruction in instructions {

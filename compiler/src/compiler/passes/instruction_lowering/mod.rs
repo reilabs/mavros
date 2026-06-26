@@ -170,7 +170,7 @@ impl InstructionLowering {
         for block_id in block_ids {
             let (instructions, terminator) = {
                 let mut block = fb.function.take_block(block_id);
-                let instructions = block.take_located_instructions();
+                let instructions = block.take_instructions();
                 let terminator = block.take_terminator();
                 fb.function.put_block(block_id, block);
                 (instructions, terminator)

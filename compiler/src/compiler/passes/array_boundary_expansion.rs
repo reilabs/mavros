@@ -601,7 +601,7 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan, index_consts: &[ValueI
         }
         entry.put_parameters(new_params);
 
-        let old_instrs = entry.take_located_instructions();
+        let old_instrs = entry.take_instructions();
         let mut new_instrs = Vec::with_capacity(old_instrs.len() + reconstructs.len());
         new_instrs.extend(reconstructs);
         new_instrs.extend(old_instrs);
@@ -672,7 +672,7 @@ fn rewrite_caller_block(
     index_consts: &[ValueId],
 ) {
     let block = func.get_block_mut(bid);
-    let old = block.take_located_instructions();
+    let old = block.take_instructions();
     let mut new_instrs = Vec::with_capacity(old.len());
     let mut next = 0;
     for instr in old {

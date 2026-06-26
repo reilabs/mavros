@@ -243,7 +243,7 @@ impl ElideTuples {
             }
             block.put_parameters(new_params);
 
-            let old_instructions = block.take_located_instructions();
+            let old_instructions = block.take_instructions();
             let mut new_instructions = Vec::with_capacity(old_instructions.len());
             for instr in &old_instructions {
                 let mut lowered = Vec::new();

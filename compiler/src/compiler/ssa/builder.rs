@@ -196,7 +196,7 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
     }
 
     pub fn emit_instruction(&mut self, instruction: impl Into<Located<Op>>) {
-        self.block.push_located_instruction(instruction.into());
+        self.block.push_instruction(instruction.into());
     }
 
     /// Build a loop with the three-block structure: header -> body -> back-edge.

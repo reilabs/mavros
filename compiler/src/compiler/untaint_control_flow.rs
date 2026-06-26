@@ -102,7 +102,7 @@ impl UntaintControlFlow {
             new_block.put_parameters(new_parameters);
 
             let mut new_instructions = Vec::<LocatedOpCode>::new();
-            for instruction in block.take_located_instructions() {
+            for instruction in block.take_instructions() {
                 let location = instruction.location().clone();
                 let new = match instruction.payload() {
                     instr @ OpCode::Alloc { .. } => instr,
@@ -225,7 +225,7 @@ impl UntaintControlFlow {
 
             let block_ids: Vec<BlockId> = function.get_blocks().map(|(bid, _)| *bid).collect();
             for block_id in block_ids {
-                let instructions = function.get_block_mut(block_id).take_located_instructions();
+                let instructions = function.get_block_mut(block_id).take_instructions();
                 let mut new_instructions = Vec::new();
                 for instruction in instructions {
                     let (instruction, location) = instruction.take();
@@ -394,7 +394,7 @@ impl UntaintControlFlow {
         let mut block = function.take_block(block_id);
         let block_taint = *block_taint_vars.get(&block_id).unwrap();
 
-        let old_instructions = block.take_located_instructions();
+        let old_instructions = block.take_instructions();
         let mut new_instructions = Vec::new();
 
         for instruction in old_instructions {
@@ -595,7 +595,7 @@ impl UntaintControlFlow {
                                 for instr in instrs {
                                     function
                                         .get_block_mut(merger_block)
-                                        .push_located_instruction(instr);
+                                        .push_instruction(instr);
                                 }
                             }
                         }

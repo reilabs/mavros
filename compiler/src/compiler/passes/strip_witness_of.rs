@@ -58,7 +58,7 @@ impl StripWitnessOf {
                 // injections/strips and elementwise Maps thereof): with all
                 // WitnessOf types stripped they are identities, so the result
                 // simply aliases the input.
-                let old_instructions = block.take_located_instructions();
+                let old_instructions = block.take_instructions();
                 let new_instructions: Vec<_> = old_instructions
                     .into_iter()
                     .filter_map(|mut instr| {

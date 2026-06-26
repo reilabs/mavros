@@ -79,7 +79,7 @@ impl WitnessLowering {
                 fb.function.get_block_mut(bid).put_parameters(new_params);
 
                 let terminator = fb.function.get_block_mut(bid).take_terminator();
-                let instructions = fb.function.get_block_mut(bid).take_located_instructions();
+                let instructions = fb.function.get_block_mut(bid).take_instructions();
 
                 let mut emitter = fb.block(bid);
 

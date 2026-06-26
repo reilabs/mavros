@@ -263,7 +263,7 @@ impl PrepareEntryPoint {
             sb.modify_function(fid, |fb| {
                 for bid in block_ids {
                     let block = fb.function.get_block_mut(bid);
-                    let old_instructions = block.take_located_instructions();
+                    let old_instructions = block.take_instructions();
 
                     let mut new_instructions = Vec::new();
 

@@ -161,7 +161,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         let func = ssa.get_function_mut(fid);
         for bid in block_ids {
             let block = func.get_block_mut(bid);
-            let instructions = block.take_located_instructions();
+            let instructions = block.take_instructions();
             let mut new_instructions = Vec::new();
 
             for instr in instructions {
@@ -237,7 +237,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
             }
             block.put_parameters(params);
 
-            let mut instructions = block.take_located_instructions();
+            let mut instructions = block.take_instructions();
             for instr in instructions.iter_mut() {
                 replace_function_types_in_instruction(&mut *instr);
             }

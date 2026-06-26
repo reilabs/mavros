@@ -124,7 +124,7 @@ impl RCInsertion {
                 }
             }
 
-            for instruction in block.take_located_instructions().into_iter().rev() {
+            for instruction in block.take_instructions().into_iter().rev() {
                 match &*instruction {
                     OpCode::BinaryArithOp {
                         kind: _,

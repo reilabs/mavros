@@ -119,7 +119,7 @@ impl Simplifier {
         let mut new_blocks = HashMap::default();
         for (bid, mut block) in fb.function.take_blocks().into_iter() {
             let mut new_instructions = Vec::new();
-            for mut instruction in block.take_located_instructions().into_iter() {
+            for mut instruction in block.take_instructions().into_iter() {
                 // Apply aliases collected so far in this iteration before pattern-matching, so we
                 // see up-to-date operands.
                 aliases.replace_inputs(&mut *instruction);
