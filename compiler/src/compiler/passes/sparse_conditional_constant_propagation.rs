@@ -234,7 +234,7 @@ mod tests {
     use super::*;
     use crate::compiler::{
         Field,
-        analysis::click_cooper::tests::run_in_test,
+        analysis::click_cooper::test::run_in_test,
         ssa::hlssa::{BinaryArithOpKind, CastTarget, CmpKind, Constant, SequenceTargetType, Type},
     };
 
