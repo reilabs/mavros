@@ -20,7 +20,7 @@ use crate::compiler::{
         },
     },
     ssa::{
-        BlockId, FunctionId, ValueId,
+        BlockId, FunctionId, ProgramPoint, ValueId,
         hlssa::{CallTarget, HLFunction, HLSSA, OpCode, Type, TypeExpr},
         traits::Instruction,
     },
@@ -451,11 +451,12 @@ struct ContextSolution {
     /// The witness shape of each return value, positionally.
     return_shapes: Vec<WitnessShape>,
 
-    /// Each constrained static call site, keyed by `(block, instruction index)`, paired with the
-    /// concrete callee context it resolves to. Cloning preserves block ids and instruction order,
-    /// so rewiring looks each call up by its site (`BTreeMap` keeps clone-discovery order
-    /// deterministic).
-    calls: BTreeMap<(BlockId, usize), Ctx>,
+    /// Each constrained static call site, keyed by its [`ProgramPoint`], paired with the concrete
+    /// callee context it resolves to.
+    ///
+    /// Cloning preserves block ids and instruction order, so rewiring looks each call up by its
+    /// site (`BTreeMap` keeps clone-discovery order deterministic).
+    calls: BTreeMap<ProgramPoint, Ctx>,
 }
 
 /// Walk the reachable `(function, concrete arg shapes, concrete return-deref shapes, concrete
@@ -529,7 +530,8 @@ fn specialize_contexts(
         ctx_result.insert(ctx, result);
     }
 
-    // Materialize: re-key shapes onto each clone, register FunctionWitnessType, rewire call targets.
+    // Materialize: re-key shapes onto each clone, register FunctionWitnessType, rewire call
+    // targets.
     let mut functions: HashMap<FunctionId, FunctionWitnessType> = HashMap::default();
     for (ctx, result) in &ctx_result {
         let (clone_id, remap) = &ctx_clone[ctx];
@@ -570,7 +572,7 @@ fn specialize_contexts(
                 {
                     let cc = result
                         .calls
-                        .get(&(bid, idx))
+                        .get(&ProgramPoint::new(bid, idx))
                         .expect("ICE: constrained call site without a solved context");
                     *t = ctx_clone[cc].0;
                     rewired += 1;
@@ -683,7 +685,7 @@ fn solve_context(
     }
 
     // Constrained static call sites, keyed by site, with their concrete callee contexts.
-    let mut calls: BTreeMap<(BlockId, usize), Ctx> = BTreeMap::new();
+    let mut calls: BTreeMap<ProgramPoint, Ctx> = BTreeMap::new();
     for (bid, block) in func.get_blocks() {
         let block_cw = *block_cfg_witness.get(bid).unwrap();
         for (idx, instr) in block.get_instructions().enumerate() {
@@ -718,7 +720,7 @@ fn solve_context(
                     })
                     .collect();
                 calls.insert(
-                    (*bid, idx),
+                    ProgramPoint::new(*bid, idx),
                     Ctx {
                         fid: *callee,
                         arg_shapes,

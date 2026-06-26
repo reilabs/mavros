@@ -75,8 +75,10 @@
 //!   accepting runs that preserve their establishing constraint, so they are exposed only through
 //!   dedicated queries. An assert, being a global constraint that holds at every point of an
 //!   accepting run, is *also* attributed to in-scope blocks it post-dominates (the assert is then
-//!   guaranteed on every continuation). Control-flow derived equality and disequality facts, being
-//!   path-conditional, stay dominance-only.
+//!   guaranteed on every continuation), and — at index granularity — to uses *after* it in its own
+//!   block (the index-precise "already ran" direction; a use textually before a same-block assert
+//!   still sees only the cross-block facts). Control-flow derived equality and disequality facts,
+//!   being path-conditional, stay dominance-only.
 //! - **Witness Forwarding:** Both readings of the one witness↔value correspondence — the
 //!   `WriteWitness` hint (`r = witness_of(v)`) and the `ValueOf` projection (`v = value_of(r)`) —
 //!   only _add_ constraints and hence never reject an honest run, while two free witnesses are
@@ -103,10 +105,6 @@
 //!
 //! The following are improvements planned for the future of this analysis.
 //!
-//! - **Assert Facts at Index Granularity:** Assert-derived facts are attributed at block-entry
-//!   granularity via *strict* dominance/post-dominance, so a use in the asserting block itself
-//!   (after the assert) is not yet claimed. Index-precise program points would recover it; soundness
-//!   is unaffected.
 //! - **Symbolic Interprocedural Congruence:** Cross-call congruence currently requires that *all*
 //!   arguments are congruent and is gated on a whole-return determinism bit; it does not graft a
 //!   callee's return expression into the caller, so it cannot relate `f(x)` to an open expression
@@ -119,6 +117,12 @@
 //!   pass per `(function, context)` — as `specialize` already does for the unconditional facts —
 //!   would let a context-specialized assert or branch expose more facts, and would warrant adding
 //!   the `_in` variants.
+//! - **Sound Post-Dominance for Assert Facts:** Assert facts (`asserted_const`/`asserted_equal`)
+//!   currently fan out by dominance only. The post-dominance direction — an assert in `B` is *bound
+//!   to run* at every block `C` it strictly post-dominates, so its fact would also hold at a use
+//!   *before* a requires an additional notion of value stability to be added to the analysis. A
+//!   future post-dominance direction would require gating all of the asserted values on being
+//!   value-stable using a cyclic-SCC membership primitive.
 
 mod conditional;
 mod congruence;
@@ -147,7 +151,7 @@ use crate::{
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore},
         ssa::{
-            BlockId, FunctionId, ValueId,
+            BlockId, FunctionId, ProgramPoint, ValueId,
             hlssa::{Constant, HLSSA, HLSSAConstantsSnapshot},
         },
     },
@@ -448,23 +452,42 @@ impl ClickCooper {
         out
     }
 
-    /// The constant `v` is pinned to on entry to `bid` in `f` by a *dominating assert*
-    /// (`Assert{v}`⇒`true`, or `AssertCmp{Eq, v, c}`).
+    /// The constant `v` is pinned to at `point` in `f` (`Assert{v}`⇒`true`, or
+    /// `AssertCmp{Eq, v, c}`) by a *dominating assert* (which holds at every index of `point.block`)
+    /// or by an assert *earlier in `point.block`* than `point.index`.
     ///
-    /// A conditional fact, deliberately disjoint from [`Self::const_of`] as a
-    /// consumer must keep the establishing assert.
-    pub fn asserted_const(&self, f: FunctionId, bid: BlockId, v: ValueId) -> Option<Arc<Constant>> {
-        self.conditional.get(&f)?.asserted_const(bid, v)
+    /// `point.index` is the position of the *using* instruction itself within
+    /// `point.block.get_instructions()` — a consumer walking `get_instructions().enumerate()` has
+    /// it for free, and a use in the terminator takes `index == get_instructions().count()`. A
+    /// same-block assert is reported only for use-indices *strictly greater* than its own, so the
+    /// assert never folds its own operand and vacuums the constraint.
+    ///
+    /// A conditional fact, deliberately disjoint from [`Self::const_of`] as a consumer must keep
+    /// the establishing assert.
+    pub fn asserted_const(
+        &self,
+        f: FunctionId,
+        point: ProgramPoint,
+        v: ValueId,
+    ) -> Option<Arc<Constant>> {
+        self.conditional.get(&f)?.asserted_const(point, v)
     }
 
-    /// `true` if a dominating `AssertCmp{Eq}` proves `a == b` on entry to `bid` in `f`.
+    /// `true` if `a == b` is proven at `point` in `f` by a dominating `AssertCmp{Eq}` or one
+    /// earlier in `point.block` than `point.index`.
     ///
     /// The conditional analog of [`Self::known_equal`] (structural congruence): sound only for
     /// constraint-preserving use, so kept out of the unconditional partition.
-    pub fn asserted_equal(&self, f: FunctionId, bid: BlockId, a: ValueId, b: ValueId) -> bool {
+    pub fn asserted_equal(
+        &self,
+        f: FunctionId,
+        point: ProgramPoint,
+        a: ValueId,
+        b: ValueId,
+    ) -> bool {
         self.conditional
             .get(&f)
-            .is_some_and(|c| c.asserted_equal(bid, a, b))
+            .is_some_and(|c| c.asserted_equal(point, a, b))
     }
 
     /// `true` if `a` and `b` are proven unequal on entry to `bid` in `f` (the false edge of an
