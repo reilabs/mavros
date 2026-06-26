@@ -1980,6 +1980,16 @@ pub enum Constant {
     Blob(Blob),
 }
 
+impl Constant {
+    /// `true` if this is a scalar constant (not an aggregate `Blob`).
+    pub fn is_scalar(&self) -> bool {
+        match self {
+            Self::U(_, _) | Self::I(_, _) | Self::Field(_) | Self::FnPtr(_) => true,
+            Self::Blob(_) => false,
+        }
+    }
+}
+
 // REFERENCE COUNTING OPS
 // ================================================================================================
 

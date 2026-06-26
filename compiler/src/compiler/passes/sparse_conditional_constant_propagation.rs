@@ -13,6 +13,10 @@
 //! constant. A pure scalar fold whose result is constant is dropped and its uses aliased to the
 //! bare interned constant.
 //!
+//! The same applies to a pure sequence *projection* (`ArrayGet` / `SliceLen`) that Click-Cooper
+//! folded over a constant aggregate at a constant in-bounds index: its scalar result is the only
+//! thing surfaced, so it is dropped and aliased identically.
+//!
 //! The **exception** is a `WitnessOf`-typed folded constant (a witnessed comparison of congruent
 //! operands): aliasing it to a bare constant would drop the wrapper and mistype the IR, so it is
 //! instead redefined in place as `cast <const> to WitnessOf`, keeping the value witness-typed.
@@ -142,14 +146,22 @@ fn rewrite(
                 let mut results = instr.get_results();
                 if let (Some(r), None) = (results.next(), results.next()) {
                     let is_const = const_set.contains(r);
+
+                    // A surfaced scalar constant is produced either by a pure scalar fold or by a
+                    // pure sequence *projection* — an `ArrayGet`/`SliceLen` that ClickCooper folded
+                    // over a constant aggregate at a proven in-bounds constant index. Both are pure
+                    // single-result reads, so the definition is dropped and its uses are aliased to
+                    // the interned constant; any other constant-producing op is an analysis bug.
+                    let foldable = instr.is_pure_scalar_fold()
+                        || matches!(instr, OpCode::ArrayGet { .. } | OpCode::SliceLen { .. });
                     assert!(
-                        !is_const || instr.is_pure_scalar_fold(),
-                        "ICE::SCCP: result {r:?} of non-pure-scalar instruction {instr:?} is in the \
-                         constant set; the intraprocedural ClickCooper facts must never fold a \
-                         non-pure-scalar op to a constant"
+                        !is_const || foldable,
+                        "ICE: Result {r:?} of non-foldable instruction {instr:?} is in the \
+                         constant set; ClickCooper must only fold pure scalar ops and pure sequence \
+                         projections to a constant"
                     );
 
-                    if is_const && instr.is_pure_scalar_fold() {
+                    if is_const && foldable {
                         if let Some(c) = witness_consts.get(r) {
                             let bare = ssa.add_const((**c).clone());
                             kept.push(OpCode::Cast {
@@ -223,7 +235,7 @@ mod tests {
     use crate::compiler::{
         Field,
         analysis::click_cooper::tests::run_in_test,
-        ssa::hlssa::{BinaryArithOpKind, CastTarget, CmpKind, Constant, Type},
+        ssa::hlssa::{BinaryArithOpKind, CastTarget, CmpKind, Constant, SequenceTargetType, Type},
     };
 
     /// `2 + 3 == 5` decides the branch: the comparison chain folds away, the `JmpIf` becomes a
@@ -772,6 +784,57 @@ mod tests {
         assert!(matches!(
             f.get_entry().get_terminator(),
             Some(Terminator::Return(vals)) if vals.as_slice() == [ww]
+        ));
+    }
+
+    /// A constant lookup-table projection folds at the SCCP level: `ArrayGet`/`SliceLen` over a
+    /// constant `MkSeq` are dropped and their uses aliased to the interned scalar constant, while
+    /// the aggregate `MkSeq` itself (never surfaced) is left in place. Exercises the widened
+    /// `foldable` gate — the purity assert must accept these pure sequence projections.
+    #[test]
+    fn folds_constant_aggregate_projections() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let c10 = ssa.add_const(Constant::U(32, 10));
+        let c20 = ssa.add_const(Constant::U(32, 20));
+        let c30 = ssa.add_const(Constant::U(32, 30));
+        let idx = ssa.add_const(Constant::U(32, 1));
+        let c_len = ssa.add_const(Constant::U(32, 3));
+        let (seq, got, len) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+        entry.push_instruction(OpCode::MkSeq {
+            result: seq,
+            elems: vec![c10, c20, c30],
+            seq_type: SequenceTargetType::Array(3),
+            elem_type: Type::u(32),
+        });
+        entry.push_instruction(OpCode::ArrayGet {
+            result: got,
+            array: seq,
+            index: idx,
+        });
+        entry.push_instruction(OpCode::SliceLen {
+            result: len,
+            slice: seq,
+        });
+        entry.set_terminator(Terminator::Return(vec![got, len]));
+
+        let cc = run_in_test(&ssa);
+        SCCP::new().do_run(&mut ssa, &cc);
+
+        let f = ssa.get_unique_entrypoint();
+        // Both projections folded away; only the (internal, now-dead) aggregate constructor remains.
+        assert!(
+            !f.get_entry()
+                .get_instructions()
+                .any(|i| matches!(i, OpCode::ArrayGet { .. } | OpCode::SliceLen { .. })),
+            "the constant projections should have folded away"
+        );
+        assert_eq!(f.get_entry().get_instructions().count(), 1); // the surviving MkSeq
+        // Their uses are aliased to the interned scalars: element 1 == 20, length == 3.
+        assert!(matches!(
+            f.get_entry().get_terminator(),
+            Some(Terminator::Return(vals)) if vals.as_slice() == [c20, c_len]
         ));
     }
 }
