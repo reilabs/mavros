@@ -593,9 +593,7 @@ impl UntaintControlFlow {
                                     }
                                 }
                                 for instr in instrs {
-                                    function
-                                        .get_block_mut(merger_block)
-                                        .push_instruction(instr);
+                                    function.get_block_mut(merger_block).push_instruction(instr);
                                 }
                             }
                         }
