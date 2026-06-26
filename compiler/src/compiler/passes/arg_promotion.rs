@@ -585,7 +585,7 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan) {
             }));
         }
         new_instrs.extend(old_instrs);
-        entry.put_located_instructions(new_instrs);
+        entry.put_instructions(new_instrs);
     }
 
     // 3. Repoint every use of the old ref parameters at their materialized allocs.
@@ -648,7 +648,7 @@ fn rewrite_caller_block(func: &mut HLFunction, bid: BlockId, rewrites: &[CallRew
         new_instrs.push(instr);
     }
     debug_assert_eq!(next, rewrites.len(), "all recorded call rewrites consumed");
-    block.put_located_instructions(new_instrs);
+    block.put_instructions(new_instrs);
 }
 
 /// Emit `Load`-before / (modified) `Call` / `Store`-after for one promoted-callee call.

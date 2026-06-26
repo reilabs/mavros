@@ -943,7 +943,7 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
     }
 
     // TODO: Once locations become non-optional, make the plain instruction APIs traffic in
-    // Located<Op> and remove the separate located instruction variants below.
+    // Located<Op> directly.
     pub fn take_instructions(&mut self) -> Vec<Op> {
         std::mem::take(&mut self.instructions)
             .into_iter()
@@ -951,16 +951,15 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
             .collect()
     }
 
-    pub fn put_instructions(&mut self, instructions: Vec<Op>) {
-        self.instructions = instructions.into_iter().map(Located::without).collect();
+    pub fn put_instructions(&mut self, instructions: Vec<impl Into<Located<Op>>>) {
+        self.instructions = instructions
+            .into_iter()
+            .map(|instruction| instruction.into())
+            .collect();
     }
 
     pub fn take_located_instructions(&mut self) -> Vec<Located<Op>> {
         std::mem::take(&mut self.instructions)
-    }
-
-    pub fn put_located_instructions(&mut self, instructions: Vec<Located<Op>>) {
-        self.instructions = instructions;
     }
 
     pub fn push_instruction(&mut self, instruction: Op) {
@@ -1253,7 +1252,7 @@ mod tests {
         ));
 
         let located = entry.take_located_instructions();
-        entry.put_located_instructions(located);
+        entry.put_instructions(located);
 
         assert_eq!(entry.get_instruction_source_location(0), Some(&location));
     }

@@ -76,7 +76,7 @@ impl StripWitnessOf {
                         Some(instr)
                     })
                     .collect();
-                block.put_located_instructions(new_instructions);
+                block.put_instructions(new_instructions);
             }
 
             // Apply replacements for removed WitnessOf casts

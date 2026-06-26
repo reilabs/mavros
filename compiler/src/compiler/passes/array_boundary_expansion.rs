@@ -605,7 +605,7 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan, index_consts: &[ValueI
         let mut new_instrs = Vec::with_capacity(old_instrs.len() + reconstructs.len());
         new_instrs.extend(reconstructs);
         new_instrs.extend(old_instrs);
-        entry.put_located_instructions(new_instrs);
+        entry.put_instructions(new_instrs);
     }
 
     // 2. Returns: at every `Return` block, load each cell of every expanded returned array and
@@ -705,7 +705,7 @@ fn rewrite_caller_block(
         rewrites.len(),
         "all recorded array-expansion call rewrites consumed"
     );
-    block.put_located_instructions(new_instrs);
+    block.put_instructions(new_instrs);
 }
 
 /// Emit pre-call `ArrayGet`s / the spliced `Call` / post-call `MkSeq`s for one expanded call.

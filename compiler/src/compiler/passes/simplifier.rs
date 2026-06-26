@@ -146,7 +146,7 @@ impl Simplifier {
                     }
                 }
             }
-            block.put_located_instructions(new_instructions);
+            block.put_instructions(new_instructions);
             new_blocks.insert(bid, block);
         }
         fb.function.put_blocks(new_blocks);

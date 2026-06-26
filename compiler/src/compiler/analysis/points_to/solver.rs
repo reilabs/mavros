@@ -300,18 +300,26 @@ fn external_singleton() -> &'static HashSet<AbstractObject> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::analysis::points_to::object::{Context, Descent, Owner};
-    use crate::compiler::ssa::{FunctionId, ValueId};
+    use crate::compiler::{
+        analysis::{
+            points_to::object::{Descent, Owner},
+            shared::call_string::Context,
+        },
+        ssa::{FunctionId, ValueId},
+    };
 
     fn f() -> FunctionId {
         FunctionId(0)
     }
+
     fn alloc(v: u64) -> AbstractObject {
         AbstractObject::Alloc(f(), ValueId(v), Context::empty())
     }
+
     fn val(v: u64) -> NodeKey {
         NodeKey::value(ValueId(v))
     }
+
     fn objs(o: &[AbstractObject]) -> HashSet<AbstractObject> {
         o.iter().cloned().collect()
     }

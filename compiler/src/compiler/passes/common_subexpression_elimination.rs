@@ -434,7 +434,7 @@ impl CSE {
                     value_replacements.replace_inputs(&mut *instruction);
                     new_instructions.push(instruction);
                 }
-                block.put_located_instructions(new_instructions);
+                block.put_instructions(new_instructions);
                 value_replacements.replace_terminator(block.get_terminator_mut());
             }
         }

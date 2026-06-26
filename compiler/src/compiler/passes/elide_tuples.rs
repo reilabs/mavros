@@ -261,7 +261,7 @@ impl ElideTuples {
                         .map(|instruction| Located::new(instruction, location.clone())),
                 );
             }
-            block.put_located_instructions(new_instructions);
+            block.put_instructions(new_instructions);
 
             let new_terminator = match block.take_terminator().unwrap() {
                 Terminator::Jmp(dest, args) => {

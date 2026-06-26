@@ -463,7 +463,7 @@ impl DCE {
                     new_instructions.push(instruction);
                 }
 
-                block.put_located_instructions(new_instructions);
+                block.put_instructions(new_instructions);
 
                 let new_terminator = match block.take_terminator() {
                     Some(Terminator::Jmp(target, params)) => {

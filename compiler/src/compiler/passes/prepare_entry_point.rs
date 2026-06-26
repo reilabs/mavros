@@ -315,7 +315,7 @@ impl PrepareEntryPoint {
                     }
 
                     let block = fb.function.get_block_mut(bid);
-                    block.put_located_instructions(new_instructions);
+                    block.put_instructions(new_instructions);
                 }
             });
         }

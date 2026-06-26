@@ -21,10 +21,8 @@ use crate::{
     compiler::{
         analysis::{
             flow_analysis::{CFG, FlowAnalysis},
-            points_to::{
-                PointerUse, PointsTo,
-                object::{AbstractObject, Context},
-            },
+            points_to::{PointerUse, PointsTo, object::AbstractObject},
+            shared::call_string::Context,
             types::{FunctionTypeInfo, TypeInfo},
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
@@ -240,7 +238,7 @@ impl Mem2Reg {
 
                 function
                     .get_block_mut(block_id)
-                    .put_located_instructions(new_instructions);
+                    .put_instructions(new_instructions);
 
                 let mut terminator = function.get_block_mut(block_id).take_terminator().unwrap();
                 value_replacements.replace_terminator(&mut terminator);

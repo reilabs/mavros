@@ -127,7 +127,8 @@ use crate::{
     collections::{HashMap, HashSet},
     compiler::{
         analysis::{
-            flow_analysis::FlowAnalysis, points_to::builder::build_function, types::TypeInfo,
+            flow_analysis::FlowAnalysis, points_to::builder::build_function,
+            shared::call_string::Context, types::TypeInfo,
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore},
         ssa::{
@@ -138,7 +139,7 @@ use crate::{
 };
 
 use array_cells::ArrayCells;
-use object::{AbstractObject, Context, NodeKey};
+use object::{AbstractObject, NodeKey};
 use solver::PointsToSolution;
 
 // POINTS-TO ANALYSIS RESULT

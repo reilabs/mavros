@@ -192,7 +192,7 @@ impl UntaintControlFlow {
                 };
                 new_instructions.push(LocatedOpCode::new(new, location));
             }
-            new_block.put_located_instructions(new_instructions);
+            new_block.put_instructions(new_instructions);
             new_block.set_terminator(block.take_terminator().unwrap());
             function.put_block(block_id, new_block);
         }
@@ -264,7 +264,7 @@ impl UntaintControlFlow {
                 }
                 function
                     .get_block_mut(block_id)
-                    .put_located_instructions(new_instructions);
+                    .put_instructions(new_instructions);
             }
 
             ssa.put_function(function_id, function);
@@ -647,7 +647,7 @@ impl UntaintControlFlow {
             None => {}
         };
 
-        block.put_located_instructions(new_instructions);
+        block.put_instructions(new_instructions);
         function.put_block(block_id, block);
     }
 

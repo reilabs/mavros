@@ -199,7 +199,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
             }
 
             let block = func.get_block_mut(bid);
-            block.put_located_instructions(new_instructions);
+            block.put_instructions(new_instructions);
         }
     }
 
@@ -241,7 +241,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
             for instr in instructions.iter_mut() {
                 replace_function_types_in_instruction(&mut *instr);
             }
-            block.put_located_instructions(instructions);
+            block.put_instructions(instructions);
         }
     }
 }

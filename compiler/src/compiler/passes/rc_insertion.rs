@@ -737,7 +737,7 @@ impl RCInsertion {
                     });
                 }
             }
-            block.put_located_instructions(new_instructions.into_iter().rev().collect());
+            block.put_instructions(new_instructions.into_iter().rev().collect());
         }
 
         for (source, target) in cfg.get_edges() {

@@ -249,7 +249,7 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         };
         self.function
             .get_block_mut(header_id)
-            .put_located_instructions(header_instructions);
+            .put_instructions(header_instructions);
         self.function
             .get_block_mut(header_id)
             .set_terminator(Terminator::JmpIf(cond, body_id, cont_id));

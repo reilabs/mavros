@@ -289,7 +289,7 @@ impl ArraySroa {
                         .map(|instruction| LocatedOpCode::new(instruction, location.clone())),
                 );
             }
-            block.put_located_instructions(new_instructions);
+            block.put_instructions(new_instructions);
 
             let new_terminator = match block.take_terminator().unwrap() {
                 // A split-array `Jmp` arg expands into its `N` cell components, aligned by index
