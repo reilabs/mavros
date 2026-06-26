@@ -1,7 +1,9 @@
-use super::{ClickCooper, Context, FlowAnalysis};
 use crate::compiler::{
     Field,
-    analysis::types::Types,
+    analysis::{
+        click_cooper::ClickCooper, flow_analysis::FlowAnalysis, shared::call_string::Context,
+        types::Types,
+    },
     ssa::{
         ProgramPoint, Terminator,
         hlssa::{
@@ -11,12 +13,18 @@ use crate::compiler::{
     },
 };
 
+// UTILITIES
+// ================================================================================================
+
 /// Build the analysis for `ssa` with freshly-computed dependencies, for test use only.
 pub(crate) fn run_in_test(ssa: &HLSSA) -> ClickCooper {
     let flow = FlowAnalysis::run(ssa);
     let types = Types::new().run(ssa, &flow);
     ClickCooper::run(ssa, &flow, &types)
 }
+
+// TESTS
+// ================================================================================================
 
 /// `OpCode::scalar_fold` is the single source of truth for "foldable *scalar* op", and value
 /// numbering is a strict superset of it.
@@ -664,7 +672,7 @@ fn leader_of_constant_class_is_the_interned_constant() {
 }
 
 /// Assert-vacuum soundness: `assert(x == 5)` pins `x` to 5 *conditionally* in dominated blocks,
-/// but never unconditionally — so a global fold (SCCP) can't fold `x` and vacuum the assert.
+/// but never unconditionally — so a global fold (SCS) can't fold `x` and vacuum the assert.
 #[test]
 fn assert_eq_const_is_conditional_not_unconditional() {
     let mut ssa = HLSSA::with_main("main".to_string());
@@ -782,6 +790,383 @@ fn assert_eq_pure_equality_is_conditional() {
     assert!(!cc.asserted_equal(fid, ProgramPoint::new(entry_id, 0), x, y));
     // Structural congruence (unconditional) does not see the assert.
     assert!(!cc.known_equal(fid, x, y));
+}
+
+/// The asserted-equal leader is *dominance-aware*, not smallest-id: with `def(a)` dominating
+/// `def(b)`, the leader of both is the dominating `a` even though `b` has the smaller value id.
+#[test]
+fn asserted_leader_picks_dominating_member() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    // `b` is allocated first so `b.0 < a.0`; a smallest-id leader would (wrongly) pick `b`.
+    let b = ssa.fresh_value();
+    let a = ssa.fresh_value();
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let mid = f.add_block();
+    f.get_entry_mut().push_parameter(a, Type::u(32)); // def(a): entry
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(mid, vec![]));
+    let mid_block = f.get_block_mut(mid);
+    mid_block.push_instruction(OpCode::BinaryArithOp {
+        // index 0: def(b) in mid, dominated by entry
+        kind: BinaryArithOpKind::Add,
+        result: b,
+        lhs: a,
+        rhs: a,
+    });
+    mid_block.push_instruction(OpCode::AssertCmp {
+        // index 1: a == b (neither constant ⇒ an equality pair)
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
+    mid_block.set_terminator(Terminator::Return(vec![])); // index 2
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    assert!(b.0 < a.0, "test premise: b has the smaller value id");
+    // After the assert (terminator index 2) the leader is the dominating definition `a`, for both
+    // members — not the lower-id `b`.
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(mid, 2), a),
+        Some(a)
+    );
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(mid, 2), b),
+        Some(a)
+    );
+    // Nothing at the assert's own index (the equality does not yet hold).
+    assert_eq!(cc.asserted_leader(fid, ProgramPoint::new(mid, 1), a), None);
+}
+
+/// The leader is the representative of the *transitive* class: `a == b` and `b == c` make all three
+/// share one leader, which is strictly stronger than the direct-pair `asserted_equal` check.
+#[test]
+fn asserted_leader_is_transitive() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    // Allocated in order, so `a.0 < b.0 < c.0`; all three are entry params (same def site), so the
+    // dominance-root-most is the smallest-id `a`.
+    let (a, b, c) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(a, Type::u(32));
+    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_parameter(c, Type::u(32));
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 0: a == b
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 1: b == c
+        kind: CmpKind::Eq,
+        lhs: b,
+        rhs: c,
+    });
+    f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 2
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // After both asserts the whole {a, b, c} class shares the leader `a`.
+    let p2 = ProgramPoint::new(entry_id, 2);
+    assert_eq!(cc.asserted_leader(fid, p2, a), Some(a));
+    assert_eq!(cc.asserted_leader(fid, p2, b), Some(a));
+    assert_eq!(cc.asserted_leader(fid, p2, c), Some(a));
+    // The leader is strictly stronger than the direct-pair check: `a == c` is never asserted
+    // directly, so `asserted_equal` does not see it, but the transitive leader does.
+    assert!(!cc.asserted_equal(fid, p2, a, c));
+    assert!(cc.asserted_equal(fid, p2, a, b));
+    assert!(cc.asserted_equal(fid, p2, b, c));
+    // Index granularity: at index 1 only `a == b` is in effect, so `c` is still on its own.
+    let p1 = ProgramPoint::new(entry_id, 1);
+    assert_eq!(cc.asserted_leader(fid, p1, a), Some(a));
+    assert_eq!(cc.asserted_leader(fid, p1, c), None);
+}
+
+/// The leader holds at every index of a dominated block (cross-block `assert_eq`) and, within the
+/// asserting block, only at use-indices strictly after the establishing assert.
+#[test]
+fn asserted_leader_index_granular() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let (x, y) = (ssa.fresh_value(), ssa.fresh_value()); // x.0 < y.0 ⇒ leader x
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    let after = f.add_block();
+    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(y, Type::u(32));
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 0
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: y,
+    });
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(after, vec![])); // index 1
+    f.get_block_mut(after)
+        .set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // Cross-block: holds at every index of the dominated `after`.
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(after, 0), x),
+        Some(x)
+    );
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(after, 0), y),
+        Some(x)
+    );
+    // Same block: only after the assert's index (the terminator at index 1) ...
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(entry_id, 1), x),
+        Some(x)
+    );
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(entry_id, 1), y),
+        Some(x)
+    );
+    // ... never at the assert's own index.
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(entry_id, 0), x),
+        None
+    );
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(entry_id, 0), y),
+        None
+    );
+}
+
+/// An equality asserted on only one branch yields a leader within that branch (after the assert) but
+/// nowhere it fails to dominate — not the merge, the other branch, or before the branch.
+#[test]
+fn asserted_leader_respects_dominance_fanout() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let cond = ssa.fresh_value();
+    let (x, y) = (ssa.fresh_value(), ssa.fresh_value()); // x.0 < y.0 ⇒ leader x
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    let then_b = f.add_block();
+    let else_b = f.add_block();
+    let merge = f.add_block();
+    f.get_entry_mut().push_parameter(cond, Type::u(1));
+    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(y, Type::u(32));
+    f.get_entry_mut()
+        .set_terminator(Terminator::JmpIf(cond, then_b, else_b));
+    f.get_block_mut(then_b).push_instruction(OpCode::AssertCmp {
+        // index 0: x == y, only on the `then` branch
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: y,
+    });
+    f.get_block_mut(then_b)
+        .set_terminator(Terminator::Jmp(merge, vec![]));
+    f.get_block_mut(else_b)
+        .set_terminator(Terminator::Jmp(merge, vec![]));
+    f.get_block_mut(merge)
+        .set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // Within the asserting branch, after the assert: the leader holds.
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(then_b, 1), x),
+        Some(x)
+    );
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(then_b, 1), y),
+        Some(x)
+    );
+    // The `then` branch dominates neither the merge nor the `else` branch, and the assert does not
+    // hold at its own index or before the branch.
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(merge, 0), x),
+        None
+    );
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(else_b, 0), x),
+        None
+    );
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(entry_id, 0), x),
+        None
+    );
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(then_b, 0), x),
+        None
+    );
+}
+
+/// A value pinned by an `asserted_const` (one side constant) is in no equality *pair*, and a value
+/// touched by no assert at all is in no class — both have no leader.
+#[test]
+fn asserted_leader_none_without_equality() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let (x, z) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(z, Type::u(32));
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 0: x == 5 — a constant pin, not an equality pair
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: c5,
+    });
+    f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 1
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    let p1 = ProgramPoint::new(entry_id, 1);
+    // Sanity: the constant pin is recorded as an `asserted_const`, not an equality.
+    assert_eq!(
+        cc.asserted_const(fid, p1, x).as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    // So `x` has no asserted-equal leader, and the untouched `z` has none anywhere.
+    assert_eq!(cc.asserted_leader(fid, p1, x), None);
+    assert_eq!(cc.asserted_leader(fid, p1, z), None);
+}
+
+/// Even in a function that *does* have an equality class (`a == b`), a value in no pair (`z`) has
+/// no leader — it gets no entry in the precomputed per-block table, so the lookup short-circuits to
+/// `None`, while a participant `a` still resolves to its leader.
+#[test]
+fn asserted_leader_none_for_non_pair_value_amid_classes() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let (a, b, z) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(a, Type::u(32));
+    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_parameter(z, Type::u(32)); // never in any assert
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 0: a == b — a real equality pair, so the function has a non-empty `def_key`
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
+    f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 1
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    let p1 = ProgramPoint::new(entry_id, 1);
+    // The participant resolves to its leader (the dominance-earliest, here the smaller-id `a`)...
+    assert_eq!(cc.asserted_leader(fid, p1, a), Some(a));
+    assert_eq!(cc.asserted_leader(fid, p1, b), Some(a));
+    // ...while `z`, in no pair, short-circuits to `None`.
+    assert_eq!(cc.asserted_leader(fid, p1, z), None);
+}
+
+/// Two same-block equality asserts at different indices grow one class in steps: a use between them
+/// sees the smaller class's leader; a use after both sees the merged class's (lower) leader. This
+/// exercises a value carrying more than one `(threshold, leader)` step and the index binary search.
+#[test]
+fn asserted_leader_multi_threshold_same_block() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    // Allocated in order ⇒ a.0 < c.0 < d.0; all entry params (same def site), so leaders are by id.
+    let (a, c, d) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(a, Type::u(32));
+    f.get_entry_mut().push_parameter(c, Type::u(32));
+    f.get_entry_mut().push_parameter(d, Type::u(32));
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 0: c == d ⇒ class {c, d}, leader c
+        kind: CmpKind::Eq,
+        lhs: c,
+        rhs: d,
+    });
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 1: a == c ⇒ merges into {a, c, d}, leader a
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: c,
+    });
+    f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 2
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+
+    // Between the asserts (index 1): only `c == d` is in effect, so `d`'s leader is `c`, and `a` —
+    // which only the not-yet-effective second assert mentions — has no class yet.
+    let p1 = ProgramPoint::new(entry_id, 1);
+    assert_eq!(cc.asserted_leader(fid, p1, d), Some(c));
+    assert_eq!(cc.asserted_leader(fid, p1, c), Some(c));
+    assert_eq!(cc.asserted_leader(fid, p1, a), None);
+
+    // After both (index 2): the merged class has the lower leader `a` — `d`'s second step.
+    let p2 = ProgramPoint::new(entry_id, 2);
+    assert_eq!(cc.asserted_leader(fid, p2, d), Some(a));
+    assert_eq!(cc.asserted_leader(fid, p2, c), Some(a));
+    assert_eq!(cc.asserted_leader(fid, p2, a), Some(a));
+}
+
+/// A same-block assert can merge two *distinct dominating* (cross-block) classes. The merged leader
+/// is returned only at indices after that local assert; before it, each cross class keeps its own
+/// leader.
+#[test]
+fn asserted_leader_local_merges_two_cross_classes() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    // a.0 < b.0 < c.0 < d.0; all entry params, so leaders are by id.
+    let (a, b, c, d) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let mid = f.add_block();
+    f.get_entry_mut().push_parameter(a, Type::u(32));
+    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_parameter(c, Type::u(32));
+    f.get_entry_mut().push_parameter(d, Type::u(32));
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 0: a == b ⇒ dominating class {a, b}
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 1: c == d ⇒ dominating class {c, d}
+        kind: CmpKind::Eq,
+        lhs: c,
+        rhs: d,
+    });
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(mid, vec![])); // index 2
+    f.get_block_mut(mid).push_instruction(OpCode::AssertCmp {
+        // index 0 (in `mid`): b == c ⇒ merges the two cross classes into {a, b, c, d}
+        kind: CmpKind::Eq,
+        lhs: b,
+        rhs: c,
+    });
+    f.get_block_mut(mid)
+        .set_terminator(Terminator::Return(vec![])); // index 1
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+
+    // At `mid` index 0 (before the local merge): the two cross classes are separate — `d`'s leader is
+    // `c`, `b`'s is `a`.
+    let mid0 = ProgramPoint::new(mid, 0);
+    assert_eq!(cc.asserted_leader(fid, mid0, d), Some(c));
+    assert_eq!(cc.asserted_leader(fid, mid0, b), Some(a));
+
+    // At `mid` index 1 (after the local `b == c`): one class {a, b, c, d}, leader `a`.
+    let mid1 = ProgramPoint::new(mid, 1);
+    assert_eq!(cc.asserted_leader(fid, mid1, d), Some(a));
+    assert_eq!(cc.asserted_leader(fid, mid1, c), Some(a));
+    assert_eq!(cc.asserted_leader(fid, mid1, b), Some(a));
 }
 
 /// The false edge of `if x == y` proves `x != y` at its target and the blocks that target
@@ -1395,7 +1780,7 @@ fn local_assert_in_loop_body() {
 }
 
 /// A callee that returns a constant: the call result folds interprocedurally in the caller's
-/// context, while the SCCP-visible intraprocedural view leaves it `Bottom`.
+/// context, while the SCS-visible intraprocedural view leaves it `Bottom`.
 #[test]
 fn interproc_constant_return_folds_at_call_site() {
     let mut ssa = HLSSA::with_main("main".to_string());
@@ -1428,7 +1813,7 @@ fn interproc_constant_return_folds_at_call_site() {
         cc.const_of_in(main_id, &Context::empty(), r).as_deref(),
         Some(&Constant::Field(Field::from(5u64)))
     );
-    // The intraprocedural view (what SCCP reads) never folds a call result.
+    // The intraprocedural view (what SCS reads) never folds a call result.
     assert_eq!(cc.const_of(main_id, r), None);
 }
 
@@ -1540,7 +1925,7 @@ fn interproc_writeback_folds_congruent_comparison_return() {
         cc.const_of_in(main_id, &Context::empty(), r).as_deref(),
         Some(&Constant::U(1, 1))
     );
-    // The intraprocedural view (what SCCP reads) never folds a call result.
+    // The intraprocedural view (what SCS reads) never folds a call result.
     assert_eq!(cc.const_of(main_id, r), None);
 }
 
@@ -2381,7 +2766,7 @@ fn cmp_lt_of_congruent_operands_folds_false() {
 /// A comparison of congruent operands folds to a constant `true` even when it is *witnessed*
 /// (its result is `WitnessOf`-typed, as emitted by witness spilling / AD lowering) — the
 /// must-equal fact holds either way. Keeping the substituted constant witness-typed is the
-/// consumer's job; see the SCCP test `witnessed_constant_is_cast_to_witness_of`.
+/// consumer's job; see the SCS test `witnessed_constant_is_cast_to_witness_of`.
 #[test]
 fn witnessed_comparison_of_congruent_operands_is_promoted() {
     let mut ssa = HLSSA::with_main("main".to_string());
@@ -2416,7 +2801,7 @@ fn witnessed_comparison_of_congruent_operands_is_promoted() {
     let cc = run_in_test(&ssa);
 
     // Both compare congruent (identical) operands, so both fold to `true` — the witnessed one
-    // too. (SCCP then keeps `ww` witness-typed via a cast; the analysis fact is the same.)
+    // too. (SCS then keeps `ww` witness-typed via a cast; the analysis fact is the same.)
     assert!(cc.known_equal(fid, w, w));
     assert!(cc.known_equal(fid, n, n));
     assert_eq!(cc.const_of(fid, ww).as_deref(), Some(&Constant::U(1, 1)));

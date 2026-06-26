@@ -43,13 +43,14 @@ use crate::{
             lower_guards::LowerGuards,
             lower_map_casts::LowerMapCasts,
             mem2reg::Mem2Reg,
+            normalize_asserts::NormalizeAsserts,
             prepare_entry_point::PrepareEntryPoint,
             rc_insertion::RCInsertion,
             remove_unreachable_blocks::RemoveUnreachableBlocks,
             remove_unreachable_functions::RemoveUnreachableFunctions,
             simplifier::Simplifier,
             simplify_asserts::SimplifyAsserts,
-            sparse_conditional_constant_propagation::SCCP,
+            sparse_conditional_simplification::SCS,
             specializer::Specializer,
             strip_witness_of::StripWitnessOf,
             trivial_phi_elimination::TrivialPhiElimination,
@@ -209,11 +210,16 @@ impl Driver {
                 // Eliminate all tuple types immediately after the entry point is prepared, so every
                 // subsequent pass operates on tuple-free IR.
                 Box::new(ElideTuples::new()),
+                // Normalize `assert(a == b)` / `assert(a < b)` into `AssertCmp` (witness-agnostic,
+                // no `AssertR1C`) so the SCS conditional layer below can see the asserted-equal and
+                // asserted-constant facts. Run pre-WTI: operands are still scalar, so asserted
+                // constants fold away here and never become witnesses/constraints downstream.
+                Box::new(NormalizeAsserts::new()),
                 // Fold constants and prune statically-decided branches (e.g. monomorphized
                 // generic dispatch) BEFORE pruning functions: calls in never-taken branches must
                 // not keep their callees alive into witness type inference and untaint CF, which
                 // can ICE on semantically-dead code they would otherwise have to type.
-                Box::new(SCCP::new()),
+                Box::new(SCS::new(dead_code_elimination::Config::preserve_blocks())),
                 Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(RemoveUnreachableBlocks::new()),
                 // Use preserve_blocks() to keep empty intermediate blocks intact.
@@ -245,6 +251,12 @@ impl Driver {
                 // The initial mem2reg handles the obvious conversions of heap traffic to SSA
                 // variables using the points-to analysis.
                 Box::new(Mem2Reg::new()),
+                // Fold the constants the initial mem2reg just promoted out of memory (and prune any
+                // now-decidable branches) so the downstream ArraySroa / ArgPromotion /
+                // ArrayBoundaryExpansion cluster sees constant indices and a reduced CFG — more
+                // arrays prove `Split`-able, more refs prove promotable. `preserve_blocks()`: this
+                // is still pre-untaint, which cannot yet handle multiple jumps into merge blocks.
+                Box::new(SCS::new(dead_code_elimination::Config::preserve_blocks())),
                 // Promote `Ref<Array>` locals to array values, then peel every proven-`Split` array
                 // into per-cell values so the cells become individually `Pure`-able / promotable.
                 Box::new(ArraySroa::new()),
@@ -276,11 +288,22 @@ impl Driver {
                 // multiple-predecessor merges that the later untaint_control_flow cannot yet
                 // handle.
                 Box::new(DCE::new(dead_code_elimination::Config::preserve_blocks())),
+                // Re-normalize any `Cmp`-fed asserts the structural passes above introduced, then
+                // fold the post-mem2reg/SROA constants and prune now-decidable branches BEFORE
+                // WTI/untaint. This is the last optimization before witness typing: pruning here
+                // keeps dead branches from tainting witnesses (bloating constraints) and from
+                // reaching untaint, which can ICE on semantically-dead code. `preserve_blocks()`
+                // for the same pre-untaint reason as the DCE above. SCS's `JmpIf->Jmp` folding can
+                // strand trivial phis, so it runs before TrivialPhiElimination; its branch-pruning
+                // can orphan callees, so RemoveUnreachableFunctions stays after it (cf. line 207).
+                Box::new(NormalizeAsserts::new()),
+                Box::new(SCS::new(dead_code_elimination::Config::preserve_blocks())),
                 // Mem2Reg promotes each scalarized leaf cell into its own block-parameter phi. For
                 // an aggregate threaded through control flow that is mostly trivial phis (the same
                 // value from every predecessor); collapse them before they reach WTI and codegen.
                 Box::new(TrivialPhiElimination::new()),
                 Box::new(RemoveUnreachableFunctions::new()),
+                Box::new(RemoveUnreachableBlocks::new()),
             ],
         )
         .run(&mut ssa);
@@ -326,9 +349,13 @@ impl Driver {
                 Box::new(InstructionLowering::pure_guards()),
                 Box::new(InstructionLowering::witness_memory_ops()),
                 Box::new(FixDoubleJumps::new()),
+                // Re-normalize asserts to `AssertCmp` so the conditional facts are visible to the
+                // SCS runs in this phase too (the `AssertR1C` lowering stays in `SimplifyAsserts`,
+                // below). New `Cmp`-fed asserts can appear after the pre-WTI passes and lowering.
+                Box::new(NormalizeAsserts::new()),
                 // Fold pure constants and prune constant-condition branches before the cleanup
                 // rounds, so Simplifier/CSE/DCE work on the reduced CFG.
-                Box::new(SCCP::new()),
+                Box::new(SCS::new(dead_code_elimination::Config::pre_r1c())),
                 // Simplify → CSE → DCE, twice. The doubled rounds let
                 // CSE-dedup expose new fold operands and folds expose new CSE
                 // matches. Each Simplifier internally iterates to fixed point
@@ -339,8 +366,8 @@ impl Driver {
                 Box::new(Simplifier::new()),
                 Box::new(CSE::pre_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
-                // Re-run SCCP after cleanup exposes new constants and branch predicate facts.
-                Box::new(SCCP::new()),
+                // Re-run SCS after cleanup exposes new constants and branch predicate facts.
+                Box::new(SCS::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(CSE::pre_r1c()),
                 Box::new(DeduplicatePhis::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
@@ -361,7 +388,7 @@ impl Driver {
                 Box::new(Specializer::new(5.0)),
                 // Specialization exposes fresh constants (folded call arguments and branch
                 // conditions); propagate them before the post-specialization cleanup.
-                Box::new(SCCP::new()),
+                Box::new(SCS::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(Simplifier::new()),
                 Box::new(CSE::pre_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),

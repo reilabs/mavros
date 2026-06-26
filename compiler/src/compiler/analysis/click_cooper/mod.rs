@@ -126,6 +126,7 @@
 
 mod conditional;
 mod congruence;
+mod def_order;
 mod lattice;
 mod solver;
 mod summary;
@@ -141,7 +142,7 @@ use crate::{
         analysis::{
             click_cooper::{
                 conditional::ConditionalFacts,
-                lattice::{Constness, bool_constant},
+                lattice::Constness,
                 solver::{FunctionFacts, solve_with_writeback},
                 summary::{compute_determinism, compute_summaries, specialize},
             },
@@ -156,6 +157,10 @@ use crate::{
         },
     },
 };
+
+/// The canonical 1-bit constant for a folded boolean, re-exported for the consumers of this
+/// analysis (e.g. the sparse conditional simplification pass).
+pub(crate) use self::lattice::bool_constant;
 
 // CLICK COOPER ANALYSIS
 // ================================================================================================
@@ -199,18 +204,17 @@ impl ClickCooper {
 
         // Phase 0: per-`(callee, return)` determinism, used below to value-number deterministic
         // static-call results cross-call. It only refines congruence (never the constant lattice or
-        // reachability), so it leaves the SCCP-visible facts byte-identical.
+        // reachability), so it leaves the SCS-visible facts byte-identical.
         let det = compute_determinism(ssa, flow);
 
         // Per-function intraprocedural facts: parameters and call results `Bottom` (no summaries
         // here). The conditional side facts are computed from the same converged state plus CFG
         // dominance, kept in a disjoint map so the unconditional view is untouched.
         //
-        // This solve MUST stay summary-free: SCCP reads `functions` (via `const_of`/
-        // `new_const_values`/`is_reachable`) and relies on `Call` staying `Bottom`, so that every
-        // constant-valued result it aliases or deletes is a pure scalar fold. Wiring summaries in
-        // here would let a constrained `Call` result become `Const` and break that contract (an
-        // `assert!` in SCCP's `rewrite` guards against it).
+        // This solve MUST stay summary-free: SCS reads `functions` and relies on `Call` staying
+        // `Bottom`, so that every constant-valued result it aliases or deletes is a pure scalar
+        // fold. Wiring summaries in here would let a constrained `Call` result become `Const` and
+        // break that contract.
         let mut functions = HashMap::default();
         let mut conditional = HashMap::default();
         for fid in ssa.get_function_ids() {
@@ -218,9 +222,10 @@ impl ClickCooper {
 
             // Combined-fixpoint writeback (intraprocedural, summary-free): solve constants +
             // reachability, then fold a comparison of congruent operands to a constant and re-solve
-            // until no new fact appears (see `solve_with_writeback`). `summaries = None` keeps every
-            // `Call` result `Bottom` — the contract SCCP reads `functions` under — and round 0 has
-            // empty promotions, so a function with no such comparison is solved once and unchanged.
+            // until no new fact appears (see `solve_with_writeback`). `summaries = None` keeps
+            // every `Call` result `Bottom` — the contract SCS reads `functions` under — and round 0
+            // has empty promotions, so a function with no such comparison is solved once and
+            // unchanged.
             let mut facts =
                 solve_with_writeback(function, &consts, &det, None, &HashMap::default());
 
@@ -352,10 +357,10 @@ impl ClickCooper {
 
 /// Unconditional interprocedural queries — the 1-CFA per-`(function, context)` refinement.
 ///
-/// These read the specialized `contexts` map (never the SCCP-visible `functions` view), so they are
-/// disjoint from the intraprocedural queries above. They are unconditional facts *within* their
-/// context: a caller's argument constants seed the callee's parameters, constant-returning calls
-/// fold, and the combined-fixpoint writeback folds comparisons of congruent operands per context.
+/// These read the specialized `contexts` map (never the `functions` view), so they are disjoint
+/// from the intraprocedural queries above. They are unconditional facts *within* their context: a
+/// caller's argument constants seed the callee's parameters, constant-returning calls fold, and the
+/// combined-fixpoint writeback folds comparisons of congruent operands per context.
 ///
 /// A consumer must respect two contracts these facts inherit. First, a `const_of_in` / `leader_in`
 /// answer is conditional on the context `ctx`, so it must drive a context-specialized rewrite only
@@ -488,6 +493,25 @@ impl ClickCooper {
         self.conditional
             .get(&f)
             .is_some_and(|c| c.asserted_equal(point, a, b))
+    }
+
+    /// Gets the canonical representative of `v`'s transitive asserted-equal class at `point` in
+    /// `f`.
+    ///
+    /// This is the dominance-root-most member, a value provably equal to `v` there whose definition
+    /// dominates `point` — or `None` if `v` is in no asserted equality at `point`. May return `v`
+    /// itself when `v` is already the root-most (a consumer copy-propagates only when the leader
+    /// differs from `v`).
+    ///
+    /// The conditional analog of the congruence [`Self::leader`]: sound only under
+    /// constraint-preserving use.  
+    pub fn asserted_leader(
+        &self,
+        f: FunctionId,
+        point: ProgramPoint,
+        v: ValueId,
+    ) -> Option<ValueId> {
+        self.conditional.get(&f)?.asserted_leader(point, v)
     }
 
     /// `true` if `a` and `b` are proven unequal on entry to `bid` in `f` (the false edge of an
