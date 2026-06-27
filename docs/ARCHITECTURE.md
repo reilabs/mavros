@@ -36,7 +36,7 @@ $c_r \cdot C$. The naïve approach to this would require materializing the full 
 multiplying them out, but this is expensive (100s of MiB) memory-wise for large circuits.
 
 **Mavros' key insight** is that if you view the constraint evaluation as a function
-$f(w) = c_r \cdot A \cdot w$ (a scalar), then the gradient $\nabla f$ is equal to `c_r \cdot A`.
+$f(w) = c_r \cdot A \cdot w$ (a scalar), then the gradient $\nabla f$ is equal to $c_r \cdot A$.
 This is _exactly_ the row linear combination that we need. The same applies to $B$ and $C$. This
 reduces the memory cost to 100s of KiB.
 
