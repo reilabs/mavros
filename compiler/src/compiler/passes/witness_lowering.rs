@@ -87,8 +87,8 @@ impl WitnessLowering {
                     let location = instruction.location().clone();
                     let mut instruction = instruction.payload();
                     replacements.replace_instruction(&mut instruction);
-                    let start = emitter.instruction_count();
-                    match instruction {
+	                    emitter.with_source_location(location, |mut emitter| {
+                        match instruction {
                         OpCode::Guard { .. } => {
                             panic!("ICE: Guard should be lowered before witness lowering");
                         }
@@ -186,9 +186,9 @@ impl WitnessLowering {
                             });
                         }
                         OpCode::Constrain { a, b, c } => {
-                            let a = self.ensure_witness_ref(a, type_info, &mut emitter);
-                            let b = self.ensure_witness_ref(b, type_info, &mut emitter);
-                            let c = self.ensure_witness_ref(c, type_info, &mut emitter);
+                            let a = self.ensure_witness_ref(a, type_info, emitter);
+                            let b = self.ensure_witness_ref(b, type_info, emitter);
+                            let c = self.ensure_witness_ref(c, type_info, emitter);
                             let new_val = emitter.fresh_value();
                             emitter.emit(OpCode::NextDCoeff { result: new_val });
                             emitter.emit(OpCode::BumpD {
@@ -466,8 +466,8 @@ impl WitnessLowering {
                         OpCode::MkTuple { .. }
                         | OpCode::TupleProj { .. }
                         | OpCode::TupleRefProj { .. } => ice_non_elided_tuple(),
-                    };
-                    emitter.set_instruction_source_locations_from(start, location);
+                        };
+                    });
                 }
 
                 // Handle terminator on current (possibly split) block

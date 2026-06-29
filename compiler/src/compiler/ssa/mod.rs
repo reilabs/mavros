@@ -776,6 +776,10 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
         (new_id, block)
     }
 
+    pub fn next_block_id_bound(&self) -> u64 {
+        self.next_block
+    }
+
     pub fn add_return_type(&mut self, typ: Ty) {
         self.returns.push(typ);
     }
@@ -1016,7 +1020,7 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
         self.instructions.len()
     }
 
-    pub fn set_instruction_source_locations_from(
+    pub fn stamp_source_location_from(
         &mut self,
         start: usize,
         source_location: Option<SourceLocation>,

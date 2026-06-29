@@ -741,20 +741,20 @@ fn lower_function(
 
         // Lower instructions
         for (instruction, source_location) in block.get_instructions_with_source_locations() {
-            let before = emitter.instruction_count_snapshot();
-            lower_instruction(
-                instruction,
-                &mut emitter,
-                &mut val_map,
-                fn_type_info,
-                fn_map,
-                drop_fns,
-                ad_fns,
-                lookup_fns,
-                hlssa_global_types,
-                options,
-            );
-            emitter.set_instruction_source_locations_since(&before, source_location.cloned());
+            emitter.with_source_location(source_location.cloned(), |emitter| {
+                lower_instruction(
+                    instruction,
+                    emitter,
+                    &mut val_map,
+                    fn_type_info,
+                    fn_map,
+                    drop_fns,
+                    ad_fns,
+                    lookup_fns,
+                    hlssa_global_types,
+                    options,
+                );
+            });
         }
 
         // Lower terminator (into current block, which may have changed due to block splits)

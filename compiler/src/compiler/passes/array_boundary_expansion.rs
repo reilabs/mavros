@@ -581,6 +581,10 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan, index_consts: &[ValueI
     if !cp.params.is_empty() {
         let entry_id = func.get_entry_id();
         let entry = func.get_block_mut(entry_id);
+        let entry_location = entry
+            .get_instructions_with_source_locations()
+            .next()
+            .and_then(|(_, location)| location.cloned());
         let old_params = entry.take_parameters();
         let mut new_params = Vec::with_capacity(old_params.len());
         let mut reconstructs: Vec<LocatedOpCode> = Vec::with_capacity(cp.params.len());
@@ -589,12 +593,15 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan, index_consts: &[ValueI
                 for cell in &pe.cells {
                     new_params.push((*cell, pe.elem.clone()));
                 }
-                reconstructs.push(LocatedOpCode::without(OpCode::MkSeq {
-                    result: pid,
-                    elems: pe.cells.clone(),
-                    seq_type: SequenceTargetType::Array(pe.n),
-                    elem_type: pe.elem.clone(),
-                }));
+                reconstructs.push(LocatedOpCode::new(
+                    OpCode::MkSeq {
+                        result: pid,
+                        elems: pe.cells.clone(),
+                        seq_type: SequenceTargetType::Array(pe.n),
+                        elem_type: pe.elem.clone(),
+                    },
+                    entry_location.clone(),
+                ));
             } else {
                 new_params.push((pid, ty));
             }

@@ -30,7 +30,7 @@ use crate::{
         ssa::{
             BlockId, FunctionId, Terminator, ValueId,
             hlssa::{
-                HLFunction, HLSSA, LocatedOpCode, OpCode,
+                HLFunction, HLSSA, OpCode,
                 builder::{HLFunctionBuilder, HLSSABuilder},
             },
         },
@@ -190,7 +190,7 @@ impl Mem2Reg {
                 }
 
                 let instructions = function.get_block_mut(block_id).take_instructions();
-                let mut new_instructions = Vec::<LocatedOpCode>::new();
+                let mut new_instructions = Vec::new();
 
                 for mut instruction in instructions {
                     // `&instruction` is borrowed only for this match; the borrow ends before the

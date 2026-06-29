@@ -12,7 +12,7 @@ use crate::{
             witness_taint_inference::WitnessTaintInference,
         },
         ssa::{
-            BlockId, FunctionId, Terminator, ValueId,
+            BlockId, FunctionId, Location, Terminator, ValueId,
             hlssa::{
                 BinaryArithOpKind, CallTarget, CastTarget, HLBlock, HLFunction, HLSSA,
                 LocatedOpCode, OpCode, SequenceTargetType, Type, TypeExpr,
@@ -39,14 +39,20 @@ fn get_witness_or_pure(
 }
 
 /// Push an instruction, wrapping in Guard if block is tainted.
-fn maybe_guard(instrs: &mut Vec<OpCode>, taint: Option<ValueId>, instr: OpCode) {
-    match taint {
-        Some(taint) => instrs.push(OpCode::Guard {
+fn maybe_guard(
+    instrs: &mut Vec<LocatedOpCode>,
+    taint: Option<ValueId>,
+    instr: OpCode,
+    location: &Location,
+) {
+    let instruction = match taint {
+        Some(taint) => OpCode::Guard {
             condition: taint,
             inner: Box::new(instr),
-        }),
-        None => instrs.push(instr),
-    }
+        },
+        None => instr,
+    };
+    instrs.push(LocatedOpCode::new(instruction, location.clone()));
 }
 
 impl UntaintControlFlow {
@@ -101,7 +107,7 @@ impl UntaintControlFlow {
             }
             new_block.put_parameters(new_parameters);
 
-            let mut new_instructions = Vec::<LocatedOpCode>::new();
+            let mut new_instructions = Vec::new();
             for instruction in block.take_instructions() {
                 let location = instruction.location().clone();
                 let new = match instruction.payload() {
@@ -399,19 +405,14 @@ impl UntaintControlFlow {
 
         for instruction in old_instructions {
             let (instruction, location) = instruction.take();
-            let mut processed_instructions = Vec::new();
             self.process_instruction(
                 instruction,
                 function,
                 ssa,
                 type_info,
                 block_taint,
-                &mut processed_instructions,
-            );
-            new_instructions.extend(
-                processed_instructions
-                    .into_iter()
-                    .map(|instruction| LocatedOpCode::new(instruction, location.clone())),
+                &location,
+                &mut new_instructions,
             );
         }
 
@@ -617,6 +618,7 @@ impl UntaintControlFlow {
                         &mut new_instructions,
                         block_taint,
                         cast_instrs,
+                        &None,
                     );
                     block.set_terminator(Terminator::Jmp(target, new_args));
                 }
@@ -638,6 +640,7 @@ impl UntaintControlFlow {
                         &mut new_instructions,
                         block_taint,
                         cast_instrs,
+                        &None,
                     );
                     block.set_terminator(Terminator::Return(new_values));
                 }
@@ -657,7 +660,8 @@ impl UntaintControlFlow {
         ssa: &mut HLSSA,
         type_info: Option<&FunctionTypeInfo>,
         block_taint: Option<ValueId>,
-        new_instructions: &mut Vec<OpCode>,
+        location: &Location,
+        new_instructions: &mut Vec<LocatedOpCode>,
     ) {
         match instruction {
             // -- Constrained Call: push cfg_witness arg --
@@ -670,12 +674,15 @@ impl UntaintControlFlow {
                 if let Some(arg) = block_taint {
                     args.push(arg);
                 }
-                new_instructions.push(OpCode::Call {
-                    results: ret,
-                    function: CallTarget::Static(tgt),
-                    args,
-                    unconstrained: false,
-                });
+                new_instructions.push(LocatedOpCode::new(
+                    OpCode::Call {
+                        results: ret,
+                        function: CallTarget::Static(tgt),
+                        args,
+                        unconstrained: false,
+                    },
+                    location.clone(),
+                ));
             }
             // -- Unconstrained Call: strip WitnessOf from args --
             OpCode::Call {
@@ -700,20 +707,31 @@ impl UntaintControlFlow {
                             })
                             .collect()
                     };
-                    flush_conversion_instrs(new_instructions, block_taint, cast_instrs);
-                    new_instructions.push(OpCode::Call {
-                        results,
-                        function: CallTarget::Static(tgt),
-                        args: new_args,
-                        unconstrained: true,
-                    });
+                    flush_conversion_instrs_located(
+                        new_instructions,
+                        block_taint,
+                        cast_instrs,
+                        location,
+                    );
+                    new_instructions.push(LocatedOpCode::new(
+                        OpCode::Call {
+                            results,
+                            function: CallTarget::Static(tgt),
+                            args: new_args,
+                            unconstrained: true,
+                        },
+                        location.clone(),
+                    ));
                 } else {
-                    new_instructions.push(OpCode::Call {
-                        results,
-                        function: CallTarget::Static(tgt),
-                        args,
-                        unconstrained: true,
-                    });
+                    new_instructions.push(LocatedOpCode::new(
+                        OpCode::Call {
+                            results,
+                            function: CallTarget::Static(tgt),
+                            args,
+                            unconstrained: true,
+                        },
+                        location.clone(),
+                    ));
                 }
             }
             OpCode::Call {
@@ -738,7 +756,12 @@ impl UntaintControlFlow {
                         .map(|v| convert_if_needed(*v, &target_elem_type, ti, &mut builder))
                         .collect()
                 };
-                flush_conversion_instrs(new_instructions, block_taint, cast_instrs);
+                flush_conversion_instrs_located(
+                    new_instructions,
+                    block_taint,
+                    cast_instrs,
+                    location,
+                );
                 maybe_guard(
                     new_instructions,
                     block_taint,
@@ -748,6 +771,7 @@ impl UntaintControlFlow {
                         seq_type: s,
                         elem_type: target_elem_type,
                     },
+                    location,
                 );
             }
             // -- Cast insertion for MkRepeated --
@@ -765,7 +789,12 @@ impl UntaintControlFlow {
                     let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     convert_if_needed(element, &target_elem_type, ti, &mut builder)
                 };
-                flush_conversion_instrs(new_instructions, block_taint, cast_instrs);
+                flush_conversion_instrs_located(
+                    new_instructions,
+                    block_taint,
+                    cast_instrs,
+                    location,
+                );
                 maybe_guard(
                     new_instructions,
                     block_taint,
@@ -776,6 +805,7 @@ impl UntaintControlFlow {
                         count,
                         elem_type: target_elem_type,
                     },
+                    location,
                 );
             }
             // -- Cast insertion for ArraySet --
@@ -799,7 +829,12 @@ impl UntaintControlFlow {
                     let cv = convert_if_needed(value, &expected_elem_type, ti, &mut builder);
                     (ca, cv)
                 };
-                flush_conversion_instrs(new_instructions, block_taint, cast_instrs);
+                flush_conversion_instrs_located(
+                    new_instructions,
+                    block_taint,
+                    cast_instrs,
+                    location,
+                );
                 maybe_guard(
                     new_instructions,
                     block_taint,
@@ -809,6 +844,7 @@ impl UntaintControlFlow {
                         index,
                         value: converted_value,
                     },
+                    location,
                 );
             }
             // -- Cast insertion for SlicePush --
@@ -834,7 +870,12 @@ impl UntaintControlFlow {
                         .collect();
                     (new_slice, new_values)
                 };
-                flush_conversion_instrs(new_instructions, block_taint, cast_instrs);
+                flush_conversion_instrs_located(
+                    new_instructions,
+                    block_taint,
+                    cast_instrs,
+                    location,
+                );
                 maybe_guard(
                     new_instructions,
                     block_taint,
@@ -844,6 +885,7 @@ impl UntaintControlFlow {
                         slice: new_slice,
                         values: new_values,
                     },
+                    location,
                 );
             }
             // -- Cast insertion for Store --
@@ -856,7 +898,12 @@ impl UntaintControlFlow {
                     let mut builder = HLInstrBuilder::new(function, ssa, &mut cast_instrs);
                     convert_if_needed(value, &target_type, ti, &mut builder)
                 };
-                flush_conversion_instrs(new_instructions, block_taint, cast_instrs);
+                flush_conversion_instrs_located(
+                    new_instructions,
+                    block_taint,
+                    cast_instrs,
+                    location,
+                );
                 maybe_guard(
                     new_instructions,
                     block_taint,
@@ -864,6 +911,7 @@ impl UntaintControlFlow {
                         ptr,
                         value: converted,
                     },
+                    location,
                 );
             }
             // -- Cast insertion for Select --
@@ -884,7 +932,12 @@ impl UntaintControlFlow {
                     let f = convert_if_needed(if_f, &target_type, ti, &mut builder);
                     (t, f)
                 };
-                flush_conversion_instrs(new_instructions, block_taint, cast_instrs);
+                flush_conversion_instrs_located(
+                    new_instructions,
+                    block_taint,
+                    cast_instrs,
+                    location,
+                );
                 maybe_guard(
                     new_instructions,
                     block_taint,
@@ -894,10 +947,11 @@ impl UntaintControlFlow {
                         if_t: new_if_t,
                         if_f: new_if_f,
                     },
+                    location,
                 );
             }
             // -- All other non-Call ops: Guard-wrap when tainted --
-            other => maybe_guard(new_instructions, block_taint, other),
+            other => maybe_guard(new_instructions, block_taint, other, location),
         }
     }
 }
@@ -958,32 +1012,16 @@ fn emit_strip_witness(
     }
 }
 
-/// Append conversion instructions emitted at a typed-slot boundary,
-/// Guard-wrapping them in tainted blocks.
-fn flush_conversion_instrs(
-    instrs: &mut Vec<OpCode>,
-    taint: Option<ValueId>,
-    cast_instrs: Vec<LocatedOpCode>,
-) {
-    for instr in cast_instrs {
-        maybe_guard(instrs, taint, instr.payload());
-    }
-}
-
 fn flush_conversion_instrs_located(
     instrs: &mut Vec<LocatedOpCode>,
     taint: Option<ValueId>,
     cast_instrs: Vec<LocatedOpCode>,
+    fallback_location: &Location,
 ) {
     for instr in cast_instrs {
         let (instr, location) = instr.take();
-        let mut guarded = Vec::new();
-        maybe_guard(&mut guarded, taint, instr);
-        instrs.extend(
-            guarded
-                .into_iter()
-                .map(|instruction| LocatedOpCode::new(instruction, location.clone())),
-        );
+        let location = location.or_else(|| fallback_location.clone());
+        maybe_guard(instrs, taint, instr, &location);
     }
 }
 

@@ -575,14 +575,20 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan) {
 
         // 2. Materialize one local alloc per promoted parameter, seeded from the value-parameter.
         let old_instrs = entry.take_instructions();
+        let entry_location = old_instrs
+            .first()
+            .and_then(|instruction| instruction.location().clone());
         let mut new_instrs = Vec::with_capacity(old_instrs.len() + cp.params.len() * 2);
         for pp in &cp.params {
             // The alloc carries its initial value, so seed it directly from the by-value parameter
             // with no follow-up store needed.
-            new_instrs.push(LocatedOpCode::without(OpCode::Alloc {
-                result: pp.alloc,
-                value: pp.new_param,
-            }));
+            new_instrs.push(LocatedOpCode::new(
+                OpCode::Alloc {
+                    result: pp.alloc,
+                    value: pp.new_param,
+                },
+                entry_location.clone(),
+            ));
         }
         new_instrs.extend(old_instrs);
         entry.put_instructions(new_instrs);

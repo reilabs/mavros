@@ -1,7 +1,7 @@
 //! Converts monomorphized AST expressions to SSA instructions.
 
 use acvm::AcirField;
-use fm::{FileId, FileManager, FileMap};
+use fm::{FileId, FileManager};
 use noirc_errors::Location as NoirLocation;
 use noirc_frontend::{
     ast::BinaryOpKind,
@@ -10,14 +10,14 @@ use noirc_frontend::{
         Index, LValue, Let, LocalId, Type as AstType, While,
     },
 };
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
         lowering::type_converter::TypeConverter,
         ssa::{
-            BlockId, FunctionId, SourceLocation, SourcePosition, ValueId,
+            BlockId, FunctionId, SourceLocation, ValueId,
             hlssa::{
                 Blob, CastTarget, Constant, Endianness, MAX_SUPPORTED_SIGNED_BITS, Radix,
                 SequenceTargetType, Type, TypeExpr,
@@ -73,6 +73,9 @@ pub struct ExpressionConverter<'a> {
 
     /// File manager used to turn Noir byte spans into user-facing source locations.
     file_manager: Option<&'a FileManager>,
+
+    /// Memoized user-facing source paths keyed by Noir file id.
+    source_files: RefCell<HashMap<FileId, Arc<str>>>,
 }
 
 impl<'a> ExpressionConverter<'a> {
@@ -97,6 +100,7 @@ impl<'a> ExpressionConverter<'a> {
             global_constants,
             current_block: entry_block,
             file_manager,
+            source_files: RefCell::new(HashMap::default()),
         }
     }
 
@@ -111,64 +115,38 @@ impl<'a> ExpressionConverter<'a> {
         emit: impl FnOnce(&mut HLBlockEmitter<'_>) -> R,
     ) -> R {
         let mut e = b.block(self.current_block);
-        let start = e.instruction_count();
-        let result = emit(&mut e);
-        self.stamp_new_instructions(&mut e, start, location);
-        result
-    }
-
-    fn stamp_new_instructions(
-        &self,
-        emitter: &mut HLBlockEmitter<'_>,
-        start: usize,
-        location: Option<NoirLocation>,
-    ) {
         let source_location = location.and_then(|location| self.source_location(location));
-        emitter.set_instruction_source_locations_from(start, source_location);
+        e.with_source_location(source_location, emit)
     }
 
     fn source_location(&self, location: NoirLocation) -> Option<SourceLocation> {
         let file_manager = self.file_manager?;
         let source = file_manager.fetch_file(location.file)?;
-        let path = file_manager.path(location.file)?;
         let file_map = file_manager.as_file_map();
+        let file = self.source_file(location.file)?;
 
-        Some(SourceLocation::new(
-            path.to_string_lossy().into_owned(),
-            Self::source_position(file_map, location.file, source, location.span.start()),
-            Self::source_position(file_map, location.file, source, location.span.end()),
+        Some(SourceLocation::from_file_offsets(
+            file,
+            file_map,
+            location.file,
+            source,
+            location.span.start(),
+            location.span.end(),
         ))
     }
 
-    /// Resolve a byte offset to a 1-based line/column.
-    ///
-    /// Lines come from the file map's precomputed line index (`codespan`), so this is a binary
-    /// search per offset rather than a scan from the start of the file. The column is the 1-based
-    /// count of `char`s from the start of the line to `byte_offset`.
-    fn source_position(
-        file_map: &FileMap,
-        file: FileId,
-        source: &str,
-        byte_offset: u32,
-    ) -> SourcePosition {
-        use fm::codespan_files::Files;
-
-        // Clamp to a char boundary so the slice below can never panic on a malformed span.
-        let mut byte_offset = (byte_offset as usize).min(source.len());
-        while byte_offset > 0 && !source.is_char_boundary(byte_offset) {
-            byte_offset -= 1;
+    fn source_file(&self, file: FileId) -> Option<Arc<str>> {
+        if let Some(source_file) = self.source_files.borrow().get(&file).cloned() {
+            return Some(source_file);
         }
 
-        let Ok(line_index) = file_map.line_index(file, byte_offset) else {
-            return SourcePosition::new(1, 1);
-        };
-        let line_start = file_map
-            .line_range(file, line_index)
-            .map(|range| range.start)
-            .unwrap_or(0);
-
-        let column = source[line_start..byte_offset].chars().count() + 1;
-        SourcePosition::new(line_index as u64 + 1, column as u64)
+        let file_manager = self.file_manager?;
+        let path = file_manager.path(file)?;
+        let source_file: Arc<str> = Arc::from(path.to_string_lossy().as_ref());
+        self.source_files
+            .borrow_mut()
+            .insert(file, source_file.clone());
+        Some(source_file)
     }
 
     fn expression_location(expr: &Expression) -> Option<NoirLocation> {
@@ -546,18 +524,16 @@ impl<'a> ExpressionConverter<'a> {
                 object,
                 field_index,
             } => {
+                let object_location = Self::lvalue_location(object);
                 if let Some(tuple_ref) = self.try_lvalue_ref(object, b) {
-                    let field_ref = self.emit_located(b, Self::lvalue_location(object), |e| {
+                    let field_ref = self.emit_located(b, object_location.clone(), |e| {
                         e.tuple_ref_proj(tuple_ref, *field_index)
                     });
-                    return self
-                        .emit_located(b, Self::lvalue_location(object), |e| e.load(field_ref));
+                    return self.emit_located(b, object_location, |e| e.load(field_ref));
                 }
 
                 let tuple = self.read_lvalue(object, b);
-                self.emit_located(b, Self::lvalue_location(object), |e| {
-                    e.tuple_proj(tuple, *field_index)
-                })
+                self.emit_located(b, object_location, |e| e.tuple_proj(tuple, *field_index))
             }
             LValue::Index { array, index, .. } => {
                 let array_value = self.read_lvalue(array, b);

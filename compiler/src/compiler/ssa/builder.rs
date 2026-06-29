@@ -145,50 +145,58 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         self.block.instruction_count()
     }
 
-    pub fn instruction_count_snapshot(&self) -> Vec<(BlockId, usize)> {
-        let mut counts: Vec<_> = self
-            .function
-            .get_blocks()
-            .map(|(id, block)| (*id, block.instruction_count()))
-            .collect();
-        counts.push((self.block_id, self.block.instruction_count()));
-        counts
-    }
-
-    pub fn set_instruction_source_locations_from(
+    pub fn stamp_source_location_from(
         &mut self,
         start: usize,
         source_location: Option<crate::compiler::ssa::SourceLocation>,
     ) {
         self.block
-            .set_instruction_source_locations_from(start, source_location);
+            .stamp_source_location_from(start, source_location);
     }
 
-    pub fn set_instruction_source_locations_since(
+    pub fn with_source_location<R>(
         &mut self,
-        before: &[(BlockId, usize)],
         source_location: Option<crate::compiler::ssa::SourceLocation>,
-    ) {
+        emit: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let start_block = self.block_id;
+        let start_len = self.block.instruction_count();
+        let next_block_before = self.function.next_block_id_bound();
+
+        let result = emit(self);
+
         let Some(source_location) = source_location else {
-            return;
+            return result;
         };
 
-        for (block_id, block) in self.function.get_blocks_mut() {
-            let start = before
-                .iter()
-                .find(|(id, _)| id == block_id)
-                .map(|(_, count)| *count)
-                .unwrap_or(0);
-            block.set_instruction_source_locations_from(start, Some(source_location.clone()));
+        if self.block_id == start_block && self.function.next_block_id_bound() == next_block_before
+        {
+            self.block
+                .stamp_source_location_from(start_len, Some(source_location));
+            return result;
+        };
+
+        if self.block_id == start_block {
+            self.block
+                .stamp_source_location_from(start_len, Some(source_location.clone()));
+        } else {
+            self.function
+                .get_block_mut(start_block)
+                .stamp_source_location_from(start_len, Some(source_location.clone()));
         }
 
-        let start = before
-            .iter()
-            .find(|(id, _)| *id == self.block_id)
-            .map(|(_, count)| *count)
-            .unwrap_or(0);
-        self.block
-            .set_instruction_source_locations_from(start, Some(source_location));
+        for (block_id, block) in self.function.get_blocks_mut() {
+            if block_id.0 >= next_block_before {
+                block.stamp_source_location_from(0, Some(source_location.clone()));
+            }
+        }
+
+        if self.block_id.0 >= next_block_before {
+            self.block
+                .stamp_source_location_from(0, Some(source_location));
+        }
+
+        result
     }
 
     pub fn add_block(&mut self) -> (BlockId, &mut Block<Op, Ty>) {
@@ -566,21 +574,21 @@ mod tests {
             sb.modify_function(main_id, |fb| {
                 let entry_id = fb.function.get_entry_id();
                 let mut block = fb.block(entry_id);
-                let before = block.instruction_count_snapshot();
-                let cond = block.not(ValueId(0));
-                block.build_if_else(
-                    cond,
-                    vec![],
-                    |then_block| {
-                        then_block.not(ValueId(0));
-                        vec![]
-                    },
-                    |else_block| {
-                        else_block.not(ValueId(0));
-                        vec![]
-                    },
-                );
-                block.set_instruction_source_locations_since(&before, Some(loc.clone()));
+                block.with_source_location(Some(loc.clone()), |block| {
+                    let cond = block.not(ValueId(0));
+                    block.build_if_else(
+                        cond,
+                        vec![],
+                        |then_block| {
+                            then_block.not(ValueId(0));
+                            vec![]
+                        },
+                        |else_block| {
+                            else_block.not(ValueId(0));
+                            vec![]
+                        },
+                    );
+                });
             });
         }
 

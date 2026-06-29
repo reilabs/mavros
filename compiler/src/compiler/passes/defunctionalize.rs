@@ -15,7 +15,7 @@ use crate::{
         pass_manager::{AnalysisStore, Pass},
         passes::fix_double_jumps::ValueReplacements,
         ssa::{
-            BlockId, FunctionId, Terminator, ValueId,
+            BlockId, FunctionId, Located, Terminator, ValueId,
             hlssa::{
                 CallTarget, Constant, HLSSA, OpCode, Type, TypeExpr,
                 builder::{HLEmitter, HLSSABuilder},
@@ -182,7 +182,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
                         new_args.push(fn_ptr_val);
                         new_args.extend(args);
 
-                        new_instructions.push(crate::compiler::ssa::Located::new(
+                        new_instructions.push(Located::new(
                             OpCode::Call {
                                 results,
                                 function: CallTarget::Static(dispatch_fn),
@@ -192,9 +192,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
                             location,
                         ));
                     }
-                    other => {
-                        new_instructions.push(crate::compiler::ssa::Located::new(other, location))
-                    }
+                    other => new_instructions.push(Located::new(other, location)),
                 }
             }
 
