@@ -10,7 +10,7 @@ use crate::{
         pass_manager::{AnalysisId, AnalysisStore, Pass},
         passes::fix_double_jumps::ValueReplacements,
         ssa::{
-            BlockId, SSAConstantsSnapshot, ValueId,
+            BlockId, ProgramPoint, SSAConstantsSnapshot, ValueId,
             hlssa::{
                 BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
                 LookupTarget, OpCode, Radix,
@@ -335,42 +335,29 @@ impl CSE {
                 if occurrences.len() <= 1 {
                     continue;
                 }
-                let mut replacement_groups: Vec<((BlockId, usize, ValueId), Vec<ValueId>)> = vec![];
-                for (block_id, instruction_idx, value_id) in occurrences {
+                let mut replacement_groups: Vec<((ProgramPoint, ValueId), Vec<ValueId>)> = vec![];
+                for (point, value_id) in occurrences {
                     let mut found = false;
-                    for ((candidate_block, candidate_instruction, candidate_value_id), others) in
+                    for ((candidate_point, candidate_value_id), others) in
                         replacement_groups.iter_mut()
                     {
-                        if self.can_replace(
-                            cfg,
-                            *candidate_block,
-                            *candidate_instruction,
-                            block_id,
-                            instruction_idx,
-                        ) {
+                        if self.can_replace(cfg, *candidate_point, point) {
                             found = true;
                             others.push(value_id);
                             break;
-                        } else if self.can_replace(
-                            cfg,
-                            block_id,
-                            instruction_idx,
-                            *candidate_block,
-                            *candidate_instruction,
-                        ) {
+                        } else if self.can_replace(cfg, point, *candidate_point) {
                             found = true;
                             others.push(*candidate_value_id);
-                            *candidate_block = block_id;
-                            *candidate_instruction = instruction_idx;
+                            *candidate_point = point;
                             *candidate_value_id = value_id;
                             break;
                         }
                     }
                     if !found {
-                        replacement_groups.push(((block_id, instruction_idx, value_id), vec![]));
+                        replacement_groups.push(((point, value_id), vec![]));
                     }
                 }
-                for ((_, _, value_id), others) in replacement_groups {
+                for ((_, value_id), others) in replacement_groups {
                     for other in others {
                         value_replacements.insert(other, value_id);
                     }
@@ -379,44 +366,31 @@ impl CSE {
 
             // Side-effect dedup: same dominance grouping as the value loop,
             // but duplicates are dropped rather than redirected.
-            let mut to_remove: HashSet<(BlockId, usize)> = HashSet::default();
+            let mut to_remove: HashSet<ProgramPoint> = HashSet::default();
             for (_, occurrences) in assertions {
                 if occurrences.len() <= 1 {
                     continue;
                 }
-                let mut groups: Vec<(BlockId, usize, Vec<(BlockId, usize)>)> = vec![];
-                for (block_id, instruction_idx) in occurrences {
+                let mut groups: Vec<(ProgramPoint, Vec<ProgramPoint>)> = vec![];
+                for point in occurrences {
                     let mut found = false;
-                    for (candidate_block, candidate_instruction, others) in groups.iter_mut() {
-                        if self.can_replace(
-                            cfg,
-                            *candidate_block,
-                            *candidate_instruction,
-                            block_id,
-                            instruction_idx,
-                        ) {
+                    for (candidate_point, others) in groups.iter_mut() {
+                        if self.can_replace(cfg, *candidate_point, point) {
                             found = true;
-                            others.push((block_id, instruction_idx));
+                            others.push(point);
                             break;
-                        } else if self.can_replace(
-                            cfg,
-                            block_id,
-                            instruction_idx,
-                            *candidate_block,
-                            *candidate_instruction,
-                        ) {
+                        } else if self.can_replace(cfg, point, *candidate_point) {
                             found = true;
-                            others.push((*candidate_block, *candidate_instruction));
-                            *candidate_block = block_id;
-                            *candidate_instruction = instruction_idx;
+                            others.push(*candidate_point);
+                            *candidate_point = point;
                             break;
                         }
                     }
                     if !found {
-                        groups.push((block_id, instruction_idx, vec![]));
+                        groups.push((point, vec![]));
                     }
                 }
-                for (_, _, others) in groups {
+                for (_, others) in groups {
                     for pos in others {
                         to_remove.insert(pos);
                     }
@@ -428,7 +402,7 @@ impl CSE {
                 let old_instructions = block.take_instructions();
                 let mut new_instructions = Vec::with_capacity(old_instructions.len());
                 for (idx, mut instruction) in old_instructions.into_iter().enumerate() {
-                    if to_remove.contains(&(bid, idx)) {
+                    if to_remove.contains(&ProgramPoint::new(bid, idx)) {
                         continue;
                     }
                     value_replacements.replace_inputs(&mut instruction);
@@ -440,18 +414,13 @@ impl CSE {
         }
     }
 
-    fn can_replace(
-        &self,
-        cfg: &CFG,
-        block1: BlockId,
-        instruction1: usize,
-        block2: BlockId,
-        instruction2: usize,
-    ) -> bool {
-        if block1 == block2 && instruction1 < instruction2 {
+    /// Whether a definition/assertion at `p1` is available at `p2`: either earlier in the same block,
+    /// or in a block that dominates `p2`'s.
+    fn can_replace(&self, cfg: &CFG, p1: ProgramPoint, p2: ProgramPoint) -> bool {
+        if p1.block == p2.block && p1.index < p2.index {
             return true;
         }
-        if cfg.dominates(block1, block2) {
+        if cfg.dominates(p1.block, p2.block) {
             return true;
         }
         false
@@ -463,12 +432,12 @@ impl CSE {
         cfg: &CFG,
         constants: &SSAConstantsSnapshot<Constant>,
     ) -> (
-        HashMap<ExprId, Vec<(BlockId, usize, ValueId)>>,
-        HashMap<Assertion, Vec<(BlockId, usize)>>,
+        HashMap<ExprId, Vec<(ProgramPoint, ValueId)>>,
+        HashMap<Assertion, Vec<ProgramPoint>>,
     ) {
         let mut interner = ExprInterner::default();
-        let mut result: HashMap<ExprId, Vec<(BlockId, usize, ValueId)>> = HashMap::default();
-        let mut assertions: HashMap<Assertion, Vec<(BlockId, usize)>> = HashMap::default();
+        let mut result: HashMap<ExprId, Vec<(ProgramPoint, ValueId)>> = HashMap::default();
+        let mut assertions: HashMap<Assertion, Vec<ProgramPoint>> = HashMap::default();
 
         // Seed the value->expr map with the SSA's constants so they can be referenced as operands.
         // They are not recorded into `result`: the constant store already dedups them, so CSE must
@@ -497,7 +466,7 @@ impl CSE {
 
         fn record_expr(
             exprs: &mut HashMap<ValueId, ExprId>,
-            result: &mut HashMap<ExprId, Vec<(BlockId, usize, ValueId)>>,
+            result: &mut HashMap<ExprId, Vec<(ProgramPoint, ValueId)>>,
             block_id: BlockId,
             instruction_idx: usize,
             value_id: ValueId,
@@ -507,11 +476,11 @@ impl CSE {
             result
                 .entry(expr)
                 .or_default()
-                .push((block_id, instruction_idx, value_id));
+                .push((ProgramPoint::new(block_id, instruction_idx), value_id));
         }
 
         fn record_assertion(
-            assertions: &mut HashMap<Assertion, Vec<(BlockId, usize)>>,
+            assertions: &mut HashMap<Assertion, Vec<ProgramPoint>>,
             block_id: BlockId,
             instruction_idx: usize,
             assertion: Assertion,
@@ -519,7 +488,7 @@ impl CSE {
             assertions
                 .entry(assertion)
                 .or_default()
-                .push((block_id, instruction_idx));
+                .push(ProgramPoint::new(block_id, instruction_idx));
         }
 
         fn lookup_target_expr(

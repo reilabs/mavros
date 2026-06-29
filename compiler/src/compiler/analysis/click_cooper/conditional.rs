@@ -7,36 +7,40 @@
 //! post-convergence using a single pass over the already solved function facts structure, plus the
 //! dominance.
 //!
-//! # Dominance and Post-Dominance, not Dataflow
+//! # Dominance, not Dataflow
 //!
 //! An assert is a *global* constraint, not a runtime check: on an accepting run it holds at every
-//! program point, whether the assert lies in that point's past or future. So an assert in reachable
-//! block `B` contributes its fact to the entry of every reachable block `C` for which the assert is
-//! guaranteed to be on the accepting run that flows through `C` — and there are two static ways to
-//! prove that:
+//! program point. So an assert in reachable block `B` contributes its fact to the entry of every
+//! reachable block `C` that `B` strictly dominates — the assert has *already run* before `C`, so
+//! the constraint is established there. Static dominance is sound because every statically-dominating
+//! block also dominates on the executable subgraph (pruning paths only adds dominators), a
+//! conservative under-approximation of executable-path dominance, and thus subsumes the
+//! intersect-at-join dataflow used by branch facts. Because `def(v) dom B dom C`, the asserted value
+//! `v` is transitively live at `C`, so the dominance direction needs no separate in-scope check.
 //!
-//! - **`B` strictly dominates `C`** — the assert has *already run* before `C`. Static dominance is
-//!   sound because every statically-dominating block also dominates on the executable subgraph
-//!   (pruning paths only adds dominators), a conservative under-approximation of executable-path
-//!   dominance, and thus subsumes the intersect-at-join dataflow used by branch facts.
-//! - **`B` strictly post-dominates `C`** — the assert is *bound to run* on every continuation out of
-//!   `C`, so on an accepting (terminating) run the constraint is satisfied and the fact holds at `C`
-//!   too. (A non-terminating run never reaches the assert, but never reaches `exit` either, so it is
-//!   non-accepting and excluded; `post_dominates` is `false` for a block that cannot reach `exit`,
-//!   which is the safe answer.)
+//! # Index Granularity Within the Asserting Block
 //!
-//! The post-dominance direction needs one guard the dominance direction supplies for free: under
-//! dominance `def(v) dom B dom C`, so the asserted value `v` is transitively live at `C`; under
-//! post-dominance that chain breaks, so `v` (both sides, for an equality) must be independently
-//! checked to be in scope at `C` (defined in a block that dominates `C`). This also keeps a
-//! loop-carried value — defined inside a loop and asserted below it — from being mis-attributed to a
-//! pre-loop block.
+//! The dominance fan-out above is *strict* (`B != C`), so it never attributes an assert to its own
+//! block `B`. A use in `B` *after* the assert is instead recovered at index granularity: each
+//! assert is recorded against `B` together with its instruction index (the `local_*` maps), and a
+//! query at a program point in `B` sees the fact only when its use-index is strictly greater than
+//! the assert's.
 //!
-//! Only asserts get the post-dominance direction. A disequality is an *edge* fact (the false edge of
-//! an equality branch): it is path-conditional — true only on the taken edge — so it holds at the
-//! entry of its target block `else_b` only when that edge is the block's sole executable in-edge, and
-//! from there propagates to every block `else_b` *dominates* (reflexively). A post-dominated block
-//! need not have taken that edge, so disequalities stay dominance-only.
+//! Strict `>` is the index-granular form of the "already ran" (dominance) direction, and it
+//! self-protects the constraint: an assert never informs its *own* operands (same index), so it
+//! cannot be folded into a vacuous tautology — not even by a later, contradictory assert in `B`
+//! (the earliest establisher wins — first-writer-wins). The asserted operands are the assert's own
+//! inputs, hence defined before it, hence in scope at every later index — so the `local_*` path
+//! needs no `in_scope` check.
+//!
+//! A use textually *before* a same-block assert is deliberately left at entry granularity: it still
+//! sees any cross-block fact for the same value, and recovering the before-the-assert case would
+//! reintroduce the contradiction hazard for no real gain.
+//!
+//! A disequality is an *edge* fact (the false edge of an equality branch): it is path-conditional —
+//! true only on the taken edge — so it holds at the entry of its target block `else_b` only when
+//! that edge is the block's sole executable in-edge, and from there propagates to every block
+//! `else_b` *dominates* (reflexively).
 
 use std::sync::Arc;
 
@@ -50,10 +54,9 @@ use crate::{
             },
             flow_analysis::CFG,
             types::FunctionTypeInfo,
-            value_definitions::{FunctionValueDefinitions, ValueDefinition},
         },
         ssa::{
-            BlockId, Terminator, ValueId,
+            BlockId, ProgramPoint, Terminator, ValueId,
             hlssa::{CastTarget, CmpKind, Constant, HLFunction, HLSSAConstantsSnapshot, OpCode},
         },
     },
@@ -64,17 +67,41 @@ use crate::{
 
 /// The conditional facts of one function.
 ///
-/// All maps are keyed by the block at whose **entry** the fact holds.
+/// The cross-block maps ([`Self::assert_const`], [`Self::assert_eq`], [`Self::diseq`]) are keyed by
+/// the block at whose **entry** the fact holds. The two `local_*` maps are keyed by the *asserting*
+/// block and additionally carry the establishing assert's instruction index, so their facts hold
+/// only at use-indices after it (see their field docs and the module "Index Granularity" section).
 #[derive(Debug, Default)]
 pub(crate) struct ConditionalFacts {
-    /// Values forced to a constant by a dominating or post-dominating assert: `Assert{v}` ⇒
-    /// `v = true`, `AssertCmp{Eq, x, c}` (with one side unconditional-constant `c`) ⇒ the other
-    /// side `= c`.
+    /// Values forced to a constant by a dominating assert: `Assert{v}` ⇒ `v = true`,
+    /// `AssertCmp{Eq, x, c}` (with one side unconditional-constant `c`) ⇒ the other side `= c`.
     assert_const: HashMap<BlockId, HashMap<ValueId, Arc<Constant>>>,
 
-    /// Equalities established by a dominating or post-dominating `AssertCmp{Eq, a, b}` where neither
-    /// side is a (unconditional) constant — a *conditional* analog of congruence's `known_equal`.
+    /// Equalities established by a dominating `AssertCmp{Eq, a, b}` where neither side is a
+    /// (unconditional) constant — a *conditional* analog of congruence's `known_equal`.
+    ///
+    /// Each pair is stored canonically as `(min, max)` by value id, so `(a, b)` and `(b, a)` dedup
+    /// as one.
     assert_eq: HashMap<BlockId, Vec<(ValueId, ValueId)>>,
+
+    /// Values pinned to a constant by an assert *within* the keyed block, each paired with the
+    /// instruction index of the establishing assert.
+    ///
+    /// The within-block analog of [`Self::assert_const`]: rather than holding at the whole block,
+    /// each entry holds only at use-indices strictly greater than its stored index, recovering uses
+    /// in the asserting block after the assert. The `Vec` is in instruction order (so the earliest
+    /// establisher wins); it must not be sorted or deduplicated, as that order *is* the
+    /// deterministic first-writer rule.
+    local_assert_const: HashMap<BlockId, Vec<(usize, ValueId, Arc<Constant>)>>,
+
+    /// Equalities established by an `AssertCmp{Eq, a, b}` *within* the keyed block (neither side a
+    /// constant), each paired with the assert's instruction index.
+    ///
+    /// The within-block analog of [`Self::assert_eq`], holding only at use-indices strictly greater
+    /// than the stored index; likewise kept in instruction order. Each pair is stored canonically
+    /// as `(min, max)` by value id (the *entries* stay in instruction order — only each pair's two
+    /// sides are ordered).
+    local_assert_eq: HashMap<BlockId, Vec<(usize, ValueId, ValueId)>>,
 
     /// Disequalities `(a, b)` from the false edge of an equality `JmpIf` dominating the block.
     diseq: HashMap<BlockId, HashSet<(ValueId, ValueId)>>,
@@ -89,17 +116,37 @@ pub(crate) struct ConditionalFacts {
 }
 
 impl ConditionalFacts {
-    /// The constant `v` is forced to on entry to `bid` by a dominating assert, or `None`.
-    pub(crate) fn asserted_const(&self, bid: BlockId, v: ValueId) -> Option<Arc<Constant>> {
-        self.assert_const.get(&bid)?.get(&v).cloned()
+    /// The constant `v` is forced to at `point` by a dominating assert (valid at every index of the
+    /// block) or by a same-block assert strictly before `point.index`, or `None`.
+    pub(crate) fn asserted_const(&self, point: ProgramPoint, v: ValueId) -> Option<Arc<Constant>> {
+        // A cross-block assert holds at every index of the block.
+        if let Some(c) = self.assert_const.get(&point.block).and_then(|m| m.get(&v)) {
+            return Some(c.clone());
+        }
+
+        // Otherwise a same-block assert strictly *before* the use supplies the fact. The `Vec` is
+        // in instruction order, so `find` returns the earliest establisher (first-writer-wins).
+        self.local_assert_const
+            .get(&point.block)?
+            .iter()
+            .find(|(i, vv, _)| *i < point.index && *vv == v)
+            .map(|(_, _, c)| c.clone())
     }
 
-    /// `true` if a dominating assert proves `a == b` on entry to `bid` (reflexive + symmetric).
-    pub(crate) fn asserted_equal(&self, bid: BlockId, a: ValueId, b: ValueId) -> bool {
+    /// `true` if `a == b` is proven at `point` by a dominating assert or by a same-block assert
+    /// strictly before `point.index` (reflexive + symmetric).
+    pub(crate) fn asserted_equal(&self, point: ProgramPoint, a: ValueId, b: ValueId) -> bool {
+        // Pairs are stored canonically as `(min, max)` by value id, so canonicalize the query pair
+        // once and compare directly.
+        let (lo, hi) = if a.0 <= b.0 { (a, b) } else { (b, a) };
         a == b
-            || self.assert_eq.get(&bid).is_some_and(|eqs| {
+            || self
+                .assert_eq
+                .get(&point.block)
+                .is_some_and(|eqs| eqs.iter().any(|p| *p == (lo, hi)))
+            || self.local_assert_eq.get(&point.block).is_some_and(|eqs| {
                 eqs.iter()
-                    .any(|(x, y)| (*x == a && *y == b) || (*x == b && *y == a))
+                    .any(|(i, x, y)| *i < point.index && (*x, *y) == (lo, hi))
             })
     }
 
@@ -147,36 +194,25 @@ pub(crate) fn build(
         }
     };
 
-    // A value→defining-block lookup, used to gate the post-dominance fan-out (Step 3) on the
-    // asserted value being live at the target block. `v` is in scope on entry to `c` iff it is
-    // defined in a block that dominates `c`. A value with no structural definition (an interned
-    // constant / global) is in scope everywhere. Dominance fan-out needs no such check: `def(v)`
-    // dominates the asserting block, which dominates the target, so `v` is transitively live there.
-    let defs = FunctionValueDefinitions::from_function(function);
-    let in_scope = |v: ValueId, c: BlockId| match defs.get_definition(v) {
-        Some(ValueDefinition::Param(b, ..) | ValueDefinition::Instruction(b, ..)) => {
-            cfg.dominates(*b, c)
-        }
-        None => true,
-    };
-
-    // Step 1: Gather facts at their establishing block, plus the (global) witness forwards and the
-    // `Cmp{Eq}` results needed to interpret equality branches.
-    let mut raw_const: HashMap<BlockId, Vec<(ValueId, Arc<Constant>)>> = HashMap::default();
-    let mut raw_eq: HashMap<BlockId, Vec<(ValueId, ValueId)>> = HashMap::default();
+    // Step 1: Gather facts at their establishing block — tagged with the instruction index of the
+    // establishing assert, so the asserting block's own post-assert uses can be recovered at index
+    // granularity (the cross-block fan-out in Step 3 ignores the index) — plus the (global) witness
+    // forwards and the `Cmp{Eq}` results needed to interpret equality branches.
+    let mut raw_const: HashMap<BlockId, Vec<(usize, ValueId, Arc<Constant>)>> = HashMap::default();
+    let mut raw_eq: HashMap<BlockId, Vec<(usize, ValueId, ValueId)>> = HashMap::default();
     let mut eq_cmp_of: HashMap<ValueId, (ValueId, ValueId)> = HashMap::default();
 
     for (bid, block) in function.get_blocks() {
         if !facts.reachable.contains(bid) {
             continue;
         }
-        for instr in block.get_instructions() {
+        for (idx, instr) in block.get_instructions().enumerate() {
             match instr {
                 OpCode::Assert { value } => {
                     raw_const
                         .entry(*bid)
                         .or_default()
-                        .push((*value, bool_constant(true)));
+                        .push((idx, *value, bool_constant(true)));
                 }
                 OpCode::AssertCmp {
                     kind: CmpKind::Eq,
@@ -184,11 +220,18 @@ pub(crate) fn build(
                     rhs,
                 } => {
                     if let Some(c) = const_of(*lhs) {
-                        raw_const.entry(*bid).or_default().push((*rhs, c));
+                        raw_const.entry(*bid).or_default().push((idx, *rhs, c));
                     } else if let Some(c) = const_of(*rhs) {
-                        raw_const.entry(*bid).or_default().push((*lhs, c));
+                        raw_const.entry(*bid).or_default().push((idx, *lhs, c));
                     } else {
-                        raw_eq.entry(*bid).or_default().push((*lhs, *rhs));
+                        // Store the pair canonically (min, max) by value id so `(x, y)` and
+                        // `(y, x)` dedup as one in the cross-block fan-out below.
+                        let (lo, hi) = if lhs.0 <= rhs.0 {
+                            (*lhs, *rhs)
+                        } else {
+                            (*rhs, *lhs)
+                        };
+                        raw_eq.entry(*bid).or_default().push((idx, lo, hi));
                     }
                 }
                 OpCode::Cmp {
@@ -238,6 +281,13 @@ pub(crate) fn build(
     // whose entry they hold. The fact holds there only when that edge is the target's *sole*
     // executable in-edge (otherwise a join could merge in a path that never established it).
     let mut raw_diseq: HashMap<BlockId, HashSet<(ValueId, ValueId)>> = HashMap::default();
+
+    // Executable in-edges per block (the reverse of `exec_edges`), built once for efficiency.
+    let mut exec_preds_of: HashMap<BlockId, Vec<BlockId>> = HashMap::default();
+    for (p, t) in &facts.exec_edges {
+        exec_preds_of.entry(*t).or_default().push(*p);
+    }
+
     for (bid, block) in function.get_blocks() {
         if !facts.reachable.contains(bid) {
             continue;
@@ -257,22 +307,20 @@ pub(crate) fn build(
             continue;
         }
 
-        let preds: Vec<BlockId> = facts
-            .exec_edges
-            .iter()
-            .filter(|(_, t)| t == else_b)
-            .map(|(p, _)| *p)
-            .collect();
+        let preds = exec_preds_of
+            .get(else_b)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         if preds.len() == 1 && preds[0] == *bid {
             raw_diseq.entry(*else_b).or_default().insert((*lhs, *rhs));
         }
     }
 
-    // Step 3: Fan out to dominated (and, for asserts, post-dominated) blocks. The inner loop only
-    // needs the blocks that actually established a fact (the keys of the raw maps), not every
-    // reachable block. Iterating sorted targets `C` (outer) and sorted fact-source blocks `B`
-    // (inner) keeps the result deterministic and first-writer-wins on any contradictory pair of
-    // asserts (which can only co-dominate/co-post-dominate a block that no honest run reaches).
+    // Step 3: Fan out to dominated blocks. The inner loop only needs the blocks that actually
+    // established a fact (the keys of the raw maps), not every reachable block. Iterating sorted
+    // targets `C` (outer) and sorted fact-source blocks `B` (inner) keeps the result deterministic
+    // and first-writer-wins on any contradictory pair of asserts (which can only co-dominate a block
+    // that no honest run reaches).
     let mut reachable_blocks: Vec<BlockId> = facts.reachable.iter().copied().collect();
     reachable_blocks.sort_by_key(|b| b.0);
     let mut fact_sources: Vec<BlockId> = raw_const
@@ -286,43 +334,33 @@ pub(crate) fn build(
 
     for &c in &reachable_blocks {
         for &b in &fact_sources {
-            // Assert facts hold at `C` when the assert is guaranteed on every run flowing through
-            // `C`: either it has already run (`B` strictly dominates `C`) or it is bound to run on
-            // every continuation (`B` strictly post-dominates `C`). `B != C` excludes the asserting
-            // block's own entry.
-            let dominates = b != c && cfg.dominates(b, c);
-            let post_dominates = b != c && cfg.post_dominates(b, c);
-
-            if dominates || post_dominates {
+            // Assert facts hold at `C` when the assert has already run before `C`, i.e. `B` strictly
+            // dominates `C`. `B != C` excludes the asserting block's own entry; its own post-assert
+            // uses are recovered separately at index granularity from the `local_*` maps (see the
+            // module "Index Granularity" section). Dominance makes the asserted value transitively
+            // live at `C`, so no in-scope check is needed. The post-dominance direction is
+            // deliberately omitted as unsound for loop-carried values — see `mod.rs`'s "Deferred
+            // Improvements".
+            if b != c && cfg.dominates(b, c) {
                 if let Some(consts_at_b) = raw_const.get(&b) {
                     let entry = out.assert_const.entry(c).or_default();
-                    for (v, k) in consts_at_b {
-                        // Dominance makes `v` transitively live at `C`; under post-dominance only,
-                        // `v` must be independently in scope (see the module soundness note).
-                        if dominates || in_scope(*v, c) {
-                            entry.entry(*v).or_insert_with(|| k.clone());
-                        }
+                    for (_i, v, k) in consts_at_b {
+                        entry.entry(*v).or_insert_with(|| k.clone());
                     }
                 }
                 if let Some(eqs_at_b) = raw_eq.get(&b) {
                     let entry = out.assert_eq.entry(c).or_default();
-                    for pair in eqs_at_b {
-                        let (x, y) = pair;
-
-                        // Post-dominance requires *both* sides of the equality to be in scope at
-                        // `C`.
-                        if (dominates || (in_scope(*x, c) && in_scope(*y, c)))
-                            && !entry.contains(pair)
-                        {
-                            entry.push(*pair);
+                    for (_i, x, y) in eqs_at_b {
+                        let pair = (*x, *y);
+                        if !entry.contains(&pair) {
+                            entry.push(pair);
                         }
                     }
                 }
             }
 
             // Disequalities are path-conditional edge facts already attached to their target's
-            // entry, so they propagate reflexively (`B == C` keeps the fact at the target itself)
-            // and stay dominance-only — a post-dominated block need not have taken that edge.
+            // entry, so they propagate reflexively (`B == C` keeps the fact at the target itself).
             if cfg.dominates(b, c) {
                 if let Some(diseqs_at_b) = raw_diseq.get(&b) {
                     let entry = out.diseq.entry(c).or_default();
@@ -333,6 +371,11 @@ pub(crate) fn build(
             }
         }
     }
+
+    // The raw per-block asserts (now unborrowed by Step 3) *are* the asserting block's own facts,
+    // already in instruction order: move them in to drive the index-granular `local_*` queries.
+    out.local_assert_const = raw_const;
+    out.local_assert_eq = raw_eq;
 
     out
 }

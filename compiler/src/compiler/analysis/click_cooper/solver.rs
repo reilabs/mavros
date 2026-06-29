@@ -838,6 +838,7 @@ pub(crate) fn solve_with_writeback(
     // to `None`, `set_lattice`'s guard is `false`, and `into_facts` materialises nothing).
     let mut promotions: HashMap<ValueId, Arc<Constant>> = HashMap::default();
     let mut facts = None;
+    let mut converged = false;
     for _ in 0..MAX_WRITEBACK_ROUNDS {
         let mut solver = FunctionSolver::new(function, consts)
             .with_determinism(det)
@@ -855,12 +856,19 @@ pub(crate) fn solve_with_writeback(
         for (v, c) in derive_promotions(function, &solved) {
             promotions.entry(v).or_insert(c);
         }
-        let converged = promotions.len() == before;
+        converged = promotions.len() == before;
         facts = Some(solved);
         if converged {
             break;
         }
     }
+
+    debug_assert!(
+        converged,
+        "ClickCooper combined-fixpoint writeback did not converge within {MAX_WRITEBACK_ROUNDS} \
+         rounds for `{}` (expected 1–2)",
+        function.get_name(),
+    );
     facts.expect("the writeback loop always runs at least one round")
 }
 
