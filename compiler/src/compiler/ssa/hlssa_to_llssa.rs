@@ -741,7 +741,7 @@ fn lower_function(
 
         // Lower instructions
         for (instruction, source_location) in block.get_instructions_with_source_locations() {
-            emitter.with_source_location(source_location.cloned(), |emitter| {
+            emitter.emit_with_location(source_location.cloned(), |emitter| {
                 lower_instruction(
                     instruction,
                     emitter,

@@ -593,15 +593,15 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan, index_consts: &[ValueI
                 for cell in &pe.cells {
                     new_params.push((*cell, pe.elem.clone()));
                 }
-                reconstructs.push(LocatedOpCode::new(
+                reconstructs.push(
                     OpCode::MkSeq {
                         result: pid,
                         elems: pe.cells.clone(),
                         seq_type: SequenceTargetType::Array(pe.n),
                         elem_type: pe.elem.clone(),
-                    },
-                    entry_location.clone(),
-                ));
+                    }
+                    .locate(entry_location.clone()),
+                );
             } else {
                 new_params.push((pid, ty));
             }
@@ -699,7 +699,7 @@ fn rewrite_caller_block(
                 new_instrs.extend(
                     rewritten
                         .into_iter()
-                        .map(|instruction| LocatedOpCode::new(instruction, location.clone())),
+                        .map(|instruction| instruction.locate(location.clone())),
                 );
                 next += 1;
                 continue;

@@ -116,7 +116,7 @@ impl<'a> ExpressionConverter<'a> {
     ) -> R {
         let mut e = b.block(self.current_block);
         let source_location = location.and_then(|location| self.source_location(location));
-        e.with_source_location(source_location, emit)
+        e.emit_with_location(source_location, emit)
     }
 
     fn source_location(&self, location: NoirLocation) -> Option<SourceLocation> {

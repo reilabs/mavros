@@ -154,7 +154,7 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
             .stamp_source_location_from(start, source_location);
     }
 
-    pub fn with_source_location<R>(
+    pub fn emit_with_location<R>(
         &mut self,
         source_location: Option<crate::compiler::ssa::SourceLocation>,
         emit: impl FnOnce(&mut Self) -> R,
@@ -574,7 +574,7 @@ mod tests {
             sb.modify_function(main_id, |fb| {
                 let entry_id = fb.function.get_entry_id();
                 let mut block = fb.block(entry_id);
-                block.with_source_location(Some(loc.clone()), |block| {
+                block.emit_with_location(Some(loc.clone()), |block| {
                     let cond = block.not(ValueId(0));
                     block.build_if_else(
                         cond,

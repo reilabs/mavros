@@ -52,7 +52,7 @@ fn maybe_guard(
         },
         None => instr,
     };
-    instrs.push(LocatedOpCode::new(instruction, location.clone()));
+    instrs.push(instruction.locate(location.clone()));
 }
 
 impl UntaintControlFlow {
@@ -196,7 +196,7 @@ impl UntaintControlFlow {
                     },
                     other => other,
                 };
-                new_instructions.push(LocatedOpCode::new(new, location));
+                new_instructions.push(new.locate(location));
             }
             new_block.put_instructions(new_instructions);
             new_block.set_terminator(block.take_terminator().unwrap());
@@ -236,7 +236,7 @@ impl UntaintControlFlow {
                 for instruction in instructions {
                     let (instruction, location) = instruction.take();
                     let OpCode::Alloc { result, value } = instruction else {
-                        new_instructions.push(LocatedOpCode::new(instruction, location));
+                        new_instructions.push(instruction.locate(location));
                         continue;
                     };
                     let cell_shape = function_wt
@@ -260,13 +260,13 @@ impl UntaintControlFlow {
                         }
                         new_instructions.push(cast_instruction);
                     }
-                    new_instructions.push(LocatedOpCode::new(
+                    new_instructions.push(
                         OpCode::Alloc {
                             result,
                             value: converted,
-                        },
-                        location,
-                    ));
+                        }
+                        .locate(location),
+                    );
                 }
                 function
                     .get_block_mut(block_id)
@@ -674,15 +674,15 @@ impl UntaintControlFlow {
                 if let Some(arg) = block_taint {
                     args.push(arg);
                 }
-                new_instructions.push(LocatedOpCode::new(
+                new_instructions.push(
                     OpCode::Call {
                         results: ret,
                         function: CallTarget::Static(tgt),
                         args,
                         unconstrained: false,
-                    },
-                    location.clone(),
-                ));
+                    }
+                    .locate(location.clone()),
+                );
             }
             // -- Unconstrained Call: strip WitnessOf from args --
             OpCode::Call {
@@ -713,25 +713,25 @@ impl UntaintControlFlow {
                         cast_instrs,
                         location,
                     );
-                    new_instructions.push(LocatedOpCode::new(
+                    new_instructions.push(
                         OpCode::Call {
                             results,
                             function: CallTarget::Static(tgt),
                             args: new_args,
                             unconstrained: true,
-                        },
-                        location.clone(),
-                    ));
+                        }
+                        .locate(location.clone()),
+                    );
                 } else {
-                    new_instructions.push(LocatedOpCode::new(
+                    new_instructions.push(
                         OpCode::Call {
                             results,
                             function: CallTarget::Static(tgt),
                             args,
                             unconstrained: true,
-                        },
-                        location.clone(),
-                    ));
+                        }
+                        .locate(location.clone()),
+                    );
                 }
             }
             OpCode::Call {

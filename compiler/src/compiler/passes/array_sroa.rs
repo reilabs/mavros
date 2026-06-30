@@ -60,7 +60,7 @@ use crate::{
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
         ssa::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
-            hlssa::{Constant, HLSSA, LocatedOpCode, OpCode, Type, TypeExpr},
+            hlssa::{Constant, HLSSA, OpCode, Type, TypeExpr},
         },
     },
 };
@@ -286,7 +286,7 @@ impl ArraySroa {
                 new_instructions.extend(
                     lowered
                         .into_iter()
-                        .map(|instruction| LocatedOpCode::new(instruction, location.clone())),
+                        .map(|instruction| instruction.locate(location.clone())),
                 );
             }
             block.put_instructions(new_instructions);

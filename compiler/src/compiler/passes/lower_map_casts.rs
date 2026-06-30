@@ -60,7 +60,7 @@ impl LowerMapCasts {
                     let mut emitter = fb.block(bid);
                     for instruction in instructions {
                         let location = instruction.location().clone();
-                        emitter.with_source_location(location, |emitter| {
+                        emitter.emit_with_location(location, |emitter| {
                             match instruction.payload() {
                                 OpCode::Cast {
                                     result,

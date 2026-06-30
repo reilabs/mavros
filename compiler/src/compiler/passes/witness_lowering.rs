@@ -87,7 +87,7 @@ impl WitnessLowering {
                     let location = instruction.location().clone();
                     let mut instruction = instruction.payload();
                     replacements.replace_instruction(&mut instruction);
-	                    emitter.with_source_location(location, |mut emitter| {
+                    emitter.emit_with_location(location, |mut emitter| {
                         match instruction {
                         OpCode::Guard { .. } => {
                             panic!("ICE: Guard should be lowered before witness lowering");

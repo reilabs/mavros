@@ -94,9 +94,7 @@ use crate::{
         passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
         ssa::{
             BlockId, FunctionId, Terminator, ValueId,
-            hlssa::{
-                CallTarget, Constant, HLFunction, HLSSA, LocatedOpCode, OpCode, Type, TypeExpr,
-            },
+            hlssa::{CallTarget, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr},
         },
     },
 };
@@ -582,13 +580,13 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan) {
         for pp in &cp.params {
             // The alloc carries its initial value, so seed it directly from the by-value parameter
             // with no follow-up store needed.
-            new_instrs.push(LocatedOpCode::new(
+            new_instrs.push(
                 OpCode::Alloc {
                     result: pp.alloc,
                     value: pp.new_param,
-                },
-                entry_location.clone(),
-            ));
+                }
+                .locate(entry_location.clone()),
+            );
         }
         new_instrs.extend(old_instrs);
         entry.put_instructions(new_instrs);
@@ -645,7 +643,7 @@ fn rewrite_caller_block(func: &mut HLFunction, bid: BlockId, rewrites: &[CallRew
                 new_instrs.extend(
                     rewritten
                         .into_iter()
-                        .map(|instruction| LocatedOpCode::new(instruction, location.clone())),
+                        .map(|instruction| instruction.locate(location.clone())),
                 );
                 next += 1;
                 continue;
