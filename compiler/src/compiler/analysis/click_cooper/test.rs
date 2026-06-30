@@ -3248,3 +3248,644 @@ fn aggregate_folding_refuses_oob_set_and_over_cap_constructors() {
     assert_eq!(cc.const_of(fid, at_pushed), None);
     assert_eq!(cc.const_of(fid, at_big), None);
 }
+
+// SYMBOLIC INTERPROCEDURAL CONGRUENCE
+// ================================================================================================
+
+/// A symbolic return jump ignores an argument the return does not use: `f(x, y) = x + 1` makes
+/// `f(a, c)` and `f(a, d)` congruent even when `c ≢ d` (which the whole-argument `CallDet`
+/// numbering cannot see), while a call differing in the *used* argument stays distinct.
+#[test]
+fn symbolic_jump_ignores_dead_argument() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+    let c1 = ssa.add_const(Constant::Field(Field::from(1u64)));
+    let (x, y, fa) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    // f(x, y) = x + 1  (y is dead).
+    {
+        let hf = ssa.get_function_mut(f);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_parameter(y, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: fa,
+            lhs: x,
+            rhs: c1,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![fa]));
+    }
+
+    let (a, b, c, d) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let (r1, r2, r3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        mf.get_entry_mut().push_parameter(b, Type::field());
+        mf.get_entry_mut().push_parameter(c, Type::field());
+        mf.get_entry_mut().push_parameter(d, Type::field());
+        let entry = mf.get_entry_mut();
+        for (res, args) in [(r1, vec![a, c]), (r2, vec![a, d]), (r3, vec![b, c])] {
+            entry.push_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(f),
+                args,
+                unconstrained: false,
+            });
+        }
+        entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
+    }
+
+    let cc = run_in_test(&ssa);
+    assert!(cc.known_equal(main_id, r1, r2)); // dead 2nd arg ⇒ congruent
+    assert!(!cc.known_equal(main_id, r1, r3)); // distinct 1st arg ⇒ distinct
+}
+
+/// A symbolic return jump relates a call result to an *open expression* over the caller's values:
+/// `f(x) = x + 5` makes `f(a)` congruent to a caller-local `a + 5` (which the opaque per-callee
+/// `CallDet` node cannot), and not to `a + 6`. The call result still stays `Bottom` in the lattice,
+/// so the SCS contract (the `eval_call` constant channel untouched) holds.
+#[test]
+fn symbolic_jump_relates_call_to_open_expression() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+    let c6 = ssa.add_const(Constant::Field(Field::from(6u64)));
+    let (x, fa) = (ssa.fresh_value(), ssa.fresh_value());
+
+    // f(x) = x + 5
+    {
+        let hf = ssa.get_function_mut(f);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: fa,
+            lhs: x,
+            rhs: c5,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![fa]));
+    }
+
+    let a = ssa.fresh_value();
+    let (r, w, w2) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        let entry = mf.get_entry_mut();
+        entry.push_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(f),
+            args: vec![a],
+            unconstrained: false,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: w,
+            lhs: a,
+            rhs: c5,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: w2,
+            lhs: a,
+            rhs: c6,
+        });
+        entry.set_terminator(Terminator::Return(vec![r]));
+    }
+
+    let cc = run_in_test(&ssa);
+    assert!(cc.known_equal(main_id, r, w)); // r ≡ a + 5
+    assert!(!cc.known_equal(main_id, r, w2)); // r ≢ a + 6
+    // The call result is never folded into the constant lattice (Bottom contract).
+    assert_eq!(cc.const_of(main_id, r), None);
+    assert!(cc.new_const_values(main_id).iter().all(|(v, _)| *v != r));
+}
+
+/// A two-level return expression grafts through a synthetic intermediate node: `f(x) = (x + 5) * 2`
+/// makes `f(a)` congruent to a caller-local `(a + 5) * 2`. The synthetic scaffolding is stripped,
+/// so it never reaches a congruence class or `compute_leaders` (which would otherwise treat a
+/// def-less id as an illegal leader).
+#[test]
+fn symbolic_jump_depth_two_grafts_via_synthetic() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+    let c2 = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let (x, ft, fa) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    // f(x) = (x + 5) * 2
+    {
+        let hf = ssa.get_function_mut(f);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: ft,
+            lhs: x,
+            rhs: c5,
+        });
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: fa,
+            lhs: ft,
+            rhs: c2,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![fa]));
+    }
+
+    let a = ssa.fresh_value();
+    let (r, wt, w) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        let entry = mf.get_entry_mut();
+        entry.push_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(f),
+            args: vec![a],
+            unconstrained: false,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: wt,
+            lhs: a,
+            rhs: c5,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: w,
+            lhs: wt,
+            rhs: c2,
+        });
+        entry.set_terminator(Terminator::Return(vec![r]));
+    }
+
+    let cc = run_in_test(&ssa);
+    assert!(cc.known_equal(main_id, r, w)); // r ≡ (a + 5) * 2
+
+    // `r`'s class is exactly `{r, w}` — no synthetic id leaked in.
+    let mut r_class = cc.congruence_class(main_id, r);
+    r_class.sort();
+    let mut expected = vec![r, w];
+    expected.sort();
+    assert_eq!(r_class, expected);
+
+    // The grafted inner `Add(a, 5)` is congruent to the real `wt`, but the synthetic that carried
+    // it was stripped, so `wt`'s class is `{wt}` alone and its leader is a real, def-dominating
+    // value.
+    assert_eq!(cc.congruence_class(main_id, wt), vec![wt]);
+    assert_eq!(cc.leader(main_id, wt), Some(wt));
+    let leader = cc.leader(main_id, r).expect("r is in a class");
+    assert!(leader == r || leader == w);
+}
+
+/// The dead-argument win survives a two-level return: `f(x, y) = (x + 5) * 2` (y dead) makes
+/// `f(a, c) ≡ f(a, d)` — the case a depth-1-only graft would lose by falling back to
+/// `CallDet[x, y]`.
+#[test]
+fn symbolic_jump_dead_argument_behind_depth_two() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+    let c2 = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let (x, y, ft, fa) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    // f(x, y) = (x + 5) * 2  (y is dead).
+    {
+        let hf = ssa.get_function_mut(f);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_parameter(y, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: ft,
+            lhs: x,
+            rhs: c5,
+        });
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: fa,
+            lhs: ft,
+            rhs: c2,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![fa]));
+    }
+
+    let (a, b, c, d) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let (r1, r2, r3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        mf.get_entry_mut().push_parameter(b, Type::field());
+        mf.get_entry_mut().push_parameter(c, Type::field());
+        mf.get_entry_mut().push_parameter(d, Type::field());
+        let entry = mf.get_entry_mut();
+        for (res, args) in [(r1, vec![a, c]), (r2, vec![a, d]), (r3, vec![b, c])] {
+            entry.push_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(f),
+                args,
+                unconstrained: false,
+            });
+        }
+        entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
+    }
+
+    let cc = run_in_test(&ssa);
+    assert!(cc.known_equal(main_id, r1, r2)); // dead 2nd arg, two levels deep ⇒ still congruent
+    assert!(!cc.known_equal(main_id, r1, r3)); // distinct 1st arg ⇒ distinct
+}
+
+/// A return deeper than the depth cap is not symbolically expressed (`Sym = None`), so the call
+/// falls back to `CallDet`: two identical calls stay congruent and a distinct argument does not,
+/// but the result is *not* related to the caller-local full expression.
+#[test]
+fn symbolic_jump_depth_over_cap_falls_back_to_calldet() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+    let c1 = ssa.add_const(Constant::Field(Field::from(1u64)));
+    let c2 = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let c3 = ssa.add_const(Constant::Field(Field::from(3u64)));
+    let (x, ft, fu, fa) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    // f(x) = ((x + 1) * 2) + 3  (depth 3, over the cap).
+    {
+        let hf = ssa.get_function_mut(f);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: ft,
+            lhs: x,
+            rhs: c1,
+        });
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: fu,
+            lhs: ft,
+            rhs: c2,
+        });
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: fa,
+            lhs: fu,
+            rhs: c3,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![fa]));
+    }
+
+    let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
+    let (r1, r2, r3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let (wt, wu, w) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        mf.get_entry_mut().push_parameter(b, Type::field());
+        let entry = mf.get_entry_mut();
+        for (res, arg) in [(r1, a), (r2, a), (r3, b)] {
+            entry.push_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(f),
+                args: vec![arg],
+                unconstrained: false,
+            });
+        }
+        // The caller-local `((a + 1) * 2) + 3`.
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: wt,
+            lhs: a,
+            rhs: c1,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: wu,
+            lhs: wt,
+            rhs: c2,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: w,
+            lhs: wu,
+            rhs: c3,
+        });
+        entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
+    }
+
+    let cc = run_in_test(&ssa);
+    assert!(cc.known_equal(main_id, r1, r2)); // CallDet still fires for identical args
+    assert!(!cc.known_equal(main_id, r1, r3)); // distinct arg ⇒ distinct
+    assert!(!cc.known_equal(main_id, r1, w)); // no symbolic graft past the depth cap
+}
+
+/// A return that flows through a nested call is opaque at a single interprocedural level
+/// (`Sym = None`), falling back to `CallDet`: `g(x) = h(x) + 1` numbers identical calls congruent
+/// and a distinct argument distinct, but does not graft the open expression.
+#[test]
+fn symbolic_jump_nested_call_falls_back_to_calldet() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let h = ssa.add_function("h".to_string());
+    let g = ssa.add_function("g".to_string());
+    let c1 = ssa.add_const(Constant::Field(Field::from(1u64)));
+
+    let (hx, hr) = (ssa.fresh_value(), ssa.fresh_value());
+    // h(x) = x + 1
+    {
+        let hf = ssa.get_function_mut(h);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(hx, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: hr,
+            lhs: hx,
+            rhs: c1,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![hr]));
+    }
+
+    let (gx, gc, ga) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    // g(x) = h(x) + 1
+    {
+        let gf = ssa.get_function_mut(g);
+        gf.add_return_type(Type::field());
+        gf.get_entry_mut().push_parameter(gx, Type::field());
+        gf.get_entry_mut().push_instruction(OpCode::Call {
+            results: vec![gc],
+            function: CallTarget::Static(h),
+            args: vec![gx],
+            unconstrained: false,
+        });
+        gf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: ga,
+            lhs: gc,
+            rhs: c1,
+        });
+        gf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![ga]));
+    }
+
+    let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
+    let (r1, r2, r3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        mf.get_entry_mut().push_parameter(b, Type::field());
+        let entry = mf.get_entry_mut();
+        for (res, arg) in [(r1, a), (r2, a), (r3, b)] {
+            entry.push_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(g),
+                args: vec![arg],
+                unconstrained: false,
+            });
+        }
+        entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
+    }
+
+    let cc = run_in_test(&ssa);
+    assert!(cc.known_equal(main_id, r1, r2)); // CallDet fallback: identical args congruent
+    assert!(!cc.known_equal(main_id, r1, r3)); // distinct arg ⇒ distinct
+}
+
+/// Commutativity is carried verbatim from `op_signature`: a non-commutative `f(x, y) = x - y` does
+/// not equate `f(a, b)` with `f(b, a)` (which an unsound commute would), while identical calls
+/// match.
+#[test]
+fn symbolic_jump_preserves_noncommutativity() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+    let (x, y, fa) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    // f(x, y) = x - y
+    {
+        let hf = ssa.get_function_mut(f);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_parameter(y, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Sub,
+            result: fa,
+            lhs: x,
+            rhs: y,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![fa]));
+    }
+
+    let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
+    let (r1, r2, r3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        mf.get_entry_mut().push_parameter(b, Type::field());
+        let entry = mf.get_entry_mut();
+        for (res, args) in [(r1, vec![a, b]), (r2, vec![b, a]), (r3, vec![a, b])] {
+            entry.push_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(f),
+                args,
+                unconstrained: false,
+            });
+        }
+        entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
+    }
+
+    let cc = run_in_test(&ssa);
+    assert!(!cc.known_equal(main_id, r1, r2)); // x - y ≢ y - x
+    assert!(cc.known_equal(main_id, r1, r3)); // same operand order ⇒ congruent
+}
+
+/// A return mixing a formal with a fresh witness is not a pure function of the formals: `build_sym`
+/// bails on the witness operand (`Sym = None`) and, being non-deterministic, the return is not
+/// `CallDet`-numbered either, so two such calls stay distinct.
+#[test]
+fn symbolic_jump_witness_operand_is_not_grafted() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+    let (x, wit, fa) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    // f(x) = x + witness
+    {
+        let hf = ssa.get_function_mut(f);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::FreshWitness {
+            result: wit,
+            result_type: Type::field(),
+        });
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: fa,
+            lhs: x,
+            rhs: wit,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![fa]));
+    }
+
+    let a = ssa.fresh_value();
+    let (r1, r2) = (ssa.fresh_value(), ssa.fresh_value());
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        let entry = mf.get_entry_mut();
+        for res in [r1, r2] {
+            entry.push_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(f),
+                args: vec![a],
+                unconstrained: false,
+            });
+        }
+        entry.set_terminator(Terminator::Return(vec![r1, r2]));
+    }
+
+    let cc = run_in_test(&ssa);
+    assert!(!cc.known_equal(main_id, r1, r2)); // witness in return ⇒ neither grafted nor CallDet
+}
+
+/// A grafted return that names a *callee-only* constant must not produce a false congruence by
+/// minting its synthetic scaffolding onto a real value's id.
+#[test]
+fn symbolic_jump_synthetic_does_not_collide_with_callee_only_constant() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+
+    // Caller-side constants used to *synthesize* Field(5) without naming the callee-only constant,
+    // so the caller has a value in `C`'s constant class without referencing `C`'s id.
+    let two = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let three = ssa.add_const(Constant::Field(Field::from(3u64)));
+
+    // `f`'s formal, then every caller value — all minted before the callee-only constant so its id
+    // is exactly one above the caller's local maximum (the single-synthetic window).
+    let x = ssa.fresh_value();
+    let a = ssa.fresh_value();
+    let v = ssa.fresh_value();
+    let w = ssa.fresh_value();
+    let r = ssa.fresh_value();
+
+    // The callee-only constant, interned last. Field(5) so the caller's `2 + 3` folds into its
+    // class.
+    let c = ssa.add_const(Constant::Field(Field::from(5u64)));
+
+    // `f`'s internal op results.
+    let (ft, fa) = (ssa.fresh_value(), ssa.fresh_value());
+
+    // Precondition: `c` sits exactly where a local-max-upward synthetic counter would mint its
+    // first synthetic. The downward allocator avoids it, but this positioning keeps the test a live
+    // regression guard against reverting to the buggy scheme. If id allocation ever shifts, it fails
+    // loudly rather than silently no longer exercising the collision.
+    assert_eq!(c.0, r.0 + 1);
+
+    // f(x) = x + (x * C)
+    {
+        let hf = ssa.get_function_mut(f);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: ft,
+            lhs: x,
+            rhs: c,
+        });
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: fa,
+            lhs: x,
+            rhs: ft,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![fa]));
+    }
+
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        let entry = mf.get_entry_mut();
+        // v = 2 + 3, which folds to Field(5) — the same constant class as `c`.
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: v,
+            lhs: two,
+            rhs: three,
+        });
+        // r = f(a)
+        entry.push_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(f),
+            args: vec![a],
+            unconstrained: false,
+        });
+        // w = a + v, a genuine `a + 5`.
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: w,
+            lhs: a,
+            rhs: v,
+        });
+        entry.set_terminator(Terminator::Return(vec![r, w]));
+    }
+
+    let cc = run_in_test(&ssa);
+    // f(a) = a + a*5, never a + 5, so `r` must not be congruent to `w`.
+    assert!(!cc.known_equal(main_id, r, w));
+}
