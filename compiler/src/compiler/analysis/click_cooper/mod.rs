@@ -14,8 +14,11 @@
 //! - **Interprocedural facts** refine the intraprocedural view across calls: polymorphic
 //!   jump-function summaries (a `return_const` holding for any arguments, a `return Param(i)`
 //!   pass-through) and 1-CFA per-`(function, context)` specialization seeding callee parameters
-//!   with the caller's argument constants, plus determinism-gated *cross-call congruence* (two
-//!   constrained static calls to one callee with congruent arguments yield congruent results).
+//!   with the caller's argument constants, plus *cross-call congruence*: a constrained static call's
+//!   result is numbered by grafting the callee's symbolic return expression over the actual
+//!   arguments (relating it to an open expression, and ignoring arguments the return does not use),
+//!   or — failing that — by a determinism-gated whole-call key (two calls with congruent arguments
+//!   yield congruent results).
 //! - **Conditional facts** are ones derived from asserts, equalities, disequalities, and unpinned
 //!   witness forwarding. They are computed post-convergence over the same reachability state plus
 //!   CFG dominance, and are intentionally disjoint from the unconditional view.
@@ -67,10 +70,15 @@
 //!   `return Param(i)` pass-through equals argument `i` exactly. Per-context parameter seeds are
 //!   the meet of the argument constants over *every* static call path mapped to that context, so a
 //!   per-context constant holds on every concrete invocation in that context.
-//! - **Cross-Call Congruence:** A constrained static call's result is value-numbered by
-//!   `(callee, return-index)` over its argument classes only when the callee's return is a
-//!   deterministic function of its arguments; equal arguments then force an equal result. A
-//!   non-deterministic return (e.g. one carrying a fresh witness) stays opaque.
+//! - **Cross-Call Congruence:** A constrained static call's result is value-numbered either by
+//!   grafting the callee's symbolic return — a bounded-depth expression whose leaves are the
+//!   callee's formals (instantiated to the actual arguments) and program constants and whose nodes
+//!   are pure, deterministic ops — or, when no such expression exists, by a `(callee, return-index)`
+//!   key over its argument classes, gated on the return being a deterministic function of its
+//!   arguments. Both are sound because the constrained call pins the result to that deterministic
+//!   function of its arguments, so equal (congruent) arguments force an equal result; a
+//!   non-deterministic return (e.g. one carrying a fresh witness) is expressible by neither and
+//!   stays opaque, and an unconstrained (advice) result is never numbered.
 //! - **Conditional Facts:** Assert-derived constants, equalities, and disequalities hold only on
 //!   accepting runs that preserve their establishing constraint, so they are exposed only through
 //!   dedicated queries. An assert, being a global constraint that holds at every point of an
@@ -105,11 +113,6 @@
 //!
 //! The following are improvements planned for the future of this analysis.
 //!
-//! - **Symbolic Interprocedural Congruence:** Cross-call congruence currently requires that *all*
-//!   arguments are congruent and is gated on a whole-return determinism bit; it does not graft a
-//!   callee's return expression into the caller, so it cannot relate `f(x)` to an open expression
-//!   over `x`, nor see that a return ignores some argument. A symbolic return jump function would
-//!   recover both.
 //! - **Per-context Conditional Facts:** The assert/disequality/witness-forwarding conditional facts
 //!   are computed once per function and not refined per 1-CFA context, so they have no `_in(f, ctx,
 //!   …)` query: a caller reads them through the intraprocedural methods, whose (sound,
@@ -120,9 +123,19 @@
 //! - **Sound Post-Dominance for Assert Facts:** Assert facts (`asserted_const`/`asserted_equal`)
 //!   currently fan out by dominance only. The post-dominance direction — an assert in `B` is *bound
 //!   to run* at every block `C` it strictly post-dominates, so its fact would also hold at a use
-//!   *before* a requires an additional notion of value stability to be added to the analysis. A
-//!   future post-dominance direction would require gating all of the asserted values on being
-//!   value-stable using a cyclic-SCC membership primitive.
+//!   *before* the assert on any path guaranteed to reach it — requires an additional notion of value
+//!   stability to be added to the analysis. A future post-dominance direction would require gating
+//!   all of the asserted values on being value-stable using a cyclic-SCC membership primitive.
+//! - **Deeper Symbolic Interprocedural Congruence:** The implemented symbolic cross-call congruence
+//!   (a callee's return grafted into the caller as a bounded-depth expression over its formals) is
+//!   intentionally restricted to a *single* interprocedural level and a shallow depth cap. A nested
+//!   call in a callee's return is an opaque leaf, so a composed gadget `g(x) = h(x) + 1` is not
+//!   expressed. Transitively inlining a callee's own symbolic return, or raising the depth cap,
+//!   would widen coverage — but multi-level inlining reintroduces a feedback edge into the summary
+//!   fixpoint (the projection is currently a structurally output-only post-pass), so it must
+//!   restore termination with a depth bound. A further extension would consume the symbolic return
+//!   in the constant channel (`eval_call`) to fold a call whose arguments are constant (that
+//!   channel is untouched today).
 
 mod conditional;
 mod congruence;
@@ -142,9 +155,12 @@ use crate::{
         analysis::{
             click_cooper::{
                 conditional::ConditionalFacts,
+                def_order::DefOrder,
                 lattice::Constness,
                 solver::{FunctionFacts, solve_with_writeback},
-                summary::{compute_determinism, compute_summaries, specialize},
+                summary::{
+                    compute_determinism, compute_summaries, compute_sym_summaries, specialize,
+                },
             },
             flow_analysis::FlowAnalysis,
             shared::call_string::Context,
@@ -157,6 +173,9 @@ use crate::{
         },
     },
 };
+
+// RE-EXPORTS
+// ================================================================================================
 
 /// The canonical 1-bit constant for a folded boolean, re-exported for the consumers of this
 /// analysis (e.g. the sparse conditional simplification pass).
@@ -203,52 +222,69 @@ impl ClickCooper {
         let consts = ssa.const_snapshot();
 
         // Phase 0: per-`(callee, return)` determinism, used below to value-number deterministic
-        // static-call results cross-call. It only refines congruence (never the constant lattice or
-        // reachability), so it leaves the SCS-visible facts byte-identical.
+        // static-call results cross-call. It refines only congruence, not reachability and not the
+        // constant lattice *directly* — though a refined congruence can still reach the lattice
+        // indirectly through the writeback's `derive_promotions` (a `Cmp{Eq}`/`Cmp{Lt}` over
+        // newly-congruent operands folding to a constant). In practice this is corpus-neutral for
+        // SCS, but that is an empirically verified result, not a structural guarantee.
         let det = compute_determinism(ssa, flow);
 
-        // Per-function intraprocedural facts: parameters and call results `Bottom` (no summaries
-        // here). The conditional side facts are computed from the same converged state plus CFG
-        // dominance, kept in a disjoint map so the unconditional view is untouched.
+        // Interprocedural summaries first: the polymorphic jump functions, then the symbolic
+        // congruence projection as a post-fixpoint pass over the converged summaries). Both are
+        // computed before the intraprocedural solve so it can graft symbolic call-return
+        // expressions into its congruence partition.
+        let (summaries, sym_cache) = compute_summaries(ssa, flow, &consts, &det);
+        let sym = compute_sym_summaries(ssa, &consts, &sym_cache);
+        drop(sym_cache);
+
+        // Per-function intraprocedural facts: parameters and call results `Bottom`. The conditional
+        // facts are computed from the same converged state plus CFG dominance, kept in a disjoint
+        // map so the unconditional view is untouched.
         //
-        // This solve MUST stay summary-free: SCS reads `functions` and relies on `Call` staying
-        // `Bottom`, so that every constant-valued result it aliases or deletes is a pure scalar
-        // fold. Wiring summaries in here would let a constrained `Call` result become `Const` and
-        // break that contract.
+        // The eval-call summary channel MUST stay off here as downstream passes rely on `Call`
+        // staying `Bottom`. The _symbolic_ channel is enabled: like the `det` channel above, it
+        // refines congruence — not reachability, and not the constant lattice *directly*.
         let mut functions = HashMap::default();
         let mut conditional = HashMap::default();
         for fid in ssa.get_function_ids() {
             let function = ssa.get_function(fid);
 
-            // Combined-fixpoint writeback (intraprocedural, summary-free): solve constants +
-            // reachability, then fold a comparison of congruent operands to a constant and re-solve
-            // until no new fact appears (see `solve_with_writeback`). `summaries = None` keeps
-            // every `Call` result `Bottom` — the contract SCS reads `functions` under — and round 0
-            // has empty promotions, so a function with no such comparison is solved once and
-            // unchanged.
-            let mut facts =
-                solve_with_writeback(function, &consts, &det, None, &HashMap::default());
+            // Combined-fixpoint writeback (intraprocedural): solve constants + reachability, then
+            // fold a comparison of congruent operands to a constant and re-solve until no new fact
+            // appears (see `solve_with_writeback`). The eval-call `summaries = None` keeps every
+            // `Call` result `Bottom` — the contract SCS reads `functions` under — while
+            // `Some(&sym)` grafts symbolic call-return expressions into the congruence partition.
+            let mut facts = solve_with_writeback(
+                function,
+                &consts,
+                &det,
+                None,
+                Some(&sym),
+                &HashMap::default(),
+            );
 
-            // Finalize dominance-aware congruence leaders against the function's CFG, so `leader`
-            // returns a legal redirect target.
-            facts
-                .congruence
-                .compute_leaders(function, flow.get_function_cfg(fid));
+            // The shared dominance-consistent definition order, built once and reused for both the
+            // congruence leaders and the conditional-fact leaders below.
+            let order = DefOrder::new(function, flow.get_function_cfg(fid));
+
+            // Finalize dominance-aware congruence leaders, so `leader` returns a legal redirect
+            // target.
+            facts.congruence.compute_leaders(&order);
             let cond = conditional::build(
                 function,
                 &facts,
                 flow.get_function_cfg(fid),
                 &consts,
                 types.get_function(fid),
+                &order,
             );
             conditional.insert(fid, cond);
             functions.insert(fid, facts);
         }
 
-        // Handle the interprocedural layer using polymorphic jump-function summaries then
-        // contextual facts on the 1-CFA.
-        let summaries = compute_summaries(ssa, flow, &consts, &det);
-        let contexts = specialize(ssa, flow, &consts, &summaries, &det);
+        // The 1-CFA contextual facts, built from the polymorphic summaries (computed above) plus
+        // the symbolic congruence projection.
+        let contexts = specialize(ssa, flow, &consts, &summaries, &sym, &det);
 
         ClickCooper {
             consts,
@@ -504,7 +540,7 @@ impl ClickCooper {
     /// differs from `v`).
     ///
     /// The conditional analog of the congruence [`Self::leader`]: sound only under
-    /// constraint-preserving use.  
+    /// constraint-preserving use.
     pub fn asserted_leader(
         &self,
         f: FunctionId,
