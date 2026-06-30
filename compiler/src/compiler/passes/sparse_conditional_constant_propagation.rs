@@ -118,7 +118,10 @@ fn rewrite(
     let const_set: HashSet<ValueId> = const_values.iter().map(|(v, _)| *v).collect();
 
     // In practice `witness_consts` only ever holds `Cmp` instruction *results* — the sole witnessed
-    // constants the analysis produces (a vacuous witnessed comparison).
+    // constants the analysis produces (a vacuous witnessed comparison). A witness-typed *block
+    // parameter* proven constant would also land here, but is intentionally left as-is (neither
+    // aliased nor redefined — the cast-redefine below runs only for instruction results): sound,
+    // just unfolded.
     let mut witness_consts = HashMap::default();
     for (v, c) in &const_values {
         if fn_type_info.get_value_type(*v).is_witness_of() {

@@ -3,7 +3,7 @@ use crate::compiler::{
     Field,
     analysis::types::Types,
     ssa::{
-        Terminator,
+        ProgramPoint, Terminator,
         hlssa::{
             BinaryArithOpKind, Blob, CallTarget, CastTarget, CmpKind, Constant, HLSSA, OpCode,
             ScalarFold, SequenceTargetType, SliceOpDir, Type,
@@ -693,11 +693,22 @@ fn assert_eq_const_is_conditional_not_unconditional() {
     assert!(cc.new_const_values(fid).iter().all(|(v, _)| *v != x));
     // Conditionally `x == 5` at every block the assert *strictly* dominates ...
     assert_eq!(
-        cc.asserted_const(fid, after, x).as_deref(),
+        cc.asserted_const(fid, ProgramPoint::new(after, 0), x)
+            .as_deref(),
         Some(&Constant::U(32, 5))
     );
-    // ... but not in the asserting block itself (block-entry granularity).
-    assert_eq!(cc.asserted_const(fid, entry_id, x), None);
+    // ... and, at index granularity, in the asserting block itself *after* the assert (the assert is
+    // instruction 0, so the terminator at index 1 sees the pin) ...
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), x)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    // ... but never at the assert's own index, where folding `x` would vacuum the constraint.
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 0), x),
+        None
+    );
 }
 
 /// `assert(b)` proves `b == true` conditionally in dominated blocks, never unconditionally.
@@ -707,6 +718,7 @@ fn assert_bool_is_conditional() {
     let b = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
     let after = f.add_block();
     f.get_entry_mut().push_parameter(b, Type::u(1));
     f.get_entry_mut()
@@ -720,8 +732,20 @@ fn assert_bool_is_conditional() {
     let cc = run_in_test(&ssa);
     assert_eq!(cc.const_of(fid, b), None);
     assert_eq!(
-        cc.asserted_const(fid, after, b).as_deref(),
+        cc.asserted_const(fid, ProgramPoint::new(after, 0), b)
+            .as_deref(),
         Some(&Constant::U(1, 1))
+    );
+    // Index granularity: the bool pin also holds after the `Assert` (instruction 0) in its own
+    // block, but not at the assert's own index.
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), b)
+            .as_deref(),
+        Some(&Constant::U(1, 1))
+    );
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 0), b),
+        None
     );
 }
 
@@ -749,9 +773,13 @@ fn assert_eq_pure_equality_is_conditional() {
 
     let fid = ssa.get_unique_entrypoint_id();
     let cc = run_in_test(&ssa);
-    assert!(cc.asserted_equal(fid, after, x, y));
-    assert!(cc.asserted_equal(fid, after, y, x)); // symmetric
-    assert!(!cc.asserted_equal(fid, entry_id, x, y)); // not in the asserting block
+    assert!(cc.asserted_equal(fid, ProgramPoint::new(after, 0), x, y));
+    assert!(cc.asserted_equal(fid, ProgramPoint::new(after, 0), y, x)); // symmetric
+    // Index granularity: also holds after the assert (index 0) in its own block, symmetrically ...
+    assert!(cc.asserted_equal(fid, ProgramPoint::new(entry_id, 1), x, y));
+    assert!(cc.asserted_equal(fid, ProgramPoint::new(entry_id, 1), y, x));
+    // ... but not at the assert's own index.
+    assert!(!cc.asserted_equal(fid, ProgramPoint::new(entry_id, 0), x, y));
     // Structural congruence (unconditional) does not see the assert.
     assert!(!cc.known_equal(fid, x, y));
 }
@@ -886,11 +914,14 @@ fn witness_forward_unions_hint_and_value_of_reads() {
     assert!(!cc.known_equal(fid, r, r2));
 }
 
-/// An assert placed in the *last* block proves nothing by dominance (nothing follows it), but it
-/// post-dominates everything upstream — so on accepting runs its fact holds at those earlier
-/// blocks. The asserted value (`x`, a parameter) is in scope throughout.
+/// An assert placed in the *last* block proves nothing by dominance (nothing follows it). The
+/// post-dominance direction — which would carry its fact up to the earlier blocks it post-dominates
+/// — was removed because it is unsound for loop-carried values (see `mod.rs`'s "Deferred
+/// Improvements" and `post_dominating_assert_unsound_for_loop_carried_value`), so the
+/// fact is *not* propagated to `entry`/`mid`. Index granularity still recovers it within the
+/// asserting block.
 #[test]
-fn assert_below_use_holds_via_post_dominance() {
+fn post_dominance_not_propagated_at_block_granularity() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let c5 = ssa.add_const(Constant::U(32, 5));
     let x = ssa.fresh_value();
@@ -914,65 +945,84 @@ fn assert_below_use_holds_via_post_dominance() {
 
     let fid = ssa.get_unique_entrypoint_id();
     let cc = run_in_test(&ssa);
-    // `tail` post-dominates `mid` and `entry`, so `x == 5` holds at both — a fact pure dominance
-    // (the assert is last) would miss entirely.
+    // `tail` only post-dominates `mid`/`entry` (it does not dominate them), so its assert's fact is
+    // withheld there now that the post-dominance direction is gone.
+    assert_eq!(cc.asserted_const(fid, ProgramPoint::new(mid, 0), x), None);
     assert_eq!(
-        cc.asserted_const(fid, mid, x).as_deref(),
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 0), x),
+        None
+    );
+    // In the asserting block, index granularity still recovers it *after* the assert (index 0), but
+    // not at the assert's own index.
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(tail, 1), x)
+            .as_deref(),
         Some(&Constant::U(32, 5))
     );
-    assert_eq!(
-        cc.asserted_const(fid, entry_id, x).as_deref(),
-        Some(&Constant::U(32, 5))
-    );
-    // Still never recorded at the asserting block's own entry (block-entry granularity).
-    assert_eq!(cc.asserted_const(fid, tail, x), None);
+    assert_eq!(cc.asserted_const(fid, ProgramPoint::new(tail, 0), x), None);
 }
 
-/// Post-dominance fan-out is gated on the asserted value being in scope: a value defined *below*
-/// the target block must not have the fact attributed to that target (the guard dominance
-/// otherwise supplies for free).
+/// Regression for the soundness bug that motivated removing the post-dominance direction: a
+/// loop-carried value asserted *after* the loop. `after` post-dominates `header`/`body` and
+/// `def(v) = header` dominates them, yet `v` is `0..9` at the header on every iteration but the
+/// last — so pinning `v = 10` there is false, and a constraint-preserving consumer could fold the
+/// loop away and turn an accepting run rejecting. With post-dominance gone the fact is withheld at
+/// `header` and `body` (the old code wrongly produced `Some(10)`).
 #[test]
-fn post_dominance_respects_value_scope() {
+fn post_dominating_assert_unsound_for_loop_carried_value() {
     let mut ssa = HLSSA::with_main("main".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
     let c10 = ssa.add_const(Constant::U(32, 10));
-    let p = ssa.fresh_value();
-    let x = ssa.fresh_value();
+    let (v, lt, v1) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
-    let entry_id = f.get_entry_id();
-    let mid = f.add_block();
-    let tail = f.add_block();
-    f.get_entry_mut().push_parameter(p, Type::u(32));
+    let header = f.add_block();
+    let body = f.add_block();
+    let after = f.add_block();
+
     f.get_entry_mut()
-        .set_terminator(Terminator::Jmp(mid, vec![]));
-    // `x` is defined in `mid`, *below* `entry`.
-    f.get_block_mut(mid)
-        .push_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: x,
-            lhs: p,
-            rhs: p,
-        });
-    f.get_block_mut(mid)
-        .set_terminator(Terminator::Jmp(tail, vec![]));
-    f.get_block_mut(tail).push_instruction(OpCode::AssertCmp {
-        kind: CmpKind::Eq,
-        lhs: x,
+        .set_terminator(Terminator::Jmp(header, vec![c0]));
+    let header_block = f.get_block_mut(header);
+    header_block.push_parameter(v, Type::u(32));
+    header_block.push_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: lt,
+        lhs: v,
         rhs: c10,
     });
-    f.get_block_mut(tail)
-        .set_terminator(Terminator::Return(vec![]));
+    header_block.set_terminator(Terminator::JmpIf(lt, body, after));
+    let body_block = f.get_block_mut(body);
+    body_block.push_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: v1,
+        lhs: v,
+        rhs: c1,
+    });
+    body_block.set_terminator(Terminator::Jmp(header, vec![v1]));
+    let after_block = f.get_block_mut(after);
+    after_block.push_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: v,
+        rhs: c10,
+    });
+    after_block.set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
     let cc = run_in_test(&ssa);
-    // At `mid`, `x` is in scope and `tail` post-dominates it ⇒ the fact holds.
+    // The (removed) post-dominance attribution would pin `v = 10` at the loop header/body; it must
+    // not, regardless of `def(v)` being in scope there.
     assert_eq!(
-        cc.asserted_const(fid, mid, x).as_deref(),
+        cc.asserted_const(fid, ProgramPoint::new(header, 0), v),
+        None
+    );
+    assert_eq!(cc.asserted_const(fid, ProgramPoint::new(body, 0), v), None);
+    // Sanity: within `after`, after the assert (index 0), index granularity still recovers it.
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(after, 1), v)
+            .as_deref(),
         Some(&Constant::U(32, 10))
     );
-    // At `entry`, `x` is not yet defined — the in-scope guard withholds the fact even though
-    // `tail` post-dominates `entry`.
-    assert_eq!(cc.asserted_const(fid, entry_id, x), None);
 }
 
 /// An assert on only one arm of a branch neither dominates nor post-dominates the blocks around
@@ -1010,54 +1060,338 @@ fn assert_on_one_branch_does_not_post_dominate() {
     let cc = run_in_test(&ssa);
     // `x` is in scope everywhere, so only the missing dominance/post-dominance keeps the fact
     // out of `entry` and `merge` (the `else` path skips the assert).
-    assert_eq!(cc.asserted_const(fid, entry_id, x), None);
-    assert_eq!(cc.asserted_const(fid, merge, x), None);
-    // And never at the asserting block's own entry.
-    assert_eq!(cc.asserted_const(fid, then_b, x), None);
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 0), x),
+        None
+    );
+    assert_eq!(cc.asserted_const(fid, ProgramPoint::new(merge, 0), x), None);
+    // In the asserting block itself the fact is still recovered after the assert (index
+    // granularity), but never at the assert's own index.
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(then_b, 1), x)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(then_b, 0), x),
+        None
+    );
 }
 
-/// A post-dominating *pure* equality (`assert(x == y)`, neither side constant) requires *both*
-/// sides in scope at the target.
+/// A use in the terminator sits at `index == instruction count`, so the asserting block's own pin
+/// reaches a value the terminator forwards (here a return), proving the index convention.
 #[test]
-fn post_dominating_assert_eq_needs_both_sides_in_scope() {
+fn local_assert_reaches_terminator_use() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let x = ssa.fresh_value();
-    let y = ssa.fresh_value();
-    let p = ssa.fresh_value();
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let (x, doubled) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
-    let mid = f.add_block();
-    let tail = f.add_block();
     f.get_entry_mut().push_parameter(x, Type::u(32));
-    f.get_entry_mut().push_parameter(p, Type::u(32));
-    f.get_entry_mut()
-        .set_terminator(Terminator::Jmp(mid, vec![]));
-    // `y` is defined in `mid`, below `entry`.
-    f.get_block_mut(mid)
-        .push_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: y,
-            lhs: p,
-            rhs: p,
-        });
-    f.get_block_mut(mid)
-        .set_terminator(Terminator::Jmp(tail, vec![]));
-    f.get_block_mut(tail).push_instruction(OpCode::AssertCmp {
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 0
         kind: CmpKind::Eq,
         lhs: x,
-        rhs: y,
+        rhs: c5,
     });
-    f.get_block_mut(tail)
+    f.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+        // index 1
+        kind: BinaryArithOpKind::Add,
+        result: doubled,
+        lhs: x,
+        rhs: x,
+    });
+    f.get_entry_mut()
+        .set_terminator(Terminator::Return(vec![doubled])); // terminator: index 2
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let term_index = ssa
+        .get_unique_entrypoint()
+        .get_entry()
+        .get_instructions()
+        .count();
+    assert_eq!(term_index, 2);
+    let cc = run_in_test(&ssa);
+    // The pin holds at the terminator's index (== instruction count) and at the add after it ...
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, term_index), x)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), x)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    // ... but not at the assert's own index.
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 0), x),
+        None
+    );
+}
+
+/// Two asserts on different values in one block are each recovered only after their own index.
+#[test]
+fn multiple_local_asserts_each_recovered_after_its_index() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c6 = ssa.add_const(Constant::U(32, 6));
+    let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(y, Type::u(32));
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 0: x == 5
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: c5,
+    });
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 1: y == 6
+        kind: CmpKind::Eq,
+        lhs: y,
+        rhs: c6,
+    });
+    f.get_entry_mut().set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // At index 1 only `x == 5` is in effect (the `y` assert has not been passed yet).
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), x)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), y),
+        None
+    );
+    // At index 2 both hold.
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 2), x)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 2), y)
+            .as_deref(),
+        Some(&Constant::U(32, 6))
+    );
+}
+
+/// Two contradictory asserts in one block: a use after both sees the *earliest* (first-writer-wins,
+/// the instruction order is the deterministic tie-break), and the first assert's own operand is
+/// never informed by the later one.
+#[test]
+fn contradictory_local_asserts_first_writer_wins() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c7 = ssa.add_const(Constant::U(32, 7));
+    let x = ssa.fresh_value();
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 0: x == 5
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: c5,
+    });
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 1: x == 7
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: c7,
+    });
+    f.get_entry_mut().set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // The first assert's own operand (index 0) is never informed.
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 0), x),
+        None
+    );
+    // Between the two asserts (index 1) only the first is in effect.
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), x)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    // After both, first-writer-wins keeps the earliest establisher.
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 2), x)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+}
+
+/// A block that is both dominated by an outer assert *and* makes its own asserts: the cross-block
+/// fact holds at *every* index (including before the local re-assert — the documented
+/// before-the-assert behavior), while a local fact holds only after its own index; a cross-block
+/// fact also takes precedence over a contradictory local one.
+#[test]
+fn entry_and_local_assert_facts_layer() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c6 = ssa.add_const(Constant::U(32, 6));
+    let c7 = ssa.add_const(Constant::U(32, 7));
+    let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let inner = f.add_block();
+    f.get_entry_mut().push_parameter(a, Type::u(32));
+    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // outer: a == 5
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: c5,
+    });
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(inner, vec![]));
+    let inner_block = f.get_block_mut(inner);
+    inner_block.push_instruction(OpCode::AssertCmp {
+        // index 0: b == 6
+        kind: CmpKind::Eq,
+        lhs: b,
+        rhs: c6,
+    });
+    inner_block.push_instruction(OpCode::AssertCmp {
+        // index 1: a == 7 (contradicts the dominating outer assert)
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: c7,
+    });
+    inner_block.set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // The outer (cross-block) pin on `a` holds at every index of `inner` — before the local
+    // re-assert and after it — and wins over the contradictory local `a == 7`.
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(inner, 0), a)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(inner, 2), a)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    // The local pin on `b` is the before-the-assert gap: absent at index 0, present after index 0.
+    assert_eq!(cc.asserted_const(fid, ProgramPoint::new(inner, 0), b), None);
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(inner, 1), b)
+            .as_deref(),
+        Some(&Constant::U(32, 6))
+    );
+}
+
+/// The asserted operand is defined earlier in the same block: local facts need no `in_scope` check
+/// (the operand is necessarily defined before the assert), and the pin is recovered after it.
+#[test]
+fn local_assert_on_value_defined_earlier_in_block() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let (p, y) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(p, Type::u(32));
+    f.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+        // index 0: y = p + p
+        kind: BinaryArithOpKind::Add,
+        result: y,
+        lhs: p,
+        rhs: p,
+    });
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 1: y == 10
+        kind: CmpKind::Eq,
+        lhs: y,
+        rhs: c10,
+    });
+    f.get_entry_mut()
+        .set_terminator(Terminator::Return(vec![y])); // index 2
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // At/before the assert (index 1): no fact. After it (the return at index 2 forwards `y`): 10.
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), y),
+        None
+    );
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 2), y)
+            .as_deref(),
+        Some(&Constant::U(32, 10))
+    );
+}
+
+/// An assert inside a loop body is recovered after it within the body, and is not mis-attributed to
+/// the loop header (which the body neither dominates nor post-dominates).
+#[test]
+fn local_assert_in_loop_body() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let (n, i, lt, next) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let header = f.add_block();
+    let body = f.add_block();
+    let exit = f.add_block();
+    f.get_entry_mut().push_parameter(n, Type::u(32));
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(header, vec![c0]));
+    let header_block = f.get_block_mut(header);
+    header_block.push_parameter(i, Type::u(32));
+    header_block.push_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: lt,
+        lhs: i,
+        rhs: n,
+    });
+    header_block.set_terminator(Terminator::JmpIf(lt, body, exit));
+    let body_block = f.get_block_mut(body);
+    // `next = i + 1` keeps `i` loop-variant (else it would fold to the constant 0 and the assert
+    // would degrade to a constant pin rather than the pure equality this test exercises).
+    body_block.push_instruction(OpCode::BinaryArithOp {
+        // index 0
+        kind: BinaryArithOpKind::Add,
+        result: next,
+        lhs: i,
+        rhs: c1,
+    });
+    body_block.push_instruction(OpCode::AssertCmp {
+        // index 1: i == n
+        kind: CmpKind::Eq,
+        lhs: i,
+        rhs: n,
+    });
+    body_block.set_terminator(Terminator::Jmp(header, vec![next]));
+    f.get_block_mut(exit)
         .set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
     let cc = run_in_test(&ssa);
-    // Both sides live at `mid` ⇒ the post-dominating equality holds, symmetrically.
-    assert!(cc.asserted_equal(fid, mid, x, y));
-    assert!(cc.asserted_equal(fid, mid, y, x));
-    // `y` is undefined at `entry`, so the equality is withheld there.
-    assert!(!cc.asserted_equal(fid, entry_id, x, y));
+    // Recovered after the assert (index 1) in the body, not at or before its own index.
+    assert!(cc.asserted_equal(fid, ProgramPoint::new(body, 2), i, n));
+    assert!(!cc.asserted_equal(fid, ProgramPoint::new(body, 1), i, n));
+    assert!(!cc.asserted_equal(fid, ProgramPoint::new(body, 0), i, n));
+    // Not mis-attributed to the header (body neither dominates nor post-dominates it).
+    assert!(!cc.asserted_equal(fid, ProgramPoint::new(header, 0), i, n));
+    assert!(!cc.asserted_equal(fid, ProgramPoint::new(header, 2), i, n));
 }
 
 /// A callee that returns a constant: the call result folds interprocedurally in the caller's

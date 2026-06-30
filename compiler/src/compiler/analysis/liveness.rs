@@ -16,16 +16,6 @@ use crate::{
     },
 };
 
-pub enum InstructionPosition {
-    Offset(usize),
-    Terminator,
-}
-
-pub struct InstructionPointer {
-    pub position: InstructionPosition,
-    pub block: BlockId,
-}
-
 pub struct BlockLiveness {
     pub live_in: HashSet<ValueId>,
     pub live_out: HashSet<ValueId>,

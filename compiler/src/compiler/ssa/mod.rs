@@ -869,6 +869,33 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
     }
 }
 
+// PROGRAM POINT
+// ================================================================================================
+
+/// A pointer to a specific instruction in a program.
+///
+/// It describes the `block` in the SSA in which the instruction is found, and the 0-based `index`
+/// of the instruction within that block. The terminating instruction of the block is found at
+/// `index == block.get_instructions().count()`.
+///
+/// Ordering is lexicographic on `(block, index)` so comparing two points is only meaningful where
+/// `p1.block == p2.block`. Across blocks it yields an arbitrary-but-stable total order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ProgramPoint {
+    /// The block the point lies in.
+    pub block: BlockId,
+
+    /// The instruction position within `block` (the terminator is at the instruction count).
+    pub index: usize,
+}
+
+impl ProgramPoint {
+    /// A point at instruction `index` within `block`.
+    pub fn new(block: BlockId, index: usize) -> Self {
+        Self { block, index }
+    }
+}
+
 // BLOCK
 // ================================================================================================
 
