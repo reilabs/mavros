@@ -526,7 +526,7 @@ impl<'a> ExpressionConverter<'a> {
             } => {
                 let object_location = Self::lvalue_location(object);
                 if let Some(tuple_ref) = self.try_lvalue_ref(object, b) {
-                    let field_ref = self.emit_located(b, object_location.clone(), |e| {
+                    let field_ref = self.emit_located(b, object_location, |e| {
                         e.tuple_ref_proj(tuple_ref, *field_index)
                     });
                     return self.emit_located(b, object_location, |e| e.load(field_ref));
