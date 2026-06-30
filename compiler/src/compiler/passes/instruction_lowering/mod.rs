@@ -178,7 +178,10 @@ impl InstructionLowering {
 
             let mut b = fb.block(block_id);
             for instruction in instructions {
-                if self.try_lower_instruction(&mut b, &context, &instruction) {
+                let location = instruction.location().clone();
+                if b.emit_with_location(location, |b| {
+                    self.try_lower_instruction(b, &context, instruction.as_ref())
+                }) {
                     changed = true;
                 } else {
                     b.emit(instruction);

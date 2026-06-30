@@ -15,7 +15,7 @@ use crate::{
         pass_manager::{AnalysisStore, Pass},
         passes::fix_double_jumps::ValueReplacements,
         ssa::{
-            BlockId, FunctionId, Terminator, ValueId,
+            BlockId, FunctionId, Located, Terminator, ValueId,
             hlssa::{
                 CallTarget, Constant, HLSSA, OpCode, Type, TypeExpr,
                 builder::{HLEmitter, HLSSABuilder},
@@ -165,7 +165,8 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
             let mut new_instructions = Vec::new();
 
             for instr in instructions {
-                match instr {
+                let location = instr.location().clone();
+                match instr.payload() {
                     OpCode::Call {
                         results,
                         function: CallTarget::Dynamic(fn_ptr_val),
@@ -181,14 +182,17 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
                         new_args.push(fn_ptr_val);
                         new_args.extend(args);
 
-                        new_instructions.push(OpCode::Call {
-                            results,
-                            function: CallTarget::Static(dispatch_fn),
-                            args: new_args,
-                            unconstrained,
-                        });
+                        new_instructions.push(Located::new(
+                            OpCode::Call {
+                                results,
+                                function: CallTarget::Static(dispatch_fn),
+                                args: new_args,
+                                unconstrained,
+                            },
+                            location,
+                        ));
                     }
-                    other => new_instructions.push(other),
+                    other => new_instructions.push(Located::new(other, location)),
                 }
             }
 
@@ -233,7 +237,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
 
             let mut instructions = block.take_instructions();
             for instr in instructions.iter_mut() {
-                replace_function_types_in_instruction(instr);
+                replace_function_types_in_instruction(&mut *instr);
             }
             block.put_instructions(instructions);
         }

@@ -334,13 +334,12 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static> PassM
                     ssa,
                     format!("before {}: {}", pass_index, pass_name),
                 );
-                fs::write(
+                self.write_debug_text(
                     debug_output_dir
                         .join(format!("before_pass_{}_{}", pass_index, pass_name))
                         .join("code.txt"),
                     format!("{}", ssa.to_string(&DefaultSSAAnnotator)),
-                )
-                .unwrap();
+                );
             }
         }
     }
@@ -363,11 +362,37 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static> PassM
                     "final result".to_string(),
                 );
             }
-            fs::write(
+            self.write_debug_text(
                 debug_output_dir.join("final_result").join("code.txt"),
                 format!("{}", ssa.to_string(&DefaultSSAAnnotator)),
-            )
-            .unwrap();
+            );
         }
+    }
+
+    fn write_debug_text(&self, path: impl Into<PathBuf>, contents: String) {
+        let path = path.into();
+        fs::write(&path, self.normalize_debug_text(&path, contents)).unwrap();
+    }
+
+    fn normalize_debug_text(&self, path: &PathBuf, mut contents: String) -> String {
+        let root = path
+            .ancestors()
+            .find(|ancestor| {
+                ancestor
+                    .file_name()
+                    .is_some_and(|name| name == "mavros_debug")
+            })
+            .and_then(|debug_dir| debug_dir.parent());
+        let Some(root) = root else {
+            return contents;
+        };
+
+        let root = root.to_string_lossy();
+        contents = contents.replace(root.as_ref(), "$PROJECT_ROOT");
+        if let Ok(canonical_root) = fs::canonicalize(root.as_ref()) {
+            let canonical_root = canonical_root.to_string_lossy();
+            contents = contents.replace(canonical_root.as_ref(), "$PROJECT_ROOT");
+        }
+        contents
     }
 }

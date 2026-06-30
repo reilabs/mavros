@@ -740,19 +740,21 @@ fn lower_function(
         let mut emitter = LLBlockEmitter::new(&mut ll_func, llssa, ll_block_id);
 
         // Lower instructions
-        for instruction in block.get_instructions() {
-            lower_instruction(
-                instruction,
-                &mut emitter,
-                &mut val_map,
-                fn_type_info,
-                fn_map,
-                drop_fns,
-                ad_fns,
-                lookup_fns,
-                hlssa_global_types,
-                options,
-            );
+        for (instruction, source_location) in block.get_instructions_with_source_locations() {
+            emitter.emit_with_location(source_location.cloned(), |emitter| {
+                lower_instruction(
+                    instruction,
+                    emitter,
+                    &mut val_map,
+                    fn_type_info,
+                    fn_map,
+                    drop_fns,
+                    ad_fns,
+                    lookup_fns,
+                    hlssa_global_types,
+                    options,
+                );
+            });
         }
 
         // Lower terminator (into current block, which may have changed due to block splits)

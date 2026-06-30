@@ -279,8 +279,15 @@ impl ArraySroa {
 
             let old_instructions = block.take_instructions();
             let mut new_instructions = Vec::with_capacity(old_instructions.len());
-            for instr in &old_instructions {
-                lower_instruction(instr, plan, &mut new_instructions);
+            for instr in old_instructions {
+                let location = instr.location().clone();
+                let mut lowered = Vec::new();
+                lower_instruction(&instr, plan, &mut lowered);
+                new_instructions.extend(
+                    lowered
+                        .into_iter()
+                        .map(|instruction| instruction.locate(location.clone())),
+                );
             }
             block.put_instructions(new_instructions);
 

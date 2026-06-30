@@ -196,7 +196,7 @@ impl Mem2Reg {
                     // `&instruction` is borrowed only for this match; the borrow ends before the
                     // fall-through keep path rewrites and pushes the instruction. Each promoted
                     // Store/Load resolves its alloc exactly once.
-                    match &instruction {
+                    match instruction.as_ref() {
                         // A promoted alloc's defining instruction is dropped; a non-promoted alloc
                         // (escaping, ref-pointee, or aliased) falls through and is kept verbatim.
                         OpCode::Alloc { result, value } if promotable.contains(result) => {

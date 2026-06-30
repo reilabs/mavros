@@ -1,5 +1,8 @@
 //! Converts monomorphized AST expressions to SSA instructions.
+
 use acvm::AcirField;
+use fm::{FileId, FileManager};
+use noirc_errors::Location as NoirLocation;
 use noirc_frontend::{
     ast::BinaryOpKind,
     monomorphization::ast::{
@@ -7,18 +10,18 @@ use noirc_frontend::{
         Index, LValue, Let, LocalId, Type as AstType, While,
     },
 };
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
         lowering::type_converter::TypeConverter,
         ssa::{
-            BlockId, FunctionId, ValueId,
+            BlockId, FunctionId, SourceLocation, ValueId,
             hlssa::{
                 Blob, CastTarget, Constant, Endianness, MAX_SUPPORTED_SIGNED_BITS, Radix,
                 SequenceTargetType, Type, TypeExpr,
-                builder::{HLEmitter, HLFunctionBuilder},
+                builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder},
             },
         },
     },
@@ -67,6 +70,12 @@ pub struct ExpressionConverter<'a> {
 
     /// Current block being emitted into
     current_block: BlockId,
+
+    /// File manager used to turn Noir byte spans into user-facing source locations.
+    file_manager: Option<&'a FileManager>,
+
+    /// Memoized user-facing source paths keyed by Noir file id.
+    source_files: RefCell<HashMap<FileId, Arc<str>>>,
 }
 
 impl<'a> ExpressionConverter<'a> {
@@ -77,6 +86,7 @@ impl<'a> ExpressionConverter<'a> {
         global_slots: &'a HashMap<GlobalId, usize>,
         global_constants: &'a HashMap<GlobalId, ValueId>,
         entry_block: BlockId,
+        file_manager: Option<&'a FileManager>,
     ) -> Self {
         Self {
             bindings: HashMap::default(),
@@ -89,6 +99,109 @@ impl<'a> ExpressionConverter<'a> {
             global_slots,
             global_constants,
             current_block: entry_block,
+            file_manager,
+            source_files: RefCell::new(HashMap::default()),
+        }
+    }
+
+    /// Emit instructions into the current block and stamp the freshly emitted ones with `location`.
+    ///
+    /// `emit` runs against the current block's emitter and returns the instruction's result; every
+    /// instruction it pushes that does not already carry a location is annotated with `location`.
+    fn emit_located<R>(
+        &self,
+        b: &mut HLFunctionBuilder<'_>,
+        location: Option<NoirLocation>,
+        emit: impl FnOnce(&mut HLBlockEmitter<'_>) -> R,
+    ) -> R {
+        let mut e = b.block(self.current_block);
+        let source_location = location.and_then(|location| self.source_location(location));
+        e.emit_with_location(source_location, emit)
+    }
+
+    fn source_location(&self, location: NoirLocation) -> Option<SourceLocation> {
+        let file_manager = self.file_manager?;
+        let source = file_manager.fetch_file(location.file)?;
+        let file_map = file_manager.as_file_map();
+        let file = self.source_file(location.file)?;
+
+        Some(SourceLocation::from_file_offsets(
+            file,
+            file_map,
+            location.file,
+            source,
+            location.span.start(),
+            location.span.end(),
+        ))
+    }
+
+    fn source_file(&self, file: FileId) -> Option<Arc<str>> {
+        if let Some(source_file) = self.source_files.borrow().get(&file).cloned() {
+            return Some(source_file);
+        }
+
+        let file_manager = self.file_manager?;
+        let path = file_manager.path(file)?;
+        let source_file: Arc<str> = Arc::from(path.to_string_lossy().as_ref());
+        self.source_files
+            .borrow_mut()
+            .insert(file, source_file.clone());
+        Some(source_file)
+    }
+
+    fn expression_location(expr: &Expression) -> Option<NoirLocation> {
+        match expr {
+            Expression::Ident(ident) => ident.location,
+            Expression::Literal(lit) => Self::literal_location(lit),
+            Expression::Block(exprs) => exprs.last().and_then(Self::expression_location),
+            Expression::Unary(unary) => Some(unary.location),
+            Expression::Binary(binary) => Some(binary.location),
+            Expression::Index(index) => Some(index.location),
+            Expression::Cast(cast) => Some(cast.location),
+            Expression::For(for_expr) => Some(for_expr.start_range_location),
+            Expression::Loop(body)
+            | Expression::Semi(body)
+            | Expression::Clone(body)
+            | Expression::Drop(body) => Self::expression_location(body),
+            Expression::While(while_expr) => Self::expression_location(&while_expr.condition),
+            Expression::If(if_expr) => Self::expression_location(&if_expr.condition),
+            Expression::Tuple(exprs) => exprs.first().and_then(Self::expression_location),
+            Expression::ExtractTupleField(tuple_expr, _) => Self::expression_location(tuple_expr),
+            Expression::Call(call) => Some(call.location),
+            Expression::Let(let_expr) => Self::expression_location(&let_expr.expression),
+            Expression::Constrain(_, location, _) => Some(*location),
+            Expression::Assign(assign) => Self::lvalue_location(&assign.lvalue)
+                .or_else(|| Self::expression_location(&assign.expression)),
+            Expression::Match(_) | Expression::Break | Expression::Continue => None,
+        }
+    }
+
+    fn literal_location(
+        lit: &noirc_frontend::monomorphization::ast::Literal,
+    ) -> Option<NoirLocation> {
+        use noirc_frontend::monomorphization::ast::Literal;
+
+        match lit {
+            Literal::Integer(_, _, location) => Some(*location),
+            Literal::Array(array_lit) | Literal::Vector(array_lit) => array_lit
+                .contents
+                .first()
+                .and_then(Self::expression_location),
+            Literal::Repeated { element, .. } => Self::expression_location(element),
+            Literal::FmtStr(_, _, captures) => Self::expression_location(captures),
+            Literal::Bool(_) | Literal::Unit | Literal::Str(_) => None,
+        }
+    }
+
+    fn lvalue_location(lvalue: &LValue) -> Option<NoirLocation> {
+        match lvalue {
+            LValue::Ident(ident) => ident.location,
+            LValue::Index { location, .. } => Some(*location),
+            LValue::MemberAccess { object, .. }
+            | LValue::Dereference {
+                reference: object, ..
+            }
+            | LValue::Clone(object) => Self::lvalue_location(object),
         }
     }
 
@@ -135,8 +248,8 @@ impl<'a> ExpressionConverter<'a> {
             Expression::Binary(binary) => self.convert_binary(binary, b),
             Expression::Let(let_expr) => self.convert_let(let_expr, b),
             Expression::Block(exprs) => self.convert_block(exprs, b),
-            Expression::Constrain(constraint_expr, _location, _msg) => {
-                self.convert_constrain(constraint_expr, b)
+            Expression::Constrain(constraint_expr, location, _msg) => {
+                self.convert_constrain(constraint_expr, Some(*location), b)
             }
             Expression::Semi(inner) => {
                 // Semi expressions evaluate the inner expression and discard the result
@@ -174,9 +287,9 @@ impl<'a> ExpressionConverter<'a> {
                 if let Some((loop_index, index_bit_size)) = for_loop_index {
                     // For loop: increment index and jump back to header
                     let one = b.emit_const(Constant::U(index_bit_size, 1));
-                    let mut e = b.block(self.current_block);
-                    let next_index = e.add(loop_index, one);
-                    e.terminate_jmp(loop_header, vec![next_index]);
+                    let next_index = self.emit_located(b, None, |e| e.add(loop_index, one));
+                    b.block(self.current_block)
+                        .terminate_jmp(loop_header, vec![next_index]);
                 } else {
                     // While/loop: just jump back to header with no args
                     b.block(self.current_block)
@@ -206,7 +319,7 @@ impl<'a> ExpressionConverter<'a> {
 
                 // For mutable variables, we need to load from the pointer
                 let value = if self.mutable_locals.contains(local_id) {
-                    b.block(self.current_block).load(value)
+                    self.emit_located(b, ident.location, |e| e.load(value))
                 } else {
                     value
                 };
@@ -240,7 +353,8 @@ impl<'a> ExpressionConverter<'a> {
                     .get(global_id)
                     .unwrap_or_else(|| panic!("Undefined global: {:?}", global_id));
                 let typ = self.type_converter.convert_type(&ident.typ);
-                let value = b.block(self.current_block).read_global(slot as u64, typ);
+                let value =
+                    self.emit_located(b, ident.location, |e| e.read_global(slot as u64, typ));
                 Some(value)
             }
         }
@@ -254,8 +368,7 @@ impl<'a> ExpressionConverter<'a> {
         let lhs = self.convert_expression(&binary.lhs, b).unwrap();
         let rhs = self.convert_expression(&binary.rhs, b).unwrap();
 
-        let mut e = b.block(self.current_block);
-        let result = match binary.operator {
+        let result = self.emit_located(b, Some(binary.location), |e| match binary.operator {
             BinaryOpKind::Add => e.add(lhs, rhs),
             BinaryOpKind::Subtract => e.sub(lhs, rhs),
             BinaryOpKind::Multiply => e.mul(lhs, rhs),
@@ -281,7 +394,7 @@ impl<'a> ExpressionConverter<'a> {
             BinaryOpKind::Modulo => e.modulo(lhs, rhs),
             BinaryOpKind::ShiftLeft => e.shl(lhs, rhs),
             BinaryOpKind::ShiftRight => e.shr(lhs, rhs),
-        };
+        });
 
         Some(result)
     }
@@ -290,16 +403,18 @@ impl<'a> ExpressionConverter<'a> {
         let result = self.convert_expression(&let_expr.expression, b);
         let value = result.unwrap_or_else(|| {
             // Unit binding (e.g., `let unit = ()`) — create an empty tuple
-            b.block(self.current_block).mk_tuple(vec![], vec![])
+            self.emit_located(b, Self::expression_location(&let_expr.expression), |e| {
+                e.mk_tuple(vec![], vec![])
+            })
         });
 
         if let_expr.mutable {
             // Use a single pointer for the whole value.
             // Nested field/index updates are handled by the descend-modify-ascend
             // pattern in convert_assign.
-            let mut e = b.block(self.current_block);
-            let ptr = e.alloc(value);
-            drop(e);
+            let ptr = self.emit_located(b, Self::expression_location(&let_expr.expression), |e| {
+                e.alloc(value)
+            });
             self.bindings.insert(let_expr.id, ptr);
             self.mutable_locals.insert(let_expr.id);
         } else {
@@ -331,7 +446,9 @@ impl<'a> ExpressionConverter<'a> {
             &assign.lvalue,
             b,
             &|this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
-                b.block(this.current_block).store(ptr, new_value);
+                this.emit_located(b, Self::lvalue_location(&assign.lvalue), |e| {
+                    e.store(ptr, new_value)
+                });
             },
         );
         None
@@ -358,9 +475,9 @@ impl<'a> ExpressionConverter<'a> {
                     object,
                     b,
                     &|this: &mut Self, tuple_ref, b: &mut HLFunctionBuilder<'_>| {
-                        let field_ref = b
-                            .block(this.current_block)
-                            .tuple_ref_proj(tuple_ref, *field_index);
+                        let field_ref = this.emit_located(b, Self::lvalue_location(object), |e| {
+                            e.tuple_ref_proj(tuple_ref, *field_index)
+                        });
                         f(this, field_ref, b);
                     },
                 );
@@ -369,27 +486,25 @@ impl<'a> ExpressionConverter<'a> {
                 array,
                 index,
                 element_type: _,
-                ..
+                location,
             } => {
                 let array_value = self.read_lvalue(array, b);
                 let idx = self.convert_expression(index, b).unwrap();
-                let element = b.block(self.current_block).array_get(array_value, idx);
-                let element_ref = {
-                    let mut e = b.block(self.current_block);
-                    e.alloc(element)
-                };
+                let element =
+                    self.emit_located(b, Some(*location), |e| e.array_get(array_value, idx));
+                let element_ref = self.emit_located(b, Some(*location), |e| e.alloc(element));
 
                 f(self, element_ref, b);
 
-                let element = b.block(self.current_block).load(element_ref);
-                let updated = b
-                    .block(self.current_block)
-                    .array_set(array_value, idx, element);
+                let element = self.emit_located(b, Some(*location), |e| e.load(element_ref));
+                let updated = self.emit_located(b, Some(*location), |e| {
+                    e.array_set(array_value, idx, element)
+                });
                 self.with_lvalue_ref(
                     array,
                     b,
                     &|this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
-                        b.block(this.current_block).store(ptr, updated);
+                        this.emit_located(b, Some(*location), |e| e.store(ptr, updated));
                     },
                 );
             }
@@ -403,26 +518,29 @@ impl<'a> ExpressionConverter<'a> {
             LValue::Ident(ident) => self.convert_ident(ident, b).unwrap(),
             LValue::Dereference { reference, .. } => {
                 let ptr = self.read_lvalue(reference, b);
-                b.block(self.current_block).load(ptr)
+                self.emit_located(b, Self::lvalue_location(reference), |e| e.load(ptr))
             }
             LValue::MemberAccess {
                 object,
                 field_index,
             } => {
+                let object_location = Self::lvalue_location(object);
                 if let Some(tuple_ref) = self.try_lvalue_ref(object, b) {
-                    let field_ref = b
-                        .block(self.current_block)
-                        .tuple_ref_proj(tuple_ref, *field_index);
-                    return b.block(self.current_block).load(field_ref);
+                    let field_ref = self.emit_located(b, object_location, |e| {
+                        e.tuple_ref_proj(tuple_ref, *field_index)
+                    });
+                    return self.emit_located(b, object_location, |e| e.load(field_ref));
                 }
 
                 let tuple = self.read_lvalue(object, b);
-                b.block(self.current_block).tuple_proj(tuple, *field_index)
+                self.emit_located(b, object_location, |e| e.tuple_proj(tuple, *field_index))
             }
             LValue::Index { array, index, .. } => {
                 let array_value = self.read_lvalue(array, b);
                 let idx = self.convert_expression(index, b).unwrap();
-                b.block(self.current_block).array_get(array_value, idx)
+                self.emit_located(b, Self::expression_location(index), |e| {
+                    e.array_get(array_value, idx)
+                })
             }
             LValue::Clone(inner) => self.read_lvalue(inner, b),
         }
@@ -446,10 +564,9 @@ impl<'a> ExpressionConverter<'a> {
                 field_index,
             } => {
                 let tuple_ref = self.try_lvalue_ref(object, b)?;
-                Some(
-                    b.block(self.current_block)
-                        .tuple_ref_proj(tuple_ref, *field_index),
-                )
+                Some(self.emit_located(b, Self::lvalue_location(object), |e| {
+                    e.tuple_ref_proj(tuple_ref, *field_index)
+                }))
             }
             LValue::Index { .. } => None,
             LValue::Clone(inner) => self.try_lvalue_ref(inner, b),
@@ -466,7 +583,9 @@ impl<'a> ExpressionConverter<'a> {
         // if range is inclusive, bump by one
         let end = if for_expr.inclusive {
             let one = b.emit_const(Constant::U(index_type.get_bit_size(), 1));
-            b.block(self.current_block).add(end_raw, one)
+            self.emit_located(b, Some(for_expr.end_range_location), |e| {
+                e.add(end_raw, one)
+            })
         } else {
             end_raw
         };
@@ -514,9 +633,11 @@ impl<'a> ExpressionConverter<'a> {
         // (only if current block is not already terminated by break/continue)
         if !b.block(self.current_block).is_terminated() {
             let one = b.emit_const(Constant::U(index_bit_size, 1));
-            let mut body_end = b.block(self.current_block);
-            let next_index = body_end.add(loop_index, one);
-            body_end.terminate_jmp(loop_header, vec![next_index]);
+            let next_index = self.emit_located(b, Some(for_expr.start_range_location), |e| {
+                e.add(loop_index, one)
+            });
+            b.block(self.current_block)
+                .terminate_jmp(loop_header, vec![next_index]);
         }
 
         // Continue in the exit block
@@ -723,37 +844,41 @@ impl<'a> ExpressionConverter<'a> {
 
                 // General case: evaluate the expression, alloc a fresh Ref, store into it.
                 let value = self.convert_expression(&unary.rhs, b).unwrap();
-                let mut e = b.block(self.current_block);
-                let ptr = e.alloc(value);
+                let ptr = self.emit_located(b, Some(unary.location), |e| e.alloc(value));
                 Some(ptr)
             }
             noirc_frontend::ast::UnaryOp::Dereference { .. } => {
                 let value = self.convert_expression(&unary.rhs, b).unwrap();
-                Some(b.block(self.current_block).load(value))
+                let loaded = self.emit_located(b, Some(unary.location), |e| e.load(value));
+                Some(loaded)
             }
             _ => {
                 let value = self.convert_expression(&unary.rhs, b).unwrap();
-                let result = match unary.operator {
+                let zero_const = if matches!(unary.operator, noirc_frontend::ast::UnaryOp::Minus) {
+                    use noirc_frontend::monomorphization::ast::Type as AstType;
+                    Some(match unary.rhs.return_type().as_deref() {
+                        Some(AstType::Integer(
+                            noirc_frontend::shared::Signedness::Signed,
+                            bit_size,
+                        )) => Constant::I(bit_size.bit_size() as usize, 0),
+                        Some(AstType::Integer(
+                            noirc_frontend::shared::Signedness::Unsigned,
+                            bit_size,
+                        )) => Constant::U(bit_size.bit_size() as usize, 0),
+                        _ => Constant::Field(ark_bn254::Fr::from(0u64)),
+                    })
+                } else {
+                    None
+                };
+                let zero = zero_const.map(|zero_const| b.emit_const(zero_const));
+                let result = self.emit_located(b, Some(unary.location), |e| match unary.operator {
                     noirc_frontend::ast::UnaryOp::Dereference { .. } => unreachable!(),
-                    noirc_frontend::ast::UnaryOp::Not => b.block(self.current_block).not(value),
+                    noirc_frontend::ast::UnaryOp::Not => e.not(value),
                     noirc_frontend::ast::UnaryOp::Minus => {
-                        use noirc_frontend::monomorphization::ast::Type as AstType;
-                        let zero_const = match unary.rhs.return_type().as_deref() {
-                            Some(AstType::Integer(
-                                noirc_frontend::shared::Signedness::Signed,
-                                bit_size,
-                            )) => Constant::I(bit_size.bit_size() as usize, 0),
-                            Some(AstType::Integer(
-                                noirc_frontend::shared::Signedness::Unsigned,
-                                bit_size,
-                            )) => Constant::U(bit_size.bit_size() as usize, 0),
-                            _ => Constant::Field(ark_bn254::Fr::from(0u64)),
-                        };
-                        let zero = b.emit_const(zero_const);
-                        b.block(self.current_block).sub(zero, value)
+                        e.sub(zero.expect("minus should have a zero constant"), value)
                     }
                     _ => unreachable!(),
-                };
+                });
                 Some(result)
             }
         }
@@ -790,7 +915,11 @@ impl<'a> ExpressionConverter<'a> {
             }
             Expression::ExtractTupleField(tuple_expr, idx) => {
                 let tuple_ref = self.try_tuple_expression_ref(tuple_expr.as_ref(), b)?;
-                Some(b.block(self.current_block).tuple_ref_proj(tuple_ref, *idx))
+                Some(
+                    self.emit_located(b, Self::expression_location(tuple_expr), |e| {
+                        e.tuple_ref_proj(tuple_ref, *idx)
+                    }),
+                )
             }
             Expression::Clone(inner) => self.try_expression_ref(inner.as_ref(), b),
             _ => {
@@ -856,10 +985,10 @@ impl<'a> ExpressionConverter<'a> {
             Self::expression_type(&index.collection),
             Some(noirc_frontend::monomorphization::ast::Type::Reference(_, _))
         ) {
-            collection = b.block(self.current_block).load(collection);
+            collection = self.emit_located(b, Some(index.location), |e| e.load(collection));
         }
         let idx = self.convert_expression(&index.index, b).unwrap();
-        let result = b.block(self.current_block).array_get(collection, idx);
+        let result = self.emit_located(b, Some(index.location), |e| e.array_get(collection, idx));
         Some(result)
     }
 
@@ -874,9 +1003,15 @@ impl<'a> ExpressionConverter<'a> {
             Self::expression_type(tuple_expr),
             Some(AstType::Reference(inner, _)) if matches!(inner.as_ref(), AstType::Tuple(_))
         ) {
-            return Some(b.block(self.current_block).tuple_ref_proj(value, idx));
+            return Some(
+                self.emit_located(b, Self::expression_location(tuple_expr), |e| {
+                    e.tuple_ref_proj(value, idx)
+                }),
+            );
         }
-        let result = b.block(self.current_block).tuple_proj(value, idx);
+        let result = self.emit_located(b, Self::expression_location(tuple_expr), |e| {
+            e.tuple_proj(value, idx)
+        });
         Some(result)
     }
 
@@ -913,33 +1048,34 @@ impl<'a> ExpressionConverter<'a> {
             _ => panic!("Unsupported cast target type: {:?}", cast.r#type),
         };
 
-        let mut e = b.block(self.current_block);
+        let result = self.emit_located(b, Some(cast.location), |e| {
+            // Narrowing cast: select the low bits first, then cast.
+            let value = if src_bits > 0 && target_bits < src_bits {
+                e.bit_range(value, 0, target_bits)
+            } else {
+                value
+            };
 
-        // Narrowing cast: select the low bits first, then cast.
-        let value = if src_bits > 0 && target_bits < src_bits {
-            e.bit_range(value, 0, target_bits)
-        } else {
-            value
-        };
+            // Signed widening: sign-extend before casting
+            let value = if src_signed && src_bits > 0 && target_bits > src_bits {
+                e.sext(value, src_bits, target_bits)
+            } else {
+                value
+            };
 
-        // Signed widening: sign-extend before casting
-        let value = if src_signed && src_bits > 0 && target_bits > src_bits {
-            e.sext(value, src_bits, target_bits)
-        } else {
-            value
-        };
-
-        let result = e.cast_to(target, value);
+            e.cast_to(target, value)
+        });
         Some(result)
     }
 
     fn convert_constrain(
         &mut self,
         constraint_expr: &Expression,
+        location: Option<NoirLocation>,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
         let result = self.convert_expression(constraint_expr, b).unwrap();
-        b.block(self.current_block).assert_bool(result);
+        self.emit_located(b, location, |e| e.assert_bool(result));
         None
     }
 
@@ -981,9 +1117,9 @@ impl<'a> ExpressionConverter<'a> {
                     SequenceTargetType::Array(len)
                 };
                 let elem_type = self.type_converter.convert_type(elem_ast_type);
-                let result =
-                    b.block(self.current_block)
-                        .mk_repeated(element_val, seq_type, len, elem_type);
+                let result = self.emit_located(b, Self::expression_location(element), |e| {
+                    e.mk_repeated(element_val, seq_type, len, elem_type)
+                });
                 Some(result)
             }
             Literal::Str(s) => {
@@ -991,7 +1127,7 @@ impl<'a> ExpressionConverter<'a> {
                 let elem_type = Type::u(8);
                 let elems = s.bytes().map(|byte| Constant::U(8, byte as u128)).collect();
                 let blob = b.emit_const(Constant::Blob(Blob::new(elem_type.clone(), elems)));
-                let arr = b.block(self.current_block).mk_seq_of_blob(elem_type, blob);
+                let arr = self.emit_located(b, None, |e| e.mk_seq_of_blob(elem_type, blob));
                 Some(arr)
             }
             Literal::FmtStr(fragments, _count, captures) => {
@@ -1012,9 +1148,9 @@ impl<'a> ExpressionConverter<'a> {
                 let cp_len = codepoint_constants.len();
                 let blob =
                     b.emit_const(Constant::Blob(Blob::new(Type::u(32), codepoint_constants)));
-                let cp_array = b
-                    .block(self.current_block)
-                    .mk_seq_of_blob(Type::u(32), blob);
+                let cp_array = self.emit_located(b, Self::expression_location(captures), |e| {
+                    e.mk_seq_of_blob(Type::u(32), blob)
+                });
 
                 // Convert captures (always a Tuple expression) and flatten
                 let mut tuple_elems = vec![cp_array];
@@ -1028,9 +1164,9 @@ impl<'a> ExpressionConverter<'a> {
                     }
                 }
 
-                let result = b
-                    .block(self.current_block)
-                    .mk_tuple(tuple_elems, elem_types);
+                let result = self.emit_located(b, Self::expression_location(captures), |e| {
+                    e.mk_tuple(tuple_elems, elem_types)
+                });
                 Some(result)
             }
         }
@@ -1064,7 +1200,14 @@ impl<'a> ExpressionConverter<'a> {
         if let Some(elements) = self.const_scalar_array_elements(array_lit, &elem_type) {
             debug_assert!(matches!(seq_type, SequenceTargetType::Array(_)));
             let blob = b.emit_const(Constant::Blob(Blob::new(elem_type.clone(), elements)));
-            let result = b.block(self.current_block).mk_seq_of_blob(elem_type, blob);
+            let result = self.emit_located(
+                b,
+                array_lit
+                    .contents
+                    .first()
+                    .and_then(Self::expression_location),
+                |e| e.mk_seq_of_blob(elem_type, blob),
+            );
             return Some(result);
         }
 
@@ -1074,9 +1217,14 @@ impl<'a> ExpressionConverter<'a> {
             .map(|e| self.convert_expression(e, b).unwrap())
             .collect();
 
-        let result = b
-            .block(self.current_block)
-            .mk_seq(elements, seq_type, elem_type);
+        let result = self.emit_located(
+            b,
+            array_lit
+                .contents
+                .first()
+                .and_then(Self::expression_location),
+            |e| e.mk_seq(elements, seq_type, elem_type),
+        );
         Some(result)
     }
 
@@ -1174,7 +1322,7 @@ impl<'a> ExpressionConverter<'a> {
     ) -> Option<ValueId> {
         if exprs.is_empty() {
             // Empty struct/tuple — still a value (e.g. A {})
-            return Some(b.block(self.current_block).mk_tuple(vec![], vec![]));
+            return Some(self.emit_located(b, None, |e| e.mk_tuple(vec![], vec![])));
         }
 
         // Convert each element to a single materialized value
@@ -1202,7 +1350,9 @@ impl<'a> ExpressionConverter<'a> {
             .collect();
 
         // Always construct a materialized tuple
-        let tuple = b.block(self.current_block).mk_tuple(values, types);
+        let tuple = self.emit_located(b, exprs.first().and_then(Self::expression_location), |e| {
+            e.mk_tuple(values, types)
+        });
         Some(tuple)
     }
 
@@ -1236,9 +1386,9 @@ impl<'a> ExpressionConverter<'a> {
                 let return_type = &call.return_type;
                 let return_size = self.return_size(return_type);
 
-                let results = b
-                    .block(self.current_block)
-                    .call_indirect(fn_ptr, args, return_size);
+                let results = self.emit_located(b, Some(call.location), |e| {
+                    e.call_indirect(fn_ptr, args, return_size)
+                });
 
                 if results.is_empty() {
                     None
@@ -1274,13 +1424,14 @@ impl<'a> ExpressionConverter<'a> {
         // Constrained calling unconstrained: emit unconstrained call
         let is_unconstrained_call =
             !self.in_unconstrained && self.natively_unconstrained.contains(func_id);
-        let results = if is_unconstrained_call {
-            b.block(self.current_block)
-                .call_unconstrained(*ssa_func_id, args, return_size)
-        } else {
-            b.block(self.current_block)
-                .call(*ssa_func_id, args, return_size)
-        };
+        let ssa_func_id = *ssa_func_id;
+        let results = self.emit_located(b, Some(call.location), |e| {
+            if is_unconstrained_call {
+                e.call_unconstrained(ssa_func_id, args, return_size)
+            } else {
+                e.call(ssa_func_id, args, return_size)
+            }
+        });
 
         if results.is_empty() {
             None
@@ -1300,13 +1451,13 @@ impl<'a> ExpressionConverter<'a> {
             "assert_eq" => {
                 let lhs = self.convert_expression(&call.arguments[0], b).unwrap();
                 let rhs = self.convert_expression(&call.arguments[1], b).unwrap();
-                b.block(self.current_block).assert_eq(lhs, rhs);
+                self.emit_located(b, Some(call.location), |e| e.assert_eq(lhs, rhs));
                 None
             }
             "static_assert" => {
                 // static_assert(condition, message) - drop the string message
                 let cond = self.convert_expression(&call.arguments[0], b).unwrap();
-                b.block(self.current_block).assert_bool(cond);
+                self.emit_located(b, Some(call.location), |e| e.assert_bool(cond));
                 None
             }
             "array_len" => {
@@ -1324,7 +1475,8 @@ impl<'a> ExpressionConverter<'a> {
                     }
                     noirc_frontend::monomorphization::ast::Type::Vector(_) => {
                         let slice = self.convert_expression(&call.arguments[0], b).unwrap();
-                        let value = b.block(self.current_block).slice_len(slice);
+                        let value =
+                            self.emit_located(b, Some(call.location), |e| e.slice_len(slice));
                         Some(value)
                     }
                     _ => panic!("array_len called on non-array/slice type: {:?}", arg_type),
@@ -1341,12 +1493,9 @@ impl<'a> ExpressionConverter<'a> {
                         call.return_type
                     ),
                 };
-                let result = b.block(self.current_block).to_radix(
-                    input,
-                    Radix::Dyn(radix),
-                    Endianness::Little,
-                    output_size,
-                );
+                let result = self.emit_located(b, Some(call.location), |e| {
+                    e.to_radix(input, Radix::Dyn(radix), Endianness::Little, output_size)
+                });
                 Some(result)
             }
             "to_be_radix" => {
@@ -1360,12 +1509,9 @@ impl<'a> ExpressionConverter<'a> {
                         call.return_type
                     ),
                 };
-                let result = b.block(self.current_block).to_radix(
-                    input,
-                    Radix::Dyn(radix),
-                    Endianness::Big,
-                    output_size,
-                );
+                let result = self.emit_located(b, Some(call.location), |e| {
+                    e.to_radix(input, Radix::Dyn(radix), Endianness::Big, output_size)
+                });
                 Some(result)
             }
             "apply_range_constraint" => {
@@ -1379,13 +1525,14 @@ impl<'a> ExpressionConverter<'a> {
                         other
                     ),
                 };
-                b.block(self.current_block).rangecheck(value, bit_size);
+                self.emit_located(b, Some(call.location), |e| e.rangecheck(value, bit_size));
                 None
             }
             "field_less_than" => {
                 let lhs = self.convert_expression(&call.arguments[0], b).unwrap();
                 let rhs = self.convert_expression(&call.arguments[1], b).unwrap();
-                Some(b.block(self.current_block).lt(lhs, rhs))
+                let result = self.emit_located(b, Some(call.location), |e| e.lt(lhs, rhs));
+                Some(result)
             }
             "is_unconstrained" => {
                 let value = b
@@ -1407,9 +1554,9 @@ impl<'a> ExpressionConverter<'a> {
                         call.return_type
                     ),
                 };
-                let result =
-                    b.block(self.current_block)
-                        .to_bits(input, Endianness::Little, output_size);
+                let result = self.emit_located(b, Some(call.location), |e| {
+                    e.to_bits(input, Endianness::Little, output_size)
+                });
                 Some(result)
             }
             "to_be_bits" => {
@@ -1421,17 +1568,17 @@ impl<'a> ExpressionConverter<'a> {
                         call.return_type
                     ),
                 };
-                let result =
-                    b.block(self.current_block)
-                        .to_bits(input, Endianness::Big, output_size);
+                let result = self.emit_located(b, Some(call.location), |e| {
+                    e.to_bits(input, Endianness::Big, output_size)
+                });
                 Some(result)
             }
             "as_vector" => {
                 let array = self.convert_expression(&call.arguments[0], b).unwrap();
-                Some(
-                    b.block(self.current_block)
-                        .cast_to(CastTarget::ArrayToSlice, array),
-                )
+                let result = self.emit_located(b, Some(call.location), |e| {
+                    e.cast_to(CastTarget::ArrayToSlice, array)
+                });
+                Some(result)
             }
             _ => todo!("Builtin function '{}' not yet supported", name),
         }
@@ -1478,7 +1625,8 @@ impl<'a> ExpressionConverter<'a> {
                 };
 
                 let value = self.convert_expression(&call.arguments[0], b).unwrap();
-                let result = b.block(self.current_block).cast_to(target, value);
+                let result =
+                    self.emit_located(b, Some(call.location), |e| e.cast_to(target, value));
                 Some(result)
             }
             "spread_inner" => {
@@ -1488,7 +1636,8 @@ impl<'a> ExpressionConverter<'a> {
                     "spread: bits must be 1..=16, got {bits}"
                 );
                 let value = self.convert_expression(&call.arguments[0], b).unwrap();
-                let result = b.block(self.current_block).spread(value, bits as u8);
+                let result =
+                    self.emit_located(b, Some(call.location), |e| e.spread(value, bits as u8));
                 Some(result)
             }
             "unspread_inner" => {
@@ -1498,10 +1647,10 @@ impl<'a> ExpressionConverter<'a> {
                     "unspread: bits must be 1..=16, got {bits}"
                 );
                 let value = self.convert_expression(&call.arguments[0], b).unwrap();
-                let (odd, even) = b.block(self.current_block).unspread(value, bits as u8);
-                let result = b
-                    .block(self.current_block)
-                    .mk_tuple(vec![odd, even], vec![Type::u(32), Type::u(32)]);
+                let result = self.emit_located(b, Some(call.location), |e| {
+                    let (odd, even) = e.unspread(value, bits as u8);
+                    e.mk_tuple(vec![odd, even], vec![Type::u(32), Type::u(32)])
+                });
                 Some(result)
             }
             _ => None,

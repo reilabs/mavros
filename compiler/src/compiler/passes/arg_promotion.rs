@@ -573,14 +573,20 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan) {
 
         // 2. Materialize one local alloc per promoted parameter, seeded from the value-parameter.
         let old_instrs = entry.take_instructions();
+        let entry_location = old_instrs
+            .first()
+            .and_then(|instruction| instruction.location().clone());
         let mut new_instrs = Vec::with_capacity(old_instrs.len() + cp.params.len() * 2);
         for pp in &cp.params {
             // The alloc carries its initial value, so seed it directly from the by-value parameter
             // with no follow-up store needed.
-            new_instrs.push(OpCode::Alloc {
-                result: pp.alloc,
-                value: pp.new_param,
-            });
+            new_instrs.push(
+                OpCode::Alloc {
+                    result: pp.alloc,
+                    value: pp.new_param,
+                }
+                .locate(entry_location.clone()),
+            );
         }
         new_instrs.extend(old_instrs);
         entry.put_instructions(new_instrs);
@@ -627,11 +633,18 @@ fn rewrite_caller_block(func: &mut HLFunction, bid: BlockId, rewrites: &[CallRew
         if let OpCode::Call {
             function: CallTarget::Static(g),
             ..
-        } = &instr
+        } = instr.as_ref()
         {
             // The recorded rewrites cover exactly the promoted-callee calls, in this order.
             if next < rewrites.len() && rewrites[next].callee == *g {
-                apply_call_rewrite(instr, &rewrites[next], &mut new_instrs);
+                let (instr, location) = instr.take();
+                let mut rewritten = Vec::new();
+                apply_call_rewrite(instr, &rewrites[next], &mut rewritten);
+                new_instrs.extend(
+                    rewritten
+                        .into_iter()
+                        .map(|instruction| instruction.locate(location.clone())),
+                );
                 next += 1;
                 continue;
             }

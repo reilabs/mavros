@@ -405,7 +405,7 @@ impl CSE {
                     if to_remove.contains(&ProgramPoint::new(bid, idx)) {
                         continue;
                     }
-                    value_replacements.replace_inputs(&mut instruction);
+                    value_replacements.replace_inputs(&mut *instruction);
                     new_instructions.push(instruction);
                 }
                 block.put_instructions(new_instructions);

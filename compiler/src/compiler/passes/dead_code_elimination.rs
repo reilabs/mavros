@@ -441,7 +441,7 @@ impl DCE {
                         function: CallTarget::Static(callee),
                         args,
                         unconstrained: _,
-                    } = &mut instruction
+                    } = &mut *instruction
                     {
                         let mut new_args = vec![];
                         for (arg_i, arg) in args.iter().enumerate() {

@@ -92,7 +92,8 @@ use crate::{
         ssa::{
             BlockId, FunctionId, Terminator, ValueId,
             hlssa::{
-                CallTarget, Constant, HLFunction, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
+                CallTarget, Constant, HLFunction, HLSSA, LocatedOpCode, OpCode, SequenceTargetType,
+                Type, TypeExpr,
             },
         },
     },
@@ -580,20 +581,27 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan, index_consts: &[ValueI
     if !cp.params.is_empty() {
         let entry_id = func.get_entry_id();
         let entry = func.get_block_mut(entry_id);
+        let entry_location = entry
+            .get_instructions_with_source_locations()
+            .next()
+            .and_then(|(_, location)| location.cloned());
         let old_params = entry.take_parameters();
         let mut new_params = Vec::with_capacity(old_params.len());
-        let mut reconstructs: Vec<OpCode> = Vec::with_capacity(cp.params.len());
+        let mut reconstructs: Vec<LocatedOpCode> = Vec::with_capacity(cp.params.len());
         for (idx, (pid, ty)) in old_params.into_iter().enumerate() {
             if let Some(pe) = cp.params.iter().find(|p| p.index == idx) {
                 for cell in &pe.cells {
                     new_params.push((*cell, pe.elem.clone()));
                 }
-                reconstructs.push(OpCode::MkSeq {
-                    result: pid,
-                    elems: pe.cells.clone(),
-                    seq_type: SequenceTargetType::Array(pe.n),
-                    elem_type: pe.elem.clone(),
-                });
+                reconstructs.push(
+                    OpCode::MkSeq {
+                        result: pid,
+                        elems: pe.cells.clone(),
+                        seq_type: SequenceTargetType::Array(pe.n),
+                        elem_type: pe.elem.clone(),
+                    }
+                    .locate(entry_location.clone()),
+                );
             } else {
                 new_params.push((pid, ty));
             }
@@ -678,14 +686,21 @@ fn rewrite_caller_block(
         if let OpCode::Call {
             function: CallTarget::Static(g),
             ..
-        } = &instr
+        } = instr.as_ref()
         {
             // The recorded rewrites cover exactly the expanded-callee calls, in this order. Order
             // matching is sound because the callee-rewrite phase (run before any caller rewrite in
             // `apply`) only ever *inserts* `MkSeq`/`ArrayGet`, never a `Call`, so the `Call`
             // subsequence of every block is identical to the one `build_plan` recorded against.
             if next < rewrites.len() && rewrites[next].callee == *g {
-                apply_call_rewrite(instr, &rewrites[next], index_consts, &mut new_instrs);
+                let (instr, location) = instr.take();
+                let mut rewritten = Vec::new();
+                apply_call_rewrite(instr, &rewrites[next], index_consts, &mut rewritten);
+                new_instrs.extend(
+                    rewritten
+                        .into_iter()
+                        .map(|instruction| instruction.locate(location.clone())),
+                );
                 next += 1;
                 continue;
             }

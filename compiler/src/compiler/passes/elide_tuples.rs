@@ -38,7 +38,7 @@ use crate::{
         analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
         ssa::{
-            BlockId, FunctionId, Instruction, Terminator, ValueId,
+            BlockId, FunctionId, Instruction, Located, Terminator, ValueId,
             hlssa::{HLSSA, OpCode, Type, TypeExpr},
         },
     },
@@ -246,12 +246,19 @@ impl ElideTuples {
             let old_instructions = block.take_instructions();
             let mut new_instructions = Vec::with_capacity(old_instructions.len());
             for instr in &old_instructions {
+                let mut lowered = Vec::new();
                 lower_instruction(
-                    instr,
+                    instr.as_ref(),
                     value_map,
                     global_offsets,
                     old_global_types,
-                    &mut new_instructions,
+                    &mut lowered,
+                );
+                let location = instr.location().clone();
+                new_instructions.extend(
+                    lowered
+                        .into_iter()
+                        .map(|instruction| Located::new(instruction, location.clone())),
                 );
             }
             block.put_instructions(new_instructions);

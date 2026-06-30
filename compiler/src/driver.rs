@@ -136,6 +136,21 @@ impl Driver {
         self.project.package_root()
     }
 
+    fn write_debug_text(&self, path: impl AsRef<Path>, contents: impl Into<String>) {
+        fs::write(path, self.normalize_debug_text(contents.into())).unwrap();
+    }
+
+    fn normalize_debug_text(&self, mut contents: String) -> String {
+        let root = self.project.package_root();
+        let root = root.to_string_lossy();
+        contents = contents.replace(root.as_ref(), "$PROJECT_ROOT");
+        if let Ok(canonical_root) = fs::canonicalize(self.project.package_root()) {
+            let canonical_root = canonical_root.to_string_lossy();
+            contents = contents.replace(canonical_root.as_ref(), "$PROJECT_ROOT");
+        }
+        contents
+    }
+
     #[tracing::instrument(skip_all)]
     pub fn run_noir_compiler(&mut self) -> Result<(), Error> {
         let (mut context, crate_id) = nargo::prepare_package(
@@ -167,18 +182,18 @@ impl Driver {
         ));
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
-        let (ssa, main_is_unconstrained) = HLSSA::from_program(&program);
+        let (ssa, main_is_unconstrained) =
+            HLSSA::from_program_with_file_manager(&program, Some(self.project.file_manager()));
         self.initial_ssa = Some(ssa);
         self.main_is_unconstrained = main_is_unconstrained;
 
-        fs::write(
+        self.write_debug_text(
             self.get_debug_output_dir().join("initial_ssa.txt"),
             self.initial_ssa
                 .as_ref()
                 .unwrap()
                 .to_string(&DefaultSSAAnnotator),
-        )
-        .unwrap();
+        );
 
         Ok(())
     }
@@ -283,23 +298,21 @@ impl Driver {
         let mut witness_inference = WitnessTaintInference::new();
         witness_inference.run(&mut ssa, &flow_analysis);
 
-        fs::write(
+        self.write_debug_text(
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),
             ssa.to_string(&witness_inference),
-        )
-        .unwrap();
+        );
 
         let mut untaint_cf = UntaintControlFlow::new();
         self.monomorphized_ssa = Some(untaint_cf.run(ssa, &witness_inference));
 
-        fs::write(
+        self.write_debug_text(
             self.get_debug_output_dir().join("untainted_ssa.txt"),
             self.monomorphized_ssa
                 .as_ref()
                 .unwrap()
                 .to_string(&DefaultSSAAnnotator),
-        )
-        .unwrap();
+        );
 
         Ok(())
     }
@@ -439,11 +452,10 @@ impl Driver {
 
         let codegen = CodeGen::new(options);
         let program = codegen.run(ssa, &flow_analysis, &type_info);
-        fs::write(
+        self.write_debug_text(
             self.get_debug_output_dir().join("program_bytecode.txt"),
             format!("{}", program),
-        )
-        .unwrap();
+        );
 
         let binary = program.to_binary();
 
@@ -532,11 +544,10 @@ impl Driver {
         tail_pm.set_debug_output_dir(self.get_debug_output_dir().clone());
         tail_pm.run(&mut ssa);
 
-        fs::write(
+        self.write_debug_text(
             self.get_debug_output_dir().join("program_ssa.txt"),
             ssa.to_string(&DefaultSSAAnnotator),
-        )
-        .unwrap();
+        );
 
         self.program_ssa = Some(ssa);
     }
@@ -560,12 +571,11 @@ impl Driver {
         let type_info = Types::new().run(ssa, &flow_analysis);
 
         // Dump HLSSA just before lowering
-        fs::write(
+        self.write_debug_text(
             self.get_debug_output_dir()
                 .join("hlssa_before_lowering.txt"),
             ssa.to_string(&DefaultSSAAnnotator),
-        )
-        .unwrap();
+        );
 
         // Lower HLSSA → LLSSA
         let llssa = hlssa_to_llssa::lower_with_layout(
@@ -578,11 +588,10 @@ impl Driver {
         );
 
         // Dump LLSSA after lowering
-        fs::write(
+        self.write_debug_text(
             self.get_debug_output_dir().join("llssa_after_lowering.txt"),
             llssa.to_string(&DefaultSSAAnnotator),
-        )
-        .unwrap();
+        );
 
         // Compile LLSSA → LLVM
         let ll_flow_analysis = FlowAnalysis::run(&llssa);

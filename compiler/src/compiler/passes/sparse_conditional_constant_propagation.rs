@@ -32,7 +32,7 @@ use crate::{
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
         passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
         ssa::{
-            BlockId, FunctionId, Instruction, Terminator, ValueId,
+            BlockId, FunctionId, Instruction, Located, Terminator, ValueId,
             hlssa::{CastTarget, HLFunction, HLSSA, OpCode},
         },
     },
@@ -138,7 +138,8 @@ fn rewrite(
 
         let instructions = block.take_instructions();
         let mut kept = Vec::with_capacity(instructions.len());
-        for instr in instructions {
+        for mut instr in instructions {
+            let location = instr.location().clone();
             // Purity gate: a single-result instruction whose result the analysis proved constant is
             // dropped only when it is a pure scalar fold; its uses are aliased above either way.
             //
@@ -156,7 +157,7 @@ fn rewrite(
                     // single-result reads, so the definition is dropped and its uses are aliased to
                     // the interned constant; any other constant-producing op is an analysis bug.
                     let foldable = instr.is_pure_scalar_fold()
-                        || matches!(instr, OpCode::ArrayGet { .. } | OpCode::SliceLen { .. });
+                        || matches!(&*instr, OpCode::ArrayGet { .. } | OpCode::SliceLen { .. });
                     assert!(
                         !is_const || foldable,
                         "ICE: Result {r:?} of non-foldable instruction {instr:?} is in the \
@@ -167,11 +168,14 @@ fn rewrite(
                     if is_const && foldable {
                         if let Some(c) = witness_consts.get(r) {
                             let bare = ssa.add_const((**c).clone());
-                            kept.push(OpCode::Cast {
-                                result: *r,
-                                value: bare,
-                                target: CastTarget::WitnessOf,
-                            });
+                            kept.push(Located::new(
+                                OpCode::Cast {
+                                    result: *r,
+                                    value: bare,
+                                    target: CastTarget::WitnessOf,
+                                },
+                                location,
+                            ));
                         }
                         continue;
                     }
@@ -185,18 +189,16 @@ fn rewrite(
                 cond,
                 if_t,
                 if_f,
-            } = &instr
+            } = &*instr
             {
                 if let Some(b) = cc.const_bool_in_block(fid, bid, *cond) {
                     replacements.insert(*result, if b { *if_t } else { *if_f });
                     continue;
                 }
             }
-            let mut instr = instr;
-            local_replacements.replace_inputs(&mut instr);
+            local_replacements.replace_inputs(&mut *instr);
             kept.push(instr);
         }
-
         block.put_instructions(kept);
 
         if let Some(Terminator::JmpIf(cond, t, f)) = block.get_terminator() {

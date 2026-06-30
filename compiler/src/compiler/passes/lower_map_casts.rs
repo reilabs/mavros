@@ -59,39 +59,42 @@ impl LowerMapCasts {
 
                     let mut emitter = fb.block(bid);
                     for instruction in instructions {
-                        match instruction {
-                            OpCode::Cast {
-                                result,
-                                value,
-                                target: CastTarget::Map(inner),
-                            } => {
-                                let src_type = type_info.get_value_type(value).clone();
-                                let converted = lower_map(&mut emitter, value, &src_type, &inner);
-                                // Bind the original result id to the loop's
-                                // output; the Nop cast is a pure alias.
-                                emitter.emit(OpCode::Cast {
+                        let location = instruction.location().clone();
+                        emitter.emit_with_location(location, |emitter| {
+                            match instruction.payload() {
+                                OpCode::Cast {
                                     result,
-                                    value: converted,
-                                    target: CastTarget::Nop,
-                                });
-                            }
-                            OpCode::Guard { condition, inner } => {
-                                if matches!(
-                                    inner.as_ref(),
-                                    OpCode::Cast {
-                                        target: CastTarget::Map(_),
-                                        ..
-                                    }
-                                ) {
-                                    panic!(
-                                        "ICE: guarded Map cast reached LowerMapCasts; \
-                                         LowerSideEffectFreeGuards should have unwrapped it"
-                                    );
+                                    value,
+                                    target: CastTarget::Map(inner),
+                                } => {
+                                    let src_type = type_info.get_value_type(value).clone();
+                                    let converted = lower_map(emitter, value, &src_type, &inner);
+                                    // Bind the original result id to the loop's
+                                    // output; the Nop cast is a pure alias.
+                                    emitter.emit(OpCode::Cast {
+                                        result,
+                                        value: converted,
+                                        target: CastTarget::Nop,
+                                    });
                                 }
-                                emitter.emit(OpCode::Guard { condition, inner });
+                                OpCode::Guard { condition, inner } => {
+                                    if matches!(
+                                        inner.as_ref(),
+                                        OpCode::Cast {
+                                            target: CastTarget::Map(_),
+                                            ..
+                                        }
+                                    ) {
+                                        panic!(
+                                            "ICE: guarded Map cast reached LowerMapCasts; \
+                                             LowerSideEffectFreeGuards should have unwrapped it"
+                                        );
+                                    }
+                                    emitter.emit(OpCode::Guard { condition, inner });
+                                }
+                                other => emitter.emit(other),
                             }
-                            other => emitter.emit(other),
-                        }
+                        });
                     }
                     if let Some(terminator) = terminator {
                         emitter.set_terminator(terminator);

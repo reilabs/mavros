@@ -141,6 +141,64 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         self.block_id
     }
 
+    pub fn instruction_count(&self) -> usize {
+        self.block.instruction_count()
+    }
+
+    pub fn stamp_source_location_from(
+        &mut self,
+        start: usize,
+        source_location: Option<crate::compiler::ssa::SourceLocation>,
+    ) {
+        self.block
+            .stamp_source_location_from(start, source_location);
+    }
+
+    pub fn emit_with_location<R>(
+        &mut self,
+        source_location: Option<crate::compiler::ssa::SourceLocation>,
+        emit: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let start_block = self.block_id;
+        let start_len = self.block.instruction_count();
+        let next_block_before = self.function.next_block_id_bound();
+
+        let result = emit(self);
+
+        let Some(source_location) = source_location else {
+            return result;
+        };
+
+        if self.block_id == start_block && self.function.next_block_id_bound() == next_block_before
+        {
+            self.block
+                .stamp_source_location_from(start_len, Some(source_location));
+            return result;
+        };
+
+        if self.block_id == start_block {
+            self.block
+                .stamp_source_location_from(start_len, Some(source_location.clone()));
+        } else {
+            self.function
+                .get_block_mut(start_block)
+                .stamp_source_location_from(start_len, Some(source_location.clone()));
+        }
+
+        for (block_id, block) in self.function.get_blocks_mut() {
+            if block_id.0 >= next_block_before {
+                block.stamp_source_location_from(0, Some(source_location.clone()));
+            }
+        }
+
+        if self.block_id.0 >= next_block_before {
+            self.block
+                .stamp_source_location_from(0, Some(source_location));
+        }
+
+        result
+    }
+
     pub fn add_block(&mut self) -> (BlockId, &mut Block<Op, Ty>) {
         self.function.add_block_mut()
     }
@@ -183,7 +241,7 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
     }
 
     pub fn emit_instruction(&mut self, instruction: impl Into<Located<Op>>) {
-        self.block.push_located_instruction(instruction.into());
+        self.block.push_instruction(instruction.into());
     }
 
     /// Build a loop with the three-block structure: header -> body -> back-edge.
@@ -236,7 +294,7 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         };
         self.function
             .get_block_mut(header_id)
-            .put_located_instructions(header_instructions);
+            .put_instructions(header_instructions);
         self.function
             .get_block_mut(header_id)
             .set_terminator(Terminator::JmpIf(cond, body_id, cont_id));
@@ -503,5 +561,47 @@ mod tests {
 
         assert_eq!(instructions.len(), 1);
         assert_eq!(instructions[0].get_location(), Some(&loc));
+    }
+
+    #[test]
+    fn block_emitter_stamps_new_instructions_across_block_splits() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let loc = test_location();
+
+        {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(main_id, |fb| {
+                let entry_id = fb.function.get_entry_id();
+                let mut block = fb.block(entry_id);
+                block.emit_with_location(Some(loc.clone()), |block| {
+                    let cond = block.not(ValueId(0));
+                    block.build_if_else(
+                        cond,
+                        vec![],
+                        |then_block| {
+                            then_block.not(ValueId(0));
+                            vec![]
+                        },
+                        |else_block| {
+                            else_block.not(ValueId(0));
+                            vec![]
+                        },
+                    );
+                });
+            });
+        }
+
+        let function = ssa.get_function(main_id);
+        let located_instruction_count: usize = function
+            .get_blocks()
+            .map(|(_, block)| {
+                block
+                    .get_instructions_with_source_locations()
+                    .inspect(|(_, location)| assert_eq!(*location, Some(&loc)))
+                    .count()
+            })
+            .sum();
+        assert_eq!(located_instruction_count, 3);
     }
 }

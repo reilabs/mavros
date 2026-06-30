@@ -83,9 +83,12 @@ impl WitnessLowering {
 
                 let mut emitter = fb.block(bid);
 
-                for mut instruction in instructions.into_iter() {
+                for instruction in instructions.into_iter() {
+                    let location = instruction.location().clone();
+                    let mut instruction = instruction.payload();
                     replacements.replace_instruction(&mut instruction);
-                    match instruction {
+                    emitter.emit_with_location(location, |mut emitter| {
+                        match instruction {
                         OpCode::Guard { .. } => {
                             panic!("ICE: Guard should be lowered before witness lowering");
                         }
@@ -99,7 +102,11 @@ impl WitnessLowering {
                                 // Already WitnessOf — don't double-wrap
                                 replacements.insert(r, v);
                             } else {
-                                emitter.emit(instruction);
+                                emitter.emit(OpCode::Cast {
+                                    result: r,
+                                    value: v,
+                                    target: target.clone(),
+                                });
                             }
                         }
                         OpCode::FreshWitness { .. } => {
@@ -179,9 +186,9 @@ impl WitnessLowering {
                             });
                         }
                         OpCode::Constrain { a, b, c } => {
-                            let a = self.ensure_witness_ref(a, type_info, &mut emitter);
-                            let b = self.ensure_witness_ref(b, type_info, &mut emitter);
-                            let c = self.ensure_witness_ref(c, type_info, &mut emitter);
+                            let a = self.ensure_witness_ref(a, type_info, emitter);
+                            let b = self.ensure_witness_ref(b, type_info, emitter);
+                            let c = self.ensure_witness_ref(c, type_info, emitter);
                             let new_val = emitter.fresh_value();
                             emitter.emit(OpCode::NextDCoeff { result: new_val });
                             emitter.emit(OpCode::BumpD {
@@ -459,7 +466,8 @@ impl WitnessLowering {
                         OpCode::MkTuple { .. }
                         | OpCode::TupleProj { .. }
                         | OpCode::TupleRefProj { .. } => ice_non_elided_tuple(),
-                    };
+                        };
+                    });
                 }
 
                 // Handle terminator on current (possibly split) block

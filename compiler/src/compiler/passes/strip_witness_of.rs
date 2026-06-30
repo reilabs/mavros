@@ -66,13 +66,13 @@ impl StripWitnessOf {
                             result,
                             value,
                             target,
-                        } = &instr
+                        } = &*instr
                             && target.is_witness_repr_only()
                         {
                             replacements.insert(*result, *value);
                             return None;
                         }
-                        Self::strip_instruction(&mut instr);
+                        Self::strip_instruction(&mut *instr);
                         Some(instr)
                     })
                     .collect();

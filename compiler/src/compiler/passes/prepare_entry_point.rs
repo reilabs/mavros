@@ -24,7 +24,7 @@ use crate::{
     compiler::{
         pass_manager::{AnalysisStore, Pass},
         ssa::{
-            BlockId, FunctionId, ValueId,
+            BlockId, FunctionId, Located, ValueId,
             hlssa::{
                 CallTarget, CastTarget, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
                 builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
@@ -268,12 +268,13 @@ impl PrepareEntryPoint {
                     let mut new_instructions = Vec::new();
 
                     for mut instr in old_instructions {
+                        let location = instr.location().clone();
                         if let OpCode::Call {
                             unconstrained: true,
                             results,
                             function: CallTarget::Static(callee_id),
                             ..
-                        } = &mut instr
+                        } = &mut *instr
                         {
                             let return_types = callee_return_types
                                 .get(callee_id)
@@ -298,12 +299,15 @@ impl PrepareEntryPoint {
                                 .zip(return_types.iter())
                             {
                                 let prepare_fn = Self::find_prepare_fn(return_type, &prepare_fns);
-                                new_instructions.push(OpCode::Call {
-                                    results: vec![original_result],
-                                    function: CallTarget::Static(prepare_fn),
-                                    args: vec![fresh_result],
-                                    unconstrained: false,
-                                });
+                                new_instructions.push(Located::new(
+                                    OpCode::Call {
+                                        results: vec![original_result],
+                                        function: CallTarget::Static(prepare_fn),
+                                        args: vec![fresh_result],
+                                        unconstrained: false,
+                                    },
+                                    location.clone(),
+                                ));
                             }
                         } else {
                             new_instructions.push(instr);

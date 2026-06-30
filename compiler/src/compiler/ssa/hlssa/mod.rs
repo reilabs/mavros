@@ -7,8 +7,8 @@ use itertools::Itertools;
 use std::fmt::Display;
 
 use crate::compiler::ssa::{
-    Block, Function, FunctionId, Instruction, Located, SSA, SSAConstants, SSAConstantsSnapshot,
-    ValueId,
+    Block, Function, FunctionId, Instruction, Located, Location, SSA, SSAConstants,
+    SSAConstantsSnapshot, ValueId,
 };
 
 pub use type_system::{MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type, TypeExpr};
@@ -21,6 +21,12 @@ pub type HLSSA = SSA<OpCode, Type, Constant>;
 
 /// Opcodes for HLSSA with attached location metadata.
 pub type LocatedOpCode = Located<OpCode>;
+
+impl OpCode {
+    pub fn locate(self, location: Location) -> LocatedOpCode {
+        LocatedOpCode::new(self, location)
+    }
+}
 
 impl HLSSA {
     pub fn new() -> Self {
