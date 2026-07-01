@@ -219,6 +219,7 @@ pub(crate) fn build(
     cfg: &CFG,
     consts: &HLSSAConstantsSnapshot,
     type_info: &FunctionTypeInfo,
+    order: &DefOrder,
 ) -> ConditionalFacts {
     let mut out = ConditionalFacts::default();
 
@@ -421,10 +422,9 @@ pub(crate) fn build(
     // `ConditionalFacts::asserted_leader`. Only values appearing in an equality pair can be class
     // members, and every such value appears in `local_assert_eq` (the cross-block `assert_eq` is
     // fanned out from the same pairs), so a non-empty `local_assert_eq` is the authoritative "any
-    // equalities exist" gate — the (O(n)) definition order and per-block tables are built only
-    // then.
+    // equalities exist" gate — the per-block leader tables are built only then (the definition
+    // `order` is shared from the caller, built once for the congruence leaders too).
     if out.local_assert_eq.values().any(|eqs| !eqs.is_empty()) {
-        let order = DefOrder::new(function, cfg);
         for &b in &reachable_blocks {
             let cross = out.assert_eq.get(&b).map(Vec::as_slice).unwrap_or(&[]);
             let local = out
