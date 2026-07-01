@@ -21,7 +21,7 @@ use std::sync::Arc;
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
-        analysis::flow_analysis::CFG,
+        analysis::{click_cooper::def_order::DefOrder, flow_analysis::CFG},
         ssa::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
             hlssa::{
@@ -97,70 +97,23 @@ impl Congruence {
     ///
     /// Must be called before [`Self::leader`] is queried.
     pub(crate) fn compute_leaders(&mut self, function: &HLFunction, cfg: &CFG) {
-        let entry = function.get_entry_id();
-
-        // Definition site of every value: `(block, rank)`, where a block parameter (φ) ranks before
-        // all instructions (`0`) and instruction `i`'s results rank `i + 1`. A member with no
-        // recorded site — an entry parameter or an interned constant referenced as an operand — is
-        // treated as defined at `(entry, 0)` and hence available throughout the function.
-        let mut def_site: HashMap<ValueId, (BlockId, usize)> = HashMap::default();
-        for (bid, block) in function.get_blocks() {
-            for p in block.get_parameter_values() {
-                def_site.insert(*p, (*bid, 0));
-            }
-            for (index, instr) in block.get_instructions().enumerate() {
-                for r in instr.get_results() {
-                    def_site.insert(*r, (*bid, index + 1));
-                }
-            }
-        }
-
-        // `def(w)` dominates `def(v)`: strict block dominance across blocks, or earlier rank within
-        // a block (with a value-id tie-break for two parameters of the same block, both available
-        // at block entry). `CFG::dominates` is reflexive, so it is only consulted across blocks.
-        let site = |v: ValueId| def_site.get(&v).copied().unwrap_or((entry, 0));
-        let dominates_def = |w: ValueId, v: ValueId| {
-            let (bw, rw) = site(w);
-            let (bv, rv) = site(v);
-            if bw == bv {
-                rw < rv || (rw == rv && w.0 < v.0)
-            } else {
-                cfg.dominates(bw, bv)
-            }
-        };
-
-        // A dominator-tree pre-order index per block: a linear extension of block dominance in
-        // which an ancestor block always precedes its descendants. Paired with the in-block rank
-        // and value id it gives a total `def_key` consistent with `dominates_def` — if `def(w)`
-        // dominates `def(v)` then `def_key(w) < def_key(v)`.
-        let preorder: HashMap<BlockId, usize> = cfg
-            .get_domination_pre_order()
-            .enumerate()
-            .map(|(i, b)| (b, i))
-            .collect();
-        let def_key = |v: ValueId| {
-            let (b, rank) = site(v);
-            (preorder.get(&b).copied().unwrap_or(usize::MAX), rank, v.0)
-        };
+        // The shared definition order: `order.key(v)` is a total order that is a linear extension
+        // of definition dominance (if `def(w)` dominates `def(v)` then `key(w) < key(v)`), and
+        // `order.dominates_def(w, v)` is the dominance test itself.
+        let order = DefOrder::new(function, cfg);
 
         // For each member, the root-most class member dominating its definition. Every member that
         // dominates `def(v)` lies on `v`'s dominator chain, so all such members are mutually
         // comparable and the root-most is well-defined and order-independent.
-        //
-        // Sorting the class into `def_key` order (a linear extension of dominance) lets a single
-        // stack pass replace the quadratic all-pairs scan: the stack holds the current dominator
-        // chain (root → nearest). For each `v` we drop chain members that do not dominate it (by
-        // transitivity, whatever remains does); the chain's base is then `v`'s root-most dominating
-        // peer — its leader — or `v` itself when the chain is empty.
         let mut leader_of = HashMap::default();
         for class in &self.members {
             let mut sorted = class.clone();
-            sorted.sort_by_key(|&v| def_key(v));
+            sorted.sort_by_key(|&v| order.key(v));
 
             let mut chain: Vec<ValueId> = Vec::new();
             for &v in &sorted {
                 while let Some(&top) = chain.last() {
-                    if dominates_def(top, v) {
+                    if order.dominates_def(top, v) {
                         break;
                     }
                     chain.pop();
