@@ -21,7 +21,8 @@
 //!   yield congruent results).
 //! - **Conditional facts** are ones derived from asserts, equalities, disequalities, and unpinned
 //!   witness forwarding. They are computed post-convergence over the same reachability state plus
-//!   CFG dominance, and are intentionally disjoint from the unconditional view.
+//!   CFG dominance — once from the intraprocedural facts and once per `(function, context)` from
+//!   the 1-CFA-specialized facts — and are intentionally disjoint from the unconditional view.
 //!
 //! **Unconditional facts** are those which hold on any path so that any use (replacing a use,
 //! deleting a pure definition, or pruning an unreachable block) maintains soundness. **Conditional
@@ -111,15 +112,10 @@
 //!
 //! # Deferred Improvements
 //!
-//! The following are improvements planned for the future of this analysis.
+//! The following are improvements for the future of this analysis. They are either necessary for
+//! future work, or deferred because they are expected to yield little benefit on our current
+//! circuit corpus.
 //!
-//! - **Per-context Conditional Facts:** The assert/disequality/witness-forwarding conditional facts
-//!   are computed once per function and not refined per 1-CFA context, so they have no `_in(f, ctx,
-//!   …)` query: a caller reads them through the intraprocedural methods, whose (sound,
-//!   context-independent) answer is a per-context under-approximation. Recomputing the conditional
-//!   pass per `(function, context)` — as `specialize` already does for the unconditional facts —
-//!   would let a context-specialized assert or branch expose more facts, and would warrant adding
-//!   the `_in` variants.
 //! - **Sound Post-Dominance for Assert Facts:** Assert facts (`asserted_const`/`asserted_equal`)
 //!   currently fan out by dominance only. The post-dominance direction — an assert in `B` is *bound
 //!   to run* at every block `C` it strictly post-dominates, so its fact would also hold at a use
@@ -203,6 +199,11 @@ pub struct ClickCooper {
     ///
     /// They are intentionally disjoint from the unconditional views above.
     conditional: HashMap<FunctionId, ConditionalFacts>,
+
+    /// Per-`(function, context)` **conditional** facts (the 1-CFA refinement of `conditional`).
+    ///
+    /// Disjoint from `contexts`, exactly as `conditional` is from `functions`.
+    conditional_contexts: HashMap<(FunctionId, Context), ConditionalFacts>,
 }
 
 impl Analysis for ClickCooper {
@@ -237,6 +238,33 @@ impl ClickCooper {
         let sym = compute_sym_summaries(ssa, &consts, &sym_cache);
         drop(sym_cache);
 
+        // One dominance-consistent definition order per function, shared by the congruence-leader
+        // finalization (intraprocedural here, per-context inside `specialize`) and every
+        // conditional build below: it depends only on function structure and CFG dominance, both
+        // context-independent.
+        let orders: HashMap<FunctionId, DefOrder> = ssa
+            .get_function_ids()
+            .map(|fid| {
+                (
+                    fid,
+                    DefOrder::new(ssa.get_function(fid), flow.get_function_cfg(fid)),
+                )
+            })
+            .collect();
+
+        // One conditional build, shared verbatim by the intraprocedural and per-context loops
+        // below; only the converged facts differ between the two.
+        let build_conditional = |fid: FunctionId, facts: &FunctionFacts| {
+            conditional::build(
+                ssa.get_function(fid),
+                facts,
+                flow.get_function_cfg(fid),
+                &consts,
+                types.get_function(fid),
+                &orders[&fid],
+            )
+        };
+
         // Per-function intraprocedural facts: parameters and call results `Bottom`. The conditional
         // facts are computed from the same converged state plus CFG dominance, kept in a disjoint
         // map so the unconditional view is untouched.
@@ -263,34 +291,34 @@ impl ClickCooper {
                 &HashMap::default(),
             );
 
-            // The shared dominance-consistent definition order, built once and reused for both the
-            // congruence leaders and the conditional-fact leaders below.
-            let order = DefOrder::new(function, flow.get_function_cfg(fid));
-
             // Finalize dominance-aware congruence leaders, so `leader` returns a legal redirect
             // target.
-            facts.congruence.compute_leaders(&order);
-            let cond = conditional::build(
-                function,
-                &facts,
-                flow.get_function_cfg(fid),
-                &consts,
-                types.get_function(fid),
-                &order,
-            );
-            conditional.insert(fid, cond);
+            facts.congruence.compute_leaders(&orders[&fid]);
+            conditional.insert(fid, build_conditional(fid, &facts));
             functions.insert(fid, facts);
         }
 
         // The 1-CFA contextual facts, built from the polymorphic summaries (computed above) plus
         // the symbolic congruence projection.
-        let contexts = specialize(ssa, flow, &consts, &summaries, &sym, &det);
+        let contexts = specialize(ssa, &consts, &summaries, &sym, &det, &orders);
+
+        // The per-`(function, context)` conditional facts, rebuilt by the same `conditional::build`
+        // from each context's specialized facts, so every fact is anchored to context-reachable
+        // blocks and context-live values — which is what makes the `_in` queries safe to drive
+        // context-specialized rewrites, and why they read this map exclusively. Neither view
+        // refines the other in general. The map iteration order is immaterial: each build is
+        // independent and internally deterministic, and the results land in a keyed map.
+        let mut conditional_contexts = HashMap::default();
+        for ((fid, ctx), facts) in &contexts {
+            conditional_contexts.insert((*fid, ctx.clone()), build_conditional(*fid, facts));
+        }
 
         ClickCooper {
             consts,
             functions,
             contexts,
             conditional,
+            conditional_contexts,
         }
     }
 }
@@ -305,6 +333,16 @@ impl ClickCooper {
     /// The context-specialized (1-CFA) facts of `f` under `ctx`, or `None`.
     fn facts_in(&self, f: FunctionId, ctx: &Context) -> Option<&FunctionFacts> {
         self.contexts.get(&(f, ctx.clone()))
+    }
+
+    /// The intraprocedural conditional facts of `f`, or `None` if `f` was not analyzed.
+    fn conditional(&self, f: FunctionId) -> Option<&ConditionalFacts> {
+        self.conditional.get(&f)
+    }
+
+    /// The per-context conditional facts of `f` under `ctx`, or `None`.
+    fn conditional_in(&self, f: FunctionId, ctx: &Context) -> Option<&ConditionalFacts> {
+        self.conditional_contexts.get(&(f, ctx.clone()))
     }
 
     /// The constant `v` holds in `facts`, or `None`: interned constants first, then the constant
@@ -447,12 +485,31 @@ impl ClickCooper {
 /// that keeps the establishing branch/assert (never folding away the constraint that proves the
 /// fact).
 ///
-/// These are **intraprocedural** and hence have no context. A conditional fact is established by
-/// control flow *internal to `f`* (a dominating assert, a branch predicate, a witness write), so it
-/// holds in *every* calling context. A context only adds parameter constants and prunes blocks, so
-/// it can make a block unreachable but can never invalidate a fact on a block that remains
-/// reachable. The intraprocedural answer is thus a sound **under-approximation** of the per-context
-/// one.
+/// These are **intraprocedural**: a conditional fact here is established by control flow _internal
+/// to `f`_ (a dominating assert, a branch predicate, a witness write), so the fact itself holds in
+/// _every_ calling context. Reading them is sound for **context-independent** rewrites.
+///
+/// A **context-specialized** rewrite — one applied to a per-context clone that prunes context-dead
+/// blocks — must use the `_in` analogs instead (rebuilt per `(function, context)` from the
+/// specialized facts; see [`Self::asserted_const_in`] and its sibling `_in` queries). This is
+/// because an intraprocedural fact can name a value whose definition the clone prunes (e.g. a
+/// `ValueOf`-derived witness-forward member defined in a context-dead block).
+///
+/// **No pointwise inclusion holds between the two views, in either direction, on any channel.**
+/// Context seeding usually adds facts (a pinned parameter turns an asserted equality into an
+/// asserted constant; a pruned edge creates a disequality) but can also remove them. The following
+/// are examples:
+///
+/// - An equality migrates to the const channel when one side becomes a per-context constant.
+/// - An assert whose *asserted* side becomes a per-context constant moves to the (strictly
+///   stronger) unconditional channel and out of `asserted_const_in`.
+/// - An aggregate-pinning assert contributes nothing.
+/// - A per-context constant can *split* an intraprocedurally-proven congruence so a branch the
+///   intraprocedural writeback folded stays live in the context — shifting reachability, and every
+///   reachability-derived fact, in the *growing* direction.
+///
+/// A consumer wanting the full per-context picture must consult both families, applying each fact
+/// only under its own contract.
 impl ClickCooper {
     /// The constant `v` holds on entry to `bid` in `f`, honoring path-sensitive branch facts.
     pub fn const_in_block(&self, f: FunctionId, bid: BlockId, v: ValueId) -> Option<Arc<Constant>> {
@@ -504,14 +561,16 @@ impl ClickCooper {
     /// assert never folds its own operand and vacuums the constraint.
     ///
     /// A conditional fact, deliberately disjoint from [`Self::const_of`] as a consumer must keep
-    /// the establishing assert.
+    /// the establishing assert. The constant is always scalar: an assert pinning a value to an
+    /// aggregate contributes no fact, upholding the module contract that `Blob` constants are
+    /// never surfaced.
     pub fn asserted_const(
         &self,
         f: FunctionId,
         point: ProgramPoint,
         v: ValueId,
     ) -> Option<Arc<Constant>> {
-        self.conditional.get(&f)?.asserted_const(point, v)
+        self.conditional(f)?.asserted_const(point, v)
     }
 
     /// `true` if `a == b` is proven at `point` in `f` by a dominating `AssertCmp{Eq}` or one
@@ -526,8 +585,7 @@ impl ClickCooper {
         a: ValueId,
         b: ValueId,
     ) -> bool {
-        self.conditional
-            .get(&f)
+        self.conditional(f)
             .is_some_and(|c| c.asserted_equal(point, a, b))
     }
 
@@ -547,7 +605,7 @@ impl ClickCooper {
         point: ProgramPoint,
         v: ValueId,
     ) -> Option<ValueId> {
-        self.conditional.get(&f)?.asserted_leader(point, v)
+        self.conditional(f)?.asserted_leader(point, v)
     }
 
     /// `true` if `a` and `b` are proven unequal on entry to `bid` in `f` (the false edge of an
@@ -556,8 +614,7 @@ impl ClickCooper {
     /// Note that this only accounts for _disequality_ `a != b`, and not expanded linear
     /// inequalities.
     pub fn known_unequal(&self, f: FunctionId, bid: BlockId, a: ValueId, b: ValueId) -> bool {
-        self.conditional
-            .get(&f)
+        self.conditional(f)
             .is_some_and(|c| c.known_disequal(bid, a, b))
     }
 
@@ -572,15 +629,15 @@ impl ClickCooper {
     /// rejecting the honest run), not a structural congruence — so it lives here, never in
     /// [`Self::known_equal`], and two free witnesses are never unified.
     pub fn witness_forward(&self, f: FunctionId, r: ValueId) -> &[ValueId] {
-        self.conditional
-            .get(&f)
+        self.conditional(f)
             .map(|c| c.witness_forward(r))
             .unwrap_or_default()
     }
 }
 
-/// Interprocedural conditional queries — the per-context analogs of the *branch-fact*
-/// intraprocedural conditional queries above (e.g. for a clone of `f` specialized to `ctx`).
+/// Interprocedural conditional queries, the *branch-fact* family — the per-context analogs of the
+/// branch-fact intraprocedural conditional queries above (e.g. for a clone of `f` specialized to
+/// `ctx`).
 ///
 /// They are sound *only* under constraint-preserving use: a local, structure-preserving rewrite
 /// that keeps the establishing branch (never folding away the constraint that proves the fact).
@@ -650,5 +707,83 @@ impl ClickCooper {
             m.iter().map(|(v, b)| (*v, bool_constant(*b))).collect();
         out.sort_by_key(|(v, _)| v.0);
         out
+    }
+}
+
+/// Interprocedural conditional queries, the *assert/disequality/witness* family — reading the
+/// `ConditionalFacts` rebuilt per `(function, context)` from the context-specialized facts.
+///
+/// They inherit **both** contracts.
+///
+/// - **Constraint-Preserving Use:** A local, structure-preserving rewrite that keeps the
+///   establishing assert/branch (never folding away the constraint that proves the fact).
+/// - **Context-Locality:** An answer that is conditional on `ctx` must drive a context-specialized
+///   rewrite only — never be lifted into a context-independent change.
+///
+/// The context refinement *typically* strengthens the assert-const and disequality channels (e.g.
+/// an `AssertCmp{Eq, x, p}` whose `p` is a per-context constant pins `x` to an asserted *constant*
+/// where the intraprocedural view only has an asserted _equality_), but no channel is a pointwise
+/// superset or subset of its intraprocedural counterpart. These queries read the per-context map
+/// exclusively: its facts are anchored to context-live blocks and values, which is what makes them
+/// safe to drive context-specialized rewrites.
+impl ClickCooper {
+    /// [`Self::asserted_const`] under calling context `ctx`.
+    pub fn asserted_const_in(
+        &self,
+        f: FunctionId,
+        ctx: &Context,
+        point: ProgramPoint,
+        v: ValueId,
+    ) -> Option<Arc<Constant>> {
+        self.conditional_in(f, ctx)?.asserted_const(point, v)
+    }
+
+    /// [`Self::asserted_equal`] under calling context `ctx`.
+    pub fn asserted_equal_in(
+        &self,
+        f: FunctionId,
+        ctx: &Context,
+        point: ProgramPoint,
+        a: ValueId,
+        b: ValueId,
+    ) -> bool {
+        self.conditional_in(f, ctx)
+            .is_some_and(|c| c.asserted_equal(point, a, b))
+    }
+
+    /// [`Self::asserted_leader`] under calling context `ctx`.
+    pub fn asserted_leader_in(
+        &self,
+        f: FunctionId,
+        ctx: &Context,
+        point: ProgramPoint,
+        v: ValueId,
+    ) -> Option<ValueId> {
+        self.conditional_in(f, ctx)?.asserted_leader(point, v)
+    }
+
+    /// [`Self::known_unequal`] under calling context `ctx`.
+    pub fn known_unequal_in(
+        &self,
+        f: FunctionId,
+        ctx: &Context,
+        bid: BlockId,
+        a: ValueId,
+        b: ValueId,
+    ) -> bool {
+        self.conditional_in(f, ctx)
+            .is_some_and(|c| c.known_disequal(bid, a, b))
+    }
+
+    /// [`Self::witness_forward`] under calling context `ctx`.
+    ///
+    /// Reads the per-context scan exclusively: a forward established in a context-dead block is
+    /// dropped (so every member is context-live), while a block live only under the context's
+    /// refinement can contribute a forward the intraprocedural set lacks — neither set contains
+    /// the other in general.
+    pub fn witness_forward_in(&self, f: FunctionId, ctx: &Context, r: ValueId) -> &[ValueId] {
+        self.conditional_in(f, ctx)
+            .map(|c| c.witness_forward(r))
+            .unwrap_or_default()
     }
 }

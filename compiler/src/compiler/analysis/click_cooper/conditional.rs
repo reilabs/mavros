@@ -75,7 +75,11 @@ use crate::{
 #[derive(Debug, Default)]
 pub(crate) struct ConditionalFacts {
     /// Values forced to a constant by a dominating assert: `Assert{v}` ⇒ `v = true`,
-    /// `AssertCmp{Eq, x, c}` (with one side unconditional-constant `c`) ⇒ the other side `= c`.
+    /// `AssertCmp{Eq, x, c}` (with one side an unconditional *scalar* constant `c`) ⇒ the other
+    /// side `= c`.
+    ///
+    /// Aggregate (`Blob`) pins are recorded nowhere as Blob constants are never surfaced to
+    /// consumers.
     assert_const: HashMap<BlockId, HashMap<ValueId, Arc<Constant>>>,
 
     /// Equalities established by a dominating `AssertCmp{Eq, a, b}` where neither side is a
@@ -223,7 +227,8 @@ pub(crate) fn build(
 ) -> ConditionalFacts {
     let mut out = ConditionalFacts::default();
 
-    // The *unconditional* constant of `v` (interned or proven by the lattice), if any.
+    // The *unconditional* constant of `v` (interned or proven by the lattice), if any — including
+    // aggregates, which callers must gate out before recording a fact.
     //
     // Asserts that pin a value to such a constant produce a *conditional* fact; the unconditional
     // view is never touched.
@@ -262,19 +267,30 @@ pub(crate) fn build(
                     lhs,
                     rhs,
                 } => {
-                    if let Some(c) = const_of(*lhs) {
-                        raw_const.entry(*bid).or_default().push((idx, *rhs, c));
-                    } else if let Some(c) = const_of(*rhs) {
-                        raw_const.entry(*bid).or_default().push((idx, *lhs, c));
-                    } else {
-                        // Store the pair canonically (min, max) by value id so `(x, y)` and
-                        // `(y, x)` dedup as one in the cross-block fan-out below.
-                        let (lo, hi) = if lhs.0 <= rhs.0 {
-                            (*lhs, *rhs)
-                        } else {
-                            (*rhs, *lhs)
-                        };
-                        raw_eq.entry(*bid).or_default().push((idx, lo, hi));
+                    // The pinned side, if the other is an unconditional constant: `(value, c)`.
+                    let pin = const_of(*lhs)
+                        .map(|c| (*rhs, c))
+                        .or_else(|| const_of(*rhs).map(|c| (*lhs, c)));
+                    match pin {
+                        Some((v, c)) if c.is_scalar() => {
+                            raw_const.entry(*bid).or_default().push((idx, v, c));
+                        }
+
+                        // An aggregate (`Blob`) pin is recorded in *neither* channel: Blob
+                        // constants are never surfaced to consumers (see `const_in_facts`), and
+                        // routing the pair to the eq channel would put a constant-sided pair into
+                        // the leader machinery.
+                        Some(_) => {}
+                        None => {
+                            // Store the pair canonically (min, max) by value id so `(x, y)` and
+                            // `(y, x)` dedup as one in the cross-block fan-out below.
+                            let (lo, hi) = if lhs.0 <= rhs.0 {
+                                (*lhs, *rhs)
+                            } else {
+                                (*rhs, *lhs)
+                            };
+                            raw_eq.entry(*bid).or_default().push((idx, lo, hi));
+                        }
                     }
                 }
                 OpCode::Cmp {

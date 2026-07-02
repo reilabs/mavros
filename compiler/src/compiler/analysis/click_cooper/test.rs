@@ -5,7 +5,7 @@ use crate::compiler::{
         types::Types,
     },
     ssa::{
-        ProgramPoint, Terminator,
+        FunctionId, ProgramPoint, Terminator,
         hlssa::{
             BinaryArithOpKind, Blob, CallTarget, CastTarget, CmpKind, Constant, HLSSA, OpCode,
             ScalarFold, SequenceTargetType, SliceOpDir, Type,
@@ -21,6 +21,13 @@ pub(crate) fn run_in_test(ssa: &HLSSA) -> ClickCooper {
     let flow = FlowAnalysis::run(ssa);
     let types = Types::new().run(ssa, &flow);
     ClickCooper::run(ssa, &flow, &types)
+}
+
+/// The single context `f` was specialized in, asserting there is exactly one.
+fn sole_context(cc: &ClickCooper, f: FunctionId) -> Context {
+    let ctxs = cc.contexts_of(f);
+    assert_eq!(ctxs.len(), 1);
+    ctxs.into_iter().next().unwrap()
 }
 
 // TESTS
@@ -2075,10 +2082,10 @@ fn interproc_writeback_terminates_under_recursion() {
     }
 }
 
-/// The context-parameterized conditional queries. The branch-fact family (`const_in_block_in`)
+/// The context-parameterized conditional queries: the branch-fact family (`const_in_block_in`)
 /// is context-*precise* — it sees the per-context parameter constant the intraprocedural query
-/// cannot — while the assert/witness family forwards to the (sound, context-independent)
-/// intraprocedural facts.
+/// cannot. (The assert/disequality/witness family is likewise rebuilt per context; see the
+/// `*_in` conditional tests below.)
 #[test]
 fn context_parameterized_conditional_queries() {
     let mut ssa = HLSSA::with_main("main".to_string());
@@ -2110,16 +2117,551 @@ fn context_parameterized_conditional_queries() {
 
     let entry_id = ssa.get_function(id).get_entry_id();
     let cc = run_in_test(&ssa);
-    let ctxs = cc.contexts_of(id);
-    assert_eq!(ctxs.len(), 1);
-    let ctx = &ctxs[0];
+    let ctx = sole_context(&cc, id);
 
     // Intraprocedurally `p` is unconstrained; under the single call context it is the constant 7.
     assert_eq!(cc.const_in_block(id, entry_id, p), None);
     assert_eq!(
-        cc.const_in_block_in(id, ctx, entry_id, p).as_deref(),
+        cc.const_in_block_in(id, &ctx, entry_id, p).as_deref(),
         Some(&Constant::Field(Field::from(7u64)))
     );
+}
+
+/// Per-context conditional facts can be more precise: `assert(x == p)` is only an asserted
+/// *equality* intraprocedurally (`p` opaque), but pins `x` to an asserted *constant* in a context
+/// where `p` is a lattice constant. The pair then *migrates* channels — it leaves the per-context
+/// eq channel, so `asserted_equal_in` is deliberately not a pointwise superset of `asserted_equal`.
+#[test]
+fn asserted_const_refines_per_context() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let g = ssa.add_function("g".to_string());
+    let (x, p) = (ssa.fresh_value(), ssa.fresh_value());
+    let c7 = ssa.add_const(Constant::Field(Field::from(7u64)));
+    let x0 = ssa.fresh_value();
+
+    let after = {
+        let hf = ssa.get_function_mut(g);
+        let after = hf.add_block();
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_parameter(p, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: p,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Jmp(after, vec![]));
+        hf.get_block_mut(after)
+            .set_terminator(Terminator::Return(vec![]));
+        after
+    };
+    {
+        let mf = ssa.get_function_mut(main_id);
+        let entry = mf.get_entry_mut();
+        entry.push_parameter(x0, Type::field());
+        entry.push_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(g),
+            args: vec![x0, c7],
+            unconstrained: false,
+        });
+        entry.set_terminator(Terminator::Return(vec![]));
+    }
+
+    let cc = run_in_test(&ssa);
+    let ctx = sole_context(&cc, g);
+    let pp = ProgramPoint::new(after, 0);
+
+    // Intraprocedurally `p` is opaque: the assert is an equality, not a constant pin.
+    assert_eq!(cc.asserted_const(g, pp, x), None);
+    assert!(cc.asserted_equal(g, pp, x, p));
+    // In the context `p` is the constant 7, so the same assert pins `x` to it...
+    assert_eq!(
+        cc.asserted_const_in(g, &ctx, pp, x).as_deref(),
+        Some(&Constant::Field(Field::from(7u64)))
+    );
+    // ...and the pair has migrated out of the per-context eq channel.
+    assert!(!cc.asserted_equal_in(g, &ctx, pp, x, p));
+}
+
+/// `witness_forward_in` drops a forward established in a context-dead block: the witness scan is
+/// reachability-gated, so a forward the intraprocedural view reports can be absent per context —
+/// the hazard that forbids `witness_forward_in` from delegating to the intraprocedural map. The
+/// other direction exists too; see `context_constant_can_split_congruence`
+#[test]
+fn witness_forward_in_prunes_context_dead_forward() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let g = ssa.add_function("g".to_string());
+    let (p, w, r) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let c_true = ssa.add_const(Constant::U(1, 1));
+    let w0 = ssa.fresh_value();
+
+    {
+        let hf = ssa.get_function_mut(g);
+        let then_b = hf.add_block();
+        let else_b = hf.add_block();
+        let after = hf.add_block();
+        hf.get_entry_mut().push_parameter(p, Type::u(1));
+        hf.get_entry_mut().push_parameter(w, Type::u(32));
+        hf.get_entry_mut()
+            .set_terminator(Terminator::JmpIf(p, then_b, else_b));
+        hf.get_block_mut(then_b)
+            .set_terminator(Terminator::Jmp(after, vec![]));
+        // The false arm establishes the forward `r → w`; it is dead once a context pins `p`.
+        hf.get_block_mut(else_b)
+            .push_instruction(OpCode::WriteWitness {
+                result: Some(r),
+                value: w,
+                pinned: false,
+            });
+        hf.get_block_mut(else_b)
+            .set_terminator(Terminator::Jmp(after, vec![]));
+        hf.get_block_mut(after)
+            .set_terminator(Terminator::Return(vec![]));
+    }
+    {
+        let mf = ssa.get_function_mut(main_id);
+        let entry = mf.get_entry_mut();
+        entry.push_parameter(w0, Type::u(32));
+        entry.push_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(g),
+            args: vec![c_true, w0],
+            unconstrained: false,
+        });
+        entry.set_terminator(Terminator::Return(vec![]));
+    }
+
+    let cc = run_in_test(&ssa);
+    let ctx = sole_context(&cc, g);
+
+    // Intraprocedurally `p` is opaque, both arms live: the forward is gathered.
+    assert_eq!(cc.witness_forward(g, r), [w].as_slice());
+    // In the context `p = true` kills the false arm — and its forward with it.
+    assert!(cc.witness_forward_in(g, &ctx, r).is_empty());
+}
+
+/// Parity when nothing refines: under `main`'s empty context the seeds are Bottom, and `main` has
+/// no static calls (the per-context solve enables the eval-call summary channel the
+/// intraprocedural one keeps off, so a folding call would break the "nothing refines" premise) —
+/// every per-context conditional channel coincides with its intraprocedural counterpart.
+#[test]
+fn conditional_queries_parity_under_empty_context() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let (x, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let (d, e) = (ssa.fresh_value(), ssa.fresh_value());
+    let (eq, r) = (ssa.fresh_value(), ssa.fresh_value());
+    let c5 = ssa.add_const(Constant::U(32, 5));
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let then_b = f.add_block();
+    let else_b = f.add_block();
+    let after = f.add_block();
+    for v in [x, a, b, d, e] {
+        f.get_entry_mut().push_parameter(v, Type::u(32));
+    }
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: c5,
+    });
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
+    f.get_entry_mut().push_instruction(OpCode::WriteWitness {
+        result: Some(r),
+        value: x,
+        pinned: false,
+    });
+    f.get_entry_mut().push_instruction(OpCode::Cmp {
+        kind: CmpKind::Eq,
+        result: eq,
+        lhs: d,
+        rhs: e,
+    });
+    f.get_entry_mut()
+        .set_terminator(Terminator::JmpIf(eq, then_b, else_b));
+    f.get_block_mut(then_b)
+        .set_terminator(Terminator::Jmp(after, vec![]));
+    f.get_block_mut(else_b)
+        .set_terminator(Terminator::Jmp(after, vec![]));
+    f.get_block_mut(after)
+        .set_terminator(Terminator::Return(vec![]));
+
+    let cc = run_in_test(&ssa);
+    let ctx = Context::empty();
+    let pp = ProgramPoint::new(after, 0);
+
+    // Assert-const channel.
+    assert_eq!(
+        cc.asserted_const(main_id, pp, x).as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    assert_eq!(
+        cc.asserted_const_in(main_id, &ctx, pp, x),
+        cc.asserted_const(main_id, pp, x)
+    );
+    // Assert-eq channel and its leaders.
+    assert!(cc.asserted_equal(main_id, pp, a, b));
+    assert!(cc.asserted_equal_in(main_id, &ctx, pp, a, b));
+    assert_eq!(cc.asserted_leader(main_id, pp, b), Some(a));
+    assert_eq!(
+        cc.asserted_leader_in(main_id, &ctx, pp, b),
+        cc.asserted_leader(main_id, pp, b)
+    );
+    // Disequality channel (the false edge is the sole in-edge of `else_b` in both views).
+    assert!(cc.known_unequal(main_id, else_b, d, e));
+    assert!(cc.known_unequal_in(main_id, &ctx, else_b, d, e));
+    // Witness channel.
+    assert_eq!(cc.witness_forward(main_id, r), [x].as_slice());
+    assert_eq!(
+        cc.witness_forward_in(main_id, &ctx, r),
+        cc.witness_forward(main_id, r)
+    );
+}
+
+/// A context can *create* a disequality: pinning the branch predicate prunes one predecessor of
+/// the false-edge target, making the false edge its sole executable in-edge — so `known_unequal_in`
+/// holds where the intraprocedural `known_unequal` (two live in-edges) cannot.
+#[test]
+fn known_unequal_in_gains_from_pruned_predecessor() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let g = ssa.add_function("g".to_string());
+    let (p, d, e, eq) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let c_false = ssa.add_const(Constant::U(1, 0));
+    let (d0, e0) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let join = {
+        let hf = ssa.get_function_mut(g);
+        let side = hf.add_block();
+        let main_b = hf.add_block();
+        let then_b = hf.add_block();
+        let join = hf.add_block();
+        hf.get_entry_mut().push_parameter(p, Type::u(1));
+        hf.get_entry_mut().push_parameter(d, Type::u(32));
+        hf.get_entry_mut().push_parameter(e, Type::u(32));
+        hf.get_entry_mut().push_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: eq,
+            lhs: d,
+            rhs: e,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::JmpIf(p, side, main_b));
+        // `side` is `join`'s second predecessor; it dies once a context pins `p = false`.
+        hf.get_block_mut(side)
+            .set_terminator(Terminator::Jmp(join, vec![]));
+        hf.get_block_mut(main_b)
+            .set_terminator(Terminator::JmpIf(eq, then_b, join));
+        hf.get_block_mut(then_b)
+            .set_terminator(Terminator::Return(vec![]));
+        hf.get_block_mut(join)
+            .set_terminator(Terminator::Return(vec![]));
+        join
+    };
+    {
+        let mf = ssa.get_function_mut(main_id);
+        let entry = mf.get_entry_mut();
+        entry.push_parameter(d0, Type::u(32));
+        entry.push_parameter(e0, Type::u(32));
+        entry.push_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(g),
+            args: vec![c_false, d0, e0],
+            unconstrained: false,
+        });
+        entry.set_terminator(Terminator::Return(vec![]));
+    }
+
+    let cc = run_in_test(&ssa);
+    let ctx = sole_context(&cc, g);
+
+    // Intraprocedurally `join` has two live in-edges (`side` and the false edge): no diseq.
+    assert!(!cc.known_unequal(g, join, d, e));
+    // The context pins `p = false`, killing `side`: the false edge becomes `join`'s sole
+    // executable in-edge, and the disequality appears.
+    assert!(cc.known_unequal_in(g, &ctx, join, d, e));
+}
+
+/// An assert pinning a value to an *aggregate* constant contributes no conditional fact: `Blob`
+/// constants are never surfaced (the module "Aggregate Folding" contract), so the pin enters
+/// neither the assert-const channel — whose consumers materialise the constant — nor the eq
+/// channel, whose pairs must be constant-free.
+#[test]
+fn asserted_const_never_aggregate() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let c0 = ssa.add_const(Constant::U(32, 10));
+    let c1 = ssa.add_const(Constant::U(32, 20));
+    let (x, s) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let after = f.add_block();
+    f.get_entry_mut().push_parameter(x, Type::u(32).array_of(2));
+    let entry = f.get_entry_mut();
+    // `s` aggregate-folds to a lattice `Const(Blob)`, so the assert pins `x` to a Blob.
+    entry.push_instruction(OpCode::MkSeq {
+        result: s,
+        elems: vec![c0, c1],
+        seq_type: SequenceTargetType::Array(2),
+        elem_type: Type::u(32),
+    });
+    entry.push_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: s,
+    });
+    entry.set_terminator(Terminator::Jmp(after, vec![]));
+    f.get_block_mut(after)
+        .set_terminator(Terminator::Return(vec![]));
+
+    let cc = run_in_test(&ssa);
+    let pp = ProgramPoint::new(after, 0);
+
+    // The Blob must not surface through the conditional channel...
+    assert_eq!(cc.asserted_const(main_id, pp, x), None);
+    // ...nor reroute into the eq channel as a constant-sided pair.
+    assert!(!cc.asserted_equal(main_id, pp, x, s));
+}
+
+/// The per-context analog: a callee parameter seeded with the caller's constant-aggregate argument
+/// pins the asserted side to a `Blob` in that context. The pin is dropped there too — per context
+/// the assert contributes *no* fact at all (the intraprocedural eq view keeps the pair), one of the
+/// fact-losing directions the impl docs call out.
+#[test]
+fn asserted_const_in_never_aggregate() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let g = ssa.add_function("g".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 10));
+    let c1 = ssa.add_const(Constant::U(32, 20));
+    let (a, x) = (ssa.fresh_value(), ssa.fresh_value());
+    let (s, y) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let after = {
+        let hf = ssa.get_function_mut(g);
+        let after = hf.add_block();
+        hf.get_entry_mut()
+            .push_parameter(a, Type::u(32).array_of(2));
+        hf.get_entry_mut()
+            .push_parameter(x, Type::u(32).array_of(2));
+        hf.get_entry_mut().push_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: a,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Jmp(after, vec![]));
+        hf.get_block_mut(after)
+            .set_terminator(Terminator::Return(vec![]));
+        after
+    };
+    {
+        let mf = ssa.get_function_mut(main_id);
+        let entry = mf.get_entry_mut();
+        entry.push_parameter(y, Type::u(32).array_of(2));
+        entry.push_instruction(OpCode::MkSeq {
+            result: s,
+            elems: vec![c0, c1],
+            seq_type: SequenceTargetType::Array(2),
+            elem_type: Type::u(32),
+        });
+        entry.push_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(g),
+            args: vec![s, y],
+            unconstrained: false,
+        });
+        entry.set_terminator(Terminator::Return(vec![]));
+    }
+
+    let cc = run_in_test(&ssa);
+    let ctx = sole_context(&cc, g);
+    let pp = ProgramPoint::new(after, 0);
+
+    // Intraprocedurally both sides are opaque: an ordinary asserted equality.
+    assert!(cc.asserted_equal(g, pp, x, a));
+    assert_eq!(cc.asserted_const(g, pp, x), None);
+    // In the context `a` is a Blob: the pin surfaces through no per-context channel.
+    assert_eq!(cc.asserted_const_in(g, &ctx, pp, x), None);
+    assert!(!cc.asserted_equal_in(g, &ctx, pp, x, a));
+}
+
+/// When the *asserted* side itself becomes a per-context constant, the fact leaves
+/// `asserted_const_in` — but only because it migrated to the strictly stronger *unconditional*
+/// per-context channel, where `const_of_in` answers it without any constraint-preservation proviso.
+/// Nothing is lost; the documented "no pointwise inclusion" is this migration.
+#[test]
+fn asserted_const_migrates_to_unconditional_channel() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let g = ssa.add_function("g".to_string());
+    let x = ssa.fresh_value();
+    let c7 = ssa.add_const(Constant::Field(Field::from(7u64)));
+
+    let after = {
+        let hf = ssa.get_function_mut(g);
+        let after = hf.add_block();
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: c7,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Jmp(after, vec![]));
+        hf.get_block_mut(after)
+            .set_terminator(Terminator::Return(vec![]));
+        after
+    };
+    {
+        let mf = ssa.get_function_mut(main_id);
+        let entry = mf.get_entry_mut();
+        entry.push_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(g),
+            args: vec![c7],
+            unconstrained: false,
+        });
+        entry.set_terminator(Terminator::Return(vec![]));
+    }
+
+    let cc = run_in_test(&ssa);
+    let ctx = sole_context(&cc, g);
+    let pp = ProgramPoint::new(after, 0);
+
+    // Intraprocedurally `x` is opaque, so the assert pins it conditionally.
+    assert_eq!(
+        cc.asserted_const(g, pp, x).as_deref(),
+        Some(&Constant::Field(Field::from(7u64)))
+    );
+    // In the context the seed already proves `x = 7` unconditionally: the conditional entry is
+    // gone...
+    assert_eq!(cc.asserted_const_in(g, &ctx, pp, x), None);
+    // ...because the unconditional channel now carries it.
+    assert_eq!(
+        cc.const_of_in(g, &ctx, x).as_deref(),
+        Some(&Constant::Field(Field::from(7u64)))
+    );
+}
+
+/// A per-context constant can *split* an intraprocedurally-proven congruence. Intraprocedurally
+/// `x = call g(a)` is value-numbered equal to `y = a*3` via `g`'s grafted symbolic return, the
+/// writeback folds the `x == y` branch, and the else arm is dead — its forward never gathered. Per
+/// context `a = 5` folds `y` to a constant, whose `Const` label replaces the structural one, while
+/// the call result `x` (lattice-opaque) keeps its `Op` class: the classes split, the branch stays
+/// live, and the forward appears in `witness_forward_in` only. Reachability-derived facts can thus
+/// flow in the *growing* direction per context — the reason the impl docs promise no inclusion
+/// between the two views in either direction.
+#[test]
+fn context_constant_can_split_congruence() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+    let g = ssa.add_function("g".to_string());
+    let c3 = ssa.add_const(Constant::Field(Field::from(3u64)));
+    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+    let (p, m) = (ssa.fresh_value(), ssa.fresh_value());
+    let (a, w, x, y, eq, r) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let w0 = ssa.fresh_value();
+
+    // g(p) { return p * 3 } — pure, so its symbolic return `Mul(Param0, 3)` grafts.
+    {
+        let hf = ssa.get_function_mut(g);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(p, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: m,
+            lhs: p,
+            rhs: c3,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![m]));
+    }
+    // f(a, w) { x = g(a); y = a*3; if x == y { } else { r = write_witness(w) } }
+    {
+        let hf = ssa.get_function_mut(f);
+        let then_b = hf.add_block();
+        let else_b = hf.add_block();
+        let after = hf.add_block();
+        hf.get_entry_mut().push_parameter(a, Type::field());
+        hf.get_entry_mut().push_parameter(w, Type::u(32));
+        hf.get_entry_mut().push_instruction(OpCode::Call {
+            results: vec![x],
+            function: CallTarget::Static(g),
+            args: vec![a],
+            unconstrained: false,
+        });
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: y,
+            lhs: a,
+            rhs: c3,
+        });
+        hf.get_entry_mut().push_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: eq,
+            lhs: x,
+            rhs: y,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::JmpIf(eq, then_b, else_b));
+        hf.get_block_mut(then_b)
+            .set_terminator(Terminator::Jmp(after, vec![]));
+        hf.get_block_mut(else_b)
+            .push_instruction(OpCode::WriteWitness {
+                result: Some(r),
+                value: w,
+                pinned: false,
+            });
+        hf.get_block_mut(else_b)
+            .set_terminator(Terminator::Jmp(after, vec![]));
+        hf.get_block_mut(after)
+            .set_terminator(Terminator::Return(vec![]));
+    }
+    {
+        let mf = ssa.get_function_mut(main_id);
+        let entry = mf.get_entry_mut();
+        entry.push_parameter(w0, Type::u(32));
+        entry.push_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(f),
+            args: vec![c5, w0],
+            unconstrained: false,
+        });
+        entry.set_terminator(Terminator::Return(vec![]));
+    }
+
+    let cc = run_in_test(&ssa);
+    let ctx = sole_context(&cc, f);
+
+    // Intraprocedurally the sym graft proves `x ≡ y`, the branch folds, the else arm dies: no
+    // forward.
+    assert!(cc.known_equal(f, x, y));
+    assert!(cc.witness_forward(f, r).is_empty());
+    // Per context `y` is `Const(15)` while `x` stays opaque: the congruence splits, the else arm
+    // is live, and the forward exists only in the per-context view.
+    assert!(!cc.known_equal_in(f, &ctx, x, y));
+    assert_eq!(cc.witness_forward_in(f, &ctx, r), [w].as_slice());
 }
 
 /// Two call sites of one helper get distinct contexts with distinct per-context parameter
