@@ -499,13 +499,16 @@ fn build_sym(
 
 /// Phase 2: re-solve every reachable `(function, context)` with parameters seeded by the calling
 /// context's argument constants.
+///
+/// `orders` is the caller's per-function definition order (context-independent, so shared across
+/// every context of a function), consumed by the per-context congruence-leader finalization.
 pub(crate) fn specialize(
     ssa: &HLSSA,
-    flow: &FlowAnalysis,
     consts: &HLSSAConstantsSnapshot,
     summaries: &HashMap<FunctionId, FnSummary>,
     sym: &SymSummaries,
     det: &DetSummaries,
+    orders: &HashMap<FunctionId, DefOrder>,
 ) -> HashMap<(FunctionId, Context), FunctionFacts> {
     let main = ssa.get_unique_entrypoint_id();
 
@@ -556,8 +559,7 @@ pub(crate) fn specialize(
 
         // Build the dominance-aware congruence leaders so `leader_in` yields a legal redirect
         // target.
-        let order = DefOrder::new(func, flow.get_function_cfg(f));
-        facts.congruence.compute_leaders(&order);
+        facts.congruence.compute_leaders(&orders[&f]);
 
         // Propagate argument constants from each reachable static call into the callee's context.
         for (bid, block) in func.get_blocks() {
