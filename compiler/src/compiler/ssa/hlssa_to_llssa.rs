@@ -19,7 +19,7 @@ use crate::{
             hlssa::{
                 BinaryArithOpKind, CmpKind, Constant, DMatrix, Endianness, HLFunction, HLSSA,
                 HLSSAConstantsSnapshot, MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS,
-                Type as HLType, TypeExpr as HLTypeExpr,
+                SliceOpDir, Type as HLType, TypeExpr as HLTypeExpr,
             },
             llssa::{
                 Blob as LLBlob, Constant as LLConstant, FieldArithOp, IntArithOp, IntCmpOp,
@@ -1060,6 +1060,25 @@ fn lower_instruction(
             val_map.insert(*result, ll_len);
         }
 
+        OpCode::SlicePush {
+            result,
+            slice,
+            values,
+            dir,
+        } => {
+            lower_slice_push(
+                e,
+                val_map,
+                fn_type_info,
+                *result,
+                *slice,
+                values,
+                *dir,
+                drop_fns,
+                ad_fns,
+            );
+        }
+
         // -- RC operations --
         OpCode::MemOp {
             kind: RefCountOp::Bump(n),
@@ -2093,6 +2112,89 @@ fn lower_array_set(
     );
 
     val_map.insert(result, merge_results[0]);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_slice_push(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    fn_type_info: &FunctionTypeInfo,
+    result: ValueId,
+    slice: ValueId,
+    values: &[ValueId],
+    dir: SliceOpDir,
+    drop_fns: &mut Vec<DropFnEntry>,
+    ad_fns: &mut AdFunctions,
+) {
+    let slice_type = fn_type_info.get_value_type(slice);
+    let et = sequence_elem_type(slice_type);
+    let rc_struct = sequence_rc_struct(slice_type);
+    let es = elem_struct(et);
+    let elem_is_rc = needs_drop(&et.expr);
+    if elem_is_rc {
+        get_or_create_drop_fn(et, e.ssa, drop_fns, ad_fns);
+    }
+
+    let ll_slice = val_map[&slice];
+    let n = values.len();
+    let n_const = e.emit_int_const(64, n as u64);
+    let front = matches!(dir, SliceOpDir::Front);
+
+    let old_len = sequence_len_value(e, ll_slice, slice_type);
+    let new_len = e.int_add(old_len, n_const);
+
+    let hdr = e.struct_field_ptr(ll_slice, rc_struct.clone(), 0);
+    let rc_ptr = e.struct_field_ptr(hdr, LLStruct::rc_header(), 0);
+    let rc = e.ll_load(rc_ptr, LLType::i64());
+    let one = e.emit_int_const(64, 1);
+    let is_unique = e.int_eq(rc, one);
+
+    let new_seq = e.heap_alloc(rc_struct.clone(), Some(new_len));
+    init_rc_sequence_header(e, new_seq, rc_struct.clone(), new_len);
+
+    let old_data = sequence_data_ptr(e, ll_slice, slice_type);
+    let new_data = sequence_data_ptr(e, new_seq, slice_type);
+    let old_dst = if front {
+        e.array_elem_ptr(new_data, es.clone(), n_const)
+    } else {
+        new_data
+    };
+    e.memcpy(old_dst, old_data, es.clone(), Some(old_len));
+
+    e.build_if_else(
+        is_unique,
+        vec![],
+        |me| {
+            me.free(ll_slice);
+            vec![]
+        },
+        |se| {
+            if elem_is_rc {
+                se.build_counted_loop(old_len, vec![], |le, i_val, _| {
+                    let elem_ptr = le.array_elem_ptr(old_data, es.clone(), i_val);
+                    let elem_val = le.ll_load(elem_ptr, LLType::Ptr);
+                    bump_rc_value(le, elem_val, et, 1);
+                    vec![]
+                });
+            }
+            modify_rc(se, rc_ptr, -1);
+            vec![]
+        },
+    );
+
+    for (i, v) in values.iter().enumerate() {
+        let ll_v = val_map[v];
+        let slot_index = if front {
+            e.emit_int_const(64, i as u64)
+        } else {
+            let i_const = e.emit_int_const(64, i as u64);
+            e.int_add(old_len, i_const)
+        };
+        let slot = e.array_elem_ptr(new_data, es.clone(), slot_index);
+        e.ll_store(slot, ll_v);
+    }
+
+    val_map.insert(result, new_seq);
 }
 
 /// Modify the provided `rc_ptr` by `delta` and store it back.
