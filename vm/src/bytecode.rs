@@ -1408,6 +1408,34 @@ mod def {
     }
 
     #[opcode]
+    fn slice_push(
+        #[out] res: *mut BoxedValue,
+        #[frame] slice: BoxedValue,
+        stride: usize,
+        is_push_front: usize,
+        values: &[FramePosition],
+        frame: Frame,
+        vm: &mut VM,
+    ) {
+        let extra_space_needed = values.len() * stride;
+        let new_array = slice.alloc_grown_slice(extra_space_needed, is_push_front, vm);
+        let pushed_data_offset = if is_push_front != 0 {
+            0
+        } else {
+            new_array.layout().array_size() - extra_space_needed
+        };
+        for (i, item) in values.iter().enumerate() {
+            let tgt = unsafe { new_array.data().add(pushed_data_offset + i * stride) };
+            unsafe {
+                frame.write_to(tgt, item.0 as isize, stride);
+            }
+        }
+        unsafe {
+            *res = new_array;
+        }
+    }
+
+    #[opcode]
     fn inc_rc(#[frame] array: BoxedValue, amount: u64) {
         // println!("inc_array_rc_intro");
         array.inc_rc(amount);
