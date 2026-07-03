@@ -14,7 +14,7 @@
 //! - **Interprocedural facts** refine the intraprocedural view across calls: polymorphic
 //!   jump-function summaries (a `return_const` holding for any arguments, a `return Param(i)`
 //!   pass-through) and 1-CFA per-`(function, context)` specialization seeding callee parameters
-//!   with the caller's argument constants, plus *cross-call congruence*: a constrained static call's
+//!   with the caller's argument constants, plus _cross-call congruence_: a constrained static call's
 //!   result is numbered by grafting the callee's symbolic return expression over the actual
 //!   arguments (relating it to an open expression, and ignoring arguments the return does not use),
 //!   or — failing that — by a determinism-gated whole-call key (two calls with congruent arguments
@@ -32,7 +32,7 @@
 //! # Combined-Fixpoint Writeback
 //!
 //! The constant and reachability factors feed congruence (constants seed the partition,
-//! reachability scopes φ-operands), and congruence feeds *back*: a comparison whose operands are
+//! reachability scopes φ-operands), and congruence feeds _back_: a comparison whose operands are
 //! proven congruent is a constant the lattice alone cannot derive — `x == y` is unconditionally
 //! `true` and `x < y` unconditionally `false` when `x` and `y` are congruent.
 //!
@@ -69,7 +69,7 @@
 //!   promoted, so the fact stays safe to replace, delete, or prune on.
 //! - **Interprocedural Constants:** A `return_const` jump function holds for any arguments; a
 //!   `return Param(i)` pass-through equals argument `i` exactly. Per-context parameter seeds are
-//!   the meet of the argument constants over *every* static call path mapped to that context, so a
+//!   the meet of the argument constants over _every_ static call path mapped to that context, so a
 //!   per-context constant holds on every concrete invocation in that context.
 //! - **Cross-Call Congruence:** A constrained static call's result is value-numbered either by
 //!   grafting the callee's symbolic return — a bounded-depth expression whose leaves are the
@@ -81,13 +81,33 @@
 //!   non-deterministic return (e.g. one carrying a fresh witness) is expressible by neither and
 //!   stays opaque, and an unconstrained (advice) result is never numbered.
 //! - **Conditional Facts:** Assert-derived constants, equalities, and disequalities hold only on
-//!   accepting runs that preserve their establishing constraint, so they are exposed only through
-//!   dedicated queries. An assert, being a global constraint that holds at every point of an
-//!   accepting run, is *also* attributed to in-scope blocks it post-dominates (the assert is then
-//!   guaranteed on every continuation), and — at index granularity — to uses *after* it in its own
-//!   block (the index-precise "already ran" direction; a use textually before a same-block assert
-//!   still sees only the cross-block facts). Control-flow derived equality and disequality facts,
-//!   being path-conditional, stay dominance-only.
+//!   runs that preserve their establishing constraint, so they are exposed only through dedicated
+//!   queries (the _Soundness on Rejecting Runs_ section below states the observation model that
+//!   makes this style of argument valid). An assert contributes its fact in two directions.
+//!
+//!   - To every block it strictly _dominates_ it has **already run**, so the constraint is
+//!     established there (the `asserted_*` channel; `def(v) dom B dom C` makes scope free).
+//!   - To every in-scope block it strictly _post-dominates_ it is **bound to run**: a run visiting
+//!     such a block reaches the check — which tests the _genuine_ values — aborts earlier, or
+//!     hangs, and every non-reaching outcome rejects (a non-terminating run produces no witness).
+//!     This is the `anticipated_*` channel, additionally gated per asserted value on _stability_
+//!     **or** finality at the target, and on an explicit in-scope check. Post-dominance, cyclicity,
+//!     and finality are measured on the **executable subgraph** when this build's solver pruned a
+//!     static edge (honest runs traverse executable edges only; post-dominance as the union with
+//!     the static relation — see [`exec_view`]), and on the static CFG otherwise. The in-scope
+//!     check stays static dominance always: it guards the _textual_ SSA validity of consumer
+//!     rewrites, not a run-time property. See [`stability`].
+//!
+//!   Within the asserting block both directions apply at index granularity — uses after the assert
+//!   via "already ran", uses before it via "bound to run" (same-iteration straight-line, so no
+//!   stability gate), while the assert's own operands are informed by neither. Anticipated facts
+//!   carry one extra consumer obligation (**Gate 3**): they must never rewrite the operands of any
+//!   `Assert`/`AssertCmp`, else two bound-to-run checks of one fact could erase each other and
+//!   silently drop the constraint. The anticipated _leader_ (copy-propagation) table exploits this:
+//!   since both directions cover every non-assert index, its union equality classes are
+//!   index-independent — only each leader carries an in-block availability threshold — and the
+//!   own-operands exclusion rests wholly on Gate 3 there. Control-flow derived equality and
+//!   disequality facts, being path-conditional, stay dominance-only.
 //! - **Witness Forwarding:** Both readings of the one witness↔value correspondence — the
 //!   `WriteWitness` hint (`r = witness_of(v)`) and the `ValueOf` projection (`v = value_of(r)`) —
 //!   only _add_ constraints and hence never reject an honest run, while two free witnesses are
@@ -101,7 +121,7 @@
 //! - **Reachability:** `exec_edges` and `reachable` grow monotonically within the finite CFG;
 //!   per-block branch facts only ever shrink at joins. The two-worklist loop drains a finite number
 //!   of edge/value events.
-//! - **Congruence:** Partition refinement only ever *splits* classes, and the class count is
+//! - **Congruence:** Partition refinement only ever _splits_ classes, and the class count is
 //!   bounded by the value count, so it stabilises in at most `|values|` rounds.
 //! - **Determinism / Interprocedural Summaries:** The determinism bits and the `ReturnJump` lattice
 //!   are finite, and a caller is re-queued only when a callee's summary strictly changed, so each
@@ -110,21 +130,78 @@
 //!   hence finite. Per-context parameter seeds move monotonically down the finite-height constant
 //!   lattice, and a context is re-queued only when newly discovered or its seed lowered.
 //!
+//! # Soundness on Rejecting Runs (the Accept/Reject Model)
+//!
+//! The conditional-fact arguments above (seen throughout this analysis) lean on phrases like "every
+//! non-reaching outcome rejects" and "a block that no accepting run reaches". What follows is a
+//! precise statement of what these mean, because a _non-accepting_ run **can** reach such blocks
+//! and execute the rewritten code there.
+//!
+//! The only observable outcome of a run is _accept_ (producing a witness) or _reject_. A failed
+//! assert aborts the run and a non-terminating run never finishes, so neither yields a witness, and
+//! nothing either computes along the way is observable. A transformation is therefore sound iff it:
+//!
+//! 1. leaves every accepting run accepting, computing the same results, and
+//! 2. leaves every rejecting run rejecting.
+//!
+//! Obligation 2 explicitly permits changing _how_ a run rejects — aborting at a different
+//! constraint, hanging where it used to abort, or vice versa — because all rejections collapse to
+//! the same observable. It is discharged by a single invariant: **the establishing assert survives
+//! every constraint-preserving rewrite, still checking its genuine (never-rewritten) operand
+//! values**. Granted that, consider any run on which an exploited fact is false:
+//!
+//! - **Dominance Channel:** The rewrite sits strictly after the establisher, so the run aborts _at
+//!   the assert_, before the rewritten code — on that run the rewrite is not merely unobservable,
+//!   it never executes.
+//! - **Anticipated Channel:** The rewrite sits before a bound-to-run establisher, so the run may
+//!   compute garbage at the rewrite point — but it then reaches the genuine check and fails it,
+//!   aborts on an earlier constraint, or hangs. Every arm rejects, so the garbage never enters an
+//!   accepted witness. The same surviving check is what defeats an adversarial witness: an
+//!   assignment on which the fact is false still violates that constraint in the transformed
+//!   program.
+//!
+//! The only way to break the invariant is to weaken the establisher _using its own fact_, and the
+//! structural gates exist precisely to forbid that. Gate 3 bars anticipated facts from `Assert` and
+//! `AssertCmp` operands, and the strict same-block index rules mean an assert never informs its own
+//! operands in either direction (see [`conditional`]).
+//!
+//! Branch folding is the strongest exploitation. Folding a `JmpIf` on an anticipated pin reroutes
+//! a doomed run onto a path it never originally took. This stays inside the model because the
+//! establisher post-dominates the fold point and hence lies on the _surviving_ path. Thus, the
+//! rerouted run still meets the genuine check (possibly later, possibly hanging in a loop instead
+//! of aborting — both reject). The fold _can_ even orphan the establisher, but only in one
+//! degenerate shape: a check reachable solely through the pruned edge post-dominates the fold
+//! point only when every path from the fold point to the exit traverses that edge (the surviving
+//! edge can reach it only by looping back through the fold point), so pruning it leaves the exit
+//! unreachable from the fold point — every run arriving there hangs, and hanging rejects.
+//! Consistently, no accepting run visited the fold point in the original program either: the gated
+//! fact holds at every visit, so such a run could never have taken the pruned edge it needed to
+//! exit. And when the fact is _true_ on a run, the folded branch is the branch that run took
+//! anyway, so a fold never changes where a satisfying run goes — in particular it cannot turn a
+//! hang into an accept.
+//!
+//! "A block that no accepting run reaches" (contradictory asserts under first-writer-wins; see
+//! [`conditional`]) is the degenerate case. Contradictory _co-dominating_ asserts mean **no run at
+//! all** reaches the block — reaching it requires passing both genuine checks — and contradictory
+//! _co-post-dominating_ asserts mean every run visiting it is bound to fail one or the other.
+//! Either way, an arbitrary choice among the contradictory facts decorates code whose values appear
+//! in no accepted witness.
+//!
+//! This model settles only the rejecting direction. Obligation 1 — never turning an accepting run
+//! rejecting, or changing what it computes — is _not_ "it would fail anyway". Instead it is each
+//! channel's own burden to prove its fact _true_ at the rewrite point on every accepting run (the
+//! SSA dominance structure for the `asserted_*` channel; stability and scope, Gates 1–2, for the
+//! `anticipated_*` channel — see [`conditional`]), which makes the rewrite an identity there.
+//!
 //! # Deferred Improvements
 //!
 //! The following are improvements for the future of this analysis. They are either necessary for
 //! future work, or deferred because they are expected to yield little benefit on our current
 //! circuit corpus.
 //!
-//! - **Sound Post-Dominance for Assert Facts:** Assert facts (`asserted_const`/`asserted_equal`)
-//!   currently fan out by dominance only. The post-dominance direction — an assert in `B` is *bound
-//!   to run* at every block `C` it strictly post-dominates, so its fact would also hold at a use
-//!   *before* the assert on any path guaranteed to reach it — requires an additional notion of value
-//!   stability to be added to the analysis. A future post-dominance direction would require gating
-//!   all of the asserted values on being value-stable using a cyclic-SCC membership primitive.
 //! - **Deeper Symbolic Interprocedural Congruence:** The implemented symbolic cross-call congruence
 //!   (a callee's return grafted into the caller as a bounded-depth expression over its formals) is
-//!   intentionally restricted to a *single* interprocedural level and a shallow depth cap. A nested
+//!   intentionally restricted to a _single_ interprocedural level and a shallow depth cap. A nested
 //!   call in a callee's return is an opaque leaf, so a composed gadget `g(x) = h(x) + 1` is not
 //!   expressed. Transitively inlining a callee's own symbolic return, or raising the depth cap,
 //!   would widen coverage — but multi-level inlining reintroduces a feedback edge into the summary
@@ -136,8 +213,10 @@
 mod conditional;
 mod congruence;
 mod def_order;
+mod exec_view;
 mod lattice;
 mod solver;
+mod stability;
 mod summary;
 
 #[cfg(test)]
@@ -154,6 +233,7 @@ use crate::{
                 def_order::DefOrder,
                 lattice::Constness,
                 solver::{FunctionFacts, solve_with_writeback},
+                stability::{BlockReach, CyclicBlocks, static_edge_count},
                 summary::{
                     compute_determinism, compute_summaries, compute_sym_summaries, specialize,
                 },
@@ -165,7 +245,7 @@ use crate::{
         pass_manager::{Analysis, AnalysisId, AnalysisStore},
         ssa::{
             BlockId, FunctionId, ProgramPoint, ValueId,
-            hlssa::{Constant, HLSSA, HLSSAConstantsSnapshot},
+            hlssa::{Constant, HLFunction, HLSSA, HLSSAConstantsSnapshot},
         },
     },
 };
@@ -224,7 +304,7 @@ impl ClickCooper {
 
         // Phase 0: per-`(callee, return)` determinism, used below to value-number deterministic
         // static-call results cross-call. It refines only congruence, not reachability and not the
-        // constant lattice *directly* — though a refined congruence can still reach the lattice
+        // constant lattice _directly_ — though a refined congruence can still reach the lattice
         // indirectly through the writeback's `derive_promotions` (a `Cmp{Eq}`/`Cmp{Lt}` over
         // newly-congruent operands folding to a constant). In practice this is corpus-neutral for
         // SCS, but that is an empirically verified result, not a structural guarantee.
@@ -252,6 +332,36 @@ impl ClickCooper {
             })
             .collect();
 
+        // Static-CFG block cyclicity per function, computed once here (linear per function) for
+        // the anticipated stability gate. ClickCooper is its only consumer for this information
+        // right now so we avoid doing the extra work in the pipeline-wide CFG builds. This is the
+        // _unpruned fast path_: pruned builds derive their own executable view (see `exec_view`).
+        let cyclics: HashMap<FunctionId, CyclicBlocks> = ssa
+            .get_function_ids()
+            .map(|fid| (fid, CyclicBlocks::new(ssa.get_function(fid))))
+            .collect();
+
+        // One static-CFG block-reachability table per _cyclic, assert-bearing_ function, shared
+        // by every conditional build below whose solver pruned nothing (Part B of the anticipated
+        // stability gate is context-independent on that fast path; pruned builds derive their own
+        // executable view). Other functions get no entry: an acyclic one has every value stable
+        // by rule 2 of the invariance closure, and an assert-free one produces no anticipated
+        // fact for the finality gate to test.
+        let reaches: HashMap<FunctionId, BlockReach> = ssa
+            .get_function_ids()
+            .filter(|fid| cyclics[fid].has_cycles() && has_assert_facts(ssa.get_function(*fid)))
+            .map(|fid| (fid, BlockReach::new(ssa.get_function(fid))))
+            .collect();
+
+        // The deduped static terminator-edge count per function: the baseline of `ExecView`'s
+        // unpruned fast path, which compares the solver's executable-edge count against it.
+        // Context-independent, so computing it once here spares every per-`(function, context)`
+        // conditional build a rebuild of the static edge set.
+        let static_edge_counts: HashMap<FunctionId, usize> = ssa
+            .get_function_ids()
+            .map(|fid| (fid, static_edge_count(ssa.get_function(fid))))
+            .collect();
+
         // One conditional build, shared verbatim by the intraprocedural and per-context loops
         // below; only the converged facts differ between the two.
         let build_conditional = |fid: FunctionId, facts: &FunctionFacts| {
@@ -262,6 +372,10 @@ impl ClickCooper {
                 &consts,
                 types.get_function(fid),
                 &orders[&fid],
+                &cyclics[&fid],
+                reaches.get(&fid),
+                &det,
+                static_edge_counts[&fid],
             )
         };
 
@@ -271,7 +385,7 @@ impl ClickCooper {
         //
         // The eval-call summary channel MUST stay off here as downstream passes rely on `Call`
         // staying `Bottom`. The _symbolic_ channel is enabled: like the `det` channel above, it
-        // refines congruence — not reachability, and not the constant lattice *directly*.
+        // refines congruence — not reachability, and not the constant lattice _directly_.
         let mut functions = HashMap::default();
         let mut conditional = HashMap::default();
         for fid in ssa.get_function_ids() {
@@ -357,7 +471,7 @@ impl ClickCooper {
         }
         match facts?.lattice.get(&v) {
             // Aggregate (`Blob`) constants are folded only to drive `ArrayGet`/`SliceLen`
-            // projections *within* the analysis; they are never surfaced, so no consumer is asked
+            // projections _within_ the analysis; they are never surfaced, so no consumer is asked
             // to materialise an aggregate constant value (only the scalar projections flow out).
             Some(Constness::Const(c)) if c.is_scalar() => Some(c.clone()),
             Some(Constness::Const(_) | Constness::Top | Constness::Bottom) | None => None,
@@ -370,7 +484,7 @@ impl ClickCooper {
 /// Using them to replace uses, delete pure defs, or prune unreachable blocks is always correctness
 /// preserving.
 impl ClickCooper {
-    /// The constant `v` provably holds in `f` in *every* run, or `None`.
+    /// The constant `v` provably holds in `f` in _every_ run, or `None`.
     ///
     /// Interned constants and the global constant lattice only; path-sensitive branch facts are
     /// excluded.
@@ -409,7 +523,7 @@ impl ClickCooper {
             .collect()
     }
 
-    /// `true` if `a` and `b` are proven *structurally* congruent in `f`.
+    /// `true` if `a` and `b` are proven _structurally_ congruent in `f`.
     pub fn known_equal(&self, f: FunctionId, a: ValueId, b: ValueId) -> bool {
         self.facts(f)
             .is_some_and(|facts| facts.congruence.known_equal(a, b))
@@ -418,7 +532,7 @@ impl ClickCooper {
     /// Every value structurally congruent to `v` in `f` (including `v`), sorted by value id.
     pub fn congruence_class(&self, f: FunctionId, v: ValueId) -> Vec<ValueId> {
         self.facts(f)
-            .map(|facts| facts.congruence.class_members(v))
+            .map(|facts| facts.congruence.class_members(v).to_vec())
             .unwrap_or_default()
     }
 
@@ -432,7 +546,7 @@ impl ClickCooper {
 /// Unconditional interprocedural queries — the 1-CFA per-`(function, context)` refinement.
 ///
 /// These read the specialized `contexts` map (never the `functions` view), so they are disjoint
-/// from the intraprocedural queries above. They are unconditional facts *within* their context: a
+/// from the intraprocedural queries above. They are unconditional facts _within_ their context: a
 /// caller's argument constants seed the callee's parameters, constant-returning calls fold, and the
 /// combined-fixpoint writeback folds comparisons of congruent operands per context.
 ///
@@ -455,7 +569,7 @@ impl ClickCooper {
     /// Every value congruent to `v` in `f` under context `ctx` (including `v`), sorted by value id.
     pub fn congruence_class_in(&self, f: FunctionId, ctx: &Context, v: ValueId) -> Vec<ValueId> {
         self.facts_in(f, ctx)
-            .map(|facts| facts.congruence.class_members(v))
+            .map(|facts| facts.congruence.class_members(v).to_vec())
             .unwrap_or_default()
     }
 
@@ -481,7 +595,7 @@ impl ClickCooper {
 
 /// Intraprocedural conditional queries — facts established by a branch or assert.
 ///
-/// They are sound *only* under constraint-preserving use: a local, structure-preserving rewrite
+/// They are sound _only_ under constraint-preserving use: a local, structure-preserving rewrite
 /// that keeps the establishing branch/assert (never folding away the constraint that proves the
 /// fact).
 ///
@@ -501,12 +615,12 @@ impl ClickCooper {
 /// are examples:
 ///
 /// - An equality migrates to the const channel when one side becomes a per-context constant.
-/// - An assert whose *asserted* side becomes a per-context constant moves to the (strictly
+/// - An assert whose _asserted_ side becomes a per-context constant moves to the (strictly
 ///   stronger) unconditional channel and out of `asserted_const_in`.
 /// - An aggregate-pinning assert contributes nothing.
-/// - A per-context constant can *split* an intraprocedurally-proven congruence so a branch the
+/// - A per-context constant can _split_ an intraprocedurally-proven congruence so a branch the
 ///   intraprocedural writeback folded stays live in the context — shifting reachability, and every
-///   reachability-derived fact, in the *growing* direction.
+///   reachability-derived fact, in the _growing_ direction.
 ///
 /// A consumer wanting the full per-context picture must consult both families, applying each fact
 /// only under its own contract.
@@ -551,13 +665,13 @@ impl ClickCooper {
     }
 
     /// The constant `v` is pinned to at `point` in `f` (`Assert{v}`⇒`true`, or
-    /// `AssertCmp{Eq, v, c}`) by a *dominating assert* (which holds at every index of `point.block`)
+    /// `AssertCmp{Eq, v, c}`) by a _dominating assert_ (which holds at every index of `point.block`)
     /// or by an assert *earlier in `point.block`* than `point.index`.
     ///
-    /// `point.index` is the position of the *using* instruction itself within
+    /// `point.index` is the position of the _using_ instruction itself within
     /// `point.block.get_instructions()` — a consumer walking `get_instructions().enumerate()` has
     /// it for free, and a use in the terminator takes `index == get_instructions().count()`. A
-    /// same-block assert is reported only for use-indices *strictly greater* than its own, so the
+    /// same-block assert is reported only for use-indices _strictly greater_ than its own, so the
     /// assert never folds its own operand and vacuums the constraint.
     ///
     /// A conditional fact, deliberately disjoint from [`Self::const_of`] as a consumer must keep
@@ -625,7 +739,7 @@ impl ClickCooper {
     /// `WriteWitness{result: Some(r), value, pinned: false}` hint (`r = witness_of(value)`) and
     /// every `Cast{value: r, target: ValueOf}` read (`result = value_of(r)`).
     ///
-    /// A sound *redirect* fact (each member adds a functional constraint ⇒ `A_M ⊆ A_N`, never
+    /// A sound _redirect_ fact (each member adds a functional constraint ⇒ `A_M ⊆ A_N`, never
     /// rejecting the honest run), not a structural congruence — so it lives here, never in
     /// [`Self::known_equal`], and two free witnesses are never unified.
     pub fn witness_forward(&self, f: FunctionId, r: ValueId) -> &[ValueId] {
@@ -633,13 +747,87 @@ impl ClickCooper {
             .map(|c| c.witness_forward(r))
             .unwrap_or_default()
     }
+
+    /// The constant `v` is pinned to at `point` in `f` by a _bound-to-run_ assert: one in a block
+    /// strictly post-dominating `point.block` or one _later_ in `point.block` than `point.index`
+    /// (the index convention of [`Self::asserted_const`], mirrored).
+    ///
+    /// The anticipated (post-dominance) counterpart of [`Self::asserted_const`], and disjoint from
+    /// it. This never reports a dominance fact, so a consumer wanting both directions chains the
+    /// two queries.
+    ///
+    /// On top of constraint-preserving use, an anticipated fact carries one extra obligation: it is
+    /// justified by the assert _still running_ on the genuine values — a run on which the fact is
+    /// false aborts there (or hangs, producing no witness) — so a consumer must **never** use it to
+    /// rewrite the operands of any `Assert`/`AssertCmp`. Two bound-to-run checks of the same fact
+    /// could otherwise erase each other, silently dropping the constraint.
+    pub fn anticipated_const(
+        &self,
+        f: FunctionId,
+        point: ProgramPoint,
+        v: ValueId,
+    ) -> Option<Arc<Constant>> {
+        self.conditional(f)?.anticipated_const(point, v)
+    }
+
+    /// [`Self::anticipated_const`] narrowed to a boolean pin: `Some(b)` when a bound-to-run assert
+    /// pins `v` to the boolean constant `b` at `point` (e.g. an `Assert{v}` pinning `v = true`),
+    /// for consumers deciding a branch. Same contract as [`Self::anticipated_const`].
+    pub fn anticipated_const_bool(
+        &self,
+        f: FunctionId,
+        point: ProgramPoint,
+        v: ValueId,
+    ) -> Option<bool> {
+        self.anticipated_const(f, point, v)
+            .and_then(|c| lattice::const_bool(&c))
+    }
+
+    /// `true` if `a == b` is proven at `point` in `f` by a bound-to-run `AssertCmp{Eq}`: one in a
+    /// strictly post-dominating block (values single-valued per invocation or final at the block,
+    /// and in scope), or one later in `point.block`.
+    ///
+    /// The anticipated counterpart of [`Self::asserted_equal`], disjoint from it and under the
+    /// [`Self::anticipated_const`] contract (never rewrite `Assert`/`AssertCmp` operands with it).
+    pub fn anticipated_equal(
+        &self,
+        f: FunctionId,
+        point: ProgramPoint,
+        a: ValueId,
+        b: ValueId,
+    ) -> bool {
+        self.conditional(f)
+            .is_some_and(|c| c.anticipated_equal(point, a, b))
+    }
+
+    /// The canonical representative of `v`'s transitive equality class at `point` in `f` over the
+    /// union of the block's dominance-direction, same-block (both index directions, so a use
+    /// _before_ a same-block assert redirects too), and anticipated pairs — or `None` if `v` joins
+    /// no class.
+    ///
+    /// Unlike the boolean queries this is a _union_ view (a single redirect target must account
+    /// for every equality holding at `point`), so it supersedes [`Self::asserted_leader`] wherever
+    /// the anticipated direction contributes and falls back to it elsewhere. The leader's
+    /// definition dominates `point` — enforced within the block by a per-leader index threshold
+    /// that any query at a real use of `v` passes — making it a legal redirect target. A redirect
+    /// it produces may be anticipated-justified, so it inherits the [`Self::anticipated_const`]
+    /// contract (never into `Assert`/`AssertCmp` operands) — the sole guard at the establishing
+    /// assert's own index.
+    pub fn anticipated_leader(
+        &self,
+        f: FunctionId,
+        point: ProgramPoint,
+        v: ValueId,
+    ) -> Option<ValueId> {
+        self.conditional(f)?.anticipated_leader(point, v)
+    }
 }
 
-/// Interprocedural conditional queries, the *branch-fact* family — the per-context analogs of the
+/// Interprocedural conditional queries, the _branch-fact_ family — the per-context analogs of the
 /// branch-fact intraprocedural conditional queries above (e.g. for a clone of `f` specialized to
 /// `ctx`).
 ///
-/// They are sound *only* under constraint-preserving use: a local, structure-preserving rewrite
+/// They are sound _only_ under constraint-preserving use: a local, structure-preserving rewrite
 /// that keeps the establishing branch (never folding away the constraint that proves the fact).
 impl ClickCooper {
     /// [`Self::const_in_block`] under calling context `ctx`.
@@ -710,7 +898,7 @@ impl ClickCooper {
     }
 }
 
-/// Interprocedural conditional queries, the *assert/disequality/witness* family — reading the
+/// Interprocedural conditional queries, the _assert/disequality/witness_ family — reading the
 /// `ConditionalFacts` rebuilt per `(function, context)` from the context-specialized facts.
 ///
 /// They inherit **both** contracts.
@@ -720,8 +908,8 @@ impl ClickCooper {
 /// - **Context-Locality:** An answer that is conditional on `ctx` must drive a context-specialized
 ///   rewrite only — never be lifted into a context-independent change.
 ///
-/// The context refinement *typically* strengthens the assert-const and disequality channels (e.g.
-/// an `AssertCmp{Eq, x, p}` whose `p` is a per-context constant pins `x` to an asserted *constant*
+/// The context refinement _typically_ strengthens the assert-const and disequality channels (e.g.
+/// an `AssertCmp{Eq, x, p}` whose `p` is a per-context constant pins `x` to an asserted _constant_
 /// where the intraprocedural view only has an asserted _equality_), but no channel is a pointwise
 /// superset or subset of its intraprocedural counterpart. These queries read the per-context map
 /// exclusively: its facts are anchored to context-live blocks and values, which is what makes them
@@ -786,4 +974,55 @@ impl ClickCooper {
             .map(|c| c.witness_forward(r))
             .unwrap_or_default()
     }
+
+    /// [`Self::anticipated_const`] under calling context `ctx` (inheriting its never-into-assert-
+    /// operands obligation on top of the two contracts above).
+    pub fn anticipated_const_in(
+        &self,
+        f: FunctionId,
+        ctx: &Context,
+        point: ProgramPoint,
+        v: ValueId,
+    ) -> Option<Arc<Constant>> {
+        self.conditional_in(f, ctx)?.anticipated_const(point, v)
+    }
+
+    /// [`Self::anticipated_equal`] under calling context `ctx` (same inherited obligations as
+    /// [`Self::anticipated_const_in`]).
+    pub fn anticipated_equal_in(
+        &self,
+        f: FunctionId,
+        ctx: &Context,
+        point: ProgramPoint,
+        a: ValueId,
+        b: ValueId,
+    ) -> bool {
+        self.conditional_in(f, ctx)
+            .is_some_and(|c| c.anticipated_equal(point, a, b))
+    }
+
+    /// [`Self::anticipated_leader`] under calling context `ctx` (same inherited obligations as
+    /// [`Self::anticipated_const_in`]).
+    pub fn anticipated_leader_in(
+        &self,
+        f: FunctionId,
+        ctx: &Context,
+        point: ProgramPoint,
+        v: ValueId,
+    ) -> Option<ValueId> {
+        self.conditional_in(f, ctx)?.anticipated_leader(point, v)
+    }
+}
+
+// INTERNAL FUNCTIONS
+// ================================================================================================
+
+/// `true` if `function` contains any fact-establishing assert.
+///
+/// The gate for building its [`BlockReach`], which only the anticipated channel's finality gate
+/// consults.
+fn has_assert_facts(function: &HLFunction) -> bool {
+    function
+        .get_blocks()
+        .any(|(_, block)| block.get_instructions().any(|instr| instr.is_assert()))
 }

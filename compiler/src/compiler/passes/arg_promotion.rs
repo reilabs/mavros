@@ -91,7 +91,7 @@ use crate::{
             types::{FunctionTypeInfo, TypeInfo},
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-        passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
+        passes::shared::value_replacements::{ReplaceScope, ValueReplacements},
         ssa::{
             BlockId, FunctionId, Terminator, ValueId,
             hlssa::{CallTarget, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr},

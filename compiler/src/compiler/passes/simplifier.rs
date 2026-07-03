@@ -13,7 +13,7 @@ use crate::{
             value_definitions::{FunctionValueDefinitions, ValueDefinition},
         },
         pass_manager::{AnalysisId, AnalysisStore, Pass},
-        passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
+        passes::shared::value_replacements::{ReplaceScope, ValueReplacements},
         ssa::{
             FunctionId, Located, ValueId,
             hlssa::{

@@ -78,6 +78,26 @@ impl<'a> DefOrder<'a> {
         self.def_site.get(&v).copied().unwrap_or((self.entry, 0))
     }
 
+    /// The block `v` is defined in, with the [`Self::site`] entry-block fallback for an unrecorded
+    /// value (an entry parameter or an interned constant, available throughout the function).
+    pub(crate) fn def_block(&self, v: ValueId) -> BlockId {
+        self.site(v).0
+    }
+
+    /// The redirect-validity threshold of `v` as a leader queried in `block`.
+    ///
+    /// This is `0` when `v` is defined outside `block` or bound at its entry (available at every
+    /// index), else its defining instruction's rank (`d + 1` for instruction `d`, so
+    /// `threshold <= use_index` iff the use is strictly after the definition).
+    ///
+    /// The out-of-block `0` is only a valid threshold under the caller's invariant that `v`'s
+    /// defining block _dominates_ `block` (as every union-leader class member's does). Checking
+    /// dominance is the **responsibility of the caller**.
+    pub(crate) fn redirect_threshold_in(&self, v: ValueId, block: BlockId) -> usize {
+        let (b, rank) = self.site(v);
+        if b == block { rank } else { 0 }
+    }
+
     /// The dominance-consistent total [`DefKey`] of `v` (the defining block's dominator-preorder
     /// index, the in-block rank, and the value id as a final tie-break).
     pub(crate) fn key(&self, v: ValueId) -> DefKey {

@@ -70,11 +70,13 @@ impl Congruence {
         }
     }
 
-    /// Every value congruent to `v` (including `v`), sorted by value id. Empty if `v` is unknown.
-    pub(crate) fn class_members(&self, v: ValueId) -> Vec<ValueId> {
+    /// Every value congruent to `v` (including `v`), sorted by value id.
+    ///
+    /// Empty if `v` is unknown.
+    pub(crate) fn class_members(&self, v: ValueId) -> &[ValueId] {
         match self.class_of.get(&v) {
-            Some(&cid) => self.members[cid].clone(),
-            None => Vec::new(),
+            Some(&cid) => &self.members[cid],
+            None => &[],
         }
     }
 
