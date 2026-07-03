@@ -16,12 +16,11 @@
 //! - **Reachability** scopes φ-operands — a block parameter's operands are the incoming jump-args
 //!   on each *executable* predecessor edge only, so a dead in-edge never forces two φ's apart.
 
-use std::sync::Arc;
-
+use super::summary::{Sym, SymSummaries};
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
-        analysis::{click_cooper::def_order::DefOrder, flow_analysis::CFG},
+        analysis::click_cooper::def_order::DefOrder,
         ssa::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
             hlssa::{
@@ -31,6 +30,7 @@ use crate::{
         },
     },
 };
+use std::sync::Arc;
 
 // TYPES
 // ================================================================================================
@@ -93,15 +93,13 @@ impl Congruence {
         }
     }
 
-    /// Build the dominance-aware [`Self::leader`] of every member using `cfg`.
+    /// Build the dominance-aware [`Self::leader`] of every member using the shared definition
+    /// `order`: `order.key(v)` is a total order that is a linear extension of definition dominance
+    /// (if `def(w)` dominates `def(v)` then `key(w) < key(v)`), and `order.dominates_def(w, v)` is
+    /// the dominance test itself.
     ///
     /// Must be called before [`Self::leader`] is queried.
-    pub(crate) fn compute_leaders(&mut self, function: &HLFunction, cfg: &CFG) {
-        // The shared definition order: `order.key(v)` is a total order that is a linear extension
-        // of definition dominance (if `def(w)` dominates `def(v)` then `key(w) < key(v)`), and
-        // `order.dominates_def(w, v)` is the dominance test itself.
-        let order = DefOrder::new(function, cfg);
-
+    pub(crate) fn compute_leaders(&mut self, order: &DefOrder) {
         // For each member, the root-most class member dominating its definition. Every member that
         // dominates `def(v)` lies on `v`'s dominator chain, so all such members are mutually
         // comparable and the root-most is well-defined and order-independent.
@@ -140,6 +138,7 @@ impl Congruence {
         exec_edges: &HashSet<(BlockId, BlockId)>,
         const_of: impl Fn(ValueId) -> Option<Arc<Constant>>,
         call_det: impl Fn(FunctionId, usize) -> bool,
+        sym_summaries: Option<&SymSummaries>,
     ) -> Congruence {
         let entry = function.get_entry_id();
 
@@ -147,6 +146,20 @@ impl Congruence {
         //    (definitions plus every referenced operand).
         let mut nodes: HashMap<ValueId, Node> = HashMap::default();
         let mut universe: HashSet<ValueId> = HashSet::default();
+
+        // Synthetic-graft state for symbolic call returns, shared across every call site so
+        // identical grafted subexpressions collapse to one synthetic id. A constrained static call
+        // whose callee has a symbolic return has its result node grafted inline (below) from that
+        // return expression over the call's actual arguments.
+        //
+        // Synthetic ids stand in for internal graft nodes that have no value in this function. They
+        // must be disjoint from every real id `const_of` can resolve — not merely this function's
+        // `universe`, but every program-interned constant id, since `const_of` queries the
+        // whole-program snapshot and the single global monotonic id counter can place a constant
+        // used only by another function *above* this function's local max.
+        let mut synthetic: HashSet<ValueId> = HashSet::default();
+        let mut hashcons: HashMap<(OpKey, Vec<ValueId>), ValueId> = HashMap::default();
+        let mut next_synth = u64::MAX;
 
         for (bid, block) in function.get_blocks() {
             if !reachable.contains(bid) {
@@ -193,12 +206,32 @@ impl Congruence {
                 {
                     for (j, r) in results.iter().enumerate() {
                         universe.insert(*r);
-                        let node = if call_det(*g, j) {
-                            Node::Op {
-                                key: OpKey::CallDet(*g, j),
-                                operands: args.clone(),
-                                commutative: false,
+
+                        // A symbolic jump grafts the callee's return *expression* over the actual
+                        // arguments; it strictly refines the whole-argument `CallDet` numbering (it
+                        // can ignore an unused argument and relate the result to an open
+                        // expression), so prefer it. Grafting is inline: synthetic ids for internal
+                        // tree nodes are minted disjoint from all real ids (see above), so no
+                        // post-pass over a finalized universe is needed.
+                        let sym = sym_summaries
+                            .and_then(|s| s.get(g))
+                            .and_then(|rets| rets.get(j))
+                            .and_then(|jump| jump.as_ref());
+                        if let Some(sym) = sym {
+                            let node = Graft {
+                                nodes: &mut nodes,
+                                universe: &mut universe,
+                                synthetic: &mut synthetic,
+                                hashcons: &mut hashcons,
+                                next_synth: &mut next_synth,
                             }
+                            .instantiate_root(sym, args);
+                            nodes.insert(*r, node);
+                            continue;
+                        }
+
+                        let node = if call_det(*g, j) {
+                            Node::op(OpKey::CallDet(*g, j), args.clone(), false)
                         } else {
                             Node::Opaque
                         };
@@ -212,14 +245,7 @@ impl Congruence {
                         let mut results = instr.get_results();
                         if let Some(r) = results.next() {
                             universe.insert(*r);
-                            nodes.insert(
-                                *r,
-                                Node::Op {
-                                    key,
-                                    operands,
-                                    commutative,
-                                },
-                            );
+                            nodes.insert(*r, Node::op(key, operands, commutative));
                         }
 
                         // Pure folds are single-result; any extra results are opaque (defensive).
@@ -338,12 +364,99 @@ impl Congruence {
             }
         }
 
+        // Strip the synthetic graft scaffolding. Refinement has finalized every *real* value's
+        // class (two real call results unified only through shared synthetic subnodes keep the same
+        // class id), so dropping the synthetics preserves all real-value congruences while keeping
+        // a def-less id out of `compute_leaders` (where `DefOrder` would treat it as defined at
+        // entry and could emit it as an illegal leader) and out of every consumer query.
+        if !synthetic.is_empty() {
+            for v in &synthetic {
+                class_of.remove(v);
+            }
+            for class in &mut members {
+                class.retain(|v| !synthetic.contains(v));
+            }
+        }
+
         // Leaders are finalized separately by `compute_leaders` once a CFG is available; the
         // transient summary-phase partition that never exposes `leader` skips it.
         Congruence {
             class_of,
             members,
             leader_of: HashMap::default(),
+        }
+    }
+}
+
+// GRAFT
+// ================================================================================================
+
+/// Mutable state for grafting callees' symbolic return expressions into this function's value
+/// numbering: the growing `nodes`/`universe` maps plus the synthetic-id bookkeeping shared across
+/// every grafted call site (so identical subexpressions collapse to one synthetic id).
+struct Graft<'a> {
+    nodes: &'a mut HashMap<ValueId, Node>,
+    universe: &'a mut HashSet<ValueId>,
+    synthetic: &'a mut HashSet<ValueId>,
+    hashcons: &'a mut HashMap<(OpKey, Vec<ValueId>), ValueId>,
+    next_synth: &'a mut u64,
+}
+
+impl Graft<'_> {
+    /// Instantiate an `Op`-rooted return `sym` as the node for a call result.
+    ///
+    /// The root becomes a real [`Node::Op`] over `sym`'s grafted operands — no synthetic for the
+    /// root, which *is* the call result value. A non-`Op` root (already covered by the constant /
+    /// pass-through [`ReturnJump`](super::summary::ReturnJump)) or any unresolvable leaf yields
+    /// [`Node::Opaque`].
+    fn instantiate_root(&mut self, sym: &Sym, args: &[ValueId]) -> Node {
+        let Sym::Op(key, commutative, children) = sym else {
+            return Node::Opaque;
+        };
+        let mut operands = Vec::with_capacity(children.len());
+        for child in children {
+            match self.instantiate(child, args) {
+                Some(id) => operands.push(id),
+                None => return Node::Opaque,
+            }
+        }
+        Node::op(key.clone(), operands, *commutative)
+    }
+
+    /// Instantiate a symbolic sub-expression `sym` over a call's actual `args`, returning the value
+    /// id that represents it for value numbering, or `None` if a leaf is unresolvable.
+    ///
+    /// `Param`/`Const` leaves resolve to real ids (the argument, or the program-interned constant
+    /// id, which is added to `universe` so the labelling pass numbers it). An internal `Op` mints
+    /// (or, via `hashcons`, reuses) a synthetic id whose node is registered in `nodes` and recorded
+    /// in `synthetic` for stripping after refinement.
+    fn instantiate(&mut self, sym: &Sym, args: &[ValueId]) -> Option<ValueId> {
+        match sym {
+            Sym::Param(i) => args.get(*i).copied(),
+            Sym::Const(id) => {
+                self.universe.insert(*id);
+                Some(*id)
+            }
+            Sym::Op(key, commutative, children) => {
+                let mut operands = Vec::with_capacity(children.len());
+                for child in children {
+                    operands.push(self.instantiate(child, args)?);
+                }
+
+                let cache_key = (key.clone(), operands.clone());
+                if let Some(&existing) = self.hashcons.get(&cache_key) {
+                    return Some(existing);
+                }
+
+                let s = ValueId(*self.next_synth);
+                *self.next_synth -= 1;
+                self.nodes
+                    .insert(s, Node::op(key.clone(), operands, *commutative));
+                self.universe.insert(s);
+                self.synthetic.insert(s);
+                self.hashcons.insert(cache_key, s);
+                Some(s)
+            }
         }
     }
 }
@@ -366,10 +479,22 @@ enum Node {
     Opaque,
 }
 
+impl Node {
+    /// A pure-operator node (the common [`Node::Op`] constructor, shared by the direct build and the
+    /// symbolic graft).
+    fn op(key: OpKey, operands: Vec<ValueId>, commutative: bool) -> Node {
+        Node::Op {
+            key,
+            operands,
+            commutative,
+        }
+    }
+}
+
 /// The operand-free operator key seeding the optimistic partition: two values can be congruent only
 /// if they share this key (same operator and the same immediate, non-value attributes).
-#[derive(Clone, PartialEq, Eq, Hash)]
-enum OpKey {
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum OpKey {
     Add,
     Sub,
     Mul,
@@ -451,7 +576,7 @@ pub(crate) fn pure_op_operands(instr: &OpCode) -> Option<Vec<ValueId>> {
 /// (their aggregate results never enter the constant lattice). So it may disagree with
 /// `is_pure_scalar_fold` / `solver::transfer` on the sequence ops by design, but never on a scalar
 /// op.
-fn op_signature(instr: &OpCode) -> Option<(OpKey, Vec<ValueId>, bool)> {
+pub(crate) fn op_signature(instr: &OpCode) -> Option<(OpKey, Vec<ValueId>, bool)> {
     // Sequence ops are pure and deterministic but not scalar-foldable, so they are matched directly
     // rather than via `scalar_fold`. Sequence order is significant, so none are commutative.
     match instr {
