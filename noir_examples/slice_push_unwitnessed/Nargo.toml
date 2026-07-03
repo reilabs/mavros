@@ -1,0 +1,6 @@
+[package]
+name = "slice_push_unwitnessed"
+type = "bin"
+authors = [""]
+
+[dependencies]
