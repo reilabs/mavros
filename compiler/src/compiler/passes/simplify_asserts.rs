@@ -13,12 +13,16 @@ use crate::{
             types::{FunctionTypeInfo, TypeInfo},
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        passes::shared::rewrite_asserts::rewrite_asserts,
         ssa::{
-            Instruction, Located, ValueId,
+            ValueId,
             hlssa::{BinaryArithOpKind, CmpKind, HLSSA, OpCode, TypeExpr},
         },
     },
 };
+
+// SIMPLIFY ASSERTS
+// ================================================================================================
 
 pub struct SimplifyAsserts {}
 
@@ -43,100 +47,22 @@ impl SimplifyAsserts {
     }
 
     pub fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo) {
-        for (function_id, function) in ssa.iter_functions_mut() {
-            let function_type_info = type_info.get_function(*function_id);
-
-            let mut defs: HashMap<ValueId, OpCode> = HashMap::default();
-            for (_, block) in function.get_blocks() {
-                for instruction in block.get_instructions() {
-                    for result in instruction.get_results() {
-                        defs.insert(*result, instruction.clone());
-                    }
-                }
-            }
-
-            let mut new_blocks = HashMap::default();
-            for (block_id, mut block) in function.take_blocks() {
-                let mut new_instructions = Vec::new();
-                for instruction in block.take_instructions().into_iter() {
-                    let location = instruction.location().clone();
-                    match instruction.payload() {
-                        OpCode::Assert { value } => {
-                            new_instructions.extend(
-                                emit_assert(value, &defs, function_type_info)
-                                    .into_iter()
-                                    .map(|instruction| Located::new(instruction, location.clone())),
-                            );
-                        }
-                        OpCode::AssertCmp {
-                            kind: CmpKind::Eq,
-                            lhs,
-                            rhs,
-                        } => {
-                            new_instructions.extend(
-                                emit_assert_eq(lhs, rhs, &defs, function_type_info)
-                                    .into_iter()
-                                    .map(|instruction| Located::new(instruction, location.clone())),
-                            );
-                        }
-                        other => {
-                            new_instructions.push(Located::new(other, location));
-                        }
-                    }
-                }
-                block.put_instructions(new_instructions);
-                new_blocks.insert(block_id, block);
-            }
-            function.put_blocks(new_blocks);
-        }
+        // Lower an equality via `emit_assert_eq` (the R1CS-native `AssertR1C` where a `Field`-mul
+        // feeds it, else `AssertCmp{Eq}`). `lower_assert_cmp_eq = true` so an already-normalized
+        // `AssertCmp{Eq}` instruction (e.g. emitted earlier by `NormalizeAsserts`) is lowered here
+        // too — the witness-aware `Field`-mul → `AssertR1C` step lives only in this pass.
+        rewrite_asserts(ssa, type_info, true, emit_assert_eq);
     }
 }
 
-fn emit_assert(
-    value: ValueId,
-    defs: &HashMap<ValueId, OpCode>,
-    function_type_info: &FunctionTypeInfo,
-) -> Vec<OpCode> {
-    match defs.get(&value) {
-        Some(OpCode::Cmp {
-            kind: CmpKind::Eq,
-            result: _,
-            lhs,
-            rhs,
-        }) => emit_assert_eq(*lhs, *rhs, defs, function_type_info),
+// INTERNAL FUNCTIONS
+// ================================================================================================
 
-        Some(OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: _,
-            lhs,
-            rhs,
-        }) => vec![OpCode::AssertCmp {
-            kind: CmpKind::Lt,
-            lhs: *lhs,
-            rhs: *rhs,
-        }],
-
-        Some(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::And,
-            result,
-            lhs,
-            rhs,
-        }) => {
-            let result_type = function_type_info.get_value_type(*result);
-            match result_type.strip_witness().expr {
-                TypeExpr::U(1) => {
-                    let mut out = emit_assert(*lhs, defs, function_type_info);
-                    out.extend(emit_assert(*rhs, defs, function_type_info));
-                    out
-                }
-                _ => vec![OpCode::Assert { value }],
-            }
-        }
-
-        _ => vec![OpCode::Assert { value }],
-    }
-}
-
+/// Lower an asserted equality `lhs == rhs` to the R1CS-native `AssertR1C` when a `Field` multiply
+/// feeds either side, falling back to `AssertCmp{Eq}` otherwise.
+///
+/// This is the one piece `NormalizeAsserts` deliberately omits (it must stay witness-agnostic),
+/// injected as [`rewrite_asserts`]'s equality handler.
 fn emit_assert_eq(
     lhs: ValueId,
     rhs: ValueId,

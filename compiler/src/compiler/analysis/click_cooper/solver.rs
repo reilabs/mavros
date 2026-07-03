@@ -116,8 +116,7 @@ pub(crate) struct FunctionSolver<'f, 'c, 's> {
     /// Interprocedural jump-function summaries, used to fold the results of constrained static
     /// `Call`s into the constant lattice.
     ///
-    /// `None` (the default) is the intraprocedural mode the SCCP-visible facts use: every `Call`
-    /// result is `Bottom`.
+    /// `None` (the default) is the intraprocedural mode where every `Call` result is `Bottom`.
     summaries: Option<&'s HashMap<FunctionId, FnSummary>>,
 
     /// Per-`(callee, return-index)` determinism bits, used when building the congruence partition
