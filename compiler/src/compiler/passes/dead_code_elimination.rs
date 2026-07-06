@@ -36,11 +36,15 @@ enum ValueDefinition {
     Instruction(BlockId, usize),
 }
 
+#[derive(Clone, Copy)]
 pub struct Config {
     pub witness_shape_frozen: bool,
+
     /// When true, all blocks are marked as live, preventing removal of empty intermediate blocks.
+    ///
     /// This is a workaround for untaint_control_flow not handling multiple merge predecessors.
-    /// TODO: Remove this option once untaint_control_flow properly handles multiple jumps into merge blocks.
+    /// Remove this option once untaint_control_flow properly handles multiple jumps into merge
+    /// blocks.
     pub preserve_all_blocks: bool,
 }
 

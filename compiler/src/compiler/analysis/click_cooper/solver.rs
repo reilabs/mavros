@@ -17,7 +17,7 @@ use crate::{
                 eval_array_set, eval_binary, eval_bit_range, eval_cast, eval_cmp, eval_mk_repeated,
                 eval_mk_seq, eval_not, eval_sext, eval_slice_len, eval_slice_push,
             },
-            summary::{DetSummaries, FnSummary, ReturnJump},
+            summary::{DetSummaries, FnSummary, ReturnJump, SymSummaries},
         },
         ssa::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
@@ -116,8 +116,7 @@ pub(crate) struct FunctionSolver<'f, 'c, 's> {
     /// Interprocedural jump-function summaries, used to fold the results of constrained static
     /// `Call`s into the constant lattice.
     ///
-    /// `None` (the default) is the intraprocedural mode the SCCP-visible facts use: every `Call`
-    /// result is `Bottom`.
+    /// `None` (the default) is the intraprocedural mode where every `Call` result is `Bottom`.
     summaries: Option<&'s HashMap<FunctionId, FnSummary>>,
 
     /// Per-`(callee, return-index)` determinism bits, used when building the congruence partition
@@ -125,6 +124,15 @@ pub(crate) struct FunctionSolver<'f, 'c, 's> {
     ///
     /// `None` (the default) leaves every call result opaque, identical to the prior behavior.
     det: Option<&'s DetSummaries>,
+
+    /// Per-`(callee, return-index)` symbolic congruence jump functions, used when building the
+    /// congruence partition to graft a callee's return expression into a constrained static call.
+    ///
+    /// A *separate* channel from `summaries`: this refines only congruence, never the constant
+    /// lattice (`eval_call`), so it can be enabled in the summary-free intraprocedural solve
+    /// without breaking the contract that keeps `Call` results `Bottom`. `None` (the default) falls
+    /// back to the `det`-gated `CallDet` numbering.
+    sym_summaries: Option<&'s SymSummaries>,
 
     /// Entry-parameter seeds for a context-sensitive solve: an entry parameter maps to the constant
     /// the calling context proved for the matching argument. Absent params default to `Bottom`.
@@ -174,6 +182,7 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
             uses,
             summaries: None,
             det: None,
+            sym_summaries: None,
             param_seeds: HashMap::default(),
             promotions: None,
         }
@@ -188,6 +197,13 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
     /// Number deterministic static-call results cross-call using these determinism bits.
     pub(crate) fn with_determinism(mut self, det: &'s DetSummaries) -> Self {
         self.det = Some(det);
+        self
+    }
+
+    /// Graft callees' symbolic return expressions into constrained static-call results when
+    /// building the congruence partition (a refinement of the `det`-gated `CallDet` numbering).
+    pub(crate) fn with_sym_summaries(mut self, sym_summaries: &'s SymSummaries) -> Self {
+        self.sym_summaries = Some(sym_summaries);
         self
     }
 
@@ -259,6 +275,7 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
             |g, j| {
                 det.is_some_and(|d| d.get(&g).and_then(|rets| rets.get(j)).copied() == Some(true))
             },
+            self.sym_summaries,
         );
 
         // Materialise the promotions into the returned lattice: they live in the borrowed
@@ -831,6 +848,7 @@ pub(crate) fn solve_with_writeback(
     consts: &HLSSAConstantsSnapshot,
     det: &DetSummaries,
     summaries: Option<&HashMap<FunctionId, FnSummary>>,
+    sym_summaries: Option<&SymSummaries>,
     param_seeds: &HashMap<ValueId, Constness>,
 ) -> FunctionFacts {
     // The accumulator starts empty, so the first iteration is a plain base solve:
@@ -844,14 +862,20 @@ pub(crate) fn solve_with_writeback(
             .with_determinism(det)
             .with_param_seeds(param_seeds.clone())
             .with_promotions(&promotions);
+
         if let Some(summaries) = summaries {
             solver = solver.with_summaries(summaries);
         }
+
+        if let Some(sym_summaries) = sym_summaries {
+            solver = solver.with_sym_summaries(sym_summaries);
+        }
+
         solver.run();
         let solved = solver.into_facts();
 
-        // Fold every newly-foldable comparison of congruent operands; re-solve only if the set grew,
-        // otherwise the combined fixpoint is reached.
+        // Fold every newly-foldable comparison of congruent operands; re-solve only if the set
+        // grew, otherwise the combined fixpoint is reached.
         let before = promotions.len();
         for (v, c) in derive_promotions(function, &solved) {
             promotions.entry(v).or_insert(c);

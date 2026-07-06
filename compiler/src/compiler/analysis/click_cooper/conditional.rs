@@ -45,10 +45,11 @@
 use std::sync::Arc;
 
 use crate::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, UnionFind},
     compiler::{
         analysis::{
             click_cooper::{
+                def_order::DefOrder,
                 lattice::{Constness, bool_constant},
                 solver::FunctionFacts,
             },
@@ -74,7 +75,11 @@ use crate::{
 #[derive(Debug, Default)]
 pub(crate) struct ConditionalFacts {
     /// Values forced to a constant by a dominating assert: `Assert{v}` ⇒ `v = true`,
-    /// `AssertCmp{Eq, x, c}` (with one side unconditional-constant `c`) ⇒ the other side `= c`.
+    /// `AssertCmp{Eq, x, c}` (with one side an unconditional *scalar* constant `c`) ⇒ the other
+    /// side `= c`.
+    ///
+    /// Aggregate (`Blob`) pins are recorded nowhere as Blob constants are never surfaced to
+    /// consumers.
     assert_const: HashMap<BlockId, HashMap<ValueId, Arc<Constant>>>,
 
     /// Equalities established by a dominating `AssertCmp{Eq, a, b}` where neither side is a
@@ -113,6 +118,18 @@ pub(crate) struct ConditionalFacts {
     /// `v = value_of(r)` — a `Cast { value: r, target: ValueOf }` honest projection (`r → result`).
     /// Both key on the witness `r`; each `Vec` is sorted + deduplicated for determinism.
     witness_fwd: HashMap<ValueId, Vec<ValueId>>,
+
+    /// Per-block, index-thresholded asserted-equal leaders, precomputed in [`build`] so
+    /// [`Self::asserted_leader`] is a lookup rather than a per-query transitive-closure scan.
+    ///
+    /// For each value that joins a non-singleton asserted-equal class in the block, a list of
+    /// `(threshold, leader)` steps sorted ascending by `threshold`. The leader in effect for a
+    /// query at `point.index = q` is the last step with `threshold <= q`; no such step (or no entry
+    /// for the value) means `v` is a singleton there, so the answer is `None`. A cross-block pair
+    /// holds at every index (`threshold = 0`); a same-block pair at instruction index `i` holds
+    /// only for use-indices `> i` (`threshold = i + 1`, so it applies iff `i < q`). Empty when the
+    /// function has no asserted equalities.
+    asserted_leaders: HashMap<BlockId, HashMap<ValueId, Vec<(usize, ValueId)>>>,
 }
 
 impl ConditionalFacts {
@@ -150,6 +167,35 @@ impl ConditionalFacts {
             })
     }
 
+    /// Gets the canonical representative of `v`'s transitive asserted-equal class at `point`.
+    ///
+    /// This is its *dominance-root-most* member — or `None` if `v` is in no asserted equality there
+    /// (nothing to copy-propagate to). May return `v` itself when `v` is already the root-most.
+    ///
+    /// The class is the transitive closure of the equality pairs holding at `point`: every
+    /// cross-block pair (`assert_eq`, at every index of the block) plus the same-block pairs
+    /// (`local_assert_eq`) established strictly before `point.index`. Transitive closure is what
+    /// makes the leader well-defined — every member of a class returns the *same* representative,
+    /// the member minimizing the dominance-consistent `DefKey` (the dominance-earliest).
+    ///
+    /// Every component member's definition dominates `point`: each pair's operands are inputs of an
+    /// `AssertCmp` that either dominates `point.block` or precedes `point` within it, so by SSA
+    /// they are defined before `point`. The blocks dominating `point.block` form a single chain, so
+    /// the members are mutually dominance-comparable and the `DefKey` minimum is the
+    /// dominance-root-most — hence it itself dominates `point` and is available there (this is what
+    /// makes the redirect to it sound).
+    ///
+    /// The classes are precomputed per block in [`build`] (see [`build_block_leaders`]); this is
+    /// the lookup. `asserted_leaders[block][v]` holds the `(threshold, leader)` steps sorted
+    /// ascending by `threshold`, and the leader in effect at `point.index` is the last step whose
+    /// `threshold <= point.index`. Leaders are monotone in `threshold` (a class only grows, which
+    /// can only lower the `DefKey` minimum), so the last applicable step is the current leader.
+    pub(crate) fn asserted_leader(&self, point: ProgramPoint, v: ValueId) -> Option<ValueId> {
+        let steps = self.asserted_leaders.get(&point.block)?.get(&v)?;
+        let applicable = steps.partition_point(|(threshold, _)| *threshold <= point.index);
+        (applicable > 0).then(|| steps[applicable - 1].1)
+    }
+
     /// `true` if `a` and `b` are proven unequal on entry to `bid` (symmetric).
     pub(crate) fn known_disequal(&self, bid: BlockId, a: ValueId, b: ValueId) -> bool {
         self.diseq
@@ -177,10 +223,12 @@ pub(crate) fn build(
     cfg: &CFG,
     consts: &HLSSAConstantsSnapshot,
     type_info: &FunctionTypeInfo,
+    order: &DefOrder,
 ) -> ConditionalFacts {
     let mut out = ConditionalFacts::default();
 
-    // The *unconditional* constant of `v` (interned or proven by the lattice), if any.
+    // The *unconditional* constant of `v` (interned or proven by the lattice), if any — including
+    // aggregates, which callers must gate out before recording a fact.
     //
     // Asserts that pin a value to such a constant produce a *conditional* fact; the unconditional
     // view is never touched.
@@ -219,19 +267,30 @@ pub(crate) fn build(
                     lhs,
                     rhs,
                 } => {
-                    if let Some(c) = const_of(*lhs) {
-                        raw_const.entry(*bid).or_default().push((idx, *rhs, c));
-                    } else if let Some(c) = const_of(*rhs) {
-                        raw_const.entry(*bid).or_default().push((idx, *lhs, c));
-                    } else {
-                        // Store the pair canonically (min, max) by value id so `(x, y)` and
-                        // `(y, x)` dedup as one in the cross-block fan-out below.
-                        let (lo, hi) = if lhs.0 <= rhs.0 {
-                            (*lhs, *rhs)
-                        } else {
-                            (*rhs, *lhs)
-                        };
-                        raw_eq.entry(*bid).or_default().push((idx, lo, hi));
+                    // The pinned side, if the other is an unconditional constant: `(value, c)`.
+                    let pin = const_of(*lhs)
+                        .map(|c| (*rhs, c))
+                        .or_else(|| const_of(*rhs).map(|c| (*lhs, c)));
+                    match pin {
+                        Some((v, c)) if c.is_scalar() => {
+                            raw_const.entry(*bid).or_default().push((idx, v, c));
+                        }
+
+                        // An aggregate (`Blob`) pin is recorded in *neither* channel: Blob
+                        // constants are never surfaced to consumers (see `const_in_facts`), and
+                        // routing the pair to the eq channel would put a constant-sided pair into
+                        // the leader machinery.
+                        Some(_) => {}
+                        None => {
+                            // Store the pair canonically (min, max) by value id so `(x, y)` and
+                            // `(y, x)` dedup as one in the cross-block fan-out below.
+                            let (lo, hi) = if lhs.0 <= rhs.0 {
+                                (*lhs, *rhs)
+                            } else {
+                                (*rhs, *lhs)
+                            };
+                            raw_eq.entry(*bid).or_default().push((idx, lo, hi));
+                        }
                     }
                 }
                 OpCode::Cmp {
@@ -319,8 +378,8 @@ pub(crate) fn build(
     // Step 3: Fan out to dominated blocks. The inner loop only needs the blocks that actually
     // established a fact (the keys of the raw maps), not every reachable block. Iterating sorted
     // targets `C` (outer) and sorted fact-source blocks `B` (inner) keeps the result deterministic
-    // and first-writer-wins on any contradictory pair of asserts (which can only co-dominate a block
-    // that no honest run reaches).
+    // and first-writer-wins on any contradictory pair of asserts (which can only co-dominate a
+    // block that no honest run reaches).
     let mut reachable_blocks: Vec<BlockId> = facts.reachable.iter().copied().collect();
     reachable_blocks.sort_by_key(|b| b.0);
     let mut fact_sources: Vec<BlockId> = raw_const
@@ -334,13 +393,11 @@ pub(crate) fn build(
 
     for &c in &reachable_blocks {
         for &b in &fact_sources {
-            // Assert facts hold at `C` when the assert has already run before `C`, i.e. `B` strictly
-            // dominates `C`. `B != C` excludes the asserting block's own entry; its own post-assert
-            // uses are recovered separately at index granularity from the `local_*` maps (see the
-            // module "Index Granularity" section). Dominance makes the asserted value transitively
-            // live at `C`, so no in-scope check is needed. The post-dominance direction is
-            // deliberately omitted as unsound for loop-carried values — see `mod.rs`'s "Deferred
-            // Improvements".
+            // Assert facts hold at `C` when the assert has already run before `C`, i.e. `B`
+            // strictly dominates `C`. `B != C` excludes the asserting block's own entry; its own
+            // post-assert uses are recovered separately at index granularity from the `local_*`
+            // maps (see the module "Index Granularity" section). Dominance makes the asserted value
+            // transitively live at `C`, so no in-scope check is needed.
             if b != c && cfg.dominates(b, c) {
                 if let Some(consts_at_b) = raw_const.get(&b) {
                     let entry = out.assert_const.entry(c).or_default();
@@ -377,5 +434,121 @@ pub(crate) fn build(
     out.local_assert_const = raw_const;
     out.local_assert_eq = raw_eq;
 
+    // Step 4: Per-block, index-thresholded asserted-equal leaders, consumed by
+    // `ConditionalFacts::asserted_leader`. Only values appearing in an equality pair can be class
+    // members, and every such value appears in `local_assert_eq` (the cross-block `assert_eq` is
+    // fanned out from the same pairs), so a non-empty `local_assert_eq` is the authoritative "any
+    // equalities exist" gate — the per-block leader tables are built only then (the definition
+    // `order` is shared from the caller, built once for the congruence leaders too).
+    if out.local_assert_eq.values().any(|eqs| !eqs.is_empty()) {
+        for &b in &reachable_blocks {
+            let cross = out.assert_eq.get(&b).map(Vec::as_slice).unwrap_or(&[]);
+            let local = out
+                .local_assert_eq
+                .get(&b)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let table = build_block_leaders(cross, local, &order);
+            if !table.is_empty() {
+                out.asserted_leaders.insert(b, table);
+            }
+        }
+    }
+
     out
+}
+
+// INTERNAL FUNCTIONS
+// ================================================================================================
+
+/// Precompute the index-thresholded asserted-equal leaders of one block.
+///
+/// `cross` are the block's dominating equality pairs — they hold at every index, so they form the
+/// threshold-`0` classes. `local` are its same-block pairs `(index, a, b)`, each holding only for
+/// use-indices `> index`, so it is applied at threshold `index + 1` (matching the `i < point.index`
+/// rule).
+///
+/// The result maps each value that ever joins a non-singleton class to its `(threshold, leader)`
+/// steps in ascending `threshold` order, the leader being the `DefKey`-minimum of the value's
+/// component once all pairs up to that threshold are merged. A value that stays a singleton —
+/// including one appearing only in a degenerate `(a, a)` self-pair — gets no entry, so its leader
+/// query is `None`, exactly as the previous per-query closure returned.
+fn build_block_leaders(
+    cross: &[(ValueId, ValueId)],
+    local: &[(usize, ValueId, ValueId)],
+    order: &DefOrder,
+) -> HashMap<ValueId, Vec<(usize, ValueId)>> {
+    // Local indices are unique within a block (one instruction per index), so sorting by index
+    // gives a total, deterministic batch order.
+    let mut sorted_local: Vec<(usize, ValueId, ValueId)> = local.to_vec();
+    sorted_local.sort_by_key(|(i, _, _)| *i);
+
+    // The last leader recorded for each value, so a batch that leaves a value's leader unchanged
+    // adds no step.
+    let mut last_leader: HashMap<ValueId, ValueId> = HashMap::default();
+    let mut table: HashMap<ValueId, Vec<(usize, ValueId)>> = HashMap::default();
+
+    // Cross pairs at threshold 0, then each local pair at its own `index + 1`, ascending.
+    let mut uf: UnionFind<ValueId> = UnionFind::default();
+    record_batch(0, cross, &mut uf, &mut last_leader, &mut table, order);
+    for &(i, a, b) in &sorted_local {
+        record_batch(
+            i + 1,
+            &[(a, b)],
+            &mut uf,
+            &mut last_leader,
+            &mut table,
+            order,
+        );
+    }
+
+    table
+}
+
+/// Merge one batch of equality `pairs` into `uf` at `threshold`, then record a `(threshold,
+/// leader)` step for every value whose class leader changed.
+///
+/// Classes still singleton (size `< 2`) are skipped, so a value never in a real two-distinct-value
+/// class gets no step.
+fn record_batch(
+    threshold: usize,
+    pairs: &[(ValueId, ValueId)],
+    uf: &mut UnionFind<ValueId>,
+    last_leader: &mut HashMap<ValueId, ValueId>,
+    table: &mut HashMap<ValueId, Vec<(usize, ValueId)>>,
+    order: &DefOrder,
+) {
+    for &(a, b) in pairs {
+        uf.union(a, b);
+    }
+
+    // Recover the current partition via `nodes()`/`find()` (as `points_to::array_cells` does):
+    // every tracked value paired with its class representative.
+    let nodes: Vec<ValueId> = uf.nodes().collect();
+    let reps: Vec<(ValueId, ValueId)> = nodes.into_iter().map(|v| (v, uf.find(v))).collect();
+
+    // Per class: its `DefKey`-minimum leader and its size (to skip singletons). `DefKey` is a total
+    // order (value-id tie-break), so the minimum is unique and independent of iteration order — the
+    // recorded leader is deterministic.
+    let mut leader_of: HashMap<ValueId, ValueId> = HashMap::default();
+    let mut size_of: HashMap<ValueId, usize> = HashMap::default();
+    for &(v, rep) in &reps {
+        *size_of.entry(rep).or_insert(0) += 1;
+        let cur = leader_of.entry(rep).or_insert(v);
+        if order.key(v) < order.key(*cur) {
+            *cur = v;
+        }
+    }
+
+    // Record a step for each non-singleton member whose class leader changed at this threshold.
+    for &(v, rep) in &reps {
+        if size_of[&rep] < 2 {
+            continue;
+        }
+        let leader = leader_of[&rep];
+        if last_leader.get(&v) != Some(&leader) {
+            table.entry(v).or_default().push((threshold, leader));
+            last_leader.insert(v, leader);
+        }
+    }
 }

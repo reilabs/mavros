@@ -1,9 +1,11 @@
-use super::{ClickCooper, Context, FlowAnalysis};
 use crate::compiler::{
     Field,
-    analysis::types::Types,
+    analysis::{
+        click_cooper::ClickCooper, flow_analysis::FlowAnalysis, shared::call_string::Context,
+        types::Types,
+    },
     ssa::{
-        ProgramPoint, Terminator,
+        FunctionId, ProgramPoint, Terminator,
         hlssa::{
             BinaryArithOpKind, Blob, CallTarget, CastTarget, CmpKind, Constant, HLSSA, OpCode,
             ScalarFold, SequenceTargetType, SliceOpDir, Type,
@@ -11,12 +13,25 @@ use crate::compiler::{
     },
 };
 
+// UTILITIES
+// ================================================================================================
+
 /// Build the analysis for `ssa` with freshly-computed dependencies, for test use only.
 pub(crate) fn run_in_test(ssa: &HLSSA) -> ClickCooper {
     let flow = FlowAnalysis::run(ssa);
     let types = Types::new().run(ssa, &flow);
     ClickCooper::run(ssa, &flow, &types)
 }
+
+/// The single context `f` was specialized in, asserting there is exactly one.
+fn sole_context(cc: &ClickCooper, f: FunctionId) -> Context {
+    let ctxs = cc.contexts_of(f);
+    assert_eq!(ctxs.len(), 1);
+    ctxs.into_iter().next().unwrap()
+}
+
+// TESTS
+// ================================================================================================
 
 /// `OpCode::scalar_fold` is the single source of truth for "foldable *scalar* op", and value
 /// numbering is a strict superset of it.
@@ -664,7 +679,7 @@ fn leader_of_constant_class_is_the_interned_constant() {
 }
 
 /// Assert-vacuum soundness: `assert(x == 5)` pins `x` to 5 *conditionally* in dominated blocks,
-/// but never unconditionally — so a global fold (SCCP) can't fold `x` and vacuum the assert.
+/// but never unconditionally — so a global fold (SCS) can't fold `x` and vacuum the assert.
 #[test]
 fn assert_eq_const_is_conditional_not_unconditional() {
     let mut ssa = HLSSA::with_main("main".to_string());
@@ -782,6 +797,383 @@ fn assert_eq_pure_equality_is_conditional() {
     assert!(!cc.asserted_equal(fid, ProgramPoint::new(entry_id, 0), x, y));
     // Structural congruence (unconditional) does not see the assert.
     assert!(!cc.known_equal(fid, x, y));
+}
+
+/// The asserted-equal leader is *dominance-aware*, not smallest-id: with `def(a)` dominating
+/// `def(b)`, the leader of both is the dominating `a` even though `b` has the smaller value id.
+#[test]
+fn asserted_leader_picks_dominating_member() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    // `b` is allocated first so `b.0 < a.0`; a smallest-id leader would (wrongly) pick `b`.
+    let b = ssa.fresh_value();
+    let a = ssa.fresh_value();
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let mid = f.add_block();
+    f.get_entry_mut().push_parameter(a, Type::u(32)); // def(a): entry
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(mid, vec![]));
+    let mid_block = f.get_block_mut(mid);
+    mid_block.push_instruction(OpCode::BinaryArithOp {
+        // index 0: def(b) in mid, dominated by entry
+        kind: BinaryArithOpKind::Add,
+        result: b,
+        lhs: a,
+        rhs: a,
+    });
+    mid_block.push_instruction(OpCode::AssertCmp {
+        // index 1: a == b (neither constant ⇒ an equality pair)
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
+    mid_block.set_terminator(Terminator::Return(vec![])); // index 2
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    assert!(b.0 < a.0, "test premise: b has the smaller value id");
+    // After the assert (terminator index 2) the leader is the dominating definition `a`, for both
+    // members — not the lower-id `b`.
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(mid, 2), a),
+        Some(a)
+    );
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(mid, 2), b),
+        Some(a)
+    );
+    // Nothing at the assert's own index (the equality does not yet hold).
+    assert_eq!(cc.asserted_leader(fid, ProgramPoint::new(mid, 1), a), None);
+}
+
+/// The leader is the representative of the *transitive* class: `a == b` and `b == c` make all three
+/// share one leader, which is strictly stronger than the direct-pair `asserted_equal` check.
+#[test]
+fn asserted_leader_is_transitive() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    // Allocated in order, so `a.0 < b.0 < c.0`; all three are entry params (same def site), so the
+    // dominance-root-most is the smallest-id `a`.
+    let (a, b, c) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(a, Type::u(32));
+    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_parameter(c, Type::u(32));
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 0: a == b
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 1: b == c
+        kind: CmpKind::Eq,
+        lhs: b,
+        rhs: c,
+    });
+    f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 2
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // After both asserts the whole {a, b, c} class shares the leader `a`.
+    let p2 = ProgramPoint::new(entry_id, 2);
+    assert_eq!(cc.asserted_leader(fid, p2, a), Some(a));
+    assert_eq!(cc.asserted_leader(fid, p2, b), Some(a));
+    assert_eq!(cc.asserted_leader(fid, p2, c), Some(a));
+    // The leader is strictly stronger than the direct-pair check: `a == c` is never asserted
+    // directly, so `asserted_equal` does not see it, but the transitive leader does.
+    assert!(!cc.asserted_equal(fid, p2, a, c));
+    assert!(cc.asserted_equal(fid, p2, a, b));
+    assert!(cc.asserted_equal(fid, p2, b, c));
+    // Index granularity: at index 1 only `a == b` is in effect, so `c` is still on its own.
+    let p1 = ProgramPoint::new(entry_id, 1);
+    assert_eq!(cc.asserted_leader(fid, p1, a), Some(a));
+    assert_eq!(cc.asserted_leader(fid, p1, c), None);
+}
+
+/// The leader holds at every index of a dominated block (cross-block `assert_eq`) and, within the
+/// asserting block, only at use-indices strictly after the establishing assert.
+#[test]
+fn asserted_leader_index_granular() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let (x, y) = (ssa.fresh_value(), ssa.fresh_value()); // x.0 < y.0 ⇒ leader x
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    let after = f.add_block();
+    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(y, Type::u(32));
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 0
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: y,
+    });
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(after, vec![])); // index 1
+    f.get_block_mut(after)
+        .set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // Cross-block: holds at every index of the dominated `after`.
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(after, 0), x),
+        Some(x)
+    );
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(after, 0), y),
+        Some(x)
+    );
+    // Same block: only after the assert's index (the terminator at index 1) ...
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(entry_id, 1), x),
+        Some(x)
+    );
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(entry_id, 1), y),
+        Some(x)
+    );
+    // ... never at the assert's own index.
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(entry_id, 0), x),
+        None
+    );
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(entry_id, 0), y),
+        None
+    );
+}
+
+/// An equality asserted on only one branch yields a leader within that branch (after the assert) but
+/// nowhere it fails to dominate — not the merge, the other branch, or before the branch.
+#[test]
+fn asserted_leader_respects_dominance_fanout() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let cond = ssa.fresh_value();
+    let (x, y) = (ssa.fresh_value(), ssa.fresh_value()); // x.0 < y.0 ⇒ leader x
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    let then_b = f.add_block();
+    let else_b = f.add_block();
+    let merge = f.add_block();
+    f.get_entry_mut().push_parameter(cond, Type::u(1));
+    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(y, Type::u(32));
+    f.get_entry_mut()
+        .set_terminator(Terminator::JmpIf(cond, then_b, else_b));
+    f.get_block_mut(then_b).push_instruction(OpCode::AssertCmp {
+        // index 0: x == y, only on the `then` branch
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: y,
+    });
+    f.get_block_mut(then_b)
+        .set_terminator(Terminator::Jmp(merge, vec![]));
+    f.get_block_mut(else_b)
+        .set_terminator(Terminator::Jmp(merge, vec![]));
+    f.get_block_mut(merge)
+        .set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // Within the asserting branch, after the assert: the leader holds.
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(then_b, 1), x),
+        Some(x)
+    );
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(then_b, 1), y),
+        Some(x)
+    );
+    // The `then` branch dominates neither the merge nor the `else` branch, and the assert does not
+    // hold at its own index or before the branch.
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(merge, 0), x),
+        None
+    );
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(else_b, 0), x),
+        None
+    );
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(entry_id, 0), x),
+        None
+    );
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(then_b, 0), x),
+        None
+    );
+}
+
+/// A value pinned by an `asserted_const` (one side constant) is in no equality *pair*, and a value
+/// touched by no assert at all is in no class — both have no leader.
+#[test]
+fn asserted_leader_none_without_equality() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let (x, z) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(z, Type::u(32));
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 0: x == 5 — a constant pin, not an equality pair
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: c5,
+    });
+    f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 1
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    let p1 = ProgramPoint::new(entry_id, 1);
+    // Sanity: the constant pin is recorded as an `asserted_const`, not an equality.
+    assert_eq!(
+        cc.asserted_const(fid, p1, x).as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    // So `x` has no asserted-equal leader, and the untouched `z` has none anywhere.
+    assert_eq!(cc.asserted_leader(fid, p1, x), None);
+    assert_eq!(cc.asserted_leader(fid, p1, z), None);
+}
+
+/// Even in a function that *does* have an equality class (`a == b`), a value in no pair (`z`) has
+/// no leader — it gets no entry in the precomputed per-block table, so the lookup short-circuits to
+/// `None`, while a participant `a` still resolves to its leader.
+#[test]
+fn asserted_leader_none_for_non_pair_value_amid_classes() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let (a, b, z) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(a, Type::u(32));
+    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_parameter(z, Type::u(32)); // never in any assert
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 0: a == b — a real equality pair, so the function has a non-empty `def_key`
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
+    f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 1
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    let p1 = ProgramPoint::new(entry_id, 1);
+    // The participant resolves to its leader (the dominance-earliest, here the smaller-id `a`)...
+    assert_eq!(cc.asserted_leader(fid, p1, a), Some(a));
+    assert_eq!(cc.asserted_leader(fid, p1, b), Some(a));
+    // ...while `z`, in no pair, short-circuits to `None`.
+    assert_eq!(cc.asserted_leader(fid, p1, z), None);
+}
+
+/// Two same-block equality asserts at different indices grow one class in steps: a use between them
+/// sees the smaller class's leader; a use after both sees the merged class's (lower) leader. This
+/// exercises a value carrying more than one `(threshold, leader)` step and the index binary search.
+#[test]
+fn asserted_leader_multi_threshold_same_block() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    // Allocated in order ⇒ a.0 < c.0 < d.0; all entry params (same def site), so leaders are by id.
+    let (a, c, d) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(a, Type::u(32));
+    f.get_entry_mut().push_parameter(c, Type::u(32));
+    f.get_entry_mut().push_parameter(d, Type::u(32));
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 0: c == d ⇒ class {c, d}, leader c
+        kind: CmpKind::Eq,
+        lhs: c,
+        rhs: d,
+    });
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 1: a == c ⇒ merges into {a, c, d}, leader a
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: c,
+    });
+    f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 2
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+
+    // Between the asserts (index 1): only `c == d` is in effect, so `d`'s leader is `c`, and `a` —
+    // which only the not-yet-effective second assert mentions — has no class yet.
+    let p1 = ProgramPoint::new(entry_id, 1);
+    assert_eq!(cc.asserted_leader(fid, p1, d), Some(c));
+    assert_eq!(cc.asserted_leader(fid, p1, c), Some(c));
+    assert_eq!(cc.asserted_leader(fid, p1, a), None);
+
+    // After both (index 2): the merged class has the lower leader `a` — `d`'s second step.
+    let p2 = ProgramPoint::new(entry_id, 2);
+    assert_eq!(cc.asserted_leader(fid, p2, d), Some(a));
+    assert_eq!(cc.asserted_leader(fid, p2, c), Some(a));
+    assert_eq!(cc.asserted_leader(fid, p2, a), Some(a));
+}
+
+/// A same-block assert can merge two *distinct dominating* (cross-block) classes. The merged leader
+/// is returned only at indices after that local assert; before it, each cross class keeps its own
+/// leader.
+#[test]
+fn asserted_leader_local_merges_two_cross_classes() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    // a.0 < b.0 < c.0 < d.0; all entry params, so leaders are by id.
+    let (a, b, c, d) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let mid = f.add_block();
+    f.get_entry_mut().push_parameter(a, Type::u(32));
+    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_parameter(c, Type::u(32));
+    f.get_entry_mut().push_parameter(d, Type::u(32));
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 0: a == b ⇒ dominating class {a, b}
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        // index 1: c == d ⇒ dominating class {c, d}
+        kind: CmpKind::Eq,
+        lhs: c,
+        rhs: d,
+    });
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(mid, vec![])); // index 2
+    f.get_block_mut(mid).push_instruction(OpCode::AssertCmp {
+        // index 0 (in `mid`): b == c ⇒ merges the two cross classes into {a, b, c, d}
+        kind: CmpKind::Eq,
+        lhs: b,
+        rhs: c,
+    });
+    f.get_block_mut(mid)
+        .set_terminator(Terminator::Return(vec![])); // index 1
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+
+    // At `mid` index 0 (before the local merge): the two cross classes are separate — `d`'s leader is
+    // `c`, `b`'s is `a`.
+    let mid0 = ProgramPoint::new(mid, 0);
+    assert_eq!(cc.asserted_leader(fid, mid0, d), Some(c));
+    assert_eq!(cc.asserted_leader(fid, mid0, b), Some(a));
+
+    // At `mid` index 1 (after the local `b == c`): one class {a, b, c, d}, leader `a`.
+    let mid1 = ProgramPoint::new(mid, 1);
+    assert_eq!(cc.asserted_leader(fid, mid1, d), Some(a));
+    assert_eq!(cc.asserted_leader(fid, mid1, c), Some(a));
+    assert_eq!(cc.asserted_leader(fid, mid1, b), Some(a));
 }
 
 /// The false edge of `if x == y` proves `x != y` at its target and the blocks that target
@@ -1395,7 +1787,7 @@ fn local_assert_in_loop_body() {
 }
 
 /// A callee that returns a constant: the call result folds interprocedurally in the caller's
-/// context, while the SCCP-visible intraprocedural view leaves it `Bottom`.
+/// context, while the SCS-visible intraprocedural view leaves it `Bottom`.
 #[test]
 fn interproc_constant_return_folds_at_call_site() {
     let mut ssa = HLSSA::with_main("main".to_string());
@@ -1428,7 +1820,7 @@ fn interproc_constant_return_folds_at_call_site() {
         cc.const_of_in(main_id, &Context::empty(), r).as_deref(),
         Some(&Constant::Field(Field::from(5u64)))
     );
-    // The intraprocedural view (what SCCP reads) never folds a call result.
+    // The intraprocedural view (what SCS reads) never folds a call result.
     assert_eq!(cc.const_of(main_id, r), None);
 }
 
@@ -1540,7 +1932,7 @@ fn interproc_writeback_folds_congruent_comparison_return() {
         cc.const_of_in(main_id, &Context::empty(), r).as_deref(),
         Some(&Constant::U(1, 1))
     );
-    // The intraprocedural view (what SCCP reads) never folds a call result.
+    // The intraprocedural view (what SCS reads) never folds a call result.
     assert_eq!(cc.const_of(main_id, r), None);
 }
 
@@ -1690,10 +2082,10 @@ fn interproc_writeback_terminates_under_recursion() {
     }
 }
 
-/// The context-parameterized conditional queries. The branch-fact family (`const_in_block_in`)
+/// The context-parameterized conditional queries: the branch-fact family (`const_in_block_in`)
 /// is context-*precise* — it sees the per-context parameter constant the intraprocedural query
-/// cannot — while the assert/witness family forwards to the (sound, context-independent)
-/// intraprocedural facts.
+/// cannot. (The assert/disequality/witness family is likewise rebuilt per context; see the
+/// `*_in` conditional tests below.)
 #[test]
 fn context_parameterized_conditional_queries() {
     let mut ssa = HLSSA::with_main("main".to_string());
@@ -1725,16 +2117,551 @@ fn context_parameterized_conditional_queries() {
 
     let entry_id = ssa.get_function(id).get_entry_id();
     let cc = run_in_test(&ssa);
-    let ctxs = cc.contexts_of(id);
-    assert_eq!(ctxs.len(), 1);
-    let ctx = &ctxs[0];
+    let ctx = sole_context(&cc, id);
 
     // Intraprocedurally `p` is unconstrained; under the single call context it is the constant 7.
     assert_eq!(cc.const_in_block(id, entry_id, p), None);
     assert_eq!(
-        cc.const_in_block_in(id, ctx, entry_id, p).as_deref(),
+        cc.const_in_block_in(id, &ctx, entry_id, p).as_deref(),
         Some(&Constant::Field(Field::from(7u64)))
     );
+}
+
+/// Per-context conditional facts can be more precise: `assert(x == p)` is only an asserted
+/// *equality* intraprocedurally (`p` opaque), but pins `x` to an asserted *constant* in a context
+/// where `p` is a lattice constant. The pair then *migrates* channels — it leaves the per-context
+/// eq channel, so `asserted_equal_in` is deliberately not a pointwise superset of `asserted_equal`.
+#[test]
+fn asserted_const_refines_per_context() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let g = ssa.add_function("g".to_string());
+    let (x, p) = (ssa.fresh_value(), ssa.fresh_value());
+    let c7 = ssa.add_const(Constant::Field(Field::from(7u64)));
+    let x0 = ssa.fresh_value();
+
+    let after = {
+        let hf = ssa.get_function_mut(g);
+        let after = hf.add_block();
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_parameter(p, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: p,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Jmp(after, vec![]));
+        hf.get_block_mut(after)
+            .set_terminator(Terminator::Return(vec![]));
+        after
+    };
+    {
+        let mf = ssa.get_function_mut(main_id);
+        let entry = mf.get_entry_mut();
+        entry.push_parameter(x0, Type::field());
+        entry.push_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(g),
+            args: vec![x0, c7],
+            unconstrained: false,
+        });
+        entry.set_terminator(Terminator::Return(vec![]));
+    }
+
+    let cc = run_in_test(&ssa);
+    let ctx = sole_context(&cc, g);
+    let pp = ProgramPoint::new(after, 0);
+
+    // Intraprocedurally `p` is opaque: the assert is an equality, not a constant pin.
+    assert_eq!(cc.asserted_const(g, pp, x), None);
+    assert!(cc.asserted_equal(g, pp, x, p));
+    // In the context `p` is the constant 7, so the same assert pins `x` to it...
+    assert_eq!(
+        cc.asserted_const_in(g, &ctx, pp, x).as_deref(),
+        Some(&Constant::Field(Field::from(7u64)))
+    );
+    // ...and the pair has migrated out of the per-context eq channel.
+    assert!(!cc.asserted_equal_in(g, &ctx, pp, x, p));
+}
+
+/// `witness_forward_in` drops a forward established in a context-dead block: the witness scan is
+/// reachability-gated, so a forward the intraprocedural view reports can be absent per context —
+/// the hazard that forbids `witness_forward_in` from delegating to the intraprocedural map. The
+/// other direction exists too; see `context_constant_can_split_congruence`
+#[test]
+fn witness_forward_in_prunes_context_dead_forward() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let g = ssa.add_function("g".to_string());
+    let (p, w, r) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let c_true = ssa.add_const(Constant::U(1, 1));
+    let w0 = ssa.fresh_value();
+
+    {
+        let hf = ssa.get_function_mut(g);
+        let then_b = hf.add_block();
+        let else_b = hf.add_block();
+        let after = hf.add_block();
+        hf.get_entry_mut().push_parameter(p, Type::u(1));
+        hf.get_entry_mut().push_parameter(w, Type::u(32));
+        hf.get_entry_mut()
+            .set_terminator(Terminator::JmpIf(p, then_b, else_b));
+        hf.get_block_mut(then_b)
+            .set_terminator(Terminator::Jmp(after, vec![]));
+        // The false arm establishes the forward `r → w`; it is dead once a context pins `p`.
+        hf.get_block_mut(else_b)
+            .push_instruction(OpCode::WriteWitness {
+                result: Some(r),
+                value: w,
+                pinned: false,
+            });
+        hf.get_block_mut(else_b)
+            .set_terminator(Terminator::Jmp(after, vec![]));
+        hf.get_block_mut(after)
+            .set_terminator(Terminator::Return(vec![]));
+    }
+    {
+        let mf = ssa.get_function_mut(main_id);
+        let entry = mf.get_entry_mut();
+        entry.push_parameter(w0, Type::u(32));
+        entry.push_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(g),
+            args: vec![c_true, w0],
+            unconstrained: false,
+        });
+        entry.set_terminator(Terminator::Return(vec![]));
+    }
+
+    let cc = run_in_test(&ssa);
+    let ctx = sole_context(&cc, g);
+
+    // Intraprocedurally `p` is opaque, both arms live: the forward is gathered.
+    assert_eq!(cc.witness_forward(g, r), [w].as_slice());
+    // In the context `p = true` kills the false arm — and its forward with it.
+    assert!(cc.witness_forward_in(g, &ctx, r).is_empty());
+}
+
+/// Parity when nothing refines: under `main`'s empty context the seeds are Bottom, and `main` has
+/// no static calls (the per-context solve enables the eval-call summary channel the
+/// intraprocedural one keeps off, so a folding call would break the "nothing refines" premise) —
+/// every per-context conditional channel coincides with its intraprocedural counterpart.
+#[test]
+fn conditional_queries_parity_under_empty_context() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let (x, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let (d, e) = (ssa.fresh_value(), ssa.fresh_value());
+    let (eq, r) = (ssa.fresh_value(), ssa.fresh_value());
+    let c5 = ssa.add_const(Constant::U(32, 5));
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let then_b = f.add_block();
+    let else_b = f.add_block();
+    let after = f.add_block();
+    for v in [x, a, b, d, e] {
+        f.get_entry_mut().push_parameter(v, Type::u(32));
+    }
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: c5,
+    });
+    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
+    f.get_entry_mut().push_instruction(OpCode::WriteWitness {
+        result: Some(r),
+        value: x,
+        pinned: false,
+    });
+    f.get_entry_mut().push_instruction(OpCode::Cmp {
+        kind: CmpKind::Eq,
+        result: eq,
+        lhs: d,
+        rhs: e,
+    });
+    f.get_entry_mut()
+        .set_terminator(Terminator::JmpIf(eq, then_b, else_b));
+    f.get_block_mut(then_b)
+        .set_terminator(Terminator::Jmp(after, vec![]));
+    f.get_block_mut(else_b)
+        .set_terminator(Terminator::Jmp(after, vec![]));
+    f.get_block_mut(after)
+        .set_terminator(Terminator::Return(vec![]));
+
+    let cc = run_in_test(&ssa);
+    let ctx = Context::empty();
+    let pp = ProgramPoint::new(after, 0);
+
+    // Assert-const channel.
+    assert_eq!(
+        cc.asserted_const(main_id, pp, x).as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    assert_eq!(
+        cc.asserted_const_in(main_id, &ctx, pp, x),
+        cc.asserted_const(main_id, pp, x)
+    );
+    // Assert-eq channel and its leaders.
+    assert!(cc.asserted_equal(main_id, pp, a, b));
+    assert!(cc.asserted_equal_in(main_id, &ctx, pp, a, b));
+    assert_eq!(cc.asserted_leader(main_id, pp, b), Some(a));
+    assert_eq!(
+        cc.asserted_leader_in(main_id, &ctx, pp, b),
+        cc.asserted_leader(main_id, pp, b)
+    );
+    // Disequality channel (the false edge is the sole in-edge of `else_b` in both views).
+    assert!(cc.known_unequal(main_id, else_b, d, e));
+    assert!(cc.known_unequal_in(main_id, &ctx, else_b, d, e));
+    // Witness channel.
+    assert_eq!(cc.witness_forward(main_id, r), [x].as_slice());
+    assert_eq!(
+        cc.witness_forward_in(main_id, &ctx, r),
+        cc.witness_forward(main_id, r)
+    );
+}
+
+/// A context can *create* a disequality: pinning the branch predicate prunes one predecessor of
+/// the false-edge target, making the false edge its sole executable in-edge — so `known_unequal_in`
+/// holds where the intraprocedural `known_unequal` (two live in-edges) cannot.
+#[test]
+fn known_unequal_in_gains_from_pruned_predecessor() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let g = ssa.add_function("g".to_string());
+    let (p, d, e, eq) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let c_false = ssa.add_const(Constant::U(1, 0));
+    let (d0, e0) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let join = {
+        let hf = ssa.get_function_mut(g);
+        let side = hf.add_block();
+        let main_b = hf.add_block();
+        let then_b = hf.add_block();
+        let join = hf.add_block();
+        hf.get_entry_mut().push_parameter(p, Type::u(1));
+        hf.get_entry_mut().push_parameter(d, Type::u(32));
+        hf.get_entry_mut().push_parameter(e, Type::u(32));
+        hf.get_entry_mut().push_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: eq,
+            lhs: d,
+            rhs: e,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::JmpIf(p, side, main_b));
+        // `side` is `join`'s second predecessor; it dies once a context pins `p = false`.
+        hf.get_block_mut(side)
+            .set_terminator(Terminator::Jmp(join, vec![]));
+        hf.get_block_mut(main_b)
+            .set_terminator(Terminator::JmpIf(eq, then_b, join));
+        hf.get_block_mut(then_b)
+            .set_terminator(Terminator::Return(vec![]));
+        hf.get_block_mut(join)
+            .set_terminator(Terminator::Return(vec![]));
+        join
+    };
+    {
+        let mf = ssa.get_function_mut(main_id);
+        let entry = mf.get_entry_mut();
+        entry.push_parameter(d0, Type::u(32));
+        entry.push_parameter(e0, Type::u(32));
+        entry.push_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(g),
+            args: vec![c_false, d0, e0],
+            unconstrained: false,
+        });
+        entry.set_terminator(Terminator::Return(vec![]));
+    }
+
+    let cc = run_in_test(&ssa);
+    let ctx = sole_context(&cc, g);
+
+    // Intraprocedurally `join` has two live in-edges (`side` and the false edge): no diseq.
+    assert!(!cc.known_unequal(g, join, d, e));
+    // The context pins `p = false`, killing `side`: the false edge becomes `join`'s sole
+    // executable in-edge, and the disequality appears.
+    assert!(cc.known_unequal_in(g, &ctx, join, d, e));
+}
+
+/// An assert pinning a value to an *aggregate* constant contributes no conditional fact: `Blob`
+/// constants are never surfaced (the module "Aggregate Folding" contract), so the pin enters
+/// neither the assert-const channel — whose consumers materialise the constant — nor the eq
+/// channel, whose pairs must be constant-free.
+#[test]
+fn asserted_const_never_aggregate() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let c0 = ssa.add_const(Constant::U(32, 10));
+    let c1 = ssa.add_const(Constant::U(32, 20));
+    let (x, s) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let after = f.add_block();
+    f.get_entry_mut().push_parameter(x, Type::u(32).array_of(2));
+    let entry = f.get_entry_mut();
+    // `s` aggregate-folds to a lattice `Const(Blob)`, so the assert pins `x` to a Blob.
+    entry.push_instruction(OpCode::MkSeq {
+        result: s,
+        elems: vec![c0, c1],
+        seq_type: SequenceTargetType::Array(2),
+        elem_type: Type::u(32),
+    });
+    entry.push_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: s,
+    });
+    entry.set_terminator(Terminator::Jmp(after, vec![]));
+    f.get_block_mut(after)
+        .set_terminator(Terminator::Return(vec![]));
+
+    let cc = run_in_test(&ssa);
+    let pp = ProgramPoint::new(after, 0);
+
+    // The Blob must not surface through the conditional channel...
+    assert_eq!(cc.asserted_const(main_id, pp, x), None);
+    // ...nor reroute into the eq channel as a constant-sided pair.
+    assert!(!cc.asserted_equal(main_id, pp, x, s));
+}
+
+/// The per-context analog: a callee parameter seeded with the caller's constant-aggregate argument
+/// pins the asserted side to a `Blob` in that context. The pin is dropped there too — per context
+/// the assert contributes *no* fact at all (the intraprocedural eq view keeps the pair), one of the
+/// fact-losing directions the impl docs call out.
+#[test]
+fn asserted_const_in_never_aggregate() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let g = ssa.add_function("g".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 10));
+    let c1 = ssa.add_const(Constant::U(32, 20));
+    let (a, x) = (ssa.fresh_value(), ssa.fresh_value());
+    let (s, y) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let after = {
+        let hf = ssa.get_function_mut(g);
+        let after = hf.add_block();
+        hf.get_entry_mut()
+            .push_parameter(a, Type::u(32).array_of(2));
+        hf.get_entry_mut()
+            .push_parameter(x, Type::u(32).array_of(2));
+        hf.get_entry_mut().push_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: a,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Jmp(after, vec![]));
+        hf.get_block_mut(after)
+            .set_terminator(Terminator::Return(vec![]));
+        after
+    };
+    {
+        let mf = ssa.get_function_mut(main_id);
+        let entry = mf.get_entry_mut();
+        entry.push_parameter(y, Type::u(32).array_of(2));
+        entry.push_instruction(OpCode::MkSeq {
+            result: s,
+            elems: vec![c0, c1],
+            seq_type: SequenceTargetType::Array(2),
+            elem_type: Type::u(32),
+        });
+        entry.push_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(g),
+            args: vec![s, y],
+            unconstrained: false,
+        });
+        entry.set_terminator(Terminator::Return(vec![]));
+    }
+
+    let cc = run_in_test(&ssa);
+    let ctx = sole_context(&cc, g);
+    let pp = ProgramPoint::new(after, 0);
+
+    // Intraprocedurally both sides are opaque: an ordinary asserted equality.
+    assert!(cc.asserted_equal(g, pp, x, a));
+    assert_eq!(cc.asserted_const(g, pp, x), None);
+    // In the context `a` is a Blob: the pin surfaces through no per-context channel.
+    assert_eq!(cc.asserted_const_in(g, &ctx, pp, x), None);
+    assert!(!cc.asserted_equal_in(g, &ctx, pp, x, a));
+}
+
+/// When the *asserted* side itself becomes a per-context constant, the fact leaves
+/// `asserted_const_in` — but only because it migrated to the strictly stronger *unconditional*
+/// per-context channel, where `const_of_in` answers it without any constraint-preservation proviso.
+/// Nothing is lost; the documented "no pointwise inclusion" is this migration.
+#[test]
+fn asserted_const_migrates_to_unconditional_channel() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let g = ssa.add_function("g".to_string());
+    let x = ssa.fresh_value();
+    let c7 = ssa.add_const(Constant::Field(Field::from(7u64)));
+
+    let after = {
+        let hf = ssa.get_function_mut(g);
+        let after = hf.add_block();
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: c7,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Jmp(after, vec![]));
+        hf.get_block_mut(after)
+            .set_terminator(Terminator::Return(vec![]));
+        after
+    };
+    {
+        let mf = ssa.get_function_mut(main_id);
+        let entry = mf.get_entry_mut();
+        entry.push_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(g),
+            args: vec![c7],
+            unconstrained: false,
+        });
+        entry.set_terminator(Terminator::Return(vec![]));
+    }
+
+    let cc = run_in_test(&ssa);
+    let ctx = sole_context(&cc, g);
+    let pp = ProgramPoint::new(after, 0);
+
+    // Intraprocedurally `x` is opaque, so the assert pins it conditionally.
+    assert_eq!(
+        cc.asserted_const(g, pp, x).as_deref(),
+        Some(&Constant::Field(Field::from(7u64)))
+    );
+    // In the context the seed already proves `x = 7` unconditionally: the conditional entry is
+    // gone...
+    assert_eq!(cc.asserted_const_in(g, &ctx, pp, x), None);
+    // ...because the unconditional channel now carries it.
+    assert_eq!(
+        cc.const_of_in(g, &ctx, x).as_deref(),
+        Some(&Constant::Field(Field::from(7u64)))
+    );
+}
+
+/// A per-context constant can *split* an intraprocedurally-proven congruence. Intraprocedurally
+/// `x = call g(a)` is value-numbered equal to `y = a*3` via `g`'s grafted symbolic return, the
+/// writeback folds the `x == y` branch, and the else arm is dead — its forward never gathered. Per
+/// context `a = 5` folds `y` to a constant, whose `Const` label replaces the structural one, while
+/// the call result `x` (lattice-opaque) keeps its `Op` class: the classes split, the branch stays
+/// live, and the forward appears in `witness_forward_in` only. Reachability-derived facts can thus
+/// flow in the *growing* direction per context — the reason the impl docs promise no inclusion
+/// between the two views in either direction.
+#[test]
+fn context_constant_can_split_congruence() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+    let g = ssa.add_function("g".to_string());
+    let c3 = ssa.add_const(Constant::Field(Field::from(3u64)));
+    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+    let (p, m) = (ssa.fresh_value(), ssa.fresh_value());
+    let (a, w, x, y, eq, r) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let w0 = ssa.fresh_value();
+
+    // g(p) { return p * 3 } — pure, so its symbolic return `Mul(Param0, 3)` grafts.
+    {
+        let hf = ssa.get_function_mut(g);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(p, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: m,
+            lhs: p,
+            rhs: c3,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![m]));
+    }
+    // f(a, w) { x = g(a); y = a*3; if x == y { } else { r = write_witness(w) } }
+    {
+        let hf = ssa.get_function_mut(f);
+        let then_b = hf.add_block();
+        let else_b = hf.add_block();
+        let after = hf.add_block();
+        hf.get_entry_mut().push_parameter(a, Type::field());
+        hf.get_entry_mut().push_parameter(w, Type::u(32));
+        hf.get_entry_mut().push_instruction(OpCode::Call {
+            results: vec![x],
+            function: CallTarget::Static(g),
+            args: vec![a],
+            unconstrained: false,
+        });
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: y,
+            lhs: a,
+            rhs: c3,
+        });
+        hf.get_entry_mut().push_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: eq,
+            lhs: x,
+            rhs: y,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::JmpIf(eq, then_b, else_b));
+        hf.get_block_mut(then_b)
+            .set_terminator(Terminator::Jmp(after, vec![]));
+        hf.get_block_mut(else_b)
+            .push_instruction(OpCode::WriteWitness {
+                result: Some(r),
+                value: w,
+                pinned: false,
+            });
+        hf.get_block_mut(else_b)
+            .set_terminator(Terminator::Jmp(after, vec![]));
+        hf.get_block_mut(after)
+            .set_terminator(Terminator::Return(vec![]));
+    }
+    {
+        let mf = ssa.get_function_mut(main_id);
+        let entry = mf.get_entry_mut();
+        entry.push_parameter(w0, Type::u(32));
+        entry.push_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(f),
+            args: vec![c5, w0],
+            unconstrained: false,
+        });
+        entry.set_terminator(Terminator::Return(vec![]));
+    }
+
+    let cc = run_in_test(&ssa);
+    let ctx = sole_context(&cc, f);
+
+    // Intraprocedurally the sym graft proves `x ≡ y`, the branch folds, the else arm dies: no
+    // forward.
+    assert!(cc.known_equal(f, x, y));
+    assert!(cc.witness_forward(f, r).is_empty());
+    // Per context `y` is `Const(15)` while `x` stays opaque: the congruence splits, the else arm
+    // is live, and the forward exists only in the per-context view.
+    assert!(!cc.known_equal_in(f, &ctx, x, y));
+    assert_eq!(cc.witness_forward_in(f, &ctx, r), [w].as_slice());
 }
 
 /// Two call sites of one helper get distinct contexts with distinct per-context parameter
@@ -2381,7 +3308,7 @@ fn cmp_lt_of_congruent_operands_folds_false() {
 /// A comparison of congruent operands folds to a constant `true` even when it is *witnessed*
 /// (its result is `WitnessOf`-typed, as emitted by witness spilling / AD lowering) — the
 /// must-equal fact holds either way. Keeping the substituted constant witness-typed is the
-/// consumer's job; see the SCCP test `witnessed_constant_is_cast_to_witness_of`.
+/// consumer's job; see the SCS test `witnessed_constant_is_cast_to_witness_of`.
 #[test]
 fn witnessed_comparison_of_congruent_operands_is_promoted() {
     let mut ssa = HLSSA::with_main("main".to_string());
@@ -2416,7 +3343,7 @@ fn witnessed_comparison_of_congruent_operands_is_promoted() {
     let cc = run_in_test(&ssa);
 
     // Both compare congruent (identical) operands, so both fold to `true` — the witnessed one
-    // too. (SCCP then keeps `ww` witness-typed via a cast; the analysis fact is the same.)
+    // too. (SCS then keeps `ww` witness-typed via a cast; the analysis fact is the same.)
     assert!(cc.known_equal(fid, w, w));
     assert!(cc.known_equal(fid, n, n));
     assert_eq!(cc.const_of(fid, ww).as_deref(), Some(&Constant::U(1, 1)));
@@ -2862,4 +3789,645 @@ fn aggregate_folding_refuses_oob_set_and_over_cap_constructors() {
     assert_eq!(cc.const_of(fid, at_set_oob), None);
     assert_eq!(cc.const_of(fid, at_pushed), None);
     assert_eq!(cc.const_of(fid, at_big), None);
+}
+
+// SYMBOLIC INTERPROCEDURAL CONGRUENCE
+// ================================================================================================
+
+/// A symbolic return jump ignores an argument the return does not use: `f(x, y) = x + 1` makes
+/// `f(a, c)` and `f(a, d)` congruent even when `c ≢ d` (which the whole-argument `CallDet`
+/// numbering cannot see), while a call differing in the *used* argument stays distinct.
+#[test]
+fn symbolic_jump_ignores_dead_argument() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+    let c1 = ssa.add_const(Constant::Field(Field::from(1u64)));
+    let (x, y, fa) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    // f(x, y) = x + 1  (y is dead).
+    {
+        let hf = ssa.get_function_mut(f);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_parameter(y, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: fa,
+            lhs: x,
+            rhs: c1,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![fa]));
+    }
+
+    let (a, b, c, d) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let (r1, r2, r3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        mf.get_entry_mut().push_parameter(b, Type::field());
+        mf.get_entry_mut().push_parameter(c, Type::field());
+        mf.get_entry_mut().push_parameter(d, Type::field());
+        let entry = mf.get_entry_mut();
+        for (res, args) in [(r1, vec![a, c]), (r2, vec![a, d]), (r3, vec![b, c])] {
+            entry.push_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(f),
+                args,
+                unconstrained: false,
+            });
+        }
+        entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
+    }
+
+    let cc = run_in_test(&ssa);
+    assert!(cc.known_equal(main_id, r1, r2)); // dead 2nd arg ⇒ congruent
+    assert!(!cc.known_equal(main_id, r1, r3)); // distinct 1st arg ⇒ distinct
+}
+
+/// A symbolic return jump relates a call result to an *open expression* over the caller's values:
+/// `f(x) = x + 5` makes `f(a)` congruent to a caller-local `a + 5` (which the opaque per-callee
+/// `CallDet` node cannot), and not to `a + 6`. The call result still stays `Bottom` in the lattice,
+/// so the SCS contract (the `eval_call` constant channel untouched) holds.
+#[test]
+fn symbolic_jump_relates_call_to_open_expression() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+    let c6 = ssa.add_const(Constant::Field(Field::from(6u64)));
+    let (x, fa) = (ssa.fresh_value(), ssa.fresh_value());
+
+    // f(x) = x + 5
+    {
+        let hf = ssa.get_function_mut(f);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: fa,
+            lhs: x,
+            rhs: c5,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![fa]));
+    }
+
+    let a = ssa.fresh_value();
+    let (r, w, w2) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        let entry = mf.get_entry_mut();
+        entry.push_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(f),
+            args: vec![a],
+            unconstrained: false,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: w,
+            lhs: a,
+            rhs: c5,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: w2,
+            lhs: a,
+            rhs: c6,
+        });
+        entry.set_terminator(Terminator::Return(vec![r]));
+    }
+
+    let cc = run_in_test(&ssa);
+    assert!(cc.known_equal(main_id, r, w)); // r ≡ a + 5
+    assert!(!cc.known_equal(main_id, r, w2)); // r ≢ a + 6
+    // The call result is never folded into the constant lattice (Bottom contract).
+    assert_eq!(cc.const_of(main_id, r), None);
+    assert!(cc.new_const_values(main_id).iter().all(|(v, _)| *v != r));
+}
+
+/// A two-level return expression grafts through a synthetic intermediate node: `f(x) = (x + 5) * 2`
+/// makes `f(a)` congruent to a caller-local `(a + 5) * 2`. The synthetic scaffolding is stripped,
+/// so it never reaches a congruence class or `compute_leaders` (which would otherwise treat a
+/// def-less id as an illegal leader).
+#[test]
+fn symbolic_jump_depth_two_grafts_via_synthetic() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+    let c2 = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let (x, ft, fa) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    // f(x) = (x + 5) * 2
+    {
+        let hf = ssa.get_function_mut(f);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: ft,
+            lhs: x,
+            rhs: c5,
+        });
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: fa,
+            lhs: ft,
+            rhs: c2,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![fa]));
+    }
+
+    let a = ssa.fresh_value();
+    let (r, wt, w) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        let entry = mf.get_entry_mut();
+        entry.push_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(f),
+            args: vec![a],
+            unconstrained: false,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: wt,
+            lhs: a,
+            rhs: c5,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: w,
+            lhs: wt,
+            rhs: c2,
+        });
+        entry.set_terminator(Terminator::Return(vec![r]));
+    }
+
+    let cc = run_in_test(&ssa);
+    assert!(cc.known_equal(main_id, r, w)); // r ≡ (a + 5) * 2
+
+    // `r`'s class is exactly `{r, w}` — no synthetic id leaked in.
+    let mut r_class = cc.congruence_class(main_id, r);
+    r_class.sort();
+    let mut expected = vec![r, w];
+    expected.sort();
+    assert_eq!(r_class, expected);
+
+    // The grafted inner `Add(a, 5)` is congruent to the real `wt`, but the synthetic that carried
+    // it was stripped, so `wt`'s class is `{wt}` alone and its leader is a real, def-dominating
+    // value.
+    assert_eq!(cc.congruence_class(main_id, wt), vec![wt]);
+    assert_eq!(cc.leader(main_id, wt), Some(wt));
+    let leader = cc.leader(main_id, r).expect("r is in a class");
+    assert!(leader == r || leader == w);
+}
+
+/// The dead-argument win survives a two-level return: `f(x, y) = (x + 5) * 2` (y dead) makes
+/// `f(a, c) ≡ f(a, d)` — the case a depth-1-only graft would lose by falling back to
+/// `CallDet[x, y]`.
+#[test]
+fn symbolic_jump_dead_argument_behind_depth_two() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+    let c2 = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let (x, y, ft, fa) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    // f(x, y) = (x + 5) * 2  (y is dead).
+    {
+        let hf = ssa.get_function_mut(f);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_parameter(y, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: ft,
+            lhs: x,
+            rhs: c5,
+        });
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: fa,
+            lhs: ft,
+            rhs: c2,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![fa]));
+    }
+
+    let (a, b, c, d) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let (r1, r2, r3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        mf.get_entry_mut().push_parameter(b, Type::field());
+        mf.get_entry_mut().push_parameter(c, Type::field());
+        mf.get_entry_mut().push_parameter(d, Type::field());
+        let entry = mf.get_entry_mut();
+        for (res, args) in [(r1, vec![a, c]), (r2, vec![a, d]), (r3, vec![b, c])] {
+            entry.push_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(f),
+                args,
+                unconstrained: false,
+            });
+        }
+        entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
+    }
+
+    let cc = run_in_test(&ssa);
+    assert!(cc.known_equal(main_id, r1, r2)); // dead 2nd arg, two levels deep ⇒ still congruent
+    assert!(!cc.known_equal(main_id, r1, r3)); // distinct 1st arg ⇒ distinct
+}
+
+/// A return deeper than the depth cap is not symbolically expressed (`Sym = None`), so the call
+/// falls back to `CallDet`: two identical calls stay congruent and a distinct argument does not,
+/// but the result is *not* related to the caller-local full expression.
+#[test]
+fn symbolic_jump_depth_over_cap_falls_back_to_calldet() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+    let c1 = ssa.add_const(Constant::Field(Field::from(1u64)));
+    let c2 = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let c3 = ssa.add_const(Constant::Field(Field::from(3u64)));
+    let (x, ft, fu, fa) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    // f(x) = ((x + 1) * 2) + 3  (depth 3, over the cap).
+    {
+        let hf = ssa.get_function_mut(f);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: ft,
+            lhs: x,
+            rhs: c1,
+        });
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: fu,
+            lhs: ft,
+            rhs: c2,
+        });
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: fa,
+            lhs: fu,
+            rhs: c3,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![fa]));
+    }
+
+    let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
+    let (r1, r2, r3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let (wt, wu, w) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        mf.get_entry_mut().push_parameter(b, Type::field());
+        let entry = mf.get_entry_mut();
+        for (res, arg) in [(r1, a), (r2, a), (r3, b)] {
+            entry.push_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(f),
+                args: vec![arg],
+                unconstrained: false,
+            });
+        }
+        // The caller-local `((a + 1) * 2) + 3`.
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: wt,
+            lhs: a,
+            rhs: c1,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: wu,
+            lhs: wt,
+            rhs: c2,
+        });
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: w,
+            lhs: wu,
+            rhs: c3,
+        });
+        entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
+    }
+
+    let cc = run_in_test(&ssa);
+    assert!(cc.known_equal(main_id, r1, r2)); // CallDet still fires for identical args
+    assert!(!cc.known_equal(main_id, r1, r3)); // distinct arg ⇒ distinct
+    assert!(!cc.known_equal(main_id, r1, w)); // no symbolic graft past the depth cap
+}
+
+/// A return that flows through a nested call is opaque at a single interprocedural level
+/// (`Sym = None`), falling back to `CallDet`: `g(x) = h(x) + 1` numbers identical calls congruent
+/// and a distinct argument distinct, but does not graft the open expression.
+#[test]
+fn symbolic_jump_nested_call_falls_back_to_calldet() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let h = ssa.add_function("h".to_string());
+    let g = ssa.add_function("g".to_string());
+    let c1 = ssa.add_const(Constant::Field(Field::from(1u64)));
+
+    let (hx, hr) = (ssa.fresh_value(), ssa.fresh_value());
+    // h(x) = x + 1
+    {
+        let hf = ssa.get_function_mut(h);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(hx, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: hr,
+            lhs: hx,
+            rhs: c1,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![hr]));
+    }
+
+    let (gx, gc, ga) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    // g(x) = h(x) + 1
+    {
+        let gf = ssa.get_function_mut(g);
+        gf.add_return_type(Type::field());
+        gf.get_entry_mut().push_parameter(gx, Type::field());
+        gf.get_entry_mut().push_instruction(OpCode::Call {
+            results: vec![gc],
+            function: CallTarget::Static(h),
+            args: vec![gx],
+            unconstrained: false,
+        });
+        gf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: ga,
+            lhs: gc,
+            rhs: c1,
+        });
+        gf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![ga]));
+    }
+
+    let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
+    let (r1, r2, r3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        mf.get_entry_mut().push_parameter(b, Type::field());
+        let entry = mf.get_entry_mut();
+        for (res, arg) in [(r1, a), (r2, a), (r3, b)] {
+            entry.push_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(g),
+                args: vec![arg],
+                unconstrained: false,
+            });
+        }
+        entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
+    }
+
+    let cc = run_in_test(&ssa);
+    assert!(cc.known_equal(main_id, r1, r2)); // CallDet fallback: identical args congruent
+    assert!(!cc.known_equal(main_id, r1, r3)); // distinct arg ⇒ distinct
+}
+
+/// Commutativity is carried verbatim from `op_signature`: a non-commutative `f(x, y) = x - y` does
+/// not equate `f(a, b)` with `f(b, a)` (which an unsound commute would), while identical calls
+/// match.
+#[test]
+fn symbolic_jump_preserves_noncommutativity() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+    let (x, y, fa) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    // f(x, y) = x - y
+    {
+        let hf = ssa.get_function_mut(f);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_parameter(y, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Sub,
+            result: fa,
+            lhs: x,
+            rhs: y,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![fa]));
+    }
+
+    let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
+    let (r1, r2, r3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        mf.get_entry_mut().push_parameter(b, Type::field());
+        let entry = mf.get_entry_mut();
+        for (res, args) in [(r1, vec![a, b]), (r2, vec![b, a]), (r3, vec![a, b])] {
+            entry.push_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(f),
+                args,
+                unconstrained: false,
+            });
+        }
+        entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
+    }
+
+    let cc = run_in_test(&ssa);
+    assert!(!cc.known_equal(main_id, r1, r2)); // x - y ≢ y - x
+    assert!(cc.known_equal(main_id, r1, r3)); // same operand order ⇒ congruent
+}
+
+/// A return mixing a formal with a fresh witness is not a pure function of the formals: `build_sym`
+/// bails on the witness operand (`Sym = None`) and, being non-deterministic, the return is not
+/// `CallDet`-numbered either, so two such calls stay distinct.
+#[test]
+fn symbolic_jump_witness_operand_is_not_grafted() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+    let (x, wit, fa) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    // f(x) = x + witness
+    {
+        let hf = ssa.get_function_mut(f);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::FreshWitness {
+            result: wit,
+            result_type: Type::field(),
+        });
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: fa,
+            lhs: x,
+            rhs: wit,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![fa]));
+    }
+
+    let a = ssa.fresh_value();
+    let (r1, r2) = (ssa.fresh_value(), ssa.fresh_value());
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        let entry = mf.get_entry_mut();
+        for res in [r1, r2] {
+            entry.push_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(f),
+                args: vec![a],
+                unconstrained: false,
+            });
+        }
+        entry.set_terminator(Terminator::Return(vec![r1, r2]));
+    }
+
+    let cc = run_in_test(&ssa);
+    assert!(!cc.known_equal(main_id, r1, r2)); // witness in return ⇒ neither grafted nor CallDet
+}
+
+/// A grafted return that names a *callee-only* constant must not produce a false congruence by
+/// minting its synthetic scaffolding onto a real value's id.
+#[test]
+fn symbolic_jump_synthetic_does_not_collide_with_callee_only_constant() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let f = ssa.add_function("f".to_string());
+
+    // Caller-side constants used to *synthesize* Field(5) without naming the callee-only constant,
+    // so the caller has a value in `C`'s constant class without referencing `C`'s id.
+    let two = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let three = ssa.add_const(Constant::Field(Field::from(3u64)));
+
+    // `f`'s formal, then every caller value — all minted before the callee-only constant so its id
+    // is exactly one above the caller's local maximum (the single-synthetic window).
+    let x = ssa.fresh_value();
+    let a = ssa.fresh_value();
+    let v = ssa.fresh_value();
+    let w = ssa.fresh_value();
+    let r = ssa.fresh_value();
+
+    // The callee-only constant, interned last. Field(5) so the caller's `2 + 3` folds into its
+    // class.
+    let c = ssa.add_const(Constant::Field(Field::from(5u64)));
+
+    // `f`'s internal op results.
+    let (ft, fa) = (ssa.fresh_value(), ssa.fresh_value());
+
+    // Precondition: `c` sits exactly where a local-max-upward synthetic counter would mint its
+    // first synthetic. The downward allocator avoids it, but this positioning keeps the test a live
+    // regression guard against reverting to the buggy scheme. If id allocation ever shifts, it fails
+    // loudly rather than silently no longer exercising the collision.
+    assert_eq!(c.0, r.0 + 1);
+
+    // f(x) = x + (x * C)
+    {
+        let hf = ssa.get_function_mut(f);
+        hf.add_return_type(Type::field());
+        hf.get_entry_mut().push_parameter(x, Type::field());
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: ft,
+            lhs: x,
+            rhs: c,
+        });
+        hf.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: fa,
+            lhs: x,
+            rhs: ft,
+        });
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![fa]));
+    }
+
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.add_return_type(Type::field());
+        mf.add_return_type(Type::field());
+        mf.get_entry_mut().push_parameter(a, Type::field());
+        let entry = mf.get_entry_mut();
+        // v = 2 + 3, which folds to Field(5) — the same constant class as `c`.
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: v,
+            lhs: two,
+            rhs: three,
+        });
+        // r = f(a)
+        entry.push_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(f),
+            args: vec![a],
+            unconstrained: false,
+        });
+        // w = a + v, a genuine `a + 5`.
+        entry.push_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: w,
+            lhs: a,
+            rhs: v,
+        });
+        entry.set_terminator(Terminator::Return(vec![r, w]));
+    }
+
+    let cc = run_in_test(&ssa);
+    // f(a) = a + a*5, never a + 5, so `r` must not be congruent to `w`.
+    assert!(!cc.known_equal(main_id, r, w));
 }
