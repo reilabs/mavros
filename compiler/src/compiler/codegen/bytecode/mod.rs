@@ -1045,8 +1045,10 @@ impl CodeGen {
                     let slice_type = type_info.get_value_type(*sl);
                     let elem_type = slice_type.get_array_element();
                     let stride = layouter.type_size(&elem_type);
-                    let value_positions =
-                        vals.iter().map(|v| layouter.get_value(*v)).collect::<Vec<_>>();
+                    let value_positions = vals
+                        .iter()
+                        .map(|v| layouter.get_value(*v))
+                        .collect::<Vec<_>>();
                     let is_push_front = matches!(dir, hlssa::SliceOpDir::Front) as usize;
                     emitter.push_op(bytecode::OpCode::SlicePush {
                         res,

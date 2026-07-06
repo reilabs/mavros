@@ -549,19 +549,31 @@ impl BoxedValue {
         }
     }
 
-    pub fn alloc_grown_slice(&self, extra_space_needed: usize, is_push_front: usize, vm: &mut VM) -> Self {
+    pub fn alloc_grown_slice(
+        &self,
+        extra_space_needed: usize,
+        is_push_front: usize,
+        vm: &mut VM,
+    ) -> Self {
         let layout = self.layout();
         let current_space = layout.array_size();
         let is_boxed = layout.data_type() == DataType::BoxedArray;
 
-        let new_array = BoxedValue::alloc(BoxedLayout::array(current_space + extra_space_needed, is_boxed), vm);
+        let new_array = BoxedValue::alloc(
+            BoxedLayout::array(current_space + extra_space_needed, is_boxed),
+            vm,
+        );
         let existing_data_offset = if is_push_front != 0 {
             extra_space_needed
         } else {
             0
         };
         unsafe {
-            ptr::copy_nonoverlapping(self.data(), new_array.data().add(existing_data_offset), current_space);
+            ptr::copy_nonoverlapping(
+                self.data(),
+                new_array.data().add(existing_data_offset),
+                current_space,
+            );
         }
 
         let rc = self.rc();
