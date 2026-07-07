@@ -268,7 +268,7 @@ impl FnBuilder<'_> {
         let ty = ty.peel_witness();
         match &ty.expr {
             TypeExpr::Ref(_) => out.push(prefix.clone()),
-            TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
+            TypeExpr::Array(inner, _) | TypeExpr::Slice { elem: inner, .. } => {
                 let cells = if top_array_level {
                     self.elem_cells(value)
                 } else {
@@ -783,7 +783,7 @@ fn collect_ref_levels(ty: &Type, prefix: &mut Path, out: &mut Vec<Path>) {
     let ty = ty.peel_witness();
     match &ty.expr {
         TypeExpr::Ref(_) => out.push(prefix.clone()),
-        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
+        TypeExpr::Array(inner, _) | TypeExpr::Slice { elem: inner, .. } => {
             prefix.push(Descent::Elem(Cell::AllElems));
             collect_ref_levels(inner, prefix, out);
             prefix.pop();

@@ -128,7 +128,7 @@ fn lower_map(
             );
             results[0]
         }
-        TypeExpr::Slice(elem_src) => {
+        TypeExpr::Slice { elem: elem_src, .. } => {
             let elem_tgt = inner.result_type(elem_src);
             let len = e.slice_len(value);
             let empty = e.mk_seq(Vec::new(), SequenceTargetType::Slice, elem_tgt.clone());

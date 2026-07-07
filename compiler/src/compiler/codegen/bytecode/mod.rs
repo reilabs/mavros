@@ -1748,7 +1748,7 @@ fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {
             );
             (1, bytecode::ELEM_WITNESS)
         }
-        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => lookup_elem_kind(inner),
+        TypeExpr::Array(inner, _) | TypeExpr::Slice { elem: inner, .. } => lookup_elem_kind(inner),
         _ => panic!("Unsupported array element type in lookup: {elem_type}"),
     }
 }

@@ -782,7 +782,7 @@ fn go_shape_from(
         | TypeExpr::I(_)
         | TypeExpr::Function
         | TypeExpr::Blob(..) => WitnessShape::Scalar(info),
-        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
+        TypeExpr::Array(inner, _) | TypeExpr::Slice { elem: inner, .. } => {
             path.push(Descent::Elem);
             let c = go_shape_from(owner, path, inner, witness, read);
             path.pop();

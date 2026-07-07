@@ -57,7 +57,7 @@ fn emit_select(
             b.select(cond, lhs, rhs)
         }
         TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
-        TypeExpr::Slice(_) => panic!("Witness select on Slice type not supported"),
+        TypeExpr::Slice { .. } => panic!("Witness select on Slice type not supported"),
         TypeExpr::Function => panic!("Witness select on Function type not supported"),
         TypeExpr::Blob(..) => panic!("Witness select on Blob type not supported"),
     }

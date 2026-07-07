@@ -944,7 +944,7 @@ impl RCInsertion {
         match &value_type.expr {
             TypeExpr::Ref(_) => true,
             TypeExpr::Array(_, _) => true,
-            TypeExpr::Slice(_) => true,
+            TypeExpr::Slice { .. } => true,
             TypeExpr::Field => false,
             TypeExpr::U(_) => false,
             TypeExpr::I(_) => false,
