@@ -1152,6 +1152,7 @@ impl Specializer {
         specialized_id: FunctionId,
         unspecialized_id: FunctionId,
     ) -> HLFunction {
+        let location = SourceLocation::synthetic(&fn_name);
         let mut dispatcher = HLFunction::empty(fn_name);
         let entry_block = dispatcher.get_entry_id();
 
@@ -1172,7 +1173,7 @@ impl Specializer {
         let mut specialized_params = vec![];
         let should_call_spec;
         {
-            let mut entry = b.block(entry_block);
+            let mut entry = b.block(entry_block).with_source_location(location.clone());
             let mut cond = entry.u_const(1, 1);
 
             for (pval, psig) in dispatcher_params.iter().zip(signature.get_params().iter()) {
@@ -1229,14 +1230,16 @@ impl Specializer {
         });
 
         {
-            let mut cb = b.block(unspecialized_caller);
+            let mut cb = b
+                .block(unspecialized_caller)
+                .with_source_location(location.clone());
             let unspecialized_returns =
                 cb.call(unspecialized_id, dispatcher_params, return_values.len());
             cb.terminate_jmp(return_block, unspecialized_returns);
         }
 
         {
-            let mut cb = b.block(specialized_caller);
+            let mut cb = b.block(specialized_caller).with_source_location(location);
             let specialized_returns =
                 cb.call(specialized_id, specialized_params, return_values.len());
             cb.terminate_jmp(return_block, specialized_returns);
