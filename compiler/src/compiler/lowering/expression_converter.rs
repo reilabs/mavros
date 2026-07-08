@@ -31,6 +31,7 @@ use crate::{
 struct LoopContext {
     loop_header: BlockId,
     exit_block: BlockId,
+    source_location: SourceLocation,
     /// Only for `for` loops — (index_value, bit_size), used by Continue to increment.
     for_loop_index: Option<(ValueId, usize)>,
 }
@@ -76,11 +77,6 @@ pub struct ExpressionConverter<'a> {
 
     /// Memoized user-facing source paths keyed by Noir file id.
     source_files: RefCell<HashMap<FileId, Arc<str>>>,
-
-    /// The most recently resolved source location, used as the location for emitted instructions
-    /// that have no Noir location of their own (e.g. the loop-index increment a `continue`
-    /// desugars to).
-    last_location: Option<SourceLocation>,
 }
 
 impl<'a> ExpressionConverter<'a> {
@@ -106,7 +102,6 @@ impl<'a> ExpressionConverter<'a> {
             current_block: entry_block,
             file_manager,
             source_files: RefCell::new(HashMap::default()),
-            last_location: None,
         }
     }
 
@@ -125,22 +120,33 @@ impl<'a> ExpressionConverter<'a> {
             .emit_with_location(source_location, emit)
     }
 
+    fn emit_at_source_location<R>(
+        &mut self,
+        b: &mut HLFunctionBuilder<'_>,
+        source_location: SourceLocation,
+        emit: impl FnOnce(&mut HLBlockEmitter<'_>) -> R,
+    ) -> R {
+        b.block(self.current_block)
+            .emit_with_location(source_location, emit)
+    }
+
     /// Turn an optional Noir location into a definite `SourceLocation`.
-    ///
-    /// Locationless desugared instructions (loop-index increments, unit tuples, …) inherit the
-    /// most recently resolved location, which is the enclosing expression in practice; if nothing
-    /// has been resolved yet, they get a synthetic lowering location.
-    fn resolve_location(&mut self, location: Option<NoirLocation>) -> SourceLocation {
-        let source_location = location
+    fn resolve_location(&self, location: Option<NoirLocation>) -> SourceLocation {
+        self.source_location_or_synthetic(location, "lowering")
+    }
+
+    fn source_location_or_synthetic(
+        &self,
+        location: Option<NoirLocation>,
+        synthetic_origin: impl AsRef<str>,
+    ) -> SourceLocation {
+        location
             .and_then(|location| self.source_location(location))
-            .or_else(|| self.last_location.clone())
-            .unwrap_or_else(|| SourceLocation::synthetic("lowering"));
-        self.last_location = Some(source_location.clone());
-        source_location
+            .unwrap_or_else(|| SourceLocation::synthetic(synthetic_origin))
     }
 
     /// The definite source location of `expr`, for callers that emit on the converter's behalf.
-    pub(super) fn expression_source_location(&mut self, expr: &Expression) -> SourceLocation {
+    pub(super) fn expression_source_location(&self, expr: &Expression) -> SourceLocation {
         self.resolve_location(Self::expression_location(expr))
     }
 
@@ -307,13 +313,19 @@ impl<'a> ExpressionConverter<'a> {
                 None
             }
             Expression::Continue => {
-                let ctx = self.loop_stack.last().expect("continue outside of loop");
-                let loop_header = ctx.loop_header;
-                let for_loop_index = ctx.for_loop_index;
+                let (loop_header, for_loop_index, source_location) = {
+                    let ctx = self.loop_stack.last().expect("continue outside of loop");
+                    (
+                        ctx.loop_header,
+                        ctx.for_loop_index,
+                        ctx.source_location.clone(),
+                    )
+                };
                 if let Some((loop_index, index_bit_size)) = for_loop_index {
                     // For loop: increment index and jump back to header
                     let one = b.emit_const(Constant::U(index_bit_size, 1));
-                    let next_index = self.emit_located(b, None, |e| e.add(loop_index, one));
+                    let next_index = self
+                        .emit_at_source_location(b, source_location, |e| e.add(loop_index, one));
                     b.block(self.current_block)
                         .terminate_jmp(loop_header, vec![next_index]);
                 } else {
@@ -600,6 +612,8 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn convert_for(&mut self, for_expr: &For, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
+        let loop_location = self.resolve_location(Some(for_expr.start_range_location));
+
         // Evaluate start and end range in the current block
         let start = self.convert_expression(&for_expr.start_range, b).unwrap();
         let end_raw = self.convert_expression(&for_expr.end_range, b).unwrap();
@@ -648,6 +662,7 @@ impl<'a> ExpressionConverter<'a> {
         self.loop_stack.push(LoopContext {
             loop_header,
             exit_block,
+            source_location: loop_location,
             for_loop_index: Some((loop_index, index_bit_size)),
         });
 
@@ -679,6 +694,8 @@ impl<'a> ExpressionConverter<'a> {
         while_expr: &While,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
+        let loop_location = self.expression_source_location(&while_expr.condition);
+
         // Create blocks: loop_header evaluates condition, loop_body runs body, exit_block continues
         let loop_header = b.add_block(|_| {});
         let loop_body = b.add_block(|_| {});
@@ -699,6 +716,7 @@ impl<'a> ExpressionConverter<'a> {
         self.loop_stack.push(LoopContext {
             loop_header,
             exit_block,
+            source_location: loop_location,
             for_loop_index: None,
         });
 
@@ -724,6 +742,8 @@ impl<'a> ExpressionConverter<'a> {
         body: &Expression,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
+        let loop_location = self.expression_source_location(body);
+
         // loop { body } — only exits via break
         let loop_block = b.add_block(|_| {});
         let exit_block = b.add_block(|_| {});
@@ -737,6 +757,7 @@ impl<'a> ExpressionConverter<'a> {
         self.loop_stack.push(LoopContext {
             loop_header: loop_block,
             exit_block,
+            source_location: loop_location,
             for_loop_index: None,
         });
 
@@ -1154,7 +1175,9 @@ impl<'a> ExpressionConverter<'a> {
                 let elem_type = Type::u(8);
                 let elems = s.bytes().map(|byte| Constant::U(8, byte as u128)).collect();
                 let blob = b.emit_const(Constant::Blob(Blob::new(elem_type.clone(), elems)));
-                let arr = self.emit_located(b, None, |e| e.mk_seq_of_blob(elem_type, blob));
+                let location = SourceLocation::synthetic("str_literal");
+                let arr = self
+                    .emit_at_source_location(b, location, |e| e.mk_seq_of_blob(elem_type, blob));
                 Some(arr)
             }
             Literal::FmtStr(fragments, _count, captures) => {
@@ -1349,7 +1372,11 @@ impl<'a> ExpressionConverter<'a> {
     ) -> Option<ValueId> {
         if exprs.is_empty() {
             // Empty struct/tuple — still a value (e.g. A {})
-            return Some(self.emit_located(b, None, |e| e.mk_tuple(vec![], vec![])));
+            return Some(self.emit_at_source_location(
+                b,
+                SourceLocation::synthetic("empty_tuple"),
+                |e| e.mk_tuple(vec![], vec![]),
+            ));
         }
 
         // Convert each element to a single materialized value
