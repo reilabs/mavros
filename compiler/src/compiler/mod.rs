@@ -4,6 +4,7 @@ pub mod located;
 pub mod lowering;
 pub mod pass_manager;
 pub mod passes;
+pub mod purify_witness_slices;
 pub mod ssa;
 pub mod untaint_control_flow;
 pub mod util;

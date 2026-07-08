@@ -28,6 +28,7 @@ use crate::{
             llssa_to_llvm::WasmCompileOpts,
         },
         pass_manager::PassManager,
+        purify_witness_slices::PurifyWitnessSlices,
         passes::{
             arg_promotion::ArgPromotion,
             array_boundary_expansion::ArrayBoundaryExpansion,
@@ -325,6 +326,8 @@ impl Driver {
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),
             ssa.to_string(&witness_inference),
         );
+
+        let ssa = PurifyWitnessSlices::new().run(ssa, &witness_inference);
 
         let mut untaint_cf = UntaintControlFlow::new();
         self.monomorphized_ssa = Some(untaint_cf.run(ssa, &witness_inference));
