@@ -2414,16 +2414,15 @@ fn anticipated_const_folds_post_loop_use() {
         SourceLocation::test(),
     ));
     body_block.set_terminator(Terminator::Jmp(header, vec![v1]));
-    f.get_block_mut(after)
-        .push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: r,
-                lhs: v,
-                rhs: n,
-            },
-            SourceLocation::test(),
-        ));
+    f.get_block_mut(after).push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: r,
+            lhs: v,
+            rhs: n,
+        },
+        SourceLocation::test(),
+    ));
     f.get_block_mut(after)
         .set_terminator(Terminator::Jmp(tail, vec![]));
     f.get_block_mut(tail).push_instruction(Located::with(
@@ -2482,11 +2481,10 @@ fn bare_assert_over_cmp_chain_protected() {
         },
         SourceLocation::test(),
     ));
-    f.get_entry_mut()
-        .push_instruction(Located::with(
-            OpCode::Assert { value: w },
-            SourceLocation::test(),
-        ));
+    f.get_entry_mut().push_instruction(Located::with(
+        OpCode::Assert { value: w },
+        SourceLocation::test(),
+    ));
     f.get_entry_mut().push_instruction(Located::with(
         OpCode::AssertCmp {
             kind: CmpKind::Eq,

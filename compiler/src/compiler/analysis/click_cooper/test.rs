@@ -1872,15 +1872,14 @@ fn anticipated_const_in_gains_from_pinned_branch() {
         hf.get_entry_mut().push_parameter(x, Type::u(32));
         hf.get_entry_mut()
             .set_terminator(Terminator::JmpIf(p, then_b, else_b));
-        hf.get_block_mut(then_b)
-            .push_instruction(Located::with(
-                OpCode::AssertCmp {
-                    kind: CmpKind::Eq,
-                    lhs: x,
-                    rhs: c5,
-                },
-                SourceLocation::test(),
-            ));
+        hf.get_block_mut(then_b).push_instruction(Located::with(
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs: x,
+                rhs: c5,
+            },
+            SourceLocation::test(),
+        ));
         hf.get_block_mut(then_b)
             .set_terminator(Terminator::Jmp(merge, vec![]));
         hf.get_block_mut(else_b)
