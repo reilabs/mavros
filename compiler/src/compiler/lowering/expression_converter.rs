@@ -76,6 +76,11 @@ pub struct ExpressionConverter<'a> {
 
     /// Memoized user-facing source paths keyed by Noir file id.
     source_files: RefCell<HashMap<FileId, Arc<str>>>,
+
+    /// The most recently resolved source location, used as the location for emitted instructions
+    /// that have no Noir location of their own (e.g. the loop-index increment a `continue`
+    /// desugars to).
+    last_location: RefCell<Option<SourceLocation>>,
 }
 
 impl<'a> ExpressionConverter<'a> {
@@ -101,6 +106,7 @@ impl<'a> ExpressionConverter<'a> {
             current_block: entry_block,
             file_manager,
             source_files: RefCell::new(HashMap::default()),
+            last_location: RefCell::new(None),
         }
     }
 
@@ -115,10 +121,27 @@ impl<'a> ExpressionConverter<'a> {
         emit: impl FnOnce(&mut HLBlockEmitter<'_>) -> R,
     ) -> R {
         let mut e = b.block(self.current_block);
+        let source_location = self.resolve_location(location);
+        e.emit_with_location(source_location, emit)
+    }
+
+    /// Turn an optional Noir location into a definite `SourceLocation`.
+    ///
+    /// Locationless desugared instructions (loop-index increments, unit tuples, …) inherit the
+    /// most recently resolved location, which is the enclosing expression in practice; if nothing
+    /// has been resolved yet, they get a synthetic lowering location.
+    fn resolve_location(&self, location: Option<NoirLocation>) -> SourceLocation {
         let source_location = location
             .and_then(|location| self.source_location(location))
-            .expect("ICE: emitted SSA instruction without a source location");
-        e.emit_with_location(source_location, emit)
+            .or_else(|| self.last_location.borrow().clone())
+            .unwrap_or_else(|| SourceLocation::synthetic("lowering"));
+        *self.last_location.borrow_mut() = Some(source_location.clone());
+        source_location
+    }
+
+    /// The definite source location of `expr`, for callers that emit on the converter's behalf.
+    pub(super) fn expression_source_location(&self, expr: &Expression) -> SourceLocation {
+        self.resolve_location(Self::expression_location(expr))
     }
 
     fn source_location(&self, location: NoirLocation) -> Option<SourceLocation> {
@@ -222,8 +245,9 @@ impl<'a> ExpressionConverter<'a> {
         local_id: LocalId,
         value_id: ValueId,
         b: &mut HLFunctionBuilder<'_>,
+        location: SourceLocation,
     ) {
-        let mut e = b.block(self.current_block);
+        let mut e = b.block(self.current_block).with_source_location(location);
         let ptr = e.alloc(value_id);
         drop(e);
         self.bindings.insert(local_id, ptr);
@@ -599,7 +623,8 @@ impl<'a> ExpressionConverter<'a> {
 
         // Build header: parameter, condition, branch
         let loop_index = {
-            let mut header = b.block(loop_header);
+            let header_location = self.resolve_location(Some(for_expr.end_range_location));
+            let mut header = b.block(loop_header).with_source_location(header_location);
             let loop_index = header.add_parameter(index_type);
             let cond = header.lt(loop_index, end);
             header.terminate_jmp_if(cond, loop_body, exit_block);
@@ -1585,10 +1610,9 @@ impl<'a> ExpressionConverter<'a> {
             "vector_push_back" => {
                 let slice = self.convert_expression(&call.arguments[0], b).unwrap();
                 let elem = self.convert_expression(&call.arguments[1], b).unwrap();
-                Some(
-                    b.block(self.current_block)
-                        .slice_push(slice, vec![elem], SliceOpDir::Back),
-                )
+                Some(self.emit_located(b, Some(call.location), |e| {
+                    e.slice_push(slice, vec![elem], SliceOpDir::Back)
+                }))
             }
             _ => todo!("Builtin function '{}' not yet supported", name),
         }

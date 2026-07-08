@@ -782,10 +782,6 @@ impl<Op: Instruction, Ty: SSAType> Function<Op, Ty> {
         (new_id, block)
     }
 
-    pub fn next_block_id_bound(&self) -> u64 {
-        self.next_block
-    }
-
     pub fn add_return_type(&mut self, typ: Ty) {
         self.returns.push(typ);
     }
@@ -1039,12 +1035,6 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
 
     pub fn instruction_count(&self) -> usize {
         self.instructions.len()
-    }
-
-    pub fn stamp_source_location_from(&mut self, start: usize, source_location: SourceLocation) {
-        for instruction in self.instructions.iter_mut().skip(start) {
-            *instruction.location_mut() = source_location.clone();
-        }
     }
 
     pub fn get_instructions(&self) -> impl DoubleEndedIterator<Item = &Op> {

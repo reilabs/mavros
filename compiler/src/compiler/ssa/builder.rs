@@ -161,50 +161,18 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         self.block.instruction_count()
     }
 
-    pub fn stamp_source_location_from(&mut self, start: usize, source_location: SourceLocation) {
-        self.block
-            .stamp_source_location_from(start, source_location);
-    }
-
+    /// Run `emit` with `source_location` as the ambient location: every instruction it emits
+    /// through this emitter (including into blocks it creates) is located there at push time.
+    /// Instructions pushed with an explicit location (`emit_located_instruction`) keep theirs,
+    /// as do instructions emitted by a nested `emit_with_location` scope.
     pub fn emit_with_location<R>(
         &mut self,
         source_location: SourceLocation,
         emit: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        let start_block = self.block_id;
-        let start_len = self.block.instruction_count();
-        let next_block_before = self.function.next_block_id_bound();
-
-        let previous_source_location = self.source_location.replace(source_location.clone());
+        let previous_source_location = self.source_location.replace(source_location);
         let result = emit(self);
         self.source_location = previous_source_location;
-
-        if self.block_id == start_block && self.function.next_block_id_bound() == next_block_before
-        {
-            self.block
-                .stamp_source_location_from(start_len, source_location);
-            return result;
-        };
-
-        if self.block_id == start_block {
-            self.block
-                .stamp_source_location_from(start_len, source_location.clone());
-        } else {
-            self.function
-                .get_block_mut(start_block)
-                .stamp_source_location_from(start_len, source_location.clone());
-        }
-
-        for (block_id, block) in self.function.get_blocks_mut() {
-            if block_id.0 >= next_block_before {
-                block.stamp_source_location_from(0, source_location.clone());
-            }
-        }
-
-        if self.block_id.0 >= next_block_before {
-            self.block.stamp_source_location_from(0, source_location);
-        }
-
         result
     }
 

@@ -90,7 +90,7 @@ use crate::{
         analysis::{points_to::PointsTo, types::TypeInfo},
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
         ssa::{
-            BlockId, FunctionId, Terminator, ValueId,
+            BlockId, FunctionId, SourceLocation, Terminator, ValueId,
             hlssa::{
                 CallTarget, Constant, HLFunction, HLSSA, LocatedOpCode, OpCode, SequenceTargetType,
                 Type, TypeExpr,
@@ -585,7 +585,7 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan, index_consts: &[ValueI
             .get_instructions_with_source_locations()
             .next()
             .map(|(_, location)| location.clone())
-            .expect("ICE: expanded callee entry has no instruction source location");
+            .unwrap_or_else(|| SourceLocation::synthetic("array_boundary_expansion"));
         let old_params = entry.take_parameters();
         let mut new_params = Vec::with_capacity(old_params.len());
         let mut reconstructs: Vec<LocatedOpCode> = Vec::with_capacity(cp.params.len());
@@ -635,7 +635,7 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan, index_consts: &[ValueI
                 .get_instructions_with_source_locations()
                 .next_back()
                 .map(|(_, location)| location.clone())
-                .expect("ICE: expanded return block has no instruction source location");
+                .unwrap_or_else(|| SourceLocation::synthetic("array_boundary_expansion"));
             for (pos_idx, re) in cp.returns.iter().enumerate() {
                 let arr = values[re.position];
                 let cells = &cells_per_pos[pos_idx];

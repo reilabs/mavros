@@ -631,10 +631,12 @@ fn lower_constants_llssa(
                 val_map.insert(vid, null_ptr);
             }
             Constant::Blob(blob) => {
+                // Constants referenced only by terminators (e.g. a blob that is directly
+                // returned) have no instruction to inherit a location from.
                 let source_location = source_locations
                     .get(&vid)
-                    .expect("ICE: blob constant lowered without a source location")
-                    .clone();
+                    .cloned()
+                    .unwrap_or_else(|| SourceLocation::synthetic("const_lowering"));
                 let data_ptr = e.emit_with_location(source_location, |e| {
                     e.const_data_ptr(elem_struct(&blob.elem_type), ll_val)
                 });
@@ -787,6 +789,17 @@ fn new_ll_function(llssa: &mut LLSSA, name: impl Into<String>) -> LLFunction {
     let mut func = LLFunction::empty(name.into());
     add_vm_parameter(&mut func, llssa);
     func
+}
+
+/// Block emitter for a compiler-generated helper function: every instruction it emits is located
+/// at the helper's synthetic source, named after the function.
+fn new_helper_block_emitter<'a>(
+    func: &'a mut LLFunction,
+    llssa: &'a mut LLSSA,
+    block_id: BlockId,
+) -> LLBlockEmitter<'a> {
+    let location = SourceLocation::synthetic(func.get_name());
+    LLBlockEmitter::new(func, llssa, block_id).with_source_location(location)
 }
 
 fn add_vm_parameter(func: &mut LLFunction, llssa: &mut LLSSA) -> ValueId {
@@ -2523,7 +2536,7 @@ fn generate_ad_bump_function(llssa: &mut LLSSA, matrix: DMatrix) -> LLFunction {
     let mut func = new_ll_function(llssa, name.to_string());
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
+    let mut e = new_helper_block_emitter(&mut func, llssa, entry);
     let node = e.add_parameter(LLType::Ptr);
     let amount = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
 
@@ -2621,7 +2634,7 @@ fn generate_ad_drop_function(
     let bump_db = bumps.db;
     let bump_dc = bumps.dc;
 
-    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
+    let mut e = new_helper_block_emitter(&mut func, llssa, entry);
     let node = e.add_parameter(LLType::Ptr);
 
     // Decrement RC
@@ -2783,7 +2796,7 @@ fn generate_drop_function_for_array(
     let mut func = new_ll_function(llssa, format!("drop_{}", ty));
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
+    let mut e = new_helper_block_emitter(&mut func, llssa, entry);
 
     let ptr = e.add_parameter(LLType::Ptr);
 
@@ -2852,7 +2865,7 @@ fn generate_drop_function_for_ref(
     let mut func = new_ll_function(llssa, format!("drop_{}", ty));
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
+    let mut e = new_helper_block_emitter(&mut func, llssa, entry);
     let ptr = e.add_parameter(LLType::Ptr);
 
     let hdr = e.struct_field_ptr(ptr, rc_struct.clone(), 0);
@@ -3559,7 +3572,7 @@ fn generate_array_lookup_function(llssa: &mut LLSSA, array_type: &HLType) -> LLF
     let mut func = new_ll_function(llssa, format!("__array_lookup_{}", array_type));
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
+    let mut e = new_helper_block_emitter(&mut func, llssa, entry);
     let array = e.add_parameter(LLType::Ptr);
     let key_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
     let result_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
@@ -3624,7 +3637,7 @@ fn generate_spread_lookup_function(
     let mut func = new_ll_function(llssa, format!("__spread_{}_lookup", bits));
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
+    let mut e = new_helper_block_emitter(&mut func, llssa, entry);
     let key_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
     let result_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
     let flag_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
@@ -3701,7 +3714,7 @@ fn generate_rngchk_function(llssa: &mut LLSSA, bits: u8, table_idx_global: usize
     let mut func = new_ll_function(llssa, format!("__rngchk_{}", bits));
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
+    let mut e = new_helper_block_emitter(&mut func, llssa, entry);
     let val = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
     let flag = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
 
@@ -4111,7 +4124,7 @@ fn generate_darray_ad_call(
     let mut func = new_ll_function(llssa, format!("__darray_lookup_{}_ad_call", array_type));
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
+    let mut e = new_helper_block_emitter(&mut func, llssa, entry);
     let array = e.add_parameter(LLType::Ptr);
     let key_ptr = e.add_parameter(LLType::Ptr);
     let result_ptr = e.add_parameter(LLType::Ptr);
@@ -4172,7 +4185,7 @@ fn generate_dspread_ad_call(
     let mut func = new_ll_function(llssa, format!("__dspread_{}_ad_call", bits));
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
+    let mut e = new_helper_block_emitter(&mut func, llssa, entry);
     let key_ptr = e.add_parameter(LLType::Ptr);
     let result_ptr = e.add_parameter(LLType::Ptr);
     let flag_ptr = e.add_parameter(LLType::Ptr);
@@ -4248,7 +4261,7 @@ fn generate_drngchk_ad_call(
     let mut func = new_ll_function(llssa, format!("__drngchk_{}_ad_call", bits));
     let entry = func.get_entry_id();
 
-    let mut e = LLBlockEmitter::new(&mut func, llssa, entry);
+    let mut e = new_helper_block_emitter(&mut func, llssa, entry);
     let val_ptr = e.add_parameter(LLType::Ptr);
     let flag_ptr = e.add_parameter(LLType::Ptr);
 

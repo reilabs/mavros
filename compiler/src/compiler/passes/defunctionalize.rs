@@ -15,7 +15,7 @@ use crate::{
         pass_manager::{AnalysisStore, Pass},
         passes::shared::value_replacements::ValueReplacements,
         ssa::{
-            BlockId, FunctionId, Located, Terminator, ValueId,
+            BlockId, FunctionId, Located, SourceLocation, Terminator, ValueId,
             hlssa::{
                 CallTarget, Constant, HLSSA, OpCode, Type, TypeExpr,
                 builder::{HLEmitter, HLSSABuilder},
@@ -560,6 +560,7 @@ fn build_dispatch_function(
     variants: &[FunctionId],
 ) -> FunctionId {
     let dispatch_fn_id = ssa.add_function(format!("apply_dispatch@{}", counter));
+    let location = SourceLocation::synthetic(format!("apply_dispatch@{}", counter));
     let mut sb = HLSSABuilder::new(ssa);
     sb.modify_function(dispatch_fn_id, |b| {
         for ret_type in return_types {
@@ -590,7 +591,9 @@ fn build_dispatch_function(
 
         if variants.len() == 1 {
             let variant_id = variants[0];
-            let mut cb = b.block(current_block);
+            let mut cb = b
+                .block(current_block)
+                .with_source_location(location.clone());
             let const_val = cb.u_const(32, variant_id.0 as u128);
             cb.assert_eq(fn_id_param, const_val);
             let call_results = cb.call(variant_id, forwarded_params.clone(), return_types.len());
@@ -600,7 +603,9 @@ fn build_dispatch_function(
                 let is_last = i == variants.len() - 1;
 
                 if is_last {
-                    let mut cb = b.block(current_block);
+                    let mut cb = b
+                        .block(current_block)
+                        .with_source_location(location.clone());
                     let const_val = cb.u_const(32, variant_id.0 as u128);
                     cb.assert_eq(fn_id_param, const_val);
                     let call_results =
@@ -611,14 +616,16 @@ fn build_dispatch_function(
                     let next_check_block = b.add_block(|_| {});
 
                     {
-                        let mut cb = b.block(current_block);
+                        let mut cb = b
+                            .block(current_block)
+                            .with_source_location(location.clone());
                         let const_val = cb.u_const(32, variant_id.0 as u128);
                         let eq_result = cb.eq(fn_id_param, const_val);
                         cb.terminate_jmp_if(eq_result, call_block, next_check_block);
                     }
 
                     {
-                        let mut cb = b.block(call_block);
+                        let mut cb = b.block(call_block).with_source_location(location.clone());
                         let call_results =
                             cb.call(variant_id, forwarded_params.clone(), return_types.len());
                         cb.terminate_jmp(merge_block, call_results);

@@ -10,7 +10,7 @@ use crate::{
         Field,
         analysis::types::TypeInfo,
         ssa::{
-            BlockId, FunctionId, Instruction, Terminator, ValueId,
+            BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
                 BinaryArithOpKind, CallTarget, CastTarget, CmpKind, Constant, Endianness, HLSSA,
                 HLSSAConstantsSnapshot, LookupTarget, OpCode, Radix, RefCountOp,
@@ -135,6 +135,10 @@ pub trait Context<V> {
     fn on_return(&mut self, returns: &mut [V], return_types: &[Type]);
     fn on_jmp(&mut self, target: BlockId, params: &mut [V], param_types: &[&Type]);
 
+    /// Called with each instruction's source location before that instruction is interpreted.
+    /// Backends that emit residual instructions can use it to locate what they emit.
+    fn on_location(&mut self, _location: &SourceLocation) {}
+
     // TODO it looks odd that this is the only opcode implemented here.
     // This is the _new_ structure, so at some point we should migrate all other opcodes here.
     fn lookup(&mut self, _target: LookupTarget<V>, _args: Vec<V>, _flag: V) {
@@ -250,7 +254,8 @@ impl SymbolicExecutor {
         let mut current = Some(entry);
 
         while let Some(block) = current {
-            for instr in block.get_instructions() {
+            for (instr, location) in block.get_instructions_with_source_locations() {
+                ctx.on_location(location);
                 match instr {
                     OpCode::Cmp {
                         kind: cmp_kind,
