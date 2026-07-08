@@ -37,7 +37,7 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> InstrBuilde
     }
 
     pub fn push(&mut self, instruction: Op) {
-        self.push_located(Located::with(instruction, self.source_location.clone()));
+        self.push_located(Located::new(instruction, self.source_location.clone()));
     }
 }
 
@@ -85,6 +85,13 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash>
     /// Get a BlockEmitter for a specific block.
     pub fn block(&mut self, id: BlockId) -> BlockEmitter<'_, Op, Ty, C> {
         BlockEmitter::new(self.function, self.ssa, id)
+    }
+
+    /// Get a BlockEmitter whose ambient location is the shared test location. Test-only sugar so
+    /// hand-built SSA fixtures don't have to set a location per emitter.
+    #[cfg(test)]
+    pub fn test_block(&mut self, id: BlockId) -> BlockEmitter<'_, Op, Ty, C> {
+        self.block(id).with_source_location(SourceLocation::test())
     }
 }
 
@@ -223,7 +230,7 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
             .clone()
             .expect("ICE: emit_instruction called without a source location");
         self.block
-            .push_instruction(Located::with(instruction, source_location));
+            .push_instruction(Located::new(instruction, source_location));
     }
 
     pub fn emit_located_instruction(&mut self, instruction: Located<Op>) {
@@ -521,10 +528,8 @@ mod tests {
             let mut sb = HLSSABuilder::new(&mut ssa);
             sb.modify_function(main_id, |fb| {
                 let entry_id = fb.function.get_entry_id();
-                let mut block = fb
-                    .block(entry_id)
-                    .with_source_location(SourceLocation::test());
-                block.emit_located(Located::with(
+                let mut block = fb.test_block(entry_id);
+                block.emit_located(Located::new(
                     OpCode::Not {
                         result: ValueId(1),
                         value: ValueId(0),
@@ -548,7 +553,7 @@ mod tests {
         {
             let mut builder =
                 InstrBuilder::new(&mut function, &mut ssa, &mut instructions, loc.clone());
-            builder.emit_located(Located::with(
+            builder.emit_located(Located::new(
                 OpCode::Not {
                     result: ValueId(1),
                     value: ValueId(0),
@@ -558,7 +563,7 @@ mod tests {
         }
 
         assert_eq!(instructions.len(), 1);
-        assert_eq!(instructions[0].get_location(), &loc);
+        assert_eq!(instructions[0].location(), &loc);
     }
 
     #[test]
@@ -571,9 +576,7 @@ mod tests {
             let mut sb = HLSSABuilder::new(&mut ssa);
             sb.modify_function(main_id, |fb| {
                 let entry_id = fb.function.get_entry_id();
-                let mut block = fb
-                    .block(entry_id)
-                    .with_source_location(SourceLocation::test());
+                let mut block = fb.test_block(entry_id);
                 block.emit_with_location(loc.clone(), |block| {
                     let cond = block.not(ValueId(0));
                     block.build_if_else(

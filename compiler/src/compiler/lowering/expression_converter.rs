@@ -80,7 +80,7 @@ pub struct ExpressionConverter<'a> {
     /// The most recently resolved source location, used as the location for emitted instructions
     /// that have no Noir location of their own (e.g. the loop-index increment a `continue`
     /// desugars to).
-    last_location: RefCell<Option<SourceLocation>>,
+    last_location: Option<SourceLocation>,
 }
 
 impl<'a> ExpressionConverter<'a> {
@@ -106,7 +106,7 @@ impl<'a> ExpressionConverter<'a> {
             current_block: entry_block,
             file_manager,
             source_files: RefCell::new(HashMap::default()),
-            last_location: RefCell::new(None),
+            last_location: None,
         }
     }
 
@@ -115,14 +115,14 @@ impl<'a> ExpressionConverter<'a> {
     /// `emit` runs against the current block's emitter and returns the instruction's result; every
     /// instruction it pushes that does not already carry a location is annotated with `location`.
     fn emit_located<R>(
-        &self,
+        &mut self,
         b: &mut HLFunctionBuilder<'_>,
         location: Option<NoirLocation>,
         emit: impl FnOnce(&mut HLBlockEmitter<'_>) -> R,
     ) -> R {
-        let mut e = b.block(self.current_block);
         let source_location = self.resolve_location(location);
-        e.emit_with_location(source_location, emit)
+        b.block(self.current_block)
+            .emit_with_location(source_location, emit)
     }
 
     /// Turn an optional Noir location into a definite `SourceLocation`.
@@ -130,17 +130,17 @@ impl<'a> ExpressionConverter<'a> {
     /// Locationless desugared instructions (loop-index increments, unit tuples, …) inherit the
     /// most recently resolved location, which is the enclosing expression in practice; if nothing
     /// has been resolved yet, they get a synthetic lowering location.
-    fn resolve_location(&self, location: Option<NoirLocation>) -> SourceLocation {
+    fn resolve_location(&mut self, location: Option<NoirLocation>) -> SourceLocation {
         let source_location = location
             .and_then(|location| self.source_location(location))
-            .or_else(|| self.last_location.borrow().clone())
+            .or_else(|| self.last_location.clone())
             .unwrap_or_else(|| SourceLocation::synthetic("lowering"));
-        *self.last_location.borrow_mut() = Some(source_location.clone());
+        self.last_location = Some(source_location.clone());
         source_location
     }
 
     /// The definite source location of `expr`, for callers that emit on the converter's behalf.
-    pub(super) fn expression_source_location(&self, expr: &Expression) -> SourceLocation {
+    pub(super) fn expression_source_location(&mut self, expr: &Expression) -> SourceLocation {
         self.resolve_location(Self::expression_location(expr))
     }
 

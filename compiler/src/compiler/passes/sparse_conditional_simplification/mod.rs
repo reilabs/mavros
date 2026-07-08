@@ -99,7 +99,8 @@ use crate::{
             shared::value_replacements::{ReplaceScope, ValueReplacements},
         },
         ssa::{
-            BlockId, FunctionId, Instruction, Located, ProgramPoint, Terminator, ValueId,
+            BlockId, FunctionId, Instruction, Located, ProgramPoint, SourceLocation, Terminator,
+            ValueId,
             hlssa::{CastTarget, CmpKind, HLFunction, HLSSA, OpCode},
         },
     },
@@ -625,16 +626,24 @@ fn propagate(
     // instruction it dominates, so each `cast <const> to WitnessOf` definition dominates the uses
     // redirected to it. Emit them in result-id order for a deterministic instruction sequence.
     if !witness_const_casts.is_empty() {
+        let entry_location = function
+            .get_entry()
+            .first_location()
+            .cloned()
+            .unwrap_or_else(|| SourceLocation::synthetic("sparse_conditional_simplification"));
         let mut casts: Vec<(ValueId, ValueId)> = witness_const_casts.into_iter().collect();
         casts.sort_by_key(|(_, wit)| wit.0);
         let mut entry_instrs: Vec<Located<OpCode>> = casts
             .into_iter()
             .map(|(bare, wit)| {
-                Located::without(OpCode::Cast {
-                    result: wit,
-                    value: bare,
-                    target: CastTarget::WitnessOf,
-                })
+                Located::new(
+                    OpCode::Cast {
+                        result: wit,
+                        value: bare,
+                        target: CastTarget::WitnessOf,
+                    },
+                    entry_location.clone(),
+                )
             })
             .collect();
         let entry = function.get_entry_mut();

@@ -4340,8 +4340,8 @@ fn generate_drngchk_ad_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::ssa::DefaultSSAAnnotator;
     use crate::compiler::ssa::llssa::builder::LLSSABuilder;
-    use crate::compiler::ssa::{DefaultSSAAnnotator, SourceLocation};
 
     /// A guarded refcount mutation must compare against `RC_IMMORTAL_OBJECT`
     /// before touching the refcount word.
@@ -4359,7 +4359,7 @@ mod tests {
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
-            let mut e = fb.block(entry).with_source_location(SourceLocation::test());
+            let mut e = fb.test_block(entry);
             let arr = e.heap_alloc(rc_array.clone(), None);
             let hdr = e.struct_field_ptr(arr, rc_array.clone(), 0);
             let rc_ptr = e.struct_field_ptr(hdr, rc_header, 0);
@@ -4396,7 +4396,7 @@ mod tests {
         let mut hb = HLSSABuilder::new(&mut hlssa);
         hb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
-            let mut e = fb.block(entry).with_source_location(SourceLocation::test());
+            let mut e = fb.test_block(entry);
             let c = e.field_const(ark_bn254::Fr::from(7u64));
             e.terminate_return(vec![c]);
         });
@@ -4445,7 +4445,7 @@ mod tests {
         let mut hb = HLSSABuilder::new(&mut hlssa);
         hb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
-            let mut e = fb.block(entry).with_source_location(SourceLocation::test());
+            let mut e = fb.test_block(entry);
             let blob = e.emit_constant(HLConstant::Blob(HLBlob::new(
                 HLType::u(8),
                 vec![

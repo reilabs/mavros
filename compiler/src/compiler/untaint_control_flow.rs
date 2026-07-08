@@ -455,7 +455,7 @@ impl UntaintControlFlow {
                         let then_taint = match block_taint {
                             Some(tnt) => {
                                 let result_val = ssa.fresh_value();
-                                new_instructions.push(LocatedOpCode::with(
+                                new_instructions.push(LocatedOpCode::new(
                                     OpCode::BinaryArithOp {
                                         kind: BinaryArithOpKind::And,
                                         result: result_val,
@@ -470,7 +470,7 @@ impl UntaintControlFlow {
                         };
                         let not_cond = {
                             let nv = ssa.fresh_value();
-                            new_instructions.push(LocatedOpCode::with(
+                            new_instructions.push(LocatedOpCode::new(
                                 OpCode::Not {
                                     result: nv,
                                     value: cond,
@@ -482,7 +482,7 @@ impl UntaintControlFlow {
                         let else_taint = match block_taint {
                             Some(tnt) => {
                                 let result_val = ssa.fresh_value();
-                                new_instructions.push(LocatedOpCode::with(
+                                new_instructions.push(LocatedOpCode::new(
                                     OpCode::BinaryArithOp {
                                         kind: BinaryArithOpKind::And,
                                         result: result_val,

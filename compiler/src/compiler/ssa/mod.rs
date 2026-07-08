@@ -943,7 +943,7 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
             .iter()
             .map(|i| {
                 let instruction = i.display_instruction(func_name, &annotate_value);
-                format!("    {} @ {}", instruction, i.get_location())
+                format!("    {} @ {}", instruction, i.location())
             })
             .join("\n");
         let terminator = match &self.terminator {
@@ -990,7 +990,24 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
         source_location: SourceLocation,
     ) {
         self.instructions
-            .push(Located::with(instruction, source_location));
+            .push(Located::new(instruction, source_location));
+    }
+
+    /// Push an instruction located at the shared test location. Test-only sugar so hand-built
+    /// SSA fixtures don't have to spell out a `Located` wrapper per instruction.
+    #[cfg(test)]
+    pub fn push_test_instruction(&mut self, instruction: Op) {
+        self.push_instruction(Located::new(instruction, SourceLocation::test()));
+    }
+
+    /// The location of the first instruction, if the block has any.
+    pub fn first_location(&self) -> Option<&SourceLocation> {
+        self.instructions.first().map(Located::location)
+    }
+
+    /// The location of the last instruction, if the block has any.
+    pub fn last_location(&self) -> Option<&SourceLocation> {
+        self.instructions.last().map(Located::location)
     }
 
     pub fn set_terminator(&mut self, terminator: Terminator) {
@@ -1026,7 +1043,7 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
     }
 
     pub fn get_instruction_source_location(&self, i: usize) -> &SourceLocation {
-        self.instructions[i].get_location()
+        self.instructions[i].location()
     }
 
     pub fn set_instruction_source_location(&mut self, i: usize, source_location: SourceLocation) {
@@ -1046,7 +1063,7 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
     ) -> impl DoubleEndedIterator<Item = (&Op, &SourceLocation)> {
         self.instructions
             .iter()
-            .map(|instruction| (&**instruction, instruction.get_location()))
+            .map(|instruction| (&**instruction, instruction.location()))
     }
 
     pub fn get_instructions_mut(&mut self) -> impl Iterator<Item = &mut Op> {
@@ -1159,13 +1176,10 @@ mod tests {
         let mut ssa = HLSSA::with_main("main".to_string());
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
 
-        entry.push_instruction(Located::with(
-            OpCode::Not {
-                result: ValueId(0),
-                value: ValueId(1),
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Not {
+            result: ValueId(0),
+            value: ValueId(1),
+        });
 
         assert_eq!(
             entry.get_instruction_source_location(0),
@@ -1181,16 +1195,16 @@ mod tests {
     #[test]
     fn located_exposes_location_ref_and_take() {
         let location = test_location();
-        let mut located = Located::with(ValueId(1), location.clone());
+        let mut located = Located::new(ValueId(1), location.clone());
 
         assert_eq!(located.location(), &location);
-        assert_eq!(located.get_location(), &location);
+        assert_eq!(located.location(), &location);
         *located.location_mut() = location.clone();
         assert_eq!(AsRef::<ValueId>::as_ref(&located), &ValueId(1));
 
         let located_ref = located.to_ref();
         assert_eq!(*located_ref, &ValueId(1));
-        assert_eq!(located_ref.get_location(), &location);
+        assert_eq!(located_ref.location(), &location);
 
         assert_eq!(located.take(), (ValueId(1), location));
     }
@@ -1233,7 +1247,7 @@ mod tests {
             .take_instructions()
             .into_iter()
             .map(|instruction| instruction.payload())
-            .map(|instruction| Located::with(instruction, SourceLocation::test()))
+            .map(|instruction| Located::new(instruction, SourceLocation::test()))
             .collect();
         entry.put_instructions(instructions);
 
@@ -1249,7 +1263,7 @@ mod tests {
         let location = test_location();
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
 
-        entry.push_instruction(Located::with(
+        entry.push_instruction(Located::new(
             OpCode::Not {
                 result: ValueId(0),
                 value: ValueId(1),
