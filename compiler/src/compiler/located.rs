@@ -112,6 +112,17 @@ impl SourceLocation {
         )
     }
 
+    /// The location for compiler-synthesized code with no user-source anchor, such as generated
+    /// helper functions and dispatch stubs. `origin` names the generator, e.g. a pass or helper
+    /// name, and becomes the synthetic source identifier `<origin>`.
+    pub fn synthetic(origin: impl AsRef<str>) -> Self {
+        Self::new(
+            format!("<{}>", origin.as_ref()),
+            SourcePosition::new(1, 1),
+            SourcePosition::new(1, 1),
+        )
+    }
+
     pub fn new(file: impl Into<Arc<str>>, start: SourcePosition, end: SourcePosition) -> Self {
         Self {
             file: file.into(),

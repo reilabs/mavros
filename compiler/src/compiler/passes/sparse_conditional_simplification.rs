@@ -54,7 +54,8 @@ use crate::{
             fix_double_jumps::{ReplaceScope, ValueReplacements},
         },
         ssa::{
-            BlockId, FunctionId, Instruction, Located, ProgramPoint, Terminator, ValueId,
+            BlockId, FunctionId, Instruction, Located, ProgramPoint, SourceLocation, Terminator,
+            ValueId,
             hlssa::{CastTarget, CmpKind, HLFunction, HLSSA, OpCode},
         },
     },
@@ -453,7 +454,7 @@ fn propagate(
             .get_instructions_with_source_locations()
             .next()
             .map(|(_, location)| location.clone())
-            .expect("ICE: hoisted witness const cast has no entry source location");
+            .unwrap_or_else(|| SourceLocation::synthetic("sparse_conditional_simplification"));
         let mut casts: Vec<(ValueId, ValueId)> = witness_const_casts.into_iter().collect();
         casts.sort_by_key(|(_, wit)| wit.0);
         let mut entry_instrs: Vec<Located<OpCode>> = casts

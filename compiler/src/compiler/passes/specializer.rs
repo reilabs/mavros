@@ -19,7 +19,7 @@ use crate::{
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
         ssa::{
-            BlockId, FunctionId, ValueId,
+            BlockId, FunctionId, SourceLocation, ValueId,
             hlssa::{
                 BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness, HLFunction,
                 HLSSA, LocatedOpCode, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix,
@@ -89,6 +89,10 @@ struct SpecializationState<'a> {
 
     /// Constant values created during specialization, usually by constant folding.
     const_vals: HashMap<ValueId, ConstVal>,
+
+    /// The source location of the original instruction the symbolic executor is currently
+    /// interpreting (via `Context::on_location`); residual instructions are located there.
+    current_location: Option<SourceLocation>,
 }
 
 impl HLEmitter for SpecializationState<'_> {
@@ -98,13 +102,12 @@ impl HLEmitter for SpecializationState<'_> {
 
     fn emit(&mut self, instruction: OpCode) {
         let entry = self.body.get_entry_id();
+        // Constants materialized before execution starts have no current instruction to
+        // inherit a location from.
         let location = self
-            .body
-            .get_block(entry)
-            .get_instructions_with_source_locations()
-            .next()
-            .map(|(_, location)| location.clone())
-            .expect("ICE: specialization emitted without a source location");
+            .current_location
+            .clone()
+            .unwrap_or_else(|| SourceLocation::synthetic("specializer"));
         self.body
             .get_block_mut(entry)
             .push_instruction(instruction.locate(location));
@@ -862,6 +865,10 @@ impl symbolic_executor::Context<Val> for SpecializationState<'_> {
 
     fn on_jmp(&mut self, _target: BlockId, _params: &mut [Val], _param_types: &[&Type]) {}
 
+    fn on_location(&mut self, location: &SourceLocation) {
+        self.current_location = Some(location.clone());
+    }
+
     fn lookup(&mut self, target: LookupTarget<Val>, args: Vec<Val>, flag: Val) {
         self.emit(OpCode::Lookup {
             target: target.map(|v| v.0),
@@ -1072,6 +1079,7 @@ impl Specializer {
                 ssa: &*ssa,
                 body,
                 const_vals,
+                current_location: None,
             };
 
             // Specialization is speculative: this candidate may sit behind a branch that never

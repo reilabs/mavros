@@ -914,11 +914,13 @@ impl RCInsertion {
         value_locations: &HashMap<ValueId, SourceLocation>,
         fallback_location: Option<&SourceLocation>,
     ) -> Located<OpCode> {
+        // Block parameters have no defining instruction; in an instruction-less block there is
+        // no fallback either.
         let location = value_locations
             .get(&value)
             .or(fallback_location)
             .cloned()
-            .expect("ICE: reference-count op emitted without a source location");
+            .unwrap_or_else(|| SourceLocation::synthetic("rc_insertion"));
 
         Located::new(OpCode::MemOp { kind, value }, location)
     }

@@ -403,10 +403,11 @@ impl UntaintControlFlow {
         let block_taint = *block_taint_vars.get(&block_id).unwrap();
 
         let old_instructions = block.take_instructions();
+        // Blocks holding only a terminator have no location to anchor the taint plumbing to.
         let block_source_location = old_instructions
             .last()
             .map(|instruction| instruction.location().clone())
-            .expect("ICE: terminator rewrite needs a block source location");
+            .unwrap_or_else(|| SourceLocation::synthetic("untaint_control_flow"));
         let mut new_instructions = Vec::new();
 
         for instruction in old_instructions {

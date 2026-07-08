@@ -93,7 +93,7 @@ use crate::{
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
         passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
         ssa::{
-            BlockId, FunctionId, Terminator, ValueId,
+            BlockId, FunctionId, SourceLocation, Terminator, ValueId,
             hlssa::{CallTarget, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr},
         },
     },
@@ -576,7 +576,7 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan) {
         let entry_location = old_instrs
             .first()
             .map(|instruction| instruction.location().clone())
-            .expect("ICE: promoted callee entry has no instruction source location");
+            .unwrap_or_else(|| SourceLocation::synthetic("arg_promotion"));
         let mut new_instrs = Vec::with_capacity(old_instrs.len() + cp.params.len() * 2);
         for pp in &cp.params {
             // The alloc carries its initial value, so seed it directly from the by-value parameter
@@ -612,7 +612,7 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan) {
             .get_instructions_with_source_locations()
             .next_back()
             .map(|(_, location)| location.clone())
-            .expect("ICE: promoted return block has no instruction source location");
+            .unwrap_or_else(|| SourceLocation::synthetic("arg_promotion"));
         for (k, pp) in in_out.iter().enumerate() {
             block.push_instruction(
                 OpCode::Load {

@@ -24,7 +24,7 @@ use crate::{
     compiler::{
         pass_manager::{AnalysisStore, Pass},
         ssa::{
-            BlockId, FunctionId, Located, ValueId,
+            BlockId, FunctionId, Located, SourceLocation, ValueId,
             hlssa::{
                 CallTarget, CastTarget, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
                 builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
@@ -94,7 +94,9 @@ impl PrepareEntryPoint {
         let mut sb = HLSSABuilder::new(ssa);
         sb.modify_function(wrapper_id, |b| {
             let entry_block = b.function.get_entry_id();
-            let mut e = b.block(entry_block);
+            let mut e = b
+                .block(entry_block)
+                .with_source_location(SourceLocation::synthetic("wrapper_main"));
 
             let blob_param = e.add_parameter(Type::blob(Type::field(), total_fields));
 
@@ -379,7 +381,8 @@ impl PrepareEntryPoint {
         sb.modify_function(fn_id, |b| {
             b.function.add_return_type(typ.clone());
             let entry_block = b.function.get_entry_id();
-            let mut e = b.block(entry_block);
+            let location = SourceLocation::synthetic(b.function.get_name());
+            let mut e = b.block(entry_block).with_source_location(location);
             let param = e.add_parameter(typ.clone());
             let result = Self::emit_prepare_body(&mut e, param, typ, &child_fns);
             e.terminate_return(vec![result]);
@@ -495,7 +498,8 @@ impl PrepareEntryPoint {
         sb.modify_function(fn_id, |b| {
             b.function.add_return_type(typ.clone());
             let entry_block = b.function.get_entry_id();
-            let mut e = b.block(entry_block);
+            let location = SourceLocation::synthetic(b.function.get_name());
+            let mut e = b.block(entry_block).with_source_location(location);
 
             let input_len = Self::flattened_field_count(typ);
             let input_array = e.add_parameter(Type::field().array_of(input_len));
