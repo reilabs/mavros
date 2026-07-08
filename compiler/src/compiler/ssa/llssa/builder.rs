@@ -1,6 +1,6 @@
 use crate::compiler::ssa::{
     FunctionId, ValueId,
-    builder::{BlockEmitter, FunctionBuilder, InstrBuilder, SSABuilder},
+    builder::{BlockEditor, BlockEmitter, FunctionBuilder, InstrBuilder, SSABuilder},
     hlssa::DMatrix,
     llssa::{Constant, FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, LocatedLLOp, Type},
 };
@@ -412,6 +412,7 @@ fn ad_out_field(matrix: DMatrix) -> usize {
 
 pub type LLInstrBuilder<'a> = InstrBuilder<'a, LLOp, Type, Constant>;
 pub type LLFunctionBuilder<'a> = FunctionBuilder<'a, LLOp, Type, Constant>;
+pub type LLBlockEditor<'a> = BlockEditor<'a, LLOp, Type, Constant>;
 pub type LLBlockEmitter<'a> = BlockEmitter<'a, LLOp, Type, Constant>;
 pub type LLSSABuilder<'a> = SSABuilder<'a, LLOp, Type, Constant>;
 

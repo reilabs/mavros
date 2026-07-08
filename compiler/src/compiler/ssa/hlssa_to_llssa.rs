@@ -24,7 +24,7 @@ use crate::{
             llssa::{
                 Blob as LLBlob, Constant as LLConstant, FieldArithOp, IntArithOp, IntCmpOp,
                 LLFieldType, LLFunction, LLOp, LLSSA, LLStruct, RC_IMMORTAL_OBJECT, Type as LLType,
-                builder::{LLBlockEmitter, LLEmitter},
+                builder::{LLBlockEditor, LLBlockEmitter, LLEmitter},
             },
         },
         util::ice_non_elided_tuple,
@@ -618,7 +618,11 @@ fn lower_constants_llssa(
     referenced.sort_by_key(|v| v.0);
 
     let entry_id = ll_func.get_entry_id();
-    let mut e = LLBlockEmitter::new(ll_func, llssa, entry_id);
+    // Constants referenced only by terminators (e.g. a blob that is directly
+    // returned) have no instruction to inherit a location from.
+    let fallback_location = SourceLocation::synthetic("const_lowering");
+    let mut e =
+        LLBlockEditor::new(ll_func, llssa, entry_id).with_source_location(fallback_location);
     for vid in referenced {
         let constant = constants.get(&vid).expect("vid is in constants");
         let ll_constant = lower_constant_to_ll_constant(constant.as_ref());
@@ -631,15 +635,12 @@ fn lower_constants_llssa(
                 val_map.insert(vid, null_ptr);
             }
             Constant::Blob(blob) => {
-                // Constants referenced only by terminators (e.g. a blob that is directly
-                // returned) have no instruction to inherit a location from.
-                let source_location = source_locations
-                    .get(&vid)
-                    .cloned()
-                    .unwrap_or_else(|| SourceLocation::synthetic("const_lowering"));
-                let data_ptr = e.emit_with_location(source_location, |e| {
-                    e.const_data_ptr(elem_struct(&blob.elem_type), ll_val)
-                });
+                let data_ptr = match source_locations.get(&vid) {
+                    Some(source_location) => e.emit_with_location(source_location.clone(), |e| {
+                        e.const_data_ptr(elem_struct(&blob.elem_type), ll_val)
+                    }),
+                    None => e.const_data_ptr(elem_struct(&blob.elem_type), ll_val),
+                };
                 val_map.insert(vid, data_ptr);
             }
             _ => {
@@ -748,8 +749,10 @@ fn lower_function(
         let block = function.get_block(block_id);
         let ll_block_id = block_map[&block_id];
 
-        // Create a BlockEmitter for this block
-        let mut emitter = LLBlockEmitter::new(&mut ll_func, llssa, ll_block_id);
+        // Create a BlockEmitter for this block. Every instruction is emitted under its HL
+        // instruction's location below; emitting outside those scopes is an ICE.
+        let mut emitter = LLBlockEditor::new(&mut ll_func, llssa, ll_block_id)
+            .with_scoped_source_locations("hlssa_to_llssa");
 
         // Lower instructions
         for (instruction, source_location) in block.get_instructions_with_source_locations() {
@@ -799,7 +802,7 @@ fn new_helper_block_emitter<'a>(
     block_id: BlockId,
 ) -> LLBlockEmitter<'a> {
     let location = SourceLocation::synthetic(func.get_name());
-    LLBlockEmitter::new(func, llssa, block_id).with_source_location(location)
+    LLBlockEditor::new(func, llssa, block_id).with_source_location(location)
 }
 
 fn add_vm_parameter(func: &mut LLFunction, llssa: &mut LLSSA) -> ValueId {
@@ -2918,7 +2921,7 @@ fn generate_drop_function_for_ref(
 
 fn lower_terminator(
     terminator: &Terminator,
-    e: &mut LLBlockEmitter<'_>,
+    e: &mut LLBlockEditor<'_>,
     val_map: &HashMap<ValueId, ValueId>,
     block_map: &HashMap<BlockId, BlockId>,
     fn_type_info: &FunctionTypeInfo,

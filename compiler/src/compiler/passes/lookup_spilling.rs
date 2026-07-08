@@ -315,7 +315,11 @@ impl Pass for LookupSpilling {
                         fb.function.put_block(block_id, block);
                         (instructions, terminator)
                     };
-                    let mut e = fb.block(block_id);
+                    // Every rewritten lookup scopes its own location below; emitting outside a
+                    // scope is an ICE.
+                    let mut e = fb
+                        .block(block_id)
+                        .with_scoped_source_locations("lookup_spilling");
                     for instr in instructions {
                         let location = instr.location().clone();
                         let rewritten = e.emit_with_location(location, |e| {

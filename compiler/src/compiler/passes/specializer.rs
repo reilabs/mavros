@@ -92,7 +92,9 @@ struct SpecializationState<'a> {
 
     /// The source location of the original instruction the symbolic executor is currently
     /// interpreting (via `Context::on_location`); residual instructions are located there.
-    current_location: Option<SourceLocation>,
+    /// Starts at the pass's synthetic location, covering anything emitted before execution
+    /// reaches the first instruction.
+    current_location: SourceLocation,
 }
 
 impl HLEmitter for SpecializationState<'_> {
@@ -102,12 +104,7 @@ impl HLEmitter for SpecializationState<'_> {
 
     fn emit(&mut self, instruction: OpCode) {
         let entry = self.body.get_entry_id();
-        // Constants materialized before execution starts have no current instruction to
-        // inherit a location from.
-        let location = self
-            .current_location
-            .clone()
-            .unwrap_or_else(|| SourceLocation::synthetic("specializer"));
+        let location = self.current_location.clone();
         self.body
             .get_block_mut(entry)
             .push_instruction(instruction.locate(location));
@@ -866,7 +863,7 @@ impl symbolic_executor::Context<Val> for SpecializationState<'_> {
     fn on_jmp(&mut self, _target: BlockId, _params: &mut [Val], _param_types: &[&Type]) {}
 
     fn on_location(&mut self, location: &SourceLocation) {
-        self.current_location = Some(location.clone());
+        self.current_location = location.clone();
     }
 
     fn lookup(&mut self, target: LookupTarget<Val>, args: Vec<Val>, flag: Val) {
@@ -1079,7 +1076,7 @@ impl Specializer {
                 ssa: &*ssa,
                 body,
                 const_vals,
-                current_location: None,
+                current_location: SourceLocation::synthetic("specializer"),
             };
 
             // Specialization is speculative: this candidate may sit behind a branch that never

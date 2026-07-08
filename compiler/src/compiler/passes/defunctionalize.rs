@@ -684,3 +684,31 @@ fn replace_function_types_in_instruction(instr: &mut OpCode) {
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Dispatch stubs have no user-source anchor: every instruction they contain must carry the
+    /// synthetic location named after the generated function.
+    #[test]
+    fn dispatch_function_is_located_at_its_synthetic_source() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let f = ssa.add_function("f".to_string());
+        let g = ssa.add_function("g".to_string());
+
+        let dispatch_id =
+            build_dispatch_function(&mut ssa, 7, &[Type::field()], &[Type::field()], &[f, g]);
+
+        let dispatch = ssa.get_function(dispatch_id);
+        let expected = SourceLocation::synthetic("apply_dispatch@7");
+        let mut located_instructions = 0;
+        for (_, block) in dispatch.get_blocks() {
+            for (_, location) in block.get_instructions_with_source_locations() {
+                assert_eq!(location, &expected);
+                located_instructions += 1;
+            }
+        }
+        assert!(located_instructions > 0);
+    }
+}

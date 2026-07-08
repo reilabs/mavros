@@ -188,12 +188,20 @@ mod tests {
         )
     }
 
+    /// The synthetic source identifier is the user-visible marker for compiler-generated code;
+    /// diagnostics rely on the `<origin>` spelling.
+    #[test]
+    fn synthetic_location_names_its_origin() {
+        let location = SourceLocation::synthetic("my_pass");
+        assert_eq!(&*location.file, "<my_pass>");
+        assert_eq!(location.to_string(), "<my_pass>:1:1");
+    }
+
     #[test]
     fn located_exposes_location_ref_and_take() {
         let mut location = test_location();
         let mut located = Located::new(1, location.clone());
 
-        assert_eq!(located.location(), &location);
         assert_eq!(located.location(), &location);
         located.location_mut().start.line = 5;
         location.start.line = 5;
