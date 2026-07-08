@@ -1,14 +1,15 @@
-//! Deduplicates expressions when one occurrence dominates the other.
+//! Deduplicates expressions when one occurrence dominates the other, without floating expressions
+//! across branches or moving them outside the block in which they appear.
 //!
-//! Does not float expressions across branches or otherwise move them outside the block in which
-//! they appear (#172).
+//! This is a very simple CSE in comparison to PRE, and does elimination only to ensure that the
+//! witness shape remains frozen between the witness generator and AD programs.
 
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
         analysis::flow_analysis::{CFG, FlowAnalysis},
         pass_manager::{AnalysisId, AnalysisStore, Pass},
-        passes::shared::value_replacements::ValueReplacements,
+        passes::shared::{availability::can_replace, value_replacements::ValueReplacements},
         ssa::{
             BlockId, ProgramPoint, SSAConstantsSnapshot, ValueId,
             hlssa::{
@@ -20,275 +21,12 @@ use crate::{
     },
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct ExprId(u32);
+// COMMON SUBEXPRESSION ELIMINATION
+// ================================================================================================
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum ExprNode {
-    Add(Vec<ExprId>),
-    Mul(Vec<ExprId>),
-    Div { lhs: ExprId, rhs: ExprId },
-    Mod { lhs: ExprId, rhs: ExprId },
-    Sub { lhs: ExprId, rhs: ExprId },
-    FConst(ark_bn254::Fr),
-    UConst { bits: usize, value: u128 },
-    IConst { bits: usize, value: u128 },
-    Variable(u64),
-    Eq { lhs: ExprId, rhs: ExprId },
-    Lt { lhs: ExprId, rhs: ExprId },
-    And(Vec<ExprId>),
-    Or(Vec<ExprId>),
-    Xor(Vec<ExprId>),
-    Shl { lhs: ExprId, rhs: ExprId },
-    Shr { lhs: ExprId, rhs: ExprId },
-    BitRange { value: ExprId, offset: usize, width: usize },
-    Select { condition: ExprId, then: ExprId, otherwise: ExprId },
-    ArrayGet { array: ExprId, index: ExprId },
-    Not(ExprId),
-    ReadGlobal(u64),
-    Cast { value: ExprId, target: CastTarget },
-    SExt { value: ExprId, from_bits: usize, to_bits: usize },
-    BytesOf { value: ExprId, endianness: Endianness, count: usize },
-    BitsOf { value: ExprId, endianness: Endianness, count: usize },
-    Witness(ExprId),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum Assertion {
-    Rangecheck { value: ExprId, max_bits: usize },
-    Lookup { target: LookupAssertionTarget, args: Vec<ExprId>, flag: ExprId },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum LookupAssertionTarget {
-    Rangecheck(u8),
-    DynRangecheck(ExprId),
-    Array(ExprId),
-    Spread(u8),
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct Config {
-    deduplicate_lookups: bool,
-}
-
-impl Config {
-    pub fn pre_r1c() -> Self {
-        Self {
-            deduplicate_lookups: true,
-        }
-    }
-
-    pub fn post_r1c() -> Self {
-        Self {
-            deduplicate_lookups: false,
-        }
-    }
-}
-
-#[derive(Default)]
-struct ExprInterner {
-    nodes: Vec<ExprNode>,
-    ids: HashMap<ExprNode, ExprId>,
-}
-
-impl ExprInterner {
-    fn intern(&mut self, node: ExprNode) -> ExprId {
-        if let Some(id) = self.ids.get(&node) {
-            return *id;
-        }
-
-        let id = ExprId(self.nodes.len() as u32);
-        self.nodes.push(node.clone());
-        self.ids.insert(node, id);
-        id
-    }
-
-    fn node(&self, id: ExprId) -> &ExprNode {
-        &self.nodes[id.0 as usize]
-    }
-
-    fn variable(&mut self, value_id: ValueId) -> ExprId {
-        self.intern(ExprNode::Variable(value_id.0))
-    }
-
-    fn fconst(&mut self, value: ark_bn254::Fr) -> ExprId {
-        self.intern(ExprNode::FConst(value))
-    }
-
-    fn uconst(&mut self, bits: usize, value: u128) -> ExprId {
-        self.intern(ExprNode::UConst { bits, value })
-    }
-
-    fn iconst(&mut self, bits: usize, value: u128) -> ExprId {
-        self.intern(ExprNode::IConst { bits, value })
-    }
-
-    fn extend_adds(&self, expr: ExprId, out: &mut Vec<ExprId>) {
-        match self.node(expr) {
-            ExprNode::Add(exprs) => out.extend(exprs.iter().copied()),
-            _ => out.push(expr),
-        }
-    }
-
-    fn extend_muls(&self, expr: ExprId, out: &mut Vec<ExprId>) {
-        match self.node(expr) {
-            ExprNode::Mul(exprs) => out.extend(exprs.iter().copied()),
-            _ => out.push(expr),
-        }
-    }
-
-    fn extend_ands(&self, expr: ExprId, out: &mut Vec<ExprId>) {
-        match self.node(expr) {
-            ExprNode::And(exprs) => out.extend(exprs.iter().copied()),
-            _ => out.push(expr),
-        }
-    }
-
-    fn extend_ors(&self, expr: ExprId, out: &mut Vec<ExprId>) {
-        match self.node(expr) {
-            ExprNode::Or(exprs) => out.extend(exprs.iter().copied()),
-            _ => out.push(expr),
-        }
-    }
-
-    fn extend_xors(&self, expr: ExprId, out: &mut Vec<ExprId>) {
-        match self.node(expr) {
-            ExprNode::Xor(exprs) => out.extend(exprs.iter().copied()),
-            _ => out.push(expr),
-        }
-    }
-
-    fn add(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        let mut adds = Vec::new();
-        self.extend_adds(lhs, &mut adds);
-        self.extend_adds(rhs, &mut adds);
-        adds.sort();
-        self.intern(ExprNode::Add(adds))
-    }
-
-    fn mul(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        let mut muls = Vec::new();
-        self.extend_muls(lhs, &mut muls);
-        self.extend_muls(rhs, &mut muls);
-        muls.sort();
-        self.intern(ExprNode::Mul(muls))
-    }
-
-    fn div(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        self.intern(ExprNode::Div { lhs, rhs })
-    }
-
-    fn modulo(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        self.intern(ExprNode::Mod { lhs, rhs })
-    }
-
-    fn sub(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        self.intern(ExprNode::Sub { lhs, rhs })
-    }
-
-    fn and(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        let mut ands = Vec::new();
-        self.extend_ands(lhs, &mut ands);
-        self.extend_ands(rhs, &mut ands);
-        ands.sort();
-        ands.dedup();
-        self.intern(ExprNode::And(ands))
-    }
-
-    fn or(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        let mut ors = Vec::new();
-        self.extend_ors(lhs, &mut ors);
-        self.extend_ors(rhs, &mut ors);
-        ors.sort();
-        ors.dedup();
-        self.intern(ExprNode::Or(ors))
-    }
-
-    fn xor(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        let mut xors = Vec::new();
-        self.extend_xors(lhs, &mut xors);
-        self.extend_xors(rhs, &mut xors);
-        xors.sort();
-        self.intern(ExprNode::Xor(xors))
-    }
-
-    fn shl(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        self.intern(ExprNode::Shl { lhs, rhs })
-    }
-
-    fn shr(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        self.intern(ExprNode::Shr { lhs, rhs })
-    }
-
-    fn bit_range(&mut self, value: ExprId, offset: usize, width: usize) -> ExprId {
-        self.intern(ExprNode::BitRange {
-            value,
-            offset,
-            width,
-        })
-    }
-
-    fn eq(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        self.intern(ExprNode::Eq { lhs, rhs })
-    }
-
-    fn lt(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        self.intern(ExprNode::Lt { lhs, rhs })
-    }
-
-    fn array_get(&mut self, array: ExprId, index: ExprId) -> ExprId {
-        self.intern(ExprNode::ArrayGet { array, index })
-    }
-
-    fn select(&mut self, condition: ExprId, then: ExprId, otherwise: ExprId) -> ExprId {
-        self.intern(ExprNode::Select {
-            condition,
-            then,
-            otherwise,
-        })
-    }
-
-    fn not(&mut self, value: ExprId) -> ExprId {
-        self.intern(ExprNode::Not(value))
-    }
-
-    fn read_global(&mut self, index: u64) -> ExprId {
-        self.intern(ExprNode::ReadGlobal(index))
-    }
-
-    fn cast(&mut self, value: ExprId, target: CastTarget) -> ExprId {
-        self.intern(ExprNode::Cast { value, target })
-    }
-
-    fn sext(&mut self, value: ExprId, from_bits: usize, to_bits: usize) -> ExprId {
-        self.intern(ExprNode::SExt {
-            value,
-            from_bits,
-            to_bits,
-        })
-    }
-
-    fn bytes_of(&mut self, value: ExprId, endianness: Endianness, count: usize) -> ExprId {
-        self.intern(ExprNode::BytesOf {
-            value,
-            endianness,
-            count,
-        })
-    }
-
-    fn bits_of(&mut self, value: ExprId, endianness: Endianness, count: usize) -> ExprId {
-        self.intern(ExprNode::BitsOf {
-            value,
-            endianness,
-            count,
-        })
-    }
-
-    fn witness(&mut self, value: ExprId) -> ExprId {
-        self.intern(ExprNode::Witness(value))
-    }
-}
+/// A basic, deduplicating CSE that only deals with the elimination of redundant expressions.
+///
+/// More aggressive code motion is a non-goal, as that is instead handled by PRE.
 pub struct CSE {
     config: Config,
 }
@@ -316,10 +54,6 @@ impl CSE {
         Self { config }
     }
 
-    pub fn pre_r1c() -> Self {
-        Self::with_config(Config::pre_r1c())
-    }
-
     pub fn post_r1c() -> Self {
         Self::with_config(Config::post_r1c())
     }
@@ -341,11 +75,11 @@ impl CSE {
                     for ((candidate_point, candidate_value_id), others) in
                         replacement_groups.iter_mut()
                     {
-                        if self.can_replace(cfg, *candidate_point, point) {
+                        if can_replace(cfg, *candidate_point, point) {
                             found = true;
                             others.push(value_id);
                             break;
-                        } else if self.can_replace(cfg, point, *candidate_point) {
+                        } else if can_replace(cfg, point, *candidate_point) {
                             found = true;
                             others.push(*candidate_value_id);
                             *candidate_point = point;
@@ -375,11 +109,11 @@ impl CSE {
                 for point in occurrences {
                     let mut found = false;
                     for (candidate_point, others) in groups.iter_mut() {
-                        if self.can_replace(cfg, *candidate_point, point) {
+                        if can_replace(cfg, *candidate_point, point) {
                             found = true;
                             others.push(point);
                             break;
-                        } else if self.can_replace(cfg, point, *candidate_point) {
+                        } else if can_replace(cfg, point, *candidate_point) {
                             found = true;
                             others.push(*candidate_point);
                             *candidate_point = point;
@@ -412,18 +146,6 @@ impl CSE {
                 value_replacements.replace_terminator(block.get_terminator_mut());
             }
         }
-    }
-
-    /// Whether a definition/assertion at `p1` is available at `p2`: either earlier in the same block,
-    /// or in a block that dominates `p2`'s.
-    fn can_replace(&self, cfg: &CFG, p1: ProgramPoint, p2: ProgramPoint) -> bool {
-        if p1.block == p2.block && p1.index < p2.index {
-            return true;
-        }
-        if cfg.dominates(p1.block, p2.block) {
-            return true;
-        }
-        false
     }
 
     fn gather_expressions(
@@ -1002,5 +724,278 @@ impl CSE {
             }
         }
         (result, assertions)
+    }
+}
+
+// CONFIGURATION
+// ================================================================================================
+
+#[derive(Clone, Copy, Debug)]
+pub struct Config {
+    deduplicate_lookups: bool,
+}
+
+impl Config {
+    pub fn post_r1c() -> Self {
+        Self {
+            deduplicate_lookups: false,
+        }
+    }
+}
+
+// EXPRESSION KEYING
+// ================================================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct ExprId(u32);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum ExprNode {
+    Add(Vec<ExprId>),
+    Mul(Vec<ExprId>),
+    Div { lhs: ExprId, rhs: ExprId },
+    Mod { lhs: ExprId, rhs: ExprId },
+    Sub { lhs: ExprId, rhs: ExprId },
+    FConst(ark_bn254::Fr),
+    UConst { bits: usize, value: u128 },
+    IConst { bits: usize, value: u128 },
+    Variable(u64),
+    Eq { lhs: ExprId, rhs: ExprId },
+    Lt { lhs: ExprId, rhs: ExprId },
+    And(Vec<ExprId>),
+    Or(Vec<ExprId>),
+    Xor(Vec<ExprId>),
+    Shl { lhs: ExprId, rhs: ExprId },
+    Shr { lhs: ExprId, rhs: ExprId },
+    BitRange { value: ExprId, offset: usize, width: usize },
+    Select { condition: ExprId, then: ExprId, otherwise: ExprId },
+    ArrayGet { array: ExprId, index: ExprId },
+    Not(ExprId),
+    ReadGlobal(u64),
+    Cast { value: ExprId, target: CastTarget },
+    SExt { value: ExprId, from_bits: usize, to_bits: usize },
+    BytesOf { value: ExprId, endianness: Endianness, count: usize },
+    BitsOf { value: ExprId, endianness: Endianness, count: usize },
+    Witness(ExprId),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum Assertion {
+    Rangecheck { value: ExprId, max_bits: usize },
+    Lookup { target: LookupAssertionTarget, args: Vec<ExprId>, flag: ExprId },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum LookupAssertionTarget {
+    Rangecheck(u8),
+    DynRangecheck(ExprId),
+    Array(ExprId),
+    Spread(u8),
+}
+
+// EXPRESSION INTERNING
+// ================================================================================================
+
+#[derive(Default)]
+struct ExprInterner {
+    nodes: Vec<ExprNode>,
+    ids: HashMap<ExprNode, ExprId>,
+}
+
+impl ExprInterner {
+    fn intern(&mut self, node: ExprNode) -> ExprId {
+        if let Some(id) = self.ids.get(&node) {
+            return *id;
+        }
+
+        let id = ExprId(self.nodes.len() as u32);
+        self.nodes.push(node.clone());
+        self.ids.insert(node, id);
+        id
+    }
+
+    fn node(&self, id: ExprId) -> &ExprNode {
+        &self.nodes[id.0 as usize]
+    }
+
+    fn variable(&mut self, value_id: ValueId) -> ExprId {
+        self.intern(ExprNode::Variable(value_id.0))
+    }
+
+    fn fconst(&mut self, value: ark_bn254::Fr) -> ExprId {
+        self.intern(ExprNode::FConst(value))
+    }
+
+    fn uconst(&mut self, bits: usize, value: u128) -> ExprId {
+        self.intern(ExprNode::UConst { bits, value })
+    }
+
+    fn iconst(&mut self, bits: usize, value: u128) -> ExprId {
+        self.intern(ExprNode::IConst { bits, value })
+    }
+
+    fn extend_adds(&self, expr: ExprId, out: &mut Vec<ExprId>) {
+        match self.node(expr) {
+            ExprNode::Add(exprs) => out.extend(exprs.iter().copied()),
+            _ => out.push(expr),
+        }
+    }
+
+    fn extend_muls(&self, expr: ExprId, out: &mut Vec<ExprId>) {
+        match self.node(expr) {
+            ExprNode::Mul(exprs) => out.extend(exprs.iter().copied()),
+            _ => out.push(expr),
+        }
+    }
+
+    fn extend_ands(&self, expr: ExprId, out: &mut Vec<ExprId>) {
+        match self.node(expr) {
+            ExprNode::And(exprs) => out.extend(exprs.iter().copied()),
+            _ => out.push(expr),
+        }
+    }
+
+    fn extend_ors(&self, expr: ExprId, out: &mut Vec<ExprId>) {
+        match self.node(expr) {
+            ExprNode::Or(exprs) => out.extend(exprs.iter().copied()),
+            _ => out.push(expr),
+        }
+    }
+
+    fn extend_xors(&self, expr: ExprId, out: &mut Vec<ExprId>) {
+        match self.node(expr) {
+            ExprNode::Xor(exprs) => out.extend(exprs.iter().copied()),
+            _ => out.push(expr),
+        }
+    }
+
+    fn add(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        let mut adds = Vec::new();
+        self.extend_adds(lhs, &mut adds);
+        self.extend_adds(rhs, &mut adds);
+        adds.sort();
+        self.intern(ExprNode::Add(adds))
+    }
+
+    fn mul(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        let mut muls = Vec::new();
+        self.extend_muls(lhs, &mut muls);
+        self.extend_muls(rhs, &mut muls);
+        muls.sort();
+        self.intern(ExprNode::Mul(muls))
+    }
+
+    fn div(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        self.intern(ExprNode::Div { lhs, rhs })
+    }
+
+    fn modulo(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        self.intern(ExprNode::Mod { lhs, rhs })
+    }
+
+    fn sub(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        self.intern(ExprNode::Sub { lhs, rhs })
+    }
+
+    fn and(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        let mut ands = Vec::new();
+        self.extend_ands(lhs, &mut ands);
+        self.extend_ands(rhs, &mut ands);
+        ands.sort();
+        ands.dedup();
+        self.intern(ExprNode::And(ands))
+    }
+
+    fn or(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        let mut ors = Vec::new();
+        self.extend_ors(lhs, &mut ors);
+        self.extend_ors(rhs, &mut ors);
+        ors.sort();
+        ors.dedup();
+        self.intern(ExprNode::Or(ors))
+    }
+
+    fn xor(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        let mut xors = Vec::new();
+        self.extend_xors(lhs, &mut xors);
+        self.extend_xors(rhs, &mut xors);
+        xors.sort();
+        self.intern(ExprNode::Xor(xors))
+    }
+
+    fn shl(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        self.intern(ExprNode::Shl { lhs, rhs })
+    }
+
+    fn shr(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        self.intern(ExprNode::Shr { lhs, rhs })
+    }
+
+    fn bit_range(&mut self, value: ExprId, offset: usize, width: usize) -> ExprId {
+        self.intern(ExprNode::BitRange {
+            value,
+            offset,
+            width,
+        })
+    }
+
+    fn eq(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        self.intern(ExprNode::Eq { lhs, rhs })
+    }
+
+    fn lt(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+        self.intern(ExprNode::Lt { lhs, rhs })
+    }
+
+    fn array_get(&mut self, array: ExprId, index: ExprId) -> ExprId {
+        self.intern(ExprNode::ArrayGet { array, index })
+    }
+
+    fn select(&mut self, condition: ExprId, then: ExprId, otherwise: ExprId) -> ExprId {
+        self.intern(ExprNode::Select {
+            condition,
+            then,
+            otherwise,
+        })
+    }
+
+    fn not(&mut self, value: ExprId) -> ExprId {
+        self.intern(ExprNode::Not(value))
+    }
+
+    fn read_global(&mut self, index: u64) -> ExprId {
+        self.intern(ExprNode::ReadGlobal(index))
+    }
+
+    fn cast(&mut self, value: ExprId, target: CastTarget) -> ExprId {
+        self.intern(ExprNode::Cast { value, target })
+    }
+
+    fn sext(&mut self, value: ExprId, from_bits: usize, to_bits: usize) -> ExprId {
+        self.intern(ExprNode::SExt {
+            value,
+            from_bits,
+            to_bits,
+        })
+    }
+
+    fn bytes_of(&mut self, value: ExprId, endianness: Endianness, count: usize) -> ExprId {
+        self.intern(ExprNode::BytesOf {
+            value,
+            endianness,
+            count,
+        })
+    }
+
+    fn bits_of(&mut self, value: ExprId, endianness: Endianness, count: usize) -> ExprId {
+        self.intern(ExprNode::BitsOf {
+            value,
+            endianness,
+            count,
+        })
+    }
+
+    fn witness(&mut self, value: ExprId) -> ExprId {
+        self.intern(ExprNode::Witness(value))
     }
 }

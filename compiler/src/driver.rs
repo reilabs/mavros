@@ -44,6 +44,7 @@ use crate::{
             lower_map_casts::LowerMapCasts,
             mem2reg::Mem2Reg,
             normalize_asserts::NormalizeAsserts,
+            partial_redundancy_elimination::PRE,
             prepare_entry_point::PrepareEntryPoint,
             rc_insertion::RCInsertion,
             remove_unreachable_blocks::RemoveUnreachableBlocks,
@@ -358,19 +359,17 @@ impl Driver {
                 // needed here — the InstructionLowering runs below type every block's instructions
                 // against reachable-only `Types` info and would ICE on a leftover orphan.)
                 Box::new(SCS::new(dead_code_elimination::Config::pre_r1c())),
-                // Simplify → CSE → DCE, twice. The doubled rounds let
-                // CSE-dedup expose new fold operands and folds expose new CSE
-                // matches. Each Simplifier internally iterates to fixed point
-                // for purely-algebraic folds.
+                // Simplify → PRE, twice (PRE runs its own integrated DCE). The
+                // doubled rounds let PRE-dedup expose new fold operands and
+                // folds expose new dedup matches. Each Simplifier internally
+                // iterates to fixed point for purely-algebraic folds.
                 Box::new(Simplifier::new()),
-                Box::new(CSE::pre_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(PRE::pre_r1c()),
                 Box::new(Simplifier::new()),
-                Box::new(CSE::pre_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(PRE::pre_r1c()),
                 // Re-run SCS after cleanup exposes new constants and branch predicate facts.
                 Box::new(SCS::new(dead_code_elimination::Config::pre_r1c())),
-                Box::new(CSE::pre_r1c()),
+                Box::new(PRE::pre_r1c()),
                 Box::new(DeduplicatePhis::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(FixDoubleJumps::new()),
@@ -382,26 +381,21 @@ impl Driver {
                 // back-to-back. The first round exposes folds/dedup opportunities
                 // that the second round can then consume.
                 Box::new(Simplifier::new()),
-                Box::new(CSE::pre_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(PRE::pre_r1c()),
                 Box::new(Simplifier::new()),
-                Box::new(CSE::pre_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(PRE::pre_r1c()),
                 Box::new(Specializer::new(5.0)),
                 // Specialization exposes fresh constants (folded call arguments and branch
                 // conditions); propagate them before the post-specialization cleanup.
                 Box::new(SCS::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(Simplifier::new()),
-                Box::new(CSE::pre_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(PRE::pre_r1c()),
                 Box::new(LookupSpilling::new()),
                 Box::new(InstructionLowering::degree_spilling()),
                 Box::new(Simplifier::new()),
-                Box::new(CSE::pre_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(PRE::pre_r1c()),
                 Box::new(Simplifier::new()),
-                Box::new(CSE::pre_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(PRE::pre_r1c()),
                 Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(FixDoubleJumps::new()),
             ],
