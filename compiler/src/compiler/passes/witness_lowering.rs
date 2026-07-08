@@ -81,7 +81,11 @@ impl WitnessLowering {
                 let terminator = fb.function.get_block_mut(bid).take_terminator();
                 let instructions = fb.function.get_block_mut(bid).take_instructions();
 
-                let mut emitter = fb.block(bid);
+                // Every rewritten instruction scopes its own location below; emitting outside a
+                // scope is an ICE.
+                let mut emitter = fb
+                    .block(bid)
+                    .with_scoped_source_locations("witness_lowering");
 
                 for instruction in instructions.into_iter() {
                     let location = instruction.location().clone();

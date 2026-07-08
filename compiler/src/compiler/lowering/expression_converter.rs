@@ -77,6 +77,10 @@ pub struct ExpressionConverter<'a> {
 
     /// Memoized user-facing source paths keyed by Noir file id.
     source_files: RefCell<HashMap<FileId, Arc<str>>>,
+
+    /// Fallback location for expressions with no resolvable Noir location, built once so the
+    /// per-expression fallback path does not re-allocate it.
+    synthetic_location: SourceLocation,
 }
 
 impl<'a> ExpressionConverter<'a> {
@@ -102,6 +106,7 @@ impl<'a> ExpressionConverter<'a> {
             current_block: entry_block,
             file_manager,
             source_files: RefCell::new(HashMap::default()),
+            synthetic_location: SourceLocation::synthetic("lowering"),
         }
     }
 
@@ -116,8 +121,7 @@ impl<'a> ExpressionConverter<'a> {
         emit: impl FnOnce(&mut HLBlockEmitter<'_>) -> R,
     ) -> R {
         let source_location = self.resolve_location(location);
-        b.block(self.current_block)
-            .emit_with_location(source_location, emit)
+        self.emit_at_source_location(b, source_location, emit)
     }
 
     fn emit_at_source_location<R>(
@@ -126,23 +130,17 @@ impl<'a> ExpressionConverter<'a> {
         source_location: SourceLocation,
         emit: impl FnOnce(&mut HLBlockEmitter<'_>) -> R,
     ) -> R {
-        b.block(self.current_block)
-            .emit_with_location(source_location, emit)
+        let mut e = b
+            .block(self.current_block)
+            .with_source_location(source_location);
+        emit(&mut e)
     }
 
     /// Turn an optional Noir location into a definite `SourceLocation`.
     fn resolve_location(&self, location: Option<NoirLocation>) -> SourceLocation {
-        self.source_location_or_synthetic(location, "lowering")
-    }
-
-    fn source_location_or_synthetic(
-        &self,
-        location: Option<NoirLocation>,
-        synthetic_origin: impl AsRef<str>,
-    ) -> SourceLocation {
         location
             .and_then(|location| self.source_location(location))
-            .unwrap_or_else(|| SourceLocation::synthetic(synthetic_origin))
+            .unwrap_or_else(|| self.synthetic_location.clone())
     }
 
     /// The definite source location of `expr`, for callers that emit on the converter's behalf.

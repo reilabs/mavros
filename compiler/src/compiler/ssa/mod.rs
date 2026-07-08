@@ -1198,7 +1198,6 @@ mod tests {
         let mut located = Located::new(ValueId(1), location.clone());
 
         assert_eq!(located.location(), &location);
-        assert_eq!(located.location(), &location);
         *located.location_mut() = location.clone();
         assert_eq!(AsRef::<ValueId>::as_ref(&located), &ValueId(1));
 
