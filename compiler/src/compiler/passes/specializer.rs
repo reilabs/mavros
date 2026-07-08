@@ -96,11 +96,23 @@ impl HLEmitter for SpecializationState<'_> {
         self.ssa.fresh_value()
     }
 
-    fn emit(&mut self, instruction: impl Into<LocatedOpCode>) {
+    fn emit(&mut self, instruction: OpCode) {
         let entry = self.body.get_entry_id();
+        let location = self
+            .body
+            .get_block(entry)
+            .get_instructions_with_source_locations()
+            .next()
+            .map(|(_, location)| location.clone())
+            .expect("ICE: specialization emitted without a source location");
         self.body
             .get_block_mut(entry)
-            .push_instruction(instruction.into());
+            .push_instruction(instruction.locate(location));
+    }
+
+    fn emit_located(&mut self, instruction: LocatedOpCode) {
+        let entry = self.body.get_entry_id();
+        self.body.get_block_mut(entry).push_instruction(instruction);
     }
 
     fn emit_constant(&mut self, value: Constant) -> ValueId {

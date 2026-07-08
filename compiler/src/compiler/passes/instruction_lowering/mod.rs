@@ -184,7 +184,7 @@ impl InstructionLowering {
                 }) {
                     changed = true;
                 } else {
-                    b.emit(instruction);
+                    b.emit_located(instruction);
                 }
             }
             if let Some(terminator) = terminator {

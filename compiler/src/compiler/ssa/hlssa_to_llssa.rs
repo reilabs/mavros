@@ -15,7 +15,7 @@ use crate::{
         },
         codegen::CodeGenOptions,
         ssa::{
-            BlockId, FunctionId, Instruction, Terminator, ValueId,
+            BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
                 BinaryArithOpKind, CmpKind, Constant, DMatrix, Endianness, HLFunction, HLSSA,
                 HLSSAConstantsSnapshot, MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS,
@@ -580,11 +580,15 @@ fn lower_constants_llssa(
     val_map: &mut HashMap<ValueId, ValueId>,
 ) {
     let mut referenced = HashSet::default();
+    let mut source_locations = HashMap::<ValueId, SourceLocation>::default();
     for (_, block) in function.get_blocks() {
-        for instr in block.get_instructions() {
+        for (instr, source_location) in block.get_instructions_with_source_locations() {
             for vid in instr.get_inputs() {
                 if constants.contains_key(vid) {
                     referenced.insert(*vid);
+                    source_locations
+                        .entry(*vid)
+                        .or_insert_with(|| source_location.clone());
                 }
             }
         }
@@ -627,7 +631,13 @@ fn lower_constants_llssa(
                 val_map.insert(vid, null_ptr);
             }
             Constant::Blob(blob) => {
-                let data_ptr = e.const_data_ptr(elem_struct(&blob.elem_type), ll_val);
+                let source_location = source_locations
+                    .get(&vid)
+                    .expect("ICE: blob constant lowered without a source location")
+                    .clone();
+                let data_ptr = e.emit_with_location(source_location, |e| {
+                    e.const_data_ptr(elem_struct(&blob.elem_type), ll_val)
+                });
                 val_map.insert(vid, data_ptr);
             }
             _ => {
@@ -741,7 +751,7 @@ fn lower_function(
 
         // Lower instructions
         for (instruction, source_location) in block.get_instructions_with_source_locations() {
-            emitter.emit_with_location(source_location.cloned(), |emitter| {
+            emitter.emit_with_location(source_location.clone(), |emitter| {
                 lower_instruction(
                     instruction,
                     emitter,
@@ -4317,8 +4327,8 @@ fn generate_drngchk_ad_call(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::ssa::DefaultSSAAnnotator;
     use crate::compiler::ssa::llssa::builder::LLSSABuilder;
+    use crate::compiler::ssa::{DefaultSSAAnnotator, SourceLocation};
 
     /// A guarded refcount mutation must compare against `RC_IMMORTAL_OBJECT`
     /// before touching the refcount word.
@@ -4336,7 +4346,7 @@ mod tests {
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
-            let mut e = fb.block(entry);
+            let mut e = fb.block(entry).with_source_location(SourceLocation::test());
             let arr = e.heap_alloc(rc_array.clone(), None);
             let hdr = e.struct_field_ptr(arr, rc_array.clone(), 0);
             let rc_ptr = e.struct_field_ptr(hdr, rc_header, 0);
@@ -4373,7 +4383,7 @@ mod tests {
         let mut hb = HLSSABuilder::new(&mut hlssa);
         hb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
-            let mut e = fb.block(entry);
+            let mut e = fb.block(entry).with_source_location(SourceLocation::test());
             let c = e.field_const(ark_bn254::Fr::from(7u64));
             e.terminate_return(vec![c]);
         });
@@ -4422,7 +4432,7 @@ mod tests {
         let mut hb = HLSSABuilder::new(&mut hlssa);
         hb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
-            let mut e = fb.block(entry);
+            let mut e = fb.block(entry).with_source_location(SourceLocation::test());
             let blob = e.emit_constant(HLConstant::Blob(HLBlob::new(
                 HLType::u(8),
                 vec![

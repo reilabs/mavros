@@ -17,7 +17,7 @@ use crate::compiler::{
     },
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        Instruction, Located, Location, Terminator, ValueId,
+        Instruction, Located, SourceLocation, Terminator, ValueId,
         hlssa::{CastTarget, HLFunction, HLSSA, OpCode, RefCountOp, Type, TypeExpr},
     },
 };
@@ -68,7 +68,10 @@ impl RCInsertion {
             // inserting drops.
             let mut currently_live = liveness.block_liveness[block_id].live_out.clone();
             let mut new_instructions = vec![];
-            let block_location = None;
+            let block_location = block
+                .get_instructions_with_source_locations()
+                .next()
+                .map(|(_, location)| location.clone());
 
             match block.get_terminator().unwrap() {
                 Terminator::Return(values) => {
@@ -87,7 +90,7 @@ impl RCInsertion {
                                 RefCountOp::Bump(count),
                                 *value,
                                 &value_locations,
-                                &block_location,
+                                block_location.as_ref(),
                             );
                         }
                     }
@@ -115,7 +118,7 @@ impl RCInsertion {
                                 RefCountOp::Bump(count),
                                 *value,
                                 &value_locations,
-                                &block_location,
+                                block_location.as_ref(),
                             );
                         }
                     }
@@ -158,7 +161,7 @@ impl RCInsertion {
                                     RefCountOp::Bump(count),
                                     *input,
                                     &value_locations,
-                                    &instruction_location,
+                                    Some(&instruction_location),
                                 );
                             }
                         }
@@ -180,7 +183,7 @@ impl RCInsertion {
                                 RefCountOp::Bump(1),
                                 *v,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             );
                         }
                         if !currently_live.contains(r) {
@@ -215,7 +218,7 @@ impl RCInsertion {
                                     RefCountOp::Bump(1),
                                     *v,
                                     &value_locations,
-                                    &instruction_location,
+                                    Some(&instruction_location),
                                 );
                             }
                             // If only result is live (input dead), no RC op needed — single alias.
@@ -292,7 +295,7 @@ impl RCInsertion {
                                     RefCountOp::Drop,
                                     *input,
                                     &value_locations,
-                                    &instruction_location,
+                                    Some(&instruction_location),
                                 );
                             }
                         }
@@ -311,7 +314,7 @@ impl RCInsertion {
                                 RefCountOp::Drop,
                                 *r,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             );
                         }
                         new_instructions.push(instruction.clone());
@@ -327,7 +330,7 @@ impl RCInsertion {
                                 RefCountOp::Drop,
                                 *v,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             );
                         }
                         new_instructions.push(instruction.clone());
@@ -362,7 +365,7 @@ impl RCInsertion {
                                         RefCountOp::Bump(count),
                                         *input,
                                         &value_locations,
-                                        &instruction_location,
+                                        Some(&instruction_location),
                                     );
                                 }
                             }
@@ -415,7 +418,7 @@ impl RCInsertion {
                                     RefCountOp::Bump(bump),
                                     *element,
                                     &value_locations,
-                                    &instruction_location,
+                                    Some(&instruction_location),
                                 );
                             }
                         }
@@ -434,7 +437,7 @@ impl RCInsertion {
                                 RefCountOp::Drop,
                                 *result,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             );
                         }
                         new_instructions.push(instruction);
@@ -444,7 +447,7 @@ impl RCInsertion {
                                 RefCountOp::Bump(1),
                                 value,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             );
                         }
                         currently_live.insert(value);
@@ -461,7 +464,7 @@ impl RCInsertion {
                                 RefCountOp::Drop,
                                 ptr,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             );
                         }
                         new_instructions.push(instruction);
@@ -471,7 +474,7 @@ impl RCInsertion {
                                 RefCountOp::Bump(1),
                                 value,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             );
                         }
                         currently_live.insert(ptr);
@@ -484,7 +487,7 @@ impl RCInsertion {
                                 RefCountOp::Drop,
                                 *ptr,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             );
                         }
                         if self.needs_rc(type_info, result) {
@@ -494,7 +497,7 @@ impl RCInsertion {
                                     RefCountOp::Bump(1),
                                     *result,
                                     &value_locations,
-                                    &instruction_location,
+                                    Some(&instruction_location),
                                 );
                             } else {
                                 panic!(
@@ -525,7 +528,7 @@ impl RCInsertion {
                                     RefCountOp::Drop,
                                     *return_id,
                                     &value_locations,
-                                    &instruction_location,
+                                    Some(&instruction_location),
                                 );
                             }
                         }
@@ -548,7 +551,7 @@ impl RCInsertion {
                                     RefCountOp::Bump(count),
                                     *param,
                                     &value_locations,
-                                    &instruction_location,
+                                    Some(&instruction_location),
                                 );
                             }
                         }
@@ -567,7 +570,7 @@ impl RCInsertion {
                                 RefCountOp::Drop,
                                 *array,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             );
                         }
                         if self.needs_rc(type_info, result) {
@@ -579,7 +582,7 @@ impl RCInsertion {
                                     RefCountOp::Bump(1),
                                     *result,
                                     &value_locations,
-                                    &instruction_location,
+                                    Some(&instruction_location),
                                 );
                             } else {
                                 panic!(
@@ -607,7 +610,7 @@ impl RCInsertion {
                                 RefCountOp::Drop,
                                 *slice,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             );
                         }
                         new_instructions.push(instruction.clone());
@@ -629,7 +632,7 @@ impl RCInsertion {
                                 RefCountOp::Bump(1),
                                 *r,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             );
                         }
                         new_instructions.push(instruction.clone());
@@ -651,7 +654,7 @@ impl RCInsertion {
                                 RefCountOp::Bump(1),
                                 *array,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             );
                         }
                         if self.needs_rc(type_info, value) && currently_live.contains(value) {
@@ -660,7 +663,7 @@ impl RCInsertion {
                                 RefCountOp::Bump(1),
                                 *value,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             )
                         }
                         if !currently_live.contains(result) {
@@ -687,7 +690,7 @@ impl RCInsertion {
                                 RefCountOp::Bump(1),
                                 *slice,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             );
                         }
                         let slice_type = type_info.get_value_type(*slice);
@@ -711,7 +714,7 @@ impl RCInsertion {
                                         RefCountOp::Bump(count),
                                         *value,
                                         &value_locations,
-                                        &instruction_location,
+                                        Some(&instruction_location),
                                     );
                                 }
                             }
@@ -738,7 +741,7 @@ impl RCInsertion {
                                 RefCountOp::Bump(1),
                                 v,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             );
                         }
                         new_instructions.push(instruction);
@@ -772,7 +775,7 @@ impl RCInsertion {
                                 RefCountOp::Drop,
                                 *r,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             );
                         }
                         // ToBits should return an RC counter of 1.
@@ -792,7 +795,7 @@ impl RCInsertion {
                                 RefCountOp::Drop,
                                 *r,
                                 &value_locations,
-                                &instruction_location,
+                                Some(&instruction_location),
                             );
                         }
                         // ToRadix should return an RC counter of 1.
@@ -821,7 +824,7 @@ impl RCInsertion {
                         RefCountOp::Drop,
                         *param,
                         &value_locations,
-                        &block_location,
+                        block_location.as_ref(),
                     );
                 }
             }
@@ -887,18 +890,18 @@ impl RCInsertion {
                     RefCountOp::Drop,
                     *value,
                     &value_locations,
-                    &None,
+                    None,
                 ));
             }
         }
     }
 
-    fn value_source_locations(function: &HLFunction) -> HashMap<ValueId, Location> {
+    fn value_source_locations(function: &HLFunction) -> HashMap<ValueId, SourceLocation> {
         let mut locations = HashMap::default();
         for (_, block) in function.get_blocks() {
             for instruction in block.get_instructions_with_source_locations() {
                 for result in instruction.0.get_results() {
-                    locations.insert(*result, instruction.1.cloned());
+                    locations.insert(*result, instruction.1.clone());
                 }
             }
         }
@@ -908,24 +911,24 @@ impl RCInsertion {
     fn located_mem_op(
         kind: RefCountOp,
         value: ValueId,
-        value_locations: &HashMap<ValueId, Location>,
-        fallback_location: &Location,
+        value_locations: &HashMap<ValueId, SourceLocation>,
+        fallback_location: Option<&SourceLocation>,
     ) -> Located<OpCode> {
-        Located::new(
-            OpCode::MemOp { kind, value },
-            value_locations
-                .get(&value)
-                .cloned()
-                .unwrap_or_else(|| fallback_location.clone()),
-        )
+        let location = value_locations
+            .get(&value)
+            .or(fallback_location)
+            .cloned()
+            .expect("ICE: reference-count op emitted without a source location");
+
+        Located::new(OpCode::MemOp { kind, value }, location)
     }
 
     fn push_mem_op(
         instructions: &mut Vec<Located<OpCode>>,
         kind: RefCountOp,
         value: ValueId,
-        value_locations: &HashMap<ValueId, Location>,
-        fallback_location: &Location,
+        value_locations: &HashMap<ValueId, SourceLocation>,
+        fallback_location: Option<&SourceLocation>,
     ) {
         instructions.push(Self::located_mem_op(
             kind,

@@ -6,48 +6,44 @@ use std::{
 
 use fm::{FileId, FileMap};
 
-/// A value bundled with its optional source location.
+/// A value bundled with its source location.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Located<T> {
     payload: T,
-    location: Location,
+    location: SourceLocation,
 }
 
 impl<T> Located<T> {
-    pub fn new(payload: T, location: Location) -> Self {
+    pub fn new(payload: T, location: SourceLocation) -> Self {
         Self { payload, location }
     }
 
-    pub fn without(payload: T) -> Self {
-        Self::new(payload, None)
-    }
-
     pub fn with(payload: T, location: SourceLocation) -> Self {
-        Self::new(payload, Some(location))
+        Self::new(payload, location)
     }
 
     pub fn payload(self) -> T {
         self.payload
     }
 
-    pub fn take(self) -> (T, Location) {
+    pub fn take(self) -> (T, SourceLocation) {
         (self.payload, self.location)
     }
 
-    pub fn location(&self) -> &Location {
+    pub fn location(&self) -> &SourceLocation {
         &self.location
     }
 
-    pub fn location_mut(&mut self) -> &mut Location {
+    pub fn location_mut(&mut self) -> &mut SourceLocation {
         &mut self.location
     }
 
-    pub fn get_location(&self) -> Option<&SourceLocation> {
-        self.location().as_ref()
+    pub fn get_location(&self) -> &SourceLocation {
+        self.location()
     }
 
-    pub fn get_location_mut(&mut self) -> Option<&mut SourceLocation> {
-        self.location_mut().as_mut()
+    pub fn get_location_mut(&mut self) -> &mut SourceLocation {
+        self.location_mut()
     }
 
     pub fn to_ref(&self) -> Located<&T> {
@@ -75,21 +71,11 @@ impl<T> AsRef<T> for Located<T> {
     }
 }
 
-impl<T> From<T> for Located<T> {
-    // TODO: Remove this once source locations become non-optional and callers must pass Located<T>.
-    fn from(value: T) -> Self {
-        Located::without(value)
-    }
-}
-
 impl<T: Display> Display for Located<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         self.payload.fmt(f)
     }
 }
-
-// TODO: Remove this alias once locations become non-optional and this can be `SourceLocation`.
-pub type Location = Option<SourceLocation>;
 
 /// Lines and columns, when available, are expected to be 1-based.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -110,13 +96,22 @@ pub struct SourceLocation {
     /// The user-facing source identifier.
     ///
     /// This should be an absolute filesystem path when the source is backed by a file, but remains
-    /// a string so compiler-generated and other synthetic sources can also be represented.
+    /// a string so synthetic source names can also be represented.
     pub file: Arc<str>,
     pub start: SourcePosition,
     pub end: SourcePosition,
 }
 
 impl SourceLocation {
+    #[cfg(test)]
+    pub fn test() -> Self {
+        Self::new(
+            "<test>",
+            SourcePosition::new(1, 1),
+            SourcePosition::new(1, 1),
+        )
+    }
+
     pub fn new(file: impl Into<Arc<str>>, start: SourcePosition, end: SourcePosition) -> Self {
         Self {
             file: file.into(),
@@ -199,17 +194,17 @@ mod tests {
         let mut location = test_location();
         let mut located = Located::with(1, location.clone());
 
-        assert_eq!(located.location(), &Some(location.clone()));
-        assert_eq!(located.get_location(), Some(&location));
-        located.get_location_mut().unwrap().start.line = 5;
+        assert_eq!(located.location(), &location);
+        assert_eq!(located.get_location(), &location);
+        located.get_location_mut().start.line = 5;
         location.start.line = 5;
         assert_eq!(AsRef::<i32>::as_ref(&located), &1);
 
         let located_ref = located.to_ref();
         assert_eq!(*located_ref, &1);
-        assert_eq!(located_ref.get_location(), Some(&location));
+        assert_eq!(located_ref.get_location(), &location);
 
-        assert_eq!(located.take(), (1, Some(location)));
+        assert_eq!(located.take(), (1, location));
     }
 
     #[test]

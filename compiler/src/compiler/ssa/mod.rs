@@ -22,7 +22,7 @@ use std::{
 
 use crate::collections::HashMap;
 
-pub use super::located::{Located, Location, SourceLocation, SourcePosition};
+pub use super::located::{Located, SourceLocation, SourcePosition};
 pub use id::{BlockId, FunctionId, ValueId};
 pub use traits::{Instruction, SSAAnotator, SSAType};
 
@@ -941,10 +941,7 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
             .iter()
             .map(|i| {
                 let instruction = i.display_instruction(func_name, &annotate_value);
-                match i.get_location() {
-                    Some(source_location) => format!("    {} @ {}", instruction, source_location),
-                    None => format!("    {}", instruction),
-                }
+                format!("    {} @ {}", instruction, i.get_location())
             })
             .join("\n");
         let terminator = match &self.terminator {
@@ -973,21 +970,16 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
         }
     }
 
-    // TODO: Once locations become non-optional, make the internal representation store
-    // `SourceLocation` directly.
     pub fn take_instructions(&mut self) -> Vec<Located<Op>> {
         std::mem::take(&mut self.instructions)
     }
 
-    pub fn put_instructions(&mut self, instructions: Vec<impl Into<Located<Op>>>) {
-        self.instructions = instructions
-            .into_iter()
-            .map(|instruction| instruction.into())
-            .collect();
+    pub fn put_instructions(&mut self, instructions: Vec<Located<Op>>) {
+        self.instructions = instructions;
     }
 
-    pub fn push_instruction(&mut self, instruction: impl Into<Located<Op>>) {
-        self.instructions.push(instruction.into());
+    pub fn push_instruction(&mut self, instruction: Located<Op>) {
+        self.instructions.push(instruction);
     }
 
     pub fn push_instruction_with_source_location(
@@ -1031,15 +1023,11 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
         &self.instructions[i]
     }
 
-    pub fn get_instruction_source_location(&self, i: usize) -> Option<&SourceLocation> {
+    pub fn get_instruction_source_location(&self, i: usize) -> &SourceLocation {
         self.instructions[i].get_location()
     }
 
-    pub fn set_instruction_source_location(
-        &mut self,
-        i: usize,
-        source_location: Option<SourceLocation>,
-    ) {
+    pub fn set_instruction_source_location(&mut self, i: usize, source_location: SourceLocation) {
         *self.instructions[i].location_mut() = source_location;
     }
 
@@ -1047,19 +1035,9 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
         self.instructions.len()
     }
 
-    pub fn stamp_source_location_from(
-        &mut self,
-        start: usize,
-        source_location: Option<SourceLocation>,
-    ) {
-        let Some(source_location) = source_location else {
-            return;
-        };
-
+    pub fn stamp_source_location_from(&mut self, start: usize, source_location: SourceLocation) {
         for instruction in self.instructions.iter_mut().skip(start) {
-            if instruction.get_location().is_none() {
-                *instruction.location_mut() = Some(source_location.clone());
-            }
+            *instruction.location_mut() = source_location.clone();
         }
     }
 
@@ -1069,7 +1047,7 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
 
     pub fn get_instructions_with_source_locations(
         &self,
-    ) -> impl DoubleEndedIterator<Item = (&Op, Option<&SourceLocation>)> {
+    ) -> impl DoubleEndedIterator<Item = (&Op, &SourceLocation)> {
         self.instructions
             .iter()
             .map(|instruction| (&**instruction, instruction.get_location()))
@@ -1083,7 +1061,7 @@ impl<Op: Instruction, Ty: SSAType> Block<Op, Ty> {
 
     pub fn get_instruction_source_locations_mut(
         &mut self,
-    ) -> impl Iterator<Item = &mut Option<SourceLocation>> {
+    ) -> impl Iterator<Item = &mut SourceLocation> {
         self.instructions
             .iter_mut()
             .map(|instruction| instruction.location_mut())
@@ -1181,22 +1159,26 @@ mod tests {
     }
 
     #[test]
-    fn block_instructions_default_to_no_source_location() {
+    fn test_block_instructions_default_to_test_source_location() {
         let mut ssa = HLSSA::with_main("main".to_string());
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
 
-        entry.push_instruction(OpCode::Not {
-            result: ValueId(0),
-            value: ValueId(1),
-        });
+        entry.push_instruction(Located::with(
+            OpCode::Not {
+                result: ValueId(0),
+                value: ValueId(1),
+            },
+            SourceLocation::test(),
+        ));
 
-        assert_eq!(entry.get_instruction_source_location(0), None);
         assert_eq!(
+            entry.get_instruction_source_location(0),
+            &SourceLocation::test()
+        );
+        assert!(
             entry
                 .get_instructions_with_source_locations()
-                .map(|(_, location)| location)
-                .collect::<Vec<_>>(),
-            vec![None]
+                .all(|(_, location)| location == &SourceLocation::test())
         );
     }
 
@@ -1205,16 +1187,16 @@ mod tests {
         let location = test_location();
         let mut located = Located::with(ValueId(1), location.clone());
 
-        assert_eq!(located.location(), &Some(location.clone()));
-        assert_eq!(located.get_location(), Some(&location));
-        *located.location_mut() = Some(location.clone());
+        assert_eq!(located.location(), &location);
+        assert_eq!(located.get_location(), &location);
+        *located.location_mut() = location.clone();
         assert_eq!(AsRef::<ValueId>::as_ref(&located), &ValueId(1));
 
         let located_ref = located.to_ref();
         assert_eq!(*located_ref, &ValueId(1));
-        assert_eq!(located_ref.get_location(), Some(&location));
+        assert_eq!(located_ref.get_location(), &location);
 
-        assert_eq!(located.take(), (ValueId(1), Some(location)));
+        assert_eq!(located.take(), (ValueId(1), location));
     }
 
     #[test]
@@ -1231,7 +1213,7 @@ mod tests {
             location.clone(),
         );
 
-        assert_eq!(entry.get_instruction_source_location(0), Some(&location));
+        assert_eq!(entry.get_instruction_source_location(0), &location);
         assert!(
             ssa.to_string(&DefaultSSAAnnotator)
                 .contains("@ src/main.nr:3:5")
@@ -1239,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_instruction_replacement_clears_source_locations() {
+    fn instruction_replacement_requires_explicit_source_location() {
         let mut ssa = HLSSA::with_main("main".to_string());
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
 
@@ -1255,10 +1237,14 @@ mod tests {
             .take_instructions()
             .into_iter()
             .map(|instruction| instruction.payload())
+            .map(|instruction| Located::with(instruction, SourceLocation::test()))
             .collect();
         entry.put_instructions(instructions);
 
-        assert_eq!(entry.get_instruction_source_location(0), None);
+        assert_eq!(
+            entry.get_instruction_source_location(0),
+            &SourceLocation::test()
+        );
     }
 
     #[test]
@@ -1278,6 +1264,6 @@ mod tests {
         let instructions = entry.take_instructions();
         entry.put_instructions(instructions);
 
-        assert_eq!(entry.get_instruction_source_location(0), Some(&location));
+        assert_eq!(entry.get_instruction_source_location(0), &location);
     }
 }
