@@ -770,3 +770,42 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static> Analy
         FlowAnalysis::run(ssa)
     }
 }
+
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a [`CFG`] over blocks `0..blocks`: block `0` is the entry, `edges` are the jumps, and
+    /// each block in `returns` is wired to the synthetic return node. Edge weights are irrelevant
+    /// to the structural queries under test, so every edge is a plain `Jmp`.
+    fn build_cfg(blocks: u64, edges: &[(u64, u64)], returns: &[u64]) -> CFG {
+        let mut builder = CFGBuilder::new();
+        for b in 0..blocks {
+            builder.add_block(BlockId(b));
+        }
+        builder.set_entry(BlockId(0));
+        for &(s, t) in edges {
+            builder.add_jump(BlockId(s), BlockId(t), JumpType::Jmp);
+        }
+        for &r in returns {
+            builder.add_return(BlockId(r));
+        }
+        builder.build()
+    }
+
+    #[test]
+    fn no_exit_path_block_is_post_dominance_safe() {
+        // Block 1 self-loops with no path to the exit: 0 → {1 (→ 1), 2 → return}.
+        // `post_dominates` must answer (conservatively `false`) rather than panic — such blocks
+        // are absent from the reverse dominator tree.
+        let cfg = build_cfg(3, &[(0, 1), (1, 1), (0, 2)], &[2]);
+        assert!(!cfg.post_dominates(BlockId(2), BlockId(1)));
+        assert!(!cfg.post_dominates(BlockId(1), BlockId(0)));
+        // The exiting arm still post-dominates the entry (static post-dominance ranges over the
+        // paths that reach the exit).
+        assert!(cfg.post_dominates(BlockId(2), BlockId(0)));
+    }
+}

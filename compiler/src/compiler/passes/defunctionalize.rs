@@ -13,7 +13,7 @@ use crate::{
     collections::{HashMap, HashSet},
     compiler::{
         pass_manager::{AnalysisStore, Pass},
-        passes::fix_double_jumps::ValueReplacements,
+        passes::shared::value_replacements::ValueReplacements,
         ssa::{
             BlockId, FunctionId, Located, SourceLocation, Terminator, ValueId,
             hlssa::{

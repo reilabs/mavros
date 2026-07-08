@@ -33,12 +33,12 @@ fn sole_context(cc: &ClickCooper, f: FunctionId) -> Context {
 // TESTS
 // ================================================================================================
 
-/// `OpCode::scalar_fold` is the single source of truth for "foldable *scalar* op", and value
+/// `OpCode::scalar_fold` is the single source of truth for "foldable _scalar_ op", and value
 /// numbering is a strict superset of it.
 ///
 /// This locks the projections that read both: `is_pure_scalar_fold` agrees with
 /// `scalar_fold().is_some()`; value numbering (`pure_op_operands`, backed by `op_signature`)
-/// fires on every foldable scalar op *except* witness casts, **and additionally** on the pure
+/// fires on every foldable scalar op _except_ witness casts, **and additionally** on the pure
 /// sequence ops, which are not scalar-foldable. Both deliberate asymmetries are asserted below
 /// so neither can be silently dropped.
 #[test]
@@ -211,7 +211,7 @@ fn scalar_fold_is_the_single_classifier() {
     }
 }
 
-/// Two values that fold to the *same* constant are congruent, even when computed differently —
+/// Two values that fold to the _same_ constant are congruent, even when computed differently —
 /// the const → congruence coupling.
 #[test]
 fn equal_constants_are_congruent() {
@@ -415,7 +415,7 @@ fn array_ops_are_value_numbered() {
     assert!(!cc.known_equal(fid, s1, s4)); // different elem_type
 }
 
-/// φ-operands come from *executable* edges only: a parameter whose value differs solely on a
+/// φ-operands come from _executable_ edges only: a parameter whose value differs solely on a
 /// dead in-edge is still congruent to one that agrees on the live edge.
 #[test]
 fn phi_congruence_excludes_dead_edges() {
@@ -451,7 +451,7 @@ fn phi_congruence_excludes_dead_edges() {
     assert!(cc.known_equal(fid, p, q));
 }
 
-/// The same merge with *both* edges live keeps the parameters apart — congruence is genuinely
+/// The same merge with _both_ edges live keeps the parameters apart — congruence is genuinely
 /// reachability-sensitive.
 #[test]
 fn phi_distinguished_when_both_edges_live() {
@@ -750,7 +750,7 @@ fn leader_of_constant_class_is_the_interned_constant() {
     assert_eq!(cc.leader(fid, c5), Some(c5));
 }
 
-/// Assert-vacuum soundness: `assert(x == 5)` pins `x` to 5 *conditionally* in dominated blocks,
+/// Assert-vacuum soundness: `assert(x == 5)` pins `x` to 5 _conditionally_ in dominated blocks,
 /// but never unconditionally — so a global fold (SCS) can't fold `x` and vacuum the assert.
 #[test]
 fn assert_eq_const_is_conditional_not_unconditional() {
@@ -781,13 +781,13 @@ fn assert_eq_const_is_conditional_not_unconditional() {
     // Unconditionally `x` is unknown — the assert never enters the global lattice.
     assert_eq!(cc.const_of(fid, x), None);
     assert!(cc.new_const_values(fid).iter().all(|(v, _)| *v != x));
-    // Conditionally `x == 5` at every block the assert *strictly* dominates ...
+    // Conditionally `x == 5` at every block the assert _strictly_ dominates ...
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(after, 0), x)
             .as_deref(),
         Some(&Constant::U(32, 5))
     );
-    // ... and, at index granularity, in the asserting block itself *after* the assert (the assert is
+    // ... and, at index granularity, in the asserting block itself _after_ the assert (the assert is
     // instruction 0, so the terminator at index 1 sees the pin) ...
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), x)
@@ -841,7 +841,7 @@ fn assert_bool_is_conditional() {
     );
 }
 
-/// `assert(x == y)` with neither side constant records a *conditional* equality — distinct from
+/// `assert(x == y)` with neither side constant records a _conditional_ equality — distinct from
 /// structural congruence, which (unconditionally) keeps the two parameters apart.
 #[test]
 fn assert_eq_pure_equality_is_conditional() {
@@ -879,7 +879,7 @@ fn assert_eq_pure_equality_is_conditional() {
     assert!(!cc.known_equal(fid, x, y));
 }
 
-/// The asserted-equal leader is *dominance-aware*, not smallest-id: with `def(a)` dominating
+/// The asserted-equal leader is _dominance-aware_, not smallest-id: with `def(a)` dominating
 /// `def(b)`, the leader of both is the dominating `a` even though `b` has the smaller value id.
 #[test]
 fn asserted_leader_picks_dominating_member() {
@@ -932,7 +932,7 @@ fn asserted_leader_picks_dominating_member() {
     assert_eq!(cc.asserted_leader(fid, ProgramPoint::new(mid, 1), a), None);
 }
 
-/// The leader is the representative of the *transitive* class: `a == b` and `b == c` make all three
+/// The leader is the representative of the _transitive_ class: `a == b` and `b == c` make all three
 /// share one leader, which is strictly stronger than the direct-pair `asserted_equal` check.
 #[test]
 fn asserted_leader_is_transitive() {
@@ -1041,8 +1041,8 @@ fn asserted_leader_index_granular() {
     );
 }
 
-/// An equality asserted on only one branch yields a leader within that branch (after the assert) but
-/// nowhere it fails to dominate — not the merge, the other branch, or before the branch.
+/// An equality asserted on only one branch yields a leader within that branch (after the assert)
+/// but nowhere it fails to dominate — not the merge, the other branch, or before the branch.
 #[test]
 fn asserted_leader_respects_dominance_fanout() {
     let mut ssa = HLSSA::with_main("main".to_string());
@@ -1106,7 +1106,7 @@ fn asserted_leader_respects_dominance_fanout() {
     );
 }
 
-/// A value pinned by an `asserted_const` (one side constant) is in no equality *pair*, and a value
+/// A value pinned by an `asserted_const` (one side constant) is in no equality _pair_, and a value
 /// touched by no assert at all is in no class — both have no leader.
 #[test]
 fn asserted_leader_none_without_equality() {
@@ -1142,7 +1142,7 @@ fn asserted_leader_none_without_equality() {
     assert_eq!(cc.asserted_leader(fid, p1, z), None);
 }
 
-/// Even in a function that *does* have an equality class (`a == b`), a value in no pair (`z`) has
+/// Even in a function that _does_ have an equality class (`a == b`), a value in no pair (`z`) has
 /// no leader — it gets no entry in the precomputed per-block table, so the lookup short-circuits to
 /// `None`, while a participant `a` still resolves to its leader.
 #[test]
@@ -1227,7 +1227,7 @@ fn asserted_leader_multi_threshold_same_block() {
     assert_eq!(cc.asserted_leader(fid, p2, a), Some(a));
 }
 
-/// A same-block assert can merge two *distinct dominating* (cross-block) classes. The merged leader
+/// A same-block assert can merge two _distinct dominating_ (cross-block) classes. The merged leader
 /// is returned only at indices after that local assert; before it, each cross class keeps its own
 /// leader.
 #[test]
@@ -1339,7 +1339,7 @@ fn disequality_from_false_edge() {
 }
 
 /// An unpinned witness write forwards `r → v`; distinct witnesses get distinct forwards and are
-/// never congruent; a *pinned* write (a real constraint) forwards nothing.
+/// never congruent; a _pinned_ write (a real constraint) forwards nothing.
 #[test]
 fn unpinned_witness_forwards_distinct_not_merged() {
     let mut ssa = HLSSA::with_main("main".to_string());
@@ -1386,7 +1386,7 @@ fn unpinned_witness_forwards_distinct_not_merged() {
     assert!(!cc.known_equal(fid, r1, r2));
 }
 
-/// `witness_forward` is the sorted union of *both* readings of the one witness↔value
+/// `witness_forward` is the sorted union of _both_ readings of the one witness↔value
 /// correspondence: the `WriteWitness` hint (`r → v`) and every `value_of(r)` read (`r → w`).
 /// Distinct witnesses keep disjoint sets — no cross-witness union.
 #[test]
@@ -1449,12 +1449,13 @@ fn witness_forward_unions_hint_and_value_of_reads() {
     assert!(!cc.known_equal(fid, r, r2));
 }
 
-/// An assert placed in the *last* block proves nothing by dominance (nothing follows it). The
-/// post-dominance direction — which would carry its fact up to the earlier blocks it post-dominates
-/// — was removed because it is unsound for loop-carried values (see `mod.rs`'s "Deferred
-/// Improvements" and `post_dominating_assert_unsound_for_loop_carried_value`), so the
-/// fact is *not* propagated to `entry`/`mid`. Index granularity still recovers it within the
-/// asserting block.
+/// An assert placed in the _last_ block proves nothing by dominance (nothing follows it), so the
+/// `asserted_*` channel stays empty at the earlier blocks — but the assert is _bound to run_ at
+/// every block it strictly post-dominates, so the fact surfaces through the _anticipated_ channel
+/// there instead (the asserted value is an entry parameter: stable and in scope everywhere).
+///
+/// The two channels are disjoint by design. Index granularity still recovers the fact within the
+/// asserting block, in the dominance direction only (nothing precedes the assert there).
 #[test]
 fn post_dominance_not_propagated_at_block_granularity() {
     let mut ssa = HLSSA::with_main("main".to_string());
@@ -1483,35 +1484,58 @@ fn post_dominance_not_propagated_at_block_granularity() {
 
     let fid = ssa.get_unique_entrypoint_id();
     let cc = run_in_test(&ssa);
-    // `tail` only post-dominates `mid`/`entry` (it does not dominate them), so its assert's fact is
-    // withheld there now that the post-dominance direction is gone.
+    // `tail` only post-dominates `mid`/`entry` (it does not dominate them), so its assert's fact
+    // is withheld from the dominance channel there...
     assert_eq!(cc.asserted_const(fid, ProgramPoint::new(mid, 0), x), None);
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 0), x),
         None
     );
-    // In the asserting block, index granularity still recovers it *after* the assert (index 0), but
-    // not at the assert's own index.
+    // ...and surfaces through the anticipated channel instead: `x` is an entry parameter (defined
+    // outside every cycle, in scope everywhere), so the bound-to-run assert pins it at both.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(mid, 0), x)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(entry_id, 0), x)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    // In the asserting block, index granularity still recovers it _after_ the assert (index 0), but
+    // not at the assert's own index — in either channel (the assert is `tail`'s first instruction,
+    // so nothing precedes it for the local anticipated read to reach).
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(tail, 1), x)
             .as_deref(),
         Some(&Constant::U(32, 5))
     );
     assert_eq!(cc.asserted_const(fid, ProgramPoint::new(tail, 0), x), None);
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(tail, 0), x),
+        None
+    );
 }
 
-/// Regression for the soundness bug that motivated removing the post-dominance direction: a
-/// loop-carried value asserted *after* the loop. `after` post-dominates `header`/`body` and
-/// `def(v) = header` dominates them, yet `v` is `0..9` at the header on every iteration but the
-/// last — so pinning `v = 10` there is false, and a constraint-preserving consumer could fold the
-/// loop away and turn an accepting run rejecting. With post-dominance gone the fact is withheld at
-/// `header` and `body` (the old code wrongly produced `Some(10)`).
+/// Regression check for the potential soundness issue fixed by keeping loop-carried values out of
+/// the anticipated (post-dominance) channel: a loop-carried value asserted _after_ the loop.
+///
+/// `after` post-dominates `header`/`body` and `def(v) = header` dominates them, yet `v` is `0..9`
+/// at the header on every iteration but the last — so pinning `v = 10` there is false, and a
+/// constraint-preserving consumer could fold the loop away and turn an accepting run rejecting. The
+/// stability gate withholds the fact: `v` is defined in a CFG cycle (unstable), and both `header`
+/// and `body` re-reach that definition (not final there either), so the binding the bound-to-run
+/// assert checks is not the binding at the earlier point. A _stable_ value asserted in the same
+/// block sails through — only the fact's values need stability, never the target blocks.
 #[test]
 fn post_dominating_assert_unsound_for_loop_carried_value() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let c0 = ssa.add_const(Constant::U(32, 0));
     let c1 = ssa.add_const(Constant::U(32, 1));
+    let c5 = ssa.add_const(Constant::U(32, 5));
     let c10 = ssa.add_const(Constant::U(32, 10));
+    let s = ssa.fresh_value();
     let (v, lt, v1) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1519,6 +1543,7 @@ fn post_dominating_assert_unsound_for_loop_carried_value() {
     let body = f.add_block();
     let after = f.add_block();
 
+    f.get_entry_mut().push_parameter(s, Type::u(32));
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(header, vec![c0]));
     let header_block = f.get_block_mut(header);
@@ -1553,17 +1578,44 @@ fn post_dominating_assert_unsound_for_loop_carried_value() {
         },
         SourceLocation::test(),
     ));
+    after_block.push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: s,
+            rhs: c5,
+        },
+        SourceLocation::test(),
+    ));
     after_block.set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
     let cc = run_in_test(&ssa);
-    // The (removed) post-dominance attribution would pin `v = 10` at the loop header/body; it must
-    // not, regardless of `def(v)` being in scope there.
+    // Naive post-dominance attribution would pin `v = 10` at the loop header/body; the stability
+    // gate must withhold it there — from both channels — regardless of `def(v)` being in scope.
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(header, 0), v),
         None
     );
     assert_eq!(cc.asserted_const(fid, ProgramPoint::new(body, 0), v), None);
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(header, 0), v),
+        None
+    );
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(body, 0), v),
+        None
+    );
+    // The stable entry parameter asserted in the very same block IS anticipated everywhere `after`
+    // post-dominates — including inside the loop: cyclic _target_ blocks are fine, the gate is on
+    // the fact's values alone.
+    for bid in [header, body] {
+        assert_eq!(
+            cc.anticipated_const(fid, ProgramPoint::new(bid, 0), s)
+                .as_deref(),
+            Some(&Constant::U(32, 5)),
+            "stable value must be anticipated in loop block {bid:?}"
+        );
+    }
     // Sanity: within `after`, after the assert (index 0), index granularity still recovers it.
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(after, 1), v)
@@ -1608,13 +1660,20 @@ fn assert_on_one_branch_does_not_post_dominate() {
 
     let fid = ssa.get_unique_entrypoint_id();
     let cc = run_in_test(&ssa);
-    // `x` is in scope everywhere, so only the missing dominance/post-dominance keeps the fact
-    // out of `entry` and `merge` (the `else` path skips the assert).
+    // `x` is in scope everywhere (and stable), so only the missing dominance/post-dominance keeps
+    // the fact out of `entry` and `merge` — in both channels (the `else` path skips the assert).
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 0), x),
         None
     );
     assert_eq!(cc.asserted_const(fid, ProgramPoint::new(merge, 0), x), None);
+    for bid in [entry_id, else_b, merge] {
+        assert_eq!(
+            cc.anticipated_const(fid, ProgramPoint::new(bid, 0), x),
+            None,
+            "a one-arm assert post-dominates nothing around the branch ({bid:?})"
+        );
+    }
     // In the asserting block itself the fact is still recovered after the assert (index
     // granularity), but never at the assert's own index.
     assert_eq!(
@@ -1624,6 +1683,2239 @@ fn assert_on_one_branch_does_not_post_dominate() {
     );
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(then_b, 0), x),
+        None
+    );
+}
+
+/// Gate 2 (scope) on the anticipated channel: post-dominance, unlike dominance, does not put the
+/// fact's value in scope at the target. A value defined in `mid` and asserted in `tail` (which
+/// post-dominates everything) is anticipated at `mid` but withheld at `entry`, where its
+/// definition does not dominate.
+#[test]
+fn anticipated_fact_gated_on_scope() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let (x, v) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    let mid = f.add_block();
+    let tail = f.add_block();
+    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(mid, vec![]));
+    let mid_block = f.get_block_mut(mid);
+    mid_block.push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: v,
+            lhs: x,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    mid_block.set_terminator(Terminator::Jmp(tail, vec![]));
+    f.get_block_mut(tail).push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: v,
+            rhs: c5,
+        },
+        SourceLocation::test(),
+    ));
+    f.get_block_mut(tail)
+        .set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // In its defining block (queried after its definition) the fact holds...
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(mid, 1), v)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    // ...but at `entry` — which `tail` equally post-dominates — `def(v) = mid` does not dominate,
+    // so the scope gate withholds it.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(entry_id, 0), v),
+        None
+    );
+}
+
+/// An assert in a block with no path to the exit post-dominates nothing (it is absent from the
+/// reverse dominator tree), so it contributes no anticipated fact anywhere — and the analysis must
+/// not panic on such a CFG.
+#[test]
+fn no_exit_path_assert_contributes_nothing() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let (p, x) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    let spin = f.add_block();
+    let ret = f.add_block();
+    f.get_entry_mut().push_parameter(p, Type::u(1));
+    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut()
+        .set_terminator(Terminator::JmpIf(p, spin, ret));
+    // The asserting block loops on itself forever: reachable, but never exiting.
+    f.get_block_mut(spin).push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: c5,
+        },
+        SourceLocation::test(),
+    ));
+    f.get_block_mut(spin)
+        .set_terminator(Terminator::Jmp(spin, vec![]));
+    f.get_block_mut(ret)
+        .set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(entry_id, 0), x),
+        None
+    );
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(ret, 0), x),
+        None
+    );
+}
+
+/// The executable-subgraph post-dominance gain: an assert on one arm of a _constant-condition_
+/// branch is bound to run — the untaken arm is not executable, so in the executable subgraph the
+/// asserting arm post-dominates the entry, and the anticipated fact surfaces there. The unknown-
+/// condition twin of this shape is `assert_on_one_branch_does_not_post_dominate`, where static and
+/// executable views agree and the fact stays out.
+#[test]
+fn anticipated_gains_from_constant_branch() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c_true = ssa.add_const(Constant::U(1, 1));
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let x = ssa.fresh_value();
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    let then_b = f.add_block();
+    let else_b = f.add_block();
+    let merge = f.add_block();
+    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut()
+        .set_terminator(Terminator::JmpIf(c_true, then_b, else_b));
+    f.get_block_mut(then_b).push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: c5,
+        },
+        SourceLocation::test(),
+    ));
+    f.get_block_mut(then_b)
+        .set_terminator(Terminator::Jmp(merge, vec![]));
+    f.get_block_mut(else_b)
+        .set_terminator(Terminator::Jmp(merge, vec![]));
+    f.get_block_mut(merge)
+        .set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // Statically `then_b` post-dominates nothing above the branch; executably the pruned `else` arm
+    // is gone and every path from `entry` to the exit passes the assert.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(entry_id, 0), x)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    // The dominance channel is untouched: `then_b` still does not _dominate_ anything here (the
+    // static `else` edge into `merge` remains), so the already-ran direction stays empty...
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 0), x),
+        None
+    );
+    assert_eq!(cc.asserted_const(fid, ProgramPoint::new(merge, 0), x), None);
+    // ...and `merge`, which the asserting block does not post-dominate in either view, gains
+    // nothing from the anticipated one.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(merge, 0), x),
+        None
+    );
+    // The `_in` view of the entrypoint sees the same pruning.
+    assert_eq!(
+        cc.anticipated_const_in(fid, &Context::empty(), ProgramPoint::new(entry_id, 0), x),
+        cc.anticipated_const(fid, ProgramPoint::new(entry_id, 0), x)
+    );
+}
+
+/// The per-context analog — the case no amount of static-CFG rewriting can serve: the branch is
+/// unknown intraprocedurally, and only the 1-CFA context's pinned parameter prunes the untaken arm.
+/// The contextual anticipated view gains the fact; the shared intraprocedural view must not.
+#[test]
+fn anticipated_const_in_gains_from_pinned_branch() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let g = ssa.add_function("g".to_string());
+    let (p, x, x0) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let c_true = ssa.add_const(Constant::U(1, 1));
+    let c5 = ssa.add_const(Constant::U(32, 5));
+
+    let g_entry = {
+        let hf = ssa.get_function_mut(g);
+        let g_entry = hf.get_entry_id();
+        let then_b = hf.add_block();
+        let else_b = hf.add_block();
+        let merge = hf.add_block();
+        hf.get_entry_mut().push_parameter(p, Type::u(1));
+        hf.get_entry_mut().push_parameter(x, Type::u(32));
+        hf.get_entry_mut()
+            .set_terminator(Terminator::JmpIf(p, then_b, else_b));
+        hf.get_block_mut(then_b)
+            .push_instruction(Located::with(
+                OpCode::AssertCmp {
+                    kind: CmpKind::Eq,
+                    lhs: x,
+                    rhs: c5,
+                },
+                SourceLocation::test(),
+            ));
+        hf.get_block_mut(then_b)
+            .set_terminator(Terminator::Jmp(merge, vec![]));
+        hf.get_block_mut(else_b)
+            .set_terminator(Terminator::Jmp(merge, vec![]));
+        hf.get_block_mut(merge)
+            .set_terminator(Terminator::Return(vec![]));
+        g_entry
+    };
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.get_entry_mut().push_parameter(x0, Type::u(32));
+        mf.get_entry_mut().push_instruction(Located::with(
+            OpCode::Call {
+                results: vec![],
+                function: CallTarget::Static(g),
+                args: vec![c_true, x0],
+                unconstrained: false,
+            },
+            SourceLocation::test(),
+        ));
+        mf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![]));
+    }
+
+    let cc = run_in_test(&ssa);
+    let ctx = sole_context(&cc, g);
+    let pp = ProgramPoint::new(g_entry, 0);
+
+    // Intraprocedurally `p` is unknown: both arms stay executable, the static and executable views
+    // coincide, and the one-arm assert post-dominates nothing.
+    assert_eq!(cc.anticipated_const(g, pp, x), None);
+
+    // The context pins `p = true`, pruning the `else` arm: the assert becomes bound to run at the
+    // callee's entry, and the contextual anticipated view pins `x` there (`x` itself stays unknown
+    // — the caller passes its own free parameter).
+    assert_eq!(
+        cc.anticipated_const_in(g, &ctx, pp, x).as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+}
+
+/// The executable-subgraph _cyclicity_ gain: a call result defined in a block on a static cycle is
+/// unstable — unless the cycle's back edge hangs off a constant-false branch and is never
+/// executable, in which case no block repeats per run, the view is executably acyclic, and every
+/// value (the opaque call result included) is single-valued. The live-back-edge twin below keeps
+/// the fact out.
+#[test]
+fn anticipated_gains_from_dead_back_edge() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let g = ssa.add_function("g".to_string());
+    let (a, b, w, r, wit) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let c_false = ssa.add_const(Constant::U(1, 0));
+    let c5 = ssa.add_const(Constant::U(32, 5));
+
+    // `g(a) = a + fresh_witness`: nondeterministic, so no invariance rule — neither rule-3 form
+    // (pure-op or det-call) nor a congruence witness — can admit its result; its stability rides on
+    // cyclicity alone.
+    {
+        let hf = ssa.get_function_mut(g);
+        hf.add_return_type(Type::u(32));
+        hf.get_entry_mut().push_parameter(a, Type::u(32));
+        hf.get_entry_mut().push_instruction(Located::with(
+            OpCode::FreshWitness {
+                result: wit,
+                result_type: Type::u(32),
+            },
+            SourceLocation::test(),
+        ));
+        hf.get_entry_mut().push_instruction(Located::with(
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: b,
+                lhs: a,
+                rhs: wit,
+            },
+            SourceLocation::test(),
+        ));
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![b]));
+    }
+    let (header, after) = {
+        let mf = ssa.get_function_mut(main_id);
+        let header = mf.add_block();
+        let body = mf.add_block();
+        let after = mf.add_block();
+        mf.get_entry_mut().push_parameter(w, Type::u(32));
+        mf.get_entry_mut()
+            .set_terminator(Terminator::Jmp(header, vec![]));
+        let header_block = mf.get_block_mut(header);
+        header_block.push_instruction(Located::with(
+            OpCode::Call {
+                results: vec![r],
+                function: CallTarget::Static(g),
+                args: vec![w],
+                unconstrained: false,
+            },
+            SourceLocation::test(),
+        ));
+        // The back edge through `body` exists statically but its branch is constant-false.
+        header_block.set_terminator(Terminator::JmpIf(c_false, body, after));
+        mf.get_block_mut(body)
+            .set_terminator(Terminator::Jmp(header, vec![]));
+        mf.get_block_mut(after).push_instruction(Located::with(
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs: r,
+                rhs: c5,
+            },
+            SourceLocation::test(),
+        ));
+        mf.get_block_mut(after)
+            .set_terminator(Terminator::Return(vec![]));
+        (header, after)
+    };
+
+    let cc = run_in_test(&ssa);
+
+    // `after` post-dominates `header` even statically; the blocker was stability: `def(r) = header`
+    // sits on the static `header ⇄ body` cycle and a nondeterministic call passes no invariance
+    // rule. Executably no cycle survives, so `r` is single-valued and the bound-to-run pin holds
+    // right after its definition.
+    assert_eq!(
+        cc.anticipated_const(main_id, ProgramPoint::new(header, 1), r)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    // The dominance channel still owes nothing before the assert runs.
+    assert_eq!(
+        cc.asserted_const(main_id, ProgramPoint::new(header, 1), r),
+        None
+    );
+    // Within `after`, index granularity recovers the fact after the assert as usual.
+    assert_eq!(
+        cc.asserted_const(main_id, ProgramPoint::new(after, 1), r)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+}
+
+/// The live twin of `anticipated_gains_from_dead_back_edge`: with the loop condition unknown the
+/// executable view equals the static one (the unpruned fast path), the cycle is real, and the
+/// nondeterministic call result — which genuinely rebinds per iteration — must stay unpinned
+/// everywhere the assert merely post-dominates. (A _deterministic_ callee over the same stable
+/// argument is admitted directly by rule 3's det-call form —
+/// `anticipated_admits_det_call_directly_in_loop`.)
+#[test]
+fn live_back_edge_keeps_call_result_unstable() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let g = ssa.add_function("g".to_string());
+    let (a, b, p, w, r, wit) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let c5 = ssa.add_const(Constant::U(32, 5));
+
+    // `g(a) = a + fresh_witness`: nondeterministic, so no invariance rule can admit its result.
+    {
+        let hf = ssa.get_function_mut(g);
+        hf.add_return_type(Type::u(32));
+        hf.get_entry_mut().push_parameter(a, Type::u(32));
+        hf.get_entry_mut().push_instruction(Located::with(
+            OpCode::FreshWitness {
+                result: wit,
+                result_type: Type::u(32),
+            },
+            SourceLocation::test(),
+        ));
+        hf.get_entry_mut().push_instruction(Located::with(
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: b,
+                lhs: a,
+                rhs: wit,
+            },
+            SourceLocation::test(),
+        ));
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![b]));
+    }
+    let header = {
+        let mf = ssa.get_function_mut(main_id);
+        let header = mf.add_block();
+        let body = mf.add_block();
+        let after = mf.add_block();
+        mf.get_entry_mut().push_parameter(p, Type::u(1));
+        mf.get_entry_mut().push_parameter(w, Type::u(32));
+        mf.get_entry_mut()
+            .set_terminator(Terminator::Jmp(header, vec![]));
+        let header_block = mf.get_block_mut(header);
+        header_block.push_instruction(Located::with(
+            OpCode::Call {
+                results: vec![r],
+                function: CallTarget::Static(g),
+                args: vec![w],
+                unconstrained: false,
+            },
+            SourceLocation::test(),
+        ));
+        header_block.set_terminator(Terminator::JmpIf(p, body, after));
+        mf.get_block_mut(body)
+            .set_terminator(Terminator::Jmp(header, vec![]));
+        mf.get_block_mut(after).push_instruction(Located::with(
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs: r,
+                rhs: c5,
+            },
+            SourceLocation::test(),
+        ));
+        mf.get_block_mut(after)
+            .set_terminator(Terminator::Return(vec![]));
+        header
+    };
+
+    let cc = run_in_test(&ssa);
+    // The loop genuinely repeats: `r` rebinds per iteration and the assert only checks the last
+    // binding, so pinning it mid-loop would be unsound — the gate must withhold it.
+    assert_eq!(
+        cc.anticipated_const(main_id, ProgramPoint::new(header, 1), r),
+        None
+    );
+}
+
+/// The executable-subgraph _finality_ gain: a genuinely loop-carried value stays unstable, but at a
+/// block whose only static path back to the definition runs through a constant-false branch, the
+/// binding is executably final — the bound-to-run assert checks exactly it, and the fact lands
+/// there while staying out of the live loop.
+#[test]
+fn anticipated_finality_gains_from_pruned_back_path() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c_false = ssa.add_const(Constant::U(1, 0));
+    let (v, lt, v1) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let header = f.add_block();
+    let body = f.add_block();
+    let c_block = f.add_block();
+    let tramp = f.add_block();
+    let next = f.add_block();
+
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(header, vec![c0]));
+    let header_block = f.get_block_mut(header);
+    header_block.push_parameter(v, Type::u(32));
+    header_block.push_instruction(Located::with(
+        OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: lt,
+            lhs: v,
+            rhs: c10,
+        },
+        SourceLocation::test(),
+    ));
+    header_block.set_terminator(Terminator::JmpIf(lt, body, c_block));
+    let body_block = f.get_block_mut(body);
+    body_block.push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: v1,
+            lhs: v,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    body_block.set_terminator(Terminator::Jmp(header, vec![v1]));
+    // The static back-path `c_block → tramp → header` re-enters the definition, but only through
+    // a constant-false branch — executably `c_block` never re-reaches `def(v)`.
+    f.get_block_mut(c_block)
+        .set_terminator(Terminator::JmpIf(c_false, tramp, next));
+    f.get_block_mut(tramp)
+        .set_terminator(Terminator::Jmp(header, vec![c0]));
+    f.get_block_mut(next).push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: v,
+            rhs: c10,
+        },
+        SourceLocation::test(),
+    ));
+    f.get_block_mut(next)
+        .set_terminator(Terminator::Return(vec![]));
+
+    let cc = run_in_test(&ssa);
+    // `v` is loop-carried (two live φ operands), so stability never grants it; static finality
+    // fails at `c_block` (the trampoline path re-enters `header`), but executable finality holds:
+    // the binding at `c_block` is the one the bound-to-run assert checks.
+    assert_eq!(
+        cc.anticipated_const(main_id, ProgramPoint::new(c_block, 0), v)
+            .as_deref(),
+        Some(&Constant::U(32, 10))
+    );
+    // Inside the live loop the executable back-reach is real in both views: no fact.
+    assert_eq!(
+        cc.anticipated_const(main_id, ProgramPoint::new(header, 0), v),
+        None
+    );
+    assert_eq!(
+        cc.anticipated_const(main_id, ProgramPoint::new(body, 0), v),
+        None
+    );
+}
+
+/// The union's static-fallback arm: pruning can also _cut_ a block's last executable path to the
+/// exit, where the executable-subgraph relation answers a conservative `false` (its unit twin is
+/// `exec_view`'s `no_exec_exit_path_is_conservative`) — the static relation must keep granting on
+/// such a pruned build, so the union never loses a static fact. Here `stuck`'s only static exit
+/// path runs through the pruned arm into the asserting block: statically bound to run, executably a
+/// forever-spin — either way every run visiting `stuck` reaches the check or hangs.
+#[test]
+fn pruned_build_keeps_static_post_dominance_fact() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c_false = ssa.add_const(Constant::U(1, 0));
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let (p, x) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let stuck = f.add_block();
+    let bypass = f.add_block();
+    let check = f.add_block();
+    let spin = f.add_block();
+    f.get_entry_mut().push_parameter(p, Type::u(1));
+    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut()
+        .set_terminator(Terminator::JmpIf(p, stuck, bypass));
+    // `stuck`'s only static exit path is the `then` arm into `check` — pruned by the
+    // constant-false condition, leaving its executable successor spinning forever.
+    f.get_block_mut(stuck)
+        .set_terminator(Terminator::JmpIf(c_false, check, spin));
+    f.get_block_mut(spin)
+        .set_terminator(Terminator::Jmp(spin, vec![]));
+    // `check` stays reachable (so its assert establishes a fact) via the other arm.
+    f.get_block_mut(bypass)
+        .set_terminator(Terminator::Jmp(check, vec![]));
+    f.get_block_mut(check).push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: c5,
+        },
+        SourceLocation::test(),
+    ));
+    f.get_block_mut(check)
+        .set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // The build pruned `stuck → check`, so the executable view exists — and `stuck`, with no
+    // executable path to the exit, is absent from its reverse traversal (conservative `false`).
+    // Statically every `stuck → exit` path passes the assert, and `x` (an entry parameter) is
+    // stable and in scope: the static disjunct alone keeps the fact alive.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(stuck, 0), x)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    // The dominance channel owes nothing: the assert has not run when control is at `stuck`.
+    assert_eq!(cc.asserted_const(fid, ProgramPoint::new(stuck, 0), x), None);
+    // `spin` reaches no exit in either view: no post-dominance, no fact.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(spin, 0), x),
+        None
+    );
+}
+
+/// The local (same-block) anticipated direction: a fact from an assert _later_ in the block holds
+/// at indices before it — but never at the assert's own index, and never for the dominance-channel
+/// reads, which stay strictly after it.
+#[test]
+fn local_anticipated_before_the_assert() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: y,
+            lhs: x,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    f.get_entry_mut().push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: c5,
+        },
+        SourceLocation::test(),
+    ));
+    f.get_entry_mut().set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // Before the assert (index 0 < 1) the fact is anticipated; the dominance read sees nothing.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(entry_id, 0), x)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 0), x),
+        None
+    );
+    // At the assert's own index neither channel fires (`q == i` matches neither `<` nor `>`), so
+    // the assert can never inform its own operands.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(entry_id, 1), x),
+        None
+    );
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), x),
+        None
+    );
+    // After it (the terminator index), the channels swap roles.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(entry_id, 2), x),
+        None
+    );
+    assert_eq!(
+        cc.asserted_const(fid, ProgramPoint::new(entry_id, 2), x)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+}
+
+/// The local anticipated direction needs no stability gate: from any earlier index, straight-line
+/// execution reaches the same-block assert _within the same iteration_, on the same bindings — so
+/// even a loop-carried value is pinned before its own block's assert (while the cross-block
+/// channel correctly withholds it everywhere else).
+#[test]
+fn local_anticipated_needs_no_stability_gate() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c9 = ssa.add_const(Constant::U(32, 9));
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let (w, y, lt) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    let looping = f.add_block();
+    let exit = f.add_block();
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(looping, vec![c0]));
+    let loop_block = f.get_block_mut(looping);
+    loop_block.push_parameter(w, Type::u(32));
+    loop_block.push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: y,
+            lhs: w,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    loop_block.push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: w,
+            rhs: c9,
+        },
+        SourceLocation::test(),
+    ));
+    loop_block.push_instruction(Located::with(
+        OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: lt,
+            lhs: y,
+            rhs: c10,
+        },
+        SourceLocation::test(),
+    ));
+    loop_block.set_terminator(Terminator::JmpIf(lt, looping, exit));
+    f.get_block_mut(exit)
+        .set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // Before the same-block assert (index 0 < 2) the loop-carried `w` IS pinned: this iteration's
+    // binding is exactly what the assert checks two instructions later.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(looping, 0), w)
+            .as_deref(),
+        Some(&Constant::U(32, 9))
+    );
+    // Cross-block, `w` is withheld (both gates fail: it is loop-carried, hence unstable, and out
+    // of scope at `entry`) — `entry` gets nothing even though the loop block post-dominates it.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(entry_id, 0), w),
+        None
+    );
+}
+
+/// The anticipated equality channel and the union leader tables: a bound-to-run `AssertCmp{Eq}`
+/// surfaces pairs through `anticipated_equal` under the same gates as the const channel, while
+/// `anticipated_leader` redirects to the DefKey-minimum — including for a member defined by an
+/// instruction of the query block itself (its class leader here is an entry parameter, threshold
+/// `0`, a dominance-valid redirect target at every index).
+#[test]
+fn anticipated_equalities_and_leaders() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let (a, b, m) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    let mid = f.add_block();
+    let tail = f.add_block();
+    f.get_entry_mut().push_parameter(a, Type::u(32));
+    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(mid, vec![]));
+    let mid_block = f.get_block_mut(mid);
+    mid_block.push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: m,
+            lhs: a,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    mid_block.set_terminator(Terminator::Jmp(tail, vec![]));
+    let tail_block = f.get_block_mut(tail);
+    tail_block.push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: a,
+            rhs: b,
+        },
+        SourceLocation::test(),
+    ));
+    tail_block.push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: m,
+            rhs: b,
+        },
+        SourceLocation::test(),
+    ));
+    tail_block.set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // Both pairs are anticipated at `mid` (all values stable and in scope); neither is asserted.
+    assert!(cc.anticipated_equal(fid, ProgramPoint::new(mid, 1), a, b));
+    assert!(cc.anticipated_equal(fid, ProgramPoint::new(mid, 1), b, a));
+    assert!(cc.anticipated_equal(fid, ProgramPoint::new(mid, 1), m, b));
+    assert!(!cc.asserted_equal(fid, ProgramPoint::new(mid, 1), a, b));
+    // At `entry`, `m` is out of scope (defined in `mid`), so only the parameter pair survives.
+    assert!(cc.anticipated_equal(fid, ProgramPoint::new(entry_id, 0), a, b));
+    assert!(!cc.anticipated_equal(fid, ProgramPoint::new(entry_id, 0), m, b));
+    // Leaders: `a` is the DefKey-minimum of `{a, b}` (both entry parameters, value-id tie-break),
+    // so `b` redirects to `a` — at `mid` and at `entry` alike.
+    assert_eq!(
+        cc.anticipated_leader(fid, ProgramPoint::new(mid, 1), b),
+        Some(a)
+    );
+    assert_eq!(
+        cc.anticipated_leader(fid, ProgramPoint::new(entry_id, 0), b),
+        Some(a)
+    );
+    // `m` is defined in `mid` itself, but its class leader `a` is an entry parameter (threshold
+    // `0`), so `m` redirects to `a` even inside `mid`.
+    assert_eq!(
+        cc.anticipated_leader(fid, ProgramPoint::new(mid, 1), m),
+        Some(a)
+    );
+    // The dominance-channel leader query knows nothing of any of this.
+    assert_eq!(cc.asserted_leader(fid, ProgramPoint::new(mid, 1), b), None);
+}
+
+/// The before-the-assert direction of the union leader table: a use textually before a same-block
+/// `AssertCmp{Eq}` redirects to the class leader (the assert is bound to run on the very same
+/// bindings), where the dominance-channel leader still sees nothing.
+#[test]
+fn anticipated_leader_before_same_block_assert() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let (a, b, m) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(a, Type::u(32));
+    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            // index 0: a pre-assert use of `b`
+            kind: BinaryArithOpKind::Add,
+            result: m,
+            lhs: b,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    f.get_entry_mut().push_instruction(Located::with(
+        OpCode::AssertCmp {
+            // index 1: a == b
+            kind: CmpKind::Eq,
+            lhs: a,
+            rhs: b,
+        },
+        SourceLocation::test(),
+    ));
+    f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 2
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // Before the assert (index 0) the anticipated leader already redirects `b` to `a`...
+    assert_eq!(
+        cc.anticipated_leader(fid, ProgramPoint::new(entry_id, 0), b),
+        Some(a)
+    );
+    // ...while the dominance channel has nothing until the assert has run.
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(entry_id, 0), b),
+        None
+    );
+    // After it, both channels agree.
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(entry_id, 2), b),
+        Some(a)
+    );
+    assert_eq!(
+        cc.anticipated_leader(fid, ProgramPoint::new(entry_id, 2), b),
+        Some(a)
+    );
+}
+
+/// The before-the-assert direction needs no stability gate even in a _cyclic_ block: a same-block
+/// assert over the loop-carried `w` is bound to run on this very iteration's binding, so the union
+/// leader redirects `w` mid-loop — the leader-table mirror of
+/// `local_anticipated_needs_no_stability_gate`. Cross-block the pair stays withheld (`w` is
+/// loop-carried, hence unstable, and out of scope at `entry`).
+#[test]
+fn anticipated_leader_before_assert_in_cyclic_block() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let (a, w, y, lt) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(a, Type::u(32));
+    let looping = f.add_block();
+    let exit = f.add_block();
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(looping, vec![c0]));
+    let loop_block = f.get_block_mut(looping);
+    loop_block.push_parameter(w, Type::u(32));
+    loop_block.push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            // index 0: a pre-assert use of `w`
+            kind: BinaryArithOpKind::Add,
+            result: y,
+            lhs: w,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    loop_block.push_instruction(Located::with(
+        OpCode::AssertCmp {
+            // index 1: w == a
+            kind: CmpKind::Eq,
+            lhs: w,
+            rhs: a,
+        },
+        SourceLocation::test(),
+    ));
+    loop_block.push_instruction(Located::with(
+        OpCode::Cmp {
+            // index 2
+            kind: CmpKind::Lt,
+            result: lt,
+            lhs: y,
+            rhs: c10,
+        },
+        SourceLocation::test(),
+    ));
+    loop_block.set_terminator(Terminator::JmpIf(lt, looping, exit));
+    f.get_block_mut(exit)
+        .set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // Before the same-block assert (index 0 < 1) the loop-carried `w` redirects to the entry
+    // parameter `a` — this iteration's binding is exactly what the assert checks...
+    assert_eq!(
+        cc.anticipated_leader(fid, ProgramPoint::new(looping, 0), w),
+        Some(a)
+    );
+    // ...while the dominance channel has nothing until the assert has run.
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(looping, 0), w),
+        None
+    );
+    // After it, both channels agree.
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(looping, 2), w),
+        Some(a)
+    );
+    assert_eq!(
+        cc.anticipated_leader(fid, ProgramPoint::new(looping, 2), w),
+        Some(a)
+    );
+    // Cross-block, `w` is withheld (unstable and out of scope at `entry`) — no union table forms
+    // at `entry`, and the fallback dominance channel knows nothing either.
+    assert_eq!(
+        cc.anticipated_leader(fid, ProgramPoint::new(entry_id, 0), w),
+        None
+    );
+}
+
+/// A leader defined by the block's own instruction carries its definition rank as the redirect
+/// threshold: valid strictly after its definition, withheld before it — even though the class
+/// itself is index-independent.
+#[test]
+fn anticipated_leader_threshold_for_block_defined_leader() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c2 = ssa.add_const(Constant::U(32, 2));
+    let (a, b, x, y) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(a, Type::u(32));
+    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            // index 0: def(x)
+            kind: BinaryArithOpKind::Add,
+            result: x,
+            lhs: a,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    f.get_entry_mut().push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            // index 1: def(y)
+            kind: BinaryArithOpKind::Add,
+            result: y,
+            lhs: b,
+            rhs: c2,
+        },
+        SourceLocation::test(),
+    ));
+    f.get_entry_mut().push_instruction(Located::with(
+        OpCode::AssertCmp {
+            // index 2: x == y
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: y,
+        },
+        SourceLocation::test(),
+    ));
+    f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 3
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // `x` is the DefKey-minimum of `{x, y}`; defined at index 0, its redirect threshold is 1.
+    assert_eq!(
+        cc.anticipated_leader(fid, ProgramPoint::new(entry_id, 1), y),
+        Some(x)
+    );
+    // Before `x` exists, the threshold withholds the redirect for the whole class.
+    assert_eq!(
+        cc.anticipated_leader(fid, ProgramPoint::new(entry_id, 0), y),
+        None
+    );
+    assert_eq!(
+        cc.anticipated_leader(fid, ProgramPoint::new(entry_id, 0), x),
+        None
+    );
+    // After the assert the union view keeps answering (dominance agrees from here on).
+    assert_eq!(
+        cc.anticipated_leader(fid, ProgramPoint::new(entry_id, 3), y),
+        Some(x)
+    );
+}
+
+/// Union classes merge across the two index directions: with `x == y` already run at the query
+/// point and `y == z` bound to run there, the point between the asserts sees the full transitive
+/// class `{x, y, z}` — a merge neither single direction produces.
+#[test]
+fn anticipated_leader_merges_across_directions() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    // Allocated in order ⇒ x.0 < y.0 < z.0; all entry params, so leaders are by id.
+    let (x, y, z, m) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(y, Type::u(32));
+    f.get_entry_mut().push_parameter(z, Type::u(32));
+    f.get_entry_mut().push_instruction(Located::with(
+        OpCode::AssertCmp {
+            // index 0: x == y
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: y,
+        },
+        SourceLocation::test(),
+    ));
+    f.get_entry_mut().push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            // index 1: the between point
+            kind: BinaryArithOpKind::Add,
+            result: m,
+            lhs: z,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    f.get_entry_mut().push_instruction(Located::with(
+        OpCode::AssertCmp {
+            // index 2: y == z
+            kind: CmpKind::Eq,
+            lhs: y,
+            rhs: z,
+        },
+        SourceLocation::test(),
+    ));
+    f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 3
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // At index 1, `x == y` has already run and `y == z` is bound to run: `z` redirects to `x`.
+    assert_eq!(
+        cc.anticipated_leader(fid, ProgramPoint::new(entry_id, 1), z),
+        Some(x)
+    );
+    // The dominance channel alone has no class for `z` there.
+    assert_eq!(
+        cc.asserted_leader(fid, ProgramPoint::new(entry_id, 1), z),
+        None
+    );
+}
+
+/// At the establishing assert's own index the union leader table still answers — the exclusion of
+/// an assert's own operands rests wholly on Gate 3 there (consumers never redirect
+/// `Assert`/`AssertCmp` inputs), not on index granularity. The direct-scan equality query keeps
+/// its structural self-protection. This pins the documented contract.
+#[test]
+fn anticipated_leader_at_establishing_assert_is_gate3_guarded() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    f.get_entry_mut().push_parameter(a, Type::u(32));
+    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_instruction(Located::with(
+        OpCode::AssertCmp {
+            // index 0: a == b
+            kind: CmpKind::Eq,
+            lhs: a,
+            rhs: b,
+        },
+        SourceLocation::test(),
+    ));
+    f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 1
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    let own = ProgramPoint::new(entry_id, 0);
+    assert_eq!(cc.anticipated_leader(fid, own, b), Some(a));
+    assert!(!cc.anticipated_equal(fid, own, a, b));
+    assert!(!cc.asserted_equal(fid, own, a, b));
+}
+
+/// A block with only cross (dominance-fanned) pairs gains no union table and falls back to the
+/// asserted leader — the two queries agree there.
+#[test]
+fn anticipated_leader_cross_only_block_falls_back() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let (a, b, m) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    f.get_entry_mut().push_parameter(a, Type::u(32));
+    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_instruction(Located::with(
+        OpCode::AssertCmp {
+            // index 0: a == b, fanned out to `tail` as a cross pair
+            kind: CmpKind::Eq,
+            lhs: a,
+            rhs: b,
+        },
+        SourceLocation::test(),
+    ));
+    let tail = f.add_block();
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(tail, vec![]));
+    let tail_block = f.get_block_mut(tail);
+    tail_block.push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            // index 0: an ordinary use point in `tail`
+            kind: BinaryArithOpKind::Add,
+            result: m,
+            lhs: b,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    tail_block.set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    let pp = ProgramPoint::new(tail, 0);
+    assert_eq!(cc.asserted_leader(fid, pp, b), Some(a));
+    assert_eq!(
+        cc.anticipated_leader(fid, pp, b),
+        cc.asserted_leader(fid, pp, b)
+    );
+}
+
+/// Invariance rule 3: a value defined _inside_ a cycle by a pure op over stable operands is
+/// single-valued per invocation — every iteration rebinds it to the same value — so a
+/// post-dominating assert pins it mid-loop. The same op over the loop-carried φ stays out: its
+/// operand is multi-valued, so each iteration's rebinding genuinely differs.
+#[test]
+fn anticipated_admits_loop_invariant_pure_chain() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let (n, i, t, i2, lt) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry_id = f.get_entry_id();
+    let looping = f.add_block();
+    let exit = f.add_block();
+    f.get_entry_mut().push_parameter(n, Type::u(32));
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(looping, vec![c0]));
+    let loop_block = f.get_block_mut(looping);
+    loop_block.push_parameter(i, Type::u(32));
+    loop_block.push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            // index 0: loop-invariant — pure over the stable `n` and a constant.
+            kind: BinaryArithOpKind::Add,
+            result: t,
+            lhs: n,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    loop_block.push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            // index 1: loop-variant — pure, but over the loop-carried `i`.
+            kind: BinaryArithOpKind::Add,
+            result: i2,
+            lhs: i,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    loop_block.push_instruction(Located::with(
+        OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: lt,
+            lhs: i2,
+            rhs: c10,
+        },
+        SourceLocation::test(),
+    ));
+    loop_block.set_terminator(Terminator::JmpIf(lt, looping, exit));
+    let exit_block = f.get_block_mut(exit);
+    exit_block.push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: t,
+            rhs: c5,
+        },
+        SourceLocation::test(),
+    ));
+    exit_block.push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: i2,
+            rhs: c10,
+        },
+        SourceLocation::test(),
+    ));
+    exit_block.set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // `t` is pinned mid-loop (at a use index after its definition): the block-level gate would
+    // have rejected it (cyclic defining block), the invariance closure admits it.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(looping, 1), t)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    // The same pure op over the loop-carried `i` stays out — one unstable operand poisons it —
+    // and the loop must not collapse around a final-iteration-only fact.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(looping, 2), i2),
+        None
+    );
+    // Gate 2 is untouched: `t` is out of scope at `entry` (defined in `looping`).
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(entry_id, 0), t),
+        None
+    );
+}
+
+/// An _unconstrained_ call is outside every invariance rule however stable its argument: rule 3's
+/// det-call form requires a constrained call (advice is pinned to no function of its arguments),
+/// and an unconstrained call is never congruence-numbered either, so no rule admits it and the
+/// cyclic block back-reaches itself for binding finality — the fact is withheld mid-loop.
+#[test]
+fn anticipated_rejects_unconstrained_call_result_in_loop() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let helper = ssa.add_function("helper".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let (p, n, i, r, i2, lt) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    {
+        let hf = ssa.get_function_mut(helper);
+        hf.add_return_type(Type::u(32));
+        hf.get_entry_mut().push_parameter(p, Type::u(32));
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![p]));
+    }
+    {
+        let mf = ssa.get_function_mut(main_id);
+        let entry = mf.get_entry_mut();
+        entry.push_parameter(n, Type::u(32));
+        let looping = mf.add_block();
+        let exit = mf.add_block();
+        mf.get_entry_mut()
+            .set_terminator(Terminator::Jmp(looping, vec![c0]));
+        let loop_block = mf.get_block_mut(looping);
+        loop_block.push_parameter(i, Type::u(32));
+        loop_block.push_instruction(Located::with(
+            OpCode::Call {
+                // index 0: opaque — an unconstrained call, however stable its argument.
+                results: vec![r],
+                function: CallTarget::Static(helper),
+                args: vec![n],
+                unconstrained: true,
+            },
+            SourceLocation::test(),
+        ));
+        loop_block.push_instruction(Located::with(
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: i2,
+                lhs: i,
+                rhs: c1,
+            },
+            SourceLocation::test(),
+        ));
+        loop_block.push_instruction(Located::with(
+            OpCode::Cmp {
+                kind: CmpKind::Lt,
+                result: lt,
+                lhs: i2,
+                rhs: c10,
+            },
+            SourceLocation::test(),
+        ));
+        loop_block.set_terminator(Terminator::JmpIf(lt, looping, exit));
+        let exit_block = mf.get_block_mut(exit);
+        exit_block.push_instruction(Located::with(
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs: r,
+                rhs: c5,
+            },
+            SourceLocation::test(),
+        ));
+        exit_block.set_terminator(Terminator::Return(vec![]));
+
+        let cc = run_in_test(&ssa);
+        assert_eq!(
+            cc.anticipated_const(main_id, ProgramPoint::new(looping, 1), r),
+            None
+        );
+    }
+}
+
+/// Binding finality (the per-point half of Gate 1): a genuinely loop-carried value asserted _after_
+/// its loop is admitted at post-loop blocks — no non-empty path from them re-enters the defining
+/// block, so the in-scope binding there IS the final one the bound-to-run assert checks — while
+/// every in-loop block stays rejected exactly as before.
+#[test]
+fn anticipated_admits_accumulator_at_post_loop_block() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let (v, lt, v1) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let header = f.add_block();
+    let body = f.add_block();
+    let after = f.add_block();
+    let tail = f.add_block();
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(header, vec![c0]));
+    let header_block = f.get_block_mut(header);
+    header_block.push_parameter(v, Type::u(32));
+    header_block.push_instruction(Located::with(
+        OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: lt,
+            lhs: v,
+            rhs: c10,
+        },
+        SourceLocation::test(),
+    ));
+    header_block.set_terminator(Terminator::JmpIf(lt, body, after));
+    let body_block = f.get_block_mut(body);
+    body_block.push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: v1,
+            lhs: v,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    body_block.set_terminator(Terminator::Jmp(header, vec![v1]));
+    f.get_block_mut(after)
+        .set_terminator(Terminator::Jmp(tail, vec![]));
+    let tail_block = f.get_block_mut(tail);
+    tail_block.push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: v,
+            rhs: c10,
+        },
+        SourceLocation::test(),
+    ));
+    tail_block.set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // `v` is unstable (loop-carried), yet final at `after`: `after` cannot re-reach `header`.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(after, 0), v)
+            .as_deref(),
+        Some(&Constant::U(32, 10))
+    );
+    // Inside the loop both invariance and finality fail — `header`/`body` re-reach the
+    // definition — so mid-loop iterations keep their genuine bindings.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(header, 0), v),
+        None
+    );
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(body, 0), v),
+        None
+    );
+}
+
+/// Binding finality gates on re-reaching the _defining_ block, not on the target being cyclic: a
+/// first-loop value asserted after a second loop is admitted inside the second loop (which never
+/// leads back to the first), because cyclic _target_ blocks re-observe the same final binding.
+#[test]
+fn anticipated_admits_first_loop_value_inside_second_loop() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let (v, lt, v1, lt2) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let header = f.add_block();
+    let body = f.add_block();
+    let second = f.add_block();
+    let tail = f.add_block();
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(header, vec![c0]));
+    let header_block = f.get_block_mut(header);
+    header_block.push_parameter(v, Type::u(32));
+    header_block.push_instruction(Located::with(
+        OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: lt,
+            lhs: v,
+            rhs: c10,
+        },
+        SourceLocation::test(),
+    ));
+    header_block.set_terminator(Terminator::JmpIf(lt, body, second));
+    let body_block = f.get_block_mut(body);
+    body_block.push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: v1,
+            lhs: v,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    body_block.set_terminator(Terminator::Jmp(header, vec![v1]));
+    let second_block = f.get_block_mut(second);
+    second_block.push_instruction(Located::with(
+        OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: lt2,
+            lhs: v,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    second_block.set_terminator(Terminator::JmpIf(lt2, second, tail));
+    let tail_block = f.get_block_mut(tail);
+    tail_block.push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: v,
+            rhs: c10,
+        },
+        SourceLocation::test(),
+    ));
+    tail_block.set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // Admitted inside the _second_ loop: cyclic, but with no path back to `header`.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(second, 0), v)
+            .as_deref(),
+        Some(&Constant::U(32, 10))
+    );
+    // Still rejected inside the defining loop.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(header, 0), v),
+        None
+    );
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(body, 0), v),
+        None
+    );
+}
+
+/// Binding finality's negative direction in a loop nest: an inner-loop value queried at the _outer_
+/// latch is rejected, because the outer back-edge re-enters the inner loop and rebinds it before
+/// the post-dominating assert runs.
+#[test]
+fn anticipated_rejects_inner_loop_value_at_outer_block() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let (w, lt_i, w2, lt_o) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let outer = f.add_block();
+    let inner = f.add_block();
+    let inner_body = f.add_block();
+    let latch = f.add_block();
+    let tail = f.add_block();
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(outer, vec![]));
+    f.get_block_mut(outer)
+        .set_terminator(Terminator::Jmp(inner, vec![c0]));
+    let inner_block = f.get_block_mut(inner);
+    inner_block.push_parameter(w, Type::u(32));
+    inner_block.push_instruction(Located::with(
+        OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: lt_i,
+            lhs: w,
+            rhs: c10,
+        },
+        SourceLocation::test(),
+    ));
+    inner_block.set_terminator(Terminator::JmpIf(lt_i, inner_body, latch));
+    let inner_body_block = f.get_block_mut(inner_body);
+    inner_body_block.push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: w2,
+            lhs: w,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    inner_body_block.set_terminator(Terminator::Jmp(inner, vec![w2]));
+    let latch_block = f.get_block_mut(latch);
+    latch_block.push_instruction(Located::with(
+        OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: lt_o,
+            lhs: w,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    latch_block.set_terminator(Terminator::JmpIf(lt_o, outer, tail));
+    let tail_block = f.get_block_mut(tail);
+    tail_block.push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: w,
+            rhs: c10,
+        },
+        SourceLocation::test(),
+    ));
+    tail_block.set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // The latch runs once per _outer_ iteration with that iteration's inner-exit `w` — not the
+    // final one the assert checks — and it re-reaches `inner` via the outer back-edge.
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(latch, 0), w),
+        None
+    );
+    assert_eq!(
+        cc.anticipated_const(fid, ProgramPoint::new(outer, 0), w),
+        None
+    );
+}
+
+/// A _constrained_ deterministic call in a loop with an identical dominating pre-loop duplicate:
+/// rule 3's det-call form admits the in-loop result directly (deterministic return over the
+/// stable argument `n`), and value numbering independently proves it congruent to the duplicate —
+/// a dominating, rules-1–3-stable rule-4 witness. Either way all per-iteration bindings coincide
+/// and a post-dominating assert pins it mid-loop. (Rule 4's residual yield — congruence over an
+/// _unstable_ argument, where the det-call form cannot fire — is
+/// `anticipated_admits_det_call_via_congruence_over_unstable_arg`.)
+#[test]
+fn anticipated_admits_det_call_via_congruence_tier() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let helper = ssa.add_function("helper".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let (p, q, n, w, i, r, i2, lt) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    {
+        let hf = ssa.get_function_mut(helper);
+        hf.add_return_type(Type::u(32));
+        let entry = hf.get_entry_mut();
+        entry.push_parameter(p, Type::u(32));
+        entry.push_instruction(Located::with(
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: q,
+                lhs: p,
+                rhs: c1,
+            },
+            SourceLocation::test(),
+        ));
+        entry.set_terminator(Terminator::Return(vec![q]));
+    }
+    {
+        let mf = ssa.get_function_mut(main_id);
+        let looping = mf.add_block();
+        let exit = mf.add_block();
+        let entry = mf.get_entry_mut();
+        entry.push_parameter(n, Type::u(32));
+        entry.push_instruction(Located::with(
+            OpCode::Call {
+                // The dominating witness: same callee, same argument, in an acyclic block.
+                results: vec![w],
+                function: CallTarget::Static(helper),
+                args: vec![n],
+                unconstrained: false,
+            },
+            SourceLocation::test(),
+        ));
+        entry.set_terminator(Terminator::Jmp(looping, vec![c0]));
+        let loop_block = mf.get_block_mut(looping);
+        loop_block.push_parameter(i, Type::u(32));
+        loop_block.push_instruction(Located::with(
+            OpCode::Call {
+                // index 0: congruent to `w` (deterministic static call, congruent arguments).
+                results: vec![r],
+                function: CallTarget::Static(helper),
+                args: vec![n],
+                unconstrained: false,
+            },
+            SourceLocation::test(),
+        ));
+        loop_block.push_instruction(Located::with(
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: i2,
+                lhs: i,
+                rhs: c1,
+            },
+            SourceLocation::test(),
+        ));
+        loop_block.push_instruction(Located::with(
+            OpCode::Cmp {
+                kind: CmpKind::Lt,
+                result: lt,
+                lhs: i2,
+                rhs: c10,
+            },
+            SourceLocation::test(),
+        ));
+        loop_block.set_terminator(Terminator::JmpIf(lt, looping, exit));
+        let exit_block = mf.get_block_mut(exit);
+        exit_block.push_instruction(Located::with(
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs: r,
+                rhs: c5,
+            },
+            SourceLocation::test(),
+        ));
+        exit_block.set_terminator(Terminator::Return(vec![]));
+
+        let cc = run_in_test(&ssa);
+
+        // Admitted twice over: by the det-call form (deterministic return over the stable `n`) and
+        // by congruence to the stable dominating duplicate `w`.
+        assert_eq!(
+            cc.anticipated_const(main_id, ProgramPoint::new(looping, 1), r)
+                .as_deref(),
+            Some(&Constant::U(32, 5))
+        );
+        // Scope still bounds it: `r` is not defined at `entry`.
+        let entry_id = ssa.get_unique_entrypoint().get_entry_id();
+        assert_eq!(
+            cc.anticipated_const(main_id, ProgramPoint::new(entry_id, 0), r),
+            None
+        );
+    }
+}
+
+/// Invariance rule 3's det-call form, standing alone: a constrained static call whose return is
+/// deterministic over a stable argument rebinds the same value every iteration, so — with no
+/// dominating duplicate anywhere for rule 4 to lean on — the post-dominating assert pins its result
+/// mid-loop directly.
+#[test]
+fn anticipated_admits_det_call_directly_in_loop() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let g = ssa.add_function("g".to_string());
+    let (a, b, p, w, r) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c5 = ssa.add_const(Constant::U(32, 5));
+
+    // `g(a) = a + 1`: deterministic but _not_ an identity, and called exactly once, so the
+    // symbolic cross-call graft yields no congruent duplicate for `r` — admission is the det-call
+    // form's alone.
+    {
+        let hf = ssa.get_function_mut(g);
+        hf.add_return_type(Type::u(32));
+        hf.get_entry_mut().push_parameter(a, Type::u(32));
+        hf.get_entry_mut().push_instruction(Located::with(
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: b,
+                lhs: a,
+                rhs: c1,
+            },
+            SourceLocation::test(),
+        ));
+        hf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![b]));
+    }
+    let header = {
+        let mf = ssa.get_function_mut(main_id);
+        let header = mf.add_block();
+        let body = mf.add_block();
+        let after = mf.add_block();
+        mf.get_entry_mut().push_parameter(p, Type::u(1));
+        mf.get_entry_mut().push_parameter(w, Type::u(32));
+        mf.get_entry_mut()
+            .set_terminator(Terminator::Jmp(header, vec![]));
+        let header_block = mf.get_block_mut(header);
+        header_block.push_instruction(Located::with(
+            OpCode::Call {
+                results: vec![r],
+                function: CallTarget::Static(g),
+                args: vec![w],
+                unconstrained: false,
+            },
+            SourceLocation::test(),
+        ));
+        header_block.set_terminator(Terminator::JmpIf(p, body, after));
+        mf.get_block_mut(body)
+            .set_terminator(Terminator::Jmp(header, vec![]));
+        mf.get_block_mut(after).push_instruction(Located::with(
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs: r,
+                rhs: c5,
+            },
+            SourceLocation::test(),
+        ));
+        mf.get_block_mut(after)
+            .set_terminator(Terminator::Return(vec![]));
+        header
+    };
+
+    let cc = run_in_test(&ssa);
+    // Every iteration rebinds `r` to the one value `g(w)`, so the bound-to-run assert pins it
+    // right after its definition despite the live back edge.
+    assert_eq!(
+        cc.anticipated_const(main_id, ProgramPoint::new(header, 1), r)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+}
+
+/// The det-call form's operand gate: the callee is deterministic, but the argument is the loop
+/// induction variable — a multi-valued loop-carried φ — so each iteration's call may bind a
+/// different value and no invariance rule admits the result; the fact is withheld mid-loop.
+#[test]
+fn anticipated_rejects_det_call_over_loop_variant_arg() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let helper = ssa.add_function("helper".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let (p, q, n, i, r, i2, lt) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    // `helper(p) = p + 1`: deterministic and non-identity (the graft over the variant `i` yields
+    // no stable congruent witness either).
+    {
+        let hf = ssa.get_function_mut(helper);
+        hf.add_return_type(Type::u(32));
+        let entry = hf.get_entry_mut();
+        entry.push_parameter(p, Type::u(32));
+        entry.push_instruction(Located::with(
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: q,
+                lhs: p,
+                rhs: c1,
+            },
+            SourceLocation::test(),
+        ));
+        entry.set_terminator(Terminator::Return(vec![q]));
+    }
+    {
+        let mf = ssa.get_function_mut(main_id);
+        mf.get_entry_mut().push_parameter(n, Type::u(32));
+        let looping = mf.add_block();
+        let exit = mf.add_block();
+        mf.get_entry_mut()
+            .set_terminator(Terminator::Jmp(looping, vec![c0]));
+        let loop_block = mf.get_block_mut(looping);
+        loop_block.push_parameter(i, Type::u(32));
+        loop_block.push_instruction(Located::with(
+            OpCode::Call {
+                // index 0: a deterministic constrained call, but over the loop-variant `i`.
+                results: vec![r],
+                function: CallTarget::Static(helper),
+                args: vec![i],
+                unconstrained: false,
+            },
+            SourceLocation::test(),
+        ));
+        loop_block.push_instruction(Located::with(
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: i2,
+                lhs: i,
+                rhs: c1,
+            },
+            SourceLocation::test(),
+        ));
+        loop_block.push_instruction(Located::with(
+            OpCode::Cmp {
+                kind: CmpKind::Lt,
+                result: lt,
+                lhs: i2,
+                rhs: c10,
+            },
+            SourceLocation::test(),
+        ));
+        loop_block.set_terminator(Terminator::JmpIf(lt, looping, exit));
+        let exit_block = mf.get_block_mut(exit);
+        exit_block.push_instruction(Located::with(
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs: r,
+                rhs: c5,
+            },
+            SourceLocation::test(),
+        ));
+        exit_block.set_terminator(Terminator::Return(vec![]));
+
+        let cc = run_in_test(&ssa);
+        assert_eq!(
+            cc.anticipated_const(main_id, ProgramPoint::new(looping, 1), r),
+            None
+        );
+    }
+}
+
+/// The det-call form is per return index: a callee whose first return is a deterministic function
+/// of its argument and whose second is fresh advice gets `det = [true, false]`, so of two results
+/// of one in-loop call only the first is pinned mid-loop.
+#[test]
+fn anticipated_det_call_multi_return_per_index_bits() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let helper = ssa.add_function("helper".to_string());
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c7 = ssa.add_const(Constant::U(32, 7));
+    let (p, q, wit, cond, n, r0, r1) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    // `helper(p) = (p + 1, fresh_witness)`.
+    {
+        let hf = ssa.get_function_mut(helper);
+        hf.add_return_type(Type::u(32));
+        hf.add_return_type(Type::u(32));
+        let entry = hf.get_entry_mut();
+        entry.push_parameter(p, Type::u(32));
+        entry.push_instruction(Located::with(
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: q,
+                lhs: p,
+                rhs: c1,
+            },
+            SourceLocation::test(),
+        ));
+        entry.push_instruction(Located::with(
+            OpCode::FreshWitness {
+                result: wit,
+                result_type: Type::u(32),
+            },
+            SourceLocation::test(),
+        ));
+        entry.set_terminator(Terminator::Return(vec![q, wit]));
+    }
+    let header = {
+        let mf = ssa.get_function_mut(main_id);
+        let header = mf.add_block();
+        let body = mf.add_block();
+        let after = mf.add_block();
+        mf.get_entry_mut().push_parameter(cond, Type::u(1));
+        mf.get_entry_mut().push_parameter(n, Type::u(32));
+        mf.get_entry_mut()
+            .set_terminator(Terminator::Jmp(header, vec![]));
+        let header_block = mf.get_block_mut(header);
+        header_block.push_instruction(Located::with(
+            OpCode::Call {
+                results: vec![r0, r1],
+                function: CallTarget::Static(helper),
+                args: vec![n],
+                unconstrained: false,
+            },
+            SourceLocation::test(),
+        ));
+        header_block.set_terminator(Terminator::JmpIf(cond, body, after));
+        mf.get_block_mut(body)
+            .set_terminator(Terminator::Jmp(header, vec![]));
+        let after_block = mf.get_block_mut(after);
+        after_block.push_instruction(Located::with(
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs: r0,
+                rhs: c5,
+            },
+            SourceLocation::test(),
+        ));
+        after_block.push_instruction(Located::with(
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs: r1,
+                rhs: c7,
+            },
+            SourceLocation::test(),
+        ));
+        after_block.set_terminator(Terminator::Return(vec![]));
+        header
+    };
+
+    let cc = run_in_test(&ssa);
+    // Return 0 is deterministic over the stable `n`: pinned mid-loop.
+    assert_eq!(
+        cc.anticipated_const(main_id, ProgramPoint::new(header, 1), r0)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    // Return 1 is fresh advice each iteration: withheld.
+    assert_eq!(
+        cc.anticipated_const(main_id, ProgramPoint::new(header, 1), r1),
+        None
+    );
+}
+
+/// Invariance rule 2's formal form: entry parameters are bound once by the caller and never by a
+/// CFG edge (a conditional back edge carries no block arguments), so a cycle through the entry
+/// block does not rebind them and a post-dominating assert pins one inside the cyclic entry itself
+/// — where the block-level rule 2 and binding finality (`entry` back-reaches itself) both reject.
+#[test]
+fn anticipated_admits_entry_param_in_cyclic_entry_block() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let (p, w) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let entry_id = {
+        let mf = ssa.get_function_mut(main_id);
+        let exit = mf.add_block();
+        let entry_id = mf.get_entry_id();
+        let entry = mf.get_entry_mut();
+        entry.push_parameter(p, Type::u(1));
+        entry.push_parameter(w, Type::u(32));
+        // The self-edge makes the entry block cyclic; being conditional it carries no arguments,
+        // so re-entry rebinds nothing.
+        entry.set_terminator(Terminator::JmpIf(p, entry_id, exit));
+        let exit_block = mf.get_block_mut(exit);
+        exit_block.push_instruction(Located::with(
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs: w,
+                rhs: c5,
+            },
+            SourceLocation::test(),
+        ));
+        exit_block.set_terminator(Terminator::Return(vec![]));
+        entry_id
+    };
+
+    let cc = run_in_test(&ssa);
+    // `exit` strictly post-dominates the entry and `w` is a formal: pinned at the entry's start.
+    assert_eq!(
+        cc.anticipated_const(main_id, ProgramPoint::new(entry_id, 0), w)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+}
+
+/// Invariance rule 4's residual yield beyond the det-call form: the argument `v` is a loop-1
+/// accumulator — unstable, so the det-call form cannot fire — but the in-loop-2 call is congruent
+/// to an identical duplicate in the acyclic `mid` block (a dominating, rules-1–3-stable witness),
+/// so all its bindings coincide with that single value and the post-dominating assert pins it
+/// mid-loop.
+#[test]
+fn anticipated_admits_det_call_via_congruence_over_unstable_arg() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let helper = ssa.add_function("helper".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let (p, q, cond, v, v2, lt, w, r) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    // `helper(p) = p + 1`: deterministic and non-identity.
+    {
+        let hf = ssa.get_function_mut(helper);
+        hf.add_return_type(Type::u(32));
+        let entry = hf.get_entry_mut();
+        entry.push_parameter(p, Type::u(32));
+        entry.push_instruction(Located::with(
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: q,
+                lhs: p,
+                rhs: c1,
+            },
+            SourceLocation::test(),
+        ));
+        entry.set_terminator(Terminator::Return(vec![q]));
+    }
+    let loop2 = {
+        let mf = ssa.get_function_mut(main_id);
+        let loop1 = mf.add_block();
+        let mid = mf.add_block();
+        let loop2 = mf.add_block();
+        let body2 = mf.add_block();
+        let after = mf.add_block();
+        mf.get_entry_mut().push_parameter(cond, Type::u(1));
+        mf.get_entry_mut()
+            .set_terminator(Terminator::Jmp(loop1, vec![c0]));
+        // Loop 1 carries the accumulator `v`: multi-valued, hence unstable.
+        let loop1_block = mf.get_block_mut(loop1);
+        loop1_block.push_parameter(v, Type::u(32));
+        loop1_block.push_instruction(Located::with(
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Add,
+                result: v2,
+                lhs: v,
+                rhs: c1,
+            },
+            SourceLocation::test(),
+        ));
+        loop1_block.push_instruction(Located::with(
+            OpCode::Cmp {
+                kind: CmpKind::Lt,
+                result: lt,
+                lhs: v2,
+                rhs: c10,
+            },
+            SourceLocation::test(),
+        ));
+        loop1_block.set_terminator(Terminator::JmpIf(lt, loop1, mid));
+        // `mid` is acyclic: `w` is rule-2 stable however unstable its argument.
+        let mid_block = mf.get_block_mut(mid);
+        mid_block.push_instruction(Located::with(
+            OpCode::Call {
+                results: vec![w],
+                function: CallTarget::Static(helper),
+                args: vec![v],
+                unconstrained: false,
+            },
+            SourceLocation::test(),
+        ));
+        mid_block.set_terminator(Terminator::Jmp(loop2, vec![]));
+        let loop2_block = mf.get_block_mut(loop2);
+        loop2_block.push_instruction(Located::with(
+            OpCode::Call {
+                // index 0: congruent to `w` (same callee, same argument); `v` is unstable, so the
+                // det-call form does not fire and rule 4 is the sole admitting rule.
+                results: vec![r],
+                function: CallTarget::Static(helper),
+                args: vec![v],
+                unconstrained: false,
+            },
+            SourceLocation::test(),
+        ));
+        loop2_block.set_terminator(Terminator::JmpIf(cond, body2, after));
+        mf.get_block_mut(body2)
+            .set_terminator(Terminator::Jmp(loop2, vec![]));
+        let after_block = mf.get_block_mut(after);
+        after_block.push_instruction(Located::with(
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs: r,
+                rhs: c5,
+            },
+            SourceLocation::test(),
+        ));
+        after_block.set_terminator(Terminator::Return(vec![]));
+        loop2
+    };
+
+    let cc = run_in_test(&ssa);
+    // No path from `loop2` re-enters `loop1`, so `v` cannot rebind between `w` and any binding of
+    // `r`: rule 4's instant-equality to the single-valued `w` holds and the pin lands mid-loop.
+    assert_eq!(
+        cc.anticipated_const(main_id, ProgramPoint::new(loop2, 1), r)
+            .as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+}
+
+/// An anticipated equality pair with each member admitted by a _different_ Gate 1 condition — the
+/// loop accumulator by binding finality, the entry parameter by invariance — lands in the post-loop
+/// block's union leader table, redirecting the accumulator to the parameter.
+#[test]
+fn anticipated_eq_pair_mixed_gates() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let (n, acc, lt, acc2) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let header = f.add_block();
+    let body = f.add_block();
+    let after = f.add_block();
+    let tail = f.add_block();
+    f.get_entry_mut().push_parameter(n, Type::u(32));
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(header, vec![c0]));
+    let header_block = f.get_block_mut(header);
+    header_block.push_parameter(acc, Type::u(32));
+    header_block.push_instruction(Located::with(
+        OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: lt,
+            lhs: acc,
+            rhs: c10,
+        },
+        SourceLocation::test(),
+    ));
+    header_block.set_terminator(Terminator::JmpIf(lt, body, after));
+    let body_block = f.get_block_mut(body);
+    body_block.push_instruction(Located::with(
+        OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: acc2,
+            lhs: acc,
+            rhs: c1,
+        },
+        SourceLocation::test(),
+    ));
+    body_block.set_terminator(Terminator::Jmp(header, vec![acc2]));
+    f.get_block_mut(after)
+        .set_terminator(Terminator::Jmp(tail, vec![]));
+    let tail_block = f.get_block_mut(tail);
+    tail_block.push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: acc,
+            rhs: n,
+        },
+        SourceLocation::test(),
+    ));
+    tail_block.set_terminator(Terminator::Return(vec![]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    // At `after`: `acc` is final (no path back to `header`), `n` is stable — the pair holds.
+    assert!(cc.anticipated_equal(fid, ProgramPoint::new(after, 0), acc, n));
+    assert!(cc.anticipated_equal(fid, ProgramPoint::new(after, 0), n, acc));
+    // Mid-loop, `acc` fails both conditions, so the pair is withheld.
+    assert!(!cc.anticipated_equal(fid, ProgramPoint::new(body, 0), acc, n));
+    assert!(!cc.anticipated_equal(fid, ProgramPoint::new(header, 0), acc, n));
+    // The finality-admitted pair enters `after`'s union leader table; `n` (the entry parameter)
+    // is the DefKey minimum, so the accumulator redirects to it.
+    assert_eq!(
+        cc.anticipated_leader(fid, ProgramPoint::new(after, 0), acc),
+        Some(n)
+    );
+    // No table (and no pair) mid-loop.
+    assert_eq!(
+        cc.anticipated_leader(fid, ProgramPoint::new(body, 0), acc),
         None
     );
 }
@@ -1744,7 +4036,7 @@ fn multiple_local_asserts_each_recovered_after_its_index() {
     );
 }
 
-/// Two contradictory asserts in one block: a use after both sees the *earliest* (first-writer-wins,
+/// Two contradictory asserts in one block: a use after both sees the _earliest_ (first-writer-wins,
 /// the instruction order is the deterministic tie-break), and the first assert's own operand is
 /// never informed by the later one.
 #[test]
@@ -1798,8 +4090,8 @@ fn contradictory_local_asserts_first_writer_wins() {
     );
 }
 
-/// A block that is both dominated by an outer assert *and* makes its own asserts: the cross-block
-/// fact holds at *every* index (including before the local re-assert — the documented
+/// A block that is both dominated by an outer assert _and_ makes its own asserts: the cross-block
+/// fact holds at _every_ index (including before the local re-assert — the documented
 /// before-the-assert behavior), while a local fact holds only after its own index; a cross-block
 /// fact also takes precedence over a contradictory local one.
 #[test]
@@ -2074,7 +4366,7 @@ fn interproc_passthrough_seeds_param_and_result() {
     );
 }
 
-/// Interprocedural writeback through a summary: a callee that *returns* a comparison of
+/// Interprocedural writeback through a summary: a callee that _returns_ a comparison of
 /// congruent operands gets a `Const` summary return-jump (the writeback runs in the polymorphic
 /// summary solve), so the call result folds in the caller's context. Without it the return jump
 /// is `Bottom` and the call result is unknown.
@@ -2155,7 +4447,7 @@ fn interproc_writeback_folds_congruent_comparison_return() {
 }
 
 /// Interprocedural writeback in a specialized context: a comparison of congruent operands kept
-/// *internal* to a callee folds in that callee's per-context facts (read via `const_of_in`).
+/// _internal_ to a callee folds in that callee's per-context facts (read via `const_of_in`).
 /// This exercises the writeback in `specialize`'s per-context solve specifically — the fold is
 /// observable only through `contexts`, which the summary solve does not populate.
 #[test]
@@ -2328,7 +4620,7 @@ fn interproc_writeback_terminates_under_recursion() {
 }
 
 /// The context-parameterized conditional queries: the branch-fact family (`const_in_block_in`)
-/// is context-*precise* — it sees the per-context parameter constant the intraprocedural query
+/// is context-_precise_ — it sees the per-context parameter constant the intraprocedural query
 /// cannot. (The assert/disequality/witness family is likewise rebuilt per context; see the
 /// `*_in` conditional tests below.)
 #[test]
@@ -2376,8 +4668,8 @@ fn context_parameterized_conditional_queries() {
 }
 
 /// Per-context conditional facts can be more precise: `assert(x == p)` is only an asserted
-/// *equality* intraprocedurally (`p` opaque), but pins `x` to an asserted *constant* in a context
-/// where `p` is a lattice constant. The pair then *migrates* channels — it leaves the per-context
+/// _equality_ intraprocedurally (`p` opaque), but pins `x` to an asserted _constant_ in a context
+/// where `p` is a lattice constant. The pair then _migrates_ channels — it leaves the per-context
 /// eq channel, so `asserted_equal_in` is deliberately not a pointwise superset of `asserted_equal`.
 #[test]
 fn asserted_const_refines_per_context() {
@@ -2596,7 +4888,78 @@ fn conditional_queries_parity_under_empty_context() {
     );
 }
 
-/// A context can *create* a disequality: pinning the branch predicate prunes one predecessor of
+/// The anticipated `_in` family mirrors the intraprocedural anticipated queries under a context:
+/// the facts here are context-independent, so the two views must agree — a bound-to-run assert in
+/// `tail` pins its constant, its equality pair, and the pair's union leader at the post-dominated
+/// `mid` in both.
+#[test]
+fn anticipated_queries_parity_under_empty_context() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let (x, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let c5 = ssa.add_const(Constant::U(32, 5));
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let mid = f.add_block();
+    let tail = f.add_block();
+    for v in [x, a, b] {
+        f.get_entry_mut().push_parameter(v, Type::u(32));
+    }
+    f.get_entry_mut()
+        .set_terminator(Terminator::Jmp(mid, vec![]));
+    f.get_block_mut(mid)
+        .set_terminator(Terminator::Jmp(tail, vec![]));
+    let tail_block = f.get_block_mut(tail);
+    tail_block.push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: c5,
+        },
+        SourceLocation::test(),
+    ));
+    tail_block.push_instruction(Located::with(
+        OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: a,
+            rhs: b,
+        },
+        SourceLocation::test(),
+    ));
+    tail_block.set_terminator(Terminator::Return(vec![]));
+
+    let cc = run_in_test(&ssa);
+    let ctx = Context::empty();
+    let pp = ProgramPoint::new(mid, 0);
+
+    // Anticipated-const channel.
+    assert_eq!(
+        cc.anticipated_const(main_id, pp, x).as_deref(),
+        Some(&Constant::U(32, 5))
+    );
+    assert_eq!(
+        cc.anticipated_const_in(main_id, &ctx, pp, x),
+        cc.anticipated_const(main_id, pp, x)
+    );
+    // Anticipated-eq channel and its union leaders.
+    assert!(cc.anticipated_equal(main_id, pp, a, b));
+    assert!(cc.anticipated_equal_in(main_id, &ctx, pp, a, b));
+    assert_eq!(cc.anticipated_leader(main_id, pp, b), Some(a));
+    assert_eq!(
+        cc.anticipated_leader_in(main_id, &ctx, pp, b),
+        cc.anticipated_leader(main_id, pp, b)
+    );
+    // Same-block before-the-assert point (the `a == b` assert sits at `tail` index 1): the union
+    // leader answers below the establishing index, identically in both views.
+    let pre = ProgramPoint::new(tail, 0);
+    assert_eq!(cc.anticipated_leader(main_id, pre, b), Some(a));
+    assert_eq!(
+        cc.anticipated_leader_in(main_id, &ctx, pre, b),
+        cc.anticipated_leader(main_id, pre, b)
+    );
+}
+
+/// A context can _create_ a disequality: pinning the branch predicate prunes one predecessor of
 /// the false-edge target, making the false edge its sole executable in-edge — so `known_unequal_in`
 /// holds where the intraprocedural `known_unequal` (two live in-edges) cannot.
 #[test]
@@ -2671,7 +5034,7 @@ fn known_unequal_in_gains_from_pruned_predecessor() {
     assert!(cc.known_unequal_in(g, &ctx, join, d, e));
 }
 
-/// An assert pinning a value to an *aggregate* constant contributes no conditional fact: `Blob`
+/// An assert pinning a value to an _aggregate_ constant contributes no conditional fact: `Blob`
 /// constants are never surfaced (the module "Aggregate Folding" contract), so the pin enters
 /// neither the assert-const channel — whose consumers materialise the constant — nor the eq
 /// channel, whose pairs must be constant-free.
@@ -2720,7 +5083,7 @@ fn asserted_const_never_aggregate() {
 
 /// The per-context analog: a callee parameter seeded with the caller's constant-aggregate argument
 /// pins the asserted side to a `Blob` in that context. The pin is dropped there too — per context
-/// the assert contributes *no* fact at all (the intraprocedural eq view keeps the pair), one of the
+/// the assert contributes _no_ fact at all (the intraprocedural eq view keeps the pair), one of the
 /// fact-losing directions the impl docs call out.
 #[test]
 fn asserted_const_in_never_aggregate() {
@@ -2790,8 +5153,8 @@ fn asserted_const_in_never_aggregate() {
     assert!(!cc.asserted_equal_in(g, &ctx, pp, x, a));
 }
 
-/// When the *asserted* side itself becomes a per-context constant, the fact leaves
-/// `asserted_const_in` — but only because it migrated to the strictly stronger *unconditional*
+/// When the _asserted_ side itself becomes a per-context constant, the fact leaves
+/// `asserted_const_in` — but only because it migrated to the strictly stronger _unconditional_
 /// per-context channel, where `const_of_in` answers it without any constraint-preservation proviso.
 /// Nothing is lost; the documented "no pointwise inclusion" is this migration.
 #[test]
@@ -2854,13 +5217,13 @@ fn asserted_const_migrates_to_unconditional_channel() {
     );
 }
 
-/// A per-context constant can *split* an intraprocedurally-proven congruence. Intraprocedurally
+/// A per-context constant can _split_ an intraprocedurally-proven congruence. Intraprocedurally
 /// `x = call g(a)` is value-numbered equal to `y = a*3` via `g`'s grafted symbolic return, the
 /// writeback folds the `x == y` branch, and the else arm is dead — its forward never gathered. Per
 /// context `a = 5` folds `y` to a constant, whose `Const` label replaces the structural one, while
 /// the call result `x` (lattice-opaque) keeps its `Op` class: the classes split, the branch stays
 /// live, and the forward appears in `witness_forward_in` only. Reachability-derived facts can thus
-/// flow in the *growing* direction per context — the reason the impl docs promise no inclusion
+/// flow in the _growing_ direction per context — the reason the impl docs promise no inclusion
 /// between the two views in either direction.
 #[test]
 fn context_constant_can_split_congruence() {
@@ -3188,7 +5551,7 @@ fn cross_call_congruence_for_deterministic_callee() {
     assert!(!cc.known_equal(main_id, r1, r3)); // distinct arg ⇒ distinct result
 }
 
-/// A callee whose return carries a fresh witness is *not* a deterministic function of its
+/// A callee whose return carries a fresh witness is _not_ a deterministic function of its
 /// arguments, so its results are never numbered cross-call — two such calls stay distinct (the
 /// determinism gate that protects the free-witness non-merge prohibition).
 #[test]
@@ -3582,7 +5945,7 @@ fn writeback_cascades_to_downstream_constant() {
     assert_eq!(cc.const_of(fid, p).as_deref(), Some(&Constant::U(32, 5)));
 }
 
-/// Guard: a comparison of values that are *not* congruent stays unfolded and both branch targets
+/// Guard: a comparison of values that are _not_ congruent stays unfolded and both branch targets
 /// stay reachable.
 #[test]
 fn cmp_eq_of_noncongruent_operands_is_not_folded() {
@@ -3740,7 +6103,7 @@ fn cmp_lt_of_congruent_operands_folds_false() {
     assert_eq!(cc.const_of(fid, lt).as_deref(), Some(&Constant::U(1, 0)));
 }
 
-/// A comparison of congruent operands folds to a constant `true` even when it is *witnessed*
+/// A comparison of congruent operands folds to a constant `true` even when it is _witnessed_
 /// (its result is `WitnessOf`-typed, as emitted by witness spilling / AD lowering) — the
 /// must-equal fact holds either way. Keeping the substituted constant witness-typed is the
 /// consumer's job; see the SCS test `witnessed_constant_is_cast_to_witness_of`.
@@ -3871,7 +6234,7 @@ fn loop_carried_congruent_comparison_folds_true() {
 // AGGREGATE CONSTANT FOLDING
 // ============================================================================================
 
-/// `MkSeq` of constant elements folds to an *internal* aggregate; `ArrayGet` at a constant
+/// `MkSeq` of constant elements folds to an _internal_ aggregate; `ArrayGet` at a constant
 /// index projects a scalar constant out of it. The aggregate itself is never surfaced to
 /// consumers.
 #[test]
@@ -4339,7 +6702,7 @@ fn aggregate_folding_refuses_oob_set_and_over_cap_constructors() {
 
 /// A symbolic return jump ignores an argument the return does not use: `f(x, y) = x + 1` makes
 /// `f(a, c)` and `f(a, d)` congruent even when `c ≢ d` (which the whole-argument `CallDet`
-/// numbering cannot see), while a call differing in the *used* argument stays distinct.
+/// numbering cannot see), while a call differing in the _used_ argument stays distinct.
 #[test]
 fn symbolic_jump_ignores_dead_argument() {
     let mut ssa = HLSSA::with_main("main".to_string());
@@ -4403,7 +6766,7 @@ fn symbolic_jump_ignores_dead_argument() {
     assert!(!cc.known_equal(main_id, r1, r3)); // distinct 1st arg ⇒ distinct
 }
 
-/// A symbolic return jump relates a call result to an *open expression* over the caller's values:
+/// A symbolic return jump relates a call result to an _open expression_ over the caller's values:
 /// `f(x) = x + 5` makes `f(a)` congruent to a caller-local `a + 5` (which the opaque per-callee
 /// `CallDet` node cannot), and not to `a + 6`. The call result still stays `Bottom` in the lattice,
 /// so the SCS contract (the `eval_call` constant channel untouched) holds.
@@ -4658,7 +7021,7 @@ fn symbolic_jump_dead_argument_behind_depth_two() {
 
 /// A return deeper than the depth cap is not symbolically expressed (`Sym = None`), so the call
 /// falls back to `CallDet`: two identical calls stay congruent and a distinct argument does not,
-/// but the result is *not* related to the caller-local full expression.
+/// but the result is _not_ related to the caller-local full expression.
 #[test]
 fn symbolic_jump_depth_over_cap_falls_back_to_calldet() {
     let mut ssa = HLSSA::with_main("main".to_string());
@@ -4975,7 +7338,7 @@ fn symbolic_jump_witness_operand_is_not_grafted() {
     assert!(!cc.known_equal(main_id, r1, r2)); // witness in return ⇒ neither grafted nor CallDet
 }
 
-/// A grafted return that names a *callee-only* constant must not produce a false congruence by
+/// A grafted return that names a _callee-only_ constant must not produce a false congruence by
 /// minting its synthetic scaffolding onto a real value's id.
 #[test]
 fn symbolic_jump_synthetic_does_not_collide_with_callee_only_constant() {
@@ -4983,7 +7346,7 @@ fn symbolic_jump_synthetic_does_not_collide_with_callee_only_constant() {
     let main_id = ssa.get_unique_entrypoint_id();
     let f = ssa.add_function("f".to_string());
 
-    // Caller-side constants used to *synthesize* Field(5) without naming the callee-only constant,
+    // Caller-side constants used to _synthesize_ Field(5) without naming the callee-only constant,
     // so the caller has a value in `C`'s constant class without referencing `C`'s id.
     let two = ssa.add_const(Constant::Field(Field::from(2u64)));
     let three = ssa.add_const(Constant::Field(Field::from(3u64)));

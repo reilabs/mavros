@@ -6,7 +6,7 @@ use crate::{
     compiler::{
         analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-        passes::fix_double_jumps::ValueReplacements,
+        passes::shared::value_replacements::ValueReplacements,
         ssa::{
             BlockId, Terminator, ValueId,
             hlssa::{

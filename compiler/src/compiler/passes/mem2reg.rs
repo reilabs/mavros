@@ -26,7 +26,7 @@ use crate::{
             types::{FunctionTypeInfo, TypeInfo},
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-        passes::fix_double_jumps::ValueReplacements,
+        passes::shared::value_replacements::ValueReplacements,
         ssa::{
             BlockId, FunctionId, Terminator, ValueId,
             hlssa::{
