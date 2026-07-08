@@ -366,6 +366,16 @@ impl OpCode {
     pub fn is_pure_scalar_fold(&self) -> bool {
         self.scalar_fold().is_some()
     }
+
+    /// `true` if `self` is a fact-establishing assert (`Assert` / `AssertCmp`).
+    ///
+    /// The single classifier shared by every consumer that must treat asserts specially: the
+    /// conditional analysis records their facts (`click_cooper/conditional.rs` Step 1), and
+    /// consumers of its anticipated channel must never rewrite their inputs (Gate 3). A future
+    /// establisher opcode must be added here _and_ have its fact recorded in Step 1.
+    pub fn is_assert(&self) -> bool {
+        matches!(self, OpCode::Assert { .. } | OpCode::AssertCmp { .. })
+    }
 }
 
 impl Instruction for OpCode {

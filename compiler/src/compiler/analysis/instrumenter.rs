@@ -312,7 +312,11 @@ impl Value {
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
             BinaryArithOpKind::Div => match (self, b) {
-                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a / b),
+                // Division by zero yields 0 here (as in the signed arm below): this executor also
+                // runs for cost estimation over dummy signature values, where a zero denominator
+                // is routine — a gadget's real divisor is constrained nonzero on honest runs, but
+                // the estimate must not panic on it.
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, if *b == 0 { 0 } else { a / b }),
                 (Value::I(s, a), Value::I(_, b)) => {
                     let (sa, sb) = (Self::to_signed(*a, *s), Self::to_signed(*b, *s));
                     Value::I(
@@ -320,7 +324,11 @@ impl Value {
                         Self::from_signed(if sb == 0 { 0 } else { sa.wrapping_div(sb) }, *s),
                     )
                 }
-                (Value::Field(a), Value::Field(b)) => Value::Field(a / b),
+                (Value::Field(a), Value::Field(b)) => Value::Field(if *b == Field::ZERO {
+                    Field::ZERO
+                } else {
+                    a / b
+                }),
                 (_, Value::WitnessOf(b)) => Value::WitnessOf(Box::new(
                     self.unwrap_witness()
                         .binary_arith_op(b, binary_arith_op_kind, instrumenter),
@@ -334,7 +342,8 @@ impl Value {
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
             BinaryArithOpKind::Mod => match (self, b) {
-                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a % b),
+                // Zero modulus yields 0, as in the signed arm below and the `Div` arms above.
+                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, if *b == 0 { 0 } else { a % b }),
                 (Value::I(s, a), Value::I(_, b)) => {
                     let (sa, sb) = (Self::to_signed(*a, *s), Self::to_signed(*b, *s));
                     Value::I(
