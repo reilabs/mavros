@@ -20,7 +20,7 @@ use crate::{
             BlockId, FunctionId, SourceLocation, ValueId,
             hlssa::{
                 Blob, CastTarget, Constant, Endianness, MAX_SUPPORTED_SIGNED_BITS, Radix,
-                SequenceTargetType, Type, TypeExpr,
+                SequenceTargetType, SliceOpDir, Type, TypeExpr,
                 builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder},
             },
         },
@@ -1579,6 +1579,14 @@ impl<'a> ExpressionConverter<'a> {
                     e.cast_to(CastTarget::ArrayToSlice, array)
                 });
                 Some(result)
+            }
+            "vector_push_back" => {
+                let slice = self.convert_expression(&call.arguments[0], b).unwrap();
+                let elem = self.convert_expression(&call.arguments[1], b).unwrap();
+                Some(
+                    b.block(self.current_block)
+                        .slice_push(slice, vec![elem], SliceOpDir::Back),
+                )
             }
             _ => todo!("Builtin function '{}' not yet supported", name),
         }
