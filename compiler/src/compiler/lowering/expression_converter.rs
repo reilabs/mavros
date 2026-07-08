@@ -115,7 +115,9 @@ impl<'a> ExpressionConverter<'a> {
         emit: impl FnOnce(&mut HLBlockEmitter<'_>) -> R,
     ) -> R {
         let mut e = b.block(self.current_block);
-        let source_location = location.and_then(|location| self.source_location(location));
+        let source_location = location
+            .and_then(|location| self.source_location(location))
+            .expect("ICE: emitted SSA instruction without a source location");
         e.emit_with_location(source_location, emit)
     }
 

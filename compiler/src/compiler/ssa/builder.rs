@@ -1,7 +1,8 @@
 use std::{fmt::Debug, hash::Hash};
 
 use crate::compiler::ssa::{
-    Block, BlockId, Function, FunctionId, Instruction, Located, SSA, SSAType, Terminator, ValueId,
+    Block, BlockId, Function, FunctionId, Instruction, Located, SSA, SSAType, SourceLocation,
+    Terminator, ValueId,
 };
 
 // ---------------------------------------------------------------------------
@@ -12,6 +13,7 @@ pub struct InstrBuilder<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq 
     pub function: &'a mut Function<Op, Ty>,
     pub ssa: &'a mut SSA<Op, Ty, C>,
     pub instructions: &'a mut Vec<Located<Op>>,
+    source_location: SourceLocation,
 }
 
 impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> InstrBuilder<'a, Op, Ty, C> {
@@ -19,17 +21,23 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> InstrBuilde
         function: &'a mut Function<Op, Ty>,
         ssa: &'a mut SSA<Op, Ty, C>,
         instructions: &'a mut Vec<Located<Op>>,
+        source_location: SourceLocation,
     ) -> Self {
         Self {
             function,
             ssa,
             instructions,
+            source_location,
         }
     }
 
     /// Push a pre-built instruction (passthrough or pre-allocated result).
-    pub fn push(&mut self, instruction: impl Into<Located<Op>>) {
-        self.instructions.push(instruction.into());
+    pub fn push_located(&mut self, instruction: Located<Op>) {
+        self.instructions.push(instruction);
+    }
+
+    pub fn push(&mut self, instruction: Op) {
+        self.push_located(Located::with(instruction, self.source_location.clone()));
     }
 }
 
@@ -92,6 +100,7 @@ pub struct BlockEmitter<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq 
     pub ssa: &'a mut SSA<Op, Ty, C>,
     pub(crate) block_id: BlockId,
     pub(crate) block: Block<Op, Ty>,
+    source_location: Option<SourceLocation>,
 }
 
 impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Drop
@@ -116,6 +125,7 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
             ssa,
             block_id,
             block,
+            source_location: None,
         }
     }
 
@@ -133,6 +143,7 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
                 ssa,
                 block_id,
                 block,
+                source_location: None,
             },
         )
     }
@@ -141,59 +152,57 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         self.block_id
     }
 
+    pub fn with_source_location(mut self, source_location: SourceLocation) -> Self {
+        self.source_location = Some(source_location);
+        self
+    }
+
     pub fn instruction_count(&self) -> usize {
         self.block.instruction_count()
     }
 
-    pub fn stamp_source_location_from(
-        &mut self,
-        start: usize,
-        source_location: Option<crate::compiler::ssa::SourceLocation>,
-    ) {
+    pub fn stamp_source_location_from(&mut self, start: usize, source_location: SourceLocation) {
         self.block
             .stamp_source_location_from(start, source_location);
     }
 
     pub fn emit_with_location<R>(
         &mut self,
-        source_location: Option<crate::compiler::ssa::SourceLocation>,
+        source_location: SourceLocation,
         emit: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let start_block = self.block_id;
         let start_len = self.block.instruction_count();
         let next_block_before = self.function.next_block_id_bound();
 
+        let previous_source_location = self.source_location.replace(source_location.clone());
         let result = emit(self);
-
-        let Some(source_location) = source_location else {
-            return result;
-        };
+        self.source_location = previous_source_location;
 
         if self.block_id == start_block && self.function.next_block_id_bound() == next_block_before
         {
             self.block
-                .stamp_source_location_from(start_len, Some(source_location));
+                .stamp_source_location_from(start_len, source_location);
             return result;
         };
 
         if self.block_id == start_block {
             self.block
-                .stamp_source_location_from(start_len, Some(source_location.clone()));
+                .stamp_source_location_from(start_len, source_location.clone());
         } else {
             self.function
                 .get_block_mut(start_block)
-                .stamp_source_location_from(start_len, Some(source_location.clone()));
+                .stamp_source_location_from(start_len, source_location.clone());
         }
 
         for (block_id, block) in self.function.get_blocks_mut() {
             if block_id.0 >= next_block_before {
-                block.stamp_source_location_from(0, Some(source_location.clone()));
+                block.stamp_source_location_from(0, source_location.clone());
             }
         }
 
         if self.block_id.0 >= next_block_before {
-            self.block
-                .stamp_source_location_from(0, Some(source_location));
+            self.block.stamp_source_location_from(0, source_location);
         }
 
         result
@@ -240,8 +249,17 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         self.block.get_terminator().is_some()
     }
 
-    pub fn emit_instruction(&mut self, instruction: impl Into<Located<Op>>) {
-        self.block.push_instruction(instruction.into());
+    pub fn emit_instruction(&mut self, instruction: Op) {
+        let source_location = self
+            .source_location
+            .clone()
+            .expect("ICE: emit_instruction called without a source location");
+        self.block
+            .push_instruction(Located::with(instruction, source_location));
+    }
+
+    pub fn emit_located_instruction(&mut self, instruction: Located<Op>) {
+        self.block.push_instruction(instruction);
     }
 
     /// Build a loop with the three-block structure: header -> body -> back-edge.
@@ -289,7 +307,16 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         // Call header closure to emit condition into a temporary instruction buffer
         let mut header_instructions = vec![];
         let cond = {
-            let mut b = InstrBuilder::new(self.function, self.ssa, &mut header_instructions);
+            let source_location = self
+                .source_location
+                .clone()
+                .expect("ICE: build_loop header emitted without a source location");
+            let mut b = InstrBuilder::new(
+                self.function,
+                self.ssa,
+                &mut header_instructions,
+                source_location,
+            );
             header(&mut b, &param_ids)
         };
         self.function
@@ -526,8 +553,10 @@ mod tests {
             let mut sb = HLSSABuilder::new(&mut ssa);
             sb.modify_function(main_id, |fb| {
                 let entry_id = fb.function.get_entry_id();
-                let mut block = fb.block(entry_id);
-                block.emit(Located::with(
+                let mut block = fb
+                    .block(entry_id)
+                    .with_source_location(SourceLocation::test());
+                block.emit_located(Located::with(
                     OpCode::Not {
                         result: ValueId(1),
                         value: ValueId(0),
@@ -538,7 +567,7 @@ mod tests {
         }
 
         let entry = ssa.get_unique_entrypoint().get_entry();
-        assert_eq!(entry.get_instruction_source_location(0), Some(&loc));
+        assert_eq!(entry.get_instruction_source_location(0), &loc);
     }
 
     #[test]
@@ -549,8 +578,9 @@ mod tests {
         let loc = test_location();
 
         {
-            let mut builder = InstrBuilder::new(&mut function, &mut ssa, &mut instructions);
-            builder.emit(Located::with(
+            let mut builder =
+                InstrBuilder::new(&mut function, &mut ssa, &mut instructions, loc.clone());
+            builder.emit_located(Located::with(
                 OpCode::Not {
                     result: ValueId(1),
                     value: ValueId(0),
@@ -560,7 +590,7 @@ mod tests {
         }
 
         assert_eq!(instructions.len(), 1);
-        assert_eq!(instructions[0].get_location(), Some(&loc));
+        assert_eq!(instructions[0].get_location(), &loc);
     }
 
     #[test]
@@ -573,8 +603,10 @@ mod tests {
             let mut sb = HLSSABuilder::new(&mut ssa);
             sb.modify_function(main_id, |fb| {
                 let entry_id = fb.function.get_entry_id();
-                let mut block = fb.block(entry_id);
-                block.emit_with_location(Some(loc.clone()), |block| {
+                let mut block = fb
+                    .block(entry_id)
+                    .with_source_location(SourceLocation::test());
+                block.emit_with_location(loc.clone(), |block| {
                     let cond = block.not(ValueId(0));
                     block.build_if_else(
                         cond,
@@ -598,7 +630,7 @@ mod tests {
             .map(|(_, block)| {
                 block
                     .get_instructions_with_source_locations()
-                    .inspect(|(_, location)| assert_eq!(*location, Some(&loc)))
+                    .inspect(|(_, location)| assert_eq!(*location, &loc))
                     .count()
             })
             .sum();

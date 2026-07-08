@@ -317,7 +317,7 @@ impl Pass for LookupSpilling {
                     let mut e = fb.block(block_id);
                     for instr in instructions {
                         if !self.rewrite_lookup(&mut e, &instr, fti, sizing, &consts, &cache) {
-                            e.emit(instr);
+                            e.emit_located(instr);
                         }
                     }
                     if let Some(terminator) = terminator {
