@@ -628,16 +628,15 @@ fn propagate(
     if !witness_const_casts.is_empty() {
         let entry_location = function
             .get_entry()
-            .get_instructions_with_source_locations()
-            .next()
-            .map(|(_, location)| location.clone())
+            .first_location()
+            .cloned()
             .unwrap_or_else(|| SourceLocation::synthetic("sparse_conditional_simplification"));
         let mut casts: Vec<(ValueId, ValueId)> = witness_const_casts.into_iter().collect();
         casts.sort_by_key(|(_, wit)| wit.0);
         let mut entry_instrs: Vec<Located<OpCode>> = casts
             .into_iter()
             .map(|(bare, wit)| {
-                Located::with(
+                Located::new(
                     OpCode::Cast {
                         result: wit,
                         value: bare,

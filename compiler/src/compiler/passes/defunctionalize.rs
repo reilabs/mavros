@@ -559,8 +559,9 @@ fn build_dispatch_function(
     return_types: &[Type],
     variants: &[FunctionId],
 ) -> FunctionId {
-    let dispatch_fn_id = ssa.add_function(format!("apply_dispatch@{}", counter));
-    let location = SourceLocation::synthetic(format!("apply_dispatch@{}", counter));
+    let name = format!("apply_dispatch@{counter}");
+    let location = SourceLocation::synthetic(&name);
+    let dispatch_fn_id = ssa.add_function(name);
     let mut sb = HLSSABuilder::new(ssa);
     sb.modify_function(dispatch_fn_id, |b| {
         for ret_type in return_types {

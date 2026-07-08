@@ -582,9 +582,8 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan, index_consts: &[ValueI
         let entry_id = func.get_entry_id();
         let entry = func.get_block_mut(entry_id);
         let entry_location = entry
-            .get_instructions_with_source_locations()
-            .next()
-            .map(|(_, location)| location.clone())
+            .first_location()
+            .cloned()
             .unwrap_or_else(|| SourceLocation::synthetic("array_boundary_expansion"));
         let old_params = entry.take_parameters();
         let mut new_params = Vec::with_capacity(old_params.len());
@@ -632,9 +631,8 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan, index_consts: &[ValueI
             // Emit per-cell `ArrayGet`s from each expanded returned array (defined earlier in the
             // block, so it is in scope here at the end of the body).
             let location = block
-                .get_instructions_with_source_locations()
-                .next_back()
-                .map(|(_, location)| location.clone())
+                .last_location()
+                .cloned()
                 .unwrap_or_else(|| SourceLocation::synthetic("array_boundary_expansion"));
             for (pos_idx, re) in cp.returns.iter().enumerate() {
                 let arr = values[re.position];
@@ -803,10 +801,7 @@ mod tests {
             dead_code_elimination::{Config, DCE},
             mem2reg::Mem2Reg,
         },
-        ssa::{
-            SourceLocation,
-            hlssa::builder::{HLEmitter, HLSSABuilder},
-        },
+        ssa::hlssa::builder::{HLEmitter, HLSSABuilder},
     };
 
     fn fr(n: u64) -> ark_bn254::Fr {
@@ -889,7 +884,7 @@ mod tests {
             sb.modify_function(sink, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry).with_source_location(SourceLocation::test());
+                let mut e = b.test_block(entry);
                 let a = e.add_parameter(Type::field().array_of(2));
                 let i0 = e.u_const(32, 0);
                 let i1 = e.u_const(32, 1);
@@ -902,7 +897,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry).with_source_location(SourceLocation::test());
+                let mut e = b.test_block(entry);
                 let c3 = e.field_const(fr(3));
                 let c4 = e.field_const(fr(4));
                 let arr = e.mk_seq(vec![c3, c4], SequenceTargetType::Array(2), Type::field());
@@ -949,7 +944,7 @@ mod tests {
             sb.modify_function(make, |b| {
                 b.function.add_return_type(Type::field().array_of(2));
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry).with_source_location(SourceLocation::test());
+                let mut e = b.test_block(entry);
                 let c7 = e.field_const(fr(7));
                 let c9 = e.field_const(fr(9));
                 let arr = e.mk_seq(vec![c7, c9], SequenceTargetType::Array(2), Type::field());
@@ -959,7 +954,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry).with_source_location(SourceLocation::test());
+                let mut e = b.test_block(entry);
                 let a = e.call(make, vec![], 1)[0];
                 let i0 = e.u_const(32, 0);
                 let i1 = e.u_const(32, 1);
@@ -1004,7 +999,7 @@ mod tests {
             sb.modify_function(sink, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry).with_source_location(SourceLocation::test());
+                let mut e = b.test_block(entry);
                 let a = e.add_parameter(Type::field().array_of(2));
                 let i0 = e.u_const(32, 0);
                 let x = e.array_get(a, i0);
@@ -1013,7 +1008,7 @@ mod tests {
             // main(): arr = [3, 4]; global[0] = sink(arr); return
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry).with_source_location(SourceLocation::test());
+                let mut e = b.test_block(entry);
                 let c3 = e.field_const(fr(3));
                 let c4 = e.field_const(fr(4));
                 let arr = e.mk_seq(vec![c3, c4], SequenceTargetType::Array(2), Type::field());
@@ -1053,7 +1048,7 @@ mod tests {
             sb.modify_function(sink, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry).with_source_location(SourceLocation::test());
+                let mut e = b.test_block(entry);
                 let a = e.add_parameter(Type::field().array_of(2));
                 let i = e.add_parameter(Type::u(32));
                 let x = e.array_get(a, i);
@@ -1063,7 +1058,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry).with_source_location(SourceLocation::test());
+                let mut e = b.test_block(entry);
                 let c3 = e.field_const(fr(3));
                 let c4 = e.field_const(fr(4));
                 let arr = e.mk_seq(vec![c3, c4], SequenceTargetType::Array(2), Type::field());
@@ -1094,7 +1089,7 @@ mod tests {
             // sink(a: Array<Field,2>): global[0] = a; return   (leaks ⇒ not itself expandable)
             sb.modify_function(sink, |b| {
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry).with_source_location(SourceLocation::test());
+                let mut e = b.test_block(entry);
                 let a = e.add_parameter(Type::field().array_of(2));
                 e.init_global(0, a);
                 e.terminate_return(vec![]);
@@ -1102,7 +1097,7 @@ mod tests {
             // g(a: Array<Field,2>): sink(a); return   (forwards its array param onward)
             sb.modify_function(g, |b| {
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry).with_source_location(SourceLocation::test());
+                let mut e = b.test_block(entry);
                 let a = e.add_parameter(Type::field().array_of(2));
                 e.call(sink, vec![a], 0);
                 e.terminate_return(vec![]);
@@ -1110,7 +1105,7 @@ mod tests {
             // main(): arr = [3, 4]; g(arr); return
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry).with_source_location(SourceLocation::test());
+                let mut e = b.test_block(entry);
                 let c3 = e.field_const(fr(3));
                 let c4 = e.field_const(fr(4));
                 let arr = e.mk_seq(vec![c3, c4], SequenceTargetType::Array(2), Type::field());

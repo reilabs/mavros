@@ -66,7 +66,7 @@ mod tests {
     use crate::compiler::{
         analysis::types::Types,
         ssa::{
-            Located, SourceLocation, Terminator, ValueId,
+            Terminator, ValueId,
             hlssa::{BinaryArithOpKind, Type},
         },
     };
@@ -120,28 +120,19 @@ mod tests {
         let entry = f.get_entry_mut();
         // A `Field` multiply feeding the equality: `SimplifyAsserts` would turn this into `AssertR1C`,
         // but `NormalizeAsserts` must not.
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Mul,
-                result: mul,
-                lhs: a,
-                rhs: b,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Cmp {
-                kind: CmpKind::Eq,
-                result: eq,
-                lhs: mul,
-                rhs: c,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Assert { value: eq },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: mul,
+            lhs: a,
+            rhs: b,
+        });
+        entry.push_test_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: eq,
+            lhs: mul,
+            rhs: c,
+        });
+        entry.push_test_instruction(OpCode::Assert { value: eq });
         entry.set_terminator(Terminator::Return(vec![]));
 
         normalize(&mut ssa);
@@ -160,19 +151,13 @@ mod tests {
         f.get_entry_mut().push_parameter(a, Type::field());
         f.get_entry_mut().push_parameter(b, Type::field());
         let entry = f.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::Cmp {
-                kind: CmpKind::Lt,
-                result: lt,
-                lhs: a,
-                rhs: b,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Assert { value: lt },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: lt,
+            lhs: a,
+            rhs: b,
+        });
+        entry.push_test_instruction(OpCode::Assert { value: lt });
         entry.set_terminator(Terminator::Return(vec![]));
 
         normalize(&mut ssa);
@@ -190,19 +175,13 @@ mod tests {
         f.get_entry_mut().push_parameter(l, Type::u(1));
         f.get_entry_mut().push_parameter(r, Type::u(1));
         let entry = f.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::And,
-                result: and,
-                lhs: l,
-                rhs: r,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Assert { value: and },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::And,
+            result: and,
+            lhs: l,
+            rhs: r,
+        });
+        entry.push_test_instruction(OpCode::Assert { value: and });
         entry.set_terminator(Terminator::Return(vec![]));
 
         normalize(&mut ssa);
@@ -228,10 +207,7 @@ mod tests {
         let f = ssa.get_unique_entrypoint_mut();
         f.get_entry_mut().push_parameter(w, Type::u(1));
         let entry = f.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::Assert { value: w },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Assert { value: w });
         entry.set_terminator(Terminator::Return(vec![]));
 
         normalize(&mut ssa);

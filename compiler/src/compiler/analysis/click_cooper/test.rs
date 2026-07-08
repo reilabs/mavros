@@ -5,7 +5,7 @@ use crate::compiler::{
         types::Types,
     },
     ssa::{
-        FunctionId, Located, ProgramPoint, SourceLocation, Terminator,
+        FunctionId, ProgramPoint, Terminator,
         hlssa::{
             BinaryArithOpKind, Blob, CallTarget, CastTarget, CmpKind, Constant, HLSSA, OpCode,
             ScalarFold, SequenceTargetType, SliceOpDir, Type,
@@ -224,24 +224,18 @@ fn equal_constants_are_congruent() {
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
-    entry.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: a,
-            lhs: c2,
-            rhs: c3,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: b,
-            lhs: c1,
-            rhs: c4,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: a,
+        lhs: c2,
+        rhs: c3,
+    });
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: b,
+        lhs: c1,
+        rhs: c4,
+    });
     entry.set_terminator(Terminator::Return(vec![a, b]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -269,42 +263,30 @@ fn structural_congruence_is_commutative() {
     f.get_entry_mut().push_parameter(x, Type::u(32));
     f.get_entry_mut().push_parameter(y, Type::u(32));
     let entry = f.get_entry_mut();
-    entry.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: a,
-            lhs: x,
-            rhs: y,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: b,
-            lhs: x,
-            rhs: y,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: c,
-            lhs: y,
-            rhs: x,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Sub,
-            result: d,
-            lhs: x,
-            rhs: y,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: a,
+        lhs: x,
+        rhs: y,
+    });
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: b,
+        lhs: x,
+        rhs: y,
+    });
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: c,
+        lhs: y,
+        rhs: x,
+    });
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Sub,
+        result: d,
+        lhs: x,
+        rhs: y,
+    });
     entry.set_terminator(Terminator::Return(vec![a, b, c, d]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -342,68 +324,47 @@ fn array_ops_are_value_numbered() {
     f.get_entry_mut().push_parameter(j, Type::u(32));
     let entry = f.get_entry_mut();
     // g1, g2 are arr[i]; g3 is arr[j].
-    entry.push_instruction(Located::with(
-        OpCode::ArrayGet {
-            result: g1,
-            array: arr,
-            index: i,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArrayGet {
-            result: g2,
-            array: arr,
-            index: i,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArrayGet {
-            result: g3,
-            array: arr,
-            index: j,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: g1,
+        array: arr,
+        index: i,
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: g2,
+        array: arr,
+        index: i,
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: g3,
+        array: arr,
+        index: j,
+    });
     // s1 and s2 are the same array `[arr[i], arr[j]]` built twice — congruent elementwise.
-    entry.push_instruction(Located::with(
-        OpCode::MkSeq {
-            result: s1,
-            elems: vec![g1, g3],
-            seq_type: SequenceTargetType::Array(2),
-            elem_type: Type::field(),
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::MkSeq {
-            result: s2,
-            elems: vec![g2, g3],
-            seq_type: SequenceTargetType::Array(2),
-            elem_type: Type::field(),
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: s1,
+        elems: vec![g1, g3],
+        seq_type: SequenceTargetType::Array(2),
+        elem_type: Type::field(),
+    });
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: s2,
+        elems: vec![g2, g3],
+        seq_type: SequenceTargetType::Array(2),
+        elem_type: Type::field(),
+    });
     // s3 differs only in sequence kind (Slice), s4 only in element type (u32): neither merges.
-    entry.push_instruction(Located::with(
-        OpCode::MkSeq {
-            result: s3,
-            elems: vec![g1, g3],
-            seq_type: SequenceTargetType::Slice,
-            elem_type: Type::field(),
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::MkSeq {
-            result: s4,
-            elems: vec![g1, g3],
-            seq_type: SequenceTargetType::Array(2),
-            elem_type: Type::u(32),
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: s3,
+        elems: vec![g1, g3],
+        seq_type: SequenceTargetType::Slice,
+        elem_type: Type::field(),
+    });
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: s4,
+        elems: vec![g1, g3],
+        seq_type: SequenceTargetType::Array(2),
+        elem_type: Type::u(32),
+    });
     entry.set_terminator(Terminator::Return(vec![g1, g2, g3, s1, s2, s3, s4]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -513,35 +474,26 @@ fn loop_carried_parallel_induction_is_congruent() {
     let header_block = f.get_block_mut(header);
     header_block.push_parameter(i, Type::u(32));
     header_block.push_parameter(j, Type::u(32));
-    header_block.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: lt,
-            lhs: i,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+    header_block.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: lt,
+        lhs: i,
+        rhs: c10,
+    });
     header_block.set_terminator(Terminator::JmpIf(lt, body, exit));
     let body_block = f.get_block_mut(body);
-    body_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: i2,
-            lhs: i,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    body_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: j2,
-            lhs: j,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
+    body_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: i2,
+        lhs: i,
+        rhs: c1,
+    });
+    body_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: j2,
+        lhs: j,
+        rhs: c1,
+    });
     body_block.set_terminator(Terminator::Jmp(header, vec![i2, j2]));
     f.get_block_mut(exit)
         .set_terminator(Terminator::Return(vec![i, j]));
@@ -577,27 +529,22 @@ fn leader_is_dominating_definition() {
     f.get_entry_mut().push_parameter(x, Type::field());
     f.get_entry_mut().push_parameter(y, Type::field());
     // `a = x + y` in the entry, recomputed as `b = x + y` in a strictly dominated block.
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::BinaryArithOp {
+    f.get_entry_mut()
+        .push_test_instruction(OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::Add,
             result: a,
             lhs: x,
             rhs: y,
-        },
-        SourceLocation::test(),
-    ));
+        });
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(next, vec![]));
     let next_block = f.get_block_mut(next);
-    next_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: b,
-            lhs: x,
-            rhs: y,
-        },
-        SourceLocation::test(),
-    ));
+    next_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: b,
+        lhs: x,
+        rhs: y,
+    });
     next_block.set_terminator(Terminator::Return(vec![a, b]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -622,24 +569,18 @@ fn leader_is_earlier_in_block() {
     f.get_entry_mut().push_parameter(x, Type::field());
     f.get_entry_mut().push_parameter(y, Type::field());
     let entry = f.get_entry_mut();
-    entry.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: a,
-            lhs: x,
-            rhs: y,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: b,
-            lhs: x,
-            rhs: y,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: a,
+        lhs: x,
+        rhs: y,
+    });
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: b,
+        lhs: x,
+        rhs: y,
+    });
     entry.set_terminator(Terminator::Return(vec![a, b]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -675,37 +616,28 @@ fn leader_never_crosses_incomparable_branches() {
         .set_terminator(Terminator::JmpIf(cond, e1, e2));
     // `x + y` recomputed in both incomparable branches and again at the merge.
     let e1_block = f.get_block_mut(e1);
-    e1_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: a,
-            lhs: x,
-            rhs: y,
-        },
-        SourceLocation::test(),
-    ));
+    e1_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: a,
+        lhs: x,
+        rhs: y,
+    });
     e1_block.set_terminator(Terminator::Jmp(merge, vec![]));
     let e2_block = f.get_block_mut(e2);
-    e2_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: b,
-            lhs: x,
-            rhs: y,
-        },
-        SourceLocation::test(),
-    ));
+    e2_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: b,
+        lhs: x,
+        rhs: y,
+    });
     e2_block.set_terminator(Terminator::Jmp(merge, vec![]));
     let merge_block = f.get_block_mut(merge);
-    merge_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: c,
-            lhs: x,
-            rhs: y,
-        },
-        SourceLocation::test(),
-    ));
+    merge_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: c,
+        lhs: x,
+        rhs: y,
+    });
     merge_block.set_terminator(Terminator::Return(vec![a, b, c]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -732,15 +664,12 @@ fn leader_of_constant_class_is_the_interned_constant() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
     // `a = 2 + 3` folds to 5, congruent to the interned constant `c5`.
-    entry.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: a,
-            lhs: c2,
-            rhs: c3,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: a,
+        lhs: c2,
+        rhs: c3,
+    });
     entry.set_terminator(Terminator::Return(vec![a, c5]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -762,14 +691,11 @@ fn assert_eq_const_is_conditional_not_unconditional() {
     let entry_id = f.get_entry_id();
     let after = f.add_block();
     f.get_entry_mut().push_parameter(x, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: x,
-            rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: c5,
+    });
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(after, vec![]));
     f.get_block_mut(after)
@@ -811,10 +737,8 @@ fn assert_bool_is_conditional() {
     let entry_id = f.get_entry_id();
     let after = f.add_block();
     f.get_entry_mut().push_parameter(b, Type::u(1));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::Assert { value: b },
-        SourceLocation::test(),
-    ));
+    f.get_entry_mut()
+        .push_test_instruction(OpCode::Assert { value: b });
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(after, vec![]));
     f.get_block_mut(after)
@@ -853,14 +777,11 @@ fn assert_eq_pure_equality_is_conditional() {
     let after = f.add_block();
     f.get_entry_mut().push_parameter(x, Type::u(32));
     f.get_entry_mut().push_parameter(y, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: x,
-            rhs: y,
-        },
-        SourceLocation::test(),
-    ));
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: y,
+    });
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(after, vec![]));
     f.get_block_mut(after)
@@ -894,25 +815,19 @@ fn asserted_leader_picks_dominating_member() {
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(mid, vec![]));
     let mid_block = f.get_block_mut(mid);
-    mid_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            // index 0: def(b) in mid, dominated by entry
-            kind: BinaryArithOpKind::Add,
-            result: b,
-            lhs: a,
-            rhs: a,
-        },
-        SourceLocation::test(),
-    ));
-    mid_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 1: a == b (neither constant ⇒ an equality pair)
-            kind: CmpKind::Eq,
-            lhs: a,
-            rhs: b,
-        },
-        SourceLocation::test(),
-    ));
+    mid_block.push_test_instruction(OpCode::BinaryArithOp {
+        // index 0: def(b) in mid, dominated by entry
+        kind: BinaryArithOpKind::Add,
+        result: b,
+        lhs: a,
+        rhs: a,
+    });
+    mid_block.push_test_instruction(OpCode::AssertCmp {
+        // index 1: a == b (neither constant ⇒ an equality pair)
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
     mid_block.set_terminator(Terminator::Return(vec![])); // index 2
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -946,24 +861,18 @@ fn asserted_leader_is_transitive() {
     f.get_entry_mut().push_parameter(a, Type::u(32));
     f.get_entry_mut().push_parameter(b, Type::u(32));
     f.get_entry_mut().push_parameter(c, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 0: a == b
-            kind: CmpKind::Eq,
-            lhs: a,
-            rhs: b,
-        },
-        SourceLocation::test(),
-    ));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 1: b == c
-            kind: CmpKind::Eq,
-            lhs: b,
-            rhs: c,
-        },
-        SourceLocation::test(),
-    ));
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 0: a == b
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 1: b == c
+        kind: CmpKind::Eq,
+        lhs: b,
+        rhs: c,
+    });
     f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 2
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -996,15 +905,12 @@ fn asserted_leader_index_granular() {
     let after = f.add_block();
     f.get_entry_mut().push_parameter(x, Type::u(32));
     f.get_entry_mut().push_parameter(y, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 0
-            kind: CmpKind::Eq,
-            lhs: x,
-            rhs: y,
-        },
-        SourceLocation::test(),
-    ));
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 0
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: y,
+    });
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(after, vec![])); // index 1
     f.get_block_mut(after)
@@ -1059,15 +965,13 @@ fn asserted_leader_respects_dominance_fanout() {
     f.get_entry_mut().push_parameter(y, Type::u(32));
     f.get_entry_mut()
         .set_terminator(Terminator::JmpIf(cond, then_b, else_b));
-    f.get_block_mut(then_b).push_instruction(Located::with(
-        OpCode::AssertCmp {
+    f.get_block_mut(then_b)
+        .push_test_instruction(OpCode::AssertCmp {
             // index 0: x == y, only on the `then` branch
             kind: CmpKind::Eq,
             lhs: x,
             rhs: y,
-        },
-        SourceLocation::test(),
-    ));
+        });
     f.get_block_mut(then_b)
         .set_terminator(Terminator::Jmp(merge, vec![]));
     f.get_block_mut(else_b)
@@ -1118,15 +1022,12 @@ fn asserted_leader_none_without_equality() {
     let entry_id = f.get_entry_id();
     f.get_entry_mut().push_parameter(x, Type::u(32));
     f.get_entry_mut().push_parameter(z, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 0: x == 5 — a constant pin, not an equality pair
-            kind: CmpKind::Eq,
-            lhs: x,
-            rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 0: x == 5 — a constant pin, not an equality pair
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: c5,
+    });
     f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 1
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -1155,15 +1056,12 @@ fn asserted_leader_none_for_non_pair_value_amid_classes() {
     f.get_entry_mut().push_parameter(a, Type::u(32));
     f.get_entry_mut().push_parameter(b, Type::u(32));
     f.get_entry_mut().push_parameter(z, Type::u(32)); // never in any assert
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 0: a == b — a real equality pair, so the function has a non-empty `def_key`
-            kind: CmpKind::Eq,
-            lhs: a,
-            rhs: b,
-        },
-        SourceLocation::test(),
-    ));
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 0: a == b — a real equality pair, so the function has a non-empty `def_key`
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
     f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 1
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -1190,24 +1088,18 @@ fn asserted_leader_multi_threshold_same_block() {
     f.get_entry_mut().push_parameter(a, Type::u(32));
     f.get_entry_mut().push_parameter(c, Type::u(32));
     f.get_entry_mut().push_parameter(d, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 0: c == d ⇒ class {c, d}, leader c
-            kind: CmpKind::Eq,
-            lhs: c,
-            rhs: d,
-        },
-        SourceLocation::test(),
-    ));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 1: a == c ⇒ merges into {a, c, d}, leader a
-            kind: CmpKind::Eq,
-            lhs: a,
-            rhs: c,
-        },
-        SourceLocation::test(),
-    ));
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 0: c == d ⇒ class {c, d}, leader c
+        kind: CmpKind::Eq,
+        lhs: c,
+        rhs: d,
+    });
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 1: a == c ⇒ merges into {a, c, d}, leader a
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: c,
+    });
     f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 2
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -1247,35 +1139,27 @@ fn asserted_leader_local_merges_two_cross_classes() {
     f.get_entry_mut().push_parameter(b, Type::u(32));
     f.get_entry_mut().push_parameter(c, Type::u(32));
     f.get_entry_mut().push_parameter(d, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 0: a == b ⇒ dominating class {a, b}
-            kind: CmpKind::Eq,
-            lhs: a,
-            rhs: b,
-        },
-        SourceLocation::test(),
-    ));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 1: c == d ⇒ dominating class {c, d}
-            kind: CmpKind::Eq,
-            lhs: c,
-            rhs: d,
-        },
-        SourceLocation::test(),
-    ));
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 0: a == b ⇒ dominating class {a, b}
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 1: c == d ⇒ dominating class {c, d}
+        kind: CmpKind::Eq,
+        lhs: c,
+        rhs: d,
+    });
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(mid, vec![])); // index 2
-    f.get_block_mut(mid).push_instruction(Located::with(
-        OpCode::AssertCmp {
+    f.get_block_mut(mid)
+        .push_test_instruction(OpCode::AssertCmp {
             // index 0 (in `mid`): b == c ⇒ merges the two cross classes into {a, b, c, d}
             kind: CmpKind::Eq,
             lhs: b,
             rhs: c,
-        },
-        SourceLocation::test(),
-    ));
+        });
     f.get_block_mut(mid)
         .set_terminator(Terminator::Return(vec![])); // index 1
 
@@ -1309,15 +1193,12 @@ fn disequality_from_false_edge() {
     let after = f.add_block();
     f.get_entry_mut().push_parameter(x, Type::u(32));
     f.get_entry_mut().push_parameter(y, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Eq,
-            result: eq,
-            lhs: x,
-            rhs: y,
-        },
-        SourceLocation::test(),
-    ));
+    f.get_entry_mut().push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Eq,
+        result: eq,
+        lhs: x,
+        rhs: y,
+    });
     f.get_entry_mut()
         .set_terminator(Terminator::JmpIf(eq, then_b, else_b));
     f.get_block_mut(then_b)
@@ -1350,30 +1231,21 @@ fn unpinned_witness_forwards_distinct_not_merged() {
     f.get_entry_mut().push_parameter(v1, Type::u(32));
     f.get_entry_mut().push_parameter(v2, Type::u(32));
     let entry = f.get_entry_mut();
-    entry.push_instruction(Located::with(
-        OpCode::WriteWitness {
-            result: Some(r1),
-            value: v1,
-            pinned: false,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::WriteWitness {
-            result: Some(r2),
-            value: v2,
-            pinned: false,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::WriteWitness {
-            result: Some(rp),
-            value: v1,
-            pinned: true,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::WriteWitness {
+        result: Some(r1),
+        value: v1,
+        pinned: false,
+    });
+    entry.push_test_instruction(OpCode::WriteWitness {
+        result: Some(r2),
+        value: v2,
+        pinned: false,
+    });
+    entry.push_test_instruction(OpCode::WriteWitness {
+        result: Some(rp),
+        value: v1,
+        pinned: true,
+    });
     entry.set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -1400,40 +1272,28 @@ fn witness_forward_unions_hint_and_value_of_reads() {
     f.get_entry_mut().push_parameter(v, Type::u(32));
     f.get_entry_mut().push_parameter(v2, Type::u(32));
     let entry = f.get_entry_mut();
-    entry.push_instruction(Located::with(
-        OpCode::WriteWitness {
-            result: Some(r),
-            value: v,
-            pinned: false,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::WriteWitness {
+        result: Some(r),
+        value: v,
+        pinned: false,
+    });
     // `value_of(r)` strips r's witness wrapper: w1, w2 are honestly equal to r. Two separate
     // reads stay distinct (ValueOf is excluded from value-numbering), so both join r's set.
-    entry.push_instruction(Located::with(
-        OpCode::Cast {
-            result: w1,
-            value: r,
-            target: CastTarget::ValueOf,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::Cast {
-            result: w2,
-            value: r,
-            target: CastTarget::ValueOf,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::WriteWitness {
-            result: Some(r2),
-            value: v2,
-            pinned: false,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::Cast {
+        result: w1,
+        value: r,
+        target: CastTarget::ValueOf,
+    });
+    entry.push_test_instruction(OpCode::Cast {
+        result: w2,
+        value: r,
+        target: CastTarget::ValueOf,
+    });
+    entry.push_test_instruction(OpCode::WriteWitness {
+        result: Some(r2),
+        value: v2,
+        pinned: false,
+    });
     entry.set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -1471,14 +1331,12 @@ fn post_dominance_not_propagated_at_block_granularity() {
         .set_terminator(Terminator::Jmp(mid, vec![]));
     f.get_block_mut(mid)
         .set_terminator(Terminator::Jmp(tail, vec![]));
-    f.get_block_mut(tail).push_instruction(Located::with(
-        OpCode::AssertCmp {
+    f.get_block_mut(tail)
+        .push_test_instruction(OpCode::AssertCmp {
             kind: CmpKind::Eq,
             lhs: x,
             rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
+        });
     f.get_block_mut(tail)
         .set_terminator(Terminator::Return(vec![]));
 
@@ -1548,44 +1406,32 @@ fn post_dominating_assert_unsound_for_loop_carried_value() {
         .set_terminator(Terminator::Jmp(header, vec![c0]));
     let header_block = f.get_block_mut(header);
     header_block.push_parameter(v, Type::u(32));
-    header_block.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: lt,
-            lhs: v,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+    header_block.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: lt,
+        lhs: v,
+        rhs: c10,
+    });
     header_block.set_terminator(Terminator::JmpIf(lt, body, after));
     let body_block = f.get_block_mut(body);
-    body_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: v1,
-            lhs: v,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
+    body_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: v1,
+        lhs: v,
+        rhs: c1,
+    });
     body_block.set_terminator(Terminator::Jmp(header, vec![v1]));
     let after_block = f.get_block_mut(after);
-    after_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: v,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
-    after_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: s,
-            rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
+    after_block.push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: v,
+        rhs: c10,
+    });
+    after_block.push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: s,
+        rhs: c5,
+    });
     after_block.set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -1643,14 +1489,12 @@ fn assert_on_one_branch_does_not_post_dominate() {
     f.get_entry_mut()
         .set_terminator(Terminator::JmpIf(cond, then_b, else_b));
     // The assert lives only on the `then` branch.
-    f.get_block_mut(then_b).push_instruction(Located::with(
-        OpCode::AssertCmp {
+    f.get_block_mut(then_b)
+        .push_test_instruction(OpCode::AssertCmp {
             kind: CmpKind::Eq,
             lhs: x,
             rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
+        });
     f.get_block_mut(then_b)
         .set_terminator(Terminator::Jmp(merge, vec![]));
     f.get_block_mut(else_b)
@@ -1706,24 +1550,19 @@ fn anticipated_fact_gated_on_scope() {
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(mid, vec![]));
     let mid_block = f.get_block_mut(mid);
-    mid_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: v,
-            lhs: x,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
+    mid_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: v,
+        lhs: x,
+        rhs: c1,
+    });
     mid_block.set_terminator(Terminator::Jmp(tail, vec![]));
-    f.get_block_mut(tail).push_instruction(Located::with(
-        OpCode::AssertCmp {
+    f.get_block_mut(tail)
+        .push_test_instruction(OpCode::AssertCmp {
             kind: CmpKind::Eq,
             lhs: v,
             rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
+        });
     f.get_block_mut(tail)
         .set_terminator(Terminator::Return(vec![]));
 
@@ -1761,14 +1600,12 @@ fn no_exit_path_assert_contributes_nothing() {
     f.get_entry_mut()
         .set_terminator(Terminator::JmpIf(p, spin, ret));
     // The asserting block loops on itself forever: reachable, but never exiting.
-    f.get_block_mut(spin).push_instruction(Located::with(
-        OpCode::AssertCmp {
+    f.get_block_mut(spin)
+        .push_test_instruction(OpCode::AssertCmp {
             kind: CmpKind::Eq,
             lhs: x,
             rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
+        });
     f.get_block_mut(spin)
         .set_terminator(Terminator::Jmp(spin, vec![]));
     f.get_block_mut(ret)
@@ -1806,14 +1643,12 @@ fn anticipated_gains_from_constant_branch() {
     f.get_entry_mut().push_parameter(x, Type::u(32));
     f.get_entry_mut()
         .set_terminator(Terminator::JmpIf(c_true, then_b, else_b));
-    f.get_block_mut(then_b).push_instruction(Located::with(
-        OpCode::AssertCmp {
+    f.get_block_mut(then_b)
+        .push_test_instruction(OpCode::AssertCmp {
             kind: CmpKind::Eq,
             lhs: x,
             rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
+        });
     f.get_block_mut(then_b)
         .set_terminator(Terminator::Jmp(merge, vec![]));
     f.get_block_mut(else_b)
@@ -1872,14 +1707,12 @@ fn anticipated_const_in_gains_from_pinned_branch() {
         hf.get_entry_mut().push_parameter(x, Type::u(32));
         hf.get_entry_mut()
             .set_terminator(Terminator::JmpIf(p, then_b, else_b));
-        hf.get_block_mut(then_b).push_instruction(Located::with(
-            OpCode::AssertCmp {
+        hf.get_block_mut(then_b)
+            .push_test_instruction(OpCode::AssertCmp {
                 kind: CmpKind::Eq,
                 lhs: x,
                 rhs: c5,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_block_mut(then_b)
             .set_terminator(Terminator::Jmp(merge, vec![]));
         hf.get_block_mut(else_b)
@@ -1891,15 +1724,12 @@ fn anticipated_const_in_gains_from_pinned_branch() {
     {
         let mf = ssa.get_function_mut(main_id);
         mf.get_entry_mut().push_parameter(x0, Type::u(32));
-        mf.get_entry_mut().push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![],
-                function: CallTarget::Static(g),
-                args: vec![c_true, x0],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        mf.get_entry_mut().push_test_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(g),
+            args: vec![c_true, x0],
+            unconstrained: false,
+        });
         mf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![]));
     }
@@ -1948,22 +1778,18 @@ fn anticipated_gains_from_dead_back_edge() {
         let hf = ssa.get_function_mut(g);
         hf.add_return_type(Type::u(32));
         hf.get_entry_mut().push_parameter(a, Type::u(32));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::FreshWitness {
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::FreshWitness {
                 result: wit,
                 result_type: Type::u(32),
-            },
-            SourceLocation::test(),
-        ));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+            });
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: b,
                 lhs: a,
                 rhs: wit,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![b]));
     }
@@ -1976,27 +1802,22 @@ fn anticipated_gains_from_dead_back_edge() {
         mf.get_entry_mut()
             .set_terminator(Terminator::Jmp(header, vec![]));
         let header_block = mf.get_block_mut(header);
-        header_block.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r],
-                function: CallTarget::Static(g),
-                args: vec![w],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        header_block.push_test_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(g),
+            args: vec![w],
+            unconstrained: false,
+        });
         // The back edge through `body` exists statically but its branch is constant-false.
         header_block.set_terminator(Terminator::JmpIf(c_false, body, after));
         mf.get_block_mut(body)
             .set_terminator(Terminator::Jmp(header, vec![]));
-        mf.get_block_mut(after).push_instruction(Located::with(
-            OpCode::AssertCmp {
+        mf.get_block_mut(after)
+            .push_test_instruction(OpCode::AssertCmp {
                 kind: CmpKind::Eq,
                 lhs: r,
                 rhs: c5,
-            },
-            SourceLocation::test(),
-        ));
+            });
         mf.get_block_mut(after)
             .set_terminator(Terminator::Return(vec![]));
         (header, after)
@@ -2052,22 +1873,18 @@ fn live_back_edge_keeps_call_result_unstable() {
         let hf = ssa.get_function_mut(g);
         hf.add_return_type(Type::u(32));
         hf.get_entry_mut().push_parameter(a, Type::u(32));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::FreshWitness {
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::FreshWitness {
                 result: wit,
                 result_type: Type::u(32),
-            },
-            SourceLocation::test(),
-        ));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+            });
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: b,
                 lhs: a,
                 rhs: wit,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![b]));
     }
@@ -2081,26 +1898,21 @@ fn live_back_edge_keeps_call_result_unstable() {
         mf.get_entry_mut()
             .set_terminator(Terminator::Jmp(header, vec![]));
         let header_block = mf.get_block_mut(header);
-        header_block.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r],
-                function: CallTarget::Static(g),
-                args: vec![w],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        header_block.push_test_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(g),
+            args: vec![w],
+            unconstrained: false,
+        });
         header_block.set_terminator(Terminator::JmpIf(p, body, after));
         mf.get_block_mut(body)
             .set_terminator(Terminator::Jmp(header, vec![]));
-        mf.get_block_mut(after).push_instruction(Located::with(
-            OpCode::AssertCmp {
+        mf.get_block_mut(after)
+            .push_test_instruction(OpCode::AssertCmp {
                 kind: CmpKind::Eq,
                 lhs: r,
                 rhs: c5,
-            },
-            SourceLocation::test(),
-        ));
+            });
         mf.get_block_mut(after)
             .set_terminator(Terminator::Return(vec![]));
         header
@@ -2140,26 +1952,20 @@ fn anticipated_finality_gains_from_pruned_back_path() {
         .set_terminator(Terminator::Jmp(header, vec![c0]));
     let header_block = f.get_block_mut(header);
     header_block.push_parameter(v, Type::u(32));
-    header_block.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: lt,
-            lhs: v,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+    header_block.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: lt,
+        lhs: v,
+        rhs: c10,
+    });
     header_block.set_terminator(Terminator::JmpIf(lt, body, c_block));
     let body_block = f.get_block_mut(body);
-    body_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: v1,
-            lhs: v,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
+    body_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: v1,
+        lhs: v,
+        rhs: c1,
+    });
     body_block.set_terminator(Terminator::Jmp(header, vec![v1]));
     // The static back-path `c_block → tramp → header` re-enters the definition, but only through
     // a constant-false branch — executably `c_block` never re-reaches `def(v)`.
@@ -2167,14 +1973,12 @@ fn anticipated_finality_gains_from_pruned_back_path() {
         .set_terminator(Terminator::JmpIf(c_false, tramp, next));
     f.get_block_mut(tramp)
         .set_terminator(Terminator::Jmp(header, vec![c0]));
-    f.get_block_mut(next).push_instruction(Located::with(
-        OpCode::AssertCmp {
+    f.get_block_mut(next)
+        .push_test_instruction(OpCode::AssertCmp {
             kind: CmpKind::Eq,
             lhs: v,
             rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+        });
     f.get_block_mut(next)
         .set_terminator(Terminator::Return(vec![]));
 
@@ -2229,14 +2033,12 @@ fn pruned_build_keeps_static_post_dominance_fact() {
     // `check` stays reachable (so its assert establishes a fact) via the other arm.
     f.get_block_mut(bypass)
         .set_terminator(Terminator::Jmp(check, vec![]));
-    f.get_block_mut(check).push_instruction(Located::with(
-        OpCode::AssertCmp {
+    f.get_block_mut(check)
+        .push_test_instruction(OpCode::AssertCmp {
             kind: CmpKind::Eq,
             lhs: x,
             rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
+        });
     f.get_block_mut(check)
         .set_terminator(Terminator::Return(vec![]));
 
@@ -2273,23 +2075,18 @@ fn local_anticipated_before_the_assert() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
     f.get_entry_mut().push_parameter(x, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::BinaryArithOp {
+    f.get_entry_mut()
+        .push_test_instruction(OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::Add,
             result: y,
             lhs: x,
             rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: x,
-            rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
+        });
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: c5,
+    });
     f.get_entry_mut().set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -2347,32 +2144,23 @@ fn local_anticipated_needs_no_stability_gate() {
         .set_terminator(Terminator::Jmp(looping, vec![c0]));
     let loop_block = f.get_block_mut(looping);
     loop_block.push_parameter(w, Type::u(32));
-    loop_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: y,
-            lhs: w,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    loop_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: w,
-            rhs: c9,
-        },
-        SourceLocation::test(),
-    ));
-    loop_block.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: lt,
-            lhs: y,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+    loop_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: y,
+        lhs: w,
+        rhs: c1,
+    });
+    loop_block.push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: w,
+        rhs: c9,
+    });
+    loop_block.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: lt,
+        lhs: y,
+        rhs: c10,
+    });
     loop_block.set_terminator(Terminator::JmpIf(lt, looping, exit));
     f.get_block_mut(exit)
         .set_terminator(Terminator::Return(vec![]));
@@ -2414,33 +2202,24 @@ fn anticipated_equalities_and_leaders() {
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(mid, vec![]));
     let mid_block = f.get_block_mut(mid);
-    mid_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: m,
-            lhs: a,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
+    mid_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: m,
+        lhs: a,
+        rhs: c1,
+    });
     mid_block.set_terminator(Terminator::Jmp(tail, vec![]));
     let tail_block = f.get_block_mut(tail);
-    tail_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: a,
-            rhs: b,
-        },
-        SourceLocation::test(),
-    ));
-    tail_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: m,
-            rhs: b,
-        },
-        SourceLocation::test(),
-    ));
+    tail_block.push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
+    tail_block.push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: m,
+        rhs: b,
+    });
     tail_block.set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -2486,25 +2265,20 @@ fn anticipated_leader_before_same_block_assert() {
     let entry_id = f.get_entry_id();
     f.get_entry_mut().push_parameter(a, Type::u(32));
     f.get_entry_mut().push_parameter(b, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::BinaryArithOp {
+    f.get_entry_mut()
+        .push_test_instruction(OpCode::BinaryArithOp {
             // index 0: a pre-assert use of `b`
             kind: BinaryArithOpKind::Add,
             result: m,
             lhs: b,
             rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 1: a == b
-            kind: CmpKind::Eq,
-            lhs: a,
-            rhs: b,
-        },
-        SourceLocation::test(),
-    ));
+        });
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 1: a == b
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
     f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 2
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -2557,35 +2331,26 @@ fn anticipated_leader_before_assert_in_cyclic_block() {
         .set_terminator(Terminator::Jmp(looping, vec![c0]));
     let loop_block = f.get_block_mut(looping);
     loop_block.push_parameter(w, Type::u(32));
-    loop_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            // index 0: a pre-assert use of `w`
-            kind: BinaryArithOpKind::Add,
-            result: y,
-            lhs: w,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    loop_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 1: w == a
-            kind: CmpKind::Eq,
-            lhs: w,
-            rhs: a,
-        },
-        SourceLocation::test(),
-    ));
-    loop_block.push_instruction(Located::with(
-        OpCode::Cmp {
-            // index 2
-            kind: CmpKind::Lt,
-            result: lt,
-            lhs: y,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+    loop_block.push_test_instruction(OpCode::BinaryArithOp {
+        // index 0: a pre-assert use of `w`
+        kind: BinaryArithOpKind::Add,
+        result: y,
+        lhs: w,
+        rhs: c1,
+    });
+    loop_block.push_test_instruction(OpCode::AssertCmp {
+        // index 1: w == a
+        kind: CmpKind::Eq,
+        lhs: w,
+        rhs: a,
+    });
+    loop_block.push_test_instruction(OpCode::Cmp {
+        // index 2
+        kind: CmpKind::Lt,
+        result: lt,
+        lhs: y,
+        rhs: c10,
+    });
     loop_block.set_terminator(Terminator::JmpIf(lt, looping, exit));
     f.get_block_mut(exit)
         .set_terminator(Terminator::Return(vec![]));
@@ -2639,35 +2404,28 @@ fn anticipated_leader_threshold_for_block_defined_leader() {
     let entry_id = f.get_entry_id();
     f.get_entry_mut().push_parameter(a, Type::u(32));
     f.get_entry_mut().push_parameter(b, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::BinaryArithOp {
+    f.get_entry_mut()
+        .push_test_instruction(OpCode::BinaryArithOp {
             // index 0: def(x)
             kind: BinaryArithOpKind::Add,
             result: x,
             lhs: a,
             rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::BinaryArithOp {
+        });
+    f.get_entry_mut()
+        .push_test_instruction(OpCode::BinaryArithOp {
             // index 1: def(y)
             kind: BinaryArithOpKind::Add,
             result: y,
             lhs: b,
             rhs: c2,
-        },
-        SourceLocation::test(),
-    ));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 2: x == y
-            kind: CmpKind::Eq,
-            lhs: x,
-            rhs: y,
-        },
-        SourceLocation::test(),
-    ));
+        });
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 2: x == y
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: y,
+    });
     f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 3
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -2713,34 +2471,26 @@ fn anticipated_leader_merges_across_directions() {
     f.get_entry_mut().push_parameter(x, Type::u(32));
     f.get_entry_mut().push_parameter(y, Type::u(32));
     f.get_entry_mut().push_parameter(z, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 0: x == y
-            kind: CmpKind::Eq,
-            lhs: x,
-            rhs: y,
-        },
-        SourceLocation::test(),
-    ));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::BinaryArithOp {
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 0: x == y
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: y,
+    });
+    f.get_entry_mut()
+        .push_test_instruction(OpCode::BinaryArithOp {
             // index 1: the between point
             kind: BinaryArithOpKind::Add,
             result: m,
             lhs: z,
             rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 2: y == z
-            kind: CmpKind::Eq,
-            lhs: y,
-            rhs: z,
-        },
-        SourceLocation::test(),
-    ));
+        });
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 2: y == z
+        kind: CmpKind::Eq,
+        lhs: y,
+        rhs: z,
+    });
     f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 3
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -2770,15 +2520,12 @@ fn anticipated_leader_at_establishing_assert_is_gate3_guarded() {
     let entry_id = f.get_entry_id();
     f.get_entry_mut().push_parameter(a, Type::u(32));
     f.get_entry_mut().push_parameter(b, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 0: a == b
-            kind: CmpKind::Eq,
-            lhs: a,
-            rhs: b,
-        },
-        SourceLocation::test(),
-    ));
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 0: a == b
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
     f.get_entry_mut().set_terminator(Terminator::Return(vec![])); // index 1
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -2800,29 +2547,23 @@ fn anticipated_leader_cross_only_block_falls_back() {
     let f = ssa.get_unique_entrypoint_mut();
     f.get_entry_mut().push_parameter(a, Type::u(32));
     f.get_entry_mut().push_parameter(b, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 0: a == b, fanned out to `tail` as a cross pair
-            kind: CmpKind::Eq,
-            lhs: a,
-            rhs: b,
-        },
-        SourceLocation::test(),
-    ));
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 0: a == b, fanned out to `tail` as a cross pair
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
     let tail = f.add_block();
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(tail, vec![]));
     let tail_block = f.get_block_mut(tail);
-    tail_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            // index 0: an ordinary use point in `tail`
-            kind: BinaryArithOpKind::Add,
-            result: m,
-            lhs: b,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
+    tail_block.push_test_instruction(OpCode::BinaryArithOp {
+        // index 0: an ordinary use point in `tail`
+        kind: BinaryArithOpKind::Add,
+        result: m,
+        lhs: b,
+        rhs: c1,
+    });
     tail_block.set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -2863,53 +2604,38 @@ fn anticipated_admits_loop_invariant_pure_chain() {
         .set_terminator(Terminator::Jmp(looping, vec![c0]));
     let loop_block = f.get_block_mut(looping);
     loop_block.push_parameter(i, Type::u(32));
-    loop_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            // index 0: loop-invariant — pure over the stable `n` and a constant.
-            kind: BinaryArithOpKind::Add,
-            result: t,
-            lhs: n,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    loop_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            // index 1: loop-variant — pure, but over the loop-carried `i`.
-            kind: BinaryArithOpKind::Add,
-            result: i2,
-            lhs: i,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    loop_block.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: lt,
-            lhs: i2,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+    loop_block.push_test_instruction(OpCode::BinaryArithOp {
+        // index 0: loop-invariant — pure over the stable `n` and a constant.
+        kind: BinaryArithOpKind::Add,
+        result: t,
+        lhs: n,
+        rhs: c1,
+    });
+    loop_block.push_test_instruction(OpCode::BinaryArithOp {
+        // index 1: loop-variant — pure, but over the loop-carried `i`.
+        kind: BinaryArithOpKind::Add,
+        result: i2,
+        lhs: i,
+        rhs: c1,
+    });
+    loop_block.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: lt,
+        lhs: i2,
+        rhs: c10,
+    });
     loop_block.set_terminator(Terminator::JmpIf(lt, looping, exit));
     let exit_block = f.get_block_mut(exit);
-    exit_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: t,
-            rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
-    exit_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: i2,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+    exit_block.push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: t,
+        rhs: c5,
+    });
+    exit_block.push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: i2,
+        rhs: c10,
+    });
     exit_block.set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -2973,44 +2699,32 @@ fn anticipated_rejects_unconstrained_call_result_in_loop() {
             .set_terminator(Terminator::Jmp(looping, vec![c0]));
         let loop_block = mf.get_block_mut(looping);
         loop_block.push_parameter(i, Type::u(32));
-        loop_block.push_instruction(Located::with(
-            OpCode::Call {
-                // index 0: opaque — an unconstrained call, however stable its argument.
-                results: vec![r],
-                function: CallTarget::Static(helper),
-                args: vec![n],
-                unconstrained: true,
-            },
-            SourceLocation::test(),
-        ));
-        loop_block.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: i2,
-                lhs: i,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        loop_block.push_instruction(Located::with(
-            OpCode::Cmp {
-                kind: CmpKind::Lt,
-                result: lt,
-                lhs: i2,
-                rhs: c10,
-            },
-            SourceLocation::test(),
-        ));
+        loop_block.push_test_instruction(OpCode::Call {
+            // index 0: opaque — an unconstrained call, however stable its argument.
+            results: vec![r],
+            function: CallTarget::Static(helper),
+            args: vec![n],
+            unconstrained: true,
+        });
+        loop_block.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: i2,
+            lhs: i,
+            rhs: c1,
+        });
+        loop_block.push_test_instruction(OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: lt,
+            lhs: i2,
+            rhs: c10,
+        });
         loop_block.set_terminator(Terminator::JmpIf(lt, looping, exit));
         let exit_block = mf.get_block_mut(exit);
-        exit_block.push_instruction(Located::with(
-            OpCode::AssertCmp {
-                kind: CmpKind::Eq,
-                lhs: r,
-                rhs: c5,
-            },
-            SourceLocation::test(),
-        ));
+        exit_block.push_test_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: r,
+            rhs: c5,
+        });
         exit_block.set_terminator(Terminator::Return(vec![]));
 
         let cc = run_in_test(&ssa);
@@ -3042,38 +2756,29 @@ fn anticipated_admits_accumulator_at_post_loop_block() {
         .set_terminator(Terminator::Jmp(header, vec![c0]));
     let header_block = f.get_block_mut(header);
     header_block.push_parameter(v, Type::u(32));
-    header_block.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: lt,
-            lhs: v,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+    header_block.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: lt,
+        lhs: v,
+        rhs: c10,
+    });
     header_block.set_terminator(Terminator::JmpIf(lt, body, after));
     let body_block = f.get_block_mut(body);
-    body_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: v1,
-            lhs: v,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
+    body_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: v1,
+        lhs: v,
+        rhs: c1,
+    });
     body_block.set_terminator(Terminator::Jmp(header, vec![v1]));
     f.get_block_mut(after)
         .set_terminator(Terminator::Jmp(tail, vec![]));
     let tail_block = f.get_block_mut(tail);
-    tail_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: v,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+    tail_block.push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: v,
+        rhs: c10,
+    });
     tail_block.set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -3121,47 +2826,35 @@ fn anticipated_admits_first_loop_value_inside_second_loop() {
         .set_terminator(Terminator::Jmp(header, vec![c0]));
     let header_block = f.get_block_mut(header);
     header_block.push_parameter(v, Type::u(32));
-    header_block.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: lt,
-            lhs: v,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+    header_block.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: lt,
+        lhs: v,
+        rhs: c10,
+    });
     header_block.set_terminator(Terminator::JmpIf(lt, body, second));
     let body_block = f.get_block_mut(body);
-    body_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: v1,
-            lhs: v,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
+    body_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: v1,
+        lhs: v,
+        rhs: c1,
+    });
     body_block.set_terminator(Terminator::Jmp(header, vec![v1]));
     let second_block = f.get_block_mut(second);
-    second_block.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: lt2,
-            lhs: v,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
+    second_block.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: lt2,
+        lhs: v,
+        rhs: c1,
+    });
     second_block.set_terminator(Terminator::JmpIf(lt2, second, tail));
     let tail_block = f.get_block_mut(tail);
-    tail_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: v,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+    tail_block.push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: v,
+        rhs: c10,
+    });
     tail_block.set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -3211,47 +2904,35 @@ fn anticipated_rejects_inner_loop_value_at_outer_block() {
         .set_terminator(Terminator::Jmp(inner, vec![c0]));
     let inner_block = f.get_block_mut(inner);
     inner_block.push_parameter(w, Type::u(32));
-    inner_block.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: lt_i,
-            lhs: w,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+    inner_block.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: lt_i,
+        lhs: w,
+        rhs: c10,
+    });
     inner_block.set_terminator(Terminator::JmpIf(lt_i, inner_body, latch));
     let inner_body_block = f.get_block_mut(inner_body);
-    inner_body_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: w2,
-            lhs: w,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
+    inner_body_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: w2,
+        lhs: w,
+        rhs: c1,
+    });
     inner_body_block.set_terminator(Terminator::Jmp(inner, vec![w2]));
     let latch_block = f.get_block_mut(latch);
-    latch_block.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: lt_o,
-            lhs: w,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
+    latch_block.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: lt_o,
+        lhs: w,
+        rhs: c1,
+    });
     latch_block.set_terminator(Terminator::JmpIf(lt_o, outer, tail));
     let tail_block = f.get_block_mut(tail);
-    tail_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: w,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+    tail_block.push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: w,
+        rhs: c10,
+    });
     tail_block.set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -3300,15 +2981,12 @@ fn anticipated_admits_det_call_via_congruence_tier() {
         hf.add_return_type(Type::u(32));
         let entry = hf.get_entry_mut();
         entry.push_parameter(p, Type::u(32));
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: q,
-                lhs: p,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: q,
+            lhs: p,
+            rhs: c1,
+        });
         entry.set_terminator(Terminator::Return(vec![q]));
     }
     {
@@ -3317,57 +2995,42 @@ fn anticipated_admits_det_call_via_congruence_tier() {
         let exit = mf.add_block();
         let entry = mf.get_entry_mut();
         entry.push_parameter(n, Type::u(32));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                // The dominating witness: same callee, same argument, in an acyclic block.
-                results: vec![w],
-                function: CallTarget::Static(helper),
-                args: vec![n],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            // The dominating witness: same callee, same argument, in an acyclic block.
+            results: vec![w],
+            function: CallTarget::Static(helper),
+            args: vec![n],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Jmp(looping, vec![c0]));
         let loop_block = mf.get_block_mut(looping);
         loop_block.push_parameter(i, Type::u(32));
-        loop_block.push_instruction(Located::with(
-            OpCode::Call {
-                // index 0: congruent to `w` (deterministic static call, congruent arguments).
-                results: vec![r],
-                function: CallTarget::Static(helper),
-                args: vec![n],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
-        loop_block.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: i2,
-                lhs: i,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        loop_block.push_instruction(Located::with(
-            OpCode::Cmp {
-                kind: CmpKind::Lt,
-                result: lt,
-                lhs: i2,
-                rhs: c10,
-            },
-            SourceLocation::test(),
-        ));
+        loop_block.push_test_instruction(OpCode::Call {
+            // index 0: congruent to `w` (deterministic static call, congruent arguments).
+            results: vec![r],
+            function: CallTarget::Static(helper),
+            args: vec![n],
+            unconstrained: false,
+        });
+        loop_block.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: i2,
+            lhs: i,
+            rhs: c1,
+        });
+        loop_block.push_test_instruction(OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: lt,
+            lhs: i2,
+            rhs: c10,
+        });
         loop_block.set_terminator(Terminator::JmpIf(lt, looping, exit));
         let exit_block = mf.get_block_mut(exit);
-        exit_block.push_instruction(Located::with(
-            OpCode::AssertCmp {
-                kind: CmpKind::Eq,
-                lhs: r,
-                rhs: c5,
-            },
-            SourceLocation::test(),
-        ));
+        exit_block.push_test_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: r,
+            rhs: c5,
+        });
         exit_block.set_terminator(Terminator::Return(vec![]));
 
         let cc = run_in_test(&ssa);
@@ -3414,15 +3077,13 @@ fn anticipated_admits_det_call_directly_in_loop() {
         let hf = ssa.get_function_mut(g);
         hf.add_return_type(Type::u(32));
         hf.get_entry_mut().push_parameter(a, Type::u(32));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: b,
                 lhs: a,
                 rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![b]));
     }
@@ -3436,26 +3097,21 @@ fn anticipated_admits_det_call_directly_in_loop() {
         mf.get_entry_mut()
             .set_terminator(Terminator::Jmp(header, vec![]));
         let header_block = mf.get_block_mut(header);
-        header_block.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r],
-                function: CallTarget::Static(g),
-                args: vec![w],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        header_block.push_test_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(g),
+            args: vec![w],
+            unconstrained: false,
+        });
         header_block.set_terminator(Terminator::JmpIf(p, body, after));
         mf.get_block_mut(body)
             .set_terminator(Terminator::Jmp(header, vec![]));
-        mf.get_block_mut(after).push_instruction(Located::with(
-            OpCode::AssertCmp {
+        mf.get_block_mut(after)
+            .push_test_instruction(OpCode::AssertCmp {
                 kind: CmpKind::Eq,
                 lhs: r,
                 rhs: c5,
-            },
-            SourceLocation::test(),
-        ));
+            });
         mf.get_block_mut(after)
             .set_terminator(Terminator::Return(vec![]));
         header
@@ -3500,15 +3156,12 @@ fn anticipated_rejects_det_call_over_loop_variant_arg() {
         hf.add_return_type(Type::u(32));
         let entry = hf.get_entry_mut();
         entry.push_parameter(p, Type::u(32));
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: q,
-                lhs: p,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: q,
+            lhs: p,
+            rhs: c1,
+        });
         entry.set_terminator(Terminator::Return(vec![q]));
     }
     {
@@ -3520,44 +3173,32 @@ fn anticipated_rejects_det_call_over_loop_variant_arg() {
             .set_terminator(Terminator::Jmp(looping, vec![c0]));
         let loop_block = mf.get_block_mut(looping);
         loop_block.push_parameter(i, Type::u(32));
-        loop_block.push_instruction(Located::with(
-            OpCode::Call {
-                // index 0: a deterministic constrained call, but over the loop-variant `i`.
-                results: vec![r],
-                function: CallTarget::Static(helper),
-                args: vec![i],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
-        loop_block.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: i2,
-                lhs: i,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        loop_block.push_instruction(Located::with(
-            OpCode::Cmp {
-                kind: CmpKind::Lt,
-                result: lt,
-                lhs: i2,
-                rhs: c10,
-            },
-            SourceLocation::test(),
-        ));
+        loop_block.push_test_instruction(OpCode::Call {
+            // index 0: a deterministic constrained call, but over the loop-variant `i`.
+            results: vec![r],
+            function: CallTarget::Static(helper),
+            args: vec![i],
+            unconstrained: false,
+        });
+        loop_block.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: i2,
+            lhs: i,
+            rhs: c1,
+        });
+        loop_block.push_test_instruction(OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: lt,
+            lhs: i2,
+            rhs: c10,
+        });
         loop_block.set_terminator(Terminator::JmpIf(lt, looping, exit));
         let exit_block = mf.get_block_mut(exit);
-        exit_block.push_instruction(Located::with(
-            OpCode::AssertCmp {
-                kind: CmpKind::Eq,
-                lhs: r,
-                rhs: c5,
-            },
-            SourceLocation::test(),
-        ));
+        exit_block.push_test_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: r,
+            rhs: c5,
+        });
         exit_block.set_terminator(Terminator::Return(vec![]));
 
         let cc = run_in_test(&ssa);
@@ -3596,22 +3237,16 @@ fn anticipated_det_call_multi_return_per_index_bits() {
         hf.add_return_type(Type::u(32));
         let entry = hf.get_entry_mut();
         entry.push_parameter(p, Type::u(32));
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: q,
-                lhs: p,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::FreshWitness {
-                result: wit,
-                result_type: Type::u(32),
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: q,
+            lhs: p,
+            rhs: c1,
+        });
+        entry.push_test_instruction(OpCode::FreshWitness {
+            result: wit,
+            result_type: Type::u(32),
+        });
         entry.set_terminator(Terminator::Return(vec![q, wit]));
     }
     let header = {
@@ -3624,35 +3259,26 @@ fn anticipated_det_call_multi_return_per_index_bits() {
         mf.get_entry_mut()
             .set_terminator(Terminator::Jmp(header, vec![]));
         let header_block = mf.get_block_mut(header);
-        header_block.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r0, r1],
-                function: CallTarget::Static(helper),
-                args: vec![n],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        header_block.push_test_instruction(OpCode::Call {
+            results: vec![r0, r1],
+            function: CallTarget::Static(helper),
+            args: vec![n],
+            unconstrained: false,
+        });
         header_block.set_terminator(Terminator::JmpIf(cond, body, after));
         mf.get_block_mut(body)
             .set_terminator(Terminator::Jmp(header, vec![]));
         let after_block = mf.get_block_mut(after);
-        after_block.push_instruction(Located::with(
-            OpCode::AssertCmp {
-                kind: CmpKind::Eq,
-                lhs: r0,
-                rhs: c5,
-            },
-            SourceLocation::test(),
-        ));
-        after_block.push_instruction(Located::with(
-            OpCode::AssertCmp {
-                kind: CmpKind::Eq,
-                lhs: r1,
-                rhs: c7,
-            },
-            SourceLocation::test(),
-        ));
+        after_block.push_test_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: r0,
+            rhs: c5,
+        });
+        after_block.push_test_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: r1,
+            rhs: c7,
+        });
         after_block.set_terminator(Terminator::Return(vec![]));
         header
     };
@@ -3693,14 +3319,11 @@ fn anticipated_admits_entry_param_in_cyclic_entry_block() {
         // so re-entry rebinds nothing.
         entry.set_terminator(Terminator::JmpIf(p, entry_id, exit));
         let exit_block = mf.get_block_mut(exit);
-        exit_block.push_instruction(Located::with(
-            OpCode::AssertCmp {
-                kind: CmpKind::Eq,
-                lhs: w,
-                rhs: c5,
-            },
-            SourceLocation::test(),
-        ));
+        exit_block.push_test_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: w,
+            rhs: c5,
+        });
         exit_block.set_terminator(Terminator::Return(vec![]));
         entry_id
     };
@@ -3745,15 +3368,12 @@ fn anticipated_admits_det_call_via_congruence_over_unstable_arg() {
         hf.add_return_type(Type::u(32));
         let entry = hf.get_entry_mut();
         entry.push_parameter(p, Type::u(32));
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: q,
-                lhs: p,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: q,
+            lhs: p,
+            rhs: c1,
+        });
         entry.set_terminator(Terminator::Return(vec![q]));
     }
     let loop2 = {
@@ -3769,61 +3389,46 @@ fn anticipated_admits_det_call_via_congruence_over_unstable_arg() {
         // Loop 1 carries the accumulator `v`: multi-valued, hence unstable.
         let loop1_block = mf.get_block_mut(loop1);
         loop1_block.push_parameter(v, Type::u(32));
-        loop1_block.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: v2,
-                lhs: v,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        loop1_block.push_instruction(Located::with(
-            OpCode::Cmp {
-                kind: CmpKind::Lt,
-                result: lt,
-                lhs: v2,
-                rhs: c10,
-            },
-            SourceLocation::test(),
-        ));
+        loop1_block.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: v2,
+            lhs: v,
+            rhs: c1,
+        });
+        loop1_block.push_test_instruction(OpCode::Cmp {
+            kind: CmpKind::Lt,
+            result: lt,
+            lhs: v2,
+            rhs: c10,
+        });
         loop1_block.set_terminator(Terminator::JmpIf(lt, loop1, mid));
         // `mid` is acyclic: `w` is rule-2 stable however unstable its argument.
         let mid_block = mf.get_block_mut(mid);
-        mid_block.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![w],
-                function: CallTarget::Static(helper),
-                args: vec![v],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        mid_block.push_test_instruction(OpCode::Call {
+            results: vec![w],
+            function: CallTarget::Static(helper),
+            args: vec![v],
+            unconstrained: false,
+        });
         mid_block.set_terminator(Terminator::Jmp(loop2, vec![]));
         let loop2_block = mf.get_block_mut(loop2);
-        loop2_block.push_instruction(Located::with(
-            OpCode::Call {
-                // index 0: congruent to `w` (same callee, same argument); `v` is unstable, so the
-                // det-call form does not fire and rule 4 is the sole admitting rule.
-                results: vec![r],
-                function: CallTarget::Static(helper),
-                args: vec![v],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        loop2_block.push_test_instruction(OpCode::Call {
+            // index 0: congruent to `w` (same callee, same argument); `v` is unstable, so the
+            // det-call form does not fire and rule 4 is the sole admitting rule.
+            results: vec![r],
+            function: CallTarget::Static(helper),
+            args: vec![v],
+            unconstrained: false,
+        });
         loop2_block.set_terminator(Terminator::JmpIf(cond, body2, after));
         mf.get_block_mut(body2)
             .set_terminator(Terminator::Jmp(loop2, vec![]));
         let after_block = mf.get_block_mut(after);
-        after_block.push_instruction(Located::with(
-            OpCode::AssertCmp {
-                kind: CmpKind::Eq,
-                lhs: r,
-                rhs: c5,
-            },
-            SourceLocation::test(),
-        ));
+        after_block.push_test_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: r,
+            rhs: c5,
+        });
         after_block.set_terminator(Terminator::Return(vec![]));
         loop2
     };
@@ -3864,38 +3469,29 @@ fn anticipated_eq_pair_mixed_gates() {
         .set_terminator(Terminator::Jmp(header, vec![c0]));
     let header_block = f.get_block_mut(header);
     header_block.push_parameter(acc, Type::u(32));
-    header_block.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: lt,
-            lhs: acc,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+    header_block.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: lt,
+        lhs: acc,
+        rhs: c10,
+    });
     header_block.set_terminator(Terminator::JmpIf(lt, body, after));
     let body_block = f.get_block_mut(body);
-    body_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: acc2,
-            lhs: acc,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
+    body_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: acc2,
+        lhs: acc,
+        rhs: c1,
+    });
     body_block.set_terminator(Terminator::Jmp(header, vec![acc2]));
     f.get_block_mut(after)
         .set_terminator(Terminator::Jmp(tail, vec![]));
     let tail_block = f.get_block_mut(tail);
-    tail_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: acc,
-            rhs: n,
-        },
-        SourceLocation::test(),
-    ));
+    tail_block.push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: acc,
+        rhs: n,
+    });
     tail_block.set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -3930,25 +3526,20 @@ fn local_assert_reaches_terminator_use() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
     f.get_entry_mut().push_parameter(x, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 0
-            kind: CmpKind::Eq,
-            lhs: x,
-            rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::BinaryArithOp {
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 0
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: c5,
+    });
+    f.get_entry_mut()
+        .push_test_instruction(OpCode::BinaryArithOp {
             // index 1
             kind: BinaryArithOpKind::Add,
             result: doubled,
             lhs: x,
             rhs: x,
-        },
-        SourceLocation::test(),
-    ));
+        });
     f.get_entry_mut()
         .set_terminator(Terminator::Return(vec![doubled])); // terminator: index 2
 
@@ -3990,24 +3581,18 @@ fn multiple_local_asserts_each_recovered_after_its_index() {
     let entry_id = f.get_entry_id();
     f.get_entry_mut().push_parameter(x, Type::u(32));
     f.get_entry_mut().push_parameter(y, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 0: x == 5
-            kind: CmpKind::Eq,
-            lhs: x,
-            rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 1: y == 6
-            kind: CmpKind::Eq,
-            lhs: y,
-            rhs: c6,
-        },
-        SourceLocation::test(),
-    ));
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 0: x == 5
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: c5,
+    });
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 1: y == 6
+        kind: CmpKind::Eq,
+        lhs: y,
+        rhs: c6,
+    });
     f.get_entry_mut().set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -4048,24 +3633,18 @@ fn contradictory_local_asserts_first_writer_wins() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
     f.get_entry_mut().push_parameter(x, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 0: x == 5
-            kind: CmpKind::Eq,
-            lhs: x,
-            rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 1: x == 7
-            kind: CmpKind::Eq,
-            lhs: x,
-            rhs: c7,
-        },
-        SourceLocation::test(),
-    ));
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 0: x == 5
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: c5,
+    });
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 1: x == 7
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: c7,
+    });
     f.get_entry_mut().set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -4105,36 +3684,27 @@ fn entry_and_local_assert_facts_layer() {
     let inner = f.add_block();
     f.get_entry_mut().push_parameter(a, Type::u(32));
     f.get_entry_mut().push_parameter(b, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // outer: a == 5
-            kind: CmpKind::Eq,
-            lhs: a,
-            rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // outer: a == 5
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: c5,
+    });
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(inner, vec![]));
     let inner_block = f.get_block_mut(inner);
-    inner_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 0: b == 6
-            kind: CmpKind::Eq,
-            lhs: b,
-            rhs: c6,
-        },
-        SourceLocation::test(),
-    ));
-    inner_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 1: a == 7 (contradicts the dominating outer assert)
-            kind: CmpKind::Eq,
-            lhs: a,
-            rhs: c7,
-        },
-        SourceLocation::test(),
-    ));
+    inner_block.push_test_instruction(OpCode::AssertCmp {
+        // index 0: b == 6
+        kind: CmpKind::Eq,
+        lhs: b,
+        rhs: c6,
+    });
+    inner_block.push_test_instruction(OpCode::AssertCmp {
+        // index 1: a == 7 (contradicts the dominating outer assert)
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: c7,
+    });
     inner_block.set_terminator(Terminator::Return(vec![]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -4171,25 +3741,20 @@ fn local_assert_on_value_defined_earlier_in_block() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
     f.get_entry_mut().push_parameter(p, Type::u(32));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::BinaryArithOp {
+    f.get_entry_mut()
+        .push_test_instruction(OpCode::BinaryArithOp {
             // index 0: y = p + p
             kind: BinaryArithOpKind::Add,
             result: y,
             lhs: p,
             rhs: p,
-        },
-        SourceLocation::test(),
-    ));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 1: y == 10
-            kind: CmpKind::Eq,
-            lhs: y,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+        });
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        // index 1: y == 10
+        kind: CmpKind::Eq,
+        lhs: y,
+        rhs: c10,
+    });
     f.get_entry_mut()
         .set_terminator(Terminator::Return(vec![y])); // index 2
 
@@ -4230,38 +3795,29 @@ fn local_assert_in_loop_body() {
         .set_terminator(Terminator::Jmp(header, vec![c0]));
     let header_block = f.get_block_mut(header);
     header_block.push_parameter(i, Type::u(32));
-    header_block.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: lt,
-            lhs: i,
-            rhs: n,
-        },
-        SourceLocation::test(),
-    ));
+    header_block.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: lt,
+        lhs: i,
+        rhs: n,
+    });
     header_block.set_terminator(Terminator::JmpIf(lt, body, exit));
     let body_block = f.get_block_mut(body);
     // `next = i + 1` keeps `i` loop-variant (else it would fold to the constant 0 and the assert
     // would degrade to a constant pin rather than the pure equality this test exercises).
-    body_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            // index 0
-            kind: BinaryArithOpKind::Add,
-            result: next,
-            lhs: i,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    body_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            // index 1: i == n
-            kind: CmpKind::Eq,
-            lhs: i,
-            rhs: n,
-        },
-        SourceLocation::test(),
-    ));
+    body_block.push_test_instruction(OpCode::BinaryArithOp {
+        // index 0
+        kind: BinaryArithOpKind::Add,
+        result: next,
+        lhs: i,
+        rhs: c1,
+    });
+    body_block.push_test_instruction(OpCode::AssertCmp {
+        // index 1: i == n
+        kind: CmpKind::Eq,
+        lhs: i,
+        rhs: n,
+    });
     body_block.set_terminator(Terminator::Jmp(header, vec![next]));
     f.get_block_mut(exit)
         .set_terminator(Terminator::Return(vec![]));
@@ -4297,15 +3853,12 @@ fn interproc_constant_return_folds_at_call_site() {
         let mf = ssa.get_function_mut(main_id);
         mf.add_return_type(Type::field());
         let entry = mf.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r],
-                function: CallTarget::Static(helper),
-                args: vec![],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(helper),
+            args: vec![],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![r]));
     }
 
@@ -4340,15 +3893,12 @@ fn interproc_passthrough_seeds_param_and_result() {
         let mf = ssa.get_function_mut(main_id);
         mf.add_return_type(Type::field());
         let entry = mf.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r],
-                function: CallTarget::Static(id),
-                args: vec![c7],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(id),
+            args: vec![c7],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![r]));
     }
 
@@ -4389,33 +3939,24 @@ fn interproc_writeback_folds_congruent_comparison_return() {
         gf.add_return_type(Type::u(1));
         gf.get_entry_mut().push_parameter(x, Type::u(32));
         let entry = gf.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: a,
-                lhs: x,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: b,
-                lhs: x,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Cmp {
-                kind: CmpKind::Eq,
-                result: eq,
-                lhs: a,
-                rhs: b,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: a,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: b,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_test_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: eq,
+            lhs: a,
+            rhs: b,
+        });
         entry.set_terminator(Terminator::Return(vec![eq]));
     }
     {
@@ -4423,15 +3964,12 @@ fn interproc_writeback_folds_congruent_comparison_return() {
         mf.add_return_type(Type::u(1));
         mf.get_entry_mut().push_parameter(x0, Type::u(32));
         let entry = mf.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r],
-                function: CallTarget::Static(g),
-                args: vec![x0],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(g),
+            args: vec![x0],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![r]));
     }
 
@@ -4470,33 +4008,24 @@ fn interproc_writeback_folds_congruent_comparison_in_context() {
         gf.add_return_type(Type::u(32));
         gf.get_entry_mut().push_parameter(x, Type::u(32));
         let entry = gf.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: a,
-                lhs: x,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: b,
-                lhs: x,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Cmp {
-                kind: CmpKind::Eq,
-                result: eq,
-                lhs: a,
-                rhs: b,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: a,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: b,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_test_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: eq,
+            lhs: a,
+            rhs: b,
+        });
         entry.set_terminator(Terminator::Return(vec![x]));
     }
     {
@@ -4504,15 +4033,12 @@ fn interproc_writeback_folds_congruent_comparison_in_context() {
         mf.add_return_type(Type::u(32));
         mf.get_entry_mut().push_parameter(x0, Type::u(32));
         let entry = mf.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r],
-                function: CallTarget::Static(g),
-                args: vec![x0],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(g),
+            args: vec![x0],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![r]));
     }
 
@@ -4552,42 +4078,30 @@ fn interproc_writeback_terminates_under_recursion() {
         gf.add_return_type(Type::u(1));
         gf.get_entry_mut().push_parameter(x, Type::u(32));
         let entry = gf.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: a,
-                lhs: x,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: b,
-                lhs: x,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Cmp {
-                kind: CmpKind::Eq,
-                result: eq,
-                lhs: a,
-                rhs: b,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![t],
-                function: CallTarget::Static(g),
-                args: vec![x],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: a,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: b,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_test_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: eq,
+            lhs: a,
+            rhs: b,
+        });
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![t],
+            function: CallTarget::Static(g),
+            args: vec![x],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![eq]));
     }
     {
@@ -4595,15 +4109,12 @@ fn interproc_writeback_terminates_under_recursion() {
         mf.add_return_type(Type::u(1));
         mf.get_entry_mut().push_parameter(x0, Type::u(32));
         let entry = mf.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r],
-                function: CallTarget::Static(g),
-                args: vec![x0],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(g),
+            args: vec![x0],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![r]));
     }
 
@@ -4642,15 +4153,12 @@ fn context_parameterized_conditional_queries() {
         let mf = ssa.get_function_mut(main_id);
         mf.add_return_type(Type::field());
         let entry = mf.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r],
-                function: CallTarget::Static(id),
-                args: vec![c7],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(id),
+            args: vec![c7],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![r]));
     }
 
@@ -4684,14 +4192,11 @@ fn asserted_const_refines_per_context() {
         let after = hf.add_block();
         hf.get_entry_mut().push_parameter(x, Type::field());
         hf.get_entry_mut().push_parameter(p, Type::field());
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::AssertCmp {
-                kind: CmpKind::Eq,
-                lhs: x,
-                rhs: p,
-            },
-            SourceLocation::test(),
-        ));
+        hf.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: p,
+        });
         hf.get_entry_mut()
             .set_terminator(Terminator::Jmp(after, vec![]));
         hf.get_block_mut(after)
@@ -4702,15 +4207,12 @@ fn asserted_const_refines_per_context() {
         let mf = ssa.get_function_mut(main_id);
         let entry = mf.get_entry_mut();
         entry.push_parameter(x0, Type::field());
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![],
-                function: CallTarget::Static(g),
-                args: vec![x0, c7],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(g),
+            args: vec![x0, c7],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![]));
     }
 
@@ -4755,14 +4257,12 @@ fn witness_forward_in_prunes_context_dead_forward() {
         hf.get_block_mut(then_b)
             .set_terminator(Terminator::Jmp(after, vec![]));
         // The false arm establishes the forward `r → w`; it is dead once a context pins `p`.
-        hf.get_block_mut(else_b).push_instruction(Located::with(
-            OpCode::WriteWitness {
+        hf.get_block_mut(else_b)
+            .push_test_instruction(OpCode::WriteWitness {
                 result: Some(r),
                 value: w,
                 pinned: false,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_block_mut(else_b)
             .set_terminator(Terminator::Jmp(after, vec![]));
         hf.get_block_mut(after)
@@ -4772,15 +4272,12 @@ fn witness_forward_in_prunes_context_dead_forward() {
         let mf = ssa.get_function_mut(main_id);
         let entry = mf.get_entry_mut();
         entry.push_parameter(w0, Type::u(32));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![],
-                function: CallTarget::Static(g),
-                args: vec![c_true, w0],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(g),
+            args: vec![c_true, w0],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![]));
     }
 
@@ -4813,39 +4310,28 @@ fn conditional_queries_parity_under_empty_context() {
     for v in [x, a, b, d, e] {
         f.get_entry_mut().push_parameter(v, Type::u(32));
     }
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: x,
-            rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: a,
-            rhs: b,
-        },
-        SourceLocation::test(),
-    ));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::WriteWitness {
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: c5,
+    });
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
+    f.get_entry_mut()
+        .push_test_instruction(OpCode::WriteWitness {
             result: Some(r),
             value: x,
             pinned: false,
-        },
-        SourceLocation::test(),
-    ));
-    f.get_entry_mut().push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Eq,
-            result: eq,
-            lhs: d,
-            rhs: e,
-        },
-        SourceLocation::test(),
-    ));
+        });
+    f.get_entry_mut().push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Eq,
+        result: eq,
+        lhs: d,
+        rhs: e,
+    });
     f.get_entry_mut()
         .set_terminator(Terminator::JmpIf(eq, then_b, else_b));
     f.get_block_mut(then_b)
@@ -4909,22 +4395,16 @@ fn anticipated_queries_parity_under_empty_context() {
     f.get_block_mut(mid)
         .set_terminator(Terminator::Jmp(tail, vec![]));
     let tail_block = f.get_block_mut(tail);
-    tail_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: x,
-            rhs: c5,
-        },
-        SourceLocation::test(),
-    ));
-    tail_block.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: a,
-            rhs: b,
-        },
-        SourceLocation::test(),
-    ));
+    tail_block.push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: c5,
+    });
+    tail_block.push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: a,
+        rhs: b,
+    });
     tail_block.set_terminator(Terminator::Return(vec![]));
 
     let cc = run_in_test(&ssa);
@@ -4984,15 +4464,12 @@ fn known_unequal_in_gains_from_pruned_predecessor() {
         hf.get_entry_mut().push_parameter(p, Type::u(1));
         hf.get_entry_mut().push_parameter(d, Type::u(32));
         hf.get_entry_mut().push_parameter(e, Type::u(32));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::Cmp {
-                kind: CmpKind::Eq,
-                result: eq,
-                lhs: d,
-                rhs: e,
-            },
-            SourceLocation::test(),
-        ));
+        hf.get_entry_mut().push_test_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: eq,
+            lhs: d,
+            rhs: e,
+        });
         hf.get_entry_mut()
             .set_terminator(Terminator::JmpIf(p, side, main_b));
         // `side` is `join`'s second predecessor; it dies once a context pins `p = false`.
@@ -5011,15 +4488,12 @@ fn known_unequal_in_gains_from_pruned_predecessor() {
         let entry = mf.get_entry_mut();
         entry.push_parameter(d0, Type::u(32));
         entry.push_parameter(e0, Type::u(32));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![],
-                function: CallTarget::Static(g),
-                args: vec![c_false, d0, e0],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(g),
+            args: vec![c_false, d0, e0],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![]));
     }
 
@@ -5050,23 +4524,17 @@ fn asserted_const_never_aggregate() {
     f.get_entry_mut().push_parameter(x, Type::u(32).array_of(2));
     let entry = f.get_entry_mut();
     // `s` aggregate-folds to a lattice `Const(Blob)`, so the assert pins `x` to a Blob.
-    entry.push_instruction(Located::with(
-        OpCode::MkSeq {
-            result: s,
-            elems: vec![c0, c1],
-            seq_type: SequenceTargetType::Array(2),
-            elem_type: Type::u(32),
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::AssertCmp {
-            kind: CmpKind::Eq,
-            lhs: x,
-            rhs: s,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: s,
+        elems: vec![c0, c1],
+        seq_type: SequenceTargetType::Array(2),
+        elem_type: Type::u(32),
+    });
+    entry.push_test_instruction(OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: x,
+        rhs: s,
+    });
     entry.set_terminator(Terminator::Jmp(after, vec![]));
     f.get_block_mut(after)
         .set_terminator(Terminator::Return(vec![]));
@@ -5101,14 +4569,11 @@ fn asserted_const_in_never_aggregate() {
             .push_parameter(a, Type::u(32).array_of(2));
         hf.get_entry_mut()
             .push_parameter(x, Type::u(32).array_of(2));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::AssertCmp {
-                kind: CmpKind::Eq,
-                lhs: x,
-                rhs: a,
-            },
-            SourceLocation::test(),
-        ));
+        hf.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: a,
+        });
         hf.get_entry_mut()
             .set_terminator(Terminator::Jmp(after, vec![]));
         hf.get_block_mut(after)
@@ -5119,24 +4584,18 @@ fn asserted_const_in_never_aggregate() {
         let mf = ssa.get_function_mut(main_id);
         let entry = mf.get_entry_mut();
         entry.push_parameter(y, Type::u(32).array_of(2));
-        entry.push_instruction(Located::with(
-            OpCode::MkSeq {
-                result: s,
-                elems: vec![c0, c1],
-                seq_type: SequenceTargetType::Array(2),
-                elem_type: Type::u(32),
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![],
-                function: CallTarget::Static(g),
-                args: vec![s, y],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::MkSeq {
+            result: s,
+            elems: vec![c0, c1],
+            seq_type: SequenceTargetType::Array(2),
+            elem_type: Type::u(32),
+        });
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(g),
+            args: vec![s, y],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![]));
     }
 
@@ -5168,14 +4627,11 @@ fn asserted_const_migrates_to_unconditional_channel() {
         let hf = ssa.get_function_mut(g);
         let after = hf.add_block();
         hf.get_entry_mut().push_parameter(x, Type::field());
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::AssertCmp {
-                kind: CmpKind::Eq,
-                lhs: x,
-                rhs: c7,
-            },
-            SourceLocation::test(),
-        ));
+        hf.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: c7,
+        });
         hf.get_entry_mut()
             .set_terminator(Terminator::Jmp(after, vec![]));
         hf.get_block_mut(after)
@@ -5185,15 +4641,12 @@ fn asserted_const_migrates_to_unconditional_channel() {
     {
         let mf = ssa.get_function_mut(main_id);
         let entry = mf.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![],
-                function: CallTarget::Static(g),
-                args: vec![c7],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(g),
+            args: vec![c7],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![]));
     }
 
@@ -5248,15 +4701,13 @@ fn context_constant_can_split_congruence() {
         let hf = ssa.get_function_mut(g);
         hf.add_return_type(Type::field());
         hf.get_entry_mut().push_parameter(p, Type::field());
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Mul,
                 result: m,
                 lhs: p,
                 rhs: c3,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![m]));
     }
@@ -5268,45 +4719,35 @@ fn context_constant_can_split_congruence() {
         let after = hf.add_block();
         hf.get_entry_mut().push_parameter(a, Type::field());
         hf.get_entry_mut().push_parameter(w, Type::u(32));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![x],
-                function: CallTarget::Static(g),
-                args: vec![a],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+        hf.get_entry_mut().push_test_instruction(OpCode::Call {
+            results: vec![x],
+            function: CallTarget::Static(g),
+            args: vec![a],
+            unconstrained: false,
+        });
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Mul,
                 result: y,
                 lhs: a,
                 rhs: c3,
-            },
-            SourceLocation::test(),
-        ));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::Cmp {
-                kind: CmpKind::Eq,
-                result: eq,
-                lhs: x,
-                rhs: y,
-            },
-            SourceLocation::test(),
-        ));
+            });
+        hf.get_entry_mut().push_test_instruction(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: eq,
+            lhs: x,
+            rhs: y,
+        });
         hf.get_entry_mut()
             .set_terminator(Terminator::JmpIf(eq, then_b, else_b));
         hf.get_block_mut(then_b)
             .set_terminator(Terminator::Jmp(after, vec![]));
-        hf.get_block_mut(else_b).push_instruction(Located::with(
-            OpCode::WriteWitness {
+        hf.get_block_mut(else_b)
+            .push_test_instruction(OpCode::WriteWitness {
                 result: Some(r),
                 value: w,
                 pinned: false,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_block_mut(else_b)
             .set_terminator(Terminator::Jmp(after, vec![]));
         hf.get_block_mut(after)
@@ -5316,15 +4757,12 @@ fn context_constant_can_split_congruence() {
         let mf = ssa.get_function_mut(main_id);
         let entry = mf.get_entry_mut();
         entry.push_parameter(w0, Type::u(32));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![],
-                function: CallTarget::Static(f),
-                args: vec![c5, w0],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![],
+            function: CallTarget::Static(f),
+            args: vec![c5, w0],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![]));
     }
 
@@ -5364,24 +4802,18 @@ fn interproc_two_call_sites_are_distinguished() {
         let mf = ssa.get_function_mut(main_id);
         mf.add_return_type(Type::field());
         let entry = mf.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r5],
-                function: CallTarget::Static(id),
-                args: vec![c5],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r7],
-                function: CallTarget::Static(id),
-                args: vec![c7],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r5],
+            function: CallTarget::Static(id),
+            args: vec![c5],
+            unconstrained: false,
+        });
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r7],
+            function: CallTarget::Static(id),
+            args: vec![c7],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![r5, r7]));
     }
 
@@ -5426,24 +4858,18 @@ fn unconstrained_call_result_is_opaque() {
         mf.add_return_type(Type::field());
         mf.add_return_type(Type::field());
         let entry = mf.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r1],
-                function: CallTarget::Static(helper),
-                args: vec![],
-                unconstrained: true,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r2],
-                function: CallTarget::Static(helper),
-                args: vec![],
-                unconstrained: true,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r1],
+            function: CallTarget::Static(helper),
+            args: vec![],
+            unconstrained: true,
+        });
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r2],
+            function: CallTarget::Static(helper),
+            args: vec![],
+            unconstrained: true,
+        });
         entry.set_terminator(Terminator::Return(vec![r1, r2]));
     }
 
@@ -5471,15 +4897,13 @@ fn cross_call_congruence_for_deterministic_callee() {
         let hf = ssa.get_function_mut(dbl);
         hf.add_return_type(Type::field());
         hf.get_entry_mut().push_parameter(p, Type::field());
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: psum,
                 lhs: p,
                 rhs: p,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![psum]));
     }
@@ -5497,51 +4921,36 @@ fn cross_call_congruence_for_deterministic_callee() {
         mf.get_entry_mut().push_parameter(y, Type::field());
         let entry = mf.get_entry_mut();
         // `a` and `b` are structurally congruent (both `x + 1`); `y` is distinct.
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: a,
-                lhs: x,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: b,
-                lhs: x,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r1],
-                function: CallTarget::Static(dbl),
-                args: vec![a],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r2],
-                function: CallTarget::Static(dbl),
-                args: vec![b],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r3],
-                function: CallTarget::Static(dbl),
-                args: vec![y],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: a,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: b,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r1],
+            function: CallTarget::Static(dbl),
+            args: vec![a],
+            unconstrained: false,
+        });
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r2],
+            function: CallTarget::Static(dbl),
+            args: vec![b],
+            unconstrained: false,
+        });
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r3],
+            function: CallTarget::Static(dbl),
+            args: vec![y],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
     }
 
@@ -5563,13 +4972,11 @@ fn cross_call_no_congruence_for_nondeterministic_callee() {
     {
         let hf = ssa.get_function_mut(rnd);
         hf.add_return_type(Type::field());
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::FreshWitness {
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::FreshWitness {
                 result: w,
                 result_type: Type::field(),
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![w]));
     }
@@ -5579,24 +4986,18 @@ fn cross_call_no_congruence_for_nondeterministic_callee() {
         mf.add_return_type(Type::field());
         mf.add_return_type(Type::field());
         let entry = mf.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r1],
-                function: CallTarget::Static(rnd),
-                args: vec![],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r2],
-                function: CallTarget::Static(rnd),
-                args: vec![],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r1],
+            function: CallTarget::Static(rnd),
+            args: vec![],
+            unconstrained: false,
+        });
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r2],
+            function: CallTarget::Static(rnd),
+            args: vec![],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![r1, r2]));
     }
 
@@ -5619,15 +5020,13 @@ fn cross_call_congruence_is_transitive() {
         let hf = ssa.get_function_mut(inner);
         hf.add_return_type(Type::field());
         hf.get_entry_mut().push_parameter(ip, Type::field());
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: isum,
                 lhs: ip,
                 rhs: ip,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![isum]));
     }
@@ -5637,15 +5036,12 @@ fn cross_call_congruence_is_transitive() {
         let hf = ssa.get_function_mut(outer);
         hf.add_return_type(Type::field());
         hf.get_entry_mut().push_parameter(op, Type::field());
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![ores],
-                function: CallTarget::Static(inner),
-                args: vec![op],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        hf.get_entry_mut().push_test_instruction(OpCode::Call {
+            results: vec![ores],
+            function: CallTarget::Static(inner),
+            args: vec![op],
+            unconstrained: false,
+        });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![ores]));
     }
@@ -5660,42 +5056,30 @@ fn cross_call_congruence_is_transitive() {
         mf.add_return_type(Type::field());
         mf.get_entry_mut().push_parameter(x, Type::field());
         let entry = mf.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: a,
-                lhs: x,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: b,
-                lhs: x,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r1],
-                function: CallTarget::Static(outer),
-                args: vec![a],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r2],
-                function: CallTarget::Static(outer),
-                args: vec![b],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: a,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: b,
+            lhs: x,
+            rhs: c1,
+        });
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r1],
+            function: CallTarget::Static(outer),
+            args: vec![a],
+            unconstrained: false,
+        });
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r2],
+            function: CallTarget::Static(outer),
+            args: vec![b],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![r1, r2]));
     }
 
@@ -5722,14 +5106,11 @@ fn cross_call_congruence_for_array_returning_callee() {
         hf.add_return_type(Type::field());
         hf.get_entry_mut()
             .push_parameter(p, Type::field().array_of(1));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::ArrayGet {
-                result: elem,
-                array: p,
-                index: c0,
-            },
-            SourceLocation::test(),
-        ));
+        hf.get_entry_mut().push_test_instruction(OpCode::ArrayGet {
+            result: elem,
+            array: p,
+            index: c0,
+        });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![elem]));
     }
@@ -5746,60 +5127,42 @@ fn cross_call_congruence_for_array_returning_callee() {
         mf.get_entry_mut().push_parameter(y, Type::field());
         let entry = mf.get_entry_mut();
         // `a` and `b` are congruent single-element arrays (`[x]`); `d` is `[y]`.
-        entry.push_instruction(Located::with(
-            OpCode::MkSeq {
-                result: a,
-                elems: vec![x],
-                seq_type: SequenceTargetType::Array(1),
-                elem_type: Type::field(),
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::MkSeq {
-                result: b,
-                elems: vec![x],
-                seq_type: SequenceTargetType::Array(1),
-                elem_type: Type::field(),
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::MkSeq {
-                result: d,
-                elems: vec![y],
-                seq_type: SequenceTargetType::Array(1),
-                elem_type: Type::field(),
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r1],
-                function: CallTarget::Static(pick),
-                args: vec![a],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r2],
-                function: CallTarget::Static(pick),
-                args: vec![b],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r3],
-                function: CallTarget::Static(pick),
-                args: vec![d],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::MkSeq {
+            result: a,
+            elems: vec![x],
+            seq_type: SequenceTargetType::Array(1),
+            elem_type: Type::field(),
+        });
+        entry.push_test_instruction(OpCode::MkSeq {
+            result: b,
+            elems: vec![x],
+            seq_type: SequenceTargetType::Array(1),
+            elem_type: Type::field(),
+        });
+        entry.push_test_instruction(OpCode::MkSeq {
+            result: d,
+            elems: vec![y],
+            seq_type: SequenceTargetType::Array(1),
+            elem_type: Type::field(),
+        });
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r1],
+            function: CallTarget::Static(pick),
+            args: vec![a],
+            unconstrained: false,
+        });
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r2],
+            function: CallTarget::Static(pick),
+            args: vec![b],
+            unconstrained: false,
+        });
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r3],
+            function: CallTarget::Static(pick),
+            args: vec![d],
+            unconstrained: false,
+        });
         entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
     }
 
@@ -5829,33 +5192,24 @@ fn cmp_eq_of_congruent_operands_folds_and_prunes_dead_edge() {
     f.get_entry_mut().push_parameter(x, Type::u(32));
     let entry = f.get_entry_mut();
     // a = x + 1 and b = x + 1 are structurally congruent but not constant.
-    entry.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: a,
-            lhs: x,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: b,
-            lhs: x,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Eq,
-            result: eq,
-            lhs: a,
-            rhs: b,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: a,
+        lhs: x,
+        rhs: c1,
+    });
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: b,
+        lhs: x,
+        rhs: c1,
+    });
+    entry.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Eq,
+        result: eq,
+        lhs: a,
+        rhs: b,
+    });
     entry.set_terminator(Terminator::JmpIf(eq, then_b, else_b));
     f.get_block_mut(then_b)
         .set_terminator(Terminator::Return(vec![a]));
@@ -5899,33 +5253,24 @@ fn writeback_cascades_to_downstream_constant() {
     let merge = f.add_block();
     f.get_entry_mut().push_parameter(x, Type::u(32));
     let entry = f.get_entry_mut();
-    entry.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: a,
-            lhs: x,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: b,
-            lhs: x,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Eq,
-            result: eq,
-            lhs: a,
-            rhs: b,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: a,
+        lhs: x,
+        rhs: c1,
+    });
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: b,
+        lhs: x,
+        rhs: c1,
+    });
+    entry.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Eq,
+        result: eq,
+        lhs: a,
+        rhs: b,
+    });
     entry.set_terminator(Terminator::JmpIf(eq, then_b, else_b));
     // The dead else-edge would carry a different constant, forcing the merge to ⊥ under SCCP
     // alone.
@@ -5957,15 +5302,12 @@ fn cmp_eq_of_noncongruent_operands_is_not_folded() {
     f.get_entry_mut().push_parameter(x, Type::u(32));
     f.get_entry_mut().push_parameter(y, Type::u(32));
     let entry = f.get_entry_mut();
-    entry.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Eq,
-            result: eq,
-            lhs: x,
-            rhs: y,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Eq,
+        result: eq,
+        lhs: x,
+        rhs: y,
+    });
     entry.set_terminator(Terminator::JmpIf(eq, then_b, else_b));
     f.get_block_mut(then_b)
         .set_terminator(Terminator::Return(vec![x]));
@@ -5990,29 +5332,20 @@ fn free_witnesses_are_not_congruent_so_comparison_not_folded() {
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
-    entry.push_instruction(Located::with(
-        OpCode::FreshWitness {
-            result: w1,
-            result_type: Type::field(),
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::FreshWitness {
-            result: w2,
-            result_type: Type::field(),
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Eq,
-            result: eq,
-            lhs: w1,
-            rhs: w2,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::FreshWitness {
+        result: w1,
+        result_type: Type::field(),
+    });
+    entry.push_test_instruction(OpCode::FreshWitness {
+        result: w2,
+        result_type: Type::field(),
+    });
+    entry.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Eq,
+        result: eq,
+        lhs: w1,
+        rhs: w2,
+    });
     entry.set_terminator(Terminator::Return(vec![eq]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -6033,15 +5366,12 @@ fn writeback_is_noop_without_congruent_comparison() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
     entry.push_parameter(x, Type::u(32));
-    entry.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: a,
-            lhs: x,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: a,
+        lhs: x,
+        rhs: c1,
+    });
     entry.set_terminator(Terminator::Return(vec![a]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -6066,33 +5396,24 @@ fn cmp_lt_of_congruent_operands_folds_false() {
     let f = ssa.get_unique_entrypoint_mut();
     f.get_entry_mut().push_parameter(x, Type::u(32));
     let entry = f.get_entry_mut();
-    entry.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: a,
-            lhs: x,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: b,
-            lhs: x,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: lt,
-            lhs: a,
-            rhs: b,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: a,
+        lhs: x,
+        rhs: c1,
+    });
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: b,
+        lhs: x,
+        rhs: c1,
+    });
+    entry.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: lt,
+        lhs: a,
+        rhs: b,
+    });
     entry.set_terminator(Terminator::Return(vec![lt]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -6121,25 +5442,19 @@ fn witnessed_comparison_of_congruent_operands_is_promoted() {
     entry.push_parameter(w, Type::witness_of(Type::u(32)));
     entry.push_parameter(n, Type::u(32));
     // Witnessed comparison: an operand is `WitnessOf`, so the result is `WitnessOf(u1)`.
-    entry.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Eq,
-            result: ww,
-            lhs: w,
-            rhs: w,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Eq,
+        result: ww,
+        lhs: w,
+        rhs: w,
+    });
     // Plain comparison: result is `u1`.
-    entry.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Eq,
-            result: nn,
-            lhs: n,
-            rhs: n,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Eq,
+        result: nn,
+        lhs: n,
+        rhs: n,
+    });
     entry.set_terminator(Terminator::Return(vec![ww, nn]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -6181,44 +5496,32 @@ fn loop_carried_congruent_comparison_folds_true() {
     let header_block = f.get_block_mut(header);
     header_block.push_parameter(i, Type::u(32));
     header_block.push_parameter(j, Type::u(32));
-    header_block.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Eq,
-            result: eq,
-            lhs: i,
-            rhs: j,
-        },
-        SourceLocation::test(),
-    ));
-    header_block.push_instruction(Located::with(
-        OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: lt,
-            lhs: i,
-            rhs: c10,
-        },
-        SourceLocation::test(),
-    ));
+    header_block.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Eq,
+        result: eq,
+        lhs: i,
+        rhs: j,
+    });
+    header_block.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: lt,
+        lhs: i,
+        rhs: c10,
+    });
     header_block.set_terminator(Terminator::JmpIf(lt, body, exit));
     let body_block = f.get_block_mut(body);
-    body_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: i2,
-            lhs: i,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
-    body_block.push_instruction(Located::with(
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
-            result: j2,
-            lhs: j,
-            rhs: c1,
-        },
-        SourceLocation::test(),
-    ));
+    body_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: i2,
+        lhs: i,
+        rhs: c1,
+    });
+    body_block.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Add,
+        result: j2,
+        lhs: j,
+        rhs: c1,
+    });
     body_block.set_terminator(Terminator::Jmp(header, vec![i2, j2]));
     f.get_block_mut(exit)
         .set_terminator(Terminator::Return(vec![i, j]));
@@ -6246,23 +5549,17 @@ fn const_array_get_folds_to_scalar() {
     let (seq, got) = (ssa.fresh_value(), ssa.fresh_value());
 
     let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
-    entry.push_instruction(Located::with(
-        OpCode::MkSeq {
-            result: seq,
-            elems: vec![c0, c1, c2],
-            seq_type: SequenceTargetType::Array(3),
-            elem_type: Type::u(32),
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArrayGet {
-            result: got,
-            array: seq,
-            index: idx,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: seq,
+        elems: vec![c0, c1, c2],
+        seq_type: SequenceTargetType::Array(3),
+        elem_type: Type::u(32),
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: got,
+        array: seq,
+        index: idx,
+    });
     entry.set_terminator(Terminator::Return(vec![got]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -6290,31 +5587,22 @@ fn const_repeated_array_get_and_slice_len() {
     let (seq, got, len) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
-    entry.push_instruction(Located::with(
-        OpCode::MkRepeated {
-            result: seq,
-            element: elem,
-            seq_type: SequenceTargetType::Array(4),
-            count: 4,
-            elem_type: Type::u(32),
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArrayGet {
-            result: got,
-            array: seq,
-            index: idx,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::SliceLen {
-            result: len,
-            slice: seq,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::MkRepeated {
+        result: seq,
+        element: elem,
+        seq_type: SequenceTargetType::Array(4),
+        count: 4,
+        elem_type: Type::u(32),
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: got,
+        array: seq,
+        index: idx,
+    });
+    entry.push_test_instruction(OpCode::SliceLen {
+        result: len,
+        slice: seq,
+    });
     entry.set_terminator(Terminator::Return(vec![got, len]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -6343,40 +5631,28 @@ fn const_array_set_then_get() {
     );
 
     let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
-    entry.push_instruction(Located::with(
-        OpCode::MkSeq {
-            result: seq,
-            elems: vec![c0, c1, c2],
-            seq_type: SequenceTargetType::Array(3),
-            elem_type: Type::u(32),
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArraySet {
-            result: seq2,
-            array: seq,
-            index: idx1,
-            value: new_val,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArrayGet {
-            result: at_set,
-            array: seq2,
-            index: idx1,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArrayGet {
-            result: at_orig,
-            array: seq2,
-            index: idx0,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: seq,
+        elems: vec![c0, c1, c2],
+        seq_type: SequenceTargetType::Array(3),
+        elem_type: Type::u(32),
+    });
+    entry.push_test_instruction(OpCode::ArraySet {
+        result: seq2,
+        array: seq,
+        index: idx1,
+        value: new_val,
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: at_set,
+        array: seq2,
+        index: idx1,
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: at_orig,
+        array: seq2,
+        index: idx0,
+    });
     entry.set_terminator(Terminator::Return(vec![at_set, at_orig]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -6410,51 +5686,36 @@ fn const_slice_push_front_and_back() {
     );
 
     let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
-    entry.push_instruction(Located::with(
-        OpCode::MkSeq {
-            result: base,
-            elems: vec![mid],
-            seq_type: SequenceTargetType::Slice,
-            elem_type: Type::u(32),
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: base,
+        elems: vec![mid],
+        seq_type: SequenceTargetType::Slice,
+        elem_type: Type::u(32),
+    });
     // Front: [front, mid]; element 0 is the pushed value.
-    entry.push_instruction(Located::with(
-        OpCode::SlicePush {
-            dir: SliceOpDir::Front,
-            result: pushed_front,
-            slice: base,
-            values: vec![front],
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::SlicePush {
+        dir: SliceOpDir::Front,
+        result: pushed_front,
+        slice: base,
+        values: vec![front],
+    });
     // Back: [mid, back]; element 1 is the pushed value.
-    entry.push_instruction(Located::with(
-        OpCode::SlicePush {
-            dir: SliceOpDir::Back,
-            result: pushed_back,
-            slice: base,
-            values: vec![back],
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArrayGet {
-            result: head,
-            array: pushed_front,
-            index: idx0,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArrayGet {
-            result: tail,
-            array: pushed_back,
-            index: idx1,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::SlicePush {
+        dir: SliceOpDir::Back,
+        result: pushed_back,
+        slice: base,
+        values: vec![back],
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: head,
+        array: pushed_front,
+        index: idx0,
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: tail,
+        array: pushed_back,
+        index: idx1,
+    });
     entry.set_terminator(Terminator::Return(vec![head, tail]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -6476,22 +5737,16 @@ fn const_mk_seq_of_blob_folds() {
     let (seq, got) = (ssa.fresh_value(), ssa.fresh_value());
 
     let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
-    entry.push_instruction(Located::with(
-        OpCode::MkSeqOfBlob {
-            result: seq,
-            element_type: Type::u(32),
-            blob,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArrayGet {
-            result: got,
-            array: seq,
-            index: idx,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::MkSeqOfBlob {
+        result: seq,
+        element_type: Type::u(32),
+        blob,
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: got,
+        array: seq,
+        index: idx,
+    });
     entry.set_terminator(Terminator::Return(vec![got]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -6528,60 +5783,42 @@ fn aggregate_folding_negative_cases() {
     f.get_entry_mut().push_parameter(p, Type::u(32));
     let entry = f.get_entry_mut();
     // Out of bounds: index 5 into a length-2 array.
-    entry.push_instruction(Located::with(
-        OpCode::MkSeq {
-            result: seq,
-            elems: vec![c0, c1],
-            seq_type: SequenceTargetType::Array(2),
-            elem_type: Type::u(32),
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArrayGet {
-            result: g_oob,
-            array: seq,
-            index: idx_oob,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: seq,
+        elems: vec![c0, c1],
+        seq_type: SequenceTargetType::Array(2),
+        elem_type: Type::u(32),
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: g_oob,
+        array: seq,
+        index: idx_oob,
+    });
     // Non-constant element keeps the whole aggregate non-constant.
-    entry.push_instruction(Located::with(
-        OpCode::MkSeq {
-            result: seq_nc,
-            elems: vec![c0, p],
-            seq_type: SequenceTargetType::Array(2),
-            elem_type: Type::u(32),
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArrayGet {
-            result: g_nc,
-            array: seq_nc,
-            index: idx0,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: seq_nc,
+        elems: vec![c0, p],
+        seq_type: SequenceTargetType::Array(2),
+        elem_type: Type::u(32),
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: g_nc,
+        array: seq_nc,
+        index: idx0,
+    });
     // Over-cap repeat is refused before materialising the aggregate.
-    entry.push_instruction(Located::with(
-        OpCode::MkRepeated {
-            result: big,
-            element: c0,
-            seq_type: SequenceTargetType::Array((1 << 16) + 1),
-            count: (1 << 16) + 1,
-            elem_type: Type::u(32),
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArrayGet {
-            result: g_big,
-            array: big,
-            index: idx0,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::MkRepeated {
+        result: big,
+        element: c0,
+        seq_type: SequenceTargetType::Array((1 << 16) + 1),
+        count: (1 << 16) + 1,
+        elem_type: Type::u(32),
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: g_big,
+        array: big,
+        index: idx0,
+    });
     entry.set_terminator(Terminator::Return(vec![g_oob, g_nc, g_big]));
 
     let fid = ssa.get_unique_entrypoint_id();
@@ -6612,79 +5849,55 @@ fn aggregate_folding_refuses_oob_set_and_over_cap_constructors() {
     let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
 
     // Out-of-bounds `ArraySet` (index 5 into a length-2 array): refused, so the get sees Bottom.
-    entry.push_instruction(Located::with(
-        OpCode::MkSeq {
-            result: base,
-            elems: vec![c0, c1],
-            seq_type: SequenceTargetType::Array(2),
-            elem_type: Type::u(32),
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArraySet {
-            result: set_oob,
-            array: base,
-            index: idx_oob,
-            value: c0,
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArrayGet {
-            result: at_set_oob,
-            array: set_oob,
-            index: idx0,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: base,
+        elems: vec![c0, c1],
+        seq_type: SequenceTargetType::Array(2),
+        elem_type: Type::u(32),
+    });
+    entry.push_test_instruction(OpCode::ArraySet {
+        result: set_oob,
+        array: base,
+        index: idx_oob,
+        value: c0,
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: at_set_oob,
+        array: set_oob,
+        index: idx0,
+    });
 
     // `SlicePush` whose result would exceed the cap (1 + CAP values): refused.
-    entry.push_instruction(Located::with(
-        OpCode::MkSeq {
-            result: one,
-            elems: vec![c0],
-            seq_type: SequenceTargetType::Slice,
-            elem_type: Type::u(32),
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::SlicePush {
-            dir: SliceOpDir::Back,
-            result: pushed,
-            slice: one,
-            values: vec![c0; 1 << 12],
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArrayGet {
-            result: at_pushed,
-            array: pushed,
-            index: idx0,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: one,
+        elems: vec![c0],
+        seq_type: SequenceTargetType::Slice,
+        elem_type: Type::u(32),
+    });
+    entry.push_test_instruction(OpCode::SlicePush {
+        dir: SliceOpDir::Back,
+        result: pushed,
+        slice: one,
+        values: vec![c0; 1 << 12],
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: at_pushed,
+        array: pushed,
+        index: idx0,
+    });
 
     // Over-cap `MkSeq`: refused before materialising the aggregate.
-    entry.push_instruction(Located::with(
-        OpCode::MkSeq {
-            result: big_seq,
-            elems: vec![c0; over_cap],
-            seq_type: SequenceTargetType::Array(over_cap),
-            elem_type: Type::u(32),
-        },
-        SourceLocation::test(),
-    ));
-    entry.push_instruction(Located::with(
-        OpCode::ArrayGet {
-            result: at_big,
-            array: big_seq,
-            index: idx0,
-        },
-        SourceLocation::test(),
-    ));
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: big_seq,
+        elems: vec![c0; over_cap],
+        seq_type: SequenceTargetType::Array(over_cap),
+        elem_type: Type::u(32),
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: at_big,
+        array: big_seq,
+        index: idx0,
+    });
 
     entry.set_terminator(Terminator::Return(vec![at_set_oob, at_pushed, at_big]));
 
@@ -6716,15 +5929,13 @@ fn symbolic_jump_ignores_dead_argument() {
         hf.add_return_type(Type::field());
         hf.get_entry_mut().push_parameter(x, Type::field());
         hf.get_entry_mut().push_parameter(y, Type::field());
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: fa,
                 lhs: x,
                 rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![fa]));
     }
@@ -6747,15 +5958,12 @@ fn symbolic_jump_ignores_dead_argument() {
         mf.get_entry_mut().push_parameter(d, Type::field());
         let entry = mf.get_entry_mut();
         for (res, args) in [(r1, vec![a, c]), (r2, vec![a, d]), (r3, vec![b, c])] {
-            entry.push_instruction(Located::with(
-                OpCode::Call {
-                    results: vec![res],
-                    function: CallTarget::Static(f),
-                    args,
-                    unconstrained: false,
-                },
-                SourceLocation::test(),
-            ));
+            entry.push_test_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(f),
+                args,
+                unconstrained: false,
+            });
         }
         entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
     }
@@ -6783,15 +5991,13 @@ fn symbolic_jump_relates_call_to_open_expression() {
         let hf = ssa.get_function_mut(f);
         hf.add_return_type(Type::field());
         hf.get_entry_mut().push_parameter(x, Type::field());
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: fa,
                 lhs: x,
                 rhs: c5,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![fa]));
     }
@@ -6803,33 +6009,24 @@ fn symbolic_jump_relates_call_to_open_expression() {
         mf.add_return_type(Type::field());
         mf.get_entry_mut().push_parameter(a, Type::field());
         let entry = mf.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r],
-                function: CallTarget::Static(f),
-                args: vec![a],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: w,
-                lhs: a,
-                rhs: c5,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: w2,
-                lhs: a,
-                rhs: c6,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(f),
+            args: vec![a],
+            unconstrained: false,
+        });
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: w,
+            lhs: a,
+            rhs: c5,
+        });
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: w2,
+            lhs: a,
+            rhs: c6,
+        });
         entry.set_terminator(Terminator::Return(vec![r]));
     }
 
@@ -6859,24 +6056,20 @@ fn symbolic_jump_depth_two_grafts_via_synthetic() {
         let hf = ssa.get_function_mut(f);
         hf.add_return_type(Type::field());
         hf.get_entry_mut().push_parameter(x, Type::field());
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: ft,
                 lhs: x,
                 rhs: c5,
-            },
-            SourceLocation::test(),
-        ));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+            });
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Mul,
                 result: fa,
                 lhs: ft,
                 rhs: c2,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![fa]));
     }
@@ -6888,33 +6081,24 @@ fn symbolic_jump_depth_two_grafts_via_synthetic() {
         mf.add_return_type(Type::field());
         mf.get_entry_mut().push_parameter(a, Type::field());
         let entry = mf.get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r],
-                function: CallTarget::Static(f),
-                args: vec![a],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: wt,
-                lhs: a,
-                rhs: c5,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Mul,
-                result: w,
-                lhs: wt,
-                rhs: c2,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(f),
+            args: vec![a],
+            unconstrained: false,
+        });
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: wt,
+            lhs: a,
+            rhs: c5,
+        });
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: w,
+            lhs: wt,
+            rhs: c2,
+        });
         entry.set_terminator(Terminator::Return(vec![r]));
     }
 
@@ -6960,24 +6144,20 @@ fn symbolic_jump_dead_argument_behind_depth_two() {
         hf.add_return_type(Type::field());
         hf.get_entry_mut().push_parameter(x, Type::field());
         hf.get_entry_mut().push_parameter(y, Type::field());
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: ft,
                 lhs: x,
                 rhs: c5,
-            },
-            SourceLocation::test(),
-        ));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+            });
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Mul,
                 result: fa,
                 lhs: ft,
                 rhs: c2,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![fa]));
     }
@@ -7000,15 +6180,12 @@ fn symbolic_jump_dead_argument_behind_depth_two() {
         mf.get_entry_mut().push_parameter(d, Type::field());
         let entry = mf.get_entry_mut();
         for (res, args) in [(r1, vec![a, c]), (r2, vec![a, d]), (r3, vec![b, c])] {
-            entry.push_instruction(Located::with(
-                OpCode::Call {
-                    results: vec![res],
-                    function: CallTarget::Static(f),
-                    args,
-                    unconstrained: false,
-                },
-                SourceLocation::test(),
-            ));
+            entry.push_test_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(f),
+                args,
+                unconstrained: false,
+            });
         }
         entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
     }
@@ -7041,33 +6218,27 @@ fn symbolic_jump_depth_over_cap_falls_back_to_calldet() {
         let hf = ssa.get_function_mut(f);
         hf.add_return_type(Type::field());
         hf.get_entry_mut().push_parameter(x, Type::field());
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: ft,
                 lhs: x,
                 rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+            });
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Mul,
                 result: fu,
                 lhs: ft,
                 rhs: c2,
-            },
-            SourceLocation::test(),
-        ));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+            });
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: fa,
                 lhs: fu,
                 rhs: c3,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![fa]));
     }
@@ -7084,44 +6255,32 @@ fn symbolic_jump_depth_over_cap_falls_back_to_calldet() {
         mf.get_entry_mut().push_parameter(b, Type::field());
         let entry = mf.get_entry_mut();
         for (res, arg) in [(r1, a), (r2, a), (r3, b)] {
-            entry.push_instruction(Located::with(
-                OpCode::Call {
-                    results: vec![res],
-                    function: CallTarget::Static(f),
-                    args: vec![arg],
-                    unconstrained: false,
-                },
-                SourceLocation::test(),
-            ));
+            entry.push_test_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(f),
+                args: vec![arg],
+                unconstrained: false,
+            });
         }
         // The caller-local `((a + 1) * 2) + 3`.
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: wt,
-                lhs: a,
-                rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Mul,
-                result: wu,
-                lhs: wt,
-                rhs: c2,
-            },
-            SourceLocation::test(),
-        ));
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: w,
-                lhs: wu,
-                rhs: c3,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: wt,
+            lhs: a,
+            rhs: c1,
+        });
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result: wu,
+            lhs: wt,
+            rhs: c2,
+        });
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: w,
+            lhs: wu,
+            rhs: c3,
+        });
         entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
     }
 
@@ -7148,15 +6307,13 @@ fn symbolic_jump_nested_call_falls_back_to_calldet() {
         let hf = ssa.get_function_mut(h);
         hf.add_return_type(Type::field());
         hf.get_entry_mut().push_parameter(hx, Type::field());
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: hr,
                 lhs: hx,
                 rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![hr]));
     }
@@ -7167,24 +6324,19 @@ fn symbolic_jump_nested_call_falls_back_to_calldet() {
         let gf = ssa.get_function_mut(g);
         gf.add_return_type(Type::field());
         gf.get_entry_mut().push_parameter(gx, Type::field());
-        gf.get_entry_mut().push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![gc],
-                function: CallTarget::Static(h),
-                args: vec![gx],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
-        gf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+        gf.get_entry_mut().push_test_instruction(OpCode::Call {
+            results: vec![gc],
+            function: CallTarget::Static(h),
+            args: vec![gx],
+            unconstrained: false,
+        });
+        gf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: ga,
                 lhs: gc,
                 rhs: c1,
-            },
-            SourceLocation::test(),
-        ));
+            });
         gf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![ga]));
     }
@@ -7200,15 +6352,12 @@ fn symbolic_jump_nested_call_falls_back_to_calldet() {
         mf.get_entry_mut().push_parameter(b, Type::field());
         let entry = mf.get_entry_mut();
         for (res, arg) in [(r1, a), (r2, a), (r3, b)] {
-            entry.push_instruction(Located::with(
-                OpCode::Call {
-                    results: vec![res],
-                    function: CallTarget::Static(g),
-                    args: vec![arg],
-                    unconstrained: false,
-                },
-                SourceLocation::test(),
-            ));
+            entry.push_test_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(g),
+                args: vec![arg],
+                unconstrained: false,
+            });
         }
         entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
     }
@@ -7234,15 +6383,13 @@ fn symbolic_jump_preserves_noncommutativity() {
         hf.add_return_type(Type::field());
         hf.get_entry_mut().push_parameter(x, Type::field());
         hf.get_entry_mut().push_parameter(y, Type::field());
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Sub,
                 result: fa,
                 lhs: x,
                 rhs: y,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![fa]));
     }
@@ -7258,15 +6405,12 @@ fn symbolic_jump_preserves_noncommutativity() {
         mf.get_entry_mut().push_parameter(b, Type::field());
         let entry = mf.get_entry_mut();
         for (res, args) in [(r1, vec![a, b]), (r2, vec![b, a]), (r3, vec![a, b])] {
-            entry.push_instruction(Located::with(
-                OpCode::Call {
-                    results: vec![res],
-                    function: CallTarget::Static(f),
-                    args,
-                    unconstrained: false,
-                },
-                SourceLocation::test(),
-            ));
+            entry.push_test_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(f),
+                args,
+                unconstrained: false,
+            });
         }
         entry.set_terminator(Terminator::Return(vec![r1, r2, r3]));
     }
@@ -7291,22 +6435,18 @@ fn symbolic_jump_witness_operand_is_not_grafted() {
         let hf = ssa.get_function_mut(f);
         hf.add_return_type(Type::field());
         hf.get_entry_mut().push_parameter(x, Type::field());
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::FreshWitness {
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::FreshWitness {
                 result: wit,
                 result_type: Type::field(),
-            },
-            SourceLocation::test(),
-        ));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+            });
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: fa,
                 lhs: x,
                 rhs: wit,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![fa]));
     }
@@ -7320,15 +6460,12 @@ fn symbolic_jump_witness_operand_is_not_grafted() {
         mf.get_entry_mut().push_parameter(a, Type::field());
         let entry = mf.get_entry_mut();
         for res in [r1, r2] {
-            entry.push_instruction(Located::with(
-                OpCode::Call {
-                    results: vec![res],
-                    function: CallTarget::Static(f),
-                    args: vec![a],
-                    unconstrained: false,
-                },
-                SourceLocation::test(),
-            ));
+            entry.push_test_instruction(OpCode::Call {
+                results: vec![res],
+                function: CallTarget::Static(f),
+                args: vec![a],
+                unconstrained: false,
+            });
         }
         entry.set_terminator(Terminator::Return(vec![r1, r2]));
     }
@@ -7376,24 +6513,20 @@ fn symbolic_jump_synthetic_does_not_collide_with_callee_only_constant() {
         let hf = ssa.get_function_mut(f);
         hf.add_return_type(Type::field());
         hf.get_entry_mut().push_parameter(x, Type::field());
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Mul,
                 result: ft,
                 lhs: x,
                 rhs: c,
-            },
-            SourceLocation::test(),
-        ));
-        hf.get_entry_mut().push_instruction(Located::with(
-            OpCode::BinaryArithOp {
+            });
+        hf.get_entry_mut()
+            .push_test_instruction(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
                 result: fa,
                 lhs: x,
                 rhs: ft,
-            },
-            SourceLocation::test(),
-        ));
+            });
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![fa]));
     }
@@ -7405,35 +6538,26 @@ fn symbolic_jump_synthetic_does_not_collide_with_callee_only_constant() {
         mf.get_entry_mut().push_parameter(a, Type::field());
         let entry = mf.get_entry_mut();
         // v = 2 + 3, which folds to Field(5) — the same constant class as `c`.
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: v,
-                lhs: two,
-                rhs: three,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: v,
+            lhs: two,
+            rhs: three,
+        });
         // r = f(a)
-        entry.push_instruction(Located::with(
-            OpCode::Call {
-                results: vec![r],
-                function: CallTarget::Static(f),
-                args: vec![a],
-                unconstrained: false,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Call {
+            results: vec![r],
+            function: CallTarget::Static(f),
+            args: vec![a],
+            unconstrained: false,
+        });
         // w = a + v, a genuine `a + 5`.
-        entry.push_instruction(Located::with(
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
-                result: w,
-                lhs: a,
-                rhs: v,
-            },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: w,
+            lhs: a,
+            rhs: v,
+        });
         entry.set_terminator(Terminator::Return(vec![r, w]));
     }
 

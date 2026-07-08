@@ -68,10 +68,7 @@ impl RCInsertion {
             // inserting drops.
             let mut currently_live = liveness.block_liveness[block_id].live_out.clone();
             let mut new_instructions = vec![];
-            let block_location = block
-                .get_instructions_with_source_locations()
-                .next()
-                .map(|(_, location)| location.clone());
+            let block_location = block.first_location().cloned();
 
             match block.get_terminator().unwrap() {
                 Terminator::Return(values) => {

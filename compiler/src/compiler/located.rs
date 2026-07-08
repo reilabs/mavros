@@ -18,10 +18,6 @@ impl<T> Located<T> {
         Self { payload, location }
     }
 
-    pub fn with(payload: T, location: SourceLocation) -> Self {
-        Self::new(payload, location)
-    }
-
     pub fn payload(self) -> T {
         self.payload
     }
@@ -36,14 +32,6 @@ impl<T> Located<T> {
 
     pub fn location_mut(&mut self) -> &mut SourceLocation {
         &mut self.location
-    }
-
-    pub fn get_location(&self) -> &SourceLocation {
-        self.location()
-    }
-
-    pub fn get_location_mut(&mut self) -> &mut SourceLocation {
-        self.location_mut()
     }
 
     pub fn to_ref(&self) -> Located<&T> {
@@ -203,24 +191,24 @@ mod tests {
     #[test]
     fn located_exposes_location_ref_and_take() {
         let mut location = test_location();
-        let mut located = Located::with(1, location.clone());
+        let mut located = Located::new(1, location.clone());
 
         assert_eq!(located.location(), &location);
-        assert_eq!(located.get_location(), &location);
-        located.get_location_mut().start.line = 5;
+        assert_eq!(located.location(), &location);
+        located.location_mut().start.line = 5;
         location.start.line = 5;
         assert_eq!(AsRef::<i32>::as_ref(&located), &1);
 
         let located_ref = located.to_ref();
         assert_eq!(*located_ref, &1);
-        assert_eq!(located_ref.get_location(), &location);
+        assert_eq!(located_ref.location(), &location);
 
         assert_eq!(located.take(), (1, location));
     }
 
     #[test]
     fn located_can_return_just_payload() {
-        let located = Located::with(1, test_location());
+        let located = Located::new(1, test_location());
 
         assert_eq!(located.payload(), 1);
     }

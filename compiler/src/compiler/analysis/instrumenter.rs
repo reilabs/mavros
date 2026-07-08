@@ -2308,7 +2308,7 @@ mod tests {
         Field,
         analysis::{flow_analysis::FlowAnalysis, types::Types},
         ssa::{
-            Located, SourceLocation, Terminator,
+            Terminator,
             hlssa::{Constant, HLSSA, OpCode},
         },
     };
@@ -2331,10 +2331,7 @@ mod tests {
         let b = ssa.add_const(Constant::Field(Field::from(b)));
         let c = ssa.add_const(Constant::Field(Field::from(c)));
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
-        entry.push_instruction(Located::with(
-            OpCode::Constrain { a, b, c },
-            SourceLocation::test(),
-        ));
+        entry.push_test_instruction(OpCode::Constrain { a, b, c });
         entry.set_terminator(Terminator::Return(vec![]));
         ssa
     }
