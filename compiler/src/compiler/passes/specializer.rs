@@ -92,8 +92,8 @@ struct SpecializationState<'a> {
 
     /// The source location of the original instruction the symbolic executor is currently
     /// interpreting (via `Context::on_location`); residual instructions are located there.
-    /// Starts at the pass's synthetic location, covering anything emitted before execution
-    /// reaches the first instruction.
+    /// Starts at the function entry's first instruction location, covering anything emitted before
+    /// execution reaches the first instruction.
     current_location: SourceLocation,
 }
 
@@ -1072,11 +1072,16 @@ impl Specializer {
         }
 
         let body = {
+            let current_location = body
+                .get_entry()
+                .first_location()
+                .cloned()
+                .unwrap_or_else(|| SourceLocation::synthetic("specializer"));
             let mut state = SpecializationState {
                 ssa: &*ssa,
                 body,
                 const_vals,
-                current_location: SourceLocation::synthetic("specializer"),
+                current_location,
             };
 
             // Specialization is speculative: this candidate may sit behind a branch that never
