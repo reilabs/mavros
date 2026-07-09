@@ -17,8 +17,10 @@
 //!   operands, after which the recomputed analysis sees the values as structurally congruent. PRE
 //!   therefore carries no conditional-fact obligations (no Gate 3); its one conditional read is
 //!   the disequality channel feeding the speculation gate ([`totality`]).
-//! - **Availability** (`AVAIL_OUT`) generalizes [`ClickCooper::leader`] from a value's own
-//!   definition to arbitrary program points, built top-down over the domination preorder.
+//! - **Availability** generalizes [`ClickCooper::leader`] from a value's own definition to
+//!   arbitrary program points. It is not a precomputed `AVAIL_OUT` set: each query is a dominance
+//!   scan over the key's occurrences (collected in domination preorder) plus the values this run's
+//!   motion has already minted.
 //! - **Down-safety** is a backward anticipability fixpoint, intersecting at `JmpIf` and taken as
 //!   a greatest fixpoint so anticipation is seen through loop cycles. Phi-translation is avoided
 //!   rather than performed: only binding-stable expressions (operands defined outside every CFG

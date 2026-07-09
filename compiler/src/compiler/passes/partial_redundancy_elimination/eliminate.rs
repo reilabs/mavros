@@ -6,9 +6,9 @@
 //! - **Leader Redirects:** Every eligible instruction result is redirected to the dominance-aware
 //!   leader of its congruence class ([`ClickCooper::leader`]). This inherits everything the
 //!   optimistic partition can prove — loop-carried congruences, cross-call (`CallDet` / symbolic
-//!   graft) numbering, const-seeded classes — none of which expression hashing can see. (Cross-call
-//!   numbering is inherited only through expressions *derived from* congruent call results; call
-//!   results themselves are never redirected — see the exclusions below.)
+//!   graft) numbering, const-seeded classes — none of which expression hashing can see. Call
+//!   results are excluded as redirect _sources_ but remain valid redirect _targets_: a local
+//!   expression congruent to a dominating call result is redirected straight to it.
 //! - **Canonical-Key Dedup:** A CSE-style interner keyed over *congruence classes* rather than raw
 //!   values: commutative `Add`/`Mul`/`And`/`Or`/`Xor` chains are flattened and sorted (`And`/`Or`
 //!   deduped, `MulConst` unified with `Mul`), and every terminal operand resolves to its class
@@ -613,8 +613,10 @@ enum LookupKey {
 /// The instruction results channel 1 redirects to their class leaders: the pure scalar shapes
 /// plus `ArrayGet`.
 ///
-/// Aggregate constructors and call results are deliberately excluded in this stage.
-fn leader_redirect_candidate(instruction: &OpCode) -> Option<ValueId> {
+/// Aggregate constructors and call results are deliberately excluded in this stage. The motion
+/// stage's candidate filter ([`super::insert`]) is derived from this predicate so the two op sets
+/// cannot drift.
+pub(super) fn leader_redirect_candidate(instruction: &OpCode) -> Option<ValueId> {
     match instruction {
         OpCode::BinaryArithOp { result, .. }
         | OpCode::Cmp { result, .. }

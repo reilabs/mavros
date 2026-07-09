@@ -354,7 +354,7 @@ impl Driver {
                 // below). New `Cmp`-fed asserts can appear after the pre-WTI passes and lowering.
                 Box::new(NormalizeAsserts::new()),
                 // Fold pure constants and prune constant-condition branches before the cleanup
-                // rounds, so Simplifier/CSE/DCE work on the reduced CFG. (SCS reclaims the blocks
+                // rounds, so Simplifier/PRE work on the reduced CFG. (SCS reclaims the blocks
                 // its own `JmpIf -> Jmp` folds orphan, so no trailing RemoveUnreachableBlocks is
                 // needed here — the InstructionLowering runs below type every block's instructions
                 // against reachable-only `Types` info and would ICE on a leftover orphan.)

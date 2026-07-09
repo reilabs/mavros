@@ -16,7 +16,7 @@ use crate::compiler::{
         FunctionId, Instruction, SourceLocation, SourcePosition, Terminator,
         hlssa::{
             BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLSSA, LookupTarget,
-            OpCode, SequenceTargetType, Type,
+            OpCode, Radix, SequenceTargetType, Type,
         },
     },
 };
@@ -686,12 +686,7 @@ fn add(
     lhs: crate::compiler::ssa::ValueId,
     rhs: crate::compiler::ssa::ValueId,
 ) -> OpCode {
-    OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
-        result,
-        lhs,
-        rhs,
-    }
+    bin(BinaryArithOpKind::Add, result, lhs, rhs)
 }
 
 /// The return values of `main`'s single returning block.
@@ -1037,6 +1032,45 @@ fn to_bits_deduplicates() {
     assert_eq!(return_values(&ssa), vec![r1, r1]);
 }
 
+/// The static `Bytes` form of `ToRadix` is keyed and dedups; the `Dyn` form carries a runtime
+/// bound and is never keyed.
+#[test]
+fn to_radix_bytes_deduplicates_dyn_does_not() {
+    let (mut ssa, vals) = main_with_params(&[Type::field(), Type::u(32)]);
+    let (v, d) = (vals[0], vals[1]);
+    let (r1, r2, d1, d2) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry = f.get_entry_mut();
+    for result in [r1, r2] {
+        entry.push_instruction(OpCode::ToRadix {
+            result,
+            value: v,
+            radix: Radix::Bytes,
+            endianness: Endianness::Little,
+            count: 8,
+        });
+    }
+    for result in [d1, d2] {
+        entry.push_instruction(OpCode::ToRadix {
+            result,
+            value: v,
+            radix: Radix::Dyn(d),
+            endianness: Endianness::Little,
+            count: 8,
+        });
+    }
+    entry.set_terminator(Terminator::Return(vec![r2, d2]));
+
+    eliminate(&mut ssa);
+
+    assert_eq!(return_values(&ssa), vec![r1, d2]);
+}
+
 /// A duplicated witness cast and an expression over its results both dedup within one run: the
 /// second cast's redirect is visible (chased) when the dependent expressions are keyed.
 #[test]
@@ -1324,6 +1358,27 @@ fn body_only_invariant_is_not_hoisted() {
     let (mut ssa, entry, _, body, _) = invariant_loop(false);
 
     hoist(&mut ssa);
+
+    let f = ssa.get_unique_entrypoint();
+    assert_eq!(f.get_block(entry).get_instructions().count(), 0);
+    assert_eq!(f.get_block(body).get_instructions().count(), 3);
+}
+
+/// The staging lever's bottom step: at `EliminateOnly` the pass driver never invokes the motion
+/// stage, so even the down-safe hoistable shape stays put (the elimination sweep still runs).
+#[test]
+fn hoisting_requires_the_loop_hoist_level() {
+    let (mut ssa, entry, _, body, _) = invariant_loop(true);
+    let cc = run_in_test(&ssa);
+    let flow = FlowAnalysis::run(&ssa);
+    let types = Types::new().run(&ssa, &flow);
+    let pre = super::PRE::with_config(super::Config {
+        motion: super::MotionLevel::EliminateOnly,
+        deduplicate_lookups: true,
+        dce: DceConfig::pre_r1c(),
+    });
+
+    pre.transform(&mut ssa, &cc, &types, &flow);
 
     let f = ssa.get_unique_entrypoint();
     assert_eq!(f.get_block(entry).get_instructions().count(), 0);
@@ -1963,6 +2018,108 @@ fn branching_predecessor_edge_is_split_to_carry_the_argument() {
     }
 }
 
+/// One predecessor enters the merge through *both* arms of its `JmpIf`: the wiring splits both
+/// arms, the single materialized copy lands at that predecessor's own end (its exit is the edge,
+/// dominating both splits), and both split jumps carry the copy as their argument.
+#[test]
+fn both_arms_predecessor_hosts_one_copy_and_two_arguments() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let (a, b, c) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let t1 = ssa.fresh_value();
+    let f = ssa.get_unique_entrypoint_mut();
+    let left = f.add_block();
+    let bi = f.add_block();
+    let m = f.add_block();
+
+    let entry = f.get_entry_mut();
+    entry.push_parameter(a, Type::field());
+    entry.push_parameter(b, Type::field());
+    entry.push_parameter(c, Type::u(1));
+    entry.set_terminator(Terminator::JmpIf(c, left, bi));
+    let lb = f.get_block_mut(left);
+    lb.push_instruction(add(t1, a, b));
+    lb.set_terminator(Terminator::Jmp(m, vec![]));
+    // The degenerate branch: both arms enter the merge, two distinct edges from one predecessor.
+    f.get_block_mut(bi)
+        .set_terminator(Terminator::JmpIf(c, m, m));
+    f.get_block_mut(m)
+        .set_terminator(Terminator::Return(vec![]));
+    let (x, y, _tx, _ty) = sibling_recomputations(&mut ssa, m, c, a, b, None);
+
+    join_insert(&mut ssa);
+
+    let f = ssa.get_unique_entrypoint();
+    let params: Vec<_> = f.get_block(m).get_parameter_values().copied().collect();
+    assert_eq!(params.len(), 1);
+    // The copy lives once, at the both-arms predecessor's own end...
+    let copies: Vec<_> = f.get_block(bi).get_instructions().collect();
+    assert_eq!(copies.len(), 1);
+    let copy = *copies[0].get_results().next().unwrap();
+    // ...and each arm was split into its own argument-carrying block.
+    let Some(Terminator::JmpIf(_, s_true, s_false)) = f.get_block(bi).get_terminator() else {
+        panic!("the both-arms predecessor must still branch");
+    };
+    let (s_true, s_false) = (*s_true, *s_false);
+    assert_ne!(s_true, s_false);
+    for split in [s_true, s_false] {
+        assert_ne!(split, m);
+        assert!(matches!(
+            f.get_block(split).get_terminator(),
+            Some(Terminator::Jmp(t, args)) if *t == m && *args == vec![copy]
+        ));
+    }
+    // The computing arm passes its own evaluation, and the siblings drain into the parameter.
+    assert!(matches!(
+        f.get_block(left).get_terminator(),
+        Some(Terminator::Jmp(_, args)) if *args == vec![t1]
+    ));
+    for block in [x, y] {
+        assert!(matches!(
+            f.get_block(block).get_terminator(),
+            Some(Terminator::Return(vals)) if *vals == vec![params[0]]
+        ));
+    }
+}
+
+/// An unreachable predecessor refuses the join outright: no leader can ever dominate it, yet any
+/// planted parameter would still need an argument on its dead jump. The same shape without the
+/// dead predecessor fires (see [`diamond_partial_redundancy_joins_through_parameter`]).
+#[test]
+fn merge_with_unreachable_predecessor_is_refused() {
+    let (mut ssa, a, b, left, _right, merge) = diamond();
+    let t1 = ssa.fresh_value();
+    let c = {
+        let f = ssa.get_unique_entrypoint();
+        f.get_entry()
+            .get_parameter_values()
+            .copied()
+            .nth(2)
+            .unwrap()
+    };
+    let f = ssa.get_unique_entrypoint_mut();
+    f.get_block_mut(left).push_instruction(add(t1, a, b));
+    // A block no path reaches, jumping into the merge.
+    let dead = f.add_block();
+    f.get_block_mut(dead)
+        .set_terminator(Terminator::Jmp(merge, vec![]));
+    let (x, y, tx, ty) = sibling_recomputations(&mut ssa, merge, c, a, b, None);
+
+    join_insert(&mut ssa);
+
+    let f = ssa.get_unique_entrypoint();
+    assert_eq!(f.get_block(merge).get_parameter_values().count(), 0);
+    assert!(matches!(
+        f.get_block(dead).get_terminator(),
+        Some(Terminator::Jmp(_, args)) if args.is_empty()
+    ));
+    for (block, t) in [(x, tx), (y, ty)] {
+        assert!(matches!(
+            f.get_block(block).get_terminator(),
+            Some(Terminator::Return(vals)) if *vals == vec![t]
+        ));
+    }
+}
+
 /// A merge that already carries parameters gets the new one appended, with every predecessor's
 /// existing arguments left aligned in front of the new ones.
 #[test]
@@ -2392,12 +2549,7 @@ fn mul(
     lhs: crate::compiler::ssa::ValueId,
     rhs: crate::compiler::ssa::ValueId,
 ) -> OpCode {
-    OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Mul,
-        result,
-        lhs,
-        rhs,
-    }
+    bin(BinaryArithOpKind::Mul, result, lhs, rhs)
 }
 
 /// A hoisted copy carries its template's source location, so a moved evaluation still attributes

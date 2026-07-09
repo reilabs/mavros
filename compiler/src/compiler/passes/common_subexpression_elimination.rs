@@ -14,7 +14,7 @@ use crate::{
             BlockId, ProgramPoint, SSAConstantsSnapshot, ValueId,
             hlssa::{
                 BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLFunction, HLSSA,
-                LookupTarget, OpCode, Radix,
+                OpCode, Radix,
             },
         },
         util::ice_non_elided_tuple,
@@ -26,10 +26,9 @@ use crate::{
 
 /// A basic, deduplicating CSE that only deals with the elimination of redundant expressions.
 ///
-/// More aggressive code motion is a non-goal, as that is instead handled by PRE.
-pub struct CSE {
-    config: Config,
-}
+/// More aggressive code motion is a non-goal, as that is instead handled by PRE, which owns all
+/// pre-R1C deduplication; this pass remains wired only at the post-R1C sites.
+pub struct CSE;
 
 impl Pass for CSE {
     fn name(&self) -> &'static str {
@@ -50,12 +49,9 @@ impl Pass for CSE {
 }
 
 impl CSE {
-    pub fn with_config(config: Config) -> Self {
-        Self { config }
-    }
-
+    /// The pass as wired at the post-R1C pipeline sites (its only remaining placement).
     pub fn post_r1c() -> Self {
-        Self::with_config(Config::post_r1c())
+        Self
     }
 
     pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
@@ -69,21 +65,16 @@ impl CSE {
                 if occurrences.len() <= 1 {
                     continue;
                 }
+                // Occurrences arrive in domination-preorder walk order, so an existing group
+                // leader is never dominated by a later occurrence — the forward availability
+                // query is the only direction that can match.
                 let mut replacement_groups: Vec<((ProgramPoint, ValueId), Vec<ValueId>)> = vec![];
                 for (point, value_id) in occurrences {
                     let mut found = false;
-                    for ((candidate_point, candidate_value_id), others) in
-                        replacement_groups.iter_mut()
-                    {
+                    for ((candidate_point, _), others) in replacement_groups.iter_mut() {
                         if can_replace(cfg, *candidate_point, point) {
                             found = true;
                             others.push(value_id);
-                            break;
-                        } else if can_replace(cfg, point, *candidate_point) {
-                            found = true;
-                            others.push(*candidate_value_id);
-                            *candidate_point = point;
-                            *candidate_value_id = value_id;
                             break;
                         }
                     }
@@ -112,11 +103,6 @@ impl CSE {
                         if can_replace(cfg, *candidate_point, point) {
                             found = true;
                             others.push(point);
-                            break;
-                        } else if can_replace(cfg, point, *candidate_point) {
-                            found = true;
-                            others.push(*candidate_point);
-                            *candidate_point = point;
                             break;
                         }
                     }
@@ -211,23 +197,6 @@ impl CSE {
                 .entry(assertion)
                 .or_default()
                 .push(ProgramPoint::new(block_id, instruction_idx));
-        }
-
-        fn lookup_target_expr(
-            target: &LookupTarget<ValueId>,
-            exprs: &HashMap<ValueId, ExprId>,
-            interner: &mut ExprInterner,
-        ) -> LookupAssertionTarget {
-            match target {
-                LookupTarget::Rangecheck(bits) => LookupAssertionTarget::Rangecheck(*bits),
-                LookupTarget::DynRangecheck(bound) => {
-                    LookupAssertionTarget::DynRangecheck(get_expr(exprs, interner, bound))
-                }
-                LookupTarget::Array(array) => {
-                    LookupAssertionTarget::Array(get_expr(exprs, interner, array))
-                }
-                LookupTarget::Spread(bits) => LookupAssertionTarget::Spread(*bits),
-            }
         }
 
         for block_id in cfg.get_domination_pre_order() {
@@ -651,24 +620,8 @@ impl CSE {
                             },
                         );
                     }
-                    OpCode::Lookup { target, args, flag } if self.config.deduplicate_lookups => {
-                        let target_expr = lookup_target_expr(target, &exprs, &mut interner);
-                        let arg_exprs = args
-                            .iter()
-                            .map(|arg| get_expr(&exprs, &mut interner, arg))
-                            .collect();
-                        let flag_expr = get_expr(&exprs, &mut interner, flag);
-                        record_assertion(
-                            &mut assertions,
-                            block_id,
-                            instruction_idx,
-                            Assertion::Lookup {
-                                target: target_expr,
-                                args: arg_exprs,
-                                flag: flag_expr,
-                            },
-                        );
-                    }
+                    // `Lookup`s are never deduplicated here: that dedup is pre-R1C-only and now
+                    // lives in the PRE pass.
                     OpCode::WriteWitness { result: None, .. }
                     | OpCode::Constrain { .. }
                     | OpCode::NextDCoeff { result: _ }
@@ -727,22 +680,6 @@ impl CSE {
     }
 }
 
-// CONFIGURATION
-// ================================================================================================
-
-#[derive(Clone, Copy, Debug)]
-pub struct Config {
-    deduplicate_lookups: bool,
-}
-
-impl Config {
-    pub fn post_r1c() -> Self {
-        Self {
-            deduplicate_lookups: false,
-        }
-    }
-}
-
 // EXPRESSION KEYING
 // ================================================================================================
 
@@ -782,15 +719,6 @@ enum ExprNode {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Assertion {
     Rangecheck { value: ExprId, max_bits: usize },
-    Lookup { target: LookupAssertionTarget, args: Vec<ExprId>, flag: ExprId },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum LookupAssertionTarget {
-    Rangecheck(u8),
-    DynRangecheck(ExprId),
-    Array(ExprId),
-    Spread(u8),
 }
 
 // EXPRESSION INTERNING

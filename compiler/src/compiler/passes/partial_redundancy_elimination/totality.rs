@@ -14,33 +14,35 @@
 //!
 //! The verdicts encode the engines' actual semantics:
 //!
-//! - **U/I `Add`/`Sub`/`Mul` are never speculated** even though the executable backends wrap
+//! - **U/I `Add`/`Sub`/`Mul` are Never Speculated** Even though the executable backends wrap
 //!   (`vm/src/bytecode.rs` `add_int`/`add_u128` mask to width): overflow is Noir-semantically an
 //!   error — the constant lattice refuses overflow folds as "an erroneous evaluation with a
 //!   backend-specific residue" — and a *witness-typed* op's gadget lowering emits a rejecting
-//!   overflow `Rangecheck` when the value-range analysis cannot prove fit
-//!   (`instruction_lowering/witness_integer_arith.rs`). Field arithmetic has no such predicate
-//!   and is total.
-//! - **`Div`/`Mod` trap on a zero divisor** in every engine (raw Rust `/` in the VM, `div`
-//!   instructions in LLVM, and a *compile-time panic* in the R1CS generator's constant
-//!   evaluation — strictly worse than a reject). They are speculated only where the divisor is
-//!   provably nonzero: a nonzero constant, or the analysis's disequality channel
-//!   ([`ClickCooper::known_unequal`] against the interned zero of the divisor's type) at the
-//!   insertion block. Signed division at exactly 64 bits can additionally overflow in the VM
-//!   (`div_s64` computes `i64::MIN / -1`), so it also requires the constant divisor to not be
-//!   `-1`.
-//! - **`Shl`/`Shr` diverge across backends once the amount reaches the operand width** (the VM's
-//!   `shl_u64` is an unmasked Rust shift, its `u128` variants wrap, R1CGen wraps at 128 bits), so
-//!   only a constant, in-range amount is speculated.
-//! - **`ArrayGet`/`ArraySet` trap out-of-bounds** (VM asserts, R1CGen constant evaluation
-//!   panics); only a constant index provably below a static array length is speculated.
-//! - Comparisons, `Not`, `Select`, `SExt`, `BitRange`, bitwise ops, and the representation casts
-//!   are total: their witness gadget lowerings emit only *functional* decomposition constraints
-//!   (satisfiable for every in-range input), never a semantic predicate.
+//!   overflow `Rangecheck` when the value-range analysis cannot prove fit. Field arithmetic has no
+//!   such predicate and is total.
+//! - **`Div`/`Mod` Trap on a Zero Divisor**: Integer division traps in every engine (raw Rust `/`
+//!   in the VM, `div` instructions in LLVM), while *field* division is total in the VM (`div_field`
+//!   yields 0) but still panics in the R1CS generator's constant evaluation (`inverse().unwrap()` —
+//!   a *compile-time* failure, strictly worse than a reject), so both domains are gated. They are
+//!   speculated only where the divisor is provably nonzero: a nonzero constant, or the analysis's
+//!   disequality channel ([`ClickCooper::known_unequal`] against the interned zero of the divisor's
+//!   type) at the insertion block. Signed division at exactly 64 bits can additionally overflow in
+//!   the VM (`div_s64` computes `i64::MIN / -1`), so it also requires the constant divisor to not
+//!   be `-1`.
+//! - **`Shl`/`Shr` Diverge Across Backends:** Once the amount reaches the operand width the
+//!   behaviors differ (the VM's `shl_u64` is an unmasked Rust shift, its `u128` variants wrap,
+//!   R1CGen wraps at 128 bits), so only a constant, in-range amount is speculated.
+//! - **`ArrayGet`/`ArraySet` Trap on OOB:** VM asserts, R1CGen constant evaluation panics; only a
+//!   constant index provably below a static array length is speculated.
+//! - Comparisons, `Not`, `Select`, `SExt`, `BitRange`, bitwise ops, and Casts are Total:** Their
+//!   witness gadget lowerings emit only *functional* decomposition constraints (satisfiable for
+//!   every in-range input), never a semantic predicate.
 //!
 //! The oracle answers for individual ops; whether an op is a motion candidate at all (the
 //! CSE-parity op filter, witness-machinery exclusions, aggregate deferral) is the caller's concern
-//! — verdicts here are honest for every op, including ones PRE never moves.
+//! — verdicts here are honest for every op, including ones PRE never moves, with one deliberate
+//! exception: the element-wise `Map` cast does not trap but is answered `false` anyway (it is never
+//! worth materializing at a new point, and the motion candidate filter excludes it too).
 
 use ark_ff::Zero;
 

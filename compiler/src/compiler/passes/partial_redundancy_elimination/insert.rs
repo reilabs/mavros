@@ -21,10 +21,12 @@
 //! point. (Canonical-key leaves are congruence classes; a class containing such an operand can only
 //! contain a rebindable block parameter through a constant class, where every incoming argument
 //! shares the class and translation is the identity). This deliberately excludes expressions over
-//! values defined in an _outer_ loop — hoisting those needs the value-stability machinery — and
-//! expressions over a merge's own parameters, whose translation into a predecessor is the jump's
-//! argument vector (classic GVN-PRE phi-translation, deferred): both shapes fail the operand
-//! checks below.
+//! values defined in an _outer_ loop — hoisting those needs the value-stability machinery — which
+//! fail the operand checks below. Expressions over a merge's own parameters are excluded from
+//! *placement above that merge* by a different mechanism: an acyclic merge's parameter passes the
+//! stability check, but its definition can never dominate the merge's predecessors, so the
+//! template/leader dominance checks refuse the insertion (translating such an expression into a
+//! predecessor via the jump's argument vector is classic GVN-PRE phi-translation, deferred).
 //!
 //! # Loop Hoisting
 //!
@@ -530,6 +532,8 @@ impl FunctionMotionState {
                 if let Some(generated) = self.gen_keys.get(&block_id) {
                     new_in.extend(generated.iter().copied());
                 }
+                // Comparing lengths suffices: iterating from ⊤, every recompute shrinks (or keeps)
+                // the block's set — `new_in ⊆ antic_in[b]` — so equal size implies equal set.
                 if new_in.len() != antic_in[&block_id].len() {
                     antic_in.insert(block_id, new_in);
                     changed = true;
@@ -736,6 +740,16 @@ impl FunctionMotionState {
             return false;
         }
 
+        // An unreachable predecessor can never carry a leader (nothing dominates it), yet any
+        // planted parameter would still need an argument on its jump — dropping it from the wiring
+        // instead would corrupt the arity. Refuse the merge outright rather than materializing junk
+        // copies into dead code (only an all-constant template could pass the operand checks for
+        // such an edge anyway).
+        let entry = function.get_entry_id();
+        if preds.iter().any(|&p| !cfg.dominates(entry, p)) {
+            return false;
+        }
+
         // Plan against pristine facts only; mutation starts after the plan set is fixed.
         let mut plans: Vec<JoinPlan> = Vec::new();
         for &node in &env.antic_in[&merge] {
@@ -889,6 +903,11 @@ fn loop_forest(cfg: &CFG) -> LoopForest {
 
 /// The blocks of `header`'s natural loop: the header plus every block that reaches a back edge
 /// without passing through the header.
+///
+/// The hoist rule pairs this (its `in_loop` profitability test) with header-*dominance* redirects;
+/// the two coincide only on reducible CFGs, which is everything the frontend emits. On an
+/// irreducible loop a hoist could satisfy `in_loop` through a non-dominated block and then redirect
+/// nothing — a dead, DCE-swept copy, never unsoundness.
 fn natural_loop(cfg: &CFG, header: BlockId) -> HashSet<BlockId> {
     let mut blocks: HashSet<BlockId> = HashSet::default();
     blocks.insert(header);
@@ -904,23 +923,19 @@ fn natural_loop(cfg: &CFG, header: BlockId) -> HashSet<BlockId> {
     blocks
 }
 
-/// The ops the motion stages may materialize at a new point: the pure scalar shapes plus
-/// `ArrayGet`, matching the elimination sweep's redirect set minus the element-wise `Map` casts
-/// (expanded into loops late; never worth moving).
+/// The ops the motion stages may materialize at a new point: the elimination sweep's redirect set
+/// ([`super::eliminate::leader_redirect_candidate`]) minus the element-wise `Map` casts (expanded
+/// into loops late; never worth moving).
 fn is_motion_candidate(instruction: &OpCode) -> bool {
     use crate::compiler::ssa::hlssa::CastTarget;
-    match instruction {
-        OpCode::Cast { target, .. } => !matches!(target, CastTarget::Map(_)),
-        OpCode::BinaryArithOp { .. }
-        | OpCode::Cmp { .. }
-        | OpCode::MulConst { .. }
-        | OpCode::SExt { .. }
-        | OpCode::BitRange { .. }
-        | OpCode::Not { .. }
-        | OpCode::Select { .. }
-        | OpCode::ArrayGet { .. } => true,
-        _ => false,
+    if let OpCode::Cast {
+        target: CastTarget::Map(_),
+        ..
+    } = instruction
+    {
+        return false;
     }
+    super::eliminate::leader_redirect_candidate(instruction).is_some()
 }
 
 /// Debug-only structural check for the argument-carrying rewrites: every jump's argument count

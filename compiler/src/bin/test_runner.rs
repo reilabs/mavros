@@ -1354,7 +1354,7 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
 /// Default subset for `--check-determinism`: small tests chosen to cover the passes where iteration
 /// order historically leaked into output (defunctionalize/fn-pointer interning, the specializer,
 /// globals lowering, tuple elision), plus one large composite (sha256) and the PRE code-motion
-/// shapes (speculative hoisting, the guarded-division gate).
+/// shapes (speculative hoisting, the guarded-division gate, cross-branch join insertion).
 const DEFAULT_DETERMINISM_TESTS: &[&str] = &[
     "higher_order_fns",
     "lambda_array",
@@ -1365,6 +1365,7 @@ const DEFAULT_DETERMINISM_TESTS: &[&str] = &[
     "sha256",
     "pre_licm_speculation",
     "pre_guarded_div_hoist",
+    "pre_cross_branch_join",
 ];
 
 /// The dump files the driver writes under `mavros_debug/`, in pipeline-stage order, so the first
