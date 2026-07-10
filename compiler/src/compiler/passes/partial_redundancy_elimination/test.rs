@@ -369,7 +369,7 @@ fn division_discharged_by_disequality_branch() {
     let entry = f.get_entry_mut();
     entry.push_parameter(x, Type::u(32));
     entry.push_parameter(d, Type::u(32));
-    entry.push_instruction(OpCode::Cmp {
+    entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: eq,
         lhs: d,
@@ -409,7 +409,7 @@ fn signed_64_bit_division_minus_one_hazard() {
     let entry = f.get_entry_mut();
     entry.push_parameter(x, Type::i(64));
     entry.push_parameter(d, Type::i(64));
-    entry.push_instruction(OpCode::Cmp {
+    entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: eq,
         lhs: d,
@@ -709,8 +709,8 @@ fn same_block_duplicate_is_redirected() {
     let (r1, r2) = (ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
-    entry.push_instruction(add(r1, a, b));
-    entry.push_instruction(add(r2, a, b));
+    entry.push_test_instruction(add(r1, a, b));
+    entry.push_test_instruction(add(r2, a, b));
     entry.set_terminator(Terminator::Return(vec![r2]));
 
     eliminate(&mut ssa);
@@ -725,8 +725,8 @@ fn commutative_operands_match() {
     let (r1, r2) = (ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
-    entry.push_instruction(add(r1, a, b));
-    entry.push_instruction(add(r2, b, a));
+    entry.push_test_instruction(add(r1, a, b));
+    entry.push_test_instruction(add(r2, b, a));
     entry.set_terminator(Terminator::Return(vec![r2]));
 
     eliminate(&mut ssa);
@@ -742,10 +742,10 @@ fn dominated_block_reuses_dominating_definition() {
     let f = ssa.get_unique_entrypoint_mut();
     let next = f.add_block();
     let entry = f.get_entry_mut();
-    entry.push_instruction(add(r1, a, b));
+    entry.push_test_instruction(add(r1, a, b));
     entry.set_terminator(Terminator::Jmp(next, vec![]));
     let next_block = f.get_block_mut(next);
-    next_block.push_instruction(add(r2, a, b));
+    next_block.push_test_instruction(add(r2, a, b));
     next_block.set_terminator(Terminator::Return(vec![r2]));
 
     eliminate(&mut ssa);
@@ -767,10 +767,10 @@ fn sibling_arms_are_not_deduplicated() {
     f.get_entry_mut()
         .set_terminator(Terminator::JmpIf(cond, t, e));
     let tb = f.get_block_mut(t);
-    tb.push_instruction(add(r1, a, b));
+    tb.push_test_instruction(add(r1, a, b));
     tb.set_terminator(Terminator::Jmp(m, vec![r1]));
     let eb = f.get_block_mut(e);
-    eb.push_instruction(add(r2, a, b));
+    eb.push_test_instruction(add(r2, a, b));
     eb.set_terminator(Terminator::Jmp(m, vec![r2]));
     let mb = f.get_block_mut(m);
     mb.push_parameter(p, Type::field());
@@ -803,10 +803,10 @@ fn reassociated_chains_deduplicate() {
     );
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
-    entry.push_instruction(add(t1, a, b));
-    entry.push_instruction(add(t2, t1, c));
-    entry.push_instruction(add(s1, b, c));
-    entry.push_instruction(add(s2, a, s1));
+    entry.push_test_instruction(add(t1, a, b));
+    entry.push_test_instruction(add(t2, t1, c));
+    entry.push_test_instruction(add(s1, b, c));
+    entry.push_test_instruction(add(s2, a, s1));
     entry.set_terminator(Terminator::Return(vec![t2, s2]));
 
     eliminate(&mut ssa);
@@ -822,13 +822,13 @@ fn mul_const_unifies_with_mul() {
     let (m1, m2) = (ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Mul,
         result: m1,
         lhs: a,
         rhs: c2,
     });
-    entry.push_instruction(OpCode::MulConst {
+    entry.push_test_instruction(OpCode::MulConst {
         result: m2,
         const_val: c2,
         var: a,
@@ -864,7 +864,7 @@ fn loop_carried_congruent_increments_redirect() {
     let hb = f.get_block_mut(header);
     hb.push_parameter(i, Type::u(32));
     hb.push_parameter(j, Type::u(32));
-    hb.push_instruction(OpCode::Cmp {
+    hb.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: cond,
         lhs: i,
@@ -872,8 +872,8 @@ fn loop_carried_congruent_increments_redirect() {
     });
     hb.set_terminator(Terminator::JmpIf(cond, body, exit));
     let bb = f.get_block_mut(body);
-    bb.push_instruction(add(i2, i, c1));
-    bb.push_instruction(add(j2, j, c1));
+    bb.push_test_instruction(add(i2, i, c1));
+    bb.push_test_instruction(add(j2, j, c1));
     bb.set_terminator(Terminator::Jmp(header, vec![i2, j2]));
     f.get_block_mut(exit)
         .set_terminator(Terminator::Return(vec![i, j]));
@@ -894,15 +894,15 @@ fn rangecheck_duplicates_are_dropped() {
     let v = vals[0];
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::Rangecheck {
+    entry.push_test_instruction(OpCode::Rangecheck {
         value: v,
         max_bits: 32,
     });
-    entry.push_instruction(OpCode::Rangecheck {
+    entry.push_test_instruction(OpCode::Rangecheck {
         value: v,
         max_bits: 32,
     });
-    entry.push_instruction(OpCode::Rangecheck {
+    entry.push_test_instruction(OpCode::Rangecheck {
         value: v,
         max_bits: 16,
     });
@@ -923,13 +923,13 @@ fn rangecheck_over_congruent_values_deduplicates() {
     let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
-    entry.push_instruction(add(x, a, b));
-    entry.push_instruction(add(y, a, b));
-    entry.push_instruction(OpCode::Rangecheck {
+    entry.push_test_instruction(add(x, a, b));
+    entry.push_test_instruction(add(y, a, b));
+    entry.push_test_instruction(OpCode::Rangecheck {
         value: x,
         max_bits: 32,
     });
-    entry.push_instruction(OpCode::Rangecheck {
+    entry.push_test_instruction(OpCode::Rangecheck {
         value: y,
         max_bits: 32,
     });
@@ -952,7 +952,7 @@ fn lookup_dedup_respects_config() {
         let f = ssa.get_unique_entrypoint_mut();
         let entry = f.get_entry_mut();
         for _ in 0..2 {
-            entry.push_instruction(OpCode::Lookup {
+            entry.push_test_instruction(OpCode::Lookup {
                 target: LookupTarget::Rangecheck(8),
                 args: vec![v],
                 flag,
@@ -999,7 +999,7 @@ fn unpinned_write_witness_shares_slot_pinned_does_not() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
     for (result, pinned) in [(r1, false), (r2, false), (p1, true), (p2, true)] {
-        entry.push_instruction(OpCode::WriteWitness {
+        entry.push_test_instruction(OpCode::WriteWitness {
             result: Some(result),
             value: v,
             pinned,
@@ -1020,7 +1020,7 @@ fn to_bits_deduplicates() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
     for result in [r1, r2] {
-        entry.push_instruction(OpCode::ToBits {
+        entry.push_test_instruction(OpCode::ToBits {
             result,
             value: v,
             endianness: Endianness::Little,
@@ -1049,7 +1049,7 @@ fn to_radix_bytes_deduplicates_dyn_does_not() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
     for result in [r1, r2] {
-        entry.push_instruction(OpCode::ToRadix {
+        entry.push_test_instruction(OpCode::ToRadix {
             result,
             value: v,
             radix: Radix::Bytes,
@@ -1058,7 +1058,7 @@ fn to_radix_bytes_deduplicates_dyn_does_not() {
         });
     }
     for result in [d1, d2] {
-        entry.push_instruction(OpCode::ToRadix {
+        entry.push_test_instruction(OpCode::ToRadix {
             result,
             value: v,
             radix: Radix::Dyn(d),
@@ -1087,18 +1087,18 @@ fn witness_cast_and_dependent_expression_dedup_in_one_run() {
     );
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::Cast {
+    entry.push_test_instruction(OpCode::Cast {
         result: c1,
         value: a,
         target: CastTarget::WitnessOf,
     });
-    entry.push_instruction(OpCode::Cast {
+    entry.push_test_instruction(OpCode::Cast {
         result: c2,
         value: a,
         target: CastTarget::WitnessOf,
     });
-    entry.push_instruction(add(s1, c1, c1));
-    entry.push_instruction(add(s2, c2, c2));
+    entry.push_test_instruction(add(s1, c1, c1));
+    entry.push_test_instruction(add(s2, c2, c2));
     entry.set_terminator(Terminator::Return(vec![c2, s2]));
 
     eliminate(&mut ssa);
@@ -1115,7 +1115,7 @@ fn aggregate_constructors_are_untouched() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
     for result in [r1, r2] {
-        entry.push_instruction(OpCode::MkSeq {
+        entry.push_test_instruction(OpCode::MkSeq {
             result,
             elems: vec![a, b],
             seq_type: SequenceTargetType::Array(2),
@@ -1139,7 +1139,7 @@ fn array_get_deduplicates() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
     for result in [g1, g2] {
-        entry.push_instruction(OpCode::ArrayGet {
+        entry.push_test_instruction(OpCode::ArrayGet {
             result,
             array: arr,
             index: c1,
@@ -1160,7 +1160,7 @@ fn read_global_deduplicates() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
     for result in [r1, r2] {
-        entry.push_instruction(OpCode::ReadGlobal {
+        entry.push_test_instruction(OpCode::ReadGlobal {
             result,
             offset: 0,
             result_type: Type::field(),
@@ -1188,7 +1188,7 @@ fn mismatched_type_leader_does_not_block_same_typed_dedup() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
     for (result, result_type) in [(m, Type::u(32)), (r1, Type::field()), (r2, Type::field())] {
-        entry.push_instruction(OpCode::ReadGlobal {
+        entry.push_test_instruction(OpCode::ReadGlobal {
             result,
             offset: 0,
             result_type,
@@ -1210,15 +1210,15 @@ fn integrated_dce_sweeps_redirected_definitions() {
     let (r1, r2, eq) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
-    entry.push_instruction(add(r1, a, b));
-    entry.push_instruction(add(r2, a, b));
-    entry.push_instruction(OpCode::Cmp {
+    entry.push_test_instruction(add(r1, a, b));
+    entry.push_test_instruction(add(r2, a, b));
+    entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: eq,
         lhs: r2,
         rhs: c5,
     });
-    entry.push_instruction(OpCode::Assert { value: eq });
+    entry.push_test_instruction(OpCode::Assert { value: eq });
     entry.set_terminator(Terminator::Return(vec![]));
 
     run_pass(&mut ssa);
@@ -1275,7 +1275,7 @@ fn invariant_loop(
 
     let hb = f.get_block_mut(header);
     hb.push_parameter(i, Type::u(32));
-    hb.push_instruction(OpCode::Cmp {
+    hb.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: cond,
         lhs: i,
@@ -1284,22 +1284,22 @@ fn invariant_loop(
     hb.set_terminator(Terminator::JmpIf(cond, body, exit));
 
     let bb = f.get_block_mut(body);
-    bb.push_instruction(OpCode::BinaryArithOp {
+    bb.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Mul,
         result: inv,
         lhs: a,
         rhs: b,
     });
-    bb.push_instruction(OpCode::Rangecheck {
+    bb.push_test_instruction(OpCode::Rangecheck {
         value: inv,
         max_bits: 32,
     });
-    bb.push_instruction(add(i2, i, c1));
+    bb.push_test_instruction(add(i2, i, c1));
     bb.set_terminator(Terminator::Jmp(header, vec![i2]));
 
     let eb = f.get_block_mut(exit);
     if with_exit_occurrence {
-        eb.push_instruction(OpCode::BinaryArithOp {
+        eb.push_test_instruction(OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::Mul,
             result: inv2,
             lhs: a,
@@ -1488,7 +1488,7 @@ fn post_loop_only_shape() -> (
 
     let hb = f.get_block_mut(header);
     hb.push_parameter(i, Type::u(32));
-    hb.push_instruction(OpCode::Cmp {
+    hb.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: cond,
         lhs: i,
@@ -1497,11 +1497,11 @@ fn post_loop_only_shape() -> (
     hb.set_terminator(Terminator::JmpIf(cond, body, exit));
 
     let bb = f.get_block_mut(body);
-    bb.push_instruction(add(i2, i, c1));
+    bb.push_test_instruction(add(i2, i, c1));
     bb.set_terminator(Terminator::Jmp(header, vec![i2]));
 
     let eb = f.get_block_mut(exit);
-    eb.push_instruction(OpCode::BinaryArithOp {
+    eb.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Mul,
         result: post,
         lhs: a,
@@ -1568,7 +1568,7 @@ fn loop_carried_operand_blocks_hoist() {
     let ohb = f.get_block_mut(oh);
     ohb.push_parameter(j, Type::u(32));
     ohb.push_parameter(acc, Type::field());
-    ohb.push_instruction(OpCode::Cmp {
+    ohb.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: jc,
         lhs: j,
@@ -1578,12 +1578,12 @@ fn loop_carried_operand_blocks_hoist() {
 
     // `x` is rebound every outer iteration.
     let obb = f.get_block_mut(obody);
-    obb.push_instruction(add(x, acc, c1f));
+    obb.push_test_instruction(add(x, acc, c1f));
     obb.set_terminator(Terminator::Jmp(ih, vec![c0]));
 
     let ihb = f.get_block_mut(ih);
     ihb.push_parameter(k, Type::u(32));
-    ihb.push_instruction(OpCode::Cmp {
+    ihb.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: kc,
         lhs: k,
@@ -1592,31 +1592,31 @@ fn loop_carried_operand_blocks_hoist() {
     ihb.set_terminator(Terminator::JmpIf(kc, ibody, iafter));
 
     let ibb = f.get_block_mut(ibody);
-    ibb.push_instruction(OpCode::BinaryArithOp {
+    ibb.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Mul,
         result: m1,
         lhs: x,
         rhs: c2f,
     });
-    ibb.push_instruction(OpCode::Rangecheck {
+    ibb.push_test_instruction(OpCode::Rangecheck {
         value: m1,
         max_bits: 32,
     });
-    ibb.push_instruction(add(k2, k, c1));
+    ibb.push_test_instruction(add(k2, k, c1));
     ibb.set_terminator(Terminator::Jmp(ih, vec![k2]));
 
     let iab = f.get_block_mut(iafter);
-    iab.push_instruction(OpCode::BinaryArithOp {
+    iab.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Mul,
         result: m2,
         lhs: x,
         rhs: c2f,
     });
-    iab.push_instruction(OpCode::Rangecheck {
+    iab.push_test_instruction(OpCode::Rangecheck {
         value: m2,
         max_bits: 32,
     });
-    iab.push_instruction(add(j2, j, c1));
+    iab.push_test_instruction(add(j2, j, c1));
     iab.set_terminator(Terminator::Jmp(oh, vec![j2, x]));
 
     f.get_block_mut(oexit)
@@ -2101,13 +2101,13 @@ fn jmp_if_entry_edge_is_split_for_the_hoist() {
     // A parameterless self-loop: the invariant is generated in the header itself, so it is
     // anticipated there regardless of the exit path.
     let hb = f.get_block_mut(h);
-    hb.push_instruction(OpCode::BinaryArithOp {
+    hb.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Mul,
         result: inv,
         lhs: a,
         rhs: b,
     });
-    hb.push_instruction(OpCode::Rangecheck {
+    hb.push_test_instruction(OpCode::Rangecheck {
         value: inv,
         max_bits: 32,
     });
@@ -2173,7 +2173,7 @@ fn multi_entry_header_is_skipped() {
 
     let hb = f.get_block_mut(header);
     hb.push_parameter(i, Type::u(32));
-    hb.push_instruction(OpCode::Cmp {
+    hb.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: cond,
         lhs: i,
@@ -2182,21 +2182,21 @@ fn multi_entry_header_is_skipped() {
     hb.set_terminator(Terminator::JmpIf(cond, body, exit));
 
     let bb = f.get_block_mut(body);
-    bb.push_instruction(OpCode::BinaryArithOp {
+    bb.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Mul,
         result: inv,
         lhs: a,
         rhs: b,
     });
-    bb.push_instruction(OpCode::Rangecheck {
+    bb.push_test_instruction(OpCode::Rangecheck {
         value: inv,
         max_bits: 32,
     });
-    bb.push_instruction(add(i2, i, c1));
+    bb.push_test_instruction(add(i2, i, c1));
     bb.set_terminator(Terminator::Jmp(header, vec![i2]));
 
     let eb = f.get_block_mut(exit);
-    eb.push_instruction(OpCode::BinaryArithOp {
+    eb.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Mul,
         result: inv2,
         lhs: a,
@@ -2230,12 +2230,15 @@ fn value_available_before_the_loop_is_not_rehoisted() {
         let mut instructions = eb.take_instructions();
         instructions.insert(
             0,
-            crate::compiler::ssa::Located::without(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Mul,
-                result: pre,
-                lhs: a,
-                rhs: b,
-            }),
+            crate::compiler::ssa::Located::new(
+                OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::Mul,
+                    result: pre,
+                    lhs: a,
+                    rhs: b,
+                },
+                SourceLocation::test(),
+            ),
         );
         eb.put_instructions(instructions);
     }
@@ -2312,7 +2315,7 @@ fn sibling_recomputations(
         .set_terminator(Terminator::JmpIf(cond, x, y));
     for (block, t) in [(x, tx), (y, ty)] {
         let bb = f.get_block_mut(block);
-        bb.push_instruction(add(t, a, b));
+        bb.push_test_instruction(add(t, a, b));
         let mut rets = vec![t];
         rets.extend(extra_return);
         bb.set_terminator(Terminator::Return(rets));
@@ -2337,7 +2340,7 @@ fn diamond_partial_redundancy_joins_through_parameter() {
     };
     ssa.get_unique_entrypoint_mut()
         .get_block_mut(left)
-        .push_instruction(add(t1, a, b));
+        .push_test_instruction(add(t1, a, b));
     let (x, y, _tx, _ty) = sibling_recomputations(&mut ssa, merge, c, a, b, None);
 
     join_insert(&mut ssa);
@@ -2374,9 +2377,9 @@ fn instruction_neutral_diamond_is_refused() {
     let (mut ssa, a, b, left, right, merge) = diamond();
     let (t1, t2) = (ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
-    f.get_block_mut(left).push_instruction(add(t1, a, b));
+    f.get_block_mut(left).push_test_instruction(add(t1, a, b));
     let mb = f.get_block_mut(merge);
-    mb.push_instruction(add(t2, a, b));
+    mb.push_test_instruction(add(t2, a, b));
     mb.set_terminator(Terminator::Return(vec![t2]));
 
     join_insert(&mut ssa);
@@ -2394,10 +2397,10 @@ fn cross_branch_full_availability_joins_without_copies() {
     let (mut ssa, a, b, left, right, merge) = diamond();
     let (t1, t2, t3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
-    f.get_block_mut(left).push_instruction(add(t1, a, b));
-    f.get_block_mut(right).push_instruction(add(t2, a, b));
+    f.get_block_mut(left).push_test_instruction(add(t1, a, b));
+    f.get_block_mut(right).push_test_instruction(add(t2, a, b));
     let mb = f.get_block_mut(merge);
-    mb.push_instruction(add(t3, a, b));
+    mb.push_test_instruction(add(t3, a, b));
     mb.set_terminator(Terminator::Return(vec![t3]));
 
     join_insert(&mut ssa);
@@ -2426,7 +2429,7 @@ fn key_available_on_no_edge_is_refused() {
     let t = ssa.fresh_value();
     let f = ssa.get_unique_entrypoint_mut();
     let mb = f.get_block_mut(merge);
-    mb.push_instruction(add(t, a, b));
+    mb.push_test_instruction(add(t, a, b));
     mb.set_terminator(Terminator::Return(vec![t]));
 
     join_insert(&mut ssa);
@@ -2461,8 +2464,8 @@ fn merge_without_dominated_occurrence_is_refused() {
     f.get_block_mut(pre)
         .set_terminator(Terminator::JmpIf(c, left, right));
     let lb = f.get_block_mut(left);
-    lb.push_instruction(add(t1, a, b));
-    lb.push_instruction(OpCode::Rangecheck {
+    lb.push_test_instruction(add(t1, a, b));
+    lb.push_test_instruction(OpCode::Rangecheck {
         value: t1,
         max_bits: 32,
     });
@@ -2474,7 +2477,7 @@ fn merge_without_dominated_occurrence_is_refused() {
     f.get_block_mut(w)
         .set_terminator(Terminator::Jmp(x, vec![]));
     let xb = f.get_block_mut(x);
-    xb.push_instruction(add(t2, a, b));
+    xb.push_test_instruction(add(t2, a, b));
     xb.set_terminator(Terminator::Return(vec![t2]));
 
     join_insert(&mut ssa);
@@ -2505,7 +2508,7 @@ fn branching_predecessor_edge_is_split_to_carry_the_argument() {
     entry.push_parameter(c, Type::u(1));
     entry.set_terminator(Terminator::JmpIf(c, p1, p2));
     let p1b = f.get_block_mut(p1);
-    p1b.push_instruction(add(t1, a, b));
+    p1b.push_test_instruction(add(t1, a, b));
     p1b.set_terminator(Terminator::Jmp(m, vec![]));
     f.get_block_mut(p2)
         .set_terminator(Terminator::JmpIf(c, m, z));
@@ -2558,7 +2561,7 @@ fn both_arms_predecessor_hosts_one_copy_and_two_arguments() {
     entry.push_parameter(c, Type::u(1));
     entry.set_terminator(Terminator::JmpIf(c, left, bi));
     let lb = f.get_block_mut(left);
-    lb.push_instruction(add(t1, a, b));
+    lb.push_test_instruction(add(t1, a, b));
     lb.set_terminator(Terminator::Jmp(m, vec![]));
     // The degenerate branch: both arms enter the merge, two distinct edges from one predecessor.
     f.get_block_mut(bi)
@@ -2618,7 +2621,7 @@ fn merge_with_unreachable_predecessor_is_refused() {
             .unwrap()
     };
     let f = ssa.get_unique_entrypoint_mut();
-    f.get_block_mut(left).push_instruction(add(t1, a, b));
+    f.get_block_mut(left).push_test_instruction(add(t1, a, b));
     // A block no path reaches, jumping into the merge.
     let dead = f.add_block();
     f.get_block_mut(dead)
@@ -2664,7 +2667,7 @@ fn existing_parameters_and_arguments_stay_aligned() {
     entry.push_parameter(c, Type::u(1));
     entry.set_terminator(Terminator::JmpIf(c, left, right));
     let lb = f.get_block_mut(left);
-    lb.push_instruction(add(t1, a, b));
+    lb.push_test_instruction(add(t1, a, b));
     lb.set_terminator(Terminator::Jmp(m, vec![a]));
     f.get_block_mut(right)
         .set_terminator(Terminator::Jmp(m, vec![b]));
@@ -2718,7 +2721,7 @@ fn multi_entry_loop_header_joins_with_self_carrying_back_edge() {
     entry.push_parameter(c, Type::u(1));
     entry.set_terminator(Terminator::JmpIf(c, e1, e2));
     let e1b = f.get_block_mut(e1);
-    e1b.push_instruction(add(t1, a, b));
+    e1b.push_test_instruction(add(t1, a, b));
     e1b.set_terminator(Terminator::Jmp(h, vec![]));
     f.get_block_mut(e2)
         .set_terminator(Terminator::Jmp(h, vec![]));
@@ -2726,14 +2729,14 @@ fn multi_entry_loop_header_joins_with_self_carrying_back_edge() {
         .set_terminator(Terminator::JmpIf(c, body, exit));
     // Sibling occurrences below the header: per-iteration in the body, and on the exit path.
     let bb = f.get_block_mut(body);
-    bb.push_instruction(add(tb, a, b));
-    bb.push_instruction(OpCode::Rangecheck {
+    bb.push_test_instruction(add(tb, a, b));
+    bb.push_test_instruction(OpCode::Rangecheck {
         value: tb,
         max_bits: 32,
     });
     bb.set_terminator(Terminator::Jmp(h, vec![]));
     let eb = f.get_block_mut(exit);
-    eb.push_instruction(add(te, a, b));
+    eb.push_test_instruction(add(te, a, b));
     eb.set_terminator(Terminator::Return(vec![te]));
 
     join_insert(&mut ssa);
@@ -2778,7 +2781,7 @@ fn join_insertion_requires_the_join_insert_level() {
     };
     ssa.get_unique_entrypoint_mut()
         .get_block_mut(left)
-        .push_instruction(add(t1, a, b));
+        .push_test_instruction(add(t1, a, b));
     let (x, y, tx, ty) = sibling_recomputations(&mut ssa, merge, c, a, b, None);
 
     hoist(&mut ssa);
@@ -2867,7 +2870,7 @@ fn wrapping_integer_invariant_is_not_speculated() {
     let hb = f.get_block_mut(header);
     hb.push_parameter(i, Type::u(32));
     hb.push_parameter(s, Type::u(32));
-    hb.push_instruction(OpCode::Cmp {
+    hb.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: cond,
         lhs: i,
@@ -2877,8 +2880,8 @@ fn wrapping_integer_invariant_is_not_speculated() {
 
     // The invariant wrapping sum, kept live as a loop-carried argument.
     let bb = f.get_block_mut(body);
-    bb.push_instruction(add(u, a, b));
-    bb.push_instruction(add(i2, i, c1));
+    bb.push_test_instruction(add(u, a, b));
+    bb.push_test_instruction(add(i2, i, c1));
     bb.set_terminator(Terminator::Jmp(header, vec![i2, u]));
 
     f.get_block_mut(exit)
@@ -2920,7 +2923,7 @@ fn guarded_division_is_speculated_where_the_fact_holds() {
     let entry = f.get_entry_mut();
     entry.push_parameter(x, Type::u(32));
     entry.push_parameter(d, Type::u(32));
-    entry.push_instruction(OpCode::Cmp {
+    entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: eq,
         lhs: d,
@@ -2936,7 +2939,7 @@ fn guarded_division_is_speculated_where_the_fact_holds() {
     let hb = f.get_block_mut(header);
     hb.push_parameter(i, Type::u(32));
     hb.push_parameter(acc, Type::u(32));
-    hb.push_instruction(OpCode::Cmp {
+    hb.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: cond,
         lhs: i,
@@ -2945,13 +2948,13 @@ fn guarded_division_is_speculated_where_the_fact_holds() {
     hb.set_terminator(Terminator::JmpIf(cond, body, exit));
 
     let bb = f.get_block_mut(body);
-    bb.push_instruction(OpCode::BinaryArithOp {
+    bb.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Div,
         result: q,
         lhs: x,
         rhs: d,
     });
-    bb.push_instruction(add(i2, i, c1));
+    bb.push_test_instruction(add(i2, i, c1));
     bb.set_terminator(Terminator::Jmp(header, vec![i2, q]));
 
     f.get_block_mut(exit)
@@ -3008,7 +3011,7 @@ fn unguarded_division_is_not_speculated() {
     let hb = f.get_block_mut(header);
     hb.push_parameter(i, Type::u(32));
     hb.push_parameter(acc, Type::u(32));
-    hb.push_instruction(OpCode::Cmp {
+    hb.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: cond,
         lhs: i,
@@ -3017,13 +3020,13 @@ fn unguarded_division_is_not_speculated() {
     hb.set_terminator(Terminator::JmpIf(cond, body, exit));
 
     let bb = f.get_block_mut(body);
-    bb.push_instruction(OpCode::BinaryArithOp {
+    bb.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Div,
         result: q,
         lhs: x,
         rhs: d,
     });
-    bb.push_instruction(add(i2, i, c1));
+    bb.push_test_instruction(add(i2, i, c1));
     bb.set_terminator(Terminator::Jmp(header, vec![i2, q]));
 
     f.get_block_mut(exit)
@@ -3103,7 +3106,7 @@ fn hoisted_copy_carries_the_template_source_location() {
 
     let hb = f.get_block_mut(header);
     hb.push_parameter(i, Type::u(32));
-    hb.push_instruction(OpCode::Cmp {
+    hb.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: cond,
         lhs: i,
@@ -3113,7 +3116,7 @@ fn hoisted_copy_carries_the_template_source_location() {
 
     let bb = f.get_block_mut(body);
     bb.push_instruction_with_source_location(mul(inv, a, b), test_location());
-    bb.push_instruction(add(i2, i, c1));
+    bb.push_test_instruction(add(i2, i, c1));
     bb.set_terminator(Terminator::Jmp(header, vec![i2]));
 
     let eb = f.get_block_mut(exit);
@@ -3128,7 +3131,7 @@ fn hoisted_copy_carries_the_template_source_location() {
         .get_instructions_with_source_locations()
         .collect();
     assert_eq!(hoisted.len(), 1);
-    assert_eq!(hoisted[0].1, Some(&test_location()));
+    assert_eq!(hoisted[0].1, &test_location());
 }
 
 /// A join copy materialized on a leaderless edge carries its template's source location. The
@@ -3167,5 +3170,5 @@ fn join_copy_carries_the_template_source_location() {
         .get_instructions_with_source_locations()
         .collect();
     assert_eq!(copies.len(), 1);
-    assert_eq!(copies[0].1, Some(&test_location()));
+    assert_eq!(copies[0].1, &test_location());
 }

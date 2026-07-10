@@ -152,7 +152,7 @@ use crate::{
             shared::value_replacements::{ReplaceScope, ValueReplacements},
         },
         ssa::{
-            BlockId, FunctionId, Instruction, Located, Location, Terminator, ValueId,
+            BlockId, FunctionId, Instruction, Located, SourceLocation, Terminator, ValueId,
             hlssa::{HLFunction, HLSSA, OpCode, Type},
         },
     },
@@ -286,7 +286,7 @@ struct Occurrence {
 
     /// The original instruction's source location, carried onto every materialized copy so a
     /// moved evaluation still attributes its traps.
-    location: Location,
+    location: SourceLocation,
 }
 
 impl Occurrence {
@@ -536,7 +536,7 @@ impl FunctionMotionState {
                     order,
                     result,
                     template: instruction.clone(),
-                    location: location.cloned(),
+                    location: location.clone(),
                 });
                 order += 1;
                 state.gen_keys.entry(block_id).or_default().insert(node);

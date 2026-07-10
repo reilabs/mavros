@@ -2,6 +2,7 @@ use super::*;
 use crate::compiler::{
     Field,
     analysis::click_cooper::test::run_in_test,
+    ssa::SourcePosition,
     ssa::hlssa::{BinaryArithOpKind, CastTarget, CmpKind, Constant, SequenceTargetType, Type},
 };
 
@@ -2279,6 +2280,11 @@ fn anticipated_witnessed_cmp_fold_redirects_use_via_hoisted_cast() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let c_true = ssa.add_const(Constant::U(1, 1));
     let (a, b, ww) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let cmp_location = SourceLocation::new(
+        "src/main.nr",
+        SourcePosition::new(7, 9),
+        SourcePosition::new(7, 15),
+    );
 
     let f = ssa.get_unique_entrypoint_mut();
     f.get_entry_mut()
@@ -2289,12 +2295,15 @@ fn anticipated_witnessed_cmp_fold_redirects_use_via_hoisted_cast() {
 
     // A witness operand makes the result `WitnessOf(u1)`; the assert comes _after_, so only
     // the anticipated ("bound to run") direction proves the fold.
-    entry.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Eq,
-        result: ww,
-        lhs: a,
-        rhs: b,
-    });
+    entry.push_instruction_with_source_location(
+        OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: ww,
+            lhs: a,
+            rhs: b,
+        },
+        cmp_location.clone(),
+    );
     entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
@@ -2315,18 +2324,22 @@ fn anticipated_witnessed_cmp_fold_redirects_use_via_hoisted_cast() {
         "the folded witnessed comparison must be kept"
     );
     // A fresh `cast true to WitnessOf` was hoisted into the entry block...
-    let cast_result = entry
-        .get_instructions()
-        .find_map(|i| match i {
+    let (cast_result, cast_location) = entry
+        .get_instructions_with_source_locations()
+        .find_map(|(i, location)| match i {
             OpCode::Cast {
                 result,
                 value,
                 target: CastTarget::WitnessOf,
-            } if *value == c_true => Some(*result),
+            } if *value == c_true => Some((*result, location)),
             _ => None,
         })
         .expect("a witness cast of `true` should be hoisted into the entry block");
     assert_ne!(cast_result, ww, "the recast must not redefine the kept Cmp");
+    assert_eq!(
+        cast_location, &cmp_location,
+        "the hoisted elaboration must retain the original comparison's source location"
+    );
     // ...and the pure use is redirected to it.
     assert!(matches!(
         entry.get_terminator(),
