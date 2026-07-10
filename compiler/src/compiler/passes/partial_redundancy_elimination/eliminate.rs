@@ -23,13 +23,6 @@
 //! or in a dominating block) — no code moves in this sweep. Side-effecting assertions (`Rangecheck`,
 //! and `Lookup` when configured) are deduplicated by _dropping_ a dominated duplicate, never
 //! redirected. Redirected definitions are left in place for the pass's integrated DCE.
-//!
-//! Deliberately _not_ deduplicated in this stage, matching the CSE it replaces: aggregate
-//! constructors (`MkSeq`/`MkRepeated`/`MkSeqOfBlob`/`ArraySet`/`SlicePush`/`SliceLen`), calls
-//! (including congruent deterministic call results), pinned `WriteWitness`/`FreshWitness`,
-//! dynamic `ToRadix`, and `Guard`-wrapped ops (opaque). Block parameters are never redirected (that
-//! is `TrivialPhiElimination`/`DeduplicatePhis` territory), though they do serve as redirect
-//! _targets_ through their classes.
 
 use crate::{
     collections::{HashMap, HashSet},
@@ -53,7 +46,9 @@ use crate::{
 /// Run the elimination sweep over one function.
 ///
 /// Returns the canonical key of every keyed instruction result — the value-equivalence map the
-/// motion stages plan against (two values with one key compute equal values in every run).
+/// motion stages plan against (two values with one key compute equal values whenever both are
+/// bound; the motion stage's binding-stability gate is what upgrades that to per-invocation
+/// equality — see `insert.rs`'s key-equality lemma).
 pub(crate) fn eliminate_function(
     function: &mut HLFunction,
     cc: &ClickCooper,
@@ -362,7 +357,7 @@ impl Eliminator<'_> {
             }
             // Everything else is never keyed: pinned witness writes and `FreshWitness`
             // (nondeterministic advice), memory and calls, constraint emitters, aggregate
-            // constructors (deferred), `Guard` wrappers (opaque), non-dedup lookups.
+            // constructors, `Guard` wrappers (opaque), non-dedup lookups.
             _ => {}
         }
     }
@@ -613,9 +608,9 @@ enum LookupKey {
 /// The instruction results channel 1 redirects to their class leaders: the pure scalar shapes
 /// plus `ArrayGet`.
 ///
-/// Aggregate constructors and call results are deliberately excluded in this stage. The motion
-/// stage's candidate filter ([`super::insert`]) is derived from this predicate so the two op sets
-/// cannot drift.
+/// Aggregate constructors and call results are deliberately excluded. The motion stage's
+/// candidate filter ([`super::insert`]) is derived from this predicate so the two op sets cannot
+/// drift.
 pub(super) fn leader_redirect_candidate(instruction: &OpCode) -> Option<ValueId> {
     match instruction {
         OpCode::BinaryArithOp { result, .. }

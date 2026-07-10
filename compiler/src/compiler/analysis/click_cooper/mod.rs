@@ -230,15 +230,15 @@ use crate::{
         analysis::{
             click_cooper::{
                 conditional::ConditionalFacts,
-                def_order::DefOrder,
                 lattice::Constness,
                 solver::{FunctionFacts, solve_with_writeback},
                 stability::{BlockReach, CyclicBlocks, static_edge_count},
                 summary::{
-                    compute_determinism, compute_summaries, compute_sym_summaries, specialize,
+                    DetSummaries, compute_determinism, compute_summaries, compute_sym_summaries,
+                    det_return, specialize,
                 },
             },
-            flow_analysis::FlowAnalysis,
+            flow_analysis::{CFG, FlowAnalysis},
             shared::call_string::Context,
             types::TypeInfo,
         },
@@ -261,6 +261,15 @@ pub(crate) use self::lattice::bool_constant;
 /// primitive behind invariance rule 2 (a value defined outside every cycle is bound at most once
 /// per run).
 pub(crate) use self::stability::CyclicBlocks as StaticCyclicBlocks;
+
+/// The dominance-consistent definition order, re-exported (with [`ValueStability`]) for consumers
+/// that need to rebuild the value invariance closure over their own view of a function via
+/// [`ClickCooper::value_stability`].
+pub(crate) use self::def_order::DefOrder;
+
+/// The per-value invariance closure, re-exported for the consumers of
+/// [`ClickCooper::value_stability`].
+pub(crate) use self::stability::ValueStability;
 
 // CLICK COOPER ANALYSIS
 // ================================================================================================
@@ -289,6 +298,10 @@ pub struct ClickCooper {
     ///
     /// Disjoint from `contexts`, exactly as `conditional` is from `functions`.
     conditional_contexts: HashMap<(FunctionId, Context), ConditionalFacts>,
+
+    /// Per-`(callee, return)` determinism summaries, retained so consumers can rebuild the
+    /// invariance closure.
+    det: DetSummaries,
 }
 
 impl Analysis for ClickCooper {
@@ -438,6 +451,7 @@ impl ClickCooper {
             contexts,
             conditional,
             conditional_contexts,
+            det,
         }
     }
 }
@@ -495,6 +509,47 @@ impl ClickCooper {
     /// excluded.
     pub fn const_of(&self, f: FunctionId, v: ValueId) -> Option<Arc<Constant>> {
         Self::const_in_facts(&self.consts, self.facts(f), v)
+    }
+
+    /// The per-value invariance closure ([`ValueStability`]) of `f`, built over the caller's view
+    /// of the function, or `None` if `f` was not analyzed.
+    ///
+    /// This mirrors the intraprocedural conditional build, pointwise conservatively: rule 3's
+    /// det-call form reads the same determinism summaries and rule 4 the same intraprocedural
+    /// congruence partition, but rule 1 reads this analysis's *surfaced* constant view
+    /// ([`Self::const_in_facts`], whose lattice arm is gated on `is_scalar`) rather than the
+    /// build's un-gated `const_of` — an aggregate lattice constant is not rule-1 stable here,
+    /// though rule 3 (aggregate constructors are pure ops) and rule 4 (lattice-seeded const
+    /// classes) recover most of that residue. The cyclicity view is the static CFG (the
+    /// conditional builds may use the sharper executable subgraph; static cycles are a superset).
+    /// Both divergences only refuse more, so this view is sound wherever theirs is.
+    ///
+    /// `function` may be a *semantics-preserving rewrite* of the function this analysis ran on —
+    /// the PRE consumer passes its post-elimination view, where congruent uses were substituted
+    /// (instruction operands and terminator arguments alike) and dominated duplicate asserts
+    /// dropped. That is sound here because such rewrites change no terminator *targets* and move
+    /// no definition across blocks nor reorder any within one (a dropped assert defines nothing):
+    /// `cyclic`/`order` computed on the rewritten function agree with the analyzed one, every
+    /// stability rule ranges over definitions, and argument substitution never adds arguments, so
+    /// the entry-edge invariant rule 2 rests on survives.
+    pub(crate) fn value_stability<'a>(
+        &'a self,
+        f: FunctionId,
+        function: &HLFunction,
+        cfg: &CFG,
+        cyclic: &StaticCyclicBlocks,
+        order: &'a DefOrder<'a>,
+    ) -> Option<ValueStability<'a>> {
+        let facts = self.facts(f)?;
+        Some(ValueStability::compute(
+            function,
+            cfg,
+            cyclic,
+            order,
+            &facts.congruence,
+            |v| Self::const_in_facts(&self.consts, Some(facts), v).is_some(),
+            |g, j| det_return(&self.det, g, j),
+        ))
     }
 
     /// `true` if `bid` reachable in `f`.

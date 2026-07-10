@@ -1,0 +1,6 @@
+[package]
+name = "pre_nested_loop_hoist"
+type = "bin"
+authors = [""]
+
+[dependencies]
