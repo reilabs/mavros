@@ -47,6 +47,7 @@
 | noir_tests/pre_cross_branch_join | ✅ | ✅ | 55 | 101 | 12408 | 202359 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/pre_guarded_div_hoist | ✅ | ✅ | 34 | 61 | 13248 | 200462 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/pre_licm_speculation | ✅ | ✅ | 2 | 4 | 4008 | 187984 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/pre_nested_loop_hoist | ✅ | ✅ | 21 | 23 | 5584 | 190225 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/recursion | ✅ | ✅ | 5 | 9 | 12664 | 194168 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/ref_param_witness_store | ✅ | ✅ | 2 | 3 | 3464 | 186621 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/ref_return_alias | ✅ | ✅ | 1 | 2 | 3064 | 186422 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
