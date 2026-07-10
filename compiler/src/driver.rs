@@ -28,7 +28,6 @@ use crate::{
             llssa_to_llvm::WasmCompileOpts,
         },
         pass_manager::PassManager,
-        purify_witness_slices::PurifyWitnessSlices,
         passes::{
             arg_promotion::ArgPromotion,
             array_boundary_expansion::ArrayBoundaryExpansion,
@@ -59,6 +58,7 @@ use crate::{
             witness_write_to_fresh::WitnessWriteToFresh,
             witness_write_to_void::WitnessWriteToVoid,
         },
+        purify_witness_slices::PurifyWitnessSlices,
         ssa::{
             DefaultSSAAnnotator,
             hlssa::{Constant, HLSSA},
@@ -327,10 +327,27 @@ impl Driver {
             ssa.to_string(&witness_inference),
         );
 
-        let ssa = PurifyWitnessSlices::new().run(ssa, &witness_inference);
+        let (mut ssa, purified) = PurifyWitnessSlices::new().run(ssa, &witness_inference);
 
         let mut untaint_cf = UntaintControlFlow::new();
-        self.monomorphized_ssa = Some(untaint_cf.run(ssa, &witness_inference));
+        self.monomorphized_ssa = Some(if purified {
+            PassManager::new(
+                "elide_tuples_from_slice_substitution".to_string(),
+                self.draw_cfg,
+                vec![
+                    Box::new(ElideTuples::new()),
+                    Box::new(RemoveUnreachableFunctions::new()),
+                ],
+            )
+            .run(&mut ssa);
+
+            let flow_analysis = FlowAnalysis::run(&ssa);
+            let mut witness_inference = WitnessTaintInference::new();
+            witness_inference.run(&mut ssa, &flow_analysis);
+            untaint_cf.run(ssa, &witness_inference)
+        } else {
+            untaint_cf.run(ssa, &witness_inference)
+        });
 
         self.write_debug_text(
             self.get_debug_output_dir().join("untainted_ssa.txt"),
@@ -378,6 +395,7 @@ impl Driver {
                 Box::new(SimplifyAsserts::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(InstructionLowering::witness_array_access()),
+                Box::new(InstructionLowering::slice_select()),
                 Box::new(InstructionLowering::witness_integer_ops()),
                 // After the last pre-spilling lowering, run cleanup twice
                 // back-to-back. The first round exposes folds/dedup opportunities

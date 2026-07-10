@@ -2,6 +2,7 @@ mod bit_range;
 mod degree_spilling;
 mod pure_guards;
 mod side_effect_free_guards;
+mod slice_select;
 mod witness_array;
 mod witness_assert;
 mod witness_bitwise;
@@ -27,10 +28,11 @@ use crate::compiler::{
 use self::{
     bit_range::LowerBitRangeOps, degree_spilling::LowerDegreeSpillingOps,
     pure_guards::LowerPureGuards, side_effect_free_guards::LowerSideEffectFreeGuards,
-    witness_array::LowerWitnessArrayOps, witness_assert::LowerWitnessAssertOps,
-    witness_bitwise::LowerWitnessBitwiseOps, witness_compare::LowerWitnessCompareOps,
-    witness_field::LowerWitnessFieldOps, witness_integer_arith::LowerWitnessIntegerArithOps,
-    witness_memory::LowerWitnessMemoryOps, witness_spread::LowerWitnessSpreadOps,
+    slice_select::LowerSliceSelect, witness_array::LowerWitnessArrayOps,
+    witness_assert::LowerWitnessAssertOps, witness_bitwise::LowerWitnessBitwiseOps,
+    witness_compare::LowerWitnessCompareOps, witness_field::LowerWitnessFieldOps,
+    witness_integer_arith::LowerWitnessIntegerArithOps, witness_memory::LowerWitnessMemoryOps,
+    witness_spread::LowerWitnessSpreadOps,
 };
 
 const ITERATION_LIMIT: usize = 32;
@@ -89,6 +91,14 @@ impl InstructionLowering {
                 Box::new(LowerWitnessFieldOps::new()),
             ],
             true,
+        )
+    }
+
+    pub fn slice_select() -> Self {
+        Self::with_lowerers(
+            "instruction_lowering_slice_select",
+            vec![Box::new(LowerSliceSelect::new())],
+            false,
         )
     }
 

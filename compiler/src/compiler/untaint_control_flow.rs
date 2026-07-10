@@ -1113,7 +1113,18 @@ fn emit_merge_select(
             result
         }
         TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
-        TypeExpr::Slice { .. } => panic!("Witness select on Slice type not supported"),
+        TypeExpr::Slice { .. } => {
+            let lhs = emit_value_conversion(lhs, lhs_type, result_type, builder);
+            let rhs = emit_value_conversion(rhs, rhs_type, result_type, builder);
+            let result = result.unwrap_or_else(|| builder.fresh_value());
+            builder.push(OpCode::Select {
+                result,
+                cond,
+                if_t: lhs,
+                if_f: rhs,
+            });
+            result
+        }
         TypeExpr::Function => panic!("Witness select on Function type not supported"),
         TypeExpr::Blob(..) => panic!("Witness select on Blob type not supported"),
     }
@@ -1159,14 +1170,9 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
                 base
             }
         }
-        (TypeExpr::Slice { elem: inner, .. }, WitnessShape::Array(top, inner_wt)) => {
+        (TypeExpr::Slice { elem: inner, .. }, WitnessShape::Array(_top, inner_wt)) => {
             let elem_base = apply_witness_type(*inner, inner_wt.as_ref());
-            let len = if top.is_witness() {
-                Type::witness_of(Type::u(32))
-            } else {
-                Type::u(32)
-            };
-            elem_base.slice_of_with_len(len)
+            elem_base.slice_of_with_len(Type::u(32))
         }
         (TypeExpr::Ref(inner), WitnessShape::Ref(top, inner_wt)) => {
             let base = apply_witness_type(*inner, inner_wt.as_ref()).ref_of();

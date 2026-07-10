@@ -523,6 +523,12 @@ fn specialize_contexts(
         for cc in result.calls.values() {
             if !ctx_clone.contains_key(cc) {
                 let (cid, remap) = ssa.duplicate_function_with_remap(cc.fid);
+                if Some(cc.fid) == ssa.get_globals_init_fn() {
+                    ssa.set_globals_init_fn(cid);
+                }
+                if Some(cc.fid) == ssa.get_globals_deinit_fn() {
+                    ssa.set_globals_deinit_fn(cid);
+                }
                 ctx_clone.insert(cc.clone(), (cid, remap));
                 worklist.push_back(cc.clone());
             }

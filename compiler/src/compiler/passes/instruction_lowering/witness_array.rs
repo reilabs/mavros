@@ -12,7 +12,7 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            CastTarget, OpCode, Type, TypeExpr,
+            CastTarget, OpCode, SequenceTargetType, SliceOpDir, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -78,19 +78,16 @@ impl LowerWitnessArrayOps {
                 index: idx,
                 value,
             } => {
-                if guard.is_some() {
-                    panic!(
-                        "ArraySet inside Guard not supported yet: {:?}",
-                        OpCode::ArraySet {
-                            result: *result,
-                            array: *arr,
-                            index: *idx,
-                            value: *value,
-                        }
-                    );
-                }
                 if self.has_witness_index(function_type_info, *arr, *idx) {
-                    self.gen_witness_array_set(b, function_type_info, *arr, *idx, *value, *result);
+                    self.gen_witness_array_set(
+                        b,
+                        function_type_info,
+                        *arr,
+                        *idx,
+                        *value,
+                        *result,
+                        guard,
+                    );
                     true
                 } else {
                     false
@@ -201,9 +198,9 @@ impl LowerWitnessArrayOps {
         idx: ValueId,
         value: ValueId,
         result: ValueId,
+        guard: Option<ValueId>,
     ) {
-        let result_type = function_type_info.get_value_type(result);
-        let length = array_len(result_type, "ArraySet result");
+        let result_type = function_type_info.get_value_type(result).clone();
         let result_elem_type = result_type.get_array_element();
         let result_elem_back_cast = match &result_elem_type.strip_witness().expr {
             TypeExpr::Field => None,
@@ -219,26 +216,52 @@ impl LowerWitnessArrayOps {
         let value_field = b.ensure_field(value, value_type);
         let idx_bits = uint_bits(function_type_info.get_value_type(idx), "ArraySet index");
 
-        let updated_array = b.build_array_loop(length, result_elem_type.clone(), |b, i| {
+        let elem_at = |b: &mut HLBlockEmitter<'_>, i: ValueId| -> ValueId {
             let cmp_index = if idx_bits == 32 {
                 i
             } else {
                 b.cast_to(CastTarget::U(idx_bits), i)
             };
-            let eq = b.eq(idx, cmp_index);
+            let hit = b.eq(idx, cmp_index);
+            let write = match guard {
+                Some(g) => b.and(g, hit),
+                None => hit,
+            };
             let arr_i = b.array_get(arr, i);
             let arr_i_field = b.cast_to_field(arr_i);
-
-            let new_i_field = b.select(eq, value_field, arr_i_field);
-            if let Some(target) = result_elem_back_cast {
-                b.cast_to(target, new_i_field)
-            } else {
-                new_i_field
+            let new_i_field = b.select(write, value_field, arr_i_field);
+            match result_elem_back_cast {
+                Some(target) => b.cast_to(target, new_i_field),
+                None => new_i_field,
             }
-        });
+        };
+
+        let updated = if result_type.is_slice() {
+            let slice_len = b.slice_len(arr); // Will fold to const
+            let zero = b.u_const(32, 0);
+            let one = b.u_const(32, 1);
+            let empty = b.mk_seq(vec![], SequenceTargetType::Slice, result_elem_type.clone());
+            let results = b.build_loop(
+                vec![(zero, Type::u(32)), (empty, result_type.clone())],
+                |hb, params| hb.lt(params[0], slice_len),
+                |bb, params| {
+                    let i = params[0];
+                    let acc = params[1];
+                    let elem = elem_at(bb, i);
+                    let acc2 = bb.slice_push(acc, vec![elem], SliceOpDir::Back);
+                    let i = bb.add(i, one);
+                    vec![i, acc2]
+                },
+            );
+            results[1]
+        } else {
+            let length = array_len(&result_type, "ArraySet result");
+            b.build_array_loop(length, result_elem_type.clone(), |b, i| elem_at(b, i))
+        };
+
         b.emit(OpCode::Cast {
             result,
-            value: updated_array,
+            value: updated,
             target: CastTarget::Nop,
         });
     }

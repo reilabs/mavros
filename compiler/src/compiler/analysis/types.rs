@@ -438,11 +438,14 @@ impl Types {
                 let alt_type = then_type.get_arithmetic_result_type(otherwise_type);
                 // If cond is WitnessOf and alternatives are not already WitnessOf,
                 // the result is WitnessOf(alt_type). Otherwise result = alt_type.
-                let result_type = if cond_type.is_witness_of() && !alt_type.is_witness_of() {
-                    Type::witness_of(alt_type)
-                } else {
-                    alt_type
-                };
+                // Exception: a slice select keeps its type as it was purified in a previous pass
+                let is_slice = matches!(alt_type.expr, TypeExpr::Slice { .. });
+                let result_type =
+                    if cond_type.is_witness_of() && !alt_type.is_witness_of() && !is_slice {
+                        Type::witness_of(alt_type)
+                    } else {
+                        alt_type
+                    };
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }

@@ -491,6 +491,7 @@ impl Type {
             (TypeExpr::Field, _) | (_, TypeExpr::Field) => Type::field(),
             (TypeExpr::U(size1), TypeExpr::U(size2)) => Type::u(*size1.max(size2)),
             (TypeExpr::I(size1), TypeExpr::I(size2)) => Type::i(*size1.max(size2)),
+            (TypeExpr::Slice { .. }, TypeExpr::Slice { .. }) if self == other => self.clone(),
             _ => panic!("Cannot perform arithmetic on types {} and {}", self, other),
         }
     }
