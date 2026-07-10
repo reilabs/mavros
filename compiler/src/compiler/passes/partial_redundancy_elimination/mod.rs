@@ -23,10 +23,11 @@
 //!   motion has already minted.
 //! - **Down-safety** is a backward anticipability fixpoint, intersecting at `JmpIf` and taken as
 //!   a greatest fixpoint so anticipation is seen through loop cycles. Phi-translation is avoided
-//!   rather than performed: only binding-stable expressions (operands defined outside every CFG
-//!   cycle) participate in motion, so a key names the same values at every program point. Placement
-//!   at a down-safe point needs no totality gate: the op was bound to run, so a trap merely fires
-//!   earlier on a run already doomed to reject (the accept/reject model).
+//!   rather than performed: only binding-stable expressions (operands single-valued per invocation,
+//!   per the Click–Cooper invariance closure — see `insert.rs`'s module doc) participate in motion,
+//!   so a key names the same values at every program point. Placement at a down-safe point needs no
+//!   totality gate: the op was bound to run, so a trap merely fires earlier on a run already doomed
+//!   to reject (the accept/reject model).
 //! - **Insertion** clones a template occurrence into the predecessors where a class is unavailable,
 //!   splitting `JmpIf` edges lazily ([`edge_split`]) and joining the copies through a fresh block
 //!   parameter.
@@ -44,6 +45,66 @@
 //! The kinds of code motion that the pass can perform is gated by the provided [`MotionLevel`] in
 //! the pass' configuration. These levels encompass a basic elimination sweep, loop invariant
 //! floating in down-safe contexts, general join insertion, and totality-gated speculative hoisting.
+//!
+//! # Deferred Improvements
+//!
+//! Improvements deliberately left for later. Each is either gated on machinery that does not exist
+//! yet or expected/measured to yield little on the current circuit corpus.
+//!
+//! - **One-Level Phi-Translation at Joins (classic GVN-PRE):** An expression over an acyclic
+//!   merge's own parameters is already collected (the parameter is stable) and anticipated; only
+//!   *placement* refuses it, because no occurrence or template operand can dominate the
+//!   predecessors. The classic fix translates the key through each predecessor's jump-argument
+//!   vector: substitute the parameter's leaf with the leaf of that edge's argument (canonicalized
+//!   through the elimination sweep's interner, which is get-or-create), look up per-predecessor
+//!   leaders on the *translated* key, and materialize translated templates into the edges that do
+//!   not, whose substituted operands are in scope at the predecessor's end by construction (its
+//!   terminator reads them).
+//!
+//!   Sound because the key and each translation are individually single-valued per invocation and
+//!   φ-edge semantics equate them on that edge, so anticipation at the merge licenses the per-edge
+//!   insert. Translation through back edges must be refused (expressions grow without bound around
+//!   a loop — the classic termination hazard); the full translated-ANTIC / virtual-value-table form
+//!   of GVN-PRE stays out of scope (it duplicates the analysis's value table and needs termination
+//!   caps). Main plumbing: the motion stage must receive the interner itself — only the `node_of`
+//!   map crosses today.
+//! - **Cluster Hoisting:** A chain fully interior to a loop is stable link-by-link but each link is
+//!   placeable only after its operands are (see `insert.rs`'s module doc). Hoisting whole chains in
+//!   one run needs dependence-ordered materialization with template operands rewritten to freshly
+//!   minted carriers; it lifts the first-round-only hoist restriction (a carrier can unlock a
+//!   previously template-less key) and must query the [`totality::TotalityOracle`] and the type
+//!   info with *pristine* templates only (`get_value_type` panics on ids minted after typing). Low
+//!   expected yield: the eight pipeline sites already convert pure chains link-by-link across
+//!   sites — each site's hoist redirects the next link's operand to an acyclically defined value —
+//!   leaving only chains rooted in call results (calls never move) and chains deeper than the
+//!   remaining sites.
+//! - **Break-Even Loop Joins:** The static-cost gate refuses instruction-neutral joins even when
+//!   every drained occurrence sits at strictly greater loop depth than the planted copies — a
+//!   per-iteration win bought with a per-entry copy, including the `(1,1)` multi-entry-header
+//!   self-carry. Reclaiming them means loop-depth profitability in the join rule; the loop forest
+//!   the speculation stage introduced already supplies the depths.
+//! - **Speculative Join Insertion:** Speculation lives only in the single-entry-header hoist rule;
+//!   the join rule is down-safe at every level, so a body-only key at a *multi-entry* loop header
+//!   never moves. Closing it means porting the totality license and the strictly-smaller-loop-depth
+//!   gate to the join rule's per-edge placements.
+//! - **Aggregate Deduplication:** The elimination sweep currently excludes the aggregate operations
+//!   (`MkSeq`, `MkRepeated`, `MkSeqOfBlob`, `ArraySet`, `SlicePush`, `SliceLen`). A dedup toggle is
+//!   plausible but must be corpus-gated: aggregate rewrites have regressed witgen bytecode at scale
+//!   before.
+//! - **Witness-Typed `Div`/`Mod` and `Shl`/`Shr` Speculation:** [`totality`] hard-refuses any
+//!   witness-typed operand regardless of facts. Lifting it needs a witness-aware totality argument:
+//!   the witness gadget lowering introduces its own rejecting constraints, so the license must
+//!   reason about the lowered form, not the scalar op. This is complex.
+//! - **Seeing Through Noir's `!=` Lowering:** `if d != 0` lowers to a boolean-not through field
+//!   arithmetic (`jmp_if(cast(1 - cast(d == 0)))`) that the analysis's disequality extraction does
+//!   not see through, so idiomatic `!=` guards never produce the `known_unequal` fact the divisor
+//!   gate consumes. An analysis upgrade this pass inherits for free — bounded, though: witness
+//!   divisors are refused outright (above), and most real guards are witness-conditioned and
+//!   untainted away.
+//! - **A Pre-Untaint Site:** the pass runs only at the eight post-untaint spill sites; no value
+//!   numbering exists before `UntaintControlFlow`, so conditional facts keyed on raw value pairs
+//!   can stay invisible until a later site happens to unify the pair. A pipeline-placement question
+//!   rather than a pass feature.
 
 pub mod edge_split;
 mod eliminate;
@@ -123,6 +184,8 @@ impl PRE {
                 let oracle = totality::TotalityOracle::new(cc, ssa, fid, function_types);
                 insert::perform_code_motion(
                     ssa,
+                    cc,
+                    fid,
                     &mut function,
                     function_types,
                     cfg,

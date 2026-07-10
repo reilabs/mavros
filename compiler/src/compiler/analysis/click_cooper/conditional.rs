@@ -105,7 +105,7 @@ use crate::{
                 lattice::{Constness, bool_constant},
                 solver::FunctionFacts,
                 stability::{BlockReach, CyclicBlocks, ValueStability},
-                summary::DetSummaries,
+                summary::{DetSummaries, det_return},
             },
             flow_analysis::CFG,
             types::FunctionTypeInfo,
@@ -631,7 +631,7 @@ pub(crate) fn build(
             order,
             &facts.congruence,
             |v| const_of(v).is_some(),
-            |g, j| det.get(&g).and_then(|rets| rets.get(j)).copied() == Some(true),
+            |g, j| det_return(det, g, j),
         )
     });
     let mut stable_at = |v: ValueId, c: BlockId| -> bool {

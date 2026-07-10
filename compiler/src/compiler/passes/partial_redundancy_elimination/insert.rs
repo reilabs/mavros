@@ -15,18 +15,46 @@
 //! anticipation, which is exactly right under the accept/reject model: a run that never gets there
 //! hangs, and hang is a reject.
 //!
-//! No phi-translation is required, by construction: `GEN` admits an occurrence only when every
-//! operand's definition lies outside every CFG cycle ([`StaticCyclicBlocks`]), so each operand is
-//! bound at most once per invocation and the expression names the same values at every program
-//! point. (Canonical-key leaves are congruence classes; a class containing such an operand can only
-//! contain a rebindable block parameter through a constant class, where every incoming argument
-//! shares the class and translation is the identity). This deliberately excludes expressions over
-//! values defined in an _outer_ loop — hoisting those needs the value-stability machinery — which
-//! fail the operand checks below. Expressions over a merge's own parameters are excluded from
-//! *placement above that merge* by a different mechanism: an acyclic merge's parameter passes the
-//! stability check, but its definition can never dominate the merge's predecessors, so the
-//! template/leader dominance checks refuse the insertion (translating such an expression into a
-//! predecessor via the jump's argument vector is classic GVN-PRE phi-translation, deferred).
+//! No phi-translation is required, by construction. `GEN` admits an occurrence only when every
+//! operand is *single-valued per invocation* ([`ValueStability`]), so the expression names the same
+//! values at every program point. Loop-carried parameters, and anything computed from them,
+//! generally stay unstable and are never collected — the exceptions are a constant fold (rule 1)
+//! and a stable dominating congruent witness (rule 4), both of which restore single-valuedness.
+//!
+//! Canonical-key leaves are congruence classes; a class can contain a rebindable block parameter
+//! only when the parameter is congruent to a stable dominating member, in which case it is itself
+//! single-valued — the closure's grounded congruence tier — so translation through it is the
+//! identity function. Note that the gate supplies *invariance* only; being **bound** at an
+//! insertion point is a separate obligation, discharged by the template/leader dominance checks
+//! below.
+//!
+//! Those same checks exclude expressions over a merge's own parameters from _placement above that
+//! merge_: an acyclic merge's parameter is stable, but its definition can never dominate the
+//! merge's predecessors. A chain fully interior to a loop is likewise stable link-by-link but
+//! placeable only after its operands are. Both limits can be lifted if needed.
+//!
+//! # The Key-Equality Lemma
+//!
+//! The motion rules lean on a property strictly stronger than the leader-redirect theorem the
+//! elimination sweep needs: **two collected (binding-stable) occurrences of one canonical key
+//! compute equal values whenever both are bound, even when neither dominates the other.**
+//!
+//! A redirect target and a redirected occurrence may sit in sibling branches or bind in different
+//! loop iterations; congruence alone does not license that (two `i + 1` computations in sibling
+//! arms of one loop are congruent yet can hold different iterations' values — the stability gate
+//! is exactly what excludes such operands). The lemma rests on three legs:
+//!
+//! 1. φ nodes are labeled per block, so φs of different headers are never congruent — no cross-loop
+//!    identification exists for the gate to mis-bless.
+//! 2. Const-seeded classes contain only proven-constant members, so a class never smuggles a free
+//!    value in through a constant.
+//! 3. For congruent values over stable operands, rule-3-style induction applies: each operand is
+//!    single-valued per invocation and congruence supplies instant equality at each binding event,
+//!    so all bindings of both values coincide.
+//!
+//! A congruence widening that breaks a leg — cross-block φ numbering, a symbolic-congruence upgrade
+//! relating values across rebinding boundaries — would break motion *silently*: every dominance
+//! check below still passes. Treat this section as the tripwire when touching the partition.
 //!
 //! # Loop Hoisting
 //!
@@ -76,7 +104,11 @@
 //! the parameter alone merges the branch-local evaluations. Occurrences `M` dominates redirect to
 //! the parameter; at a loop header this includes the back edge's own leader, whose argument the
 //! final rewrite folds into the parameter itself — carrying the previous iteration's value is sound
-//! because binding-stable keys name one value per invocation.
+//! because binding-stable keys name one value per invocation. The same argument covers a
+//! materialized copy whose template operand the final rewrite redirects to a parameter of the
+//! merge being processed — possible only when `M` dominates the operand's definition, which
+//! dominates the predecessor, forcing that predecessor onto a back edge — where the copy likewise
+//! reads the previous iteration's binding.
 //!
 //! Profitability is a static-cost gate: the join must drain more live dominated occurrences than
 //! the copies it materializes, so every insertion shrinks the instruction count and the shrinkage
@@ -84,8 +116,7 @@
 //! computing arm, one recomputation) is deliberately refused — statically it trades one op for one
 //! op plus wiring, and dynamically it only converts an evaluation on the computing path into
 //! argument moves on every path. Break-even joins whose redirects sit inside a loop (a per-iter win
-//! for a per-entry copy) are sacrificed with it; reclaiming those needs the loop-depth
-//! profitability the speculation stage introduces.
+//! for a per-entry copy) are sacrificed with it (see the pass module doc's Deferred Improvements).
 //!
 //! The sweep runs to a fixpoint: a parameter planted at one merge is new availability that can
 //! unlock a merge processed earlier in the same round (dominator-preorder position does not order
@@ -100,11 +131,17 @@
 //! static-cost gate keeps every insertion tied to a strict net elimination, and the fixpoint
 //! usually covers the stragglers at their own merges, but the guarantee is per-key, not per-path;
 //! the corpus row/byte gates are the empirical backstop for the residue.
+//!
+//! [`ValueStability`]: crate::compiler::analysis::click_cooper::ValueStability
 
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
-        analysis::{click_cooper::StaticCyclicBlocks, flow_analysis::CFG, types::FunctionTypeInfo},
+        analysis::{
+            click_cooper::{ClickCooper, DefOrder, StaticCyclicBlocks},
+            flow_analysis::CFG,
+            types::FunctionTypeInfo,
+        },
         passes::{
             partial_redundancy_elimination::{
                 MotionLevel,
@@ -115,7 +152,7 @@ use crate::{
             shared::value_replacements::{ReplaceScope, ValueReplacements},
         },
         ssa::{
-            BlockId, Instruction, Located, Location, Terminator, ValueId,
+            BlockId, FunctionId, Instruction, Located, Location, Terminator, ValueId,
             hlssa::{HLFunction, HLSSA, OpCode, Type},
         },
     },
@@ -130,9 +167,12 @@ use crate::{
 ///
 /// `node_of` is the canonical-key map the elimination sweep built over this (already-rewritten)
 /// function; `ssa` is borrowed only to mint fresh value ids; `oracle` answers against the same
-/// pristine function the other analyses were computed over.
+/// pristine function the other analyses were computed over; `cc`/`fid` supply the invariance
+/// closure behind the binding-stability gate on key collection.
 pub(crate) fn perform_code_motion(
     ssa: &HLSSA,
+    cc: &ClickCooper,
+    fid: FunctionId,
     function: &mut HLFunction,
     types: &FunctionTypeInfo,
     cfg: &CFG,
@@ -140,7 +180,25 @@ pub(crate) fn perform_code_motion(
     motion: MotionLevel,
     oracle: &TotalityOracle,
 ) {
-    let state = FunctionMotionState::collect(function, cfg, node_of);
+    // No keyed results means no occurrences to move; skip the stability machinery outright.
+    if node_of.is_empty() {
+        return;
+    }
+
+    // The binding-stability query (module doc): [`ValueStability`] when the analysis covered this
+    // function, else a conservative sub-predicate of the closure — rule 2 alone (definition outside
+    // every cycle), with constants routed through `DefOrder`'s entry fallback. Built over the
+    // post-elimination view of the function, which is sound because elimination moves no definition
+    // sites and changes no terminator targets (see [`ClickCooper::value_stability`]); nothing here
+    // borrows `function` past collection.
+    let cyclic = StaticCyclicBlocks::new(function);
+    let order = DefOrder::new(function, cfg);
+    let mut stability = cc.value_stability(fid, function, cfg, &cyclic, &order);
+    let mut stable = |v: ValueId| match stability.as_mut() {
+        Some(s) => s.is_stable(v),
+        None => !cyclic.is_in_cycle(order.def_block(v)),
+    };
+    let state = FunctionMotionState::collect(function, cfg, node_of, &mut stable);
     if state.occurrences.is_empty() {
         return;
     }
@@ -148,6 +206,7 @@ pub(crate) fn perform_code_motion(
         ssa,
         types,
         cfg,
+        order: &order,
         oracle,
         motion,
         antic_in: state.anticipated(function, cfg),
@@ -177,10 +236,11 @@ pub(crate) fn perform_code_motion(
                     .collect();
                 if let [entry_pred] = entry_preds[..] {
                     // Hoists can fire only in the first round: every hoist gate is static across
-                    // rounds (ANTIC, loop structure, totality, `def_block`) or monotone against it
-                    // (carriers only accumulate, so availability only grows), so a later round
-                    // could only rescan and skip. Single-entry headers stay owned by the hoist
-                    // rule — they never fall through to the join rule in any round.
+                    // rounds (ANTIC, loop structure, totality, `def_block`, and the stability
+                    // bits — computed once, before the rounds) or monotone against it (carriers
+                    // only accumulate, so availability only grows), so a later round could only
+                    // rescan and skip. Single-entry headers stay owned by the hoist rule — they
+                    // never fall through to the join rule in any round.
                     if first_round {
                         changed |=
                             state.hoist_into_header(&env, function, block, entry_pred, &mut ctx);
@@ -244,10 +304,6 @@ impl Occurrence {
 /// The per-function facts the motion rules plan against, collected from the post-elimination
 /// function before any mutation.
 struct FunctionMotionState {
-    /// The defining block of every parameter and instruction result. Absent values are interned
-    /// constants, available everywhere.
-    def_block: HashMap<ValueId, BlockId>,
-
     /// Binding-stable occurrences per canonical key, in domination-preorder order.
     occurrences: HashMap<NodeId, Vec<Occurrence>>,
 
@@ -271,6 +327,10 @@ struct MotionEnv<'a> {
 
     /// The CFG for the function in question.
     cfg: &'a CFG,
+
+    /// The definition sites of the post-elimination function (interned constants take the entry
+    /// fallback, so they count as available everywhere) — the template operand-dominance source.
+    order: &'a DefOrder<'a>,
 
     /// The totality license for speculative placement, answering over the pristine function.
     oracle: &'a TotalityOracle<'a>,
@@ -447,10 +507,9 @@ impl FunctionMotionState {
         function: &HLFunction,
         cfg: &CFG,
         node_of: &HashMap<ValueId, NodeId>,
+        stable: &mut dyn FnMut(ValueId) -> bool,
     ) -> FunctionMotionState {
-        let cyclic = StaticCyclicBlocks::new(function);
         let mut state = FunctionMotionState {
-            def_block: HashMap::default(),
             occurrences: HashMap::default(),
             gen_keys: HashMap::default(),
             used: HashSet::default(),
@@ -458,14 +517,8 @@ impl FunctionMotionState {
         let mut order = 0;
         for block_id in cfg.get_domination_pre_order() {
             let block = function.get_block(block_id);
-            for &(param, _) in block.get_parameters() {
-                state.def_block.insert(param, block_id);
-            }
             for (instruction, location) in block.get_instructions_with_source_locations() {
                 state.used.extend(instruction.get_inputs().copied());
-                for &result in instruction.get_results() {
-                    state.def_block.insert(result, block_id);
-                }
                 if !is_motion_candidate(instruction) {
                     continue;
                 }
@@ -473,15 +526,9 @@ impl FunctionMotionState {
                 let Some(&node) = node_of.get(&result) else {
                     continue;
                 };
-                // Binding stability: every operand defined outside every cycle (or an interned
-                // constant), so the expression names the same values at every program point.
-                let stable = instruction.get_inputs().all(|operand| {
-                    state
-                        .def_block
-                        .get(operand)
-                        .is_none_or(|&b| !cyclic.is_in_cycle(b))
-                });
-                if !stable {
+                // Binding stability: every operand single-valued per invocation, so the
+                // expression names the same values at every program point (module doc).
+                if !instruction.get_inputs().all(|operand| stable(*operand)) {
                     continue;
                 }
                 state.occurrences.entry(node).or_default().push(Occurrence {
@@ -582,13 +629,15 @@ impl FunctionMotionState {
 
     /// The first of `occurrences` fit to clone into every block of `targets`.
     ///
-    /// Each template operand's definition dominates every target (an absent definition is an
-    /// interned constant, available everywhere), and the result type matches `expected` when one is
-    /// given (the hoist rule selects its template *first* and derives the expected type from it).
+    /// Each template operand's definition dominates every target (an interned constant takes
+    /// [`DefOrder`]'s entry fallback, so it is available everywhere), and the result type matches
+    /// `expected` when one is given (the hoist rule selects its template *first* and derives the
+    /// expected type from it).
     fn template_for<'a>(
         &self,
         cfg: &CFG,
         types: &FunctionTypeInfo,
+        order: &DefOrder,
         occurrences: &'a [Occurrence],
         targets: &[BlockId],
         expected: Option<&Type>,
@@ -596,9 +645,8 @@ impl FunctionMotionState {
         occurrences.iter().find(|occ| {
             expected.is_none_or(|t| types.get_value_type(occ.result) == t)
                 && occ.template.get_inputs().all(|operand| {
-                    self.def_block
-                        .get(operand)
-                        .is_none_or(|&b| targets.iter().all(|&t| cfg.dominates(b, t)))
+                    let def = order.def_block(*operand);
+                    targets.iter().all(|&t| cfg.dominates(def, t))
                 })
         })
     }
@@ -631,7 +679,14 @@ impl FunctionMotionState {
             // the entry predecessor (and hence on the entry edge it dominates). Its result type
             // scopes every check below — one key can carry occurrences of distinct types (the
             // witness-wrapper asymmetry), and the hoisted value serves only the template's type.
-            let template = self.template_for(env.cfg, env.types, occurrences, &[entry_pred], None);
+            let template = self.template_for(
+                env.cfg,
+                env.types,
+                env.order,
+                occurrences,
+                &[entry_pred],
+                None,
+            );
             let Some(template) = template else {
                 continue;
             };
@@ -805,7 +860,14 @@ impl FunctionMotionState {
             let template = if missing.is_empty() {
                 None
             } else {
-                match self.template_for(cfg, types, occurrences, &missing, Some(expected)) {
+                match self.template_for(
+                    cfg,
+                    types,
+                    env.order,
+                    occurrences,
+                    &missing,
+                    Some(expected),
+                ) {
                     Some(template) => Some(template),
                     None => continue,
                 }

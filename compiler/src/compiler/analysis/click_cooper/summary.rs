@@ -71,6 +71,13 @@ const K: usize = 1;
 /// a deterministic function of `g`'s arguments.
 pub(crate) type DetSummaries = HashMap<FunctionId, Vec<bool>>;
 
+/// `true` iff return `j` of `g` is a deterministic function of `g`'s arguments per `det` (an
+/// unknown function or out-of-range position answers `false`) — the one canonical read of the
+/// summaries, shared by every consumer.
+pub(crate) fn det_return(det: &DetSummaries, g: FunctionId, j: usize) -> bool {
+    det.get(&g).and_then(|rets| rets.get(j)).copied() == Some(true)
+}
+
 /// Solve every function's per-return determinism to a fixpoint over the call graph.
 pub(crate) fn compute_determinism(ssa: &HLSSA, flow: &FlowAnalysis) -> DetSummaries {
     // Optimistic: every return position starts deterministic; the worklist only ever lowers a bit
@@ -125,9 +132,7 @@ fn analyze_determinism(ssa: &HLSSA, det: &DetSummaries, fid: FunctionId) -> Vec<
                     // return `j` is and every argument is.
                     let arg_tainted = args.iter().any(|a| tainted.contains(a));
                     (0..results.len())
-                        .map(|j| {
-                            arg_tainted || det.get(g).and_then(|r| r.get(j)).copied() != Some(true)
-                        })
+                        .map(|j| arg_tainted || !det_return(det, *g, j))
                         .collect()
                 } else {
                     // A non-deterministic source: witnesses, memory, globals, lookups, dynamic or

@@ -15,8 +15,8 @@ use crate::compiler::{
     ssa::{
         FunctionId, Instruction, SourceLocation, SourcePosition, Terminator,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Constant, Endianness, HLSSA, LookupTarget,
-            OpCode, Radix, SequenceTargetType, Type,
+            BinaryArithOpKind, CallTarget, CastTarget, CmpKind, Constant, Endianness, HLSSA,
+            LookupTarget, OpCode, Radix, SequenceTargetType, Type,
         },
     },
 };
@@ -646,6 +646,8 @@ fn motion(ssa: &mut HLSSA, level: super::MotionLevel) {
         let oracle = TotalityOracle::new(&cc, ssa, fid, types.get_function(fid));
         super::insert::perform_code_motion(
             ssa,
+            &cc,
+            fid,
             &mut function,
             types.get_function(fid),
             flow.get_function_cfg(fid),
@@ -1104,7 +1106,7 @@ fn witness_cast_and_dependent_expression_dedup_in_one_run() {
     assert_eq!(return_values(&ssa), vec![c1, s1]);
 }
 
-/// Aggregate constructors are deliberately not deduplicated in this stage (CSE parity).
+/// Aggregate constructors are deliberately not deduplicated (CSE parity).
 #[test]
 fn aggregate_constructors_are_untouched() {
     let (mut ssa, vals) = main_with_params(&[Type::field(), Type::field()]);
@@ -1460,10 +1462,13 @@ fn post_loop_only_occurrence_is_not_hoisted() {
     ));
 }
 
-/// Binding stability: an "invariant" of an inner loop whose operand is defined in the enclosing
-/// loop's body is rebound per outer iteration — the acyclic-definition gate must refuse it.
+/// Binding stability: an inner-loop "invariant" whose operand chains through the enclosing
+/// loop's carried accumulator is rebound to a NEW value per outer iteration — no invariance rule
+/// admits `x = acc + 1` over the loop-carried parameter `acc`, so the inner-loop expression over
+/// `x` must stay put. (Contrast [`outer_body_pure_operand_hoists_from_inner_loop`], where the
+/// outer-body operand recomputes the SAME value per iteration and the hoist fires.)
 #[test]
-fn operand_defined_in_outer_loop_blocks_hoist() {
+fn loop_carried_operand_blocks_hoist() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let c0 = ssa.add_const(Constant::U(32, 0));
     let c1 = ssa.add_const(Constant::U(32, 1));
@@ -1556,6 +1561,456 @@ fn operand_defined_in_outer_loop_blocks_hoist() {
     // The inner preheader (the outer body) still holds exactly its `Add`; nothing was hoisted.
     let f = ssa.get_unique_entrypoint();
     assert_eq!(f.get_block(obody).get_instructions().count(), 1);
+}
+
+/// The nested-loop widening shape: `x` is defined in the OUTER loop's body by a pure op over the
+/// entry parameters — recomputed per outer iteration but rebinding the same value (invariance rule
+/// 3) — and the inner loop evaluates `m1 = x * 2`. `down_safe` adds the inner exit path's
+/// re-evaluation that makes the key anticipated at the inner header; `wrapping` builds the `U(32)`
+/// twin whose key op the totality oracle refuses (and which, lacking a `Field` result, carries no
+/// rangecheck — `Types` refuses integer rangechecks). The twin's `m1` being dead cannot mask that
+/// refusal: the hoist rule's `in_loop`/`deeper` gates are deliberately liveness-blind (only the
+/// join rule consults the `used` set), so totality is provably the sole gate standing.
+fn outer_body_operand_shape(
+    down_safe: bool,
+    wrapping: bool,
+) -> (
+    HLSSA,
+    crate::compiler::ssa::BlockId,
+    crate::compiler::ssa::BlockId,
+    crate::compiler::ssa::BlockId,
+) {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c2 = if wrapping {
+        ssa.add_const(Constant::U(32, 2))
+    } else {
+        ssa.add_const(Constant::Field(Field::from(2u64)))
+    };
+    let (j, jc, x, k, kc, m1, k2, m2, j2) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let operand_type = if wrapping { Type::u(32) } else { Type::field() };
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let oh = f.add_block();
+    let obody = f.add_block();
+    let ih = f.add_block();
+    let ibody = f.add_block();
+    let iafter = f.add_block();
+    let oexit = f.add_block();
+
+    let entry = f.get_entry_mut();
+    entry.push_parameter(a, operand_type.clone());
+    entry.push_parameter(b, operand_type);
+    entry.set_terminator(Terminator::Jmp(oh, vec![c0]));
+
+    let ohb = f.get_block_mut(oh);
+    ohb.push_parameter(j, Type::u(32));
+    ohb.push_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: jc,
+        lhs: j,
+        rhs: c10,
+    });
+    ohb.set_terminator(Terminator::JmpIf(jc, obody, oexit));
+
+    // `x` is recomputed every outer iteration, always to the same value.
+    let obb = f.get_block_mut(obody);
+    obb.push_instruction(mul(x, a, b));
+    obb.set_terminator(Terminator::Jmp(ih, vec![c0]));
+
+    let ihb = f.get_block_mut(ih);
+    ihb.push_parameter(k, Type::u(32));
+    ihb.push_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: kc,
+        lhs: k,
+        rhs: c10,
+    });
+    ihb.set_terminator(Terminator::JmpIf(kc, ibody, iafter));
+
+    let ibb = f.get_block_mut(ibody);
+    ibb.push_instruction(mul(m1, x, c2));
+    if !wrapping {
+        ibb.push_instruction(OpCode::Rangecheck {
+            value: m1,
+            max_bits: 32,
+        });
+    }
+    ibb.push_instruction(add(k2, k, c1));
+    ibb.set_terminator(Terminator::Jmp(ih, vec![k2]));
+
+    let iab = f.get_block_mut(iafter);
+    if down_safe {
+        iab.push_instruction(mul(m2, x, c2));
+        iab.push_instruction(OpCode::Rangecheck {
+            value: m2,
+            max_bits: 32,
+        });
+    }
+    iab.push_instruction(add(j2, j, c1));
+    iab.set_terminator(Terminator::Jmp(oh, vec![j2]));
+
+    f.get_block_mut(oexit)
+        .set_terminator(Terminator::Return(vec![]));
+
+    (ssa, obody, ibody, iafter)
+}
+
+/// The widening the invariance closure buys: the outer-body `x = a * b` is single-valued per
+/// invocation (rule 3 over entry parameters), so the inner-loop `x * 2` is binding-stable and its
+/// down-safe hoist lands in the inner preheader — the outer body — where it runs once per OUTER
+/// iteration instead of once per inner one. The old acyclic-definition gate refused this shape.
+#[test]
+fn outer_body_pure_operand_hoists_from_inner_loop() {
+    let (mut ssa, obody, ibody, iafter) = outer_body_operand_shape(true, false);
+
+    hoist(&mut ssa);
+
+    let f = ssa.get_unique_entrypoint();
+    let instrs: Vec<_> = f.get_block(obody).get_instructions().collect();
+    assert_eq!(instrs.len(), 2);
+    assert!(matches!(
+        instrs[1],
+        OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            ..
+        }
+    ));
+    let hoisted = *instrs[1].get_results().next().unwrap();
+    // Both the per-iteration and the exit-path rangechecks now check the hoisted value.
+    for block in [ibody, iafter] {
+        assert!(
+            f.get_block(block)
+                .get_instructions()
+                .any(|i| matches!(i, OpCode::Rangecheck { value, .. } if *value == hoisted))
+        );
+    }
+}
+
+/// Zero-trip down-safety is orthogonal to the widening: without the inner exit path demanding the
+/// key, the body-only occurrence over the stable outer-body operand may not hoist down-safely.
+#[test]
+fn outer_body_operand_body_only_is_not_hoisted() {
+    let (mut ssa, obody, _, _) = outer_body_operand_shape(false, false);
+
+    hoist(&mut ssa);
+
+    let f = ssa.get_unique_entrypoint();
+    assert_eq!(f.get_block(obody).get_instructions().count(), 1);
+}
+
+/// ...but the speculation level moves it: the `Field` `Mul` is total everywhere, and the occurrence
+/// sits at a strictly greater loop depth than the insertion point.
+#[test]
+fn outer_body_operand_body_only_is_speculated() {
+    let (mut ssa, obody, ibody, _) = outer_body_operand_shape(false, false);
+
+    speculate(&mut ssa);
+
+    let f = ssa.get_unique_entrypoint();
+    let instrs: Vec<_> = f.get_block(obody).get_instructions().collect();
+    assert_eq!(instrs.len(), 2);
+    let hoisted = *instrs[1].get_results().next().unwrap();
+    assert!(
+        f.get_block(ibody)
+            .get_instructions()
+            .any(|i| matches!(i, OpCode::Rangecheck { value, .. } if *value == hoisted))
+    );
+}
+
+/// The totality license still gates every newly admitted shape: the `U(32)` twin's `Mul` wraps
+/// rather than traps, but integer overflow is Noir-semantically an error, so the body-only
+/// occurrence stays put even at the speculation level.
+#[test]
+fn outer_body_operand_wrapping_op_is_not_speculated() {
+    let (mut ssa, obody, _, _) = outer_body_operand_shape(false, true);
+
+    speculate(&mut ssa);
+
+    let f = ssa.get_unique_entrypoint();
+    assert_eq!(f.get_block(obody).get_instructions().count(), 1);
+}
+
+/// The nested-loop call-result shape: the outer-body operand `x` is the result of a static call to
+/// a pure callee over an entry parameter, and the inner loop evaluates `x * 2` down-safely (the
+/// inner exit path re-evaluates it). `unconstrained` flips the call's constrained-ness: a
+/// constrained call to the deterministic callee is invariance rule 3's det-call form, while an
+/// unconstrained call is nondeterministic advice the determinism summaries never bless.
+fn call_result_operand_shape(
+    unconstrained: bool,
+) -> (
+    HLSSA,
+    crate::compiler::ssa::BlockId,
+    crate::compiler::ssa::BlockId,
+    crate::compiler::ssa::BlockId,
+) {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let g = ssa.add_function("g".to_string());
+    let (p, r) = (ssa.fresh_value(), ssa.fresh_value());
+    let (a, x) = (ssa.fresh_value(), ssa.fresh_value());
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c2f = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let (j, jc, k, kc, m1, k2, m2, j2) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    {
+        let gf = ssa.get_function_mut(g);
+        gf.add_return_type(Type::field());
+        gf.get_entry_mut().push_parameter(p, Type::field());
+        gf.get_entry_mut().push_instruction(add(r, p, p));
+        gf.get_entry_mut()
+            .set_terminator(Terminator::Return(vec![r]));
+    }
+
+    let f = ssa.get_function_mut(main_id);
+    let oh = f.add_block();
+    let obody = f.add_block();
+    let ih = f.add_block();
+    let ibody = f.add_block();
+    let iafter = f.add_block();
+    let oexit = f.add_block();
+
+    let entry = f.get_entry_mut();
+    entry.push_parameter(a, Type::field());
+    entry.set_terminator(Terminator::Jmp(oh, vec![c0]));
+
+    let ohb = f.get_block_mut(oh);
+    ohb.push_parameter(j, Type::u(32));
+    ohb.push_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: jc,
+        lhs: j,
+        rhs: c10,
+    });
+    ohb.set_terminator(Terminator::JmpIf(jc, obody, oexit));
+
+    let obb = f.get_block_mut(obody);
+    obb.push_instruction(OpCode::Call {
+        results: vec![x],
+        function: CallTarget::Static(g),
+        args: vec![a],
+        unconstrained,
+    });
+    obb.set_terminator(Terminator::Jmp(ih, vec![c0]));
+
+    let ihb = f.get_block_mut(ih);
+    ihb.push_parameter(k, Type::u(32));
+    ihb.push_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: kc,
+        lhs: k,
+        rhs: c10,
+    });
+    ihb.set_terminator(Terminator::JmpIf(kc, ibody, iafter));
+
+    let ibb = f.get_block_mut(ibody);
+    ibb.push_instruction(mul(m1, x, c2f));
+    ibb.push_instruction(OpCode::Rangecheck {
+        value: m1,
+        max_bits: 32,
+    });
+    ibb.push_instruction(add(k2, k, c1));
+    ibb.set_terminator(Terminator::Jmp(ih, vec![k2]));
+
+    let iab = f.get_block_mut(iafter);
+    iab.push_instruction(mul(m2, x, c2f));
+    iab.push_instruction(OpCode::Rangecheck {
+        value: m2,
+        max_bits: 32,
+    });
+    iab.push_instruction(add(j2, j, c1));
+    iab.set_terminator(Terminator::Jmp(oh, vec![j2]));
+
+    f.get_block_mut(oexit)
+        .set_terminator(Terminator::Return(vec![]));
+
+    (ssa, obody, ibody, iafter)
+}
+
+/// Invariance rule 3's det-call form: the outer-body operand is a constrained static call to a
+/// deterministic callee over entry parameters — single-valued per invocation even though the call
+/// itself can never move — so the inner-loop expression over its result hoists.
+#[test]
+fn det_call_result_operand_hoists_from_inner_loop() {
+    let (mut ssa, obody, ibody, iafter) = call_result_operand_shape(false);
+
+    hoist(&mut ssa);
+
+    let f = ssa.get_unique_entrypoint();
+    let instrs: Vec<_> = f.get_block(obody).get_instructions().collect();
+    assert_eq!(instrs.len(), 2);
+    assert!(matches!(instrs[0], OpCode::Call { .. }));
+    let hoisted = *instrs[1].get_results().next().unwrap();
+    for block in [ibody, iafter] {
+        assert!(
+            f.get_block(block)
+                .get_instructions()
+                .any(|i| matches!(i, OpCode::Rangecheck { value, .. } if *value == hoisted))
+        );
+    }
+}
+
+/// The negative twin: an `unconstrained` call is nondeterministic advice — its results are pinned
+/// to no function of their arguments, and rule 3's det-call form requires a *constrained* static
+/// call — so `x` stays unstable and the inner-loop `x * 2` must stay put. If the gate's determinism
+/// read regressed to blessing every call, this hoist would fire.
+#[test]
+fn nondet_call_result_operand_blocks_hoist() {
+    let (mut ssa, obody, ibody, _) = call_result_operand_shape(true);
+
+    hoist(&mut ssa);
+
+    let f = ssa.get_unique_entrypoint();
+    // The outer body holds exactly the call; nothing was hoisted into it.
+    let instrs: Vec<_> = f.get_block(obody).get_instructions().collect();
+    assert_eq!(instrs.len(), 1);
+    assert!(matches!(instrs[0], OpCode::Call { .. }));
+    // The per-iteration evaluation stays in the inner body (mul + rangecheck + increment).
+    assert_eq!(f.get_block(ibody).get_instructions().count(), 3);
+}
+
+/// The invariance closure's rule-4 (congruence-tier) form, isolated: the inner-loop key's array
+/// operand is the OUTER header's parameter `arr = φ(arr0, arr0)`, which no other rule admits —
+/// its lattice constant is an aggregate the scalar-gated rule 1 refuses, its definition sits in a
+/// cyclic block (rule 2 — the old acyclic-definition gate refused this shape the same way), and a
+/// parameter has no defining op for rule 3. Only the congruence tier admits it: the lattice folds
+/// the φ to the same `Blob` constant as the entry-block `arr0 = MkSeq(...)`, the const-seeded
+/// partition puts both in one class, and `arr0` — acyclically defined, hence rules-1–3 stable —
+/// is the dominating witness. The index must be the NON-constant entry formal: a constant index
+/// would let the lattice's `ArrayGet` projection fold the occurrences away entirely.
+#[test]
+fn aggregate_const_phi_operand_hoists_via_congruence_tier() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let idx = ssa.fresh_value();
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let ce1 = ssa.add_const(Constant::Field(Field::from(7u64)));
+    let ce2 = ssa.add_const(Constant::Field(Field::from(9u64)));
+    let (arr0, j, arr, jc, k, kc, x1, k2, x2, j2) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let oh = f.add_block();
+    let obody = f.add_block();
+    let ih = f.add_block();
+    let ibody = f.add_block();
+    let iafter = f.add_block();
+    let oexit = f.add_block();
+
+    let entry = f.get_entry_mut();
+    entry.push_parameter(idx, Type::u(32));
+    entry.push_instruction(OpCode::MkSeq {
+        result: arr0,
+        elems: vec![ce1, ce2],
+        seq_type: SequenceTargetType::Array(2),
+        elem_type: Type::field(),
+    });
+    entry.set_terminator(Terminator::Jmp(oh, vec![c0, arr0]));
+
+    let ohb = f.get_block_mut(oh);
+    ohb.push_parameter(j, Type::u(32));
+    ohb.push_parameter(arr, Type::field().array_of(2));
+    ohb.push_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: jc,
+        lhs: j,
+        rhs: c10,
+    });
+    ohb.set_terminator(Terminator::JmpIf(jc, obody, oexit));
+
+    f.get_block_mut(obody)
+        .set_terminator(Terminator::Jmp(ih, vec![c0]));
+
+    let ihb = f.get_block_mut(ih);
+    ihb.push_parameter(k, Type::u(32));
+    ihb.push_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: kc,
+        lhs: k,
+        rhs: c10,
+    });
+    ihb.set_terminator(Terminator::JmpIf(kc, ibody, iafter));
+
+    let ibb = f.get_block_mut(ibody);
+    ibb.push_instruction(OpCode::ArrayGet {
+        result: x1,
+        array: arr,
+        index: idx,
+    });
+    ibb.push_instruction(OpCode::Rangecheck {
+        value: x1,
+        max_bits: 32,
+    });
+    ibb.push_instruction(add(k2, k, c1));
+    ibb.set_terminator(Terminator::Jmp(ih, vec![k2]));
+
+    let iab = f.get_block_mut(iafter);
+    iab.push_instruction(OpCode::ArrayGet {
+        result: x2,
+        array: arr,
+        index: idx,
+    });
+    iab.push_instruction(OpCode::Rangecheck {
+        value: x2,
+        max_bits: 32,
+    });
+    iab.push_instruction(add(j2, j, c1));
+    iab.set_terminator(Terminator::Jmp(oh, vec![j2, arr0]));
+
+    f.get_block_mut(oexit)
+        .set_terminator(Terminator::Return(vec![]));
+
+    hoist(&mut ssa);
+
+    // The down-safe hoist lands in the inner preheader (the outer body), and both the
+    // per-iteration and exit-path rangechecks now read the hoisted access.
+    let f = ssa.get_unique_entrypoint();
+    let instrs: Vec<_> = f.get_block(obody).get_instructions().collect();
+    assert_eq!(instrs.len(), 1);
+    assert!(matches!(instrs[0], OpCode::ArrayGet { .. }));
+    let hoisted = *instrs[0].get_results().next().unwrap();
+    for block in [ibody, iafter] {
+        assert!(
+            f.get_block(block)
+                .get_instructions()
+                .any(|i| matches!(i, OpCode::Rangecheck { value, .. } if *value == hoisted))
+        );
+    }
 }
 
 /// A parameterless self-loop reached through a `JmpIf`: the hoist must split the entry edge and

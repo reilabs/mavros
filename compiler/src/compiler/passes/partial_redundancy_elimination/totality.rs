@@ -113,7 +113,7 @@ impl<'a> TotalityOracle<'a> {
                 // Field arithmetic (witness-typed or not) is total; U/I overflow is an error.
                 Add | Sub | Mul => self.value_type(*lhs).peel_witness().is_field(),
                 // A division with *any* witness-typed operand lowers to a constraint-emitting
-                // gadget whose guarded and unguarded shapes differ; never speculated (v1).
+                // gadget whose guarded and unguarded shapes differ; never speculated.
                 Div | Mod => {
                     !self.value_type(*lhs).is_witness_of()
                         && self.divisor_provably_safe(*rhs, block)
@@ -196,7 +196,8 @@ impl<'a> TotalityOracle<'a> {
     /// constant lattice folds and every backend agrees on).
     fn shift_amount_in_range(&self, lhs: ValueId, rhs: ValueId) -> bool {
         let lhs_ty = self.value_type(lhs);
-        // Witness-typed shifts lower to decomposition gadgets; never speculated (v1).
+        // Witness-typed shifts lower to decomposition gadgets; never speculated (see the pass
+        // module doc's Deferred Improvements).
         if lhs_ty.is_witness_of() || self.value_type(rhs).is_witness_of() {
             return false;
         }
