@@ -1351,9 +1351,10 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
 
 // ── Determinism check ─────────────────────────────────────────────────
 
-/// Default subset for `--check-determinism`: small tests chosen to cover the passes where
-/// iteration order historically leaked into output (defunctionalize/fn-pointer interning,
-/// the specializer, globals lowering, tuple elision), plus one large composite (sha256).
+/// Default subset for `--check-determinism`: small tests chosen to cover the passes where iteration
+/// order historically leaked into output (defunctionalize/fn-pointer interning, the specializer,
+/// globals lowering, tuple elision), plus one large composite (sha256) and the PRE code-motion
+/// shapes (speculative hoisting, the guarded-division gate, cross-branch join insertion).
 const DEFAULT_DETERMINISM_TESTS: &[&str] = &[
     "higher_order_fns",
     "lambda_array",
@@ -1362,10 +1363,13 @@ const DEFAULT_DETERMINISM_TESTS: &[&str] = &[
     "array_lookup",
     "struct_literals",
     "sha256",
+    "pre_licm_speculation",
+    "pre_guarded_div_hoist",
+    "pre_cross_branch_join",
 ];
 
-/// The dump files the driver writes under `mavros_debug/`, in pipeline-stage order, so the
-/// first divergent file names the stage that introduced the divergence.
+/// The dump files the driver writes under `mavros_debug/`, in pipeline-stage order, so the first
+/// divergent file names the stage that introduced the divergence.
 const DUMP_STAGE_ORDER: &[&str] = &[
     "initial_ssa.txt",
     "monomorphized_ssa.txt",

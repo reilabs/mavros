@@ -1,0 +1,6 @@
+[package]
+name = "pre_cross_branch_join"
+type = "bin"
+authors = [""]
+
+[dependencies]

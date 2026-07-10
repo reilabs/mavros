@@ -257,6 +257,11 @@ use crate::{
 /// analysis (e.g. the sparse conditional simplification pass).
 pub(crate) use self::lattice::bool_constant;
 
+/// Static cycle membership per block, re-exported for consumers that need the binding-stability
+/// primitive behind invariance rule 2 (a value defined outside every cycle is bound at most once
+/// per run).
+pub(crate) use self::stability::CyclicBlocks as StaticCyclicBlocks;
+
 // CLICK COOPER ANALYSIS
 // ================================================================================================
 
@@ -540,6 +545,18 @@ impl ClickCooper {
     /// dominates `v`'s definition (`v` itself when no other member does).
     pub fn leader(&self, f: FunctionId, v: ValueId) -> Option<ValueId> {
         self.facts(f).and_then(|facts| facts.congruence.leader(v))
+    }
+
+    /// The canonical key of `v`'s congruence class in `f` — its minimum member id — or `None` if
+    /// `v` was not analyzed.
+    ///
+    /// Two values share this key iff they are structurally congruent, so it is a deterministic
+    /// class identifier independent of refinement-internal class numbering. Unlike the definition
+    /// of [`Self::congruence_class`] it does not clone the member list, so it is fit for per-value
+    /// keying in a consumer's tables.
+    pub fn class_key(&self, f: FunctionId, v: ValueId) -> Option<ValueId> {
+        self.facts(f)
+            .and_then(|facts| facts.congruence.class_members(v).first().copied())
     }
 }
 

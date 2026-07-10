@@ -547,6 +547,12 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
         self.constants.read().unwrap().contains_left(&vid)
     }
 
+    /// The `ValueId` bound to `value` in the constants table, if it is already interned — the
+    /// read-only sibling of [`SSA::add_const`] for callers that must not be able to mint new ids.
+    pub fn find_const(&self, value: &C) -> Option<ValueId> {
+        self.constants.read().unwrap().get_by_right(value).copied()
+    }
+
     /// Take an owned, lock-free snapshot of the constants (`ValueId -> value`).
     ///
     /// The values are `Arc`-shared, so cloning the table is cheap. The lock is released before
