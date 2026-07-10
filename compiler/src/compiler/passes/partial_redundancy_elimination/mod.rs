@@ -101,10 +101,12 @@
 //!   gate consumes. An analysis upgrade this pass inherits for free — bounded, though: witness
 //!   divisors are refused outright (above), and most real guards are witness-conditioned and
 //!   untainted away.
-//! - **A Pre-Untaint Site:** the pass runs only at the eight post-untaint spill sites; no value
-//!   numbering exists before `UntaintControlFlow`, so conditional facts keyed on raw value pairs
-//!   can stay invisible until a later site happens to unify the pair. A pipeline-placement question
-//!   rather than a pass feature.
+//! - **Motion at the Pre-Untaint Site:** The pre-untaint site runs [`MotionLevel::EliminateOnly`]
+//!   (see [`Config::pre_untaint`]). Raising it needs two pieces: a structure-preserving hoist mode
+//!   (no `JmpIf` edge splits, no merge parameters — untaint's linearizer assumes a single jump
+//!   into each merge from a branch side), and, for speculation, a totality oracle that answers
+//!   witness-ness from `WitnessTaintInference` results rather than from the `WitnessOf` types that
+//!   only exist post-untaint.
 
 pub mod edge_split;
 mod eliminate;
@@ -161,6 +163,11 @@ impl PRE {
     /// The pass as wired at the pre-R1C pipeline sites.
     pub fn pre_r1c() -> Self {
         Self::with_config(Config::pre_r1c())
+    }
+
+    /// The pass as wired at the pre-untaint pipeline site.
+    pub fn pre_untaint() -> Self {
+        Self::with_config(Config::pre_untaint())
     }
 
     fn transform(&self, ssa: &mut HLSSA, cc: &ClickCooper, types: &TypeInfo, flow: &FlowAnalysis) {
@@ -246,6 +253,27 @@ impl Config {
             motion: MotionLevel::Speculate,
             deduplicate_lookups: true,
             dce: DceConfig::pre_r1c(),
+        }
+    }
+
+    /// The configuration for the pre-untaint pipeline site.
+    ///
+    /// Elimination only: the motion stage splits `JmpIf` edges and mints merge parameters, which
+    /// `untaint_control_flow` cannot yet absorb (it assumes a single jump into each merge from a
+    /// branch side), and the [`totality::TotalityOracle`] reads witness-ness from `WitnessOf`
+    /// types that only exist after untaint bakes them in — pre-untaint it would silently license
+    /// speculating witness-tainted ops. `EliminateOnly` reaches neither: it rewrites operands and
+    /// drops dominated duplicate assertions without touching block structure, and the oracle is
+    /// only constructed for motion.
+    ///
+    /// `Lookup` assertions are minted by `LookupSpilling` (post-untaint), so lookup deduplication
+    /// is moot here; `false` documents that. The integrated DCE preserves blocks for the same
+    /// reason as every other pre-untaint DCE/SCS run.
+    pub fn pre_untaint() -> Self {
+        Self {
+            motion: MotionLevel::EliminateOnly,
+            deduplicate_lookups: false,
+            dce: DceConfig::preserve_blocks(),
         }
     }
 }

@@ -299,6 +299,17 @@ impl Driver {
                 // can orphan callees, so RemoveUnreachableFunctions stays after it (cf. line 207).
                 Box::new(NormalizeAsserts::new()),
                 Box::new(SCS::new(dead_code_elimination::Config::preserve_blocks())),
+                // The only value-numbering sweep before witness typing: dedup here shrinks
+                // untaint's input (fewer values to taint, guard, and select) and hands the first
+                // post-untaint sites already-unified value pairs. Runs after SCS (which
+                // copy-propagates asserted-equal leaders into operands, making them structurally
+                // congruent to the recomputed analysis) and before TrivialPhiElimination (a PRE
+                // redirect can make both preds' jump args identical, and such a phi must collapse
+                // before WTI taints it into a needless `Select`). `pre_untaint()` is
+                // elimination-only: motion would split edges and mint merge params that untaint
+                // cannot yet absorb, and its speculation gate cannot see witness-ness before
+                // types carry `WitnessOf`.
+                Box::new(PRE::pre_untaint()),
                 // Mem2Reg promotes each scalarized leaf cell into its own block-parameter phi. For
                 // an aggregate threaded through control flow that is mostly trivial phis (the same
                 // value from every predecessor); collapse them before they reach WTI and codegen.

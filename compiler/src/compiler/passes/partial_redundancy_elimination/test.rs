@@ -1387,6 +1387,72 @@ fn hoisting_requires_the_loop_hoist_level() {
     assert_eq!(f.get_block(body).get_instructions().count(), 3);
 }
 
+/// The pre-untaint configuration's structural contract: the dedup fires, but the canonical diamond
+/// geometry survives — the empty arm blocks stay (the integrated DCE preserves blocks), every
+/// terminator keeps its shape and targets, and the merge grows no parameter. Untaint's linearizer
+/// relies on exactly this geometry (a single jump into the merge from each branch side).
+#[test]
+fn pre_untaint_config_dedups_without_structural_change() {
+    let (mut ssa, vals) = main_with_params(&[Type::u(1), Type::field(), Type::field()]);
+    let (cond, a, b) = (vals[0], vals[1], vals[2]);
+    let (r1, r2) = (ssa.fresh_value(), ssa.fresh_value());
+    let f = ssa.get_unique_entrypoint_mut();
+    let t = f.add_block();
+    let e = f.add_block();
+    let m = f.add_block();
+    let entry = f.get_entry_mut();
+    entry.push_instruction(add(r1, a, b));
+    entry.set_terminator(Terminator::JmpIf(cond, t, e));
+    f.get_block_mut(t)
+        .set_terminator(Terminator::Jmp(m, vec![]));
+    f.get_block_mut(e)
+        .set_terminator(Terminator::Jmp(m, vec![]));
+    let mb = f.get_block_mut(m);
+    mb.push_instruction(add(r2, a, b));
+    // The always-live anchor observing the redirect (the entrypoint's return slots are not
+    // seeded live in this harness, so a `Return` operand cannot be the witness).
+    mb.push_instruction(OpCode::Rangecheck {
+        value: r2,
+        max_bits: 32,
+    });
+    mb.set_terminator(Terminator::Return(vec![]));
+
+    // Compose exactly as `PRE::run` does under `Config::pre_untaint`: the transform followed by
+    // the integrated DCE with the config's (block-preserving) DCE configuration.
+    let config = super::Config::pre_untaint();
+    let cc = run_in_test(&ssa);
+    let flow = FlowAnalysis::run(&ssa);
+    let types = Types::new().run(&ssa, &flow);
+    super::PRE::with_config(config).transform(&mut ssa, &cc, &types, &flow);
+    let flow = FlowAnalysis::run(&ssa);
+    DCE::new(config.dce).do_run(&mut ssa, &flow);
+
+    // The dominated duplicate was redirected to the dominating occurrence (the rangecheck now
+    // reads it) and swept by the integrated DCE...
+    let f = ssa.get_unique_entrypoint();
+    let m_ops: Vec<_> = f.get_block(m).get_instructions().collect();
+    assert!(
+        matches!(m_ops[..], [OpCode::Rangecheck { value, .. }] if *value == r1),
+        "merge should hold exactly the redirected rangecheck: {m_ops:?}"
+    );
+    assert_eq!(f.get_entry().get_instructions().count(), 1);
+    // ...while the diamond is untouched.
+    assert_eq!(f.get_blocks().count(), 4);
+    assert!(matches!(
+        f.get_entry().get_terminator(),
+        Some(Terminator::JmpIf(c, tt, ee)) if *c == cond && *tt == t && *ee == e
+    ));
+    for arm in [t, e] {
+        let block = f.get_block(arm);
+        assert_eq!(block.get_instructions().count(), 0);
+        assert!(matches!(
+            block.get_terminator(),
+            Some(Terminator::Jmp(target, args)) if *target == m && args.is_empty()
+        ));
+    }
+    assert_eq!(f.get_block(m).get_parameters().count(), 0);
+}
+
 /// A counted loop whose only `a * b` evaluation sits *after* it: anticipated at the header (the
 /// exit path is bound to compute it), but eliminating nothing per-iteration.
 ///
