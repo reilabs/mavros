@@ -678,7 +678,7 @@ impl LowerPureGuards {
     ) {
         let array_type = type_info.get_value_type(array);
         let elem_type = match &array_type.strip_witness().expr {
-            TypeExpr::Array(elem, _) | TypeExpr::Slice(elem) => (**elem).clone(),
+            TypeExpr::Array(elem, _) | TypeExpr::Slice { elem, .. } => (**elem).clone(),
             other => panic!("LowerPureGuards: ArrayGet on non-seq type: {:?}", other),
         };
         let oob = self.emit_oob_cond(emitter, array, index, type_info);
@@ -795,7 +795,7 @@ impl LowerPureGuards {
         let seq_type = type_info.get_value_type(seq);
         let len_val = match &seq_type.strip_witness().expr {
             TypeExpr::Array(_, len) => emitter.u_const(32, *len as u128),
-            TypeExpr::Slice(_) => emitter.slice_len(seq),
+            TypeExpr::Slice { .. } => emitter.slice_len(seq),
             other => panic!("LowerPureGuards: seq op on non-seq type: {:?}", other),
         };
 

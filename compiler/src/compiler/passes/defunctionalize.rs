@@ -259,9 +259,9 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
     fn contains_function(typ: &Type) -> bool {
         match &typ.expr {
             TypeExpr::Function => true,
-            TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) | TypeExpr::Ref(inner) => {
-                contains_function(inner)
-            }
+            TypeExpr::Array(inner, _)
+            | TypeExpr::Slice { elem: inner, .. }
+            | TypeExpr::Ref(inner) => contains_function(inner),
             TypeExpr::Tuple(elems) => elems.iter().any(contains_function),
             TypeExpr::Field
             | TypeExpr::U(_)
@@ -640,7 +640,7 @@ fn replace_function_type(typ: &mut Type) {
             typ.expr = TypeExpr::U(32);
         }
         TypeExpr::Array(inner, _) => replace_function_type(inner),
-        TypeExpr::Slice(inner) => replace_function_type(inner),
+        TypeExpr::Slice { elem: inner, .. } => replace_function_type(inner),
         TypeExpr::Ref(inner) => replace_function_type(inner),
         TypeExpr::Tuple(elements) => {
             for elem in elements.iter_mut() {

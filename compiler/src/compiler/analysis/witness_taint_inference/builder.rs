@@ -429,17 +429,13 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
                     .extend(&path);
                 builder.add_cf_taint_to(&written, branch_conditions);
             }
+            builder.add_cf_taint_to(&builder.value_position(*result), branch_conditions);
         }
-        OpCode::SliceLen { .. } => {
-            // No edges: the length is structural metadata, Pure for every slice this analysis
-            // can express. KNOWN LIMITATION (inherited from the previous pass): a slice whose
-            // *length* is witness-dependent has no representation — `leaf_paths` deliberately
-            // excludes container-top levels, so nothing ever taints a slice's top and there is
-            // no source for SliceLen to read. The phi-merge route (a slice merged at a witness
-            // JmpIf) is rejected loudly downstream (`UntaintControlFlow` panics on witness merge
-            // selects over slices); the ref route (a witness-conditional store of a slice
-            // through a ref) would need WitnessOf-slice support throughout untaint/lowering
-            // before this rule can be tightened.
+        OpCode::SliceLen { result, slice } => {
+            builder.graph.add_ge(
+                builder.value_position(*result),
+                builder.value_position(*slice),
+            );
         }
         OpCode::MkSeqOfBlob { .. } => {
             // the blob is compile-time constant data: the result starts Pure. (no edges)
@@ -731,7 +727,7 @@ fn leaf_paths(ty: &Type) -> Vec<Vec<Descent>> {
             | TypeExpr::Function
             | TypeExpr::Blob(..) => out.push(prefix.clone()),
             TypeExpr::Ref(_) => out.push(prefix.clone()),
-            TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
+            TypeExpr::Array(inner, _) | TypeExpr::Slice { elem: inner, .. } => {
                 prefix.push(Descent::Elem);
                 go(inner, prefix, out);
                 prefix.pop();

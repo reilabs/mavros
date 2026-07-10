@@ -169,7 +169,7 @@ impl Value {
                 let elem_unknown = Value::unknown_from_type(elem);
                 Value::array(vec![elem_unknown; *n])
             }
-            TypeExpr::Slice(_) => Value::UnknownSlice,
+            TypeExpr::Slice { .. } => Value::UnknownSlice,
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Ref(inner) => {
                 Value::Pointer(Rc::new(RefCell::new(Value::unknown_from_type(inner))))
@@ -2262,7 +2262,7 @@ impl CostEstimator {
                 let elem_sig = self.type_to_unknown_sig(elem);
                 ValueSignature::Array(vec![elem_sig; *len])
             }
-            TypeExpr::Slice(elem) => {
+            TypeExpr::Slice { elem, .. } => {
                 let elem_sig = self.type_to_unknown_sig(elem);
                 ValueSignature::Array(vec![elem_sig; 0])
             }

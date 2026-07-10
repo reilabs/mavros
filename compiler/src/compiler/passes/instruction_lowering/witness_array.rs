@@ -293,7 +293,7 @@ impl LowerWitnessArrayOps {
                     built_array
                 }
             }
-            TypeExpr::Slice(_) => {
+            TypeExpr::Slice { .. } => {
                 panic!("multidimensional witness array read: slice element types not supported")
             }
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
@@ -334,7 +334,7 @@ fn leaf_scalar_count(t: &Type) -> usize {
         TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => 1,
         TypeExpr::WitnessOf(inner) => leaf_scalar_count(inner),
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
-        TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
+        TypeExpr::Slice { .. } | TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
             panic!("leaf_scalar_count: unsupported type {}", t)
         }
     }
@@ -352,7 +352,7 @@ fn scalar_cast_target(ty: &Type, context: &str) -> CastTarget {
 fn array_len(ty: &Type, context: &str) -> usize {
     match &ty.strip_witness().expr {
         TypeExpr::Array(_, n) => *n,
-        TypeExpr::Slice(_) => panic!("{context}: slice is not supported"),
+        TypeExpr::Slice { .. } => panic!("{context}: slice is not supported"),
         other => panic!("{context}: expected array type, got {:?}", other),
     }
 }
