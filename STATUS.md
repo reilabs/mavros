@@ -549,7 +549,7 @@
 | noir/test_programs/execution_failure/regression_7759 | ✅ | ✅ | 137 | 261 | 22424 | - | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ➖ | ➖ | N/A | N/A | ➖ | ➖ | ➖ |
 | noir/test_programs/execution_failure/regression_8175 | ✅ | 💥 | - | - | - | - | ➖ | ➖ | N/A | N/A | N/A | N/A | N/A | ➖ | ➖ | N/A | N/A | ➖ | ➖ | ➖ |
 | noir/test_programs/execution_failure/regression_8195 | ✅ | ✅ | 43 | 79 | 10928 | - | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ➖ | ➖ | N/A | N/A | ➖ | ➖ | ➖ |
-| noir/test_programs/execution_failure/regression_8229 | ✅ | ✅ | 39 | 57 | 16328 | 207404 | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ✅ | ❌ | N/A | N/A | ✅ | ✅ | ✅ |
+| noir/test_programs/execution_failure/regression_8229 | ✅ | ✅ | 39 | 57 | 16328 | 207404 | ✅ | ❌ | N/A | N/A | N/A | N/A | N/A | ✅ | ❌ | N/A | N/A | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_failure/regression_8230 | ✅ | ✅ | 1 | 2 | 2696 | 186034 | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ✅ | ✅ | N/A | N/A | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_failure/regression_8231 | ✅ | ✅ | 32 | 61 | 25472 | 214174 | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ✅ | ✅ | N/A | N/A | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_failure/regression_8233 | ✅ | ✅ | 23 | 41 | 12208 | - | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ➖ | ➖ | N/A | N/A | ➖ | ➖ | ➖ |
