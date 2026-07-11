@@ -79,9 +79,9 @@ pub struct ExpressionConverter<'a> {
     /// Memoized user-facing source paths keyed by Noir file id.
     source_files: RefCell<HashMap<FileId, Arc<str>>>,
 
-    /// Source anchor inherited by locationless child expressions. This starts as a synthetic
-    /// last-resort fallback, but normally gets replaced by the nearest enclosing expression's
-    /// real source location while lowering.
+    /// Source anchor inherited by locationless child expressions. This starts at the Noir-internal
+    /// fallback, but normally gets replaced by the nearest enclosing expression's real source
+    /// location while lowering.
     current_source_location: SourceLocation,
 }
 
@@ -108,7 +108,7 @@ impl<'a> ExpressionConverter<'a> {
             current_block: entry_block,
             file_manager,
             source_files: RefCell::new(HashMap::default()),
-            current_source_location: SourceLocation::synthetic("lowering"),
+            current_source_location: SourceLocation::synthetic("Noir internal"),
         }
     }
 

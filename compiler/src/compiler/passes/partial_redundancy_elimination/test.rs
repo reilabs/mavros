@@ -1401,17 +1401,17 @@ fn pre_untaint_config_dedups_without_structural_change() {
     let e = f.add_block();
     let m = f.add_block();
     let entry = f.get_entry_mut();
-    entry.push_instruction(add(r1, a, b));
+    entry.push_test_instruction(add(r1, a, b));
     entry.set_terminator(Terminator::JmpIf(cond, t, e));
     f.get_block_mut(t)
         .set_terminator(Terminator::Jmp(m, vec![]));
     f.get_block_mut(e)
         .set_terminator(Terminator::Jmp(m, vec![]));
     let mb = f.get_block_mut(m);
-    mb.push_instruction(add(r2, a, b));
+    mb.push_test_instruction(add(r2, a, b));
     // The always-live anchor observing the redirect (the entrypoint's return slots are not
     // seeded live in this harness, so a `Return` operand cannot be the witness).
-    mb.push_instruction(OpCode::Rangecheck {
+    mb.push_test_instruction(OpCode::Rangecheck {
         value: r2,
         max_bits: 32,
     });
@@ -1684,7 +1684,7 @@ fn outer_body_operand_shape(
 
     let ohb = f.get_block_mut(oh);
     ohb.push_parameter(j, Type::u(32));
-    ohb.push_instruction(OpCode::Cmp {
+    ohb.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: jc,
         lhs: j,
@@ -1694,12 +1694,12 @@ fn outer_body_operand_shape(
 
     // `x` is recomputed every outer iteration, always to the same value.
     let obb = f.get_block_mut(obody);
-    obb.push_instruction(mul(x, a, b));
+    obb.push_test_instruction(mul(x, a, b));
     obb.set_terminator(Terminator::Jmp(ih, vec![c0]));
 
     let ihb = f.get_block_mut(ih);
     ihb.push_parameter(k, Type::u(32));
-    ihb.push_instruction(OpCode::Cmp {
+    ihb.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: kc,
         lhs: k,
@@ -1708,25 +1708,25 @@ fn outer_body_operand_shape(
     ihb.set_terminator(Terminator::JmpIf(kc, ibody, iafter));
 
     let ibb = f.get_block_mut(ibody);
-    ibb.push_instruction(mul(m1, x, c2));
+    ibb.push_test_instruction(mul(m1, x, c2));
     if !wrapping {
-        ibb.push_instruction(OpCode::Rangecheck {
+        ibb.push_test_instruction(OpCode::Rangecheck {
             value: m1,
             max_bits: 32,
         });
     }
-    ibb.push_instruction(add(k2, k, c1));
+    ibb.push_test_instruction(add(k2, k, c1));
     ibb.set_terminator(Terminator::Jmp(ih, vec![k2]));
 
     let iab = f.get_block_mut(iafter);
     if down_safe {
-        iab.push_instruction(mul(m2, x, c2));
-        iab.push_instruction(OpCode::Rangecheck {
+        iab.push_test_instruction(mul(m2, x, c2));
+        iab.push_test_instruction(OpCode::Rangecheck {
             value: m2,
             max_bits: 32,
         });
     }
-    iab.push_instruction(add(j2, j, c1));
+    iab.push_test_instruction(add(j2, j, c1));
     iab.set_terminator(Terminator::Jmp(oh, vec![j2]));
 
     f.get_block_mut(oexit)
@@ -1847,7 +1847,7 @@ fn call_result_operand_shape(
         let gf = ssa.get_function_mut(g);
         gf.add_return_type(Type::field());
         gf.get_entry_mut().push_parameter(p, Type::field());
-        gf.get_entry_mut().push_instruction(add(r, p, p));
+        gf.get_entry_mut().push_test_instruction(add(r, p, p));
         gf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![r]));
     }
@@ -1866,7 +1866,7 @@ fn call_result_operand_shape(
 
     let ohb = f.get_block_mut(oh);
     ohb.push_parameter(j, Type::u(32));
-    ohb.push_instruction(OpCode::Cmp {
+    ohb.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: jc,
         lhs: j,
@@ -1875,7 +1875,7 @@ fn call_result_operand_shape(
     ohb.set_terminator(Terminator::JmpIf(jc, obody, oexit));
 
     let obb = f.get_block_mut(obody);
-    obb.push_instruction(OpCode::Call {
+    obb.push_test_instruction(OpCode::Call {
         results: vec![x],
         function: CallTarget::Static(g),
         args: vec![a],
@@ -1885,7 +1885,7 @@ fn call_result_operand_shape(
 
     let ihb = f.get_block_mut(ih);
     ihb.push_parameter(k, Type::u(32));
-    ihb.push_instruction(OpCode::Cmp {
+    ihb.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: kc,
         lhs: k,
@@ -1894,21 +1894,21 @@ fn call_result_operand_shape(
     ihb.set_terminator(Terminator::JmpIf(kc, ibody, iafter));
 
     let ibb = f.get_block_mut(ibody);
-    ibb.push_instruction(mul(m1, x, c2f));
-    ibb.push_instruction(OpCode::Rangecheck {
+    ibb.push_test_instruction(mul(m1, x, c2f));
+    ibb.push_test_instruction(OpCode::Rangecheck {
         value: m1,
         max_bits: 32,
     });
-    ibb.push_instruction(add(k2, k, c1));
+    ibb.push_test_instruction(add(k2, k, c1));
     ibb.set_terminator(Terminator::Jmp(ih, vec![k2]));
 
     let iab = f.get_block_mut(iafter);
-    iab.push_instruction(mul(m2, x, c2f));
-    iab.push_instruction(OpCode::Rangecheck {
+    iab.push_test_instruction(mul(m2, x, c2f));
+    iab.push_test_instruction(OpCode::Rangecheck {
         value: m2,
         max_bits: 32,
     });
-    iab.push_instruction(add(j2, j, c1));
+    iab.push_test_instruction(add(j2, j, c1));
     iab.set_terminator(Terminator::Jmp(oh, vec![j2]));
 
     f.get_block_mut(oexit)
@@ -2000,7 +2000,7 @@ fn aggregate_const_phi_operand_hoists_via_congruence_tier() {
 
     let entry = f.get_entry_mut();
     entry.push_parameter(idx, Type::u(32));
-    entry.push_instruction(OpCode::MkSeq {
+    entry.push_test_instruction(OpCode::MkSeq {
         result: arr0,
         elems: vec![ce1, ce2],
         seq_type: SequenceTargetType::Array(2),
@@ -2011,7 +2011,7 @@ fn aggregate_const_phi_operand_hoists_via_congruence_tier() {
     let ohb = f.get_block_mut(oh);
     ohb.push_parameter(j, Type::u(32));
     ohb.push_parameter(arr, Type::field().array_of(2));
-    ohb.push_instruction(OpCode::Cmp {
+    ohb.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: jc,
         lhs: j,
@@ -2024,7 +2024,7 @@ fn aggregate_const_phi_operand_hoists_via_congruence_tier() {
 
     let ihb = f.get_block_mut(ih);
     ihb.push_parameter(k, Type::u(32));
-    ihb.push_instruction(OpCode::Cmp {
+    ihb.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: kc,
         lhs: k,
@@ -2033,29 +2033,29 @@ fn aggregate_const_phi_operand_hoists_via_congruence_tier() {
     ihb.set_terminator(Terminator::JmpIf(kc, ibody, iafter));
 
     let ibb = f.get_block_mut(ibody);
-    ibb.push_instruction(OpCode::ArrayGet {
+    ibb.push_test_instruction(OpCode::ArrayGet {
         result: x1,
         array: arr,
         index: idx,
     });
-    ibb.push_instruction(OpCode::Rangecheck {
+    ibb.push_test_instruction(OpCode::Rangecheck {
         value: x1,
         max_bits: 32,
     });
-    ibb.push_instruction(add(k2, k, c1));
+    ibb.push_test_instruction(add(k2, k, c1));
     ibb.set_terminator(Terminator::Jmp(ih, vec![k2]));
 
     let iab = f.get_block_mut(iafter);
-    iab.push_instruction(OpCode::ArrayGet {
+    iab.push_test_instruction(OpCode::ArrayGet {
         result: x2,
         array: arr,
         index: idx,
     });
-    iab.push_instruction(OpCode::Rangecheck {
+    iab.push_test_instruction(OpCode::Rangecheck {
         value: x2,
         max_bits: 32,
     });
-    iab.push_instruction(add(j2, j, c1));
+    iab.push_test_instruction(add(j2, j, c1));
     iab.set_terminator(Terminator::Jmp(oh, vec![j2, arr0]));
 
     f.get_block_mut(oexit)
