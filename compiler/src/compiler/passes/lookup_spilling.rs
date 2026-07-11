@@ -10,7 +10,7 @@ use crate::compiler::{
     },
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        FunctionId, ValueId,
+        FunctionId, SourceLocation, ValueId,
         hlssa::{
             CastTarget, Constant, HLSSA, HLSSAConstantsSnapshot, LookupTarget,
             MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type,
@@ -140,9 +140,10 @@ impl LookupSpilling {
             HelperKind::Rangecheck => format!("__rangecheck_spill_{}_{index}", key.width),
             HelperKind::Spread => format!("__spread_spill_{}_{index}", key.width),
         };
+        let location = SourceLocation::synthetic(&name);
         let (id, ()) = sb.add_function(name, |fb| {
             let entry = fb.function().get_entry_id();
-            let mut e = fb.block(entry);
+            let mut e = fb.block(entry).with_source_location(location);
             match key.kind {
                 HelperKind::Rangecheck => {
                     let value = e.add_parameter(key.value_type.clone());
@@ -314,10 +315,18 @@ impl Pass for LookupSpilling {
                         fb.function.put_block(block_id, block);
                         (instructions, terminator)
                     };
-                    let mut e = fb.block(block_id);
+                    // Every rewritten lookup scopes its own location below; emitting outside a
+                    // scope is an ICE.
+                    let mut e = fb
+                        .block(block_id)
+                        .with_scoped_source_locations("lookup_spilling");
                     for instr in instructions {
-                        if !self.rewrite_lookup(&mut e, &instr, fti, sizing, &consts, &cache) {
-                            e.emit(instr);
+                        let location = instr.location().clone();
+                        let rewritten = e.emit_with_location(location, |e| {
+                            self.rewrite_lookup(e, &instr, fti, sizing, &consts, &cache)
+                        });
+                        if !rewritten {
+                            e.emit_located(instr);
                         }
                     }
                     if let Some(terminator) = terminator {

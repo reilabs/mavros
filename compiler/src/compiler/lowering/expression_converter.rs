@@ -31,6 +31,8 @@ use crate::{
 struct LoopContext {
     loop_header: BlockId,
     exit_block: BlockId,
+    /// Source anchor for desugared instructions emitted on behalf of the loop body.
+    body_source_location: SourceLocation,
     /// Only for `for` loops — (index_value, bit_size), used by Continue to increment.
     for_loop_index: Option<(ValueId, usize)>,
 }
@@ -76,6 +78,11 @@ pub struct ExpressionConverter<'a> {
 
     /// Memoized user-facing source paths keyed by Noir file id.
     source_files: RefCell<HashMap<FileId, Arc<str>>>,
+
+    /// Source anchor inherited by locationless child expressions. This starts at the Noir-internal
+    /// fallback, but normally gets replaced by the nearest enclosing expression's real source
+    /// location while lowering.
+    current_source_location: SourceLocation,
 }
 
 impl<'a> ExpressionConverter<'a> {
@@ -101,6 +108,7 @@ impl<'a> ExpressionConverter<'a> {
             current_block: entry_block,
             file_manager,
             source_files: RefCell::new(HashMap::default()),
+            current_source_location: SourceLocation::synthetic("Noir internal"),
         }
     }
 
@@ -109,14 +117,37 @@ impl<'a> ExpressionConverter<'a> {
     /// `emit` runs against the current block's emitter and returns the instruction's result; every
     /// instruction it pushes that does not already carry a location is annotated with `location`.
     fn emit_located<R>(
-        &self,
+        &mut self,
         b: &mut HLFunctionBuilder<'_>,
         location: Option<NoirLocation>,
         emit: impl FnOnce(&mut HLBlockEmitter<'_>) -> R,
     ) -> R {
-        let mut e = b.block(self.current_block);
-        let source_location = location.and_then(|location| self.source_location(location));
-        e.emit_with_location(source_location, emit)
+        let source_location = self.resolve_location(location);
+        self.emit_at_source_location(b, source_location, emit)
+    }
+
+    fn emit_at_source_location<R>(
+        &mut self,
+        b: &mut HLFunctionBuilder<'_>,
+        source_location: SourceLocation,
+        emit: impl FnOnce(&mut HLBlockEmitter<'_>) -> R,
+    ) -> R {
+        let mut e = b
+            .block(self.current_block)
+            .with_source_location(source_location);
+        emit(&mut e)
+    }
+
+    /// Turn an optional Noir location into a definite `SourceLocation`.
+    fn resolve_location(&self, location: Option<NoirLocation>) -> SourceLocation {
+        location
+            .and_then(|location| self.source_location(location))
+            .unwrap_or_else(|| self.current_source_location.clone())
+    }
+
+    /// The definite source location of `expr`, for callers that emit on the converter's behalf.
+    pub(super) fn expression_source_location(&self, expr: &Expression) -> SourceLocation {
+        self.resolve_location(Self::expression_location(expr))
     }
 
     fn source_location(&self, location: NoirLocation) -> Option<SourceLocation> {
@@ -220,8 +251,9 @@ impl<'a> ExpressionConverter<'a> {
         local_id: LocalId,
         value_id: ValueId,
         b: &mut HLFunctionBuilder<'_>,
+        location: SourceLocation,
     ) {
-        let mut e = b.block(self.current_block);
+        let mut e = b.block(self.current_block).with_source_location(location);
         let ptr = e.alloc(value_id);
         drop(e);
         self.bindings.insert(local_id, ptr);
@@ -239,6 +271,19 @@ impl<'a> ExpressionConverter<'a> {
 
     /// Convert an expression to SSA instructions.
     pub fn convert_expression(
+        &mut self,
+        expr: &Expression,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
+        let source_location = self.resolve_location(Self::expression_location(expr));
+        let previous_source_location =
+            std::mem::replace(&mut self.current_source_location, source_location);
+        let result = self.convert_expression_inner(expr, b);
+        self.current_source_location = previous_source_location;
+        result
+    }
+
+    fn convert_expression_inner(
         &mut self,
         expr: &Expression,
         b: &mut HLFunctionBuilder<'_>,
@@ -281,13 +326,20 @@ impl<'a> ExpressionConverter<'a> {
                 None
             }
             Expression::Continue => {
-                let ctx = self.loop_stack.last().expect("continue outside of loop");
-                let loop_header = ctx.loop_header;
-                let for_loop_index = ctx.for_loop_index;
+                let (loop_header, for_loop_index, body_source_location) = {
+                    let ctx = self.loop_stack.last().expect("continue outside of loop");
+                    (
+                        ctx.loop_header,
+                        ctx.for_loop_index,
+                        ctx.body_source_location.clone(),
+                    )
+                };
                 if let Some((loop_index, index_bit_size)) = for_loop_index {
                     // For loop: increment index and jump back to header
                     let one = b.emit_const(Constant::U(index_bit_size, 1));
-                    let next_index = self.emit_located(b, None, |e| e.add(loop_index, one));
+                    let next_index = self.emit_at_source_location(b, body_source_location, |e| {
+                        e.add(loop_index, one)
+                    });
                     b.block(self.current_block)
                         .terminate_jmp(loop_header, vec![next_index]);
                 } else {
@@ -574,6 +626,8 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn convert_for(&mut self, for_expr: &For, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
+        let body_source_location = self.expression_source_location(&for_expr.block);
+
         // Evaluate start and end range in the current block
         let start = self.convert_expression(&for_expr.start_range, b).unwrap();
         let end_raw = self.convert_expression(&for_expr.end_range, b).unwrap();
@@ -597,7 +651,8 @@ impl<'a> ExpressionConverter<'a> {
 
         // Build header: parameter, condition, branch
         let loop_index = {
-            let mut header = b.block(loop_header);
+            let header_location = self.resolve_location(Some(for_expr.end_range_location));
+            let mut header = b.block(loop_header).with_source_location(header_location);
             let loop_index = header.add_parameter(index_type);
             let cond = header.lt(loop_index, end);
             header.terminate_jmp_if(cond, loop_body, exit_block);
@@ -621,6 +676,7 @@ impl<'a> ExpressionConverter<'a> {
         self.loop_stack.push(LoopContext {
             loop_header,
             exit_block,
+            body_source_location,
             for_loop_index: Some((loop_index, index_bit_size)),
         });
 
@@ -652,6 +708,8 @@ impl<'a> ExpressionConverter<'a> {
         while_expr: &While,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
+        let body_source_location = self.expression_source_location(&while_expr.body);
+
         // Create blocks: loop_header evaluates condition, loop_body runs body, exit_block continues
         let loop_header = b.add_block(|_| {});
         let loop_body = b.add_block(|_| {});
@@ -672,6 +730,7 @@ impl<'a> ExpressionConverter<'a> {
         self.loop_stack.push(LoopContext {
             loop_header,
             exit_block,
+            body_source_location,
             for_loop_index: None,
         });
 
@@ -697,6 +756,8 @@ impl<'a> ExpressionConverter<'a> {
         body: &Expression,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
+        let body_source_location = self.expression_source_location(body);
+
         // loop { body } — only exits via break
         let loop_block = b.add_block(|_| {});
         let exit_block = b.add_block(|_| {});
@@ -710,6 +771,7 @@ impl<'a> ExpressionConverter<'a> {
         self.loop_stack.push(LoopContext {
             loop_header: loop_block,
             exit_block,
+            body_source_location,
             for_loop_index: None,
         });
 
@@ -1127,7 +1189,9 @@ impl<'a> ExpressionConverter<'a> {
                 let elem_type = Type::u(8);
                 let elems = s.bytes().map(|byte| Constant::U(8, byte as u128)).collect();
                 let blob = b.emit_const(Constant::Blob(Blob::new(elem_type.clone(), elems)));
-                let arr = self.emit_located(b, None, |e| e.mk_seq_of_blob(elem_type, blob));
+                let location = self.current_source_location.clone();
+                let arr = self
+                    .emit_at_source_location(b, location, |e| e.mk_seq_of_blob(elem_type, blob));
                 Some(arr)
             }
             Literal::FmtStr(fragments, _count, captures) => {
@@ -1322,7 +1386,11 @@ impl<'a> ExpressionConverter<'a> {
     ) -> Option<ValueId> {
         if exprs.is_empty() {
             // Empty struct/tuple — still a value (e.g. A {})
-            return Some(self.emit_located(b, None, |e| e.mk_tuple(vec![], vec![])));
+            return Some(self.emit_at_source_location(
+                b,
+                self.current_source_location.clone(),
+                |e| e.mk_tuple(vec![], vec![]),
+            ));
         }
 
         // Convert each element to a single materialized value
@@ -1583,10 +1651,9 @@ impl<'a> ExpressionConverter<'a> {
             "vector_push_back" => {
                 let slice = self.convert_expression(&call.arguments[0], b).unwrap();
                 let elem = self.convert_expression(&call.arguments[1], b).unwrap();
-                Some(
-                    b.block(self.current_block)
-                        .slice_push(slice, vec![elem], SliceOpDir::Back),
-                )
+                Some(self.emit_located(b, Some(call.location), |e| {
+                    e.slice_push(slice, vec![elem], SliceOpDir::Back)
+                }))
             }
             _ => todo!("Builtin function '{}' not yet supported", name),
         }

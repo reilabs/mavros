@@ -122,7 +122,9 @@ fn run_on_function<T: LoweringPass + ?Sized>(
             (instructions, terminator)
         };
 
-        let mut b = fb.block(block_id);
+        // Every rewritten instruction scopes its own location below; emitting outside a scope
+        // is an ICE.
+        let mut b = fb.block(block_id).with_scoped_source_locations(T::NAME);
         for instruction in instructions {
             let location = instruction.location().clone();
             b.emit_with_location(location, |b| {

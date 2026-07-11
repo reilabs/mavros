@@ -1,7 +1,8 @@
 use std::{fmt::Debug, hash::Hash};
 
 use crate::compiler::ssa::{
-    Block, BlockId, Function, FunctionId, Instruction, Located, SSA, SSAType, Terminator, ValueId,
+    Block, BlockId, Function, FunctionId, Instruction, Located, SSA, SSAType, SourceLocation,
+    Terminator, ValueId,
 };
 
 // ---------------------------------------------------------------------------
@@ -12,6 +13,7 @@ pub struct InstrBuilder<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq 
     pub function: &'a mut Function<Op, Ty>,
     pub ssa: &'a mut SSA<Op, Ty, C>,
     pub instructions: &'a mut Vec<Located<Op>>,
+    source_location: SourceLocation,
 }
 
 impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> InstrBuilder<'a, Op, Ty, C> {
@@ -19,17 +21,23 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> InstrBuilde
         function: &'a mut Function<Op, Ty>,
         ssa: &'a mut SSA<Op, Ty, C>,
         instructions: &'a mut Vec<Located<Op>>,
+        source_location: SourceLocation,
     ) -> Self {
         Self {
             function,
             ssa,
             instructions,
+            source_location,
         }
     }
 
     /// Push a pre-built instruction (passthrough or pre-allocated result).
-    pub fn push(&mut self, instruction: impl Into<Located<Op>>) {
-        self.instructions.push(instruction.into());
+    pub fn push_located(&mut self, instruction: Located<Op>) {
+        self.instructions.push(instruction);
+    }
+
+    pub fn push(&mut self, instruction: Op) {
+        self.push_located(Located::new(instruction, self.source_location.clone()));
     }
 }
 
@@ -49,9 +57,9 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash>
         Self { function, ssa }
     }
 
-    pub fn add_block(&mut self, f: impl FnOnce(&mut BlockEmitter<'_, Op, Ty, C>)) -> BlockId {
-        let (id, mut emitter) = BlockEmitter::from_new_block(self.function, self.ssa);
-        f(&mut emitter);
+    pub fn add_block(&mut self, f: impl FnOnce(&mut BlockEditor<'_, Op, Ty, C>)) -> BlockId {
+        let (id, mut editor) = BlockEditor::from_new_block(self.function, self.ssa);
+        f(&mut editor);
         id
     }
 
@@ -74,20 +82,33 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash>
         self.ssa
     }
 
-    /// Get a BlockEmitter for a specific block.
-    pub fn block(&mut self, id: BlockId) -> BlockEmitter<'_, Op, Ty, C> {
-        BlockEmitter::new(self.function, self.ssa, id)
+    /// Get a BlockEditor for a specific block. Upgrade it with
+    /// `with_source_location` to emit instructions.
+    pub fn block(&mut self, id: BlockId) -> BlockEditor<'_, Op, Ty, C> {
+        BlockEditor::new(self.function, self.ssa, id)
+    }
+
+    /// Get a BlockEmitter whose ambient location is the shared test location. Test-only sugar so
+    /// hand-built SSA fixtures don't have to set a location per emitter.
+    #[cfg(test)]
+    pub fn test_block(&mut self, id: BlockId) -> BlockEmitter<'_, Op, Ty, C> {
+        self.block(id).with_source_location(SourceLocation::test())
     }
 }
 
 // ---------------------------------------------------------------------------
-// BlockEmitter — emits instructions into a specific block, with block-splitting
+// BlockEditor — structural access to a specific block (parameters, terminators)
 // ---------------------------------------------------------------------------
 
-/// Holds the current block *taken out* of the function, so `emit()` is a
+/// Holds the current block *taken out* of the function, so pushes are a
 /// direct `Vec::push` with no HashMap lookup.  The block is put back into the
 /// function on `seal_and_switch` or `Drop`.
-pub struct BlockEmitter<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> {
+///
+/// A `BlockEditor` can shape a block (parameters, terminators) and push
+/// pre-located instructions, but cannot emit new instructions: emitting needs
+/// an ambient source location, which `with_source_location` provides by
+/// upgrading to a [`BlockEmitter`].
+pub struct BlockEditor<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> {
     pub function: &'a mut Function<Op, Ty>,
     pub ssa: &'a mut SSA<Op, Ty, C>,
     pub(crate) block_id: BlockId,
@@ -95,7 +116,7 @@ pub struct BlockEmitter<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq 
 }
 
 impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Drop
-    for BlockEmitter<'_, Op, Ty, C>
+    for BlockEditor<'_, Op, Ty, C>
 {
     fn drop(&mut self) {
         let block = std::mem::replace(&mut self.block, Block::empty());
@@ -103,8 +124,8 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Drop
     }
 }
 
-impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitter<'a, Op, Ty, C> {
-    /// Create an emitter for an existing block (takes it out of the function).
+impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEditor<'a, Op, Ty, C> {
+    /// Create an editor for an existing block (takes it out of the function).
     pub fn new(
         function: &'a mut Function<Op, Ty>,
         ssa: &'a mut SSA<Op, Ty, C>,
@@ -119,7 +140,7 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         }
     }
 
-    /// Create an emitter for a fresh block (not yet in the function).
+    /// Create an editor for a fresh block (not yet in the function).
     /// The block is inserted into the function on drop.
     pub(crate) fn from_new_block(
         function: &'a mut Function<Op, Ty>,
@@ -141,62 +162,30 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         self.block_id
     }
 
+    /// Upgrade to a [`BlockEmitter`] that emits every instruction at `source_location`.
+    pub fn with_source_location(
+        self,
+        source_location: SourceLocation,
+    ) -> BlockEmitter<'a, Op, Ty, C> {
+        BlockEmitter {
+            editor: self,
+            ambient_location: AmbientLocation::Location(source_location),
+        }
+    }
+
+    /// Upgrade to a [`BlockEmitter`] with no ambient location of its own: every emission must
+    /// happen inside an `emit_with_location` scope, and emitting outside one is an ICE naming
+    /// `pass`. For pass drivers that rewrite instructions one at a time and require every
+    /// emission to be anchored to a rewritten instruction's location.
+    pub fn with_scoped_source_locations(self, pass: &'static str) -> BlockEmitter<'a, Op, Ty, C> {
+        BlockEmitter {
+            editor: self,
+            ambient_location: AmbientLocation::IceOutsideScope(pass),
+        }
+    }
+
     pub fn instruction_count(&self) -> usize {
         self.block.instruction_count()
-    }
-
-    pub fn stamp_source_location_from(
-        &mut self,
-        start: usize,
-        source_location: Option<crate::compiler::ssa::SourceLocation>,
-    ) {
-        self.block
-            .stamp_source_location_from(start, source_location);
-    }
-
-    pub fn emit_with_location<R>(
-        &mut self,
-        source_location: Option<crate::compiler::ssa::SourceLocation>,
-        emit: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        let start_block = self.block_id;
-        let start_len = self.block.instruction_count();
-        let next_block_before = self.function.next_block_id_bound();
-
-        let result = emit(self);
-
-        let Some(source_location) = source_location else {
-            return result;
-        };
-
-        if self.block_id == start_block && self.function.next_block_id_bound() == next_block_before
-        {
-            self.block
-                .stamp_source_location_from(start_len, Some(source_location));
-            return result;
-        };
-
-        if self.block_id == start_block {
-            self.block
-                .stamp_source_location_from(start_len, Some(source_location.clone()));
-        } else {
-            self.function
-                .get_block_mut(start_block)
-                .stamp_source_location_from(start_len, Some(source_location.clone()));
-        }
-
-        for (block_id, block) in self.function.get_blocks_mut() {
-            if block_id.0 >= next_block_before {
-                block.stamp_source_location_from(0, Some(source_location.clone()));
-            }
-        }
-
-        if self.block_id.0 >= next_block_before {
-            self.block
-                .stamp_source_location_from(0, Some(source_location));
-        }
-
-        result
     }
 
     pub fn add_block(&mut self) -> (BlockId, &mut Block<Op, Ty>) {
@@ -240,8 +229,87 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         self.block.get_terminator().is_some()
     }
 
-    pub fn emit_instruction(&mut self, instruction: impl Into<Located<Op>>) {
-        self.block.push_instruction(instruction.into());
+    /// Push an instruction that already carries its own location.
+    pub fn emit_located_instruction(&mut self, instruction: Located<Op>) {
+        self.block.push_instruction(instruction);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BlockEmitter — a BlockEditor plus the ambient source location, so it can
+//                emit instructions (with block-splitting)
+// ---------------------------------------------------------------------------
+
+/// The location an emitter stamps on instructions when no `emit_with_location` scope is active.
+enum AmbientLocation {
+    /// A real location, from [`BlockEditor::with_source_location`]: emitting outside a scope is
+    /// fine and uses it.
+    Location(SourceLocation),
+    /// From [`BlockEditor::with_scoped_source_locations`]: the named pass promises to emit only
+    /// inside `emit_with_location` scopes, and emitting outside one is an ICE.
+    IceOutsideScope(&'static str),
+}
+
+impl AmbientLocation {
+    fn resolve(&self) -> SourceLocation {
+        match self {
+            AmbientLocation::Location(source_location) => source_location.clone(),
+            AmbientLocation::IceOutsideScope(pass) => {
+                panic!("ICE: {pass} emitted an instruction outside an `emit_with_location` scope")
+            }
+        }
+    }
+}
+
+/// A [`BlockEditor`] paired with the ambient source location that every
+/// instruction it emits is located at. Constructed via
+/// [`BlockEditor::with_source_location`], so holding one proves a location was
+/// provided — there is no location-less way to emit.
+pub struct BlockEmitter<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> {
+    editor: BlockEditor<'a, Op, Ty, C>,
+    ambient_location: AmbientLocation,
+}
+
+impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> std::ops::Deref
+    for BlockEmitter<'a, Op, Ty, C>
+{
+    type Target = BlockEditor<'a, Op, Ty, C>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.editor
+    }
+}
+
+impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> std::ops::DerefMut
+    for BlockEmitter<'_, Op, Ty, C>
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.editor
+    }
+}
+
+impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitter<'_, Op, Ty, C> {
+    /// Run `emit` with `source_location` as the ambient location: every instruction it emits
+    /// through this emitter (including into blocks it creates) is located there at push time.
+    /// Instructions pushed with an explicit location (`emit_located_instruction`) keep theirs,
+    /// as do instructions emitted by a nested `emit_with_location` scope.
+    pub fn emit_with_location<R>(
+        &mut self,
+        source_location: SourceLocation,
+        emit: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous_ambient_location = std::mem::replace(
+            &mut self.ambient_location,
+            AmbientLocation::Location(source_location),
+        );
+        let result = emit(self);
+        self.ambient_location = previous_ambient_location;
+        result
+    }
+
+    pub fn emit_instruction(&mut self, instruction: Op) {
+        let instruction = Located::new(instruction, self.ambient_location.resolve());
+        self.editor.block.push_instruction(instruction);
     }
 
     /// Build a loop with the three-block structure: header -> body -> back-edge.
@@ -289,7 +357,13 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitte
         // Call header closure to emit condition into a temporary instruction buffer
         let mut header_instructions = vec![];
         let cond = {
-            let mut b = InstrBuilder::new(self.function, self.ssa, &mut header_instructions);
+            let source_location = self.ambient_location.resolve();
+            let mut b = InstrBuilder::new(
+                self.editor.function,
+                self.editor.ssa,
+                &mut header_instructions,
+                source_location,
+            );
             header(&mut b, &param_ids)
         };
         self.function
@@ -526,8 +600,8 @@ mod tests {
             let mut sb = HLSSABuilder::new(&mut ssa);
             sb.modify_function(main_id, |fb| {
                 let entry_id = fb.function.get_entry_id();
-                let mut block = fb.block(entry_id);
-                block.emit(Located::with(
+                let mut block = fb.test_block(entry_id);
+                block.emit_located(Located::new(
                     OpCode::Not {
                         result: ValueId(1),
                         value: ValueId(0),
@@ -538,7 +612,7 @@ mod tests {
         }
 
         let entry = ssa.get_unique_entrypoint().get_entry();
-        assert_eq!(entry.get_instruction_source_location(0), Some(&loc));
+        assert_eq!(entry.get_instruction_source_location(0), &loc);
     }
 
     #[test]
@@ -549,8 +623,9 @@ mod tests {
         let loc = test_location();
 
         {
-            let mut builder = InstrBuilder::new(&mut function, &mut ssa, &mut instructions);
-            builder.emit(Located::with(
+            let mut builder =
+                InstrBuilder::new(&mut function, &mut ssa, &mut instructions, loc.clone());
+            builder.emit_located(Located::new(
                 OpCode::Not {
                     result: ValueId(1),
                     value: ValueId(0),
@@ -560,7 +635,44 @@ mod tests {
         }
 
         assert_eq!(instructions.len(), 1);
-        assert_eq!(instructions[0].get_location(), Some(&loc));
+        assert_eq!(instructions[0].location(), &loc);
+    }
+
+    /// A scoped-locations emitter carries no ambient location of its own: emitting outside an
+    /// `emit_with_location` scope is an attribution bug and must fail fast.
+    #[test]
+    #[should_panic(expected = "outside an `emit_with_location` scope")]
+    fn scoped_locations_emitter_ices_outside_a_scope() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry_id = fb.function.get_entry_id();
+            let mut block = fb.block(entry_id).with_scoped_source_locations("test_pass");
+            block.not(ValueId(0));
+        });
+    }
+
+    #[test]
+    fn scoped_locations_emitter_emits_inside_a_scope() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let loc = test_location();
+
+        {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(main_id, |fb| {
+                let entry_id = fb.function.get_entry_id();
+                let mut block = fb.block(entry_id).with_scoped_source_locations("test_pass");
+                block.emit_with_location(loc.clone(), |block| {
+                    block.not(ValueId(0));
+                });
+            });
+        }
+
+        let entry = ssa.get_unique_entrypoint().get_entry();
+        assert_eq!(entry.get_instruction_source_location(0), &loc);
     }
 
     #[test]
@@ -573,8 +685,8 @@ mod tests {
             let mut sb = HLSSABuilder::new(&mut ssa);
             sb.modify_function(main_id, |fb| {
                 let entry_id = fb.function.get_entry_id();
-                let mut block = fb.block(entry_id);
-                block.emit_with_location(Some(loc.clone()), |block| {
+                let mut block = fb.test_block(entry_id);
+                block.emit_with_location(loc.clone(), |block| {
                     let cond = block.not(ValueId(0));
                     block.build_if_else(
                         cond,
@@ -598,7 +710,7 @@ mod tests {
             .map(|(_, block)| {
                 block
                     .get_instructions_with_source_locations()
-                    .inspect(|(_, location)| assert_eq!(*location, Some(&loc)))
+                    .inspect(|(_, location)| assert_eq!(*location, &loc))
                     .count()
             })
             .sum();

@@ -1,6 +1,6 @@
 use crate::compiler::ssa::{
     FunctionId, ValueId,
-    builder::{BlockEmitter, FunctionBuilder, InstrBuilder, SSABuilder},
+    builder::{BlockEditor, BlockEmitter, FunctionBuilder, InstrBuilder, SSABuilder},
     hlssa::DMatrix,
     llssa::{Constant, FieldArithOp, IntArithOp, IntCmpOp, LLOp, LLStruct, LocatedLLOp, Type},
 };
@@ -11,7 +11,8 @@ use crate::compiler::ssa::{
 
 pub trait LLEmitter {
     fn fresh_value(&mut self) -> ValueId;
-    fn emit_ll(&mut self, instruction: impl Into<LocatedLLOp>);
+    fn emit_ll(&mut self, instruction: LLOp);
+    fn emit_located_ll(&mut self, instruction: LocatedLLOp);
     fn vm_ptr(&mut self) -> ValueId;
     fn emit_constant(&mut self, value: Constant) -> ValueId;
 
@@ -411,6 +412,7 @@ fn ad_out_field(matrix: DMatrix) -> usize {
 
 pub type LLInstrBuilder<'a> = InstrBuilder<'a, LLOp, Type, Constant>;
 pub type LLFunctionBuilder<'a> = FunctionBuilder<'a, LLOp, Type, Constant>;
+pub type LLBlockEditor<'a> = BlockEditor<'a, LLOp, Type, Constant>;
 pub type LLBlockEmitter<'a> = BlockEmitter<'a, LLOp, Type, Constant>;
 pub type LLSSABuilder<'a> = SSABuilder<'a, LLOp, Type, Constant>;
 
@@ -423,8 +425,12 @@ impl LLEmitter for LLInstrBuilder<'_> {
         self.ssa.fresh_value()
     }
 
-    fn emit_ll(&mut self, instruction: impl Into<LocatedLLOp>) {
+    fn emit_ll(&mut self, instruction: LLOp) {
         self.push(instruction);
+    }
+
+    fn emit_located_ll(&mut self, instruction: LocatedLLOp) {
+        self.push_located(instruction);
     }
 
     fn vm_ptr(&mut self) -> ValueId {
@@ -446,8 +452,12 @@ impl LLEmitter for LLBlockEmitter<'_> {
         self.ssa.fresh_value()
     }
 
-    fn emit_ll(&mut self, instruction: impl Into<LocatedLLOp>) {
+    fn emit_ll(&mut self, instruction: LLOp) {
         self.emit_instruction(instruction);
+    }
+
+    fn emit_located_ll(&mut self, instruction: LocatedLLOp) {
+        self.emit_located_instruction(instruction);
     }
 
     fn vm_ptr(&mut self) -> ValueId {

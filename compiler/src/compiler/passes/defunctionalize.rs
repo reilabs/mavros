@@ -15,7 +15,7 @@ use crate::{
         pass_manager::{AnalysisStore, Pass},
         passes::shared::value_replacements::ValueReplacements,
         ssa::{
-            BlockId, FunctionId, Located, Terminator, ValueId,
+            BlockId, FunctionId, Located, SourceLocation, Terminator, ValueId,
             hlssa::{
                 CallTarget, Constant, HLSSA, OpCode, Type, TypeExpr,
                 builder::{HLEmitter, HLSSABuilder},
@@ -559,7 +559,9 @@ fn build_dispatch_function(
     return_types: &[Type],
     variants: &[FunctionId],
 ) -> FunctionId {
-    let dispatch_fn_id = ssa.add_function(format!("apply_dispatch@{}", counter));
+    let name = format!("apply_dispatch@{counter}");
+    let location = SourceLocation::synthetic(&name);
+    let dispatch_fn_id = ssa.add_function(name);
     let mut sb = HLSSABuilder::new(ssa);
     sb.modify_function(dispatch_fn_id, |b| {
         for ret_type in return_types {
@@ -590,7 +592,9 @@ fn build_dispatch_function(
 
         if variants.len() == 1 {
             let variant_id = variants[0];
-            let mut cb = b.block(current_block);
+            let mut cb = b
+                .block(current_block)
+                .with_source_location(location.clone());
             let const_val = cb.u_const(32, variant_id.0 as u128);
             cb.assert_eq(fn_id_param, const_val);
             let call_results = cb.call(variant_id, forwarded_params.clone(), return_types.len());
@@ -600,7 +604,9 @@ fn build_dispatch_function(
                 let is_last = i == variants.len() - 1;
 
                 if is_last {
-                    let mut cb = b.block(current_block);
+                    let mut cb = b
+                        .block(current_block)
+                        .with_source_location(location.clone());
                     let const_val = cb.u_const(32, variant_id.0 as u128);
                     cb.assert_eq(fn_id_param, const_val);
                     let call_results =
@@ -611,14 +617,16 @@ fn build_dispatch_function(
                     let next_check_block = b.add_block(|_| {});
 
                     {
-                        let mut cb = b.block(current_block);
+                        let mut cb = b
+                            .block(current_block)
+                            .with_source_location(location.clone());
                         let const_val = cb.u_const(32, variant_id.0 as u128);
                         let eq_result = cb.eq(fn_id_param, const_val);
                         cb.terminate_jmp_if(eq_result, call_block, next_check_block);
                     }
 
                     {
-                        let mut cb = b.block(call_block);
+                        let mut cb = b.block(call_block).with_source_location(location.clone());
                         let call_results =
                             cb.call(variant_id, forwarded_params.clone(), return_types.len());
                         cb.terminate_jmp(merge_block, call_results);
@@ -674,5 +682,33 @@ fn replace_function_types_in_instruction(instr: &mut OpCode) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Dispatch stubs have no user-source anchor: every instruction they contain must carry the
+    /// synthetic location named after the generated function.
+    #[test]
+    fn dispatch_function_is_located_at_its_synthetic_source() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let f = ssa.add_function("f".to_string());
+        let g = ssa.add_function("g".to_string());
+
+        let dispatch_id =
+            build_dispatch_function(&mut ssa, 7, &[Type::field()], &[Type::field()], &[f, g]);
+
+        let dispatch = ssa.get_function(dispatch_id);
+        let expected = SourceLocation::synthetic("apply_dispatch@7");
+        let mut located_instructions = 0;
+        for (_, block) in dispatch.get_blocks() {
+            for (_, location) in block.get_instructions_with_source_locations() {
+                assert_eq!(location, &expected);
+                located_instructions += 1;
+            }
+        }
+        assert!(located_instructions > 0);
     }
 }

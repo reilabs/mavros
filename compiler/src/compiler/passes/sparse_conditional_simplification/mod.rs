@@ -99,7 +99,8 @@ use crate::{
             shared::value_replacements::{ReplaceScope, ValueReplacements},
         },
         ssa::{
-            BlockId, FunctionId, Instruction, Located, ProgramPoint, Terminator, ValueId,
+            BlockId, FunctionId, Instruction, Located, ProgramPoint, SourceLocation, Terminator,
+            ValueId,
             hlssa::{CastTarget, CmpKind, HLFunction, HLSSA, OpCode},
         },
     },
@@ -238,10 +239,11 @@ fn propagate(
 
     // Witness-typed constants materialized as casts — fed by `substitute_asserted_consts`
     // (witness-typed asserted-constant operands) and the anticipated witness `Cmp{Eq}` fold: keyed
-    // by the bare interned constant, valued by the fresh `cast <const> to WitnessOf` result.
-    // Accumulated across the whole function and hoisted into the entry block at the end (so each
-    // definition dominates every use, and identical constants share one cast).
-    let mut witness_const_casts: HashMap<ValueId, ValueId> = HashMap::default();
+    // by the bare interned constant, valued by the fresh `cast <const> to WitnessOf` result and the
+    // source location of the original instruction that required it. Accumulated across the whole
+    // function and hoisted into the entry block at the end (so each definition dominates every
+    // use, and identical constants share one cast without losing their original provenance).
+    let mut witness_const_casts: HashMap<ValueId, (ValueId, SourceLocation)> = HashMap::default();
     let const_values = cc.new_const_values(fid);
     let const_set: HashSet<ValueId> = const_values.iter().map(|(v, _)| *v).collect();
 
@@ -385,9 +387,10 @@ fn propagate(
                 if cc.anticipated_equal(fid, point, lhs, rhs) {
                     let bare = ssa.add_const((*bool_constant(true)).clone());
                     if fn_type_info.get_value_type(result).is_witness_of() {
-                        let wit = *witness_const_casts
+                        let wit = witness_const_casts
                             .entry(bare)
-                            .or_insert_with(|| ssa.fresh_value());
+                            .or_insert_with(|| (ssa.fresh_value(), location.clone()))
+                            .0;
                         anticipated_witness_replacements.insert(result, wit);
                     } else {
                         anticipated_replacements.insert(result, bare);
@@ -444,6 +447,7 @@ fn propagate(
                 ProgramPoint::new(bid, i),
                 allow_witness,
                 allow_anticipated,
+                &location,
                 &mut witness_const_casts,
                 instr.get_inputs_mut(),
             );
@@ -496,6 +500,10 @@ fn propagate(
         // `Return` values and `Jmp` args are pure value consumers, so witness substitution is
         // allowed here just as for the safe-target instructions above.
         let term_point = ProgramPoint::new(bid, instr_count);
+        let terminator_location = block
+            .last_location()
+            .cloned()
+            .unwrap_or_else(|| SourceLocation::synthetic("sparse_conditional_simplification"));
         match block.get_terminator_mut() {
             Terminator::Return(vals) => {
                 substitute_asserted_consts(
@@ -506,6 +514,7 @@ fn propagate(
                     term_point,
                     true,
                     true,
+                    &terminator_location,
                     &mut witness_const_casts,
                     vals.iter_mut(),
                 );
@@ -519,6 +528,7 @@ fn propagate(
                     term_point,
                     true,
                     true,
+                    &terminator_location,
                     &mut witness_const_casts,
                     params.iter_mut(),
                 );
@@ -623,18 +633,23 @@ fn propagate(
     // 9. Hoist the witness-typed constants materialized above — by the asserted-constant
     // substitution and the anticipated witness `Cmp{Eq}` fold — into the entry block, whose every
     // instruction it dominates, so each `cast <const> to WitnessOf` definition dominates the uses
-    // redirected to it. Emit them in result-id order for a deterministic instruction sequence.
+    // redirected to it. Each cast keeps the source location of the original instruction that first
+    // required it. Emit them in result-id order for a deterministic instruction sequence.
     if !witness_const_casts.is_empty() {
-        let mut casts: Vec<(ValueId, ValueId)> = witness_const_casts.into_iter().collect();
-        casts.sort_by_key(|(_, wit)| wit.0);
+        let mut casts: Vec<(ValueId, (ValueId, SourceLocation))> =
+            witness_const_casts.into_iter().collect();
+        casts.sort_by_key(|(_, (wit, _))| wit.0);
         let mut entry_instrs: Vec<Located<OpCode>> = casts
             .into_iter()
-            .map(|(bare, wit)| {
-                Located::without(OpCode::Cast {
-                    result: wit,
-                    value: bare,
-                    target: CastTarget::WitnessOf,
-                })
+            .map(|(bare, (wit, location))| {
+                Located::new(
+                    OpCode::Cast {
+                        result: wit,
+                        value: bare,
+                        target: CastTarget::WitnessOf,
+                    },
+                    location,
+                )
             })
             .collect();
         let entry = function.get_entry_mut();
@@ -713,7 +728,8 @@ fn substitute_asserted_consts<'a>(
     point: ProgramPoint,
     allow_witness: bool,
     allow_anticipated: bool,
-    witness_casts: &mut HashMap<ValueId, ValueId>,
+    source_location: &SourceLocation,
+    witness_casts: &mut HashMap<ValueId, (ValueId, SourceLocation)>,
     inputs: impl Iterator<Item = &'a mut ValueId>,
 ) {
     for input in inputs {
@@ -730,9 +746,10 @@ fn substitute_asserted_consts<'a>(
             if !fn_type_info.get_value_type(*input).is_witness_of() {
                 *input = bare;
             } else if allow_witness {
-                let wit = *witness_casts
+                let wit = witness_casts
                     .entry(bare)
-                    .or_insert_with(|| ssa.fresh_value());
+                    .or_insert_with(|| (ssa.fresh_value(), source_location.clone()))
+                    .0;
                 *input = wit;
             }
         }

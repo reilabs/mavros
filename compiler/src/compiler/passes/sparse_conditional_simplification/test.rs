@@ -2,6 +2,7 @@ use super::*;
 use crate::compiler::{
     Field,
     analysis::click_cooper::test::run_in_test,
+    ssa::SourcePosition,
     ssa::hlssa::{BinaryArithOpKind, CastTarget, CmpKind, Constant, SequenceTargetType, Type},
 };
 
@@ -42,13 +43,13 @@ fn folds_constants_and_prunes_dead_branch() {
     let else_b = f.add_block();
 
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: sum,
         lhs: c2,
         rhs: c3,
     });
-    entry.push_instruction(OpCode::Cmp {
+    entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: is_five,
         lhs: sum,
@@ -133,7 +134,7 @@ fn loop_variant_value_is_not_folded() {
         .set_terminator(Terminator::Jmp(header, vec![c0]));
     let header_block = f.get_block_mut(header);
     header_block.push_parameter(i_param, Type::u(32));
-    header_block.push_instruction(OpCode::Cmp {
+    header_block.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: lt,
         lhs: i_param,
@@ -141,7 +142,7 @@ fn loop_variant_value_is_not_folded() {
     });
     header_block.set_terminator(Terminator::JmpIf(lt, body, exit));
     let body_block = f.get_block_mut(body);
-    body_block.push_instruction(OpCode::BinaryArithOp {
+    body_block.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: next,
         lhs: i_param,
@@ -171,7 +172,7 @@ fn does_not_fold_overflow() {
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: sum,
         lhs: c200,
@@ -199,12 +200,12 @@ fn does_not_fold_witness_casts() {
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::Cast {
+    entry.push_test_instruction(OpCode::Cast {
         result: wit,
         value: c5,
         target: CastTarget::WitnessOf,
     });
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: doubled,
         lhs: wit,
@@ -258,7 +259,7 @@ fn select_with_constant_condition_aliases_to_arm() {
     f.get_entry_mut().push_parameter(arm_t, Type::field());
     f.get_entry_mut().push_parameter(arm_f, Type::field());
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::Select {
+    entry.push_test_instruction(OpCode::Select {
         result: sel,
         cond: c_true,
         if_t: arm_t,
@@ -300,13 +301,13 @@ fn branch_fact_folds_dominated_uses() {
         .set_terminator(Terminator::JmpIf(cond, then_b, else_b));
 
     let then_block = f.get_block_mut(then_b);
-    then_block.push_instruction(OpCode::Select {
+    then_block.push_test_instruction(OpCode::Select {
         result: selected,
         cond,
         if_t: arm_t,
         if_f: arm_f,
     });
-    then_block.push_instruction(OpCode::Not {
+    then_block.push_test_instruction(OpCode::Not {
         result: not_cond,
         value: cond,
     });
@@ -346,7 +347,7 @@ fn branch_fact_does_not_cross_conflicting_merge() {
     f.get_block_mut(else_b)
         .set_terminator(Terminator::Jmp(merge, vec![]));
     let merge_block = f.get_block_mut(merge);
-    merge_block.push_instruction(OpCode::Not {
+    merge_block.push_test_instruction(OpCode::Not {
         result: not_cond,
         value: cond,
     });
@@ -409,7 +410,7 @@ fn branch_with_same_successor_does_not_infer_condition() {
     f.get_entry_mut()
         .set_terminator(Terminator::JmpIf(cond, join, join));
     let join_block = f.get_block_mut(join);
-    join_block.push_instruction(OpCode::Not {
+    join_block.push_test_instruction(OpCode::Not {
         result: not_cond,
         value: cond,
     });
@@ -480,19 +481,19 @@ fn folds_congruence_decided_branch() {
     let else_b = f.add_block();
     f.get_entry_mut().push_parameter(x, Type::u(32));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: a,
         lhs: x,
         rhs: c1,
     });
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: b,
         lhs: x,
         rhs: c1,
     });
-    entry.push_instruction(OpCode::Cmp {
+    entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: eq,
         lhs: a,
@@ -527,7 +528,7 @@ fn redundant_self_equality_assert_is_dropped() {
     let f = ssa.get_unique_entrypoint_mut();
     f.get_entry_mut().push_parameter(a, Type::field());
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: a,
@@ -557,19 +558,19 @@ fn redundant_congruent_equality_assert_is_dropped() {
     f.get_entry_mut().push_parameter(x, Type::u(32));
     let entry = f.get_entry_mut();
     // Two identical adds: `a` and `b` are congruent (`known_equal`), independent of any assert.
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: a,
         lhs: x,
         rhs: c1,
     });
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: b,
         lhs: x,
         rhs: c1,
     });
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: b,
@@ -606,7 +607,7 @@ fn non_congruent_equality_assert_is_kept() {
     f.get_entry_mut().push_parameter(a, Type::field());
     f.get_entry_mut().push_parameter(b, Type::field());
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: b,
@@ -637,7 +638,7 @@ fn witnessed_constant_is_cast_to_witness_of() {
     let entry = f.get_entry_mut();
     // An operand is `WitnessOf`, so the comparison result is `WitnessOf(u1)`.
     entry.push_parameter(w, Type::witness_of(Type::u(32)));
-    entry.push_instruction(OpCode::Cmp {
+    entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: ww,
         lhs: w,
@@ -682,18 +683,18 @@ fn folds_constant_aggregate_projections() {
     let (seq, got, len) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
-    entry.push_instruction(OpCode::MkSeq {
+    entry.push_test_instruction(OpCode::MkSeq {
         result: seq,
         elems: vec![c10, c20, c30],
         seq_type: SequenceTargetType::Array(3),
         elem_type: Type::u(32),
     });
-    entry.push_instruction(OpCode::ArrayGet {
+    entry.push_test_instruction(OpCode::ArrayGet {
         result: got,
         array: seq,
         index: idx,
     });
-    entry.push_instruction(OpCode::SliceLen {
+    entry.push_test_instruction(OpCode::SliceLen {
         result: len,
         slice: seq,
     });
@@ -731,7 +732,7 @@ fn asserted_const_substituted_after_assert() {
     let f = ssa.get_unique_entrypoint_mut();
     f.get_entry_mut().push_parameter(b, Type::u(1));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::Assert { value: b });
+    entry.push_test_instruction(OpCode::Assert { value: b });
     entry.set_terminator(Terminator::Return(vec![b]));
 
     fold(&mut ssa);
@@ -760,7 +761,7 @@ fn asserted_const_substituted_after_assert_cmp_eq() {
     let f = ssa.get_unique_entrypoint_mut();
     f.get_entry_mut().push_parameter(x, Type::field());
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: x,
         rhs: c5,
@@ -791,12 +792,12 @@ fn same_block_assert_is_index_granular() {
     let f = ssa.get_unique_entrypoint_mut();
     f.get_entry_mut().push_parameter(b, Type::u(1));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::Not {
+    entry.push_test_instruction(OpCode::Not {
         result: before,
         value: b,
     });
-    entry.push_instruction(OpCode::Assert { value: b });
-    entry.push_instruction(OpCode::Not {
+    entry.push_test_instruction(OpCode::Assert { value: b });
+    entry.push_test_instruction(OpCode::Not {
         result: after,
         value: b,
     });
@@ -844,7 +845,7 @@ fn known_unequal_folds_cmp_eq_to_false() {
     let else_b = f.add_block();
     f.get_entry_mut().push_parameter(a, Type::field());
     f.get_entry_mut().push_parameter(b, Type::field());
-    f.get_entry_mut().push_instruction(OpCode::Cmp {
+    f.get_entry_mut().push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: eq,
         lhs: a,
@@ -855,7 +856,7 @@ fn known_unequal_folds_cmp_eq_to_false() {
     f.get_block_mut(then_b)
         .set_terminator(Terminator::Return(vec![]));
     let else_block = f.get_block_mut(else_b);
-    else_block.push_instruction(OpCode::Cmp {
+    else_block.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: eq2,
         lhs: a,
@@ -901,7 +902,7 @@ fn known_unequal_folds_and_prunes_nested_jmpif() {
     let y_b = f.add_block();
     f.get_entry_mut().push_parameter(a, Type::field());
     f.get_entry_mut().push_parameter(b, Type::field());
-    f.get_entry_mut().push_instruction(OpCode::Cmp {
+    f.get_entry_mut().push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: eq,
         lhs: a,
@@ -912,7 +913,7 @@ fn known_unequal_folds_and_prunes_nested_jmpif() {
     f.get_block_mut(then_b)
         .set_terminator(Terminator::Return(vec![]));
     let else_block = f.get_block_mut(else_b);
-    else_block.push_instruction(OpCode::Cmp {
+    else_block.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: eq2,
         lhs: a,
@@ -953,12 +954,12 @@ fn asserted_equal_folds_cmp_eq_to_true() {
     f.get_entry_mut().push_parameter(a, Type::field());
     f.get_entry_mut().push_parameter(b, Type::field());
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: b,
     });
-    entry.push_instruction(OpCode::Cmp {
+    entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: eq,
         lhs: a,
@@ -1008,13 +1009,13 @@ fn witnessed_cmp_eq_folded_conditionally_is_cast_to_witness_of() {
     f.get_entry_mut()
         .push_parameter(b, Type::witness_of(Type::field()));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: b,
     });
     // A witness operand makes the result `WitnessOf(u1)`.
-    entry.push_instruction(OpCode::Cmp {
+    entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: ww,
         lhs: a,
@@ -1056,7 +1057,7 @@ fn select_with_constant_false_condition_aliases_to_else_arm() {
     f.get_entry_mut().push_parameter(arm_t, Type::field());
     f.get_entry_mut().push_parameter(arm_f, Type::field());
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::Select {
+    entry.push_test_instruction(OpCode::Select {
         result: sel,
         cond: c_false,
         if_t: arm_t,
@@ -1087,7 +1088,7 @@ fn asserted_const_substituted_in_jmp_args() {
     let target = f.add_block();
     f.get_entry_mut().push_parameter(b, Type::u(1));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::Assert { value: b });
+    entry.push_test_instruction(OpCode::Assert { value: b });
     entry.set_terminator(Terminator::Jmp(target, vec![b]));
     let target_block = f.get_block_mut(target);
     target_block.push_parameter(p, Type::u(1));
@@ -1116,7 +1117,7 @@ fn asserted_const_substituted_for_witness_operand_via_cast() {
     f.get_entry_mut()
         .push_parameter(w, Type::witness_of(Type::u(1)));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::Assert { value: w });
+    entry.push_test_instruction(OpCode::Assert { value: w });
     entry.set_terminator(Terminator::Return(vec![w]));
 
     fold(&mut ssa);
@@ -1165,8 +1166,8 @@ fn asserted_const_not_substituted_for_excluded_witness_consumer() {
     f.get_entry_mut()
         .push_parameter(w, Type::witness_of(Type::u(1)));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::Assert { value: w });
-    entry.push_instruction(OpCode::WriteWitness {
+    entry.push_test_instruction(OpCode::Assert { value: w });
+    entry.push_test_instruction(OpCode::WriteWitness {
         result: None,
         value: w,
         pinned: false,
@@ -1208,13 +1209,13 @@ fn asserted_equal_copy_propagates_to_dominating_leader() {
     let f = ssa.get_unique_entrypoint_mut();
     f.get_entry_mut().push_parameter(a, Type::field());
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: b,
         lhs: a,
         rhs: a,
     });
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: b,
@@ -1263,18 +1264,18 @@ fn asserted_equal_copy_prop_redirects_both_directions() {
     f.get_entry_mut().push_parameter(a, Type::u(32));
     f.get_entry_mut().push_parameter(b, Type::u(32));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: before,
         lhs: b,
         rhs: c0,
     });
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: b,
     });
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: after,
         lhs: b,
@@ -1338,28 +1339,28 @@ fn anticipated_copy_prop_to_block_defined_leader() {
     f.get_entry_mut().push_parameter(a, Type::u(32));
     f.get_entry_mut().push_parameter(b, Type::u(32));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         // index 0: def(x)
         kind: BinaryArithOpKind::Add,
         result: x,
         lhs: a,
         rhs: c1,
     });
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         // index 1: def(y)
         kind: BinaryArithOpKind::Add,
         result: y,
         lhs: b,
         rhs: c2,
     });
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         // index 2: a use of `y` before the assert
         kind: BinaryArithOpKind::Add,
         result: m,
         lhs: y,
         rhs: c1,
     });
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         // index 3: x == y
         kind: CmpKind::Eq,
         lhs: x,
@@ -1408,7 +1409,7 @@ fn asserted_equal_copy_prop_skips_type_mismatch() {
     f.get_entry_mut().push_parameter(x, Type::u(32));
     f.get_entry_mut().push_parameter(y, Type::u(8));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: x,
         rhs: y,
@@ -1436,12 +1437,12 @@ fn asserted_equal_copy_prop_is_transitive() {
     f.get_entry_mut().push_parameter(b, Type::field());
     f.get_entry_mut().push_parameter(c, Type::field());
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: b,
     });
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: b,
         rhs: c,
@@ -1469,7 +1470,7 @@ fn asserted_equal_copy_prop_reaches_jmp_args() {
     f.get_entry_mut().push_parameter(a, Type::field());
     f.get_entry_mut().push_parameter(b, Type::field());
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: b,
@@ -1511,19 +1512,19 @@ fn asserted_equal_copy_prop_yields_to_function_wide_fold() {
     f.get_entry_mut().push_parameter(w, Type::u(1));
     let entry = f.get_entry_mut();
     // x == y pins the comparison `v` to `true` at later points.
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: x,
         rhs: y,
     });
-    entry.push_instruction(OpCode::Cmp {
+    entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: v,
         lhs: x,
         rhs: y,
     });
     // `v` is also placed in an asserted-equal class with `w`.
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: v,
         rhs: w,
@@ -1554,7 +1555,7 @@ fn asserted_equal_copy_prop_redirects_equal_witnesses() {
     f.get_entry_mut()
         .push_parameter(wb, Type::witness_of(Type::field()));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: wa,
         rhs: wb,
@@ -1589,7 +1590,7 @@ fn asserted_equal_copy_prop_redirects_witness_machinery_consumer() {
     f.get_entry_mut()
         .push_parameter(wb, Type::witness_of(Type::field()));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: wa,
         rhs: wb,
@@ -1598,7 +1599,7 @@ fn asserted_equal_copy_prop_redirects_witness_machinery_consumer() {
     // A witness-machinery consumer of `wb`: its `value` operand is exposed via `get_inputs_mut`
     // like every witness-machinery operand (`Lookup`/`DLookup` args included), so copy-prop
     // reaches it.
-    entry.push_instruction(OpCode::WriteWitness {
+    entry.push_test_instruction(OpCode::WriteWitness {
         result: None,
         value: wb,
         pinned: false,
@@ -1640,13 +1641,13 @@ fn asserted_equal_copy_prop_keeps_establisher_under_dce() {
     let f = ssa.get_unique_entrypoint_mut();
     f.get_entry_mut().push_parameter(a, Type::field());
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: b,
         lhs: a,
         rhs: a,
     });
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: b,
@@ -1693,20 +1694,20 @@ fn congruence_dropped_assert_still_copy_propagates_soundly() {
     f.get_entry_mut().push_parameter(x, Type::u(32));
     let entry = f.get_entry_mut();
     // Two identical adds ⇒ `a` and `b` are congruent (`known_equal`), `a` defined first.
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: a,
         lhs: x,
         rhs: c1,
     });
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: b,
         lhs: x,
         rhs: c1,
     });
     // Congruence-redundant: 4b drops this in the first walk.
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: b,
@@ -1751,7 +1752,7 @@ fn integrated_dce_removes_dead_code() {
     let f = ssa.get_unique_entrypoint_mut();
     f.get_entry_mut().push_parameter(x, Type::u(32));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::BinaryArithOp {
+    entry.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: unused,
         lhs: x,
@@ -1784,18 +1785,18 @@ fn integrated_dce_sweeps_dead_aggregate() {
     let (seq, got, len) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
-    entry.push_instruction(OpCode::MkSeq {
+    entry.push_test_instruction(OpCode::MkSeq {
         result: seq,
         elems: vec![c10, c20, c30],
         seq_type: SequenceTargetType::Array(3),
         elem_type: Type::u(32),
     });
-    entry.push_instruction(OpCode::ArrayGet {
+    entry.push_test_instruction(OpCode::ArrayGet {
         result: got,
         array: seq,
         index: idx,
     });
-    entry.push_instruction(OpCode::SliceLen {
+    entry.push_test_instruction(OpCode::SliceLen {
         result: len,
         slice: seq,
     });
@@ -1842,12 +1843,12 @@ fn conditional_jmpif_fold_orphan_is_reclaimed_same_run() {
     let entry = f.get_entry_mut();
     // Dominating assert establishes `a == b` conditionally (distinct params, so never a
     // congruence/constant fact); the re-test below folds to `true` only via `asserted_equal`.
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: b,
     });
-    entry.push_instruction(OpCode::Cmp {
+    entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: eq2,
         lhs: a,
@@ -1859,7 +1860,7 @@ fn conditional_jmpif_fold_orphan_is_reclaimed_same_run() {
     // `else_b`'s sole predecessor is the entry, so folding the branch orphans it. Its distinct,
     // load-bearing constraint must not leak into the circuit.
     let else_block = f.get_block_mut(else_b);
-    else_block.push_instruction(OpCode::AssertCmp {
+    else_block.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: p,
         rhs: q,
@@ -1916,19 +1917,21 @@ fn anticipated_const_folds_earlier_use() {
     let f = ssa.get_unique_entrypoint_mut();
     let tail = f.add_block();
     f.get_entry_mut().push_parameter(x, Type::u(32));
-    f.get_entry_mut().push_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
-        result: r,
-        lhs: x,
-        rhs: c1,
-    });
+    f.get_entry_mut()
+        .push_test_instruction(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Add,
+            result: r,
+            lhs: x,
+            rhs: c1,
+        });
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(tail, vec![]));
-    f.get_block_mut(tail).push_instruction(OpCode::AssertCmp {
-        kind: CmpKind::Eq,
-        lhs: x,
-        rhs: c5,
-    });
+    f.get_block_mut(tail)
+        .push_test_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: x,
+            rhs: c5,
+        });
     f.get_block_mut(tail)
         .set_terminator(Terminator::Return(vec![r]));
 
@@ -1961,7 +1964,7 @@ fn anticipated_cmp_fold_decides_branch() {
     let merge = f.add_block();
     f.get_entry_mut().push_parameter(a, Type::u(32));
     f.get_entry_mut().push_parameter(b, Type::u(32));
-    f.get_entry_mut().push_instruction(OpCode::Cmp {
+    f.get_entry_mut().push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: w,
         lhs: a,
@@ -1973,11 +1976,12 @@ fn anticipated_cmp_fold_decides_branch() {
         .set_terminator(Terminator::Jmp(merge, vec![]));
     f.get_block_mut(else_b)
         .set_terminator(Terminator::Jmp(merge, vec![]));
-    f.get_block_mut(merge).push_instruction(OpCode::AssertCmp {
-        kind: CmpKind::Eq,
-        lhs: a,
-        rhs: b,
-    });
+    f.get_block_mut(merge)
+        .push_test_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: a,
+            rhs: b,
+        });
     f.get_block_mut(merge)
         .set_terminator(Terminator::Return(vec![]));
 
@@ -2019,7 +2023,7 @@ fn mutual_erasure_keeps_one_assert() {
     let f = ssa.get_unique_entrypoint_mut();
     f.get_entry_mut().push_parameter(v, Type::u(32));
     for _ in 0..2 {
-        f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
             kind: CmpKind::Eq,
             lhs: v,
             rhs: c5,
@@ -2075,13 +2079,13 @@ fn loop_variant_value_not_rewritten_by_later_assert() {
         .set_terminator(Terminator::Jmp(header, vec![c0]));
     let header_block = f.get_block_mut(header);
     header_block.push_parameter(v, Type::u(32));
-    header_block.push_instruction(OpCode::BinaryArithOp {
+    header_block.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: used,
         lhs: v,
         rhs: c1,
     });
-    header_block.push_instruction(OpCode::Cmp {
+    header_block.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: lt,
         lhs: v,
@@ -2089,18 +2093,19 @@ fn loop_variant_value_not_rewritten_by_later_assert() {
     });
     header_block.set_terminator(Terminator::JmpIf(lt, body, after));
     let body_block = f.get_block_mut(body);
-    body_block.push_instruction(OpCode::BinaryArithOp {
+    body_block.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: v1,
         lhs: v,
         rhs: c1,
     });
     body_block.set_terminator(Terminator::Jmp(header, vec![v1]));
-    f.get_block_mut(after).push_instruction(OpCode::AssertCmp {
-        kind: CmpKind::Eq,
-        lhs: v,
-        rhs: c10,
-    });
+    f.get_block_mut(after)
+        .push_test_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: v,
+            rhs: c10,
+        });
     f.get_block_mut(after)
         .set_terminator(Terminator::Return(vec![used]));
 
@@ -2147,7 +2152,7 @@ fn anticipated_const_folds_post_loop_use() {
         .set_terminator(Terminator::Jmp(header, vec![c0]));
     let header_block = f.get_block_mut(header);
     header_block.push_parameter(v, Type::u(32));
-    header_block.push_instruction(OpCode::Cmp {
+    header_block.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Lt,
         result: lt,
         lhs: v,
@@ -2155,7 +2160,7 @@ fn anticipated_const_folds_post_loop_use() {
     });
     header_block.set_terminator(Terminator::JmpIf(lt, body, after));
     let body_block = f.get_block_mut(body);
-    body_block.push_instruction(OpCode::BinaryArithOp {
+    body_block.push_test_instruction(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::Add,
         result: v1,
         lhs: v,
@@ -2163,7 +2168,7 @@ fn anticipated_const_folds_post_loop_use() {
     });
     body_block.set_terminator(Terminator::Jmp(header, vec![v1]));
     f.get_block_mut(after)
-        .push_instruction(OpCode::BinaryArithOp {
+        .push_test_instruction(OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::Add,
             result: r,
             lhs: v,
@@ -2171,11 +2176,12 @@ fn anticipated_const_folds_post_loop_use() {
         });
     f.get_block_mut(after)
         .set_terminator(Terminator::Jmp(tail, vec![]));
-    f.get_block_mut(tail).push_instruction(OpCode::AssertCmp {
-        kind: CmpKind::Eq,
-        lhs: v,
-        rhs: c10,
-    });
+    f.get_block_mut(tail)
+        .push_test_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: v,
+            rhs: c10,
+        });
     f.get_block_mut(tail)
         .set_terminator(Terminator::Return(vec![r]));
 
@@ -2215,15 +2221,15 @@ fn bare_assert_over_cmp_chain_protected() {
     let f = ssa.get_unique_entrypoint_mut();
     f.get_entry_mut().push_parameter(a, Type::u(32));
     f.get_entry_mut().push_parameter(b, Type::u(32));
-    f.get_entry_mut().push_instruction(OpCode::Cmp {
+    f.get_entry_mut().push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: w,
         lhs: a,
         rhs: b,
     });
     f.get_entry_mut()
-        .push_instruction(OpCode::Assert { value: w });
-    f.get_entry_mut().push_instruction(OpCode::AssertCmp {
+        .push_test_instruction(OpCode::Assert { value: w });
+    f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: b,
@@ -2274,6 +2280,11 @@ fn anticipated_witnessed_cmp_fold_redirects_use_via_hoisted_cast() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let c_true = ssa.add_const(Constant::U(1, 1));
     let (a, b, ww) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let cmp_location = SourceLocation::new(
+        "src/main.nr",
+        SourcePosition::new(7, 9),
+        SourcePosition::new(7, 15),
+    );
 
     let f = ssa.get_unique_entrypoint_mut();
     f.get_entry_mut()
@@ -2284,13 +2295,16 @@ fn anticipated_witnessed_cmp_fold_redirects_use_via_hoisted_cast() {
 
     // A witness operand makes the result `WitnessOf(u1)`; the assert comes _after_, so only
     // the anticipated ("bound to run") direction proves the fold.
-    entry.push_instruction(OpCode::Cmp {
-        kind: CmpKind::Eq,
-        result: ww,
-        lhs: a,
-        rhs: b,
-    });
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_instruction_with_source_location(
+        OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: ww,
+            lhs: a,
+            rhs: b,
+        },
+        cmp_location.clone(),
+    );
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: b,
@@ -2310,18 +2324,22 @@ fn anticipated_witnessed_cmp_fold_redirects_use_via_hoisted_cast() {
         "the folded witnessed comparison must be kept"
     );
     // A fresh `cast true to WitnessOf` was hoisted into the entry block...
-    let cast_result = entry
-        .get_instructions()
-        .find_map(|i| match i {
+    let (cast_result, cast_location) = entry
+        .get_instructions_with_source_locations()
+        .find_map(|(i, location)| match i {
             OpCode::Cast {
                 result,
                 value,
                 target: CastTarget::WitnessOf,
-            } if *value == c_true => Some(*result),
+            } if *value == c_true => Some((*result, location)),
             _ => None,
         })
         .expect("a witness cast of `true` should be hoisted into the entry block");
     assert_ne!(cast_result, ww, "the recast must not redefine the kept Cmp");
+    assert_eq!(
+        cast_location, &cmp_location,
+        "the hoisted elaboration must retain the original comparison's source location"
+    );
     // ...and the pure use is redirected to it.
     assert!(matches!(
         entry.get_terminator(),
@@ -2348,14 +2366,14 @@ fn anticipated_witnessed_cmp_fold_keeps_excluded_assert_use() {
     f.get_entry_mut()
         .push_parameter(b, Type::witness_of(Type::field()));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::Cmp {
+    entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: ww,
         lhs: a,
         rhs: b,
     });
-    entry.push_instruction(OpCode::Assert { value: ww });
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::Assert { value: ww });
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: b,
@@ -2409,24 +2427,25 @@ fn anticipated_witnessed_cmp_fold_from_post_dominating_assert() {
     f.get_entry_mut()
         .push_parameter(b, Type::witness_of(Type::field()));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::Cmp {
+    entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: ww,
         lhs: a,
         rhs: b,
     });
-    entry.push_instruction(OpCode::Select {
+    entry.push_test_instruction(OpCode::Select {
         result: s,
         cond: ww,
         if_t: a,
         if_f: b,
     });
     entry.set_terminator(Terminator::Jmp(tail, vec![]));
-    f.get_block_mut(tail).push_instruction(OpCode::AssertCmp {
-        kind: CmpKind::Eq,
-        lhs: a,
-        rhs: b,
-    });
+    f.get_block_mut(tail)
+        .push_test_instruction(OpCode::AssertCmp {
+            kind: CmpKind::Eq,
+            lhs: a,
+            rhs: b,
+        });
     f.get_block_mut(tail)
         .set_terminator(Terminator::Return(vec![s]));
 
@@ -2482,16 +2501,16 @@ fn anticipated_witness_cast_shared_with_asserted_const_channel() {
     f.get_entry_mut()
         .push_parameter(w, Type::witness_of(Type::u(1)));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::Cmp {
+    entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: ww,
         lhs: a,
         rhs: b,
     });
     // Pins `w` to `true` for the dominance-channel constant substitution in the return.
-    entry.push_instruction(OpCode::Assert { value: w });
+    entry.push_test_instruction(OpCode::Assert { value: w });
     // Proves the fold of `ww` via the anticipated channel.
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: b,
@@ -2540,14 +2559,14 @@ fn anticipated_witness_cast_unused_is_swept_by_dce() {
     f.get_entry_mut()
         .push_parameter(b, Type::witness_of(Type::field()));
     let entry = f.get_entry_mut();
-    entry.push_instruction(OpCode::Cmp {
+    entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: ww,
         lhs: a,
         rhs: b,
     });
-    entry.push_instruction(OpCode::Assert { value: ww });
-    entry.push_instruction(OpCode::AssertCmp {
+    entry.push_test_instruction(OpCode::Assert { value: ww });
+    entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: a,
         rhs: b,
