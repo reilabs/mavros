@@ -2,7 +2,7 @@
 
 use super::{
     edge_split::{JmpIfArm, split_jmp_if_edge},
-    totality::TotalityOracle,
+    totality::{TotalityOracle, WitnessnessSource},
 };
 use crate::compiler::{
     Field,
@@ -10,6 +10,7 @@ use crate::compiler::{
         click_cooper::{ClickCooper, test::run_in_test},
         flow_analysis::FlowAnalysis,
         types::{TypeInfo, Types},
+        witness_taint_inference::ApproximateWitnessTaint,
     },
     passes::dead_code_elimination::{Config as DceConfig, DCE},
     ssa::{
@@ -597,6 +598,55 @@ fn effectful_and_witness_machinery_ops_are_never_total() {
     ));
 }
 
+/// The pre-untaint witness gate: no `WitnessOf` types exist yet, so under the `Taint` source the
+/// oracle must read witness-ness from the joined WTI approximation instead. A division whose
+/// dividend is a *written witness* (its type is still a plain `U(32)`) is refused where the types
+/// alone would silently license it; the all-pure twin stays licensed, and a const-index array
+/// access is licensed too (constants are absent from the taint map ⇒ Pure).
+#[test]
+fn taint_source_gates_witness_ness_pre_untaint() {
+    let (mut ssa, vals) = main_with_params(&[Type::u(32), Type::field().array_of(3)]);
+    let (x, arr) = (vals[0], vals[1]);
+    let c2 = ssa.add_const(Constant::U(32, 2));
+    let idx = ssa.add_const(Constant::U(32, 1));
+    let (w, r) = (ssa.fresh_value(), ssa.fresh_value());
+    ssa.get_unique_entrypoint_mut()
+        .get_entry_mut()
+        .push_test_instruction(OpCode::WriteWitness {
+            result: Some(w),
+            value: x,
+            pinned: false,
+        });
+
+    let (fid, cc, types) = oracle_env(&ssa);
+    let flow = FlowAnalysis::run(&ssa);
+    let taint = ApproximateWitnessTaint::compute(&ssa, &flow, &types);
+    let oracle = TotalityOracle::with_witness_source(
+        &cc,
+        &ssa,
+        fid,
+        types.get_function(fid),
+        WitnessnessSource::Taint(&taint),
+    );
+    let entry = ssa.get_unique_entrypoint().get_entry_id();
+
+    use BinaryArithOpKind::*;
+    for kind in [Div, Mod] {
+        // The tainted dividend is refused — its plain pre-untaint type answers "pure".
+        assert!(!oracle.is_total_at(&bin(kind, r, w, c2), entry));
+        // The all-pure twin over the parameter stays licensed.
+        assert!(oracle.is_total_at(&bin(kind, r, x, c2), entry));
+    }
+    assert!(oracle.is_total_at(
+        &OpCode::ArrayGet {
+            result: r,
+            array: arr,
+            index: idx
+        },
+        entry
+    ));
+}
+
 // ELIMINATION
 // ================================================================================================
 
@@ -629,6 +679,15 @@ fn eliminate_with_lookup_dedup(ssa: &mut HLSSA, deduplicate_lookups: bool) {
 /// Motion entry: the elimination sweep followed by the motion stages enabled at `level`, without
 /// the integrated DCE (redirected/hoisted-from definitions stay observable).
 fn motion(ssa: &mut HLSSA, level: super::MotionLevel) {
+    motion_with_structure(ssa, level, false);
+}
+
+/// [`motion`] with the block/parameter geometry pinned ([`super::Config::preserve_structure`]).
+fn motion_preserving(ssa: &mut HLSSA, level: super::MotionLevel) {
+    motion_with_structure(ssa, level, true);
+}
+
+fn motion_with_structure(ssa: &mut HLSSA, level: super::MotionLevel, preserve_structure: bool) {
     let cc = run_in_test(ssa);
     let flow = FlowAnalysis::run(ssa);
     let types = Types::new().run(ssa, &flow);
@@ -653,6 +712,7 @@ fn motion(ssa: &mut HLSSA, level: super::MotionLevel) {
             flow.get_function_cfg(fid),
             &node_of,
             level,
+            preserve_structure,
             &oracle,
         );
         ssa.put_function(fid, function);
@@ -1297,6 +1357,12 @@ fn invariant_loop(
     bb.push_test_instruction(add(i2, i, c1));
     bb.set_terminator(Terminator::Jmp(header, vec![i2]));
 
+    if with_exit_occurrence {
+        // Declared so the shape stays WTI-well-formed: `Config::pre_untaint()` runs the joined
+        // taint approximation, whose graph builder binds each returned value to a declared
+        // `Return` formal.
+        f.add_return_type(Type::field());
+    }
     let eb = f.get_block_mut(exit);
     if with_exit_occurrence {
         eb.push_test_instruction(OpCode::BinaryArithOp {
@@ -1353,6 +1419,30 @@ fn anticipated_invariant_is_hoisted_to_entry_edge() {
     let _ = header;
 }
 
+/// Structure preservation costs nothing on the canonical shape: the entry predecessor ends in a
+/// `Jmp`, so the hoist is pure instruction insertion — it fires exactly as in
+/// [`anticipated_invariant_is_hoisted_to_entry_edge`] and the block/parameter geometry survives.
+#[test]
+fn jmp_terminated_entry_pred_hoist_fires_when_preserving_structure() {
+    let (mut ssa, entry, header, body, _) = invariant_loop(true);
+
+    motion_preserving(&mut ssa, super::MotionLevel::LoopHoist);
+
+    let hoisted = sole_result(&ssa, entry);
+    let f = ssa.get_unique_entrypoint();
+    assert!(
+        f.get_block(body)
+            .get_instructions()
+            .any(|i| matches!(i, OpCode::Rangecheck { value, .. } if *value == hoisted))
+    );
+    assert_eq!(f.get_blocks().count(), 4, "no split block may appear");
+    assert_eq!(f.get_block(header).get_parameters().count(), 1);
+    assert!(matches!(
+        f.get_block(entry).get_terminator(),
+        Some(Terminator::Jmp(target, args)) if *target == header && args.len() == 1
+    ));
+}
+
 /// The while-loop guard: a body-only invariant is not anticipated at the header (the zero-trip
 /// path never computes it), so the down-safe stage must leave it alone.
 #[test]
@@ -1376,6 +1466,7 @@ fn hoisting_requires_the_loop_hoist_level() {
     let types = Types::new().run(&ssa, &flow);
     let pre = super::PRE::with_config(super::Config {
         motion: super::MotionLevel::EliminateOnly,
+        preserve_structure: false,
         deduplicate_lookups: true,
         dce: DceConfig::pre_r1c(),
     });
@@ -1417,15 +1508,7 @@ fn pre_untaint_config_dedups_without_structural_change() {
     });
     mb.set_terminator(Terminator::Return(vec![]));
 
-    // Compose exactly as `PRE::run` does under `Config::pre_untaint`: the transform followed by
-    // the integrated DCE with the config's (block-preserving) DCE configuration.
-    let config = super::Config::pre_untaint();
-    let cc = run_in_test(&ssa);
-    let flow = FlowAnalysis::run(&ssa);
-    let types = Types::new().run(&ssa, &flow);
-    super::PRE::with_config(config).transform(&mut ssa, &cc, &types, &flow);
-    let flow = FlowAnalysis::run(&ssa);
-    DCE::new(config.dce).do_run(&mut ssa, &flow);
+    run_pre_untaint_config(&mut ssa);
 
     // The dominated duplicate was redirected to the dominating occurrence (the rangecheck now
     // reads it) and swept by the integrated DCE...
@@ -1451,6 +1534,195 @@ fn pre_untaint_config_dedups_without_structural_change() {
         ));
     }
     assert_eq!(f.get_block(m).get_parameters().count(), 0);
+}
+
+/// The pre-untaint configuration's motion contract: a down-safe invariant behind a `Jmp`-terminated
+/// entry predecessor is hoisted (the site is no longer elimination-only), and the block/parameter
+/// geometry still survives untouched — composed exactly as `PRE::run` composes transform and the
+/// integrated DCE.
+#[test]
+fn pre_untaint_config_hoists_without_structural_change() {
+    let (mut ssa, entry, header, body, exit) = invariant_loop(true);
+
+    run_pre_untaint_config(&mut ssa);
+
+    // The invariant moved onto the entry edge and the in-loop rangecheck observes it (the always-
+    // live anchor; this harness seeds no entrypoint return slots)...
+    let hoisted = sole_result(&ssa, entry);
+    let f = ssa.get_unique_entrypoint();
+    assert!(matches!(
+        f.get_block(entry).get_instructions().next().unwrap(),
+        OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            ..
+        }
+    ));
+    assert!(
+        f.get_block(body)
+            .get_instructions()
+            .any(|i| matches!(i, OpCode::Rangecheck { value, .. } if *value == hoisted))
+    );
+    // ...while the geometry is untouched: no split blocks, no fresh parameters, terminators keep
+    // their shapes and targets.
+    assert_eq!(f.get_blocks().count(), 4);
+    assert_eq!(f.get_block(header).get_parameters().count(), 1);
+    assert!(matches!(
+        f.get_block(entry).get_terminator(),
+        Some(Terminator::Jmp(target, args)) if *target == header && args.len() == 1
+    ));
+    assert!(matches!(
+        f.get_block(header).get_terminator(),
+        Some(Terminator::JmpIf(_, t, e)) if *t == body && *e == exit
+    ));
+    assert!(matches!(
+        f.get_block(body).get_terminator(),
+        Some(Terminator::Jmp(target, args)) if *target == header && args.len() == 1
+    ));
+}
+
+/// [`invariant_loop`]'s tainted, body-only twin: the loop body computes `kind(w, rhs)` (kept live
+/// by a rangecheck) where `w` is a witness written in the entry block — stable (the entry is
+/// acyclic) and loop-invariant, but taint-Witness with a plain pre-untaint `Field` type. `rhs` is
+/// the pure parameter `b` for `Mul` and a nonzero constant for `Div`. Nothing on the exit path
+/// demands the value, so only speculation can move it.
+///
+/// Returns `(ssa, entry, header, body, exit)`.
+fn tainted_invariant_loop(
+    kind: BinaryArithOpKind,
+) -> (
+    HLSSA,
+    crate::compiler::ssa::BlockId,
+    crate::compiler::ssa::BlockId,
+    crate::compiler::ssa::BlockId,
+    crate::compiler::ssa::BlockId,
+) {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
+    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c2f = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let (w, i, cond, inv, i2) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let header = f.add_block();
+    let body = f.add_block();
+    let exit = f.add_block();
+    let entry_id = f.get_entry_id();
+
+    let entry = f.get_entry_mut();
+    entry.push_parameter(a, Type::field());
+    entry.push_parameter(b, Type::field());
+    entry.push_test_instruction(OpCode::WriteWitness {
+        result: Some(w),
+        value: a,
+        pinned: false,
+    });
+    entry.set_terminator(Terminator::Jmp(header, vec![c0]));
+
+    let hb = f.get_block_mut(header);
+    hb.push_parameter(i, Type::u(32));
+    hb.push_test_instruction(OpCode::Cmp {
+        kind: CmpKind::Lt,
+        result: cond,
+        lhs: i,
+        rhs: c10,
+    });
+    hb.set_terminator(Terminator::JmpIf(cond, body, exit));
+
+    let rhs = match kind {
+        BinaryArithOpKind::Mul => b,
+        BinaryArithOpKind::Div => c2f,
+        other => panic!("unsupported tainted-invariant kind {other:?}"),
+    };
+    let bb = f.get_block_mut(body);
+    bb.push_test_instruction(bin(kind, inv, w, rhs));
+    bb.push_test_instruction(OpCode::Rangecheck {
+        value: inv,
+        max_bits: 32,
+    });
+    bb.push_test_instruction(add(i2, i, c1));
+    bb.set_terminator(Terminator::Jmp(header, vec![i2]));
+
+    f.get_block_mut(exit)
+        .set_terminator(Terminator::Return(vec![]));
+
+    (ssa, entry_id, header, body, exit)
+}
+
+/// Compose exactly as `PRE::run` composes under [`super::Config::pre_untaint`]: the transform
+/// followed by the integrated DCE with the config's (block-preserving) DCE configuration.
+fn run_pre_untaint_config(ssa: &mut HLSSA) {
+    let config = super::Config::pre_untaint();
+    let cc = run_in_test(ssa);
+    let flow = FlowAnalysis::run(ssa);
+    let types = Types::new().run(ssa, &flow);
+    super::PRE::with_config(config).transform(ssa, &cc, &types, &flow);
+    let flow = FlowAnalysis::run(ssa);
+    DCE::new(config.dce).do_run(ssa, &flow);
+}
+
+/// Stage 2's payoff shape: through `Config::pre_untaint()` a body-only loop-invariant field `Mul`
+/// over a *written witness* is speculated onto the `Jmp`-terminated entry edge — the taint-fed
+/// oracle licenses it (field arithmetic is total regardless of taint) — and the block/parameter
+/// geometry survives untouched.
+#[test]
+fn pre_untaint_config_speculates_tainted_total_op() {
+    let (mut ssa, entry, header, body, _exit) = tainted_invariant_loop(BinaryArithOpKind::Mul);
+
+    run_pre_untaint_config(&mut ssa);
+
+    let f = ssa.get_unique_entrypoint();
+    let entry_ops: Vec<_> = f.get_block(entry).get_instructions().collect();
+    assert_eq!(
+        entry_ops.len(),
+        2,
+        "the write_witness and the speculated mul: {entry_ops:?}"
+    );
+    let hoisted = match entry_ops[1] {
+        OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Mul,
+            result,
+            ..
+        } => *result,
+        other => panic!("expected the speculated mul, got {other:?}"),
+    };
+    // The per-iteration rangecheck observes the hoisted value (its own evaluation died to DCE)...
+    assert!(
+        f.get_block(body)
+            .get_instructions()
+            .any(|i| matches!(i, OpCode::Rangecheck { value, .. } if *value == hoisted))
+    );
+    // ...while the geometry is untouched.
+    assert_eq!(f.get_blocks().count(), 4);
+    assert_eq!(f.get_block(header).get_parameters().count(), 1);
+    assert!(matches!(
+        f.get_block(entry).get_terminator(),
+        Some(Terminator::Jmp(target, args)) if *target == header && args.len() == 1
+    ));
+}
+
+/// The dual soundness guard: the same shape around a `Div` is NOT speculated — the dividend is a
+/// written witness, and a witness division's gadget lowering emits rejecting constraints, so the
+/// taint-fed oracle refuses it even though the nonzero-constant divisor discharges the zero gate
+/// (and the plain pre-untaint types alone would have licensed it).
+#[test]
+fn pre_untaint_config_does_not_speculate_tainted_div() {
+    let (mut ssa, entry, _header, body, _exit) = tainted_invariant_loop(BinaryArithOpKind::Div);
+
+    run_pre_untaint_config(&mut ssa);
+
+    let f = ssa.get_unique_entrypoint();
+    let entry_ops: Vec<_> = f.get_block(entry).get_instructions().collect();
+    assert_eq!(entry_ops.len(), 1, "only the write_witness: {entry_ops:?}");
+    assert!(matches!(entry_ops[0], OpCode::WriteWitness { .. }));
+    assert_eq!(f.get_block(body).get_instructions().count(), 3);
 }
 
 /// A counted loop whose only `a * b` evaluation sits *after* it: anticipated at the header (the
@@ -2137,6 +2409,63 @@ fn jmp_if_entry_edge_is_split_for_the_hoist() {
     );
 }
 
+/// The structure-preserving counterpart of [`jmp_if_entry_edge_is_split_for_the_hoist`]: hosting
+/// the copy would split the `JmpIf` edge, so the header is refused — no split block appears, the
+/// entry terminator keeps its targets, and the invariant stays in the header.
+#[test]
+fn jmp_if_entry_edge_hoist_is_refused_when_preserving_structure() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let (c, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let inv = ssa.fresh_value();
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let h = f.add_block();
+    let skip = f.add_block();
+    let entry_id = f.get_entry_id();
+
+    let entry = f.get_entry_mut();
+    entry.push_parameter(c, Type::u(1));
+    entry.push_parameter(a, Type::field());
+    entry.push_parameter(b, Type::field());
+    entry.set_terminator(Terminator::JmpIf(c, h, skip));
+
+    let hb = f.get_block_mut(h);
+    hb.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::Mul,
+        result: inv,
+        lhs: a,
+        rhs: b,
+    });
+    hb.push_test_instruction(OpCode::Rangecheck {
+        value: inv,
+        max_bits: 32,
+    });
+    hb.set_terminator(Terminator::JmpIf(c, h, skip));
+
+    f.get_block_mut(skip)
+        .set_terminator(Terminator::Return(vec![]));
+
+    motion_preserving(&mut ssa, super::MotionLevel::LoopHoist);
+
+    let f = ssa.get_unique_entrypoint();
+    assert_eq!(f.get_blocks().count(), 3, "no split block may appear");
+    assert!(matches!(
+        f.get_block(entry_id).get_terminator(),
+        Some(Terminator::JmpIf(cond, t, e)) if *cond == c && *t == h && *e == skip
+    ));
+    let h_ops: Vec<_> = f.get_block(h).get_instructions().collect();
+    assert!(matches!(
+        h_ops[..],
+        [
+            OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::Mul,
+                ..
+            },
+            OpCode::Rangecheck { value, .. }
+        ] if *value == inv
+    ));
+}
+
 /// A header with two entry-side predecessors is out of scope for this stage (it needs the general
 /// join-insertion machinery); nothing moves.
 #[test]
@@ -2366,6 +2695,38 @@ fn diamond_partial_redundancy_joins_through_parameter() {
         assert!(matches!(
             f.get_block(block).get_terminator(),
             Some(Terminator::Return(vals)) if *vals == vec![params[0]]
+        ));
+    }
+}
+
+/// Under structure preservation the join rule is off wholesale — a merge parameter is exactly what
+/// the flag forbids — so even at the top motion level the profitable diamond stays untouched.
+#[test]
+fn join_insertion_is_disabled_when_preserving_structure() {
+    let (mut ssa, a, b, left, right, merge) = diamond();
+    let t1 = ssa.fresh_value();
+    let c = {
+        let f = ssa.get_unique_entrypoint();
+        f.get_entry()
+            .get_parameter_values()
+            .copied()
+            .nth(2)
+            .unwrap()
+    };
+    ssa.get_unique_entrypoint_mut()
+        .get_block_mut(left)
+        .push_test_instruction(add(t1, a, b));
+    let (x, y, tx, ty) = sibling_recomputations(&mut ssa, merge, c, a, b, None);
+
+    motion_preserving(&mut ssa, super::MotionLevel::Speculate);
+
+    let f = ssa.get_unique_entrypoint();
+    assert_eq!(f.get_block(merge).get_parameters().count(), 0);
+    assert_eq!(f.get_block(right).get_instructions().count(), 0);
+    for (block, t) in [(x, tx), (y, ty)] {
+        assert!(matches!(
+            f.get_block(block).get_terminator(),
+            Some(Terminator::Return(vals)) if *vals == vec![t]
         ));
     }
 }

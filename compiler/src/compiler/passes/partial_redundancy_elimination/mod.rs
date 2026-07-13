@@ -74,7 +74,7 @@
 //!   minted carriers; it lifts the first-round-only hoist restriction (a carrier can unlock a
 //!   previously template-less key) and must query the [`totality::TotalityOracle`] and the type
 //!   info with *pristine* templates only (`get_value_type` panics on ids minted after typing). Low
-//!   expected yield: the eight pipeline sites already convert pure chains link-by-link across
+//!   expected yield: the nine pipeline sites already convert pure chains link-by-link across
 //!   sites — each site's hoist redirects the next link's operand to an acyclically defined value —
 //!   leaving only chains rooted in call results (calls never move) and chains deeper than the
 //!   remaining sites.
@@ -101,12 +101,6 @@
 //!   gate consumes. An analysis upgrade this pass inherits for free — bounded, though: witness
 //!   divisors are refused outright (above), and most real guards are witness-conditioned and
 //!   untainted away.
-//! - **Motion at the Pre-Untaint Site:** The pre-untaint site runs [`MotionLevel::EliminateOnly`]
-//!   (see [`Config::pre_untaint`]). Raising it needs two pieces: a structure-preserving hoist mode
-//!   (no `JmpIf` edge splits, no merge parameters — untaint's linearizer assumes a single jump
-//!   into each merge from a branch side), and, for speculation, a totality oracle that answers
-//!   witness-ness from `WitnessTaintInference` results rather than from the `WitnessOf` types that
-//!   only exist post-untaint.
 
 pub mod edge_split;
 mod eliminate;
@@ -117,7 +111,10 @@ pub mod totality;
 mod test;
 
 use crate::compiler::{
-    analysis::{click_cooper::ClickCooper, flow_analysis::FlowAnalysis, types::TypeInfo},
+    analysis::{
+        click_cooper::ClickCooper, flow_analysis::FlowAnalysis, types::TypeInfo,
+        witness_taint_inference::ApproximateWitnessTaint,
+    },
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::dead_code_elimination::{Config as DceConfig, DCE},
     ssa::hlssa::HLSSA,
@@ -171,6 +168,15 @@ impl PRE {
     }
 
     fn transform(&self, ssa: &mut HLSSA, cc: &ClickCooper, types: &TypeInfo, flow: &FlowAnalysis) {
+        // Pre-untaint speculation needs witness-ness the types cannot yet answer (`WitnessOf` is
+        // baked in by untaint): approximate it once over the pristine program via the read-only
+        // joined WTI solve. Computed before any rewrite so the recorded shapes key the same value
+        // ids the oracle is queried with (elimination only redirects operands to taint-congruent
+        // leaders, and the oracle only sees pristine template operands).
+        let taint: Option<ApproximateWitnessTaint> = (self.config.preserve_structure
+            && self.config.motion >= MotionLevel::Speculate)
+            .then(|| ApproximateWitnessTaint::compute(ssa, flow, types));
+
         // Each function is taken out of the `ssa` for the duration of its rewrite so the motion
         // stage can mint fresh value ids through the shared `&SSA`.
         let fids: Vec<_> = ssa.get_function_ids().collect();
@@ -188,7 +194,19 @@ impl PRE {
             );
 
             if self.config.motion >= MotionLevel::LoopHoist {
-                let oracle = totality::TotalityOracle::new(cc, ssa, fid, function_types);
+                // With `preserve_structure` + `Speculate`, `taint` is `Some` by construction, so
+                // the unsound combination (a Types-sourced oracle speculating pre-untaint) is
+                // unreachable.
+                let oracle = match &taint {
+                    Some(t) => totality::TotalityOracle::with_witness_source(
+                        cc,
+                        ssa,
+                        fid,
+                        function_types,
+                        totality::WitnessnessSource::Taint(t),
+                    ),
+                    None => totality::TotalityOracle::new(cc, ssa, fid, function_types),
+                };
                 insert::perform_code_motion(
                     ssa,
                     cc,
@@ -198,6 +216,7 @@ impl PRE {
                     cfg,
                     &node_of,
                     self.config.motion,
+                    self.config.preserve_structure,
                     &oracle,
                 );
             }
@@ -238,6 +257,23 @@ pub struct Config {
     /// The enabled motion stage.
     pub motion: MotionLevel,
 
+    /// Whether motion must leave the block/parameter geometry untouched — the pre-untaint
+    /// contract (`untaint_control_flow` assumes a single jump into each merge from a branch
+    /// side).
+    ///
+    /// When set, the hoist rule refuses headers whose entry predecessor ends in a `JmpIf` (an edge
+    /// split would mint a block) and the join rule is off entirely (it appends merge parameters);
+    /// hoisting into a `Jmp`-terminated predecessor only inserts instructions above its terminator.
+    ///
+    /// This flag also selects the speculation gate's witness-ness source: at
+    /// [`MotionLevel::Speculate`] it switches the [`totality::TotalityOracle`] from the types to
+    /// the joined WTI approximation. A pre-untaint caller must therefore never combine `Speculate`
+    /// with `preserve_structure: false` — the Types-sourced oracle reads `is_witness_of` on types
+    /// that carry no `WitnessOf` yet, silently answering "pure" for every value and licensing
+    /// unsound speculation (besides performing structural edits untaint cannot absorb). Use the
+    /// [`Config::pre_untaint`]/[`Config::pre_r1c`] constructors rather than raw literals.
+    pub preserve_structure: bool,
+
     /// Whether `Lookup` assertions are deduplicated (pre-r1c only, mirroring the CSE config this
     /// pass subsumes).
     pub deduplicate_lookups: bool,
@@ -251,6 +287,7 @@ impl Config {
     pub fn pre_r1c() -> Self {
         Self {
             motion: MotionLevel::Speculate,
+            preserve_structure: false,
             deduplicate_lookups: true,
             dce: DceConfig::pre_r1c(),
         }
@@ -258,20 +295,20 @@ impl Config {
 
     /// The configuration for the pre-untaint pipeline site.
     ///
-    /// Elimination only: the motion stage splits `JmpIf` edges and mints merge parameters, which
-    /// `untaint_control_flow` cannot yet absorb (it assumes a single jump into each merge from a
-    /// branch side), and the [`totality::TotalityOracle`] reads witness-ness from `WitnessOf`
-    /// types that only exist after untaint bakes them in — pre-untaint it would silently license
-    /// speculating witness-tainted ops. `EliminateOnly` reaches neither: it rewrites operands and
-    /// drops dominated duplicate assertions without touching block structure, and the oracle is
-    /// only constructed for motion.
+    /// Full totality-gated speculation under [`Config::preserve_structure`]: the geometry
+    /// restrictions that flag documents are exactly untaint's, and within them a hoist is pure
+    /// instruction insertion into a `Jmp`-terminated predecessor. Because the `WitnessOf` types
+    /// the [`totality::TotalityOracle`] normally reads witness-ness from do not exist yet, the
+    /// oracle at this site is fed the read-only joined WTI approximation instead.
     ///
-    /// `Lookup` assertions are minted by `LookupSpilling` (post-untaint), so lookup deduplication
-    /// is moot here; `false` documents that. The integrated DCE preserves blocks for the same
-    /// reason as every other pre-untaint DCE/SCS run.
+    /// `Lookup` assertions are minted only post-untaint (`LookupSpilling`, the specializer, and
+    /// witness lowering), so lookup deduplication is moot here; `false` documents that. The
+    /// integrated DCE preserves blocks for the same reason as every other pre-untaint DCE/SCS
+    /// run.
     pub fn pre_untaint() -> Self {
         Self {
-            motion: MotionLevel::EliminateOnly,
+            motion: MotionLevel::Speculate,
+            preserve_structure: true,
             deduplicate_lookups: false,
             dce: DceConfig::preserve_blocks(),
         }
