@@ -210,6 +210,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .unwrap_or_else(|| SourceLocation::synthetic(function.get_name()))
     }
 
+    fn dwarf_coordinate(value: u64) -> u32 {
+        u32::try_from(value).unwrap_or(u32::MAX)
+    }
+
     fn debug_file(&mut self, location: &SourceLocation) -> DIFile<'ctx> {
         if let Some(file) = self.debug_files.get(location.file.as_ref()) {
             return *file;
@@ -235,7 +239,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         file
     }
 
-    fn declare_debug_function(
+    fn attach_debug_subprogram(
         &mut self,
         fn_id: FunctionId,
         function: &LLFunction,
@@ -243,10 +247,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     ) {
         let location = Self::function_source_location(function);
         let file = self.debug_file(&location);
+        // Stack traces only need line-level symbolication, so the debug signature omits types.
         let subroutine_type =
             self.debug_builder
                 .create_subroutine_type(file, None, &[], DIFlags::PUBLIC);
-        let line = location.start.line.min(u32::MAX as u64) as u32;
+        let line = Self::dwarf_coordinate(location.start.line);
         let subprogram = self.debug_builder.create_function(
             self.debug_compile_unit.as_debug_info_scope(),
             function.get_name(),
@@ -266,6 +271,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
     fn set_debug_location(&mut self, fn_id: FunctionId, location: &SourceLocation) {
         let file = self.debug_file(location);
+        let line = Self::dwarf_coordinate(location.start.line);
+        let column = Self::dwarf_coordinate(location.start.column);
         let key = (fn_id, location.file.to_string());
         let scope = if let Some(scope) = self.debug_scopes.get(&key) {
             *scope
@@ -274,16 +281,16 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             let scope = self.debug_builder.create_lexical_block(
                 parent.as_debug_info_scope(),
                 file,
-                location.start.line.min(u32::MAX as u64) as u32,
-                location.start.column.min(u32::MAX as u64) as u32,
+                line,
+                column,
             );
             self.debug_scopes.insert(key, scope);
             scope
         };
         let debug_location = self.debug_builder.create_debug_location(
             self.context,
-            location.start.line.min(u32::MAX as u64) as u32,
-            location.start.column.min(u32::MAX as u64) as u32,
+            line,
+            column,
             scope.as_debug_info_scope(),
             None,
         );
@@ -725,7 +732,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         };
 
         let fn_value = self.module.add_function(&name, fn_type, None);
-        self.declare_debug_function(fn_id, function, fn_value);
+        self.attach_debug_subprogram(fn_id, function, fn_value);
         self.function_map.insert(fn_id, fn_value);
     }
 
