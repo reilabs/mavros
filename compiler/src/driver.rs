@@ -43,6 +43,7 @@ use crate::{
             lower_guards::LowerGuards,
             lower_map_casts::LowerMapCasts,
             mem2reg::Mem2Reg,
+            merge_identical_functions::MergeIdenticalFunctions,
             normalize_asserts::NormalizeAsserts,
             partial_redundancy_elimination::PRE,
             prepare_entry_point::PrepareEntryPoint,
@@ -573,6 +574,11 @@ impl Driver {
             "program_tail".to_string(),
             self.draw_cfg,
             vec![
+                // The merge above put two near-copies of the whole program into one SSA;
+                // fold the byte-identical functions (notably `globals_init`) before anything
+                // downstream pays for them. Both codegen backends emit every function in the
+                // SSA, so this is where program size is won.
+                Box::new(MergeIdenticalFunctions::new()),
                 Box::new(RCInsertion::new()),
                 Box::new(FixDoubleJumps::new()),
             ],
