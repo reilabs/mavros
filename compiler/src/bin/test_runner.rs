@@ -1379,6 +1379,7 @@ const DEFAULT_DETERMINISM_TESTS: &[&str] = &[
     "pre_guarded_div_hoist",
     "pre_cross_branch_join",
     "pre_nested_loop_hoist",
+    "pre_untaint_chain_speculation",
 ];
 
 /// The dump files the driver writes under `mavros_debug/`, in pipeline-stage order, so the first
