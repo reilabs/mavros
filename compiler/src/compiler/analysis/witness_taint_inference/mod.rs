@@ -52,6 +52,12 @@
 //!   `UntaintControlFlow` bakes context-specific `WitnessOf` types and a context-specific cfg-flag
 //!   parameter into each body.
 //!
+//! Besides the mutating pipeline entry point ([`WitnessTaintInference`]), the module exposes a
+//! read-only variant, [`ApproximateWitnessTaint`]. This is phase 2 run once per function over the
+//! join of all reachable contexts instead of clone-per-context, and is intended for for pre-untaint
+//! consumers that only need a sound answer to whether a value is possibly witness under any future
+//! specialization.
+//!
 //! #### Memory and Aliasing
 //!
 //! Memory needs no separate analysis: aliasing is resolved by **unification**, directly in the ≥
@@ -180,7 +186,9 @@ use std::collections::BTreeSet;
 use crate::collections::HashMap;
 use crate::compiler::{
     analysis::{
-        flow_analysis::FlowAnalysis, witness_info::FunctionWitnessType,
+        flow_analysis::FlowAnalysis,
+        types::TypeInfo,
+        witness_info::{FunctionWitnessType, WitnessShape, WitnessType},
         witness_taint_inference::position::Position,
     },
     ssa::{BlockId, FunctionId, SSAAnotator, ValueId, hlssa::HLSSA},
@@ -272,6 +280,57 @@ struct FunctionSummary {
     /// call graphs). Iteration order is deterministic as a bonus.
     edges: BTreeSet<(Position, Position)>,
 }
+
+// READ-ONLY JOINED APPROXIMATION
+// ================================================================================================
+
+/// A read-only approximation of witness taint over the *pristine* (pre-specialization) SSA: each
+/// function solved once at the join of all calling contexts real WTI would reach, never cloned.
+///
+/// Because every transfer function distributes over taint joins (see the module documentation),
+/// this is exactly the pointwise join of every per-context solution the pipeline's real WTI run
+/// later computes — a `Pure` value here is provably `Pure` in **every** future specialization. That
+/// makes it a sound witness-ness source for pre-untaint consumers (PRE's `TotalityOracle`) that
+/// must refuse to speculate ops whose witness lowering emits rejecting constraints.
+pub struct ApproximateWitnessTaint {
+    functions: HashMap<FunctionId, HashMap<ValueId, WitnessShape>>,
+}
+
+impl ApproximateWitnessTaint {
+    /// Compute the approximation over `ssa`.
+    ///
+    /// `types` is the caller's current `TypeInfo` for the same, unmutated SSA. This is the same
+    /// computation [`phases::run`] performs internally; passed in because pre-untaint pass
+    /// managers already hold one.
+    pub fn compute(ssa: &HLSSA, flow: &FlowAnalysis, types: &TypeInfo) -> Self {
+        Self {
+            functions: phases::joined_value_shapes(ssa, flow, types),
+        }
+    }
+
+    /// Whether `vid` in `fid` is witness at its **top level** in some reachable context.
+    ///
+    /// This is the faithful mirror of the top-level `TypeExpr::WitnessOf` wrap `UntaintControlFlow`
+    /// applies (`apply_witness_type` wraps a level iff that shape level is witness), which is what
+    /// post-untaint `Type::is_witness_of` checks read.
+    ///
+    /// A value absent from a known function is a constant — always `Pure`. An unknown _function_
+    /// answers `true` (conservative refuse). Only functions unreachable via constrained static
+    /// calls are absent, i.e. dead code or unconstrained-only callees; a faithful mirror could
+    /// answer `false` there (real WTI never clones them, so untaint never types them), but no
+    /// speculation opportunity is worth relying on that fact.
+    pub fn value_is_witness(&self, fid: FunctionId, vid: ValueId) -> bool {
+        match self.functions.get(&fid) {
+            Some(values) => values
+                .get(&vid)
+                .is_some_and(|shape| shape.toplevel_info() == WitnessType::Witness),
+            None => true,
+        }
+    }
+}
+
+// TESTS
+// ================================================================================================
 
 #[cfg(test)]
 mod tests {
@@ -1052,5 +1111,165 @@ mod tests {
         assert_eq!(main_fwt.returns_witness, vec![pure()]);
         let (_, helper_fwt) = clone_fwt(&ssa, &wti, "make_ref");
         assert_eq!(helper_fwt.returns_witness, vec![ref_of_shape(pure())]);
+    }
+
+    // READ-ONLY JOINED APPROXIMATION
+    // ============================================================================================
+
+    /// The approximation over the finished, immutable SSA.
+    fn run_approx(ssa: &HLSSA) -> ApproximateWitnessTaint {
+        let flow = FlowAnalysis::run(ssa);
+        let types = crate::compiler::analysis::types::Types::new().run(ssa, &flow);
+        ApproximateWitnessTaint::compute(ssa, &flow, &types)
+    }
+
+    /// A callee reached with a pure argument at one site and a witness at another: the joined
+    /// solve makes its parameter Witness — without mutating the SSA (no clones minted, entrypoint
+    /// unchanged) — while the caller's own values stay context-precise (its pure parameter and
+    /// constants answer Pure; constants are absent from the map). A function never reached via
+    /// constrained calls answers `true` (the conservative refuse).
+    #[test]
+    fn approx_joins_call_site_contexts_without_mutation() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        let helper_id = sb.ssa().add_function("helper".to_string());
+        // helper(p: Field) -> Field { return p }
+        let helper_param = sb.modify_function(helper_id, |b| {
+            b.function.add_return_type(Type::field());
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let p = e.add_parameter(Type::field());
+            e.terminate_return(vec![p]);
+            p
+        });
+        // A function nothing calls.
+        let dead_id = sb.ssa().add_function("dead".to_string());
+        let dead_param = sb.modify_function(dead_id, |b| {
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let p = e.add_parameter(Type::field());
+            e.terminate_return(vec![]);
+            p
+        });
+        // main(x): helper(3) + helper(write_witness(x))
+        let (x, c, w) = sb.modify_function(main_id, |b| {
+            b.function.add_return_type(Type::field());
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let x = e.add_parameter(Type::field());
+            let c = e.field_const(fr(3));
+            let w = e.write_witness(x);
+            let r1 = e.call(helper_id, vec![c], 1)[0];
+            let r2 = e.call(helper_id, vec![w], 1)[0];
+            let s = e.add(r1, r2);
+            e.terminate_return(vec![s]);
+            (x, c, w)
+        });
+
+        let fids_before: Vec<FunctionId> = ssa.get_function_ids().collect();
+        let taint = run_approx(&ssa);
+
+        assert_eq!(ssa.get_function_ids().collect::<Vec<_>>(), fids_before);
+        assert_eq!(ssa.get_unique_entrypoint_id(), main_id);
+
+        // Pure ∨ Witness across the two sites = Witness inside the callee.
+        assert!(taint.value_is_witness(helper_id, helper_param));
+        // The caller's own solve stays context-precise.
+        assert!(taint.value_is_witness(main_id, w));
+        assert!(!taint.value_is_witness(main_id, x));
+        assert!(!taint.value_is_witness(main_id, c));
+        // Unreached functions are absent: conservative `true`.
+        assert!(taint.value_is_witness(dead_id, dead_param));
+    }
+
+    /// The cfg flag joins across call sites: a callee whose store runs under the *caller's*
+    /// witness control flow at one site sees a Witness cfg in the joined view, so its load of the
+    /// stored-through slot is Witness — while the pure site's call result in the caller stays
+    /// Pure (summaries instantiate per site in the caller's own solve).
+    #[test]
+    fn approx_cfg_witness_joins_across_call_sites() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        let helper_id = sb.ssa().add_function("helper".to_string());
+        // helper(p: Ref<Field>) -> Field { *p = 7; return *p }
+        let loaded = sb.modify_function(helper_id, |b| {
+            b.function.add_return_type(Type::field());
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let p = e.add_parameter(Type::field().ref_of());
+            let c = e.field_const(fr(7));
+            e.store(p, c);
+            let r = e.load(p);
+            e.terminate_return(vec![r]);
+            r
+        });
+        // main(x): r1 = helper(alloc 0);                          — pure cfg site
+        //          if (write_witness(x) == 0) { helper(alloc 0) } — witness cfg site
+        let r1 = sb.modify_function(main_id, |b| {
+            b.function.add_return_type(Type::field());
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let x = e.add_parameter(Type::field());
+            let c0 = e.field_const(fr(0));
+            let q1 = e.alloc(c0);
+            let r1 = e.call(helper_id, vec![q1], 1)[0];
+            let w = e.write_witness(x);
+            let cond = e.eq(w, c0);
+            e.build_if_else(
+                cond,
+                vec![],
+                |e| {
+                    let q2 = e.alloc(c0);
+                    e.call(helper_id, vec![q2], 1);
+                    vec![]
+                },
+                |_| vec![],
+            );
+            e.terminate_return(vec![r1]);
+            r1
+        });
+
+        let taint = run_approx(&ssa);
+
+        // Joined cfg = Pure ∨ Witness: the (predicated) store taints the pointee inside helper.
+        assert!(taint.value_is_witness(helper_id, loaded));
+        // The pure site's result in the caller is still Pure.
+        assert!(!taint.value_is_witness(main_id, r1));
+    }
+
+    /// Recursive context growth converges: `rec` is entered pure from `main` but calls itself
+    /// with a witness argument, so its joined parameter grows Pure → Witness exactly once and the
+    /// worklist drains (the re-enqueue-on-growth path).
+    #[test]
+    fn approx_recursive_context_growth_terminates() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        let rec_id = sb.ssa().add_function("rec".to_string());
+        // rec(p: Field) { rec(write_witness(1)) }
+        let rec_param = sb.modify_function(rec_id, |b| {
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let p = e.add_parameter(Type::field());
+            let c = e.field_const(fr(1));
+            let w = e.write_witness(c);
+            e.call(rec_id, vec![w], 0);
+            e.terminate_return(vec![]);
+            p
+        });
+        sb.modify_function(main_id, |b| {
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let _x = e.add_parameter(Type::field());
+            let c0 = e.field_const(fr(0));
+            e.call(rec_id, vec![c0], 0);
+            e.terminate_return(vec![]);
+        });
+
+        let taint = run_approx(&ssa);
+
+        assert!(taint.value_is_witness(rec_id, rec_param));
     }
 }

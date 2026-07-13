@@ -305,10 +305,12 @@ impl Driver {
                 // copy-propagates asserted-equal leaders into operands, making them structurally
                 // congruent to the recomputed analysis) and before TrivialPhiElimination (a PRE
                 // redirect can make both preds' jump args identical, and such a phi must collapse
-                // before WTI taints it into a needless `Select`). `pre_untaint()` is
-                // elimination-only: motion would split edges and mint merge params that untaint
-                // cannot yet absorb, and its speculation gate cannot see witness-ness before
-                // types carry `WitnessOf`.
+                // before WTI taints it into a needless `Select`).
+                //
+                // `pre_untaint()` speculates under `preserve_structure`: hoists are pure
+                // instruction insertion above `Jmp` terminators — no edge splits or merge params
+                // for untaint to absorb — and the speculation gate reads witness-ness from the
+                // read-only joined WTI approximation, since types do not yet carry `WitnessOf`.
                 Box::new(PRE::pre_untaint()),
                 // Mem2Reg promotes each scalarized leaf cell into its own block-parameter phi. For
                 // an aggregate threaded through control flow that is mostly trivial phis (the same

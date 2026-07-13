@@ -268,12 +268,63 @@ struct Ctx {
     cfg_witness: WitnessType,
 }
 
+impl Ctx {
+    /// The entry context of `fid`: all-Pure parameters, all-Pure return deref levels (the entry
+    /// has no caller to write through its returned refs), and a Pure cfg flag.
+    fn entry(ssa: &HLSSA, fid: FunctionId) -> Ctx {
+        let arg_shapes: Vec<WitnessShape> = ssa
+            .get_function(fid)
+            .get_entry()
+            .get_parameters()
+            .map(|(_, ty)| pure_shape(ty))
+            .collect();
+        let ret_shapes: Vec<DerefShape> = ssa
+            .get_function(fid)
+            .get_returns()
+            .iter()
+            .map(DerefShape::pure)
+            .collect();
+        Ctx {
+            fid,
+            arg_shapes,
+            ret_shapes,
+            cfg_witness: WitnessType::Pure,
+        }
+    }
+
+    /// The pointwise join of two contexts of the same function (least upper bound in the context
+    /// lattice).
+    ///
+    /// Both contexts share the function's signature, so the per-slot shapes always have matching
+    /// structure.
+    fn join(&self, other: &Ctx) -> Ctx {
+        debug_assert_eq!(self.fid, other.fid);
+        Ctx {
+            fid: self.fid,
+            arg_shapes: self
+                .arg_shapes
+                .iter()
+                .zip(&other.arg_shapes)
+                .map(|(a, b)| a.join(b))
+                .collect(),
+            ret_shapes: self
+                .ret_shapes
+                .iter()
+                .zip(&other.ret_shapes)
+                .map(|(a, b)| a.join(b))
+                .collect(),
+            cfg_witness: self.cfg_witness.join(other.cfg_witness),
+        }
+    }
+}
+
 /// A return's caller-determined taint: a [`WitnessShape`] carrying information only at
 /// Deref-descended levels — everything at or above the first `Ref` is `Pure`.
 ///
 /// The invariant is guaranteed by construction: the only constructors are [`DerefShape::pure`]
-/// (trivially all-Pure) and [`DerefShape::from_solution`] (which never reads a non-Deref level),
-/// so a [`Ctx`] literally cannot hold callee-determined output taint.
+/// (trivially all-Pure), [`DerefShape::from_solution`] (which never reads a non-Deref level), and
+/// [`DerefShape::join`] (pointwise, so it introduces no non-Deref information) — a [`Ctx`]
+/// literally cannot hold callee-determined output taint.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct DerefShape(WitnessShape);
 
@@ -292,6 +343,14 @@ impl DerefShape {
     /// skeleton's `path.contains(&Descent::Deref)` input filter.
     fn from_solution(owner: Owner, ty: &Type, witness: &HashSet<Position>) -> Self {
         DerefShape(go_shape_from(&owner, &mut Vec::new(), ty, witness, false))
+    }
+
+    /// The pointwise join.
+    ///
+    /// The Deref-only invariant is preserved because both sides are Pure at every
+    /// non-Deref-descended level, and `Pure ∨ Pure = Pure`.
+    fn join(&self, other: &DerefShape) -> DerefShape {
+        DerefShape(self.0.join(&other.0))
     }
 }
 
@@ -323,6 +382,96 @@ pub fn run(ssa: &mut HLSSA, flow: &FlowAnalysis) -> HashMap<FunctionId, Function
 
     let witness_globals = compute_witness_globals(ssa, &types, &graphs, &fids);
     specialize_contexts(ssa, &types, &graphs, &block_conds, &witness_globals)
+}
+
+/// Run the analysis read-only, solving each function once at the **join of all reachable calling
+/// contexts** instead of cloning per context, and return the per-value shapes keyed by the
+/// _pristine_ function/value ids. `ssa` is never mutated.
+///
+/// This is a sound over-approximation of every specialization real WTI later materializes: transfer
+/// functions distribute over taint joins and each function's `≥` graph is fixed once summaries
+/// freeze — contexts differ only in their seeds — so solving once at the joined context equals the
+/// pointwise join of every per-context solution. A value Pure here is Pure in every future clone.
+///
+/// That guarantee is stated over the SSA as it stands *now*: a consumer acting on a Pure verdict
+/// before the pipeline's real WTI run additionally relies on the intervening passes substituting
+/// only taint-equal values for the ones it judged (they mint no new witness sources).
+///
+/// Callers supply the pipeline's current `TypeInfo` rather than having it recomputed ([`run`]
+/// recomputes it only because it must precede the mutation below; the computation is identical).
+/// Functions never reached via constrained static calls are absent from the result — exactly the
+/// set real WTI never clones.
+pub(super) fn joined_value_shapes(
+    ssa: &HLSSA,
+    flow: &FlowAnalysis,
+    types: &TypeInfo,
+) -> HashMap<FunctionId, HashMap<ValueId, WitnessShape>> {
+    // Mirrors `run`'s setup, minus the `Types` recompute and minus phase-2 mutation.
+    let fids: Vec<FunctionId> = ssa
+        .get_function_ids()
+        .filter(|f| types.has_function(*f))
+        .collect();
+    let mut block_conds: HashMap<FunctionId, HashMap<BlockId, Vec<ValueId>>> = HashMap::default();
+    for f in &fids {
+        let func = ssa.get_function(*f);
+        block_conds.insert(
+            *f,
+            compute_block_conditions(func, flow.get_function_cfg(*f)),
+        );
+    }
+    let (_summaries, graphs) = compute_summaries(ssa, flow, types, &block_conds, &fids);
+    let witness_globals = compute_witness_globals(ssa, types, &graphs, &fids);
+    let global_types: Vec<Type> = ssa.get_global_types().to_vec();
+
+    // Top-down worklist from the entry: pop a function, solve it at its current joined context,
+    // then join each discovered callee context into the callee's slot, re-enqueueing on growth.
+    // Terminates by the same argument as `compute_summaries`: contexts grow monotonically in a
+    // finite lattice (bounded by type structure × 2 points), and a function is only re-queued when
+    // its joined context strictly grows.
+    let main_id = ssa.get_unique_entrypoint_id();
+    let mut joined: HashMap<FunctionId, Ctx> = HashMap::default();
+    let mut shapes: HashMap<FunctionId, HashMap<ValueId, WitnessShape>> = HashMap::default();
+    let mut worklist: VecDeque<FunctionId> = VecDeque::new();
+
+    // Queue membership, so re-enqueue checks are O(1) instead of scanning the deque.
+    let mut queued: HashSet<FunctionId> = HashSet::default();
+    joined.insert(main_id, Ctx::entry(ssa, main_id));
+    worklist.push_back(main_id);
+    queued.insert(main_id);
+
+    while let Some(f) = worklist.pop_front() {
+        queued.remove(&f);
+        let ctx = joined[&f].clone();
+        let result = solve_context(
+            &FunctionData {
+                func: ssa.get_function(f),
+                types: types.get_function(f),
+                graph: &graphs[&f],
+                block_conds: &block_conds[&f],
+            },
+            &ctx,
+            &witness_globals,
+            &global_types,
+        );
+        for cc in result.calls.values() {
+            let grown = match joined.get(&cc.fid) {
+                Some(prev) => {
+                    let new = prev.join(cc);
+                    (new != *prev).then_some(new)
+                }
+                None => Some(cc.clone()),
+            };
+            if let Some(new) = grown {
+                joined.insert(cc.fid, new);
+                if queued.insert(cc.fid) {
+                    worklist.push_back(cc.fid);
+                }
+            }
+        }
+        // A re-solve at a grown context replaces the stale (smaller) solution.
+        shapes.insert(f, result.value_shapes);
+    }
+    shapes
 }
 
 // WITNESS GLOBAL HANDLING
@@ -477,26 +626,7 @@ fn specialize_contexts(
     let main_id = ssa.get_unique_entrypoint_id();
     // Program-wide global slot types, captured before the SSA is mutated (clones/rewiring below).
     let global_types: Vec<Type> = ssa.get_global_types().to_vec();
-    let main_args: Vec<WitnessShape> = ssa
-        .get_function(main_id)
-        .get_entry()
-        .get_parameters()
-        .map(|(_, ty)| pure_shape(ty))
-        .collect();
-
-    // The entry has no caller to write through its returned refs: all-Pure.
-    let main_rets: Vec<DerefShape> = ssa
-        .get_function(main_id)
-        .get_returns()
-        .iter()
-        .map(DerefShape::pure)
-        .collect();
-    let main_ctx = Ctx {
-        fid: main_id,
-        arg_shapes: main_args,
-        ret_shapes: main_rets,
-        cfg_witness: WitnessType::Pure,
-    };
+    let main_ctx = Ctx::entry(ssa, main_id);
 
     // Discover contexts (BFS), solving each once and cloning it.
     let mut ctx_clone: HashMap<Ctx, (FunctionId, HashMap<ValueId, ValueId>)> = HashMap::default();
