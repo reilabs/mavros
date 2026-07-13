@@ -43,6 +43,10 @@ pub struct ProgramOptions {
 
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub skip_vm: bool,
+
+    /// Print absolute paths in VM stack traces and WASM debug info instead of paths relative to the current directory.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub absolute_paths: bool,
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -89,7 +93,7 @@ fn main() -> ExitCode {
     };
 
     result.unwrap_or_else(|err| {
-        eprintln!("Error Encountered: {err:?}");
+        eprintln!("Error Encountered: {err}");
         ExitCode::FAILURE
     })
 }
@@ -157,6 +161,11 @@ pub fn run_compile(
 /// `main` function of the application.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let (mut driver, r1cs) = compile_to_r1cs(args.root.clone(), args.draw_graphs)?;
+    let source_path_root = if args.absolute_paths {
+        None
+    } else {
+        Some(std::env::current_dir()?.canonicalize()?)
+    };
     if args.pprint_r1cs {
         use std::io::Write;
         let mut r1cs_file =
@@ -171,7 +180,11 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
             let wasm_path = driver.get_debug_output_dir().join("program.wasm");
             info!(message = %"Generating WebAssembly", path = %wasm_path.display());
             let runtime_lib = mavros_compiler::wasm_runtime::locate_or_build();
-            Some((wasm_path, WasmCompileOpts::release(runtime_lib)))
+            let mut opts = WasmCompileOpts::release(runtime_lib);
+            if let Some(root) = &source_path_root {
+                opts = opts.with_debug_path_root(root);
+            }
+            Some((wasm_path, opts))
         } else {
             None
         };
@@ -199,7 +212,13 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let params = api::read_prover_inputs(driver.package_root(), driver.abi())?;
     let mut binary = api::compile_bytecode(&mut driver, CodeGenOptions::default())?;
 
-    let witgen_result = api::run_witgen_from_binary(&mut binary, &r1cs, &params)?;
+    let witgen_result =
+        api::run_witgen_from_binary(&mut binary, &r1cs, &params).map_err(|mut error| {
+            if let Some(root) = &source_path_root {
+                error.relativize_source_paths(root);
+            }
+            error
+        })?;
 
     let correct = api::check_witgen(&r1cs, &witgen_result);
     if !correct {
@@ -330,4 +349,18 @@ fn parse_path(path: &str) -> Result<PathBuf, String> {
         path = std::env::current_dir().unwrap().join(path).normalize();
     }
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_paths_are_relative_by_default_with_absolute_opt_in() {
+        let relative = ProgramOptions::try_parse_from(["mavros"]).unwrap();
+        assert!(!relative.absolute_paths);
+
+        let absolute = ProgramOptions::try_parse_from(["mavros", "--absolute-paths"]).unwrap();
+        assert!(absolute.absolute_paths);
+    }
 }

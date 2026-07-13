@@ -9,7 +9,11 @@ use inkwell::{
     AddressSpace, IntPredicate, OptimizationLevel,
     builder::Builder,
     context::Context,
-    module::{Linkage, Module},
+    debug_info::{
+        AsDIScope, DICompileUnit, DIFile, DIFlags, DIFlagsConstants, DILexicalBlock, DISubprogram,
+        DWARFEmissionKind, DWARFSourceLanguage, DebugInfoBuilder,
+    },
+    module::{FlagBehavior, Linkage, Module},
     targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple},
     types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum},
     values::{
@@ -22,7 +26,7 @@ use crate::{
     compiler::{
         analysis::flow_analysis::{self, FlowAnalysis},
         ssa::{
-            BlockId, FunctionId, SSAConstantsSnapshot, Terminator, ValueId,
+            BlockId, FunctionId, SSAConstantsSnapshot, SourceLocation, Terminator, ValueId,
             llssa::{
                 Blob as LLBlob, Constant, FieldArithOp, IntArithOp, IntCmpOp, LLFieldType,
                 LLFunction, LLOp, LLSSA, LLStruct, Type,
@@ -44,6 +48,8 @@ pub struct WasmCompileOpts {
     /// responsible for building it (see [`crate::wasm_runtime`]); codegen
     /// never invokes cargo.
     pub runtime_lib: std::path::PathBuf,
+    /// Strip this prefix from source paths embedded in DWARF.
+    pub debug_path_root: Option<std::path::PathBuf>,
 }
 
 impl WasmCompileOpts {
@@ -57,6 +63,7 @@ impl WasmCompileOpts {
             midend_pipeline: Some("default<O1>"),
             codegen_level: OptimizationLevel::None,
             runtime_lib,
+            debug_path_root: None,
         }
     }
 
@@ -66,7 +73,13 @@ impl WasmCompileOpts {
             midend_pipeline: None,
             codegen_level: OptimizationLevel::Aggressive,
             runtime_lib,
+            debug_path_root: None,
         }
+    }
+
+    pub fn with_debug_path_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.debug_path_root = Some(root.into());
+        self
     }
 }
 
@@ -102,6 +115,12 @@ pub struct LLVMCodeGen<'ctx> {
     const_data_counter: usize,
     /// Exported symbol names of the program's entry points, in entry order.
     entry_symbols: Vec<String>,
+    debug_builder: DebugInfoBuilder<'ctx>,
+    debug_compile_unit: DICompileUnit<'ctx>,
+    debug_path_root: Option<std::path::PathBuf>,
+    debug_files: HashMap<String, DIFile<'ctx>>,
+    debug_subprograms: HashMap<FunctionId, DISubprogram<'ctx>>,
+    debug_scopes: HashMap<(FunctionId, String), DILexicalBlock<'ctx>>,
 }
 
 /// The exported symbol name of the entry point at `index` in the SSA's entry-point list.
@@ -116,6 +135,29 @@ pub fn entry_export_symbol(index: usize) -> String {
 impl<'ctx> LLVMCodeGen<'ctx> {
     pub fn new(context: &'ctx Context, module_name: &str) -> Self {
         let module = context.create_module(module_name);
+        module.add_basic_value_flag(
+            "Debug Info Version",
+            FlagBehavior::Warning,
+            context.i32_type().const_int(3, false),
+        );
+        let (debug_builder, debug_compile_unit) = module.create_debug_info_builder(
+            true,
+            // DWARF has no Noir language code; C is the conventional generic frontend choice.
+            DWARFSourceLanguage::C,
+            module_name,
+            ".",
+            "mavros",
+            false,
+            "",
+            0,
+            "",
+            DWARFEmissionKind::Full,
+            0,
+            false,
+            false,
+            "",
+            "",
+        );
         let builder = context.create_builder();
 
         let mut codegen = Self {
@@ -139,10 +181,113 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             globals: Vec::new(),
             const_data_counter: 0,
             entry_symbols: Vec::new(),
+            debug_builder,
+            debug_compile_unit,
+            debug_path_root: None,
+            debug_files: HashMap::default(),
+            debug_subprograms: HashMap::default(),
+            debug_scopes: HashMap::default(),
         };
 
         codegen.declare_runtime_functions();
         codegen
+    }
+
+    pub fn set_debug_path_root(&mut self, root: Option<std::path::PathBuf>) {
+        self.debug_path_root = root;
+    }
+
+    fn function_source_location(function: &LLFunction) -> SourceLocation {
+        function
+            .get_entry()
+            .first_location()
+            .cloned()
+            .or_else(|| {
+                function
+                    .get_blocks()
+                    .find_map(|(_, block)| block.first_location().cloned())
+            })
+            .unwrap_or_else(|| SourceLocation::synthetic(function.get_name()))
+    }
+
+    fn debug_file(&mut self, location: &SourceLocation) -> DIFile<'ctx> {
+        if let Some(file) = self.debug_files.get(location.file.as_ref()) {
+            return *file;
+        }
+
+        let original_path = Path::new(location.file.as_ref());
+        let path = self
+            .debug_path_root
+            .as_deref()
+            .and_then(|root| original_path.strip_prefix(root).ok())
+            .unwrap_or(original_path);
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(location.file.as_ref());
+        let directory = path
+            .parent()
+            .and_then(|parent| parent.to_str())
+            .filter(|parent| !parent.is_empty())
+            .unwrap_or(".");
+        let file = self.debug_builder.create_file(filename, directory);
+        self.debug_files.insert(location.file.to_string(), file);
+        file
+    }
+
+    fn declare_debug_function(
+        &mut self,
+        fn_id: FunctionId,
+        function: &LLFunction,
+        fn_value: FunctionValue<'ctx>,
+    ) {
+        let location = Self::function_source_location(function);
+        let file = self.debug_file(&location);
+        let subroutine_type =
+            self.debug_builder
+                .create_subroutine_type(file, None, &[], DIFlags::PUBLIC);
+        let line = location.start.line.min(u32::MAX as u64) as u32;
+        let subprogram = self.debug_builder.create_function(
+            self.debug_compile_unit.as_debug_info_scope(),
+            function.get_name(),
+            fn_value.get_name().to_str().ok(),
+            file,
+            line,
+            subroutine_type,
+            false,
+            true,
+            line,
+            DIFlags::PUBLIC,
+            false,
+        );
+        fn_value.set_subprogram(subprogram);
+        self.debug_subprograms.insert(fn_id, subprogram);
+    }
+
+    fn set_debug_location(&mut self, fn_id: FunctionId, location: &SourceLocation) {
+        let file = self.debug_file(location);
+        let key = (fn_id, location.file.to_string());
+        let scope = if let Some(scope) = self.debug_scopes.get(&key) {
+            *scope
+        } else {
+            let parent = self.debug_subprograms[&fn_id];
+            let scope = self.debug_builder.create_lexical_block(
+                parent.as_debug_info_scope(),
+                file,
+                location.start.line.min(u32::MAX as u64) as u32,
+                location.start.column.min(u32::MAX as u64) as u32,
+            );
+            self.debug_scopes.insert(key, scope);
+            scope
+        };
+        let debug_location = self.debug_builder.create_debug_location(
+            self.context,
+            location.start.line.min(u32::MAX as u64) as u32,
+            location.start.column.min(u32::MAX as u64) as u32,
+            scope.as_debug_info_scope(),
+            None,
+        );
+        self.builder.set_current_debug_location(debug_location);
     }
 
     // ── Type conversion ─────────────────────────────────────────────────
@@ -536,6 +681,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             let cfg = flow_analysis.get_function_cfg(*fn_id);
             self.compile_function(*fn_id, function, cfg, &entry_points);
         }
+        self.builder.unset_current_debug_location();
+        self.debug_builder.finalize();
     }
 
     fn declare_function(
@@ -578,6 +725,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         };
 
         let fn_value = self.module.add_function(&name, fn_type, None);
+        self.declare_debug_function(fn_id, function, fn_value);
         self.function_map.insert(fn_id, fn_value);
     }
 
@@ -598,6 +746,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.block_map.clear();
 
         let fn_value = self.function_map[&fn_id];
+        let function_location = Self::function_source_location(function);
+        self.set_debug_location(fn_id, &function_location);
         let entry_block_id = function.get_entry_id();
 
         // Create entry block
@@ -636,7 +786,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         // Generate code in dominator order
         for block_id in cfg.get_domination_pre_order() {
-            self.compile_block(function, block_id, &mut phi_nodes);
+            self.compile_block(fn_id, function, block_id, &mut phi_nodes);
         }
 
         // Wire phi incoming values
@@ -710,12 +860,19 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
     fn compile_block(
         &mut self,
+        fn_id: FunctionId,
         function: &LLFunction,
         block_id: BlockId,
         phi_nodes: &mut HashMap<(BlockId, usize), inkwell::values::PhiValue<'ctx>>,
     ) {
         let block = function.get_block(block_id);
         let bb = self.block_map[&block_id];
+        let block_location = block
+            .first_location()
+            .or_else(|| function.get_entry().first_location())
+            .cloned()
+            .unwrap_or_else(|| SourceLocation::synthetic(function.get_name()));
+        self.set_debug_location(fn_id, &block_location);
 
         // Non-entry block parameters → phi nodes
         if block_id != function.get_entry_id() {
@@ -734,7 +891,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         self.builder.position_at_end(bb);
 
-        for instruction in block.get_instructions() {
+        for (instruction, location) in block.get_instructions_with_source_locations() {
+            self.set_debug_location(fn_id, location);
             self.compile_instruction(instruction);
         }
 
@@ -1448,5 +1606,75 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
 
         std::fs::remove_file(&obj_path).ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::{
+        analysis::flow_analysis::FlowAnalysis,
+        ssa::{
+            SourcePosition,
+            llssa::{
+                LLSSA,
+                builder::{LLEmitter, LLSSABuilder},
+            },
+        },
+    };
+
+    #[test]
+    fn emits_instruction_source_locations_as_llvm_debug_info() {
+        let mut ssa = LLSSA::with_main("located_main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let location = SourceLocation::new(
+            "/tmp/mavros-project/src/main.nr",
+            SourcePosition::new(12, 7),
+            SourcePosition::new(12, 16),
+        );
+        let mut ssa_builder = LLSSABuilder::new(&mut ssa);
+        ssa_builder.modify_function(main_id, |function| {
+            let entry = function.function.get_entry_id();
+            let mut block = function.block(entry).with_source_location(location);
+            let field_type = LLStruct::field_elem();
+            let one = block.emit_struct_const(
+                field_type.clone(),
+                vec![
+                    Constant::Int { bits: 64, value: 1 },
+                    Constant::Int { bits: 64, value: 0 },
+                    Constant::Int { bits: 64, value: 0 },
+                    Constant::Int { bits: 64, value: 0 },
+                ],
+            );
+            let two = block.emit_struct_const(
+                field_type,
+                vec![
+                    Constant::Int { bits: 64, value: 2 },
+                    Constant::Int { bits: 64, value: 0 },
+                    Constant::Int { bits: 64, value: 0 },
+                    Constant::Int { bits: 64, value: 0 },
+                ],
+            );
+            block.field_arith(FieldArithOp::Add, one, two);
+            block.terminate_return(Vec::new());
+        });
+
+        let flow = FlowAnalysis::run(&ssa);
+        let context = Context::create();
+        let mut codegen = LLVMCodeGen::new(&context, "debug_test");
+        codegen.set_debug_path_root(Some("/tmp/mavros-project".into()));
+        codegen.compile(&ssa, &flow);
+        codegen.module.verify().unwrap();
+        let ir = codegen.get_ir();
+
+        assert!(ir.contains("!DIFile(filename: \"main.nr\", directory: \"src\")"));
+        assert!(ir.contains("!DISubprogram(name: \"located_main\""));
+        assert!(ir.contains("!DILocation(line: 12, column: 7"));
+        assert!(
+            ir.lines().any(|line| {
+                line.contains("call") && line.contains("@__field_add") && line.contains("!dbg")
+            }),
+            "field add must carry a debug location:\n{ir}"
+        );
     }
 }

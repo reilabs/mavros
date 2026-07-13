@@ -631,6 +631,11 @@ impl Driver {
         let ll_flow_analysis = FlowAnalysis::run(&llssa);
         let context = Context::create();
         let mut codegen = LLVMCodeGen::new(&context, "mavros_module");
+        codegen.set_debug_path_root(
+            wasm_config
+                .as_ref()
+                .and_then(|(_, opts)| opts.debug_path_root.clone()),
+        );
         codegen.compile(&llssa, &ll_flow_analysis);
 
         let llvm_ir = if emit_llvm {
