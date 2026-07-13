@@ -17,7 +17,7 @@ use crate::compiler::{
     },
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::{
-        Instruction, Located, Location, Terminator, ValueId,
+        Instruction, Located, SourceLocation, Terminator, ValueId,
         hlssa::{CastTarget, HLFunction, HLSSA, OpCode, RefCountOp, Type, TypeExpr},
     },
 };
@@ -61,6 +61,9 @@ impl RCInsertion {
         liveness: &FunctionLiveness,
     ) {
         let value_locations = Self::value_source_locations(function);
+        // Last-resort anchor for mem-ops on values with no defining instruction in an
+        // instruction-less block.
+        let pass_location = SourceLocation::synthetic("rc_insertion");
         for (block_id, block) in function.get_blocks_mut() {
             // We're traversing the block backwards, dropping everything that's not live
             // after the currently visited instruction.
@@ -68,7 +71,10 @@ impl RCInsertion {
             // inserting drops.
             let mut currently_live = liveness.block_liveness[block_id].live_out.clone();
             let mut new_instructions = vec![];
-            let block_location = None;
+            // Mem-ops inserted next to the terminator anchor to the last instruction; drops of
+            // dead parameters end up at the top of the block and anchor to the first.
+            let first_location = block.first_location().cloned();
+            let last_location = block.last_location().cloned();
 
             match block.get_terminator().unwrap() {
                 Terminator::Return(values) => {
@@ -87,7 +93,7 @@ impl RCInsertion {
                                 RefCountOp::Bump(count),
                                 *value,
                                 &value_locations,
-                                &block_location,
+                                last_location.as_ref().unwrap_or(&pass_location),
                             );
                         }
                     }
@@ -115,7 +121,7 @@ impl RCInsertion {
                                 RefCountOp::Bump(count),
                                 *value,
                                 &value_locations,
-                                &block_location,
+                                last_location.as_ref().unwrap_or(&pass_location),
                             );
                         }
                     }
@@ -821,7 +827,7 @@ impl RCInsertion {
                         RefCountOp::Drop,
                         *param,
                         &value_locations,
-                        &block_location,
+                        first_location.as_ref().unwrap_or(&pass_location),
                     );
                 }
             }
@@ -887,18 +893,18 @@ impl RCInsertion {
                     RefCountOp::Drop,
                     *value,
                     &value_locations,
-                    &None,
+                    &pass_location,
                 ));
             }
         }
     }
 
-    fn value_source_locations(function: &HLFunction) -> HashMap<ValueId, Location> {
+    fn value_source_locations(function: &HLFunction) -> HashMap<ValueId, SourceLocation> {
         let mut locations = HashMap::default();
         for (_, block) in function.get_blocks() {
             for instruction in block.get_instructions_with_source_locations() {
                 for result in instruction.0.get_results() {
-                    locations.insert(*result, instruction.1.cloned());
+                    locations.insert(*result, instruction.1.clone());
                 }
             }
         }
@@ -908,24 +914,24 @@ impl RCInsertion {
     fn located_mem_op(
         kind: RefCountOp,
         value: ValueId,
-        value_locations: &HashMap<ValueId, Location>,
-        fallback_location: &Location,
+        value_locations: &HashMap<ValueId, SourceLocation>,
+        fallback_location: &SourceLocation,
     ) -> Located<OpCode> {
-        Located::new(
-            OpCode::MemOp { kind, value },
-            value_locations
-                .get(&value)
-                .cloned()
-                .unwrap_or_else(|| fallback_location.clone()),
-        )
+        // Block parameters have no defining instruction; they use the fallback anchor.
+        let location = value_locations
+            .get(&value)
+            .unwrap_or(fallback_location)
+            .clone();
+
+        Located::new(OpCode::MemOp { kind, value }, location)
     }
 
     fn push_mem_op(
         instructions: &mut Vec<Located<OpCode>>,
         kind: RefCountOp,
         value: ValueId,
-        value_locations: &HashMap<ValueId, Location>,
-        fallback_location: &Location,
+        value_locations: &HashMap<ValueId, SourceLocation>,
+        fallback_location: &SourceLocation,
     ) {
         instructions.push(Self::located_mem_op(
             kind,

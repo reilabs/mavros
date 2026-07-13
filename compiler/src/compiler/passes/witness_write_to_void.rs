@@ -8,7 +8,7 @@
 use crate::compiler::{
     analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
-    passes::fix_double_jumps::ValueReplacements,
+    passes::shared::value_replacements::ValueReplacements,
     ssa::hlssa::{HLSSA, OpCode},
 };
 

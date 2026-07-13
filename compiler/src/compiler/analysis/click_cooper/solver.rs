@@ -17,7 +17,7 @@ use crate::{
                 eval_array_set, eval_binary, eval_bit_range, eval_cast, eval_cmp, eval_mk_repeated,
                 eval_mk_seq, eval_not, eval_sext, eval_slice_len, eval_slice_push,
             },
-            summary::{DetSummaries, FnSummary, ReturnJump, SymSummaries},
+            summary::{DetSummaries, FnSummary, ReturnJump, SymSummaries, det_return},
         },
         ssa::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
@@ -272,9 +272,7 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
                 Constness::Const(c) => Some(c),
                 Constness::Top | Constness::Bottom => None,
             },
-            |g, j| {
-                det.is_some_and(|d| d.get(&g).and_then(|rets| rets.get(j)).copied() == Some(true))
-            },
+            |g, j| det.is_some_and(|d| det_return(d, g, j)),
             self.sym_summaries,
         );
 

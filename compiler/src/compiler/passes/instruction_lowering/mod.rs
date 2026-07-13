@@ -186,7 +186,11 @@ impl InstructionLowering {
                 (instructions, terminator)
             };
 
-            let mut b = fb.block(block_id);
+            // Every lowered instruction scopes its own location below; emitting outside a scope
+            // is an ICE.
+            let mut b = fb
+                .block(block_id)
+                .with_scoped_source_locations("instruction_lowering");
             for instruction in instructions {
                 let location = instruction.location().clone();
                 if b.emit_with_location(location, |b| {
@@ -194,7 +198,7 @@ impl InstructionLowering {
                 }) {
                     changed = true;
                 } else {
-                    b.emit(instruction);
+                    b.emit_located(instruction);
                 }
             }
             if let Some(terminator) = terminator {

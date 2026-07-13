@@ -26,7 +26,7 @@ use crate::{
             types::{FunctionTypeInfo, TypeInfo},
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-        passes::fix_double_jumps::ValueReplacements,
+        passes::shared::value_replacements::ValueReplacements,
         ssa::{
             BlockId, FunctionId, Terminator, ValueId,
             hlssa::{
@@ -638,7 +638,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field().ref_of());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let kept = falloc(&mut e);
                 let returned = falloc(&mut e);
                 let c = e.field_const(fr(1));
@@ -664,7 +664,7 @@ mod tests {
             // reader(p): let _ = *p; return
             sb.modify_function(reader, |b| {
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let p = e.add_parameter(Type::field().ref_of());
                 let _ = e.load(p);
                 e.terminate_return(vec![]);
@@ -674,7 +674,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let other = falloc(&mut e);
                 let c = e.field_const(fr(2));
                 e.store(other, c);
@@ -705,7 +705,7 @@ mod tests {
             sb.modify_function(f, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let p = e.add_parameter(Type::field().ref_of());
                 let a = falloc(&mut e);
                 let c = e.field_const(fr(5));
@@ -716,7 +716,7 @@ mod tests {
             });
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 e.terminate_return(vec![]);
             });
         }
@@ -736,7 +736,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let cond = e.add_parameter(Type::bool());
                 let ra = falloc(&mut e);
                 let rb = falloc(&mut e);
@@ -769,7 +769,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let cond = e.add_parameter(Type::bool());
                 let a = falloc(&mut e);
                 let c0 = e.field_const(fr(7));
@@ -803,7 +803,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let a = falloc(&mut e);
                 let pp = e.alloc(a); // Ref<Ref<Field>>, ref pointee, seeded with `a`
                 e.store(pp, a); // *pp = a — `a`'s ref is consumed as a value
@@ -832,7 +832,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let a = falloc(&mut e); // cell seeded with its init value, never stored to
                 let v = e.load(a); // reads the alloc's initial value
                 e.terminate_return(vec![v]);
@@ -857,7 +857,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(arr_ty.clone());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let cond = e.add_parameter(Type::bool());
                 let arr0 = e.add_parameter(arr_ty.clone());
                 let arr1 = e.add_parameter(arr_ty.clone());

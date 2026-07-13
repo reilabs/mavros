@@ -350,7 +350,7 @@ mod tests {
             b.function.add_return_type(Type::field());
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let w = e.write_witness(x);
             e.terminate_return(vec![x, w]);
@@ -370,7 +370,7 @@ mod tests {
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::witness_of(Type::field()));
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let _x = e.add_parameter(Type::field());
             let c = e.field_const(fr(0));
             let w = e.cast_to_witness_of(c);
@@ -392,7 +392,7 @@ mod tests {
             b.function.add_return_type(Type::field());
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let c = e.field_const(fr(5));
             let p = e.alloc(c); // pure init store
@@ -416,7 +416,7 @@ mod tests {
             b.function.add_return_type(Type::field());
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let w = e.write_witness(x);
             let a = e.add(w, x); // witness ∨ pure = witness
@@ -441,7 +441,7 @@ mod tests {
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let w = e.write_witness(x);
             let cond = e.eq(w, x); // Witness condition
@@ -475,7 +475,7 @@ mod tests {
         // helper(p: Ref<Field>): *p = write_witness(7); return
         sb.modify_function(helper_id, |b| {
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let p = e.add_parameter(Type::field().ref_of());
             let c = e.field_const(fr(7));
             let w = e.write_witness(c);
@@ -486,7 +486,7 @@ mod tests {
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let _x = e.add_parameter(Type::field());
             let c0 = e.field_const(fr(0));
             let q = e.alloc(c0);
@@ -509,7 +509,7 @@ mod tests {
         // rec(p: Ref<Field>): *p = write_witness(1); rec(p); return
         sb.modify_function(rec_id, |b| {
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let p = e.add_parameter(Type::field().ref_of());
             let c = e.field_const(fr(1));
             let w = e.write_witness(c);
@@ -520,7 +520,7 @@ mod tests {
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let _x = e.add_parameter(Type::field());
             let c0 = e.field_const(fr(0));
             let q = e.alloc(c0);
@@ -544,7 +544,7 @@ mod tests {
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let _x = e.add_parameter(Type::field());
             // inner: Ref<Field>, with a witness stored into its pointee.
             let c = e.field_const(fr(9));
@@ -575,7 +575,7 @@ mod tests {
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let c0 = e.field_const(fr(0));
             let inner = e.alloc(c0);
@@ -620,7 +620,7 @@ mod tests {
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let c0 = e.field_const(fr(0));
             let ra = e.alloc(c0);
@@ -653,7 +653,7 @@ mod tests {
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let c1 = e.field_const(fr(1));
             let c2 = e.field_const(fr(2));
@@ -694,7 +694,7 @@ mod tests {
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let c1 = e.field_const(fr(1));
             let c2 = e.field_const(fr(2));
@@ -734,7 +734,7 @@ mod tests {
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let _x = e.add_parameter(Type::field());
             let c1 = e.field_const(fr(1));
             let c2 = e.field_const(fr(2));
@@ -760,7 +760,7 @@ mod tests {
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let c0 = e.field_const(fr(0));
             let ra = e.alloc(c0);
@@ -788,7 +788,7 @@ mod tests {
             b.function.add_return_type(Type::field()); // the merge phi
             b.function.add_return_type(Type::field()); // load after the conditional store
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let w = e.write_witness(x);
             let zero = e.field_const(fr(0));
@@ -853,7 +853,7 @@ mod tests {
         sb.modify_function(helper_id, |b| {
             b.function.add_return_type(Type::field().ref_of());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let c = e.field_const(fr(17));
             let p = e.alloc(c);
             e.terminate_return(vec![p]);
@@ -862,7 +862,7 @@ mod tests {
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let z = e.call(helper_id, vec![], 1)[0];
             let w = e.write_witness(x);
@@ -910,7 +910,7 @@ mod tests {
         sb.modify_function(inner_id, |b| {
             b.function.add_return_type(Type::field().ref_of());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let c = e.field_const(fr(17));
             let p = e.alloc(c);
             e.terminate_return(vec![p]);
@@ -919,14 +919,14 @@ mod tests {
         sb.modify_function(mid_id, |b| {
             b.function.add_return_type(Type::field().ref_of());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let r = e.call(inner_id, vec![], 1)[0];
             e.terminate_return(vec![r]);
         });
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let z = e.call(mid_id, vec![], 1)[0];
             let w = e.write_witness(x);
@@ -958,14 +958,14 @@ mod tests {
         sb.modify_function(rec_id, |b| {
             b.function.add_return_type(Type::field().ref_of());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let z = e.call(rec_id, vec![], 1)[0];
             e.terminate_return(vec![z]);
         });
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let z = e.call(rec_id, vec![], 1)[0];
             let w = e.write_witness(x);
@@ -996,7 +996,7 @@ mod tests {
         sb.modify_function(id_id, |b| {
             b.function.add_return_type(Type::field().ref_of());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let p = e.add_parameter(Type::field().ref_of());
             e.terminate_return(vec![p]);
         });
@@ -1004,7 +1004,7 @@ mod tests {
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let c0 = e.field_const(fr(0));
             let q = e.alloc(c0);
@@ -1029,7 +1029,7 @@ mod tests {
         sb.modify_function(helper_id, |b| {
             b.function.add_return_type(Type::field().ref_of());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let c = e.field_const(fr(17));
             let p = e.alloc(c);
             e.terminate_return(vec![p]);
@@ -1037,7 +1037,7 @@ mod tests {
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
             let entry = b.function.get_entry_id();
-            let mut e = b.block(entry);
+            let mut e = b.test_block(entry);
             let _x = e.add_parameter(Type::field());
             let z = e.call(helper_id, vec![], 1)[0];
             let c5 = e.field_const(fr(5));

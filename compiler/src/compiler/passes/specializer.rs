@@ -19,7 +19,7 @@ use crate::{
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
         ssa::{
-            BlockId, FunctionId, ValueId,
+            BlockId, FunctionId, SourceLocation, ValueId,
             hlssa::{
                 BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness, HLFunction,
                 HLSSA, LocatedOpCode, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix,
@@ -89,6 +89,12 @@ struct SpecializationState<'a> {
 
     /// Constant values created during specialization, usually by constant folding.
     const_vals: HashMap<ValueId, ConstVal>,
+
+    /// The source location of the original instruction the symbolic executor is currently
+    /// interpreting (via `Context::on_location`); residual instructions are located there.
+    /// Starts at the function entry's first instruction location, covering anything emitted before
+    /// execution reaches the first instruction.
+    current_location: SourceLocation,
 }
 
 impl HLEmitter for SpecializationState<'_> {
@@ -96,11 +102,17 @@ impl HLEmitter for SpecializationState<'_> {
         self.ssa.fresh_value()
     }
 
-    fn emit(&mut self, instruction: impl Into<LocatedOpCode>) {
+    fn emit(&mut self, instruction: OpCode) {
         let entry = self.body.get_entry_id();
+        let location = self.current_location.clone();
         self.body
             .get_block_mut(entry)
-            .push_instruction(instruction.into());
+            .push_instruction(instruction.locate(location));
+    }
+
+    fn emit_located(&mut self, instruction: LocatedOpCode) {
+        let entry = self.body.get_entry_id();
+        self.body.get_block_mut(entry).push_instruction(instruction);
     }
 
     fn emit_constant(&mut self, value: Constant) -> ValueId {
@@ -850,6 +862,10 @@ impl symbolic_executor::Context<Val> for SpecializationState<'_> {
 
     fn on_jmp(&mut self, _target: BlockId, _params: &mut [Val], _param_types: &[&Type]) {}
 
+    fn on_location(&mut self, location: &SourceLocation) {
+        self.current_location = location.clone();
+    }
+
     fn lookup(&mut self, target: LookupTarget<Val>, args: Vec<Val>, flag: Val) {
         self.emit(OpCode::Lookup {
             target: target.map(|v| v.0),
@@ -1056,10 +1072,16 @@ impl Specializer {
         }
 
         let body = {
+            let current_location = body
+                .get_entry()
+                .first_location()
+                .cloned()
+                .unwrap_or_else(|| SourceLocation::synthetic("specializer"));
             let mut state = SpecializationState {
                 ssa: &*ssa,
                 body,
                 const_vals,
+                current_location,
             };
 
             // Specialization is speculative: this candidate may sit behind a branch that never
@@ -1132,6 +1154,7 @@ impl Specializer {
         specialized_id: FunctionId,
         unspecialized_id: FunctionId,
     ) -> HLFunction {
+        let location = SourceLocation::synthetic(&fn_name);
         let mut dispatcher = HLFunction::empty(fn_name);
         let entry_block = dispatcher.get_entry_id();
 
@@ -1152,7 +1175,7 @@ impl Specializer {
         let mut specialized_params = vec![];
         let should_call_spec;
         {
-            let mut entry = b.block(entry_block);
+            let mut entry = b.block(entry_block).with_source_location(location.clone());
             let mut cond = entry.u_const(1, 1);
 
             for (pval, psig) in dispatcher_params.iter().zip(signature.get_params().iter()) {
@@ -1209,14 +1232,16 @@ impl Specializer {
         });
 
         {
-            let mut cb = b.block(unspecialized_caller);
+            let mut cb = b
+                .block(unspecialized_caller)
+                .with_source_location(location.clone());
             let unspecialized_returns =
                 cb.call(unspecialized_id, dispatcher_params, return_values.len());
             cb.terminate_jmp(return_block, unspecialized_returns);
         }
 
         {
-            let mut cb = b.block(specialized_caller);
+            let mut cb = b.block(specialized_caller).with_source_location(location);
             let specialized_returns =
                 cb.call(specialized_id, specialized_params, return_values.len());
             cb.terminate_jmp(return_block, specialized_returns);

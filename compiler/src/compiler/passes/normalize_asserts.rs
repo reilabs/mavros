@@ -120,19 +120,19 @@ mod tests {
         let entry = f.get_entry_mut();
         // A `Field` multiply feeding the equality: `SimplifyAsserts` would turn this into `AssertR1C`,
         // but `NormalizeAsserts` must not.
-        entry.push_instruction(OpCode::BinaryArithOp {
+        entry.push_test_instruction(OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::Mul,
             result: mul,
             lhs: a,
             rhs: b,
         });
-        entry.push_instruction(OpCode::Cmp {
+        entry.push_test_instruction(OpCode::Cmp {
             kind: CmpKind::Eq,
             result: eq,
             lhs: mul,
             rhs: c,
         });
-        entry.push_instruction(OpCode::Assert { value: eq });
+        entry.push_test_instruction(OpCode::Assert { value: eq });
         entry.set_terminator(Terminator::Return(vec![]));
 
         normalize(&mut ssa);
@@ -151,13 +151,13 @@ mod tests {
         f.get_entry_mut().push_parameter(a, Type::field());
         f.get_entry_mut().push_parameter(b, Type::field());
         let entry = f.get_entry_mut();
-        entry.push_instruction(OpCode::Cmp {
+        entry.push_test_instruction(OpCode::Cmp {
             kind: CmpKind::Lt,
             result: lt,
             lhs: a,
             rhs: b,
         });
-        entry.push_instruction(OpCode::Assert { value: lt });
+        entry.push_test_instruction(OpCode::Assert { value: lt });
         entry.set_terminator(Terminator::Return(vec![]));
 
         normalize(&mut ssa);
@@ -175,13 +175,13 @@ mod tests {
         f.get_entry_mut().push_parameter(l, Type::u(1));
         f.get_entry_mut().push_parameter(r, Type::u(1));
         let entry = f.get_entry_mut();
-        entry.push_instruction(OpCode::BinaryArithOp {
+        entry.push_test_instruction(OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::And,
             result: and,
             lhs: l,
             rhs: r,
         });
-        entry.push_instruction(OpCode::Assert { value: and });
+        entry.push_test_instruction(OpCode::Assert { value: and });
         entry.set_terminator(Terminator::Return(vec![]));
 
         normalize(&mut ssa);
@@ -207,7 +207,7 @@ mod tests {
         let f = ssa.get_unique_entrypoint_mut();
         f.get_entry_mut().push_parameter(w, Type::u(1));
         let entry = f.get_entry_mut();
-        entry.push_instruction(OpCode::Assert { value: w });
+        entry.push_test_instruction(OpCode::Assert { value: w });
         entry.set_terminator(Terminator::Return(vec![]));
 
         normalize(&mut ssa);

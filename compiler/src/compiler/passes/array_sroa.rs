@@ -601,7 +601,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let x = e.field_const(fr(7));
                 let y = e.field_const(fr(9));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
@@ -629,7 +629,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let x = e.field_const(fr(1));
                 let y = e.field_const(fr(2));
                 let z = e.field_const(fr(3));
@@ -661,7 +661,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let cond = e.add_parameter(Type::bool());
                 let a = e.field_const(fr(1));
                 let bb = e.field_const(fr(2));
@@ -703,7 +703,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let n = e.add_parameter(Type::u(32)); // dynamic index
                 let x = e.field_const(fr(7));
                 let y = e.field_const(fr(9));
@@ -729,7 +729,7 @@ mod tests {
             let mut sb = HLSSABuilder::new(&mut ssa);
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let x = e.field_const(fr(1));
                 let y = e.field_const(fr(2));
                 let z = e.field_const(fr(3));
@@ -757,7 +757,7 @@ mod tests {
             sb.modify_function(sink, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let a = e.add_parameter(arr2(Type::field()));
                 let i0 = e.u_const(32, 0);
                 let got = e.array_get(a, i0);
@@ -767,7 +767,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let x = e.field_const(fr(7));
                 let y = e.field_const(fr(9));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
@@ -793,7 +793,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let blob = e.emit_constant(Constant::Blob(Blob {
                     elem_type: Type::field(),
                     elements: vec![
@@ -825,7 +825,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let ra = falloc(&mut e);
                 let rb = falloc(&mut e);
                 let c1 = e.field_const(fr(3));
@@ -870,7 +870,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let x = e.field_const(fr(5));
                 let y = e.field_const(fr(6));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
@@ -903,7 +903,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let zero = e.field_const(fr(0));
                 let arr = e.mk_repeated(zero, SequenceTargetType::Array(4), 4, Type::field()); // [0;4]
                 let x = e.field_const(fr(7));
@@ -934,7 +934,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let r = falloc(&mut e);
                 let c = e.field_const(fr(5));
                 e.store(r, c);
@@ -965,7 +965,7 @@ mod tests {
             let mut sb = HLSSABuilder::new(&mut ssa);
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let cond = e.add_parameter(Type::bool());
                 let a = e.field_const(fr(1));
                 let bb = e.field_const(fr(2));
@@ -1000,7 +1000,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
-                let mut e = b.block(entry);
+                let mut e = b.test_block(entry);
                 let x = e.field_const(fr(7));
                 let y = e.field_const(fr(9));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());

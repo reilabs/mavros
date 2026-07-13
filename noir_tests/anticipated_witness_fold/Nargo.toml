@@ -1,0 +1,6 @@
+[package]
+name = "anticipated_witness_fold"
+type = "bin"
+authors = [""]
+
+[dependencies]

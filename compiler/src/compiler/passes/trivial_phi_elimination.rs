@@ -27,7 +27,7 @@ use crate::{
     collections::{HashMap, HashSet},
     compiler::{
         pass_manager::{AnalysisId, AnalysisStore, Pass},
-        passes::fix_double_jumps::{ReplaceScope, ValueReplacements},
+        passes::shared::value_replacements::{ReplaceScope, ValueReplacements},
         ssa::{
             BlockId, Terminator, ValueId,
             hlssa::{HLFunction, HLSSA},

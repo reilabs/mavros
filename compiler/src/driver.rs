@@ -44,6 +44,7 @@ use crate::{
             lower_map_casts::LowerMapCasts,
             mem2reg::Mem2Reg,
             normalize_asserts::NormalizeAsserts,
+            partial_redundancy_elimination::PRE,
             prepare_entry_point::PrepareEntryPoint,
             rc_insertion::RCInsertion,
             remove_unreachable_blocks::RemoveUnreachableBlocks,
@@ -299,12 +300,22 @@ impl Driver {
                 // can orphan callees, so RemoveUnreachableFunctions stays after it (cf. line 207).
                 Box::new(NormalizeAsserts::new()),
                 Box::new(SCS::new(dead_code_elimination::Config::preserve_blocks())),
+                // The only value-numbering sweep before witness typing: dedup here shrinks
+                // untaint's input (fewer values to taint, guard, and select) and hands the first
+                // post-untaint sites already-unified value pairs. Runs after SCS (which
+                // copy-propagates asserted-equal leaders into operands, making them structurally
+                // congruent to the recomputed analysis) and before TrivialPhiElimination (a PRE
+                // redirect can make both preds' jump args identical, and such a phi must collapse
+                // before WTI taints it into a needless `Select`). `pre_untaint()` is
+                // elimination-only: motion would split edges and mint merge params that untaint
+                // cannot yet absorb, and its speculation gate cannot see witness-ness before
+                // types carry `WitnessOf`.
+                Box::new(PRE::pre_untaint()),
                 // Mem2Reg promotes each scalarized leaf cell into its own block-parameter phi. For
                 // an aggregate threaded through control flow that is mostly trivial phis (the same
                 // value from every predecessor); collapse them before they reach WTI and codegen.
                 Box::new(TrivialPhiElimination::new()),
                 Box::new(RemoveUnreachableFunctions::new()),
-                Box::new(RemoveUnreachableBlocks::new()),
             ],
         )
         .run(&mut ssa);
@@ -374,21 +385,22 @@ impl Driver {
                 // below). New `Cmp`-fed asserts can appear after the pre-WTI passes and lowering.
                 Box::new(NormalizeAsserts::new()),
                 // Fold pure constants and prune constant-condition branches before the cleanup
-                // rounds, so Simplifier/CSE/DCE work on the reduced CFG.
+                // rounds, so Simplifier/PRE work on the reduced CFG. (SCS reclaims the blocks
+                // its own `JmpIf -> Jmp` folds orphan, so no trailing RemoveUnreachableBlocks is
+                // needed here — the InstructionLowering runs below type every block's instructions
+                // against reachable-only `Types` info and would ICE on a leftover orphan.)
                 Box::new(SCS::new(dead_code_elimination::Config::pre_r1c())),
-                // Simplify → CSE → DCE, twice. The doubled rounds let
-                // CSE-dedup expose new fold operands and folds expose new CSE
-                // matches. Each Simplifier internally iterates to fixed point
-                // for purely-algebraic folds.
+                // Simplify → PRE, twice (PRE runs its own integrated DCE). The
+                // doubled rounds let PRE-dedup expose new fold operands and
+                // folds expose new dedup matches. Each Simplifier internally
+                // iterates to fixed point for purely-algebraic folds.
                 Box::new(Simplifier::new()),
-                Box::new(CSE::pre_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(PRE::pre_r1c()),
                 Box::new(Simplifier::new()),
-                Box::new(CSE::pre_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(PRE::pre_r1c()),
                 // Re-run SCS after cleanup exposes new constants and branch predicate facts.
                 Box::new(SCS::new(dead_code_elimination::Config::pre_r1c())),
-                Box::new(CSE::pre_r1c()),
+                Box::new(PRE::pre_r1c()),
                 Box::new(DeduplicatePhis::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(FixDoubleJumps::new()),
@@ -401,26 +413,21 @@ impl Driver {
                 // back-to-back. The first round exposes folds/dedup opportunities
                 // that the second round can then consume.
                 Box::new(Simplifier::new()),
-                Box::new(CSE::pre_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(PRE::pre_r1c()),
                 Box::new(Simplifier::new()),
-                Box::new(CSE::pre_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(PRE::pre_r1c()),
                 Box::new(Specializer::new(5.0)),
                 // Specialization exposes fresh constants (folded call arguments and branch
                 // conditions); propagate them before the post-specialization cleanup.
                 Box::new(SCS::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(Simplifier::new()),
-                Box::new(CSE::pre_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(PRE::pre_r1c()),
                 Box::new(LookupSpilling::new()),
                 Box::new(InstructionLowering::degree_spilling()),
                 Box::new(Simplifier::new()),
-                Box::new(CSE::pre_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(PRE::pre_r1c()),
                 Box::new(Simplifier::new()),
-                Box::new(CSE::pre_r1c()),
-                Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
+                Box::new(PRE::pre_r1c()),
                 Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(FixDoubleJumps::new()),
             ],

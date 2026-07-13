@@ -7,8 +7,8 @@ use itertools::Itertools;
 use std::fmt::Display;
 
 use crate::compiler::ssa::{
-    Block, Function, FunctionId, Instruction, Located, Location, SSA, SSAConstants,
-    SSAConstantsSnapshot, ValueId,
+    Block, Function, FunctionId, Instruction, Located, SSA, SSAConstants, SSAConstantsSnapshot,
+    SourceLocation, ValueId,
 };
 
 pub use type_system::{MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type, TypeExpr};
@@ -23,7 +23,7 @@ pub type HLSSA = SSA<OpCode, Type, Constant>;
 pub type LocatedOpCode = Located<OpCode>;
 
 impl OpCode {
-    pub fn locate(self, location: Location) -> LocatedOpCode {
+    pub fn locate(self, location: SourceLocation) -> LocatedOpCode {
         LocatedOpCode::new(self, location)
     }
 }
@@ -365,6 +365,16 @@ impl OpCode {
     /// in context (e.g. a given multiplication cannot overflow).
     pub fn is_pure_scalar_fold(&self) -> bool {
         self.scalar_fold().is_some()
+    }
+
+    /// `true` if `self` is a fact-establishing assert (`Assert` / `AssertCmp`).
+    ///
+    /// The single classifier shared by every consumer that must treat asserts specially: the
+    /// conditional analysis records their facts (`click_cooper/conditional.rs` Step 1), and
+    /// consumers of its anticipated channel must never rewrite their inputs (Gate 3). A future
+    /// establisher opcode must be added here _and_ have its fact recorded in Step 1.
+    pub fn is_assert(&self) -> bool {
+        matches!(self, OpCode::Assert { .. } | OpCode::AssertCmp { .. })
     }
 }
 

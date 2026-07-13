@@ -1283,7 +1283,7 @@ mod tests {
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
-            let mut e = fb.block(entry);
+            let mut e = fb.test_block(entry);
             // Only three values for a four-limb field-element layout.
             let values = vec![
                 Constant::Int { bits: 64, value: 0 },
@@ -1342,7 +1342,7 @@ mod tests {
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
-            let mut e = fb.block(entry);
+            let mut e = fb.test_block(entry);
             let x = e.emit_int_const(64, 42);
             let y = e.emit_int_const(64, 7);
             let z = e.int_add(x, y);
@@ -1372,7 +1372,7 @@ mod tests {
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
-            let mut e = fb.block(entry);
+            let mut e = fb.test_block(entry);
             let l0 = e.emit_int_const(64, 1);
             let l1 = e.emit_int_const(64, 0);
             let l2 = e.emit_int_const(64, 0);
@@ -1407,7 +1407,7 @@ mod tests {
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
-            let mut e = fb.block(entry);
+            let mut e = fb.test_block(entry);
             let arr = e.heap_alloc(rc_array.clone(), None);
             let rc_ptr = e.struct_field_ptr(arr, rc_array.clone(), 0);
             let rc_word = e.struct_field_ptr(rc_ptr, rc_header, 0);
@@ -1439,7 +1439,7 @@ mod tests {
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
-            let mut e = fb.block(entry);
+            let mut e = fb.test_block(entry);
             let a = e.emit_int_const(64, 1);
             let b = e.emit_int_const(64, 2);
             let results = e.call(helper_id, vec![a, b], 1);
@@ -1469,7 +1469,7 @@ mod tests {
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
-            let mut e = fb.block(entry);
+            let mut e = fb.test_block(entry);
             let l0 = e.emit_int_const(64, 1);
             let l1 = e.emit_int_const(64, 0);
             let l2 = e.emit_int_const(64, 0);
@@ -1500,7 +1500,7 @@ mod tests {
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
-            let mut e = fb.block(entry);
+            let mut e = fb.test_block(entry);
             let x = e.emit_int_const(64, 256);
             let narrow = e.truncate(x, 8);
             let wide = e.zext(narrow, 64);
@@ -1528,19 +1528,19 @@ mod tests {
             let merge_blk = fb.function.add_block();
 
             {
-                let mut e = fb.block(entry);
+                let mut e = fb.test_block(entry);
                 let x = e.emit_int_const(64, 42);
                 let zero = e.emit_int_const(64, 0);
                 let cond = e.int_eq(x, zero);
                 e.terminate_jmp_if(cond, then_blk, else_blk);
             }
             {
-                let mut e = fb.block(then_blk);
+                let mut e = fb.test_block(then_blk);
                 let one = e.emit_int_const(64, 1);
                 e.terminate_jmp(merge_blk, vec![one]);
             }
             {
-                let mut e = fb.block(else_blk);
+                let mut e = fb.test_block(else_blk);
                 let two = e.emit_int_const(64, 2);
                 e.terminate_jmp(merge_blk, vec![two]);
             }
@@ -1563,7 +1563,7 @@ mod tests {
         let mut sb = LLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
-            let mut e = fb.block(entry);
+            let mut e = fb.test_block(entry);
             let dst = e.emit_nullptr_const();
             let src = e.emit_nullptr_const();
             let count = e.emit_int_const(64, 10);

@@ -57,7 +57,11 @@ impl LowerMapCasts {
                     let terminator = fb.function.get_block_mut(bid).take_terminator();
                     let instructions = fb.function.get_block_mut(bid).take_instructions();
 
-                    let mut emitter = fb.block(bid);
+                    // Every instruction scopes its own location below; emitting outside a scope
+                    // is an ICE.
+                    let mut emitter = fb
+                        .block(bid)
+                        .with_scoped_source_locations("lower_map_casts");
                     for instruction in instructions {
                         let location = instruction.location().clone();
                         emitter.emit_with_location(location, |emitter| {

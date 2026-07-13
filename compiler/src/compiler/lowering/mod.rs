@@ -13,7 +13,7 @@ use noirc_frontend::monomorphization::ast::{
 use crate::{
     collections::{HashMap, HashSet},
     compiler::ssa::{
-        FunctionId,
+        FunctionId, SourceLocation,
         hlssa::{
             HLFunction, HLSSA,
             builder::{HLEmitter, HLFunctionBuilder, HLSSABuilder},
@@ -298,7 +298,10 @@ impl SSAConverter {
                 let value = expr_converter.convert_expression(init_expr, b).unwrap();
                 current_block = expr_converter.current_block();
                 let idx = self.global_slots[gid];
-                b.block(current_block).init_global(idx, value);
+                let location = expr_converter.expression_source_location(init_expr);
+                b.block(current_block)
+                    .with_source_location(location)
+                    .init_global(idx, value);
                 if b.ssa.is_const(value) {
                     self.global_constants.insert(*gid, value);
                 }
@@ -311,9 +314,12 @@ impl SSAConverter {
         let deinit_fn_id = sb.ssa().add_function("globals_deinit".to_string());
         sb.modify_function(deinit_fn_id, |b| {
             let entry = b.function.get_entry_id();
+            let location = SourceLocation::synthetic("globals_deinit");
             for (i, typ) in global_types.iter().enumerate() {
                 if typ.is_heap_allocated() {
-                    b.block(entry).drop_global(i);
+                    b.block(entry)
+                        .with_source_location(location.clone())
+                        .drop_global(i);
                 }
             }
             b.block(entry).terminate_return(vec![]);
@@ -369,8 +375,10 @@ impl SSAConverter {
             let value_id = b.block(entry_block).add_parameter(converted_type);
 
             if *mutable {
-                // For mutable parameters, allocate a pointer and store the value
-                expr_converter.bind_local_mut(*local_id, value_id, &mut b);
+                // For mutable parameters, allocate a pointer and store the value. The alloc is
+                // attributed to the function body, the closest source anchor a parameter has.
+                let location = expr_converter.expression_source_location(&ast_func.body);
+                expr_converter.bind_local_mut(*local_id, value_id, &mut b, location);
             } else {
                 expr_converter.bind_local(*local_id, value_id);
             }
