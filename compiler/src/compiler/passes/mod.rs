@@ -13,6 +13,7 @@ pub mod lower_guards;
 pub mod lower_map_casts;
 mod lowering_pass;
 pub mod mem2reg;
+pub mod merge_identical_functions;
 pub mod normalize_asserts;
 pub mod partial_redundancy_elimination;
 pub mod prepare_entry_point;
