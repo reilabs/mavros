@@ -1,7 +1,7 @@
 //! Purifies witness-length slices into `(physical, log_len)` tuples.
 
 use crate::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     compiler::{
         analysis::{
             flow_analysis::FlowAnalysis,
@@ -12,7 +12,7 @@ use crate::{
         ssa::{
             BlockId, Instruction, Terminator, ValueId,
             hlssa::{
-                CmpKind, HLFunction, HLSSA, LocatedOpCode, OpCode, SliceOpDir, Type,
+                CmpKind, HLFunction, HLSSA, LocatedOpCode, OpCode, SliceOpDir, Type, TypeExpr,
                 builder::{HLEmitter, HLInstrBuilder},
             },
         },
@@ -41,8 +41,8 @@ impl PurifyWitnessSlices {
                 continue;
             };
             let type_info = types.get_function(function_id);
-            let lift = witness_length_slices(type_info, fwt);
-            if lift.is_empty() {
+            let affected = affected_values(type_info, fwt);
+            if affected.is_empty() {
                 continue;
             }
             changed = true;
@@ -52,7 +52,7 @@ impl PurifyWitnessSlices {
                 .get_domination_pre_order()
                 .collect();
             let mut function = ssa.take_function(function_id);
-            rewrite_function(&mut function, &mut ssa, type_info, &lift, &block_order);
+            rewrite_function(&mut function, &mut ssa, type_info, &affected, &block_order);
             ssa.put_function(function_id, function);
         }
 
@@ -60,58 +60,101 @@ impl PurifyWitnessSlices {
     }
 }
 
-fn tuple_ty(slice_ty: &Type) -> Type {
-    Type::tuple_of(vec![slice_ty.clone(), Type::u(32)])
+fn purify_type(ty: &Type, shape: &WitnessShape) -> Type {
+    match (&ty.expr, shape) {
+        (TypeExpr::Slice { elem, len }, WitnessShape::Array(top, inner)) => {
+            let physical = purify_type(elem, inner).slice_of_with_len(len.as_ref().clone());
+            if top.is_witness() {
+                Type::tuple_of(vec![physical.clone(), Type::u(32)])
+            } else {
+                physical
+            }
+        }
+        (TypeExpr::Ref(inner_ty), WitnessShape::Ref(_, inner_shape)) => {
+            purify_type(inner_ty, inner_shape).ref_of()
+        }
+        // Note that `Array<WLslice>` is unreachable today
+        (TypeExpr::Array(elem, n), WitnessShape::Array(_, inner)) => {
+            purify_type(elem, inner).array_of(*n)
+        }
+        _ => ty.clone(),
+    }
+}
+
+fn affected_values(
+    type_info: &FunctionTypeInfo,
+    fwt: &FunctionWitnessType,
+) -> HashMap<ValueId, Type> {
+    let mut affected: HashMap<ValueId, Type> = HashMap::default();
+    for (&v, shape) in fwt.value_witness_types.iter() {
+        let ty = type_info.get_value_type(v);
+        let pty = purify_type(ty, shape);
+        if pty != *ty {
+            affected.insert(v, pty);
+        }
+    }
+    affected
+}
+
+fn is_wl_slice(v: ValueId, affected: &HashMap<ValueId, Type>) -> bool {
+    affected.get(&v).is_some_and(|pty| pty.is_tuple())
+}
+
+fn materialize_pure_slice_tuple(
+    slice: ValueId,
+    type_info: &FunctionTypeInfo,
+    function: &mut HLFunction,
+    ssa: &mut HLSSA,
+    new_instrs: &mut Vec<LocatedOpCode>,
+) -> ValueId {
+    let phys_ty = type_info.get_value_type(slice).clone();
+    let mut b = HLInstrBuilder::new(function, ssa, new_instrs);
+    let ll = b.slice_len(slice);
+    b.mk_tuple(vec![slice, ll], vec![phys_ty, Type::u(32)])
 }
 
 fn rewrite_function(
     function: &mut HLFunction,
     ssa: &mut HLSSA,
     type_info: &FunctionTypeInfo,
-    lift: &HashSet<ValueId>,
+    affected: &HashMap<ValueId, Type>,
     block_order: &[BlockId],
 ) {
-    let mut tuple_of: HashMap<ValueId, ValueId> = HashMap::default();
+    let mut replacement_tuple_map: HashMap<ValueId, ValueId> = HashMap::default();
 
-    // Which parameter positions of each block are lifted — captured before we retype params, so
-    // terminators know which jmp args feed a (now tuple-typed) lifted param.
-    let lifted_positions: HashMap<BlockId, Vec<bool>> = function
+    let lifted_block_args: HashMap<BlockId, Vec<bool>> = function
         .get_blocks()
         .map(|(bid, block)| {
             let positions = block
                 .get_parameters()
-                .map(|(v, _)| lift.contains(v))
+                .map(|(v, _)| is_wl_slice(*v, affected))
                 .collect();
             (*bid, positions)
         })
         .collect();
 
-    // Return positions that carry a lifted slice (function return types are updated at the end).
-    let mut lifted_return: Vec<bool> = vec![false; function.get_returns().len()];
-
     for &bid in block_order {
-        // -- Retype lifted block params to the tuple type (still one param) --
         let old_params = function.get_block_mut(bid).take_parameters();
         let mut new_params = Vec::with_capacity(old_params.len());
         for (v, ty) in old_params {
-            if lift.contains(&v) {
-                new_params.push((v, tuple_ty(&ty)));
-                tuple_of.insert(v, v); // the param value IS the tuple
+            if let Some(pty) = affected.get(&v) {
+                new_params.push((v, pty.clone()));
+                if is_wl_slice(v, affected) {
+                    replacement_tuple_map.insert(v, v); // the param value IS the tuple
+                }
             } else {
                 new_params.push((v, ty));
             }
         }
         function.get_block_mut(bid).put_parameters(new_params);
 
-        // -- Rewrite instructions --
         let old_instrs = function.get_block_mut(bid).take_instructions();
         let mut new_instrs: Vec<LocatedOpCode> = Vec::new();
         for located in old_instrs {
             let (op, loc) = located.take();
             match op {
-                // `SliceLen(s)` on a lifted slice is its carried logical length.
-                OpCode::SliceLen { result, slice } if tuple_of.contains_key(&slice) => {
-                    let t = tuple_of[&slice];
+                OpCode::SliceLen { result, slice } if replacement_tuple_map.contains_key(&slice) => {
+                    let t = replacement_tuple_map[&slice];
                     new_instrs.push(
                         OpCode::TupleProj {
                             result,
@@ -122,13 +165,12 @@ fn rewrite_function(
                     );
                 }
 
-                // Back-push producing a lifted slice: append at the logical cursor, bump length.
                 OpCode::SlicePush {
                     result,
                     slice,
                     values,
                     dir,
-                } if lift.contains(&result) => {
+                } if is_wl_slice(result, affected) => {
                     assert!(
                         dir == SliceOpDir::Back,
                         "purify_witness_slices: front-push into a witness-length slice is not supported yet"
@@ -136,11 +178,7 @@ fn rewrite_function(
                     let phys_ty = type_info.get_value_type(result).clone();
                     let (physical, log_len) = {
                         let mut b = HLInstrBuilder::new(function, ssa, &mut new_instrs);
-                        if let Some(&t) = tuple_of.get(&slice) {
-                            // Chained: source is already a tuple. Grow unconditionally (keeps
-                            // capacity a pure `max`-of-consts) and write each value at the witness
-                            // logical cursor `log_len`; the witness-indexed `ArraySet` is lowered
-                            // to a mux by `witness_array`.
+                        if let Some(&t) = replacement_tuple_map.get(&slice) {
                             let p = b.tuple_proj(t, 0);
                             let ll = b.tuple_proj(t, 1);
                             let one = b.u_const(32, 1);
@@ -153,8 +191,6 @@ fn rewrite_function(
                             }
                             (physical, cursor)
                         } else {
-                            // Pure source: log_len == capacity, so a plain back-push lands at the
-                            // cursor.
                             let base_len = b.slice_len(slice);
                             let mut physical = slice;
                             for value in &values {
@@ -168,16 +204,15 @@ fn rewrite_function(
                         let mut b = HLInstrBuilder::new(function, ssa, &mut new_instrs);
                         b.mk_tuple(vec![physical, log_len], vec![phys_ty, Type::u(32)])
                     };
-                    tuple_of.insert(result, t);
+                    replacement_tuple_map.insert(result, t);
                 }
 
-                // Element read: bounds-check against the logical length, read from `physical`.
                 OpCode::ArrayGet {
                     result,
                     array,
                     index,
-                } if tuple_of.contains_key(&array) => {
-                    let t = tuple_of[&array];
+                } if replacement_tuple_map.contains_key(&array) => {
+                    let t = replacement_tuple_map[&array];
                     let physical = {
                         let mut b = HLInstrBuilder::new(function, ssa, &mut new_instrs);
                         let p = b.tuple_proj(t, 0);
@@ -195,15 +230,14 @@ fn rewrite_function(
                     );
                 }
 
-                // Element write: bounds-check; length unchanged.
                 OpCode::ArraySet {
                     result,
                     array,
                     index,
                     value,
-                } if tuple_of.contains_key(&array) => {
+                } if replacement_tuple_map.contains_key(&array) => {
                     let phys_ty = type_info.get_value_type(result).clone();
-                    let t = tuple_of[&array];
+                    let t = replacement_tuple_map[&array];
                     let (physical, log_len) = {
                         let mut b = HLInstrBuilder::new(function, ssa, &mut new_instrs);
                         let p = b.tuple_proj(t, 0);
@@ -215,38 +249,137 @@ fn rewrite_function(
                         let mut b = HLInstrBuilder::new(function, ssa, &mut new_instrs);
                         b.mk_tuple(vec![physical, log_len], vec![phys_ty, Type::u(32)])
                     };
-                    tuple_of.insert(result, t2);
+                    replacement_tuple_map.insert(result, t2);
+                }
+
+                OpCode::Alloc { result, value } => {
+                    let value = if let Some(&t) = replacement_tuple_map.get(&value) {
+                        t
+                    } else if affected.contains_key(&result) && !affected.contains_key(&value) {
+                        materialize_pure_slice_tuple(value, type_info, function, ssa, &mut new_instrs)
+                    } else {
+                        value
+                    };
+                    new_instrs.push(OpCode::Alloc { result, value }.locate(loc));
+                }
+
+                OpCode::Store { ptr, value } => {
+                    let value = if let Some(&t) = replacement_tuple_map.get(&value) {
+                        t
+                    } else if affected.contains_key(&ptr) && !affected.contains_key(&value) {
+                        materialize_pure_slice_tuple(value, type_info, function, ssa, &mut new_instrs)
+                    } else {
+                        value
+                    };
+                    new_instrs.push(OpCode::Store { ptr, value }.locate(loc));
+                }
+
+                OpCode::Load { result, ptr } => {
+                    new_instrs.push(OpCode::Load { result, ptr }.locate(loc));
+                    if is_wl_slice(result, affected) {
+                        replacement_tuple_map.insert(result, result);
+                    }
+                }
+
+                OpCode::Call {
+                    results,
+                    function: callee,
+                    args,
+                    unconstrained,
+                } => {
+                    let args = args
+                        .into_iter()
+                        .map(|a| replacement_tuple_map.get(&a).copied().unwrap_or(a))
+                        .collect();
+                    for &r in &results {
+                        if is_wl_slice(r, affected) {
+                            replacement_tuple_map.insert(r, r);
+                        }
+                    }
+                    new_instrs.push(
+                        OpCode::Call {
+                            results,
+                            function: callee,
+                            args,
+                            unconstrained,
+                        }
+                        .locate(loc),
+                    );
+                }
+
+                OpCode::Cast {
+                    result,
+                    value,
+                    target,
+                } => {
+                    let value = replacement_tuple_map.get(&value).copied().unwrap_or(value);
+                    new_instrs.push(
+                        OpCode::Cast {
+                            result,
+                            value,
+                            target,
+                        }
+                        .locate(loc),
+                    );
+                    if is_wl_slice(result, affected) {
+                        replacement_tuple_map.insert(result, result);
+                    }
+                }
+
+                OpCode::Select {
+                    result,
+                    cond,
+                    if_t,
+                    if_f,
+                } => {
+                    let if_t = replacement_tuple_map.get(&if_t).copied().unwrap_or(if_t);
+                    let if_f = replacement_tuple_map.get(&if_f).copied().unwrap_or(if_f);
+                    new_instrs.push(
+                        OpCode::Select {
+                            result,
+                            cond,
+                            if_t,
+                            if_f,
+                        }
+                        .locate(loc),
+                    );
+                    if is_wl_slice(result, affected) {
+                        replacement_tuple_map.insert(result, result);
+                    }
                 }
 
                 other => {
                     assert!(
-                        !other.get_inputs().any(|v| tuple_of.contains_key(v)),
+                        !other
+                            .get_inputs()
+                            .chain(other.get_results())
+                            .any(|v| affected.contains_key(v)),
                         "purify_witness_slices: witness-length slice flows into an unsupported \
-                         opcode in v1: {other:?}"
+                         opcode: {other:?}"
                     );
                     new_instrs.push(other.locate(loc));
                 }
             }
         }
 
-        // -- Terminator: carry the tuple whole; materialize one for a pure slice at a lifted edge --
         let terminator = function
             .get_block_mut(bid)
             .take_terminator()
             .expect("terminated block");
         let new_terminator = match terminator {
             Terminator::Jmp(target, args) => {
-                let positions = &lifted_positions[&target];
+                let positions = &lifted_block_args[&target];
                 let mut new_args = Vec::with_capacity(args.len());
                 for (i, arg) in args.into_iter().enumerate() {
                     if positions.get(i).copied().unwrap_or(false) {
-                        let t = tuple_of.get(&arg).copied().unwrap_or_else(|| {
-                            // Pure slice into a lifted param: a full slice's length is both its
-                            // capacity and its logical length, so `(arg, SliceLen(arg))` is exact.
-                            let phys_ty = type_info.get_value_type(arg).clone();
-                            let mut b = HLInstrBuilder::new(function, ssa, &mut new_instrs);
-                            let ll = b.slice_len(arg);
-                            b.mk_tuple(vec![arg, ll], vec![phys_ty, Type::u(32)])
+                        let t = replacement_tuple_map.get(&arg).copied().unwrap_or_else(|| {
+                            materialize_pure_slice_tuple(
+                                arg,
+                                type_info,
+                                function,
+                                ssa,
+                                &mut new_instrs,
+                            )
                         });
                         new_args.push(t);
                     } else {
@@ -257,45 +390,23 @@ fn rewrite_function(
             }
             Terminator::JmpIf(cond, t, f) => Terminator::JmpIf(cond, t, f),
             Terminator::Return(values) => {
-                let mut new_values = Vec::with_capacity(values.len());
+                let mut return_types: Vec<&mut Type> = function.iter_returns_mut().collect();
+                let mut new_return_args = Vec::with_capacity(values.len());
                 for (i, v) in values.into_iter().enumerate() {
-                    if let Some(&t) = tuple_of.get(&v) {
-                        lifted_return[i] = true;
-                        new_values.push(t);
-                    } else {
-                        new_values.push(v);
+                    if let Some(pty) = affected.get(&v) {
+                        *return_types[i] = pty.clone();
                     }
+                    new_return_args.push(if is_wl_slice(v, affected) {
+                        replacement_tuple_map[&v]
+                    } else {
+                        v
+                    });
                 }
-                Terminator::Return(new_values)
+                Terminator::Return(new_return_args)
             }
         };
 
         function.get_block_mut(bid).put_instructions(new_instrs);
         function.get_block_mut(bid).set_terminator(new_terminator);
     }
-
-    // Update function return types for lifted positions.
-    for (i, ty) in function.iter_returns_mut().enumerate() {
-        if lifted_return[i] {
-            *ty = tuple_ty(ty);
-        }
-    }
-}
-
-fn witness_length_slices(
-    type_info: &FunctionTypeInfo,
-    fwt: &FunctionWitnessType,
-) -> HashSet<ValueId> {
-    let mut lift: HashSet<ValueId> = HashSet::default();
-    for (&v, shape) in fwt.value_witness_types.iter() {
-        if !type_info.get_value_type(v).is_slice() {
-            continue;
-        }
-        if let WitnessShape::Array(top, _) = shape {
-            if top.is_witness() {
-                lift.insert(v);
-            }
-        }
-    }
-    lift
 }
