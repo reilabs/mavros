@@ -158,7 +158,9 @@ fn rewrite_function(
         for located in old_instrs {
             let (op, loc) = located.take();
             match op {
-                OpCode::SliceLen { result, slice } if replacement_tuple_map.contains_key(&slice) => {
+                OpCode::SliceLen { result, slice }
+                    if replacement_tuple_map.contains_key(&slice) =>
+                {
                     let t = replacement_tuple_map[&slice];
                     new_instrs.push(
                         OpCode::TupleProj {
@@ -182,7 +184,8 @@ fn rewrite_function(
                     );
                     let phys_ty = type_info.get_value_type(result).clone();
                     let (physical, log_len) = {
-                        let mut b = HLInstrBuilder::new(function, ssa, &mut new_instrs, loc.clone());
+                        let mut b =
+                            HLInstrBuilder::new(function, ssa, &mut new_instrs, loc.clone());
                         if let Some(&t) = replacement_tuple_map.get(&slice) {
                             let p = b.tuple_proj(t, 0);
                             let ll = b.tuple_proj(t, 1);
@@ -206,7 +209,8 @@ fn rewrite_function(
                         }
                     };
                     let t = {
-                        let mut b = HLInstrBuilder::new(function, ssa, &mut new_instrs, loc.clone());
+                        let mut b =
+                            HLInstrBuilder::new(function, ssa, &mut new_instrs, loc.clone());
                         b.mk_tuple(vec![physical, log_len], vec![phys_ty, Type::u(32)])
                     };
                     replacement_tuple_map.insert(result, t);
@@ -219,7 +223,8 @@ fn rewrite_function(
                 } if replacement_tuple_map.contains_key(&array) => {
                     let t = replacement_tuple_map[&array];
                     let physical = {
-                        let mut b = HLInstrBuilder::new(function, ssa, &mut new_instrs, loc.clone());
+                        let mut b =
+                            HLInstrBuilder::new(function, ssa, &mut new_instrs, loc.clone());
                         let p = b.tuple_proj(t, 0);
                         let ll = b.tuple_proj(t, 1);
                         b.assert_cmp(CmpKind::Lt, index, ll);
@@ -244,14 +249,16 @@ fn rewrite_function(
                     let phys_ty = type_info.get_value_type(result).clone();
                     let t = replacement_tuple_map[&array];
                     let (physical, log_len) = {
-                        let mut b = HLInstrBuilder::new(function, ssa, &mut new_instrs, loc.clone());
+                        let mut b =
+                            HLInstrBuilder::new(function, ssa, &mut new_instrs, loc.clone());
                         let p = b.tuple_proj(t, 0);
                         let ll = b.tuple_proj(t, 1);
                         b.assert_cmp(CmpKind::Lt, index, ll);
                         (b.array_set(p, index, value), ll)
                     };
                     let t2 = {
-                        let mut b = HLInstrBuilder::new(function, ssa, &mut new_instrs, loc.clone());
+                        let mut b =
+                            HLInstrBuilder::new(function, ssa, &mut new_instrs, loc.clone());
                         b.mk_tuple(vec![physical, log_len], vec![phys_ty, Type::u(32)])
                     };
                     replacement_tuple_map.insert(result, t2);
@@ -261,7 +268,13 @@ fn rewrite_function(
                     let value = if let Some(&t) = replacement_tuple_map.get(&value) {
                         t
                     } else if affected.contains_key(&result) && !affected.contains_key(&value) {
-                        materialize_pure_slice_tuple(value, type_info, function, ssa, &mut new_instrs)
+                        materialize_pure_slice_tuple(
+                            value,
+                            type_info,
+                            function,
+                            ssa,
+                            &mut new_instrs,
+                        )
                     } else {
                         value
                     };
@@ -272,7 +285,13 @@ fn rewrite_function(
                     let value = if let Some(&t) = replacement_tuple_map.get(&value) {
                         t
                     } else if affected.contains_key(&ptr) && !affected.contains_key(&value) {
-                        materialize_pure_slice_tuple(value, type_info, function, ssa, &mut new_instrs)
+                        materialize_pure_slice_tuple(
+                            value,
+                            type_info,
+                            function,
+                            ssa,
+                            &mut new_instrs,
+                        )
                     } else {
                         value
                     };
