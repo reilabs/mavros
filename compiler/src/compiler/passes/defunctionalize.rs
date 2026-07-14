@@ -560,7 +560,9 @@ fn build_dispatch_function(
     variants: &[FunctionId],
 ) -> FunctionId {
     let name = format!("apply_dispatch@{counter}");
-    let location = SourceLocation::synthetic(&name);
+    // Counter-free on purpose: merge_identical_functions compares locations, so dispatchers with
+    // identical bodies must not differ in a per-call-site location string.
+    let location = SourceLocation::synthetic("apply_dispatch");
     let dispatch_fn_id = ssa.add_function(name);
     let mut sb = HLSSABuilder::new(ssa);
     sb.modify_function(dispatch_fn_id, |b| {
@@ -690,7 +692,8 @@ mod tests {
     use super::*;
 
     /// Dispatch stubs have no user-source anchor: every instruction they contain must carry the
-    /// synthetic location named after the generated function.
+    /// shared synthetic location. It must not embed the per-call-site counter, or byte-identical
+    /// dispatchers would never fold in merge_identical_functions.
     #[test]
     fn dispatch_function_is_located_at_its_synthetic_source() {
         let mut ssa = HLSSA::with_main("main".to_string());
@@ -701,7 +704,7 @@ mod tests {
             build_dispatch_function(&mut ssa, 7, &[Type::field()], &[Type::field()], &[f, g]);
 
         let dispatch = ssa.get_function(dispatch_id);
-        let expected = SourceLocation::synthetic("apply_dispatch@7");
+        let expected = SourceLocation::synthetic("apply_dispatch");
         let mut located_instructions = 0;
         for (_, block) in dispatch.get_blocks() {
             for (_, location) in block.get_instructions_with_source_locations() {
@@ -710,5 +713,24 @@ mod tests {
             }
         }
         assert!(located_instructions > 0);
+    }
+
+    /// Two dispatchers over the same variants differ only in name and counter — both excluded
+    /// from the canonical form — so merge_identical_functions must fold them.
+    #[test]
+    fn identical_dispatchers_fold_in_merge_identical_functions() {
+        use crate::compiler::passes::merge_identical_functions::MergeIdenticalFunctions;
+
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let f = ssa.add_function("f".to_string());
+        let g = ssa.add_function("g".to_string());
+
+        let d1 = build_dispatch_function(&mut ssa, 7, &[Type::field()], &[Type::field()], &[f, g]);
+        let d2 = build_dispatch_function(&mut ssa, 8, &[Type::field()], &[Type::field()], &[f, g]);
+
+        MergeIdenticalFunctions::new().do_run(&mut ssa);
+
+        assert!(ssa.get_function_ids().any(|id| id == d1));
+        assert!(!ssa.get_function_ids().any(|id| id == d2));
     }
 }

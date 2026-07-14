@@ -43,6 +43,7 @@ use crate::{
             lower_guards::LowerGuards,
             lower_map_casts::LowerMapCasts,
             mem2reg::Mem2Reg,
+            merge_identical_functions::MergeIdenticalFunctions,
             normalize_asserts::NormalizeAsserts,
             partial_redundancy_elimination::PRE,
             prepare_entry_point::PrepareEntryPoint,
@@ -305,10 +306,12 @@ impl Driver {
                 // copy-propagates asserted-equal leaders into operands, making them structurally
                 // congruent to the recomputed analysis) and before TrivialPhiElimination (a PRE
                 // redirect can make both preds' jump args identical, and such a phi must collapse
-                // before WTI taints it into a needless `Select`). `pre_untaint()` is
-                // elimination-only: motion would split edges and mint merge params that untaint
-                // cannot yet absorb, and its speculation gate cannot see witness-ness before
-                // types carry `WitnessOf`.
+                // before WTI taints it into a needless `Select`).
+                //
+                // `pre_untaint()` speculates under `preserve_structure`: hoists are pure
+                // instruction insertion above `Jmp` terminators — no edge splits or merge params
+                // for untaint to absorb — and the speculation gate reads witness-ness from the
+                // read-only joined WTI approximation, since types do not yet carry `WitnessOf`.
                 Box::new(PRE::pre_untaint()),
                 // Mem2Reg promotes each scalarized leaf cell into its own block-parameter phi. For
                 // an aggregate threaded through control flow that is mostly trivial phis (the same
@@ -571,6 +574,11 @@ impl Driver {
             "program_tail".to_string(),
             self.draw_cfg,
             vec![
+                // The merge above put two near-copies of the whole program into one SSA;
+                // fold the byte-identical functions (notably `globals_init`) before anything
+                // downstream pays for them. Both codegen backends emit every function in the
+                // SSA, so this is where program size is won.
+                Box::new(MergeIdenticalFunctions::new()),
                 Box::new(RCInsertion::new()),
                 Box::new(FixDoubleJumps::new()),
             ],
