@@ -145,6 +145,7 @@ fn emit(line: &str) {
 fn run_single(root: PathBuf, expect_failure: bool) {
     let checking_codegen = CodeGenOptions {
         check_constraints: true,
+        ..CodeGenOptions::default()
     };
 
     // 1. Compile

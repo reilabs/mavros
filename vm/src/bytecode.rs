@@ -2448,6 +2448,14 @@ fn decode_string(program: &[u64], offset: &mut usize) -> String {
 
 impl Program {
     pub fn to_binary(&self) -> Vec<u64> {
+        self.to_binary_with_debug_info(true)
+    }
+
+    pub fn to_binary_without_debug_info(&self) -> Vec<u64> {
+        self.to_binary_with_debug_info(false)
+    }
+
+    fn to_binary_with_debug_info(&self, include_debug_info: bool) -> Vec<u64> {
         let mut binary = Vec::new();
         // Layout-table header: [num_descriptors, ...descriptors...].
         // Each descriptor: [num_fields, field_0_packed, field_1_packed, ...].
@@ -2469,56 +2477,61 @@ impl Program {
         let entry_table_start = binary.len();
         binary.extend(std::iter::repeat(0u64).take(self.entry_points.len()));
 
-        // Keep debug data in the header so dispatch never steps through it. Source-map records
-        // contain patchable absolute opcode offsets, just like the entry table below.
-        binary.push(DEBUG_INFO_MAGIC);
-        let mut file_indices = BTreeMap::<&str, usize>::new();
-        let mut files = Vec::<&str>::new();
-        for function in &self.functions {
-            assert_eq!(
-                function.code.len(),
-                function.source_locations.len(),
-                "every VM opcode must have a source location"
-            );
-            for location in &function.source_locations {
-                if !file_indices.contains_key(location.file.as_str()) {
-                    let index = files.len();
-                    file_indices.insert(location.file.as_str(), index);
-                    files.push(location.file.as_str());
+        let mut function_debug_slots: Vec<(Option<usize>, Vec<(usize, usize)>)> =
+            (0..self.functions.len())
+                .map(|_| (None, Vec::new()))
+                .collect();
+        if include_debug_info {
+            // Keep debug data in the header so dispatch never steps through it. Source-map records
+            // contain patchable absolute opcode offsets, just like the entry table below.
+            binary.push(DEBUG_INFO_MAGIC);
+            let mut file_indices = BTreeMap::<&str, usize>::new();
+            let mut files = Vec::<&str>::new();
+            for function in &self.functions {
+                assert_eq!(
+                    function.code.len(),
+                    function.source_locations.len(),
+                    "every VM opcode must have a source location"
+                );
+                for location in &function.source_locations {
+                    if !file_indices.contains_key(location.file.as_str()) {
+                        let index = files.len();
+                        file_indices.insert(location.file.as_str(), index);
+                        files.push(location.file.as_str());
+                    }
                 }
             }
-        }
-        binary.push(files.len() as u64);
-        for file in files {
-            encode_string(&mut binary, file);
-        }
-
-        binary.push(self.functions.len() as u64);
-        let mut function_debug_slots = Vec::with_capacity(self.functions.len());
-        for function in &self.functions {
-            encode_string(&mut binary, &function.name);
-            let function_offset_slot = binary.len();
-            binary.push(0);
-
-            let runs: Vec<(usize, &SourceLocation)> = function
-                .source_locations
-                .iter()
-                .enumerate()
-                .filter(|(index, location)| {
-                    *index == 0 || function.source_locations[*index - 1] != **location
-                })
-                .collect();
-            binary.push(runs.len() as u64);
-            let mut run_slots = Vec::with_capacity(runs.len());
-            for (opcode_index, location) in runs {
-                let code_offset_slot = binary.len();
-                binary.push(0);
-                binary.push(file_indices[location.file.as_str()] as u64);
-                binary.push(location.line);
-                binary.push(location.column);
-                run_slots.push((opcode_index, code_offset_slot));
+            binary.push(files.len() as u64);
+            for file in files {
+                encode_string(&mut binary, file);
             }
-            function_debug_slots.push((function_offset_slot, run_slots));
+
+            binary.push(self.functions.len() as u64);
+            for (function_index, function) in self.functions.iter().enumerate() {
+                encode_string(&mut binary, &function.name);
+                let function_offset_slot = binary.len();
+                binary.push(0);
+
+                let runs: Vec<(usize, &SourceLocation)> = function
+                    .source_locations
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, location)| {
+                        *index == 0 || function.source_locations[*index - 1] != **location
+                    })
+                    .collect();
+                binary.push(runs.len() as u64);
+                let mut run_slots = Vec::with_capacity(runs.len());
+                for (opcode_index, location) in runs {
+                    let code_offset_slot = binary.len();
+                    binary.push(0);
+                    binary.push(file_indices[location.file.as_str()] as u64);
+                    binary.push(location.line);
+                    binary.push(location.column);
+                    run_slots.push((opcode_index, code_offset_slot));
+                }
+                function_debug_slots[function_index] = (Some(function_offset_slot), run_slots);
+            }
         }
 
         let mut positions = vec![];
@@ -2528,7 +2541,9 @@ impl Program {
         for (function_index, function) in self.functions.iter().enumerate() {
             // Function marker
             function_markers.push(binary.len());
-            binary[function_debug_slots[function_index].0] = binary.len() as u64;
+            if let Some(function_offset_slot) = function_debug_slots[function_index].0 {
+                binary[function_offset_slot] = binary.len() as u64;
+            }
             binary.push(u64::MAX);
             binary.push(function.frame_size as u64);
 
@@ -2733,5 +2748,36 @@ mod tests {
 
         assert_eq!(header.code_start, 3);
         assert!(header.debug_info.functions.is_empty());
+    }
+
+    #[test]
+    fn bytecode_debug_info_can_be_excluded() {
+        let source_location = location("main", 10);
+        let program = Program {
+            functions: vec![Function {
+                name: "main".to_string(),
+                frame_size: 3,
+                code: vec![OpCode::Nop {}, OpCode::Ret {}],
+                source_locations: vec![source_location.clone(), source_location],
+            }],
+            entry_points: vec![0],
+            global_frame_size: 0,
+            struct_layouts: Vec::new(),
+        };
+
+        let with_debug_info = program.to_binary();
+        let without_debug_info = program.to_binary_without_debug_info();
+
+        assert!(without_debug_info.len() < with_debug_info.len());
+        assert!(
+            parse_program_header(&without_debug_info)
+                .debug_info
+                .functions
+                .is_empty()
+        );
+        assert_eq!(
+            parse_program_header(&without_debug_info).entry_points.len(),
+            1
+        );
     }
 }

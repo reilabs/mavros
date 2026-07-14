@@ -47,6 +47,10 @@ pub struct ProgramOptions {
     /// Print absolute paths in VM stack traces and WASM debug info instead of paths relative to the current directory.
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub absolute_paths: bool,
+
+    /// Include source metadata in bytecode and WASM artifacts.
+    #[arg(long, global = true, action = clap::ArgAction::SetTrue)]
+    pub include_debug_info: bool,
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -88,7 +92,13 @@ fn main() -> ExitCode {
             r1cs_output,
             binary_output,
             draw_graphs,
-        }) => run_compile(path, r1cs_output, binary_output, *draw_graphs),
+        }) => run_compile(
+            path,
+            r1cs_output,
+            binary_output,
+            *draw_graphs,
+            args.include_debug_info,
+        ),
         None => run(&args),
     };
 
@@ -117,11 +127,18 @@ pub fn run_compile(
     r1cs_output: &PathBuf,
     binary_output: &PathBuf,
     draw_graphs: bool,
+    include_debug_info: bool,
 ) -> Result<ExitCode, Error> {
     info!(message = %"Compiling Noir project", root = ?path, r1cs_output = ?r1cs_output, binary_output = ?binary_output);
 
     let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs)?;
-    let binary = api::compile_bytecode(&mut driver, CodeGenOptions::default())?;
+    let binary = api::compile_bytecode(
+        &mut driver,
+        CodeGenOptions {
+            include_debug_info,
+            ..CodeGenOptions::default()
+        },
+    )?;
 
     // Ensure output directories exist
     if let Some(parent) = r1cs_output.parent() {
@@ -161,6 +178,10 @@ pub fn run_compile(
 /// `main` function of the application.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let (mut driver, r1cs) = compile_to_r1cs(args.root.clone(), args.draw_graphs)?;
+    let codegen_options = CodeGenOptions {
+        include_debug_info: args.include_debug_info,
+        ..CodeGenOptions::default()
+    };
     let source_path_root = if args.absolute_paths {
         None
     } else {
@@ -184,6 +205,9 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
             if let Some(root) = &source_path_root {
                 opts = opts.with_debug_path_root(root);
             }
+            if args.include_debug_info {
+                opts = opts.with_debug_info();
+            }
             Some((wasm_path, opts))
         } else {
             None
@@ -194,12 +218,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         }
 
         driver
-            .compile_llvm_targets(
-                args.emit_llvm,
-                &r1cs,
-                wasm_config,
-                CodeGenOptions::default(),
-            )
+            .compile_llvm_targets(args.emit_llvm, &r1cs, wasm_config, codegen_options)
             .unwrap();
     }
 
@@ -210,7 +229,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     }
 
     let params = api::read_prover_inputs(driver.package_root(), driver.abi())?;
-    let mut binary = api::compile_bytecode(&mut driver, CodeGenOptions::default())?;
+    let mut binary = api::compile_bytecode(&mut driver, codegen_options)?;
 
     let witgen_result =
         api::run_witgen_from_binary(&mut binary, &r1cs, &params).map_err(|mut error| {
@@ -356,11 +375,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_paths_are_relative_by_default_with_absolute_opt_in() {
+    fn debug_info_is_excluded_by_default_with_path_and_metadata_opt_ins() {
         let relative = ProgramOptions::try_parse_from(["mavros"]).unwrap();
         assert!(!relative.absolute_paths);
+        assert!(!relative.include_debug_info);
 
-        let absolute = ProgramOptions::try_parse_from(["mavros", "--absolute-paths"]).unwrap();
+        let absolute =
+            ProgramOptions::try_parse_from(["mavros", "--absolute-paths", "--include-debug-info"])
+                .unwrap();
         assert!(absolute.absolute_paths);
+        assert!(absolute.include_debug_info);
+
+        let compile =
+            ProgramOptions::try_parse_from(["mavros", "compile", ".", "--include-debug-info"])
+                .unwrap();
+        assert!(compile.include_debug_info);
     }
 }

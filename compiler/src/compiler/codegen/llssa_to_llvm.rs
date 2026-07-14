@@ -50,6 +50,8 @@ pub struct WasmCompileOpts {
     pub runtime_lib: std::path::PathBuf,
     /// Strip this prefix from source paths embedded in DWARF.
     pub debug_path_root: Option<std::path::PathBuf>,
+    /// Retain DWARF sections in the linked WASM artifact.
+    pub include_debug_info: bool,
 }
 
 impl WasmCompileOpts {
@@ -64,6 +66,7 @@ impl WasmCompileOpts {
             codegen_level: OptimizationLevel::None,
             runtime_lib,
             debug_path_root: None,
+            include_debug_info: false,
         }
     }
 
@@ -74,11 +77,17 @@ impl WasmCompileOpts {
             codegen_level: OptimizationLevel::Aggressive,
             runtime_lib,
             debug_path_root: None,
+            include_debug_info: false,
         }
     }
 
     pub fn with_debug_path_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
         self.debug_path_root = Some(root.into());
+        self
+    }
+
+    pub fn with_debug_info(mut self) -> Self {
+        self.include_debug_info = true;
         self
     }
 }
@@ -1574,6 +1583,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         let output = Command::new(&wasm_ld)
             .arg("--no-entry")
+            .args((!opts.include_debug_info).then_some("--strip-debug"))
             .args(
                 self.entry_symbols
                     .iter()

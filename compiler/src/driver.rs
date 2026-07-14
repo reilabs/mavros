@@ -493,7 +493,11 @@ impl Driver {
             format!("{}", program),
         );
 
-        let binary = program.to_binary();
+        let binary = if options.include_debug_info {
+            program.to_binary()
+        } else {
+            program.to_binary_without_debug_info()
+        };
 
         info!(message = %"Program binary generated", binary_size = binary.len() * 8);
 
