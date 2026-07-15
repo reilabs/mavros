@@ -352,6 +352,7 @@ pub fn run_phase1(
         witness_layout.tables_data_start() - witness_layout.challenges_start(),
         global_frame.as_mut_ptr(),
         header.struct_layouts,
+        header.constant_pool,
     );
 
     let frame = Frame::base_frame(program[entry + 1], &mut vm);
@@ -709,6 +710,7 @@ pub fn run_ad(
         constraints_layout,
         global_frame.as_mut_ptr(),
         header.struct_layouts,
+        header.constant_pool,
     );
 
     let frame = Frame::push(

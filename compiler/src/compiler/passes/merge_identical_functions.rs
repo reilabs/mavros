@@ -29,15 +29,31 @@
 //! bisimulation — members call same-group callees at every site — which is what makes merging
 //! chains of clones (and identical self-recursive pairs) sound.
 //!
+//! # Preconditions
+//!
+//! The pass rewrites only `CallTarget::Static` references (via `map_call_targets`); it does not
+//! touch `CallTarget::Dynamic` or `Constant::FnPtr(FunctionId)`. So it may only run once
+//! defunctionalization has removed both — otherwise deleting a folded function could leave a
+//! dangling function-pointer reference. This holds in `program_tail`: both halves are
+//! defunctionalized before the program merge (`driver.rs` asserts no `FnPtr` constant survives).
+//! `do_run` re-checks this with a debug-only assertion so a future pipeline reorder fails loudly
+//! rather than miscompiling.
+//!
 //! # Soundness
 //!
 //! Merging never changes behavior: a call to the deleted copy becomes a call to a function with
 //! an identical body, and the *call itself* is preserved, so per-call effects (witness minting,
 //! constraint emission, globals initialization) happen exactly as before. Entry points are
-//! externally invoked by id and are never deleted; a non-entry duplicate of an entry point
-//! redirects into it, making the entry internally callable — fine today, since both backends
-//! compile entry points as ordinary functions. The pass runs after R1CS generation, so rows/cols
-//! cannot change by construction — the payoff is program size (bytecode and WASM) and downstream
+//! externally invoked by id and are never deleted; they are also never used as a redirect _target_,
+//! because the LLVM/WASM backend gives entry points a distinct calling convention (declared
+//! `fn(VM*)`, with parameters loaded from the public-input region rather than passed as arguments),
+//! so an internal call into an entry would mismatch its signature. Redirect targets are therefore
+//! always non-entry survivors: a group's entry points survive on their own, and a non-entry
+//! duplicate with no non-entry survivor to fold into is kept rather than pointed at an entry.
+//!
+//! The pass operates on the program SSA built by `Driver::prepare_program_ssa`, which R1CS
+//! generation does not consume (R1CS is generated from a separate `witness_spilled_ssa`), so
+//! rows/cols cannot change — the payoff is program size (bytecode and WASM) and downstream
 //! compile time.
 
 use crate::{
@@ -54,13 +70,8 @@ use crate::{
 // MERGE IDENTICAL FUNCTIONS
 // ================================================================================================
 
+#[derive(Default)]
 pub struct MergeIdenticalFunctions {}
-
-impl MergeIdenticalFunctions {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
 
 impl Pass for MergeIdenticalFunctions {
     fn name(&self) -> &'static str {
@@ -73,7 +84,34 @@ impl Pass for MergeIdenticalFunctions {
 }
 
 impl MergeIdenticalFunctions {
+    pub fn new() -> Self {
+        Self {}
+    }
+
     pub fn do_run(&self, ssa: &mut HLSSA) {
+        // Precondition: defunctionalization must have run, so no `Constant::FnPtr` (nor the dynamic
+        // calls it feeds) remains. This pass only rewrites `CallTarget::Static`, so a surviving
+        // function pointer to a folded function would be left dangling. `driver.rs` guarantees this
+        // before the program merge; re-check it here so a future pipeline reorder fails loudly.
+        #[cfg(debug_assertions)]
+        {
+            use crate::compiler::ssa::hlssa::Constant;
+            fn contains_fn_ptr(c: &Constant) -> bool {
+                match c {
+                    Constant::FnPtr(_) => true,
+                    Constant::Blob(blob) => blob.elements.iter().any(contains_fn_ptr),
+                    Constant::U(..) | Constant::I(..) | Constant::Field(_) => false,
+                }
+            }
+            let mut has_fn_ptr = false;
+            ssa.for_each_const(|_, cv| has_fn_ptr = has_fn_ptr || contains_fn_ptr(cv.as_ref()));
+            assert!(
+                !has_fn_ptr,
+                "merge_identical_functions requires defunctionalization first: a FnPtr constant \
+                 survived, which this pass would leave dangling when folding its target"
+            );
+        }
+
         // Constant ids are program-global and shared across the merged halves; they stay raw in the
         // canonical form while every other id is renamed positionally.
         let mut const_ids: HashSet<ValueId> = HashSet::default();
@@ -102,10 +140,20 @@ impl MergeIdenticalFunctions {
             }
             intern.len()
         };
+
+        // The shape strings are only needed for round-0 grouping; refinement and the rewrite below
+        // need just each function's callee list. Drop the strings now to release O(program-text)
+        // memory before the fixpoint. (A digest instead of exact strings would risk a collision =
+        // an unsound false merge, so grouping keeps the full strings for round 0.)
+        let callee_lists: Vec<(FunctionId, Vec<FunctionId>)> = shapes
+            .into_iter()
+            .map(|(fid, _shape, callees)| (fid, callees))
+            .collect();
+
         loop {
             let mut intern: HashMap<(usize, Vec<usize>), usize> = HashMap::default();
             let mut next_group: HashMap<FunctionId, usize> = HashMap::default();
-            for (fid, _, callees) in &shapes {
+            for (fid, callees) in &callee_lists {
                 let key = (group[fid], callees.iter().map(|c| group[c]).collect());
                 let next = intern.len();
                 let id = *intern.entry(key).or_insert(next);
@@ -119,23 +167,42 @@ impl MergeIdenticalFunctions {
             }
         }
 
-        // Per final group: entry points always survive; everything else redirects to the
-        // smallest-id survivor (an entry point if the group has one) and is deleted.
+        // Per final group: entry points always survive on their own; every non-entry duplicate
+        // redirects to the smallest-id *non-entry* survivor and is deleted. An entry point is never
+        // used as a redirect target — the LLVM/WASM backend compiles entries with a distinct
+        // calling convention (declared `fn(VM*)`, parameters loaded from the public-input region
+        // rather than passed as arguments), so an internal call into one would mismatch its
+        // signature. When a group has no non-entry member, or its only non-entry is the survivor,
+        // nothing folds there.
         let entry_points: HashSet<FunctionId> = ssa.get_entry_points().iter().copied().collect();
         let mut members: HashMap<usize, Vec<FunctionId>> = HashMap::default();
         for &fid in &fids {
             members.entry(group[&fid]).or_default().push(fid);
         }
-        let mut redirect: HashMap<FunctionId, FunctionId> = HashMap::default();
-        for &fid in &fids {
-            let mates = &members[&group[&fid]];
+
+        // One survivor per group: the smallest-id non-entry member, else (all-entry group) the
+        // smallest-id member. `members` values are in sorted-`fids` order, so `find`/`first` yield
+        // the smallest id and this stays deterministic regardless of map iteration order.
+        let mut survivor_of: HashMap<usize, FunctionId> = HashMap::default();
+        for (&gid, mates) in &members {
             let survivor = mates
                 .iter()
-                .find(|m| entry_points.contains(m))
+                .find(|m| !entry_points.contains(m))
                 .or_else(|| mates.first())
                 .copied()
                 .unwrap();
-            if fid != survivor && !entry_points.contains(&fid) {
+            survivor_of.insert(gid, survivor);
+        }
+
+        let mut redirect: HashMap<FunctionId, FunctionId> = HashMap::default();
+        for &fid in &fids {
+            if entry_points.contains(&fid) {
+                continue;
+            }
+            // `survivor` is guaranteed non-entry: `fid` is non-entry, so its group has a non-entry
+            // member and `find` picked one.
+            let survivor = survivor_of[&group[&fid]];
+            if fid != survivor {
                 redirect.insert(fid, survivor);
             }
         }
@@ -152,10 +219,10 @@ impl MergeIdenticalFunctions {
             ssa.set_globals_deinit_fn(*survivor);
         }
 
-        for (fid, _, callees) in &shapes {
+        for (fid, callees) in &callee_lists {
             if redirect.contains_key(fid) {
                 ssa.delete_function(*fid)
-                    .expect("function listed in shapes must exist");
+                    .expect("function scheduled for merging must exist");
                 continue;
             }
             if !callees.iter().any(|callee| redirect.contains_key(callee)) {
@@ -167,6 +234,44 @@ impl MergeIdenticalFunctions {
                     instruction
                         .map_call_targets(&mut |callee| *redirect.get(&callee).unwrap_or(&callee));
                 }
+            }
+        }
+
+        // Postcondition (debug only): the delete + rewrite above must leave no reference to a
+        // folded function. The folded (deleted) set is exactly `redirect`'s keys; assert that no
+        // surviving function statically calls one, and that the globals registrations don't either.
+        // `delete_function` validates nothing, so this catches a future edit that forgets a
+        // reference class before it silently ships a dangling call.
+        #[cfg(debug_assertions)]
+        {
+            for (fid, _) in &callee_lists {
+                if redirect.contains_key(fid) {
+                    continue; // deleted above
+                }
+                let function = ssa.get_function(*fid);
+                for (_, block) in function.get_blocks() {
+                    for op in block.get_instructions() {
+                        for callee in op.get_static_call_targets() {
+                            debug_assert!(
+                                !redirect.contains_key(&callee),
+                                "merge_identical_functions left a dangling call from {fid:?} to \
+                                 folded {callee:?}"
+                            );
+                        }
+                    }
+                }
+            }
+            if let Some(f) = ssa.get_globals_init_fn() {
+                debug_assert!(
+                    !redirect.contains_key(&f),
+                    "merge_identical_functions left globals_init at folded {f:?}"
+                );
+            }
+            if let Some(f) = ssa.get_globals_deinit_fn() {
+                debug_assert!(
+                    !redirect.contains_key(&f),
+                    "merge_identical_functions left globals_deinit at folded {f:?}"
+                );
             }
         }
     }
@@ -197,6 +302,13 @@ impl Canonicalizer<'_> {
 /// The canonical serialization of `function` (see the module doc for what it does and does not
 /// include) plus its static call targets in traversal order, which the caller abstracts through the
 /// partition instead of comparing raw.
+///
+/// Identity is decided by exact string equality of this serialization, which relies on `Debug` being
+/// injective over every opcode / type / source-location value that can appear: two *distinct* values
+/// must never format to the same string, or two different functions would be merged (unsound). This
+/// holds today because value-carrying immediates (constants) appear here only as their raw const
+/// `ValueId`s, never as formatted values. A future opcode field or `Type` with a lossy `Debug` would
+/// break it — prefer a purpose-built encoding over a lossy `Debug` if that ever arises.
 fn canonical_form(
     function: &Function<OpCode, Type>,
     const_ids: &HashSet<ValueId>,
@@ -486,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_point_survives_its_group() {
+    fn entry_point_is_never_a_redirect_target() {
         let mut ssa = HLSSA::with_main("main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let f = add_leaf(&mut sb, "f");
@@ -496,11 +608,12 @@ mod tests {
 
         run(&mut ssa);
 
-        // `g` is an entry point, so it must survive even though `f` has the smaller id;
-        // the non-entry duplicate redirects into it.
-        assert!(has_function(&ssa, g));
-        assert!(!has_function(&ssa, f));
-        assert_eq!(call_targets(&ssa, main_id), vec![g]);
+        // `f` (non-entry) and `g` (entry) are byte-identical and `main` calls `f`. Folding `f` into
+        // the entry `g` would make `g` internally callable, which the LLVM / WASM backend cannot
+        // honor (entries load their params from memory under a `fn(VM*)` signature). So `f` is kept
+        // — an entry is never a redirect target — and `main` keeps calling `f`.
+        assert!(has_function(&ssa, f) && has_function(&ssa, g));
+        assert_eq!(call_targets(&ssa, main_id), vec![f]);
     }
 
     #[test]
@@ -517,6 +630,26 @@ mod tests {
 
         assert!(has_function(&ssa, f) && has_function(&ssa, g));
         assert_eq!(call_targets(&ssa, main_id), vec![f, g]);
+    }
+
+    #[test]
+    fn duplicates_fold_onto_a_non_entry_survivor_not_the_entry() {
+        // Three byte-identical leaves in one group: two non-entry (`a`, `b`) and one entry (`e`).
+        // `b` folds onto the smaller-id non-entry `a` — never onto the entry `e`, which survives on
+        // its own. `main` calls both non-entries, so both call sites end up at `a`.
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        let a = add_leaf(&mut sb, "a");
+        let b = add_leaf(&mut sb, "b");
+        let e = add_leaf(&mut sb, "e");
+        let main_id = wire_main(&mut sb, &[a, b]);
+        ssa.add_entry_point(e);
+
+        run(&mut ssa);
+
+        assert!(has_function(&ssa, a) && has_function(&ssa, e));
+        assert!(!has_function(&ssa, b));
+        assert_eq!(call_targets(&ssa, main_id), vec![a, a]);
     }
 
     #[test]
