@@ -50,7 +50,7 @@ pub struct WasmCompileOpts {
     pub runtime_lib: std::path::PathBuf,
     /// Strip this prefix from source paths embedded in DWARF.
     pub debug_path_root: Option<std::path::PathBuf>,
-    /// Retain DWARF sections in the linked WASM artifact.
+    /// Emit DWARF sections into a standalone debug WASM beside the stripped executable.
     pub include_debug_info: bool,
 }
 
@@ -1622,8 +1622,42 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             panic!("wasm-ld failed with status: {}", output.status);
         }
 
+        let debug_path = wasm_debug_info_path(path);
+        if opts.include_debug_info {
+            let linked = std::fs::read(path).unwrap_or_else(|error| {
+                panic!("failed to read linked WASM {}: {error}", path.display())
+            });
+            let external_url = debug_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("WASM debug sidecar path must have a UTF-8 filename");
+            let (stripped, debug) = crate::wasm_debug::split_debug_info(&linked, external_url)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "failed to split WASM debug info from {}: {error}",
+                        path.display()
+                    )
+                });
+            std::fs::write(path, stripped).unwrap_or_else(|error| {
+                panic!("failed to write stripped WASM {}: {error}", path.display())
+            });
+            std::fs::write(&debug_path, debug).unwrap_or_else(|error| {
+                panic!(
+                    "failed to write WASM debug sidecar {}: {error}",
+                    debug_path.display()
+                )
+            });
+        } else {
+            std::fs::remove_file(debug_path).ok();
+        }
+
         std::fs::remove_file(&obj_path).ok();
     }
+}
+
+/// Path used for a WASM module's standalone DWARF sidecar.
+pub fn wasm_debug_info_path(wasm_path: &Path) -> std::path::PathBuf {
+    wasm_path.with_extension("debug.wasm")
 }
 
 #[cfg(test)]
@@ -1639,6 +1673,14 @@ mod tests {
             },
         },
     };
+
+    #[test]
+    fn wasm_debug_sidecar_has_a_wasm_extension() {
+        assert_eq!(
+            wasm_debug_info_path(Path::new("target/program.wasm")),
+            Path::new("target/program.debug.wasm")
+        );
+    }
 
     #[test]
     fn emits_instruction_source_locations_as_llvm_debug_info() {

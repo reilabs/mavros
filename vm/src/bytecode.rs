@@ -3,12 +3,12 @@
 use crate::{ConstraintsLayout, Field, TableKind, WitnessLayout};
 use ark_ff::{AdditiveGroup as _, BigInteger as _};
 use mavros_opcode_gen::interpreter;
+use serde::{Deserialize, Serialize};
 
 use crate::array::{BoxedLayout, BoxedValue, StructDescriptor};
 use crate::interpreter::{Frame, Handler};
 
 use crate::array::DataType;
-use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::ptr;
 
@@ -16,7 +16,8 @@ use std::ptr;
 pub const FELT_LIMBS: usize = 4;
 
 /// A user-facing source position attached to generated VM code.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SourceLocation {
     pub file: String,
     pub line: u64,
@@ -56,25 +57,49 @@ impl Display for StackFrame {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+/// A compact, run-length encoded map from VM bytecode word offsets to Noir source locations.
+///
+/// This is serialized separately from the executable bytecode so production programs never pay
+/// for source paths and locations. A location applies from its `code_offset` up to the next
+/// location in the same function.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DebugInfo {
-    functions: Vec<DebugFunction>,
+    pub format_version: u32,
+    pub functions: Vec<DebugFunction>,
 }
 
-#[derive(Clone, Debug)]
-struct DebugFunction {
-    name: String,
-    code_offset: usize,
-    locations: Vec<DebugLocation>,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugFunction {
+    pub name: String,
+    pub code_offset: usize,
+    pub locations: Vec<DebugLocation>,
 }
 
-#[derive(Clone, Debug)]
-struct DebugLocation {
-    code_offset: usize,
-    location: SourceLocation,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugLocation {
+    pub code_offset: usize,
+    pub location: SourceLocation,
 }
 
 impl DebugInfo {
+    /// Strip a common root from real source paths while preserving synthetic `<...>` locations.
+    pub fn relativize_source_paths(&mut self, root: &std::path::Path) {
+        for function in &mut self.functions {
+            for location in &mut function.locations {
+                let source = &mut location.location;
+                if source.file.starts_with('<') && source.file.ends_with('>') {
+                    continue;
+                }
+                if let Ok(relative) = std::path::Path::new(&source.file).strip_prefix(root) {
+                    source.file = relative.to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+
     /// Resolve a word offset in the serialized program to its function and nearest source
     /// location. Callers can pass an address inside an opcode, not only its first word.
     pub fn stack_frame_at(&self, code_offset: usize) -> Option<StackFrame> {
@@ -2441,15 +2466,6 @@ fn decode_struct_field(word: u64) -> (u32, bool) {
 
 const DEBUG_INFO_MAGIC: u64 = u64::from_le_bytes(*b"MAVROSDB");
 
-fn encode_string(binary: &mut Vec<u64>, value: &str) {
-    binary.push(value.len() as u64);
-    for chunk in value.as_bytes().chunks(8) {
-        let mut word = [0u8; 8];
-        word[..chunk.len()].copy_from_slice(chunk);
-        binary.push(u64::from_le_bytes(word));
-    }
-}
-
 fn decode_string(program: &[u64], offset: &mut usize) -> String {
     let byte_len = program[*offset] as usize;
     *offset += 1;
@@ -2464,15 +2480,18 @@ fn decode_string(program: &[u64], offset: &mut usize) -> String {
 }
 
 impl Program {
+    /// Serialize executable VM bytecode. Debug information is never embedded in this output.
     pub fn to_binary(&self) -> Vec<u64> {
-        self.to_binary_with_debug_info(true)
+        self.to_binary_and_debug_info().0
     }
 
+    /// Backwards-compatible alias for [`Program::to_binary`].
     pub fn to_binary_without_debug_info(&self) -> Vec<u64> {
-        self.to_binary_with_debug_info(false)
+        self.to_binary()
     }
 
-    fn to_binary_with_debug_info(&self, include_debug_info: bool) -> Vec<u64> {
+    /// Serialize compact executable bytecode and construct its standalone source map.
+    pub fn to_binary_and_debug_info(&self) -> (Vec<u64>, DebugInfo) {
         let mut binary = Vec::new();
         // Layout-table header: [num_descriptors, ...descriptors...].
         // Each descriptor: [num_fields, field_0_packed, field_1_packed, ...].
@@ -2498,87 +2517,40 @@ impl Program {
         let entry_table_start = binary.len();
         binary.extend(std::iter::repeat(0u64).take(self.entry_points.len()));
 
-        let mut function_debug_slots: Vec<(Option<usize>, Vec<(usize, usize)>)> =
-            (0..self.functions.len())
-                .map(|_| (None, Vec::new()))
-                .collect();
-        if include_debug_info {
-            // Keep debug data in the header so dispatch never steps through it. Source-map records
-            // contain patchable absolute opcode offsets, just like the entry table below.
-            binary.push(DEBUG_INFO_MAGIC);
-            let mut file_indices = BTreeMap::<&str, usize>::new();
-            let mut files = Vec::<&str>::new();
-            for function in &self.functions {
-                assert_eq!(
-                    function.code.len(),
-                    function.source_locations.len(),
-                    "every VM opcode must have a source location"
-                );
-                for location in &function.source_locations {
-                    if !file_indices.contains_key(location.file.as_str()) {
-                        let index = files.len();
-                        file_indices.insert(location.file.as_str(), index);
-                        files.push(location.file.as_str());
-                    }
-                }
-            }
-            binary.push(files.len() as u64);
-            for file in files {
-                encode_string(&mut binary, file);
-            }
-
-            binary.push(self.functions.len() as u64);
-            for (function_index, function) in self.functions.iter().enumerate() {
-                encode_string(&mut binary, &function.name);
-                let function_offset_slot = binary.len();
-                binary.push(0);
-
-                let runs: Vec<(usize, &SourceLocation)> = function
-                    .source_locations
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, location)| {
-                        *index == 0 || function.source_locations[*index - 1] != **location
-                    })
-                    .collect();
-                binary.push(runs.len() as u64);
-                let mut run_slots = Vec::with_capacity(runs.len());
-                for (opcode_index, location) in runs {
-                    let code_offset_slot = binary.len();
-                    binary.push(0);
-                    binary.push(file_indices[location.file.as_str()] as u64);
-                    binary.push(location.line);
-                    binary.push(location.column);
-                    run_slots.push((opcode_index, code_offset_slot));
-                }
-                function_debug_slots[function_index] = (Some(function_offset_slot), run_slots);
-            }
-        }
-
         let mut positions = vec![];
         let mut jumps_to_fix: Vec<(usize, isize)> = vec![];
         let mut function_markers = vec![];
+        let mut debug_functions = Vec::with_capacity(self.functions.len());
 
-        for (function_index, function) in self.functions.iter().enumerate() {
+        for function in &self.functions {
+            assert_eq!(
+                function.code.len(),
+                function.source_locations.len(),
+                "every VM opcode must have a source location"
+            );
             // Function marker
             function_markers.push(binary.len());
-            if let Some(function_offset_slot) = function_debug_slots[function_index].0 {
-                binary[function_offset_slot] = binary.len() as u64;
-            }
+            let function_offset = binary.len();
             binary.push(u64::MAX);
             binary.push(function.frame_size as u64);
 
-            let mut run_slots = function_debug_slots[function_index].1.iter().peekable();
+            let mut locations = Vec::new();
             for (opcode_index, op) in function.code.iter().enumerate() {
-                if let Some((run_opcode_index, patch_slot)) = run_slots.peek()
-                    && *run_opcode_index == opcode_index
-                {
-                    binary[*patch_slot] = binary.len() as u64;
-                    run_slots.next();
+                let location = &function.source_locations[opcode_index];
+                if opcode_index == 0 || function.source_locations[opcode_index - 1] != *location {
+                    locations.push(DebugLocation {
+                        code_offset: binary.len(),
+                        location: location.clone(),
+                    });
                 }
                 positions.push(binary.len());
                 op.to_binary(&mut binary, &mut jumps_to_fix);
             }
+            debug_functions.push(DebugFunction {
+                name: function.name.clone(),
+                code_offset: function_offset,
+                locations,
+            });
         }
 
         for (slot, fn_idx) in self.entry_points.iter().enumerate() {
@@ -2590,7 +2562,13 @@ impl Program {
             binary[jump_position] =
                 (target_pos as isize - (jump_position as isize + add_offset)) as u64;
         }
-        binary
+        (
+            binary,
+            DebugInfo {
+                format_version: 1,
+                functions: debug_functions,
+            },
+        )
     }
 }
 
@@ -2655,7 +2633,10 @@ pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
                 locations,
             });
         }
-        DebugInfo { functions }
+        DebugInfo {
+            format_version: 1,
+            functions,
+        }
     } else {
         DebugInfo::default()
     };
@@ -2721,10 +2702,9 @@ mod tests {
             struct_layouts: Vec::new(),
             constant_pool: Vec::new(),
         };
-        let binary = program.to_binary();
-        let header = parse_program_header(&binary);
-        let main_opcode = header.debug_info.functions[0].locations[0].code_offset;
-        let helper_opcode = header.debug_info.functions[1].locations[0].code_offset;
+        let (binary, debug_info) = program.to_binary_and_debug_info();
+        let main_opcode = debug_info.functions[0].locations[0].code_offset;
+        let helper_opcode = debug_info.functions[1].locations[0].code_offset;
 
         let mut vm = VM::new_witgen(
             ptr::null_mut(),
@@ -2741,7 +2721,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        vm.set_debug_context(binary.as_ptr(), binary.len(), header.debug_info);
+        vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
 
         let caller = Frame::base_frame(3, &mut vm);
         let callee = Frame::push(3, caller, &mut vm);
@@ -2781,7 +2761,7 @@ mod tests {
     }
 
     #[test]
-    fn bytecode_debug_info_can_be_excluded() {
+    fn bytecode_debug_info_is_always_standalone() {
         let source_location = location("main", 10);
         let program = Program {
             functions: vec![Function {
@@ -2796,19 +2776,20 @@ mod tests {
             constant_pool: Vec::new(),
         };
 
-        let with_debug_info = program.to_binary();
-        let without_debug_info = program.to_binary_without_debug_info();
+        let (binary, debug_info) = program.to_binary_and_debug_info();
 
-        assert!(without_debug_info.len() < with_debug_info.len());
+        assert_eq!(binary, program.to_binary_without_debug_info());
+        assert_eq!(binary, program.to_binary());
         assert!(
-            parse_program_header(&without_debug_info)
+            parse_program_header(&binary)
                 .debug_info
                 .functions
                 .is_empty()
         );
-        assert_eq!(
-            parse_program_header(&without_debug_info).entry_points.len(),
-            1
-        );
+        assert_eq!(debug_info.format_version, 1);
+        assert_eq!(debug_info.functions.len(), 1);
+        assert_eq!(debug_info.functions[0].name, "main");
+        assert_eq!(debug_info.functions[0].locations.len(), 1);
+        assert_eq!(parse_program_header(&binary).entry_points.len(), 1);
     }
 }

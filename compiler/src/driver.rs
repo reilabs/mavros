@@ -7,6 +7,7 @@ use std::{
 };
 
 use ark_ff::AdditiveGroup as _;
+use mavros_vm::bytecode::DebugInfo;
 use noirc_frontend::{
     debug::DebugInstrumenter,
     monomorphization::{Monomorphizer, debug_types::DebugTypeTracker},
@@ -67,6 +68,12 @@ use crate::{
         untaint_control_flow::UntaintControlFlow,
     },
 };
+
+/// Executable VM bytecode plus optional standalone source metadata.
+pub struct BytecodeArtifact {
+    pub binary: Vec<u64>,
+    pub debug_info: Option<DebugInfo>,
+}
 
 pub struct Driver {
     project: Project,
@@ -481,6 +488,15 @@ impl Driver {
 
     /// Compiles the program (both the witgen and AD entry points) into a single VM binary.
     pub fn compile_bytecode(&mut self, options: CodeGenOptions) -> Result<Vec<u64>, Error> {
+        Ok(self.compile_bytecode_artifact(options)?.binary)
+    }
+
+    /// Compiles VM bytecode and, when requested, returns debug information as a separate value.
+    /// The executable `binary` is identical regardless of `include_debug_info`.
+    pub fn compile_bytecode_artifact(
+        &mut self,
+        options: CodeGenOptions,
+    ) -> Result<BytecodeArtifact, Error> {
         self.prepare_program_ssa();
         let ssa = self.program_ssa.as_ref().unwrap();
 
@@ -494,15 +510,16 @@ impl Driver {
             format!("{}", program),
         );
 
-        let binary = if options.include_debug_info {
-            program.to_binary()
+        let (binary, debug_info) = if options.include_debug_info {
+            let (binary, debug_info) = program.to_binary_and_debug_info();
+            (binary, Some(debug_info))
         } else {
-            program.to_binary_without_debug_info()
+            (program.to_binary(), None)
         };
 
         info!(message = %"Program binary generated", binary_size = binary.len() * 8);
 
-        Ok(binary)
+        Ok(BytecodeArtifact { binary, debug_info })
     }
 
     pub fn abi(&self) -> &noirc_abi::Abi {
@@ -661,8 +678,14 @@ impl Driver {
 
         if let Some((wasm_path, wasm_opts)) = wasm_config {
             codegen.write_ir(&wasm_path.with_extension("ll"));
+            let debug_path = wasm_opts
+                .include_debug_info
+                .then(|| crate::compiler::codegen::llssa_to_llvm::wasm_debug_info_path(&wasm_path));
             codegen.compile_to_wasm(&wasm_path, wasm_opts);
             info!(message = %"WASM object generated", path = %wasm_path.display());
+            if let Some(debug_path) = debug_path {
+                info!(message = %"WASM debug info generated", path = %debug_path.display());
+            }
             self.write_wasm_metadata(&wasm_path, r1cs)?;
         }
 

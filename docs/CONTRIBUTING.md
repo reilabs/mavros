@@ -108,9 +108,28 @@ This works as follows:
 3. A `.wasm.meta.json` sidecar file is written alongside the `.wasm` with the ABI and R1CS layout
    info, so the host knows how to set up the witness generator's inputs and interpret its outputs.
 
-Running with `--emit-wasm` will execute the full compilation pipeline, and _additionall_ emit the
+Running with `--emit-wasm` will execute the full compilation pipeline, and _additionally_ emit the
 `mavros_debug/program.wasm` and `mavros_debug/program.wasm.meta.json`. This can be combined with the
 `--emit-llvm` flag to also save the intermediate LLVM IR as an `.ll` file.
+
+Pass `--include-debug-info` to additionally emit `mavros_debug/program.debug.wasm`. It is a valid,
+standalone WebAssembly debug companion containing the module structure and DWARF custom sections.
+`program.wasm` remains stripped apart from a tiny `external_debug_info` custom section pointing to
+the relative `program.debug.wasm` URL. Browser developer tools can therefore fetch the sidecar
+automatically when both files are served from the same directory.
+
+Wasmtime 31 does not follow `external_debug_info` itself. Rust hosts can use
+`mavros_compiler::wasm_runtime::load_wasmtime_module`, which follows the local reference, or
+`load_wasmtime_module_with_debug_info`, which accepts both paths explicitly. Both reconstruct the
+DWARF-bearing module in memory while leaving the executable artifact stripped on disk.
+
+```rust
+let module = mavros_compiler::wasm_runtime::load_wasmtime_module_with_debug_info(
+    &engine,
+    "mavros_debug/program.wasm",
+    "mavros_debug/program.debug.wasm",
+)?;
+```
 
 > **Note:** WASM output is only currently available via the default command (no subcommand), not via
 > `mavros compile`.

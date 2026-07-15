@@ -21,6 +21,7 @@ Expected project structure:
     mavros_debug/
       program.wasm                    # Generated WASM artifact
       program.wasm.meta.json          # Metadata
+      program.debug.wasm              # Optional external DWARF (--include-debug-info)
 
 Output is written to: <project-root>/mavros_debug/output.json
 `);

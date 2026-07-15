@@ -309,7 +309,41 @@ pub fn run_phase1(
     constraints_layout: ConstraintsLayout,
     ordered_inputs: &[InputValueOrdered],
 ) -> Result<Phase1Result, TrapError> {
+    run_phase1_impl(
+        program,
+        witness_layout,
+        constraints_layout,
+        ordered_inputs,
+        None,
+    )
+}
+
+/// Run phase 1 with source metadata loaded from a standalone debug sidecar.
+pub fn run_phase1_with_debug_info(
+    program: &[u64],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    ordered_inputs: &[InputValueOrdered],
+    debug_info: bytecode::DebugInfo,
+) -> Result<Phase1Result, TrapError> {
+    run_phase1_impl(
+        program,
+        witness_layout,
+        constraints_layout,
+        ordered_inputs,
+        Some(debug_info),
+    )
+}
+
+fn run_phase1_impl(
+    program: &[u64],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    ordered_inputs: &[InputValueOrdered],
+    external_debug_info: Option<bytecode::DebugInfo>,
+) -> Result<Phase1Result, TrapError> {
     let header = parse_program_header(program);
+    let debug_info = external_debug_info.unwrap_or_else(|| header.debug_info.clone());
     let entry = *header
         .entry_points
         .get(ENTRY_WITGEN)
@@ -367,7 +401,7 @@ pub fn run_phase1(
 
     let mut program = program.to_vec();
     prepare_dispatch(&mut program, header.code_start);
-    vm.set_debug_context(program.as_ptr(), program.len(), header.debug_info);
+    vm.set_debug_context(program.as_ptr(), program.len(), debug_info);
 
     let pc = unsafe { program.as_mut_ptr().add(entry + 2) };
 
@@ -684,6 +718,29 @@ pub fn run(
     ))
 }
 
+/// Execute witness generation with source metadata loaded from a standalone debug sidecar.
+pub fn run_with_debug_info(
+    program: &[u64],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    ordered_inputs: &[InputValueOrdered],
+    debug_info: bytecode::DebugInfo,
+) -> Result<WitgenResult, TrapError> {
+    let phase1 = run_phase1_with_debug_info(
+        program,
+        witness_layout,
+        constraints_layout,
+        ordered_inputs,
+        debug_info,
+    )?;
+
+    Ok(run_phase2_with_fake_challenges(
+        phase1,
+        witness_layout,
+        constraints_layout,
+    ))
+}
+
 #[instrument(skip_all, name = "Interpreter::run_ad")]
 pub fn run_ad(
     program: &[u64],
@@ -691,7 +748,35 @@ pub fn run_ad(
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
 ) -> Result<(Vec<Field>, Vec<Field>, Vec<Field>, AllocationInstrumenter), TrapError> {
+    run_ad_impl(program, coeffs, witness_layout, constraints_layout, None)
+}
+
+/// Execute AD with source metadata loaded from a standalone debug sidecar.
+pub fn run_ad_with_debug_info(
+    program: &[u64],
+    coeffs: &[Field],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    debug_info: bytecode::DebugInfo,
+) -> Result<(Vec<Field>, Vec<Field>, Vec<Field>, AllocationInstrumenter), TrapError> {
+    run_ad_impl(
+        program,
+        coeffs,
+        witness_layout,
+        constraints_layout,
+        Some(debug_info),
+    )
+}
+
+fn run_ad_impl(
+    program: &[u64],
+    coeffs: &[Field],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    external_debug_info: Option<bytecode::DebugInfo>,
+) -> Result<(Vec<Field>, Vec<Field>, Vec<Field>, AllocationInstrumenter), TrapError> {
     let header = parse_program_header(program);
+    let debug_info = external_debug_info.unwrap_or_else(|| header.debug_info.clone());
     let entry = *header
         .entry_points
         .get(ENTRY_AD)
@@ -723,7 +808,7 @@ pub fn run_ad(
 
     let mut program = program.to_vec();
     prepare_dispatch(&mut program, header.code_start);
-    vm.set_debug_context(program.as_ptr(), program.len(), header.debug_info);
+    vm.set_debug_context(program.as_ptr(), program.len(), debug_info);
 
     let pc = unsafe { program.as_mut_ptr().add(entry + 2) };
 
