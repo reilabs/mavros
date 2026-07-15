@@ -47,7 +47,10 @@
 use ark_ff::Zero;
 
 use crate::compiler::{
-    analysis::{click_cooper::ClickCooper, types::FunctionTypeInfo},
+    analysis::{
+        click_cooper::ClickCooper, types::FunctionTypeInfo,
+        witness_taint_inference::ApproximateWitnessTaint,
+    },
     ssa::{
         BlockId, FunctionId, ValueId,
         hlssa::{BinaryArithOpKind, CastTarget, Constant, HLSSA, OpCode, Type, TypeExpr},
@@ -80,22 +83,42 @@ pub struct TotalityOracle<'a> {
     /// typing of the function being planned over: [`FunctionTypeInfo::get_value_type`] panics on
     /// ids it has not seen, so no queried op may mention a value minted after this was computed.
     types: &'a FunctionTypeInfo,
+
+    /// Where the four witness-ness-gated verdicts read witness-ness from (see
+    /// [`WitnessnessSource`]). Post-untaint callers use [`Self::new`] (`Types`); the pre-untaint
+    /// caller must supply `Taint` via [`Self::with_witness_source`].
+    witness: WitnessnessSource<'a>,
 }
 
 impl<'a> TotalityOracle<'a> {
     /// An oracle for `fid`, answering against the `cc` facts and `types` typing computed over the
     /// same, unmutated version of the function (see the field docs for what each input supplies).
+    ///
+    /// Witness-ness is read from the types, so this constructor is only sound **post-untaint**.
     pub fn new(
         cc: &'a ClickCooper,
         ssa: &'a HLSSA,
         fid: FunctionId,
         types: &'a FunctionTypeInfo,
     ) -> Self {
+        Self::with_witness_source(cc, ssa, fid, types, WitnessnessSource::Types)
+    }
+
+    /// [`Self::new`] with an explicit witness-ness source, for the pre-untaint caller. In `Types`
+    /// mode this is exactly [`Self::new`].
+    pub fn with_witness_source(
+        cc: &'a ClickCooper,
+        ssa: &'a HLSSA,
+        fid: FunctionId,
+        types: &'a FunctionTypeInfo,
+        witness: WitnessnessSource<'a>,
+    ) -> Self {
         Self {
             cc,
             ssa,
             fid,
             types,
+            witness,
         }
     }
 
@@ -114,10 +137,7 @@ impl<'a> TotalityOracle<'a> {
                 Add | Sub | Mul => self.value_type(*lhs).peel_witness().is_field(),
                 // A division with *any* witness-typed operand lowers to a constraint-emitting
                 // gadget whose guarded and unguarded shapes differ; never speculated.
-                Div | Mod => {
-                    !self.value_type(*lhs).is_witness_of()
-                        && self.divisor_provably_safe(*rhs, block)
-                }
+                Div | Mod => !self.is_witness(*lhs) && self.divisor_provably_safe(*rhs, block),
                 Shl | Shr => self.shift_amount_in_range(*lhs, *rhs),
             },
             // Multiplication by an interned constant: the same overflow story as `Mul`.
@@ -162,13 +182,23 @@ impl<'a> TotalityOracle<'a> {
         self.types.get_value_type(v)
     }
 
+    /// Whether `v` is witness at its top level, read from the configured [`WitnessnessSource`].
+    ///
+    /// In `Types` mode this is the exact pre-existing check, `Type::is_witness_of`.
+    fn is_witness(&self, v: ValueId) -> bool {
+        match &self.witness {
+            WitnessnessSource::Types => self.value_type(v).is_witness_of(),
+            WitnessnessSource::Taint(taint) => taint.value_is_witness(self.fid, v),
+        }
+    }
+
     /// The divisor of a `Div`/`Mod` is provably safe at `block`: nonzero via a constant or the
     /// disequality channel, and free of the `i64::MIN / -1` overflow.
     fn divisor_provably_safe(&self, divisor: ValueId, block: BlockId) -> bool {
-        let ty = self.value_type(divisor);
-        if ty.is_witness_of() {
+        if self.is_witness(divisor) {
             return false;
         }
+        let ty = self.value_type(divisor);
 
         // `div_s64`/`mod_s64` sign-extend to i64, where MIN / -1 overflows. Only 64-bit operands
         // reach the full i64 range, so narrower signed widths are safe once nonzero.
@@ -195,12 +225,12 @@ impl<'a> TotalityOracle<'a> {
     /// The shift amount is a constant strictly below the shifted operand's width (the range the
     /// constant lattice folds and every backend agrees on).
     fn shift_amount_in_range(&self, lhs: ValueId, rhs: ValueId) -> bool {
-        let lhs_ty = self.value_type(lhs);
         // Witness-typed shifts lower to decomposition gadgets; never speculated (see the pass
         // module doc's Deferred Improvements).
-        if lhs_ty.is_witness_of() || self.value_type(rhs).is_witness_of() {
+        if self.is_witness(lhs) || self.is_witness(rhs) {
             return false;
         }
+        let lhs_ty = self.value_type(lhs);
         let Some(c) = self.cc.const_of(self.fid, rhs) else {
             return false;
         };
@@ -215,10 +245,10 @@ impl<'a> TotalityOracle<'a> {
     /// Slices have no static length and witness-typed accesses lower to constraint-emitting gadgets
     /// — both refused.
     fn const_index_in_bounds(&self, array: ValueId, index: ValueId) -> bool {
-        let arr_ty = self.value_type(array);
-        if arr_ty.is_witness_of() || self.value_type(index).is_witness_of() {
+        if self.is_witness(array) || self.is_witness(index) {
             return false;
         }
+        let arr_ty = self.value_type(array);
         let TypeExpr::Array(_, len) = &arr_ty.expr else {
             return false;
         };
@@ -230,6 +260,26 @@ impl<'a> TotalityOracle<'a> {
         };
         i < *len as u128
     }
+}
+
+// WITNESS-NESS SOURCE
+// ================================================================================================
+
+/// Where the oracle reads a value's witness-ness from.
+///
+/// Four verdicts gate on witness-ness because the op's *witness* lowering emits rejecting
+/// constraints its pure lowering does not (`Div`/`Mod` gadgets, shift decompositions, array-access
+/// gadgets). Post-untaint that is a type property (`TypeExpr::WitnessOf`); pre-untaint those types
+/// do not exist yet, and reading them would silently answer "pure" for every value — licensing
+/// unsound speculation. A pre-untaint caller must instead supply the taint approximation
+/// ([`ApproximateWitnessTaint`]), which answers the same question about every *future*
+/// specialization.
+pub enum WitnessnessSource<'a> {
+    /// Post-untaint: witness-ness is baked into the types the oracle already holds.
+    Types,
+
+    /// Pre-untaint: witness-ness from the read-only joined WTI solve over the pristine SSA.
+    Taint(&'a ApproximateWitnessTaint),
 }
 
 // INTERNAL UTILITIES

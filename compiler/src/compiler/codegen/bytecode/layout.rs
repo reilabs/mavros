@@ -7,13 +7,17 @@ use crate::{
         ssa::{
             ValueId,
             hlssa::{
-                HLSSA, MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type, TypeExpr,
+                Constant, HLSSA, MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type,
+                TypeExpr,
             },
         },
         util::ice_non_elided_tuple,
     },
     vm::{self, bytecode},
 };
+
+// FRAME LAYOUTER
+// ================================================================================================
 
 /// Assists in computing the layout for a single virtual machine stack frame.
 pub struct FrameLayouter {
@@ -120,6 +124,9 @@ impl FrameLayouter {
     }
 }
 
+// STRUCT LAYOUT INTERNER
+// ================================================================================================
+
 /// Interns unique struct shapes during codegen and returns a stable index into the resulting
 /// descriptor table.
 pub struct StructLayoutInterner {
@@ -150,6 +157,89 @@ impl StructLayoutInterner {
         self.table
     }
 }
+
+// CONSTANT POOL INTERNER
+// ================================================================================================
+
+/// Interns multi-cell constants during codegen into a program-global pool and returns a stable
+/// word offset into it.
+///
+/// The pool stores each distinct constant's words once, in the exact frame layout that
+/// `spill_constant_to_frame` would have written, so a `mov_const_pool` memcpy into a frame slot is
+/// byte-identical to the equivalent `MovConst` chain. Constants are keyed by their interned
+/// `ValueId` (bijective with the constant's value), which is cheaper than hashing the value and
+/// gives program-global deduplication for free.
+pub struct ConstantPoolInterner {
+    pub pool: Vec<u64>,
+    pub index: HashMap<ValueId, usize>,
+}
+
+impl ConstantPoolInterner {
+    pub fn new() -> Self {
+        Self {
+            pool: Vec::new(),
+            index: HashMap::default(),
+        }
+    }
+
+    /// Intern `constant` (identified by `vid`) and return its word offset in the pool. On a miss
+    /// the constant's words are appended in frame order.
+    pub fn intern(&mut self, vid: ValueId, constant: &Constant) -> usize {
+        if let Some(&off) = self.index.get(&vid) {
+            return off;
+        }
+        let off = self.pool.len();
+        let pool = &mut self.pool;
+        for_each_constant_word(constant, &mut |word| pool.push(word));
+        self.index.insert(vid, off);
+        off
+    }
+
+    pub fn into_pool(self) -> Vec<u64> {
+        self.pool
+    }
+}
+
+/// Visit the `u64` words of `constant` in frame order — the order in which both the constant pool
+/// and a `MovConst` spill lay them out.
+///
+/// This is the single source of truth for constant word ordering: [`ConstantPoolInterner`], the
+/// `spill_constant_to_frame` inline path, and `constant_cell_count` (which just counts the visits)
+/// all drive it, so the pooled and inline representations — and the memcpy size — cannot drift out
+/// of sync. Adding a new [`Constant`] variant only requires updating this function.
+pub fn for_each_constant_word(constant: &Constant, visit: &mut impl FnMut(u64)) {
+    match constant {
+        Constant::U(size, val) => match size {
+            bits if *bits <= 64 => visit(*val as u64),
+            128 => {
+                visit(*val as u64);
+                visit((*val >> 64) as u64);
+            }
+            bits => panic!("unsupported unsigned integer width: {bits}"),
+        },
+        Constant::I(size, val) => {
+            assert!(
+                *size <= MAX_SUPPORTED_SIGNED_BITS,
+                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+            );
+            visit(*val as u64);
+        }
+        Constant::Field(val) => {
+            for i in 0..bytecode::FELT_LIMBS {
+                visit(val.0.0[i]);
+            }
+        }
+        Constant::Blob(blob) => {
+            for element in &blob.elements {
+                for_each_constant_word(element, visit);
+            }
+        }
+        Constant::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
+    }
+}
+
+// GLOBAL FRAME LAYOUTER
+// ================================================================================================
 
 pub struct GlobalFrameLayouter {
     pub offsets: Vec<usize>,

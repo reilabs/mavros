@@ -459,6 +459,8 @@ pub struct VM {
     pub spread_tables: [Option<usize>; NUM_TABLE_SIZE_SLOTS],
     pub globals: *mut u64,
     pub struct_layouts: Vec<StructDescriptor>,
+    /// Interned constant pool (flat words), read by the `mov_const_pool` opcode.
+    pub constants: Vec<u64>,
     /// Set when the program executes a trap (e.g. a failed assertion). The
     /// interpreter checks this after dispatch returns to distinguish a clean
     /// halt from a trapped one.
@@ -484,6 +486,7 @@ impl VM {
         elem_inverses_witness_section_offset: usize,
         globals: *mut u64,
         struct_layouts: Vec<StructDescriptor>,
+        constants: Vec<u64>,
     ) -> Self {
         Self {
             data: Arrays {
@@ -507,6 +510,7 @@ impl VM {
             spread_tables: [None; NUM_TABLE_SIZE_SLOTS],
             globals,
             struct_layouts,
+            constants,
             trapped: false,
             #[cfg(feature = "vm-profile")]
             opcode_profile: vec![(0, 0); NUM_OPCODES],
@@ -523,6 +527,7 @@ impl VM {
         constraints_layout: ConstraintsLayout,
         globals: *mut u64,
         struct_layouts: Vec<StructDescriptor>,
+        constants: Vec<u64>,
     ) -> Self {
         Self {
             data: Arrays {
@@ -547,6 +552,7 @@ impl VM {
             spread_tables: [None; NUM_TABLE_SIZE_SLOTS],
             globals,
             struct_layouts,
+            constants,
             trapped: false,
             #[cfg(feature = "vm-profile")]
             opcode_profile: vec![(0, 0); NUM_OPCODES],
@@ -2212,6 +2218,13 @@ mod def {
             boxed.dec_rc(vm);
         }
     }
+
+    #[opcode]
+    fn mov_const_pool(#[out] res: *mut u64, vm: &mut VM, pool_offset: usize, size: usize) {
+        unsafe {
+            std::ptr::copy_nonoverlapping(vm.constants.as_ptr().add(pool_offset), res, size);
+        }
+    }
 }
 
 pub struct Function {
@@ -2242,6 +2255,10 @@ pub struct Program {
     pub entry_points: Vec<usize>,
     pub global_frame_size: usize,
     pub struct_layouts: Vec<StructDescriptor>,
+    /// Interned constant pool: a flat word buffer holding each distinct multi-cell constant
+    /// once. Referenced by `MovConstPool { pool_offset, size }` instead of being re-spilled
+    /// into every function's frame.
+    pub constant_pool: Vec<u64>,
 }
 
 impl Display for Program {
@@ -2294,6 +2311,10 @@ impl Program {
             }
         }
 
+        // Constant pool: [pool_len, ...words...].
+        binary.push(self.constant_pool.len() as u64);
+        binary.extend_from_slice(&self.constant_pool);
+
         binary.push(self.global_frame_size as u64);
 
         // Entry-point table: [num_entries, marker_offset_0, ...]. The offsets are absolute word
@@ -2335,6 +2356,8 @@ impl Program {
 /// The decoded header of a program binary.
 pub struct ProgramHeader {
     pub struct_layouts: Vec<StructDescriptor>,
+    /// Interned constant pool (flat words), read at runtime by `mov_const_pool`.
+    pub constant_pool: Vec<u64>,
     pub global_frame_size: usize,
     /// Absolute word offsets of each entry point's function marker, in entry-table order
     /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], ...). The entry's frame size lives at `offset + 1` and
@@ -2348,6 +2371,9 @@ pub struct ProgramHeader {
 /// table.
 pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
     let (struct_layouts, off) = parse_struct_layouts(program);
+    let pool_len = program[off] as usize;
+    let constant_pool = program[off + 1..off + 1 + pool_len].to_vec();
+    let off = off + 1 + pool_len;
     let global_frame_size = program[off] as usize;
     let num_entries = program[off + 1] as usize;
     let entry_points = (0..num_entries)
@@ -2355,6 +2381,7 @@ pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
         .collect();
     ProgramHeader {
         struct_layouts,
+        constant_pool,
         global_frame_size,
         entry_points,
         code_start: off + 2 + num_entries,

@@ -65,7 +65,10 @@
 //! edge dominates the header and every block it dominates: in-loop and post-loop occurrences
 //! redirect to it directly. When `P` ends in a `Jmp` the computation lands at the end of `P`; when
 //! it ends in a `JmpIf` (possible only for parameterless headers — a parameterized header needs
-//! argument-carrying jumps) the edge is split ([`super::edge_split`]). Because frontend loops are
+//! argument-carrying jumps) the edge is split ([`super::edge_split`]) — or, when the configuration
+//! demands the block geometry survive ([`super::Config`]), the header is refused instead, since a
+//! `Jmp`-terminated `P` is the one shape hoisting can serve by pure instruction insertion. Because
+//! frontend loops are
 //! while-style, a body-only expression is *not* anticipated at the header (the zero-trip exit path
 //! skips it); the down-safe form fires when the value is also demanded on the exit path.
 //!
@@ -178,6 +181,7 @@ pub(crate) fn perform_code_motion(
     cfg: &CFG,
     node_of: &HashMap<ValueId, NodeId>,
     motion: MotionLevel,
+    preserve_structure: bool,
     oracle: &TotalityOracle,
 ) {
     // No keyed results means no occurrences to move; skip the stability machinery outright.
@@ -209,9 +213,14 @@ pub(crate) fn perform_code_motion(
         order: &order,
         oracle,
         motion,
+        preserve_structure,
         antic_in: state.anticipated(function, cfg),
         forest: loop_forest(cfg),
     };
+
+    // The join rule is unconditionally structural (it appends a merge parameter), so structure
+    // preservation switches it off wholesale rather than restricting it.
+    let join_rule = motion >= MotionLevel::JoinInsert && !preserve_structure;
 
     // Domination preorder, so an outer loop's header (and any dominating merge) is processed before
     // the blocks it dominates: a key moved there is then *available* below rather than moved twice.
@@ -248,12 +257,12 @@ pub(crate) fn perform_code_motion(
                     continue;
                 }
             }
-            if motion >= MotionLevel::JoinInsert {
+            if join_rule {
                 changed |= state.insert_at_join(&env, function, block, &mut ctx);
             }
         }
         first_round = false;
-        if motion < MotionLevel::JoinInsert || !changed {
+        if !join_rule || !changed {
             break;
         }
     }
@@ -337,6 +346,12 @@ struct MotionEnv<'a> {
 
     /// The kinds of code motion that are allowed.
     motion: MotionLevel,
+
+    /// Whether the block and parameter geometry must survive untouched ([`super::Config`])
+    ///
+    /// If `true`, no `JmpIf` edge splits are performed (the hoist rule refuses such headers) and no
+    /// join insertion is performed.
+    preserve_structure: bool,
 
     /// The anticipated keys on entry to each block — the down-safety proof.
     antic_in: HashMap<BlockId, HashSet<NodeId>>,
@@ -656,7 +671,9 @@ impl FunctionMotionState {
     ///
     /// Anticipated keys move down-safely; at [`MotionLevel::Speculate`], body-only keys move too
     /// when the totality oracle licenses the op and an eliminated occurrence sits at strictly
-    /// greater loop depth. Returns whether anything was hoisted.
+    /// greater loop depth. Under structure preservation, headers entered through a `JmpIf` are
+    /// refused outright (hosting a copy would split the edge). Returns whether anything was
+    /// hoisted.
     fn hoist_into_header(
         &self,
         env: &MotionEnv,
@@ -665,6 +682,18 @@ impl FunctionMotionState {
         entry_pred: BlockId,
         ctx: &mut MotionContext,
     ) -> bool {
+        // A `JmpIf`-terminated entry predecessor can host copies only in a split block; under
+        // structure preservation the whole header is refused instead. Checked before any planning
+        // so `pred_wiring`'s memo never sees the edge.
+        if env.preserve_structure
+            && matches!(
+                function.get_block(entry_pred).get_terminator(),
+                Some(Terminator::JmpIf(..))
+            )
+        {
+            return false;
+        }
+
         let loop_blocks = &env.forest.loops[&header];
         let mut candidates: Vec<(NodeId, &Occurrence)> = Vec::new();
         for (&node, occurrences) in &self.occurrences {
