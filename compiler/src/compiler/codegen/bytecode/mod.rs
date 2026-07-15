@@ -17,7 +17,7 @@ use crate::{
             },
         },
         ssa::{
-            BlockId, FunctionId, Instruction, Terminator, ValueId,
+            BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
                 self, BinaryArithOpKind, CmpKind, DMatrix, Endianness, HLBlock, HLFunction, HLSSA,
                 HLSSAConstantsSnapshot, LookupTarget, MAX_SUPPORTED_SIGNED_BITS, Radix, RefCountOp,
@@ -28,6 +28,14 @@ use crate::{
     },
     vm::{self, bytecode},
 };
+
+fn vm_source_location(location: &SourceLocation) -> bytecode::SourceLocation {
+    bytecode::SourceLocation::new(
+        location.file.to_string(),
+        location.start.line,
+        location.start.column,
+    )
+}
 
 /// Materialize every constant `ValueId` referenced by `function` into the function's frame at
 /// entry.
@@ -217,7 +225,12 @@ impl CodeGen {
     ) -> bytecode::Function {
         let mut layouter = FrameLayouter::new();
         let entry = function.get_entry();
-        let mut emitter = EmitterState::new();
+        let fallback_location = function
+            .get_entry()
+            .first_location()
+            .cloned()
+            .unwrap_or_else(|| SourceLocation::synthetic(function.get_name()));
+        let mut emitter = EmitterState::new(vm_source_location(&fallback_location));
 
         // Entry block params need to be allocated at the beginning of the frame (after return
         // address and return data pointer)
@@ -344,12 +357,13 @@ impl CodeGen {
             name: function.get_name().to_string(),
             frame_size: layouter.next_free,
             code: emitter.code,
+            source_locations: emitter.source_locations,
         }
     }
 
     fn run_block_body(
         &self,
-        _function: &HLFunction,
+        function: &HLFunction,
         block_id: BlockId,
         block: &HLBlock,
         type_info: &FunctionTypeInfo,
@@ -358,8 +372,15 @@ impl CodeGen {
         emitter: &mut EmitterState,
         global_layouter: &GlobalFrameLayouter,
     ) {
+        let block_location = block
+            .first_location()
+            .or_else(|| function.get_entry().first_location())
+            .cloned()
+            .unwrap_or_else(|| SourceLocation::synthetic(function.get_name()));
+        emitter.set_source_location(vm_source_location(&block_location));
         emitter.enter_block(block_id);
-        for instruction in block.get_instructions() {
+        for (instruction, source_location) in block.get_instructions_with_source_locations() {
+            emitter.set_source_location(vm_source_location(source_location));
             match instruction {
                 hlssa::OpCode::BinaryArithOp {
                     kind: BinaryArithOpKind::Add,
@@ -1652,14 +1673,18 @@ impl CodeGen {
 
 struct EmitterState {
     code: Vec<bytecode::OpCode>,
+    source_locations: Vec<bytecode::SourceLocation>,
+    current_source_location: bytecode::SourceLocation,
     block_entrances: HashMap<BlockId, usize>,
     block_exits: HashMap<BlockId, usize>,
 }
 
 impl EmitterState {
-    fn new() -> Self {
+    fn new(current_source_location: bytecode::SourceLocation) -> Self {
         Self {
             code: Vec::new(),
+            source_locations: Vec::new(),
+            current_source_location,
             block_entrances: HashMap::default(),
             block_exits: HashMap::default(),
         }
@@ -1667,6 +1692,12 @@ impl EmitterState {
 
     fn push_op(&mut self, op: bytecode::OpCode) {
         self.code.push(op);
+        self.source_locations
+            .push(self.current_source_location.clone());
+    }
+
+    fn set_source_location(&mut self, source_location: bytecode::SourceLocation) {
+        self.current_source_location = source_location;
     }
 
     fn enter_block(&mut self, block: BlockId) {

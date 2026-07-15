@@ -8,11 +8,92 @@ use crate::array::{BoxedLayout, BoxedValue, StructDescriptor};
 use crate::interpreter::{Frame, Handler};
 
 use crate::array::DataType;
+use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::ptr;
 
 /// The number of u64 limbs making up a field element.
 pub const FELT_LIMBS: usize = 4;
+
+/// A user-facing source position attached to generated VM code.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SourceLocation {
+    pub file: String,
+    pub line: u64,
+    pub column: u64,
+}
+
+impl SourceLocation {
+    pub fn new(file: impl Into<String>, line: u64, column: u64) -> Self {
+        Self {
+            file: file.into(),
+            line,
+            column,
+        }
+    }
+}
+
+impl Display for SourceLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.file.starts_with('<') && self.file.ends_with('>') {
+            write!(f, "{}", self.file)
+        } else {
+            write!(f, "{}:{}:{}", self.file, self.line, self.column)
+        }
+    }
+}
+
+/// One frame in a VM stack trace, ordered from the trapping frame to the entry point.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StackFrame {
+    pub function: String,
+    pub location: SourceLocation,
+}
+
+impl Display for StackFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.function, self.location)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DebugInfo {
+    functions: Vec<DebugFunction>,
+}
+
+#[derive(Clone, Debug)]
+struct DebugFunction {
+    name: String,
+    code_offset: usize,
+    locations: Vec<DebugLocation>,
+}
+
+#[derive(Clone, Debug)]
+struct DebugLocation {
+    code_offset: usize,
+    location: SourceLocation,
+}
+
+impl DebugInfo {
+    /// Resolve a word offset in the serialized program to its function and nearest source
+    /// location. Callers can pass an address inside an opcode, not only its first word.
+    pub fn stack_frame_at(&self, code_offset: usize) -> Option<StackFrame> {
+        let function_index = self
+            .functions
+            .partition_point(|function| function.code_offset <= code_offset)
+            .checked_sub(1)?;
+        let function = &self.functions[function_index];
+        let location_index = function
+            .locations
+            .partition_point(|location| location.code_offset <= code_offset)
+            .checked_sub(1)?;
+
+        Some(StackFrame {
+            function: function.name.clone(),
+            location: function.locations[location_index].location.clone(),
+        })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Per-opcode profiling (enabled with the `vm-profile` feature).
@@ -465,6 +546,10 @@ pub struct VM {
     /// interpreter checks this after dispatch returns to distinguish a clean
     /// halt from a trapped one.
     pub trapped: bool,
+    program_base: *const u64,
+    program_len: usize,
+    debug_info: DebugInfo,
+    pub(crate) stack_trace: Vec<StackFrame>,
     /// Per-opcode `(invocation_count, accumulated_cycles)`, indexed by opcode
     /// discriminant. Written by the generated handlers; only present under the
     /// `vm-profile` feature.
@@ -512,6 +597,10 @@ impl VM {
             struct_layouts,
             constants,
             trapped: false,
+            program_base: ptr::null(),
+            program_len: 0,
+            debug_info: DebugInfo::default(),
+            stack_trace: Vec::new(),
             #[cfg(feature = "vm-profile")]
             opcode_profile: vec![(0, 0); NUM_OPCODES],
         }
@@ -554,12 +643,63 @@ impl VM {
             struct_layouts,
             constants,
             trapped: false,
+            program_base: ptr::null(),
+            program_len: 0,
+            debug_info: DebugInfo::default(),
+            stack_trace: Vec::new(),
             #[cfg(feature = "vm-profile")]
             opcode_profile: vec![(0, 0); NUM_OPCODES],
         }
     }
 
-    // pub fn new_
+    pub fn set_debug_context(
+        &mut self,
+        program_base: *const u64,
+        program_len: usize,
+        debug_info: DebugInfo,
+    ) {
+        self.program_base = program_base;
+        self.program_len = program_len;
+        self.debug_info = debug_info;
+    }
+
+    fn program_offset(&self, pc: *const u64) -> Option<usize> {
+        if self.program_base.is_null() {
+            return None;
+        }
+        let offset = unsafe { pc.offset_from(self.program_base) };
+        (offset >= 0 && (offset as usize) < self.program_len).then_some(offset as usize)
+    }
+
+    pub fn capture_trap(&mut self, pc: *const u64, frame: Frame) {
+        self.trapped = true;
+        self.stack_trace.clear();
+
+        let Some(offset) = self.program_offset(pc) else {
+            return;
+        };
+        if let Some(frame) = self.debug_info.stack_frame_at(offset) {
+            self.stack_trace.push(frame);
+        }
+
+        let mut current = frame;
+        while !current.data.is_null() {
+            let parent_data = unsafe { *current.data.offset(-1) as *mut u64 };
+            if parent_data.is_null() {
+                break;
+            }
+
+            let return_pc = unsafe { *current.data.offset(1) as *const u64 };
+            if let Some(return_offset) = self.program_offset(return_pc)
+                && let Some(frame) = self
+                    .debug_info
+                    .stack_frame_at(return_offset.saturating_sub(1))
+            {
+                self.stack_trace.push(frame);
+            }
+            current = Frame { data: parent_data };
+        }
+    }
 }
 
 /// Compute spread of a u32: interleave zero bits between each bit.
@@ -776,8 +916,8 @@ mod def {
     /// of the WASM target's `unreachable`: the assert-family opcodes delegate
     /// here when their check fails.
     #[raw_opcode]
-    fn trap(_pc: *const u64, frame: Frame, vm: &mut VM) -> (*const u64, Frame) {
-        vm.trapped = true;
+    fn trap(pc: *const u64, frame: Frame, vm: &mut VM) -> (*const u64, Frame) {
+        vm.capture_trap(pc, frame);
         (std::ptr::null(), frame)
     }
 
@@ -2231,6 +2371,8 @@ pub struct Function {
     pub name: String,
     pub frame_size: usize,
     pub code: Vec<OpCode>,
+    /// One location per opcode in `code`.
+    pub source_locations: Vec<SourceLocation>,
 }
 
 impl Display for Function {
@@ -2297,8 +2439,40 @@ fn decode_struct_field(word: u64) -> (u32, bool) {
     (size, refcounted)
 }
 
+const DEBUG_INFO_MAGIC: u64 = u64::from_le_bytes(*b"MAVROSDB");
+
+fn encode_string(binary: &mut Vec<u64>, value: &str) {
+    binary.push(value.len() as u64);
+    for chunk in value.as_bytes().chunks(8) {
+        let mut word = [0u8; 8];
+        word[..chunk.len()].copy_from_slice(chunk);
+        binary.push(u64::from_le_bytes(word));
+    }
+}
+
+fn decode_string(program: &[u64], offset: &mut usize) -> String {
+    let byte_len = program[*offset] as usize;
+    *offset += 1;
+    let word_len = byte_len.div_ceil(8);
+    let mut bytes = Vec::with_capacity(word_len * 8);
+    for word in &program[*offset..*offset + word_len] {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    *offset += word_len;
+    bytes.truncate(byte_len);
+    String::from_utf8(bytes).expect("source-map strings must be UTF-8")
+}
+
 impl Program {
     pub fn to_binary(&self) -> Vec<u64> {
+        self.to_binary_with_debug_info(true)
+    }
+
+    pub fn to_binary_without_debug_info(&self) -> Vec<u64> {
+        self.to_binary_with_debug_info(false)
+    }
+
+    fn to_binary_with_debug_info(&self, include_debug_info: bool) -> Vec<u64> {
         let mut binary = Vec::new();
         // Layout-table header: [num_descriptors, ...descriptors...].
         // Each descriptor: [num_fields, field_0_packed, field_1_packed, ...].
@@ -2324,17 +2498,84 @@ impl Program {
         let entry_table_start = binary.len();
         binary.extend(std::iter::repeat(0u64).take(self.entry_points.len()));
 
+        let mut function_debug_slots: Vec<(Option<usize>, Vec<(usize, usize)>)> =
+            (0..self.functions.len())
+                .map(|_| (None, Vec::new()))
+                .collect();
+        if include_debug_info {
+            // Keep debug data in the header so dispatch never steps through it. Source-map records
+            // contain patchable absolute opcode offsets, just like the entry table below.
+            binary.push(DEBUG_INFO_MAGIC);
+            let mut file_indices = BTreeMap::<&str, usize>::new();
+            let mut files = Vec::<&str>::new();
+            for function in &self.functions {
+                assert_eq!(
+                    function.code.len(),
+                    function.source_locations.len(),
+                    "every VM opcode must have a source location"
+                );
+                for location in &function.source_locations {
+                    if !file_indices.contains_key(location.file.as_str()) {
+                        let index = files.len();
+                        file_indices.insert(location.file.as_str(), index);
+                        files.push(location.file.as_str());
+                    }
+                }
+            }
+            binary.push(files.len() as u64);
+            for file in files {
+                encode_string(&mut binary, file);
+            }
+
+            binary.push(self.functions.len() as u64);
+            for (function_index, function) in self.functions.iter().enumerate() {
+                encode_string(&mut binary, &function.name);
+                let function_offset_slot = binary.len();
+                binary.push(0);
+
+                let runs: Vec<(usize, &SourceLocation)> = function
+                    .source_locations
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, location)| {
+                        *index == 0 || function.source_locations[*index - 1] != **location
+                    })
+                    .collect();
+                binary.push(runs.len() as u64);
+                let mut run_slots = Vec::with_capacity(runs.len());
+                for (opcode_index, location) in runs {
+                    let code_offset_slot = binary.len();
+                    binary.push(0);
+                    binary.push(file_indices[location.file.as_str()] as u64);
+                    binary.push(location.line);
+                    binary.push(location.column);
+                    run_slots.push((opcode_index, code_offset_slot));
+                }
+                function_debug_slots[function_index] = (Some(function_offset_slot), run_slots);
+            }
+        }
+
         let mut positions = vec![];
         let mut jumps_to_fix: Vec<(usize, isize)> = vec![];
         let mut function_markers = vec![];
 
-        for function in &self.functions {
+        for (function_index, function) in self.functions.iter().enumerate() {
             // Function marker
             function_markers.push(binary.len());
+            if let Some(function_offset_slot) = function_debug_slots[function_index].0 {
+                binary[function_offset_slot] = binary.len() as u64;
+            }
             binary.push(u64::MAX);
             binary.push(function.frame_size as u64);
 
-            for op in &function.code {
+            let mut run_slots = function_debug_slots[function_index].1.iter().peekable();
+            for (opcode_index, op) in function.code.iter().enumerate() {
+                if let Some((run_opcode_index, patch_slot)) = run_slots.peek()
+                    && *run_opcode_index == opcode_index
+                {
+                    binary[*patch_slot] = binary.len() as u64;
+                    run_slots.next();
+                }
                 positions.push(binary.len());
                 op.to_binary(&mut binary, &mut jumps_to_fix);
             }
@@ -2363,6 +2604,7 @@ pub struct ProgramHeader {
     /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], ...). The entry's frame size lives at `offset + 1` and
     /// its first opcode at `offset + 2`.
     pub entry_points: Vec<usize>,
+    pub debug_info: DebugInfo,
     /// Word offset of the first function marker, i.e. where the opcode stream begins.
     pub code_start: usize,
 }
@@ -2376,15 +2618,54 @@ pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
     let off = off + 1 + pool_len;
     let global_frame_size = program[off] as usize;
     let num_entries = program[off + 1] as usize;
-    let entry_points = (0..num_entries)
+    let entry_points: Vec<usize> = (0..num_entries)
         .map(|i| program[off + 2 + i] as usize)
         .collect();
+    let mut code_start = off + 2 + num_entries;
+    let debug_info = if program.get(code_start) == Some(&DEBUG_INFO_MAGIC) {
+        code_start += 1;
+        let num_files = program[code_start] as usize;
+        code_start += 1;
+        let files: Vec<String> = (0..num_files)
+            .map(|_| decode_string(program, &mut code_start))
+            .collect();
+        let num_functions = program[code_start] as usize;
+        code_start += 1;
+        let mut functions = Vec::with_capacity(num_functions);
+        for _ in 0..num_functions {
+            let name = decode_string(program, &mut code_start);
+            let function_offset = program[code_start] as usize;
+            let num_locations = program[code_start + 1] as usize;
+            code_start += 2;
+            let mut locations = Vec::with_capacity(num_locations);
+            for _ in 0..num_locations {
+                let location_offset = program[code_start] as usize;
+                let file_index = program[code_start + 1] as usize;
+                let line = program[code_start + 2];
+                let column = program[code_start + 3];
+                code_start += 4;
+                locations.push(DebugLocation {
+                    code_offset: location_offset,
+                    location: SourceLocation::new(files[file_index].clone(), line, column),
+                });
+            }
+            functions.push(DebugFunction {
+                name,
+                code_offset: function_offset,
+                locations,
+            });
+        }
+        DebugInfo { functions }
+    } else {
+        DebugInfo::default()
+    };
     ProgramHeader {
         struct_layouts,
         constant_pool,
         global_frame_size,
         entry_points,
-        code_start: off + 2 + num_entries,
+        debug_info,
+        code_start,
     }
 }
 
@@ -2406,4 +2687,128 @@ pub fn parse_struct_layouts(program: &[u64]) -> (Vec<StructDescriptor>, usize) {
         layouts.push(StructDescriptor::new(fields));
     }
     (layouts, off)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn location(function: &str, line: u64) -> SourceLocation {
+        SourceLocation::new(format!("src/{function}.nr"), line, 7)
+    }
+
+    #[test]
+    fn source_map_drives_trap_stack_trace() {
+        let caller_location = location("main", 10);
+        let callee_location = location("helper", 24);
+        let program = Program {
+            functions: vec![
+                Function {
+                    name: "main".to_string(),
+                    frame_size: 3,
+                    code: vec![OpCode::Nop {}, OpCode::Ret {}],
+                    source_locations: vec![caller_location.clone(), caller_location.clone()],
+                },
+                Function {
+                    name: "helper".to_string(),
+                    frame_size: 3,
+                    code: vec![OpCode::Nop {}, OpCode::Ret {}],
+                    source_locations: vec![callee_location.clone(), callee_location.clone()],
+                },
+            ],
+            entry_points: vec![0],
+            global_frame_size: 0,
+            struct_layouts: Vec::new(),
+            constant_pool: Vec::new(),
+        };
+        let binary = program.to_binary();
+        let header = parse_program_header(&binary);
+        let main_opcode = header.debug_info.functions[0].locations[0].code_offset;
+        let helper_opcode = header.debug_info.functions[1].locations[0].code_offset;
+
+        let mut vm = VM::new_witgen(
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            0,
+            0,
+            ptr::null_mut(),
+            Vec::new(),
+            Vec::new(),
+        );
+        vm.set_debug_context(binary.as_ptr(), binary.len(), header.debug_info);
+
+        let caller = Frame::base_frame(3, &mut vm);
+        let callee = Frame::push(3, caller, &mut vm);
+        unsafe {
+            *callee.data.offset(1) = binary.as_ptr().add(main_opcode + 1) as u64;
+        }
+        vm.capture_trap(unsafe { binary.as_ptr().add(helper_opcode) }, callee);
+
+        assert_eq!(
+            vm.stack_trace,
+            vec![
+                StackFrame {
+                    function: "helper".to_string(),
+                    location: callee_location,
+                },
+                StackFrame {
+                    function: "main".to_string(),
+                    location: caller_location,
+                },
+            ]
+        );
+
+        let caller = callee.pop(&mut vm);
+        let root = caller.pop(&mut vm);
+        assert!(root.data.is_null());
+    }
+
+    #[test]
+    fn binaries_without_debug_header_still_parse() {
+        // Empty header: no struct layouts, constants, globals, or entries, then code starts.
+        let binary = [0, 0, 0, 0, u64::MAX, 0];
+        let header = parse_program_header(&binary);
+
+        assert_eq!(header.code_start, 4);
+        assert!(header.constant_pool.is_empty());
+        assert!(header.debug_info.functions.is_empty());
+    }
+
+    #[test]
+    fn bytecode_debug_info_can_be_excluded() {
+        let source_location = location("main", 10);
+        let program = Program {
+            functions: vec![Function {
+                name: "main".to_string(),
+                frame_size: 3,
+                code: vec![OpCode::Nop {}, OpCode::Ret {}],
+                source_locations: vec![source_location.clone(), source_location],
+            }],
+            entry_points: vec![0],
+            global_frame_size: 0,
+            struct_layouts: Vec::new(),
+            constant_pool: Vec::new(),
+        };
+
+        let with_debug_info = program.to_binary();
+        let without_debug_info = program.to_binary_without_debug_info();
+
+        assert!(without_debug_info.len() < with_debug_info.len());
+        assert!(
+            parse_program_header(&without_debug_info)
+                .debug_info
+                .functions
+                .is_empty()
+        );
+        assert_eq!(
+            parse_program_header(&without_debug_info).entry_points.len(),
+            1
+        );
+    }
 }

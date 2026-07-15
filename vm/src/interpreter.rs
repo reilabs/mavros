@@ -236,12 +236,40 @@ pub struct WitgenResult {
 }
 
 /// The program executed a trap: a failed assertion or rangecheck.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TrapError;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrapError {
+    stack_trace: Vec<bytecode::StackFrame>,
+}
+
+impl TrapError {
+    pub fn stack_trace(&self) -> &[bytecode::StackFrame] {
+        &self.stack_trace
+    }
+
+    pub fn relativize_source_paths(&mut self, root: &std::path::Path) {
+        for frame in &mut self.stack_trace {
+            let path = std::path::Path::new(&frame.location.file);
+            if let Ok(relative) = path.strip_prefix(root) {
+                frame.location.file = relative.to_string_lossy().into_owned();
+            }
+        }
+    }
+}
 
 impl std::fmt::Display for TrapError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "VM trapped during execution")
+        write!(f, "VM trapped during execution")?;
+        let has_explanatory_frame = self
+            .stack_trace
+            .iter()
+            .any(|frame| frame.location.file != "<wrapper_main>");
+        for frame in &self.stack_trace {
+            if has_explanatory_frame && frame.location.file == "<wrapper_main>" {
+                continue;
+            }
+            write!(f, "\n  at {frame}")?;
+        }
+        Ok(())
     }
 }
 
@@ -339,6 +367,7 @@ pub fn run_phase1(
 
     let mut program = program.to_vec();
     prepare_dispatch(&mut program, header.code_start);
+    vm.set_debug_context(program.as_ptr(), program.len(), header.debug_info);
 
     let pc = unsafe { program.as_mut_ptr().add(entry + 2) };
 
@@ -348,7 +377,9 @@ pub fn run_phase1(
     vm.report_opcode_profile("witgen phase 1");
 
     if vm.trapped {
-        return Err(TrapError);
+        return Err(TrapError {
+            stack_trace: std::mem::take(&mut vm.stack_trace),
+        });
     }
 
     fix_multiplicities_section(&mut out_wit_pre_comm, witness_layout);
@@ -692,6 +723,7 @@ pub fn run_ad(
 
     let mut program = program.to_vec();
     prepare_dispatch(&mut program, header.code_start);
+    vm.set_debug_context(program.as_ptr(), program.len(), header.debug_info);
 
     let pc = unsafe { program.as_mut_ptr().add(entry + 2) };
 
@@ -701,7 +733,9 @@ pub fn run_ad(
     vm.report_opcode_profile("AD");
 
     if vm.trapped {
-        return Err(TrapError);
+        return Err(TrapError {
+            stack_trace: std::mem::take(&mut vm.stack_trace),
+        });
     }
 
     Ok((out_da, out_db, out_dc, vm.allocation_instrumenter))
@@ -735,4 +769,47 @@ fn flatten_params(value: &InputValueOrdered) -> Vec<Field> {
         ),
     }
     encoded_value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trap_error_source_paths_can_be_made_relative() {
+        let mut error = TrapError {
+            stack_trace: vec![
+                bytecode::StackFrame {
+                    function: "helper".to_string(),
+                    location: bytecode::SourceLocation::new("/project/src/helper.nr", 24, 7),
+                },
+                bytecode::StackFrame {
+                    function: "wrapper_main".to_string(),
+                    location: bytecode::SourceLocation::new("<wrapper_main>", 1, 1),
+                },
+            ],
+        };
+
+        error.relativize_source_paths(std::path::Path::new("/project"));
+
+        assert_eq!(
+            error.to_string(),
+            "VM trapped during execution\n  at helper (src/helper.nr:24:7)"
+        );
+    }
+
+    #[test]
+    fn explanatory_wrapper_frame_is_not_elided() {
+        let error = TrapError {
+            stack_trace: vec![bytecode::StackFrame {
+                function: "wrapper_main".to_string(),
+                location: bytecode::SourceLocation::new("<public return value check>", 1, 1),
+            }],
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "VM trapped during execution\n  at wrapper_main (<public return value check>)"
+        );
+    }
 }

@@ -174,13 +174,18 @@ impl PrepareEntryPoint {
             } else {
                 e.call(original_main_id, arg_values, return_types.len())
             };
-            for ((result, public_input), return_type) in results
-                .iter()
-                .zip(return_input_values.iter())
-                .zip(return_types.iter())
-            {
-                Self::assert_eq_deep(&mut e, *result, *public_input, return_type);
-            }
+            e.emit_with_location(
+                SourceLocation::synthetic("public return value check"),
+                |e| {
+                    for ((result, public_input), return_type) in results
+                        .iter()
+                        .zip(return_input_values.iter())
+                        .zip(return_types.iter())
+                    {
+                        Self::assert_eq_deep(e, *result, *public_input, return_type);
+                    }
+                },
+            );
 
             if let Some(deinit_fn) = globals_deinit_fn {
                 e.call(deinit_fn, vec![], 0);
