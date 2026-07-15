@@ -515,7 +515,11 @@ impl Driver {
             format!("{}", program),
         );
 
-        let binary = program.to_binary();
+        let binary = if options.include_debug_info {
+            program.to_binary()
+        } else {
+            program.to_binary_without_debug_info()
+        };
 
         info!(message = %"Program binary generated", binary_size = binary.len() * 8);
 
@@ -660,6 +664,11 @@ impl Driver {
         let ll_flow_analysis = FlowAnalysis::run(&llssa);
         let context = Context::create();
         let mut codegen = LLVMCodeGen::new(&context, "mavros_module");
+        codegen.set_debug_path_root(
+            wasm_config
+                .as_ref()
+                .and_then(|(_, opts)| opts.debug_path_root.clone()),
+        );
         codegen.compile(&llssa, &ll_flow_analysis);
 
         let llvm_ir = if emit_llvm {
