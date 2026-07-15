@@ -2719,6 +2719,7 @@ mod tests {
             entry_points: vec![0],
             global_frame_size: 0,
             struct_layouts: Vec::new(),
+            constant_pool: Vec::new(),
         };
         let binary = program.to_binary();
         let header = parse_program_header(&binary);
@@ -2737,6 +2738,7 @@ mod tests {
             0,
             0,
             ptr::null_mut(),
+            Vec::new(),
             Vec::new(),
         );
         vm.set_debug_context(binary.as_ptr(), binary.len(), header.debug_info);
@@ -2768,12 +2770,13 @@ mod tests {
     }
 
     #[test]
-    fn old_binaries_without_debug_header_still_parse() {
-        // Empty legacy header: no struct layouts, no globals, no entries, then code starts.
-        let legacy = [0, 0, 0, u64::MAX, 0];
-        let header = parse_program_header(&legacy);
+    fn binaries_without_debug_header_still_parse() {
+        // Empty header: no struct layouts, constants, globals, or entries, then code starts.
+        let binary = [0, 0, 0, 0, u64::MAX, 0];
+        let header = parse_program_header(&binary);
 
-        assert_eq!(header.code_start, 3);
+        assert_eq!(header.code_start, 4);
+        assert!(header.constant_pool.is_empty());
         assert!(header.debug_info.functions.is_empty());
     }
 
@@ -2790,6 +2793,7 @@ mod tests {
             entry_points: vec![0],
             global_frame_size: 0,
             struct_layouts: Vec::new(),
+            constant_pool: Vec::new(),
         };
 
         let with_debug_info = program.to_binary();
