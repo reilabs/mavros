@@ -526,6 +526,35 @@ impl Driver {
         self.abi.as_ref().unwrap()
     }
 
+    /// Flattened field count of the entry point's parameters and return value — the size of the
+    /// positional input block that `prepare_entry_point` writes into witness columns
+    /// `1..=count`.
+    ///
+    /// Together with column 0 (the constant one) these are the externally-visible columns a
+    /// compaction of the R1CS must never touch.
+    pub fn entry_point_flattened_io_count(&self) -> usize {
+        let abi = self.abi();
+        let params: usize = abi
+            .parameters
+            .iter()
+            .map(|param| count_abi_type_elements(&param.typ))
+            .sum();
+        let returns = abi
+            .return_type
+            .as_ref()
+            .map_or(0, |ret| count_abi_type_elements(&ret.abi_type));
+        params + returns
+    }
+
+    /// Number of leading R1CS witness columns a compaction must never touch.
+    ///
+    /// It must always include column 0 (the constant one) plus the positional input/return block.
+    /// There should always be at least 1, matching `r1cs_compact::analyze`'s requirement that
+    /// column 0 stays protected.
+    pub fn protected_r1cs_cols(&self) -> usize {
+        1 + self.entry_point_flattened_io_count()
+    }
+
     /// Builds the final multi-entry-point SSA.
     ///
     /// The witgen and AD halves need different lowerings of the same witness-spilled program
@@ -747,5 +776,94 @@ fn count_abi_type_elements(typ: &noirc_abi::AbiType) -> usize {
             fields.iter().map(|(_, t)| count_abi_type_elements(t)).sum()
         }
         AbiType::Tuple { fields } => fields.iter().map(count_abi_type_elements).sum(),
+    }
+}
+
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod tests {
+    use noirc_abi::{AbiType, Sign};
+
+    use super::count_abi_type_elements;
+    use crate::compiler::{passes::prepare_entry_point::PrepareEntryPoint, ssa::hlssa::Type};
+
+    /// `entry_point_flattened_io_count` sizes the protected column block from the ABI via
+    /// [`count_abi_type_elements`], while the wrapper's actual pinned witness block is sized from
+    /// the HLSSA signature via [`PrepareEntryPoint::flattened_field_count`]. The two counts must
+    /// agree on corresponding types, or the R1CS compaction analysis would protect the wrong column
+    /// range.
+    #[test]
+    fn abi_and_hlssa_io_flattening_agree() {
+        let cases: Vec<(AbiType, Type)> = vec![
+            (AbiType::Field, Type::field()),
+            (
+                AbiType::Integer {
+                    sign: Sign::Unsigned,
+                    width: 32,
+                },
+                Type::u(32),
+            ),
+            (
+                AbiType::Integer {
+                    sign: Sign::Signed,
+                    width: 64,
+                },
+                Type::i(64),
+            ),
+            (AbiType::Boolean, Type::u(1)),
+            // A Noir `str<12>` lowers to an array of 12 bytes.
+            (AbiType::String { length: 12 }, Type::u(8).array_of(12)),
+            (
+                AbiType::Array {
+                    length: 4,
+                    typ: Box::new(AbiType::Field),
+                },
+                Type::field().array_of(4),
+            ),
+            // Structs lower to tuples.
+            (
+                AbiType::Struct {
+                    path: "Pair".to_string(),
+                    fields: vec![
+                        ("a".to_string(), AbiType::Field),
+                        (
+                            "b".to_string(),
+                            AbiType::Array {
+                                length: 2,
+                                typ: Box::new(AbiType::Boolean),
+                            },
+                        ),
+                    ],
+                },
+                Type::tuple_of(vec![Type::field(), Type::u(1).array_of(2)]),
+            ),
+            // Nesting: array of tuples.
+            (
+                AbiType::Array {
+                    length: 3,
+                    typ: Box::new(AbiType::Tuple {
+                        fields: vec![
+                            AbiType::Field,
+                            AbiType::Integer {
+                                sign: Sign::Unsigned,
+                                width: 8,
+                            },
+                        ],
+                    }),
+                },
+                Type::tuple_of(vec![Type::field(), Type::u(8)]).array_of(3),
+            ),
+            // WitnessOf is transparent on the HLSSA side; the ABI never sees it.
+            (AbiType::Field, Type::witness_of(Type::field())),
+        ];
+        for (abi, hlssa) in &cases {
+            assert_eq!(
+                count_abi_type_elements(abi),
+                PrepareEntryPoint::flattened_field_count(hlssa),
+                "flattening mismatch for ABI type {abi:?} vs HLSSA type {hlssa:?}",
+            );
+        }
     }
 }

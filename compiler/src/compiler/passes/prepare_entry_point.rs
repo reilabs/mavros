@@ -345,7 +345,7 @@ impl PrepareEntryPoint {
         format!("reconstruct_{}", reconstruct_fns.len())
     }
 
-    fn flattened_field_count(typ: &Type) -> usize {
+    pub(crate) fn flattened_field_count(typ: &Type) -> usize {
         match &typ.expr {
             TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => 1,
             TypeExpr::Array(inner, size) => Self::flattened_field_count(inner) * size,

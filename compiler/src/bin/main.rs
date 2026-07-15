@@ -11,6 +11,7 @@ use mavros_compiler::compiler::Field;
 use mavros_compiler::compiler::codegen::CodeGenOptions;
 use mavros_compiler::compiler::codegen::hlssa_to_r1cs::R1CS;
 use mavros_compiler::compiler::codegen::llssa_to_llvm::WasmCompileOpts;
+use mavros_compiler::compiler::codegen::r1cs_compact;
 use mavros_compiler::driver::Driver;
 use mavros_compiler::plotting;
 
@@ -55,6 +56,11 @@ pub struct ProgramOptions {
     /// Emit standalone debug-information sidecars for VM and WASM artifacts.
     #[arg(long, global = true, action = clap::ArgAction::SetTrue)]
     pub include_debug_info: bool,
+
+    /// Run the report-only post-seal compaction analysis and log how many R1CS rows/columns a
+    /// compaction pass could remove.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub analyze_r1cs: bool,
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -209,6 +215,24 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         ..CodeGenOptions::default()
     };
     let source_path_root = debug_path_root(&driver, args.absolute_paths).map(Path::to_path_buf);
+    if args.analyze_r1cs {
+        let stats = r1cs_compact::analyze(&r1cs, driver.protected_r1cs_cols());
+        info!(
+            message = %"R1CS compaction opportunity",
+            total_rows = r1cs.constraints.len(),
+            algebraic_rows = stats.algebraic_rows,
+            removable_rows = stats.removable_rows,
+            algebraic_cols = stats.algebraic_cols,
+            removable_cols = stats.removable_cols,
+            duplicate_rows = stats.duplicate_rows,
+            tautology_rows = stats.tautology_rows,
+            pinned_cols = stats.pinned_cols,
+            merged_cols = stats.merged_cols,
+            eliminated_cols = stats.eliminated_cols,
+            linear_elim_rows = stats.linear_elim_rows,
+            rounds = stats.rounds,
+        );
+    }
     if args.pprint_r1cs {
         use std::io::Write;
         let mut r1cs_file =
