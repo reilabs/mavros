@@ -37,7 +37,13 @@ use mavros_wasm_layout::{
 };
 use noirc_abi::input_parser::Format;
 use rand::SeedableRng;
-use wasmtime::{Engine, Linker, Memory, Module, Store};
+use wasmtime::{Config, Engine, Linker, Memory, Module, Store, WasmBacktraceDetails};
+
+fn wasm_engine() -> wasmtime::Result<Engine> {
+    let mut config = Config::new();
+    config.wasm_backtrace_details(WasmBacktraceDetails::Enable);
+    Engine::new(&config)
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -139,6 +145,7 @@ fn emit(line: &str) {
 fn run_single(root: PathBuf, expect_failure: bool) {
     let checking_codegen = CodeGenOptions {
         check_constraints: true,
+        ..CodeGenOptions::default()
     };
 
     // 1. Compile
@@ -217,6 +224,8 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         }
     });
 
+    let source_path_root = driver.package_root().to_path_buf();
+
     // Load inputs (needed for witgen run)
     let ordered_params = load_inputs(&driver.package_root().join("Prover.toml"), &driver);
 
@@ -230,7 +239,8 @@ fn run_single(root: PathBuf, expect_failure: bool) {
                 emit("END:WITGEN_RUN:ok");
                 Some(result)
             }
-            Err(e) => {
+            Err(mut e) => {
+                e.relativize_source_paths(&source_path_root);
                 eprintln!("witgen run error: {e}");
                 emit("END:WITGEN_RUN:fail");
                 None
@@ -288,7 +298,8 @@ fn run_single(root: PathBuf, expect_failure: bool) {
                     emit("END:AD_RUN:ok");
                     Some((ad_coeffs, ad_a, ad_b, ad_c, ad_instrumenter))
                 }
-                Err(e) => {
+                Err(mut e) => {
+                    e.relativize_source_paths(&source_path_root);
                     eprintln!("AD run error: {e}");
                     emit("END:AD_RUN:fail");
                     None
@@ -324,7 +335,8 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         emit("START:WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.keep().join("program.wasm");
-        let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
+        let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build())
+            .with_debug_path_root(&source_path_root);
         match driver.compile_llvm_targets(
             false,
             r1cs,
@@ -567,7 +579,7 @@ fn run_wasm(
         vm_struct_size + witness_bytes + 3 * constraint_bytes + input_bytes + table_info_bytes;
 
     // Create wasmtime engine and store
-    let engine = Engine::default();
+    let engine = wasm_engine()?;
     let mut store = Store::new(&engine, ());
 
     // Load the WASM module
@@ -880,7 +892,7 @@ fn run_ad_wasm(
     let coeffs_bytes = (constraint_count * FIELD_SIZE) as u32;
     let our_data_size = vm_struct_size + da_bytes + db_bytes + dc_bytes + coeffs_bytes;
 
-    let engine = Engine::default();
+    let engine = wasm_engine()?;
     let mut store = Store::new(&engine, ());
 
     let wasm_bytes = fs::read(wasm_path)?;

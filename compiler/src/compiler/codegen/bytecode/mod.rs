@@ -12,11 +12,12 @@ use crate::{
         codegen::{
             CodeGenOptions,
             bytecode::layout::{
-                FrameLayouter, GlobalFrameLayouter, StructLayoutInterner, int_cell_count,
+                ConstantPoolInterner, FrameLayouter, GlobalFrameLayouter, StructLayoutInterner,
+                for_each_constant_word,
             },
         },
         ssa::{
-            BlockId, FunctionId, Instruction, Terminator, ValueId,
+            BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
                 self, BinaryArithOpKind, CmpKind, DMatrix, Endianness, HLBlock, HLFunction, HLSSA,
                 HLSSAConstantsSnapshot, LookupTarget, MAX_SUPPORTED_SIGNED_BITS, Radix, RefCountOp,
@@ -28,14 +29,25 @@ use crate::{
     vm::{self, bytecode},
 };
 
+fn vm_source_location(location: &SourceLocation) -> bytecode::SourceLocation {
+    bytecode::SourceLocation::new(
+        location.file.to_string(),
+        location.start.line,
+        location.start.column,
+    )
+}
+
 /// Materialize every constant `ValueId` referenced by `function` into the function's frame at
 /// entry.
 ///
-/// This can likely be improved in the future by handling constants specially in the VM, but for now
-/// this is the simplest solution that maintains semantic correctness.
+/// Multi-cell constants are interned into the program-global constant pool (`pool`) and loaded with
+/// a single `MovConstPool`, so one copy is shared across every function that references them.
+/// Single-cell scalars are spilled inline as a `MovConst`, which is already as compact as a pool
+/// load.
 fn materialize_constants(
     function: &HLFunction,
     constants: &HLSSAConstantsSnapshot,
+    pool: &mut ConstantPoolInterner,
     layouter: &mut FrameLayouter,
     emitter: &mut EmitterState,
 ) {
@@ -74,87 +86,58 @@ fn materialize_constants(
 
     for vid in referenced {
         let constant = constants.get(&vid).expect("vid is in constants").as_ref();
+        let cells = constant_cell_count(constant);
         let res = match constant {
             hlssa::Constant::U(size, _) => layouter.alloc_int(vid, *size),
             hlssa::Constant::I(size, _) => layouter.alloc_int(vid, *size),
             hlssa::Constant::Field(_) => layouter.alloc_field(vid),
-            hlssa::Constant::Blob(_) => {
-                layouter.alloc_long_data(vid, constant_cell_count(constant))
-            }
+            hlssa::Constant::Blob(_) => layouter.alloc_long_data(vid, cells),
             hlssa::Constant::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
         };
-        spill_constant_to_frame(constant, res, emitter);
-    }
-}
 
-fn constant_cell_count(value: &hlssa::Constant) -> usize {
-    match value {
-        hlssa::Constant::U(bits, _) => int_cell_count(*bits),
-        hlssa::Constant::I(bits, _) => {
-            assert!(
-                *bits <= MAX_SUPPORTED_SIGNED_BITS,
-                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-            );
-            1
+        // Multi-cell constants (fields, u128s, blobs) are interned into the program-global constant
+        // pool and loaded with a single `MovConstPool`, sharing one copy across every function that
+        // references them. Single-cell scalars stay inline: a `MovConst` is already as small as a
+        // pool load, so pooling them would only add indirection.
+        if cells >= 2 {
+            let pool_offset = pool.intern(vid, constant);
+            emitter.push_op(bytecode::OpCode::MovConstPool {
+                res,
+                pool_offset,
+                size: cells,
+            });
+        } else {
+            spill_constant_to_frame(constant, res, emitter);
         }
-        hlssa::Constant::Field(_) => bytecode::FELT_LIMBS,
-        hlssa::Constant::Blob(blob) => blob.elements.iter().map(constant_cell_count).sum(),
-        hlssa::Constant::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
     }
 }
 
+/// The number of `u64` cells `value` occupies once materialized — i.e. the number of words
+/// [`for_each_constant_word`] emits.
+///
+/// This is both the frame-slot size and the `mov_const_pool` memcpy size, so it is derived from the
+/// same visitor to keep them in lockstep.
+fn constant_cell_count(value: &hlssa::Constant) -> usize {
+    let mut count = 0usize;
+    for_each_constant_word(value, &mut |_| count += 1);
+    count
+}
+
+/// Spill `value` into `res` inline, one `MovConst` per word, in the layout defined by
+/// [`for_each_constant_word`] (the same layout the constant pool uses).
 fn spill_constant_to_frame(
     value: &hlssa::Constant,
     res: bytecode::FramePosition,
     emitter: &mut EmitterState,
 ) {
-    match value {
-        hlssa::Constant::U(size, val) => match size {
-            bits if *bits <= 64 => {
-                emitter.push_op(bytecode::OpCode::MovConst {
-                    res,
-                    val: *val as u64,
-                });
-            }
-            128 => {
-                emitter.push_op(bytecode::OpCode::MovConst {
-                    res,
-                    val: *val as u64,
-                });
-                emitter.push_op(bytecode::OpCode::MovConst {
-                    res: res.offset(1),
-                    val: (*val >> 64) as u64,
-                });
-            }
-            bits => panic!("unsupported unsigned integer width: {bits}"),
-        },
-        hlssa::Constant::I(size, val) => {
-            assert!(
-                *size <= MAX_SUPPORTED_SIGNED_BITS,
-                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-            );
-            emitter.push_op(bytecode::OpCode::MovConst {
-                res,
-                val: *val as u64,
-            });
-        }
-        hlssa::Constant::Field(val) => {
-            for i in 0..bytecode::FELT_LIMBS {
-                emitter.push_op(bytecode::OpCode::MovConst {
-                    res: res.offset(i as isize),
-                    val: val.0.0[i],
-                });
-            }
-        }
-        hlssa::Constant::Blob(blob) => {
-            let mut offset = 0usize;
-            for element in &blob.elements {
-                spill_constant_to_frame(element, res.offset(offset as isize), emitter);
-                offset += constant_cell_count(element);
-            }
-        }
-        hlssa::Constant::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
-    }
+    let mut offset = 0isize;
+    for_each_constant_word(value, &mut |word| {
+        emitter.push_op(bytecode::OpCode::MovConst {
+            res: res.offset(offset),
+            val: word,
+        });
+        offset += 1;
+    });
 }
 
 // CODE GENERATOR
@@ -173,6 +156,7 @@ impl CodeGen {
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
         let global_layouter = GlobalFrameLayouter::new(ssa);
         let struct_interner = StructLayoutInterner::new();
+        let mut const_pool = ConstantPoolInterner::new();
         let constants = ssa.const_snapshot();
 
         // Entry points are emitted first, in entry-table order; the remaining functions follow.
@@ -194,6 +178,7 @@ impl CodeGen {
                 type_info.get_function(function_id),
                 &global_layouter,
                 &constants,
+                &mut const_pool,
             );
             function_ids.insert(function_id, cur_fn_begin);
             cur_fn_begin += function.code.len();
@@ -225,6 +210,7 @@ impl CodeGen {
             entry_points: (0..entry_ids.len()).collect(),
             global_frame_size: global_layouter.total_size,
             struct_layouts: struct_interner.into_table(),
+            constant_pool: const_pool.into_pool(),
         }
     }
 
@@ -235,10 +221,16 @@ impl CodeGen {
         type_info: &FunctionTypeInfo,
         global_layouter: &GlobalFrameLayouter,
         constants: &HLSSAConstantsSnapshot,
+        pool: &mut ConstantPoolInterner,
     ) -> bytecode::Function {
         let mut layouter = FrameLayouter::new();
         let entry = function.get_entry();
-        let mut emitter = EmitterState::new();
+        let fallback_location = function
+            .get_entry()
+            .first_location()
+            .cloned()
+            .unwrap_or_else(|| SourceLocation::synthetic(function.get_name()));
+        let mut emitter = EmitterState::new(vm_source_location(&fallback_location));
 
         // Entry block params need to be allocated at the beginning of the frame (after return
         // address and return data pointer)
@@ -246,8 +238,7 @@ impl CodeGen {
             layouter.alloc_value(*param, tp);
         }
 
-        // TODO: Deal with constants better in the bytecode (#201)
-        materialize_constants(function, constants, &mut layouter, &mut emitter);
+        materialize_constants(function, constants, pool, &mut layouter, &mut emitter);
 
         self.run_block_body(
             function,
@@ -366,12 +357,13 @@ impl CodeGen {
             name: function.get_name().to_string(),
             frame_size: layouter.next_free,
             code: emitter.code,
+            source_locations: emitter.source_locations,
         }
     }
 
     fn run_block_body(
         &self,
-        _function: &HLFunction,
+        function: &HLFunction,
         block_id: BlockId,
         block: &HLBlock,
         type_info: &FunctionTypeInfo,
@@ -380,8 +372,15 @@ impl CodeGen {
         emitter: &mut EmitterState,
         global_layouter: &GlobalFrameLayouter,
     ) {
+        let block_location = block
+            .first_location()
+            .or_else(|| function.get_entry().first_location())
+            .cloned()
+            .unwrap_or_else(|| SourceLocation::synthetic(function.get_name()));
+        emitter.set_source_location(vm_source_location(&block_location));
         emitter.enter_block(block_id);
-        for instruction in block.get_instructions() {
+        for (instruction, source_location) in block.get_instructions_with_source_locations() {
+            emitter.set_source_location(vm_source_location(source_location));
             match instruction {
                 hlssa::OpCode::BinaryArithOp {
                     kind: BinaryArithOpKind::Add,
@@ -1674,14 +1673,18 @@ impl CodeGen {
 
 struct EmitterState {
     code: Vec<bytecode::OpCode>,
+    source_locations: Vec<bytecode::SourceLocation>,
+    current_source_location: bytecode::SourceLocation,
     block_entrances: HashMap<BlockId, usize>,
     block_exits: HashMap<BlockId, usize>,
 }
 
 impl EmitterState {
-    fn new() -> Self {
+    fn new(current_source_location: bytecode::SourceLocation) -> Self {
         Self {
             code: Vec::new(),
+            source_locations: Vec::new(),
+            current_source_location,
             block_entrances: HashMap::default(),
             block_exits: HashMap::default(),
         }
@@ -1689,6 +1692,12 @@ impl EmitterState {
 
     fn push_op(&mut self, op: bytecode::OpCode) {
         self.code.push(op);
+        self.source_locations
+            .push(self.current_source_location.clone());
+    }
+
+    fn set_source_location(&mut self, source_location: bytecode::SourceLocation) {
+        self.current_source_location = source_location;
     }
 
     fn enter_block(&mut self, block: BlockId) {
