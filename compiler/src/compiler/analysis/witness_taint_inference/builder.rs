@@ -419,17 +419,6 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
                 builder.value_position(*result),
                 builder.value_position(*slice),
             );
-
-            // Under witness control flow a conditional push leaves the appended elements
-            // witness-dependent.
-            for path in leaf_paths(&element_type) {
-                let written = builder
-                    .value_position(*result)
-                    .child(Descent::Elem)
-                    .extend(&path);
-                builder.add_cf_taint_to(&written, branch_conditions);
-            }
-            builder.add_cf_taint_to(&builder.value_position(*result), branch_conditions);
         }
         OpCode::SliceLen { result, slice } => {
             builder.graph.add_ge(
