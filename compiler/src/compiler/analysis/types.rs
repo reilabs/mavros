@@ -354,7 +354,7 @@ impl Types {
             OpCode::ArraySet {
                 result,
                 array,
-                index: _,
+                index,
                 value,
             } => {
                 let array_type = function_info.values.get(array).ok_or_else(|| {
@@ -364,9 +364,16 @@ impl Types {
                     .values
                     .get(value)
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+                let index_type = function_info.values.get(index).ok_or_else(|| {
+                    format!("Index value {:?} not found in type assignments", index)
+                })?;
 
                 let elem_type = array_type.get_array_element();
-                let result_elem_type = Type::join(&elem_type, value_type);
+                let result_elem_type = if index_type.is_witness_of() {
+                    push_witness_of_to_leaves(Type::join(&elem_type, value_type))
+                } else {
+                    Type::join(&elem_type, value_type)
+                };
                 let result_type = if result_elem_type == elem_type {
                     array_type.clone()
                 } else {
