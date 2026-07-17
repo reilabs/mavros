@@ -106,6 +106,19 @@ fn is_wl_slice(v: ValueId, affected: &HashMap<ValueId, Type>) -> bool {
     affected.get(&v).is_some_and(|pty| pty.is_tuple())
 }
 
+fn mk_slice_tuple(
+    physical: ValueId,
+    log_len: ValueId,
+    phys_ty: Type,
+    function: &mut HLFunction,
+    ssa: &mut HLSSA,
+    new_instrs: &mut Vec<LocatedOpCode>,
+    loc: SourceLocation,
+) -> ValueId {
+    let mut b = HLInstrBuilder::new(function, ssa, new_instrs, loc);
+    b.mk_tuple(vec![physical, log_len], vec![phys_ty, Type::u(32)])
+}
+
 fn materialize_pure_slice_tuple(
     slice: ValueId,
     type_info: &FunctionTypeInfo,
@@ -114,14 +127,9 @@ fn materialize_pure_slice_tuple(
     new_instrs: &mut Vec<LocatedOpCode>,
 ) -> ValueId {
     let phys_ty = type_info.get_value_type(slice).clone();
-    let mut b = HLInstrBuilder::new(
-        function,
-        ssa,
-        new_instrs,
-        SourceLocation::synthetic("purify_witness_slices"),
-    );
-    let ll = b.slice_len(slice);
-    b.mk_tuple(vec![slice, ll], vec![phys_ty, Type::u(32)])
+    let loc = SourceLocation::synthetic("purify_witness_slices");
+    let ll = HLInstrBuilder::new(function, ssa, new_instrs, loc.clone()).slice_len(slice);
+    mk_slice_tuple(slice, ll, phys_ty, function, ssa, new_instrs, loc)
 }
 
 fn rewrite_function(
@@ -214,11 +222,15 @@ fn rewrite_function(
                             (physical, b.add(base_len, bump))
                         }
                     };
-                    let t = {
-                        let mut b =
-                            HLInstrBuilder::new(function, ssa, &mut new_instrs, loc.clone());
-                        b.mk_tuple(vec![physical, log_len], vec![phys_ty, Type::u(32)])
-                    };
+                    let t = mk_slice_tuple(
+                        physical,
+                        log_len,
+                        phys_ty,
+                        function,
+                        ssa,
+                        &mut new_instrs,
+                        loc,
+                    );
                     replacement_tuple_map.insert(result, t);
                 }
 
@@ -262,11 +274,15 @@ fn rewrite_function(
                         b.assert_cmp(CmpKind::Lt, index, ll);
                         (b.array_set(p, index, value), ll)
                     };
-                    let t2 = {
-                        let mut b =
-                            HLInstrBuilder::new(function, ssa, &mut new_instrs, loc.clone());
-                        b.mk_tuple(vec![physical, log_len], vec![phys_ty, Type::u(32)])
-                    };
+                    let t2 = mk_slice_tuple(
+                        physical,
+                        log_len,
+                        phys_ty,
+                        function,
+                        ssa,
+                        &mut new_instrs,
+                        loc,
+                    );
                     replacement_tuple_map.insert(result, t2);
                 }
 
