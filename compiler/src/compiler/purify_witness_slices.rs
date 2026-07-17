@@ -9,6 +9,7 @@ use crate::{
             witness_info::{FunctionWitnessType, WitnessShape},
             witness_taint_inference::WitnessTaintInference,
         },
+        pass_manager::{AnalysisStore, Pass},
         ssa::{
             BlockId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
@@ -25,13 +26,21 @@ impl PurifyWitnessSlices {
     pub fn new() -> Self {
         Self {}
     }
+}
 
-    pub fn run(&self, ssa: HLSSA, wti: &WitnessTaintInference) -> (HLSSA, bool) {
-        let flow = FlowAnalysis::run(&ssa);
-        let types = Types::new().run(&ssa, &flow);
+impl Pass for PurifyWitnessSlices {
+    fn name(&self) -> &'static str {
+        "purify_witness_slices"
+    }
 
-        let mut ssa = ssa;
-        let mut changed = false;
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+        let flow = FlowAnalysis::run(ssa);
+        let mut wti = WitnessTaintInference::new();
+        wti.run(ssa, &flow);
+
+        let flow = FlowAnalysis::run(ssa);
+        let types = Types::new().run(ssa, &flow);
+
         let function_ids: Vec<_> = ssa.get_function_ids().collect();
         for function_id in function_ids {
             if !types.has_function(function_id) {
@@ -45,18 +54,15 @@ impl PurifyWitnessSlices {
             if affected.is_empty() {
                 continue;
             }
-            changed = true;
 
             let block_order: Vec<BlockId> = flow
                 .get_function_cfg(function_id)
                 .get_domination_pre_order()
                 .collect();
             let mut function = ssa.take_function(function_id);
-            rewrite_function(&mut function, &mut ssa, type_info, &affected, &block_order);
+            rewrite_function(&mut function, ssa, type_info, &affected, &block_order);
             ssa.put_function(function_id, function);
         }
-
-        (ssa, changed)
     }
 }
 
