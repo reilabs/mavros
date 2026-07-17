@@ -2262,6 +2262,7 @@ dependencies = [
  "mavros-artifacts",
  "mavros-opcode-gen",
  "serde",
+ "serde_json",
  "tracing",
 ]
 

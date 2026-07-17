@@ -213,7 +213,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
 
     // 3. Compile bytecode: a single binary holding both the witgen and AD entry points, plus its
     //    standalone debug sidecar (depends on R1CS).
-    let program_binary = r1cs.as_ref().and_then(|_| {
+    let program_artifact = r1cs.as_ref().and_then(|_| {
         emit("START:COMPILE");
         match driver.compile_bytecode_artifact(checking_codegen) {
             Ok(artifact) => {
@@ -227,7 +227,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
                 .expect("VM debug info must serialize")
                 .len();
                 emit(&format!("END:COMPILE:ok:{bytes}:{debug_bytes}"));
-                Some(artifact.binary)
+                Some(artifact)
             }
             Err(_) => {
                 emit("END:COMPILE:fail");
@@ -242,11 +242,17 @@ fn run_single(root: PathBuf, expect_failure: bool) {
     let ordered_params = load_inputs(&driver.package_root().join("Prover.toml"), &driver);
 
     // 4. Run witgen  (depends on COMPILE)
-    let witgen_result = program_binary.as_ref().and_then(|binary| {
+    let witgen_result = program_artifact.as_ref().and_then(|artifact| {
         emit("START:WITGEN_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-        match interpreter::run(binary, r1cs.witness_layout, r1cs.constraints_layout, params) {
+        match interpreter::run(
+            &artifact.binary,
+            r1cs.witness_layout,
+            r1cs.constraints_layout,
+            params,
+            artifact.debug_info.clone(),
+        ) {
             Ok(result) => {
                 emit("END:WITGEN_RUN:ok");
                 Some(result)
@@ -290,10 +296,10 @@ fn run_single(root: PathBuf, expect_failure: bool) {
 
     // 7. Run AD  (depends on COMPILE, independent of witgen). Skipped for expected-failure
     //    tests, so the native AD steps report as not-applicable.
-    let ad_result = program_binary
+    let ad_result = program_artifact
         .as_ref()
         .filter(|_| !expect_failure)
-        .and_then(|binary| {
+        .and_then(|artifact| {
             emit("START:AD_RUN");
             let r1cs = r1cs.as_ref().unwrap();
             let mut rng = rand::rngs::StdRng::seed_from_u64(42);
@@ -301,10 +307,11 @@ fn run_single(root: PathBuf, expect_failure: bool) {
                 .map(|_| ark_bn254::Fr::rand(&mut rng))
                 .collect();
             match interpreter::run_ad(
-                binary,
+                &artifact.binary,
                 &ad_coeffs,
                 r1cs.witness_layout,
                 r1cs.constraints_layout,
+                artifact.debug_info.clone(),
             ) {
                 Ok((ad_a, ad_b, ad_c, ad_instrumenter)) => {
                     emit("END:AD_RUN:ok");
@@ -1783,6 +1790,8 @@ const STATUS_COLUMNS: &[&str] = &[
     "AD WASM No Leak",
 ];
 
+/// Frozen schema for baselines generated before debug-sidecar size columns were added. Do not
+/// modify it; add a new compatibility schema if the report layout changes again.
 const LEGACY_STATUS_COLUMNS: &[&str] = &[
     "Test",
     "Compiled",
@@ -2193,8 +2202,11 @@ impl MetricChanges {
 // points.
 fn render_markdown(results: &[TestResult]) -> String {
     let mut md = String::new();
-    md.push_str("| Test | Compiled | R1CS | Rows | Cols | Bytecode Size | VM Debug Sidecar Size | WASM Size | WASM Debug Sidecar Size | Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Run VM | AD Correct | AD No Leak | WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak | AD WASM Run | AD WASM Correct | AD WASM No Leak |\n");
-    md.push_str("|------|----------|------|------|------|---------------|-----------------------|-----------|-------------------------|---------|---------------|----------------|----------------|-----------|------------|------------|--------------|-----------------|---------------------|---------------------|-------------|---------------------|---------------------|\n");
+    md.push_str(&format!("| {} |\n", STATUS_COLUMNS.join(" | ")));
+    md.push_str(&format!(
+        "| {} |\n",
+        vec!["---"; STATUS_COLUMNS.len()].join(" | ")
+    ));
 
     for r in results {
         let s = |key: &str| r.steps.get(key).copied().unwrap_or(Status::Skip).emoji();

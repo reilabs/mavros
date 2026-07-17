@@ -3,7 +3,7 @@
 use crate::{ConstraintsLayout, Field, TableKind, WitnessLayout};
 use ark_ff::{AdditiveGroup as _, BigInteger as _};
 use mavros_opcode_gen::interpreter;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::array::{BoxedLayout, BoxedValue, StructDescriptor};
 use crate::interpreter::{Frame, Handler};
@@ -31,6 +31,15 @@ impl SourceLocation {
             line,
             column,
         }
+    }
+}
+
+pub(crate) fn relativize_source_path(path: &mut String, root: &std::path::Path) {
+    if path.starts_with('<') && path.ends_with('>') {
+        return;
+    }
+    if let Ok(relative) = std::path::Path::new(path.as_str()).strip_prefix(root) {
+        *path = relative.to_string_lossy().into_owned();
     }
 }
 
@@ -62,11 +71,38 @@ impl Display for StackFrame {
 /// This is serialized separately from the executable bytecode so production programs never pay
 /// for source paths and locations. A location applies from its `code_offset` up to the next
 /// location in the same function.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub const DEBUG_INFO_FORMAT_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DebugInfo {
-    pub format_version: u32,
+    #[serde(deserialize_with = "deserialize_debug_info_format_version")]
+    format_version: u32,
+    pub files: Vec<String>,
     pub functions: Vec<DebugFunction>,
+}
+
+fn deserialize_debug_info_format_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let version = u32::deserialize(deserializer)?;
+    if version != DEBUG_INFO_FORMAT_VERSION {
+        return Err(serde::de::Error::custom(format!(
+            "unsupported VM debug info format version {version}; expected {DEBUG_INFO_FORMAT_VERSION}"
+        )));
+    }
+    Ok(version)
+}
+
+impl Default for DebugInfo {
+    fn default() -> Self {
+        Self {
+            format_version: DEBUG_INFO_FORMAT_VERSION,
+            files: Vec::new(),
+            functions: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,22 +117,20 @@ pub struct DebugFunction {
 #[serde(rename_all = "camelCase")]
 pub struct DebugLocation {
     pub code_offset: usize,
-    pub location: SourceLocation,
+    pub file_index: usize,
+    pub line: u64,
+    pub column: u64,
 }
 
 impl DebugInfo {
+    pub fn format_version(&self) -> u32 {
+        self.format_version
+    }
+
     /// Strip a common root from real source paths while preserving synthetic `<...>` locations.
     pub fn relativize_source_paths(&mut self, root: &std::path::Path) {
-        for function in &mut self.functions {
-            for location in &mut function.locations {
-                let source = &mut location.location;
-                if source.file.starts_with('<') && source.file.ends_with('>') {
-                    continue;
-                }
-                if let Ok(relative) = std::path::Path::new(&source.file).strip_prefix(root) {
-                    source.file = relative.to_string_lossy().into_owned();
-                }
-            }
+        for file in &mut self.files {
+            relativize_source_path(file, root);
         }
     }
 
@@ -113,9 +147,14 @@ impl DebugInfo {
             .partition_point(|location| location.code_offset <= code_offset)
             .checked_sub(1)?;
 
+        let location = &function.locations[location_index];
         Some(StackFrame {
             function: function.name.clone(),
-            location: function.locations[location_index].location.clone(),
+            location: SourceLocation::new(
+                self.files.get(location.file_index)?.clone(),
+                location.line,
+                location.column,
+            ),
         })
     }
 }
@@ -2464,25 +2503,10 @@ fn decode_struct_field(word: u64) -> (u32, bool) {
     (size, refcounted)
 }
 
-const DEBUG_INFO_MAGIC: u64 = u64::from_le_bytes(*b"MAVROSDB");
-
-fn decode_string(program: &[u64], offset: &mut usize) -> String {
-    let byte_len = program[*offset] as usize;
-    *offset += 1;
-    let word_len = byte_len.div_ceil(8);
-    let mut bytes = Vec::with_capacity(word_len * 8);
-    for word in &program[*offset..*offset + word_len] {
-        bytes.extend_from_slice(&word.to_le_bytes());
-    }
-    *offset += word_len;
-    bytes.truncate(byte_len);
-    String::from_utf8(bytes).expect("source-map strings must be UTF-8")
-}
-
 impl Program {
     /// Serialize executable VM bytecode. Debug information is never embedded in this output.
     pub fn to_binary(&self) -> Vec<u64> {
-        self.to_binary_and_debug_info().0
+        self.to_binary_impl(false).0
     }
 
     /// Backwards-compatible alias for [`Program::to_binary`].
@@ -2492,6 +2516,14 @@ impl Program {
 
     /// Serialize compact executable bytecode and construct its standalone source map.
     pub fn to_binary_and_debug_info(&self) -> (Vec<u64>, DebugInfo) {
+        let (binary, debug_info) = self.to_binary_impl(true);
+        (
+            binary,
+            debug_info.expect("debug info was requested while serializing VM bytecode"),
+        )
+    }
+
+    fn to_binary_impl(&self, include_debug_info: bool) -> (Vec<u64>, Option<DebugInfo>) {
         let mut binary = Vec::new();
         // Layout-table header: [num_descriptors, ...descriptors...].
         // Each descriptor: [num_fields, field_0_packed, field_1_packed, ...].
@@ -2520,37 +2552,58 @@ impl Program {
         let mut positions = vec![];
         let mut jumps_to_fix: Vec<(usize, isize)> = vec![];
         let mut function_markers = vec![];
-        let mut debug_functions = Vec::with_capacity(self.functions.len());
+        let mut debug_info = include_debug_info.then(|| DebugInfo {
+            functions: Vec::with_capacity(self.functions.len()),
+            ..DebugInfo::default()
+        });
 
         for function in &self.functions {
-            assert_eq!(
-                function.code.len(),
-                function.source_locations.len(),
-                "every VM opcode must have a source location"
-            );
+            if include_debug_info {
+                assert_eq!(
+                    function.code.len(),
+                    function.source_locations.len(),
+                    "every VM opcode must have a source location"
+                );
+            }
             // Function marker
             function_markers.push(binary.len());
             let function_offset = binary.len();
             binary.push(u64::MAX);
             binary.push(function.frame_size as u64);
 
-            let mut locations = Vec::new();
+            let mut locations = debug_info.as_ref().map(|_| Vec::new());
             for (opcode_index, op) in function.code.iter().enumerate() {
-                let location = &function.source_locations[opcode_index];
-                if opcode_index == 0 || function.source_locations[opcode_index - 1] != *location {
-                    locations.push(DebugLocation {
-                        code_offset: binary.len(),
-                        location: location.clone(),
-                    });
+                if let Some(locations) = &mut locations {
+                    let location = &function.source_locations[opcode_index];
+                    if opcode_index == 0 || function.source_locations[opcode_index - 1] != *location
+                    {
+                        let debug_info = debug_info.as_mut().unwrap();
+                        let file_index = debug_info
+                            .files
+                            .iter()
+                            .position(|file| file == &location.file)
+                            .unwrap_or_else(|| {
+                                debug_info.files.push(location.file.clone());
+                                debug_info.files.len() - 1
+                            });
+                        locations.push(DebugLocation {
+                            code_offset: binary.len(),
+                            file_index,
+                            line: location.line,
+                            column: location.column,
+                        });
+                    }
                 }
                 positions.push(binary.len());
                 op.to_binary(&mut binary, &mut jumps_to_fix);
             }
-            debug_functions.push(DebugFunction {
-                name: function.name.clone(),
-                code_offset: function_offset,
-                locations,
-            });
+            if let Some(locations) = locations {
+                debug_info.as_mut().unwrap().functions.push(DebugFunction {
+                    name: function.name.clone(),
+                    code_offset: function_offset,
+                    locations,
+                });
+            }
         }
 
         for (slot, fn_idx) in self.entry_points.iter().enumerate() {
@@ -2562,13 +2615,7 @@ impl Program {
             binary[jump_position] =
                 (target_pos as isize - (jump_position as isize + add_offset)) as u64;
         }
-        (
-            binary,
-            DebugInfo {
-                format_version: 1,
-                functions: debug_functions,
-            },
-        )
+        (binary, debug_info)
     }
 }
 
@@ -2582,7 +2629,6 @@ pub struct ProgramHeader {
     /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], ...). The entry's frame size lives at `offset + 1` and
     /// its first opcode at `offset + 2`.
     pub entry_points: Vec<usize>,
-    pub debug_info: DebugInfo,
     /// Word offset of the first function marker, i.e. where the opcode stream begins.
     pub code_start: usize,
 }
@@ -2599,53 +2645,12 @@ pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
     let entry_points: Vec<usize> = (0..num_entries)
         .map(|i| program[off + 2 + i] as usize)
         .collect();
-    let mut code_start = off + 2 + num_entries;
-    let debug_info = if program.get(code_start) == Some(&DEBUG_INFO_MAGIC) {
-        code_start += 1;
-        let num_files = program[code_start] as usize;
-        code_start += 1;
-        let files: Vec<String> = (0..num_files)
-            .map(|_| decode_string(program, &mut code_start))
-            .collect();
-        let num_functions = program[code_start] as usize;
-        code_start += 1;
-        let mut functions = Vec::with_capacity(num_functions);
-        for _ in 0..num_functions {
-            let name = decode_string(program, &mut code_start);
-            let function_offset = program[code_start] as usize;
-            let num_locations = program[code_start + 1] as usize;
-            code_start += 2;
-            let mut locations = Vec::with_capacity(num_locations);
-            for _ in 0..num_locations {
-                let location_offset = program[code_start] as usize;
-                let file_index = program[code_start + 1] as usize;
-                let line = program[code_start + 2];
-                let column = program[code_start + 3];
-                code_start += 4;
-                locations.push(DebugLocation {
-                    code_offset: location_offset,
-                    location: SourceLocation::new(files[file_index].clone(), line, column),
-                });
-            }
-            functions.push(DebugFunction {
-                name,
-                code_offset: function_offset,
-                locations,
-            });
-        }
-        DebugInfo {
-            format_version: 1,
-            functions,
-        }
-    } else {
-        DebugInfo::default()
-    };
+    let code_start = off + 2 + num_entries;
     ProgramHeader {
         struct_layouts,
         constant_pool,
         global_frame_size,
         entry_points,
-        debug_info,
         code_start,
     }
 }
@@ -2750,14 +2755,13 @@ mod tests {
     }
 
     #[test]
-    fn binaries_without_debug_header_still_parse() {
+    fn compact_binary_header_parses_without_debug_metadata() {
         // Empty header: no struct layouts, constants, globals, or entries, then code starts.
         let binary = [0, 0, 0, 0, u64::MAX, 0];
         let header = parse_program_header(&binary);
 
         assert_eq!(header.code_start, 4);
         assert!(header.constant_pool.is_empty());
-        assert!(header.debug_info.functions.is_empty());
     }
 
     #[test]
@@ -2780,16 +2784,53 @@ mod tests {
 
         assert_eq!(binary, program.to_binary_without_debug_info());
         assert_eq!(binary, program.to_binary());
-        assert!(
-            parse_program_header(&binary)
-                .debug_info
-                .functions
-                .is_empty()
-        );
-        assert_eq!(debug_info.format_version, 1);
+        assert_eq!(debug_info.format_version(), DEBUG_INFO_FORMAT_VERSION);
+        assert_eq!(debug_info.files, vec!["src/main.nr"]);
         assert_eq!(debug_info.functions.len(), 1);
         assert_eq!(debug_info.functions[0].name, "main");
         assert_eq!(debug_info.functions[0].locations.len(), 1);
+        assert_eq!(debug_info.functions[0].locations[0].file_index, 0);
         assert_eq!(parse_program_header(&binary).entry_points.len(), 1);
+    }
+
+    #[test]
+    fn debug_info_serialization_interns_files_and_validates_the_version() {
+        let source_location = location("shared", 10);
+        let program = Program {
+            functions: vec![Function {
+                name: "main".to_string(),
+                frame_size: 3,
+                code: vec![OpCode::Nop {}, OpCode::Ret {}],
+                source_locations: vec![
+                    source_location.clone(),
+                    SourceLocation::new(source_location.file.clone(), 11, 7),
+                ],
+            }],
+            entry_points: vec![0],
+            global_frame_size: 0,
+            struct_layouts: Vec::new(),
+            constant_pool: Vec::new(),
+        };
+
+        let (_, debug_info) = program.to_binary_and_debug_info();
+        assert_eq!(debug_info.files, vec!["src/shared.nr"]);
+        assert!(
+            debug_info.functions[0]
+                .locations
+                .iter()
+                .all(|location| location.file_index == 0)
+        );
+
+        let json = serde_json::to_string(&debug_info).unwrap();
+        assert_eq!(json.matches("src/shared.nr").count(), 1);
+        let unsupported = json.replace(
+            &format!("\"formatVersion\":{DEBUG_INFO_FORMAT_VERSION}"),
+            "\"formatVersion\":2",
+        );
+        assert!(serde_json::from_str::<DebugInfo>(&unsupported).is_err());
+        assert_eq!(
+            DebugInfo::default().format_version(),
+            DEBUG_INFO_FORMAT_VERSION
+        );
     }
 }

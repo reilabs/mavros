@@ -8,7 +8,7 @@ use crate::{
     abi_helpers::ordered_params_from_btreemap,
     compiler::{Field, codegen::hlssa_to_r1cs::R1CS},
     driver::Driver,
-    vm::interpreter,
+    vm::{bytecode::DebugInfo, interpreter},
 };
 use mavros_artifacts::InputValueOrdered;
 use noirc_abi::input_parser::Format;
@@ -54,17 +54,9 @@ pub fn run_witgen_from_binary(
     binary: &mut [u64],
     r1cs: &R1CS,
     params: &[InputValueOrdered],
+    debug_info: Option<DebugInfo>,
 ) -> Result<interpreter::WitgenResult, interpreter::TrapError> {
-    interpreter::run(binary, r1cs.witness_layout, r1cs.constraints_layout, params)
-}
-
-pub fn run_witgen_from_binary_with_debug_info(
-    binary: &mut [u64],
-    r1cs: &R1CS,
-    params: &[InputValueOrdered],
-    debug_info: crate::vm::bytecode::DebugInfo,
-) -> Result<interpreter::WitgenResult, interpreter::TrapError> {
-    interpreter::run_with_debug_info(
+    interpreter::run(
         binary,
         r1cs.witness_layout,
         r1cs.constraints_layout,
@@ -79,8 +71,15 @@ pub fn run_witgen_phase1(
     binary: &mut [u64],
     r1cs: &R1CS,
     params: &[InputValueOrdered],
+    debug_info: Option<DebugInfo>,
 ) -> Result<interpreter::Phase1Result, interpreter::TrapError> {
-    interpreter::run_phase1(binary, r1cs.witness_layout, r1cs.constraints_layout, params)
+    interpreter::run_phase1(
+        binary,
+        r1cs.witness_layout,
+        r1cs.constraints_layout,
+        params,
+        debug_info,
+    )
 }
 
 /// Phase 2: given real Fiat-Shamir challenges, complete witness generation.
@@ -117,6 +116,7 @@ pub fn run_ad_from_binary(
     binary: &mut [u64],
     r1cs: &R1CS,
     coeffs: &[Field],
+    debug_info: Option<DebugInfo>,
 ) -> Result<
     (
         Vec<Field>,
@@ -126,24 +126,7 @@ pub fn run_ad_from_binary(
     ),
     interpreter::TrapError,
 > {
-    interpreter::run_ad(binary, coeffs, r1cs.witness_layout, r1cs.constraints_layout)
-}
-
-pub fn run_ad_from_binary_with_debug_info(
-    binary: &mut [u64],
-    r1cs: &R1CS,
-    coeffs: &[Field],
-    debug_info: crate::vm::bytecode::DebugInfo,
-) -> Result<
-    (
-        Vec<Field>,
-        Vec<Field>,
-        Vec<Field>,
-        crate::vm::bytecode::AllocationInstrumenter,
-    ),
-    interpreter::TrapError,
-> {
-    interpreter::run_ad_with_debug_info(
+    interpreter::run_ad(
         binary,
         coeffs,
         r1cs.witness_layout,

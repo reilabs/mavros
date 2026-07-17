@@ -248,10 +248,7 @@ impl TrapError {
 
     pub fn relativize_source_paths(&mut self, root: &std::path::Path) {
         for frame in &mut self.stack_trace {
-            let path = std::path::Path::new(&frame.location.file);
-            if let Ok(relative) = path.strip_prefix(root) {
-                frame.location.file = relative.to_string_lossy().into_owned();
-            }
+            bytecode::relativize_source_path(&mut frame.location.file, root);
         }
     }
 }
@@ -308,42 +305,10 @@ pub fn run_phase1(
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
     ordered_inputs: &[InputValueOrdered],
-) -> Result<Phase1Result, TrapError> {
-    run_phase1_impl(
-        program,
-        witness_layout,
-        constraints_layout,
-        ordered_inputs,
-        None,
-    )
-}
-
-/// Run phase 1 with source metadata loaded from a standalone debug sidecar.
-pub fn run_phase1_with_debug_info(
-    program: &[u64],
-    witness_layout: WitnessLayout,
-    constraints_layout: ConstraintsLayout,
-    ordered_inputs: &[InputValueOrdered],
-    debug_info: bytecode::DebugInfo,
-) -> Result<Phase1Result, TrapError> {
-    run_phase1_impl(
-        program,
-        witness_layout,
-        constraints_layout,
-        ordered_inputs,
-        Some(debug_info),
-    )
-}
-
-fn run_phase1_impl(
-    program: &[u64],
-    witness_layout: WitnessLayout,
-    constraints_layout: ConstraintsLayout,
-    ordered_inputs: &[InputValueOrdered],
-    external_debug_info: Option<bytecode::DebugInfo>,
+    debug_info: Option<bytecode::DebugInfo>,
 ) -> Result<Phase1Result, TrapError> {
     let header = parse_program_header(program);
-    let debug_info = external_debug_info.unwrap_or_else(|| header.debug_info.clone());
+    let debug_info = debug_info.unwrap_or_default();
     let entry = *header
         .entry_points
         .get(ENTRY_WITGEN)
@@ -708,25 +673,9 @@ pub fn run(
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
     ordered_inputs: &[InputValueOrdered],
+    debug_info: Option<bytecode::DebugInfo>,
 ) -> Result<WitgenResult, TrapError> {
-    let phase1 = run_phase1(program, witness_layout, constraints_layout, ordered_inputs)?;
-
-    Ok(run_phase2_with_fake_challenges(
-        phase1,
-        witness_layout,
-        constraints_layout,
-    ))
-}
-
-/// Execute witness generation with source metadata loaded from a standalone debug sidecar.
-pub fn run_with_debug_info(
-    program: &[u64],
-    witness_layout: WitnessLayout,
-    constraints_layout: ConstraintsLayout,
-    ordered_inputs: &[InputValueOrdered],
-    debug_info: bytecode::DebugInfo,
-) -> Result<WitgenResult, TrapError> {
-    let phase1 = run_phase1_with_debug_info(
+    let phase1 = run_phase1(
         program,
         witness_layout,
         constraints_layout,
@@ -747,36 +696,10 @@ pub fn run_ad(
     coeffs: &[Field],
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
-) -> Result<(Vec<Field>, Vec<Field>, Vec<Field>, AllocationInstrumenter), TrapError> {
-    run_ad_impl(program, coeffs, witness_layout, constraints_layout, None)
-}
-
-/// Execute AD with source metadata loaded from a standalone debug sidecar.
-pub fn run_ad_with_debug_info(
-    program: &[u64],
-    coeffs: &[Field],
-    witness_layout: WitnessLayout,
-    constraints_layout: ConstraintsLayout,
-    debug_info: bytecode::DebugInfo,
-) -> Result<(Vec<Field>, Vec<Field>, Vec<Field>, AllocationInstrumenter), TrapError> {
-    run_ad_impl(
-        program,
-        coeffs,
-        witness_layout,
-        constraints_layout,
-        Some(debug_info),
-    )
-}
-
-fn run_ad_impl(
-    program: &[u64],
-    coeffs: &[Field],
-    witness_layout: WitnessLayout,
-    constraints_layout: ConstraintsLayout,
-    external_debug_info: Option<bytecode::DebugInfo>,
+    debug_info: Option<bytecode::DebugInfo>,
 ) -> Result<(Vec<Field>, Vec<Field>, Vec<Field>, AllocationInstrumenter), TrapError> {
     let header = parse_program_header(program);
-    let debug_info = external_debug_info.unwrap_or_else(|| header.debug_info.clone());
+    let debug_info = debug_info.unwrap_or_default();
     let entry = *header
         .entry_points
         .get(ENTRY_AD)

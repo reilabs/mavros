@@ -247,18 +247,15 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let mut binary = artifact.binary;
     let vm_debug_info = artifact.debug_info;
 
-    let witgen_result = match vm_debug_info.clone() {
-        Some(debug_info) => {
-            api::run_witgen_from_binary_with_debug_info(&mut binary, &r1cs, &params, debug_info)
-        }
-        None => api::run_witgen_from_binary(&mut binary, &r1cs, &params),
-    }
-    .map_err(|mut error| {
-        if let Some(root) = &source_path_root {
-            error.relativize_source_paths(root);
-        }
-        error
-    })?;
+    let witgen_result =
+        api::run_witgen_from_binary(&mut binary, &r1cs, &params, vm_debug_info.clone()).map_err(
+            |mut error| {
+                if let Some(root) = &source_path_root {
+                    error.relativize_source_paths(root);
+                }
+                error
+            },
+        )?;
 
     let correct = api::check_witgen(&r1cs, &witgen_result);
     if !correct {
@@ -320,12 +317,8 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
 
     let ad_coeffs: Vec<Field> = api::random_ad_coeffs(&r1cs);
 
-    let (ad_a, ad_b, ad_c, ad_instrumenter) = match vm_debug_info {
-        Some(debug_info) => {
-            api::run_ad_from_binary_with_debug_info(&mut binary, &r1cs, &ad_coeffs, debug_info)
-        }
-        None => api::run_ad_from_binary(&mut binary, &r1cs, &ad_coeffs),
-    }?;
+    let (ad_a, ad_b, ad_c, ad_instrumenter) =
+        api::run_ad_from_binary(&mut binary, &r1cs, &ad_coeffs, vm_debug_info)?;
 
     let leftover_memory = plotting::plot_memory_chart(
         &ad_instrumenter,
