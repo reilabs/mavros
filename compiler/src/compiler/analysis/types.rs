@@ -439,7 +439,7 @@ impl Types {
                 // If cond is WitnessOf and alternatives are not already WitnessOf,
                 // the result is WitnessOf(alt_type). Otherwise result = alt_type.
                 // Exception: a slice select keeps its type as it was purified in a previous pass
-                let is_slice = matches!(alt_type.expr, TypeExpr::Slice { .. });
+                let is_slice = alt_type.is_slice();
                 let result_type =
                     if cond_type.is_witness_of() && !alt_type.is_witness_of() && !is_slice {
                         Type::witness_of(alt_type)
