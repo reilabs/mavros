@@ -12,7 +12,7 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            CastTarget, OpCode, SequenceTargetType, SliceOpDir, Type, TypeExpr,
+            CastTarget, OpCode, SequenceTargetType, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -238,22 +238,10 @@ impl LowerWitnessArrayOps {
 
         let updated = if result_type.is_slice() {
             let slice_len = b.slice_len(arr); // Will fold to const
-            let zero = b.u_const(32, 0);
-            let one = b.u_const(32, 1);
             let empty = b.mk_seq(vec![], SequenceTargetType::Slice, result_elem_type.clone());
-            let results = b.build_loop(
-                vec![(zero, Type::u(32)), (empty, result_type.clone())],
-                |hb, params| hb.lt(params[0], slice_len),
-                |bb, params| {
-                    let i = params[0];
-                    let acc = params[1];
-                    let elem = elem_at(bb, i);
-                    let acc2 = bb.slice_push(acc, vec![elem], SliceOpDir::Back);
-                    let i = bb.add(i, one);
-                    vec![i, acc2]
-                },
-            );
-            results[1]
+            b.build_slice_extend_loop(slice_len, (empty, result_type.clone()), |b, i| {
+                elem_at(b, i)
+            })
         } else {
             let length = array_len(&result_type, "ArraySet result");
             b.build_array_loop(length, result_elem_type.clone(), |b, i| elem_at(b, i))

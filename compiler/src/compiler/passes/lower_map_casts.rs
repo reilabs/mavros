@@ -18,7 +18,7 @@ use crate::compiler::{
     ssa::{
         BlockId, ValueId,
         hlssa::{
-            CastTarget, HLSSA, OpCode, SequenceTargetType, SliceOpDir, Type, TypeExpr,
+            CastTarget, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
         },
     },
@@ -136,20 +136,10 @@ fn lower_map(
             let elem_tgt = inner.result_type(elem_src);
             let len = e.slice_len(value);
             let empty = e.mk_seq(Vec::new(), SequenceTargetType::Slice, elem_tgt.clone());
-            let const_0 = e.u_const(32, 0);
-            let const_1 = e.u_const(32, 1);
-            let results = e.build_loop(
-                vec![(const_0, Type::u(32)), (empty, elem_tgt.slice_of())],
-                |b, params| b.lt(params[0], len),
-                |e, params| {
-                    let elem = e.array_get(value, params[0]);
-                    let converted = apply_elem_cast(e, elem, elem_src, inner);
-                    let pushed = e.slice_push(params[1], vec![converted], SliceOpDir::Back);
-                    let next_i = e.add(params[0], const_1);
-                    vec![next_i, pushed]
-                },
-            );
-            results[1]
+            e.build_slice_extend_loop(len, (empty, elem_tgt.slice_of()), |e, i| {
+                let elem = e.array_get(value, i);
+                apply_elem_cast(e, elem, elem_src, inner)
+            })
         }
         other => panic!("Map cast over non-sequence type {:?}", other),
     }

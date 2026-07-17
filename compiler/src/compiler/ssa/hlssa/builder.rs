@@ -764,4 +764,29 @@ impl HLBlockEmitter<'_> {
         // Skip index, return accumulator results
         results[1..].to_vec()
     }
+
+    /// Extend a slice with a counted SSA loop, one `push_back` per iteration:
+    /// `for i in acc.len()..end { acc = acc.push_back(body(i)) }`.
+    pub fn build_slice_extend_loop(
+        &mut self,
+        end: ValueId,
+        acc: (ValueId, Type),
+        body: impl FnOnce(&mut Self, ValueId) -> ValueId,
+    ) -> ValueId {
+        let (acc_init, acc_type) = acc;
+        let start = self.slice_len(acc_init);
+        let const_1 = self.u_const(32, 1);
+        let results = self.build_loop(
+            vec![(start, Type::u(32)), (acc_init, acc_type)],
+            |b, params| b.lt(params[0], end),
+            |b, params| {
+                let (i, acc) = (params[0], params[1]);
+                let elem = body(b, i);
+                let pushed = b.slice_push(acc, vec![elem], SliceOpDir::Back);
+                let next_i = b.add(i, const_1);
+                vec![next_i, pushed]
+            },
+        );
+        results[1]
+    }
 }

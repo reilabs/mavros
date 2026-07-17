@@ -1,7 +1,7 @@
 //! Lowers a witness `Select` on a slice
 
 use crate::compiler::ssa::hlssa::{
-    CastTarget, OpCode, SequenceTargetType, SliceOpDir, Type,
+    CastTarget, OpCode, SequenceTargetType,
     builder::{HLBlockEmitter, HLEmitter},
 };
 
@@ -42,53 +42,24 @@ impl InstructionLoweringRule for LowerSliceSelect {
 
         let len_a = b.slice_len(a);
         let len_c = b.slice_len(c);
-        let zero = b.u_const(32, 0);
-        let one = b.u_const(32, 1);
+        let a_shorter = b.lt(len_a, len_c);
+        let min = b.select(a_shorter, len_a, len_c);
         let acc = b.mk_seq(vec![], SequenceTargetType::Slice, elem_ty.clone());
 
         // Prefix `0 .. min(len_a, len_c)`
-        let prefix = b.build_loop(
-            vec![(zero, Type::u(32)), (acc, result_ty.clone())],
-            |hb, p| {
-                let in_a = hb.lt(p[0], len_a);
-                let in_c = hb.lt(p[0], len_c);
-                hb.and(in_a, in_c)
-            },
-            |bb, p| {
-                let i = p[0];
-                let a_i = bb.array_get(a, i);
-                let c_i = bb.array_get(c, i);
-                let sel = bb.select(cond, a_i, c_i);
-                let acc = bb.slice_push(p[1], vec![sel], SliceOpDir::Back);
-                vec![bb.add(i, one), acc]
-            },
-        );
-        let min = prefix[0];
-        let acc = prefix[1];
+        let acc = b.build_slice_extend_loop(min, (acc, result_ty.clone()), |b, i| {
+            let a_i = b.array_get(a, i);
+            let c_i = b.array_get(c, i);
+            b.select(cond, a_i, c_i)
+        });
 
-        // Suffix from `a` (`min .. len_a`): runs only when `a` is the longer arm.
-        let acc = b.build_loop(
-            vec![(min, Type::u(32)), (acc, result_ty.clone())],
-            |hb, p| hb.lt(p[0], len_a),
-            |bb, p| {
-                let i = p[0];
-                let a_i = bb.array_get(a, i);
-                let acc = bb.slice_push(p[1], vec![a_i], SliceOpDir::Back);
-                vec![bb.add(i, one), acc]
-            },
-        )[1];
+        // Suffix from `a` (`len(acc) .. len_a`): runs only when `a` is the longer arm.
+        let acc =
+            b.build_slice_extend_loop(len_a, (acc, result_ty.clone()), |b, i| b.array_get(a, i));
 
-        // Suffix from `c` (`min .. len_c`): runs only when `c` is the longer arm.
-        let acc = b.build_loop(
-            vec![(min, Type::u(32)), (acc, result_ty.clone())],
-            |hb, p| hb.lt(p[0], len_c),
-            |bb, p| {
-                let i = p[0];
-                let c_i = bb.array_get(c, i);
-                let acc = bb.slice_push(p[1], vec![c_i], SliceOpDir::Back);
-                vec![bb.add(i, one), acc]
-            },
-        )[1];
+        // Suffix from `c` (`len(acc) .. len_c`): runs only when `c` is the longer arm
+        let acc =
+            b.build_slice_extend_loop(len_c, (acc, result_ty.clone()), |b, i| b.array_get(c, i));
 
         b.emit(OpCode::Cast {
             result: *result,
