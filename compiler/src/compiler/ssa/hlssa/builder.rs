@@ -691,7 +691,10 @@ impl HLBlockEmitter<'_> {
                     .collect();
                 self.mk_tuple(elems, element_types.clone())
             }
-            TypeExpr::Slice { .. } | TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
+            TypeExpr::Slice { elem, .. } => {
+                self.mk_seq(Vec::new(), SequenceTargetType::Slice, elem.as_ref().clone())
+            }
+            TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
                 panic!("cannot build a default value for type {}", typ)
             }
         }
