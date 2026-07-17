@@ -60,7 +60,7 @@ impl Pass for PurifyWitnessSlices {
                 .get_domination_pre_order()
                 .collect();
             let mut function = ssa.take_function(function_id);
-            rewrite_function(&mut function, ssa, type_info, &affected, &block_order);
+            rewrite_function(&mut function, ssa, type_info, &affected, &block_order, fwt);
             ssa.put_function(function_id, function);
         }
     }
@@ -138,6 +138,7 @@ fn rewrite_function(
     type_info: &FunctionTypeInfo,
     affected: &HashMap<ValueId, Type>,
     block_order: &[BlockId],
+    fwt: &FunctionWitnessType,
 ) {
     let mut replacement_tuple_map: HashMap<ValueId, ValueId> = HashMap::default();
 
@@ -149,6 +150,17 @@ fn rewrite_function(
                 .map(|(v, _)| is_wl_slice(*v, affected))
                 .collect();
             (*bid, positions)
+        })
+        .collect();
+
+    let lifted_returns: Vec<bool> = function
+        .iter_returns_mut()
+        .zip(&fwt.returns_witness)
+        .map(|(ty, shape)| {
+            let pty = purify_type(ty, shape);
+            let lifted = pty.is_tuple();
+            *ty = pty;
+            lifted
         })
         .collect();
 
@@ -436,17 +448,22 @@ fn rewrite_function(
             }
             Terminator::JmpIf(cond, t, f) => Terminator::JmpIf(cond, t, f),
             Terminator::Return(values) => {
-                let mut return_types: Vec<&mut Type> = function.iter_returns_mut().collect();
                 let mut new_return_args = Vec::with_capacity(values.len());
                 for (i, v) in values.into_iter().enumerate() {
-                    if let Some(pty) = affected.get(&v) {
-                        *return_types[i] = pty.clone();
-                    }
-                    new_return_args.push(if is_wl_slice(v, affected) {
-                        replacement_tuple_map[&v]
+                    if lifted_returns.get(i).copied().unwrap_or(false) {
+                        let t = replacement_tuple_map.get(&v).copied().unwrap_or_else(|| {
+                            materialize_pure_slice_tuple(
+                                v,
+                                type_info,
+                                function,
+                                ssa,
+                                &mut new_instrs,
+                            )
+                        });
+                        new_return_args.push(t);
                     } else {
-                        v
-                    });
+                        new_return_args.push(v);
+                    }
                 }
                 Terminator::Return(new_return_args)
             }
