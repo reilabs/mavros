@@ -1154,8 +1154,9 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
                 base
             }
         }
-        // A WitnessOf wrapper on the container means the handle/length is witness-dependent;
-        // a wrapper on the element means the elements are. Both are applied faithfully.
+        // For arrays (and refs below), a WitnessOf wrapper on the container means the handle is
+        // witness-dependent and a wrapper on the element means the elements are; both are applied
+        // faithfully
         (TypeExpr::Array(inner, size), WitnessShape::Array(top, inner_wt)) => {
             let base = apply_witness_type(*inner, inner_wt.as_ref()).array_of(size);
             if top.is_witness() {
@@ -1164,6 +1165,7 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
                 base
             }
         }
+        // A slice's top taint is deliberately *not* applied due to previous slice purification pass
         (TypeExpr::Slice { elem: inner, .. }, WitnessShape::Array(_top, inner_wt)) => {
             let elem_base = apply_witness_type(*inner, inner_wt.as_ref());
             elem_base.slice_of_with_len(Type::u(32))
