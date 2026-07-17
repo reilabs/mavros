@@ -653,17 +653,18 @@ fn specialize_contexts(
         for cc in result.calls.values() {
             if !ctx_clone.contains_key(cc) {
                 let (cid, remap) = ssa.duplicate_function_with_remap(cc.fid);
-                if Some(cc.fid) == ssa.get_globals_init_fn() {
-                    ssa.set_globals_init_fn(cid);
-                }
-                if Some(cc.fid) == ssa.get_globals_deinit_fn() {
-                    ssa.set_globals_deinit_fn(cid);
-                }
                 ctx_clone.insert(cc.clone(), (cid, remap));
                 worklist.push_back(cc.clone());
             }
         }
         ctx_result.insert(ctx, result);
+    }
+
+    if let Some(cid) = clone_of_fn(&ctx_clone, ssa.get_globals_init_fn()) {
+        ssa.set_globals_init_fn(cid);
+    }
+    if let Some(cid) = clone_of_fn(&ctx_clone, ssa.get_globals_deinit_fn()) {
+        ssa.set_globals_deinit_fn(cid);
     }
 
     // Materialize: re-key shapes onto each clone, register FunctionWitnessType, rewire call
@@ -725,6 +726,24 @@ fn specialize_contexts(
 
     ssa.set_unique_entrypoint(main_clone_id);
     functions
+}
+
+fn clone_of_fn(
+    ctx_clone: &HashMap<Ctx, (FunctionId, HashMap<ValueId, ValueId>)>,
+    fid: Option<FunctionId>,
+) -> Option<FunctionId> {
+    let fid = fid?;
+    let clones: Vec<FunctionId> = ctx_clone
+        .iter()
+        .filter(|(ctx, _)| ctx.fid == fid)
+        .map(|(_, (cid, _))| *cid)
+        .collect();
+    assert!(
+        clones.len() <= 1,
+        "ICE: globals init/deinit function {fid:?} specialized {} times; should be at most 1",
+        clones.len()
+    );
+    clones.first().copied()
 }
 
 /// The per-function immutable inputs to [`solve_context`] — everything keyed by the context's
