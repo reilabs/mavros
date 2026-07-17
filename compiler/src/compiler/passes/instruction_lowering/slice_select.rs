@@ -1,11 +1,46 @@
 //! Lowers a witness `Select` on a slice
 
-use crate::compiler::ssa::hlssa::{
-    CastTarget, OpCode, SequenceTargetType, SliceOpDir, Type,
-    builder::{HLBlockEmitter, HLEmitter},
+use crate::compiler::{
+    ssa::{
+        ValueId,
+        hlssa::{
+            CastTarget, OpCode, SequenceTargetType, SliceOpDir, Type, TypeExpr,
+            builder::{HLBlockEmitter, HLEmitter},
+        },
+    },
+    util::ice_non_elided_tuple,
 };
 
 use super::{InstructionLoweringRule, LoweringContext};
+
+fn emit_elem_select(
+    b: &mut HLBlockEmitter<'_>,
+    cond: ValueId,
+    lhs: ValueId,
+    rhs: ValueId,
+    typ: &Type,
+) -> ValueId {
+    match &typ.expr {
+        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::WitnessOf(_) => {
+            b.select(cond, lhs, rhs)
+        }
+        TypeExpr::Array(elem_type, size) => {
+            let elem_type = (**elem_type).clone();
+            b.build_array_loop(*size, elem_type.clone(), |b, idx| {
+                let lhs_elem = b.array_get(lhs, idx);
+                let rhs_elem = b.array_get(rhs, idx);
+                emit_elem_select(b, cond, lhs_elem, rhs_elem, &elem_type)
+            })
+        }
+        TypeExpr::Slice { .. } => {
+            panic!("LowerSliceSelect: nested slice is not allowed")
+        }
+        TypeExpr::Tuple(_) => ice_non_elided_tuple(),
+        TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
+            panic!("LowerSliceSelect: witness select on element type {typ} is not supported")
+        }
+    }
+}
 
 pub struct LowerSliceSelect {}
 
@@ -63,7 +98,7 @@ impl InstructionLoweringRule for LowerSliceSelect {
                 let i = p[0];
                 let a_i = bb.array_get(a, i);
                 let c_i = bb.array_get(c, i);
-                let sel = bb.select(cond, a_i, c_i);
+                let sel = emit_elem_select(bb, cond, a_i, c_i, &elem_ty);
                 let acc = bb.slice_push(p[1], vec![sel], SliceOpDir::Back);
                 vec![bb.add(i, one), acc]
             },
