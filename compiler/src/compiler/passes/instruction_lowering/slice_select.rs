@@ -35,6 +35,11 @@ impl InstructionLoweringRule for LowerSliceSelect {
         if !result_ty.is_slice() {
             return false;
         }
+        let cond_ty = context.types().get_value_type(*cond);
+        assert!(
+            cond_ty.is_witness_of(),
+            "LowerSliceSelect must have witness condition"
+        );
         let elem_ty = result_ty.get_array_element();
         let cond = *cond;
         let a = *if_t;
