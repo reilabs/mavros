@@ -693,6 +693,7 @@ enum ExprNode {
     Div { lhs: ExprId, rhs: ExprId },
     Mod { lhs: ExprId, rhs: ExprId },
     Sub { lhs: ExprId, rhs: ExprId },
+    // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
     FConst(ark_bn254::Fr),
     UConst { bits: usize, value: u128 },
     IConst { bits: usize, value: u128 },

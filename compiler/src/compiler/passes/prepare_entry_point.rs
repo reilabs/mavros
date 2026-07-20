@@ -101,6 +101,7 @@ impl PrepareEntryPoint {
             let blob_param = e.add_parameter(Type::blob(Type::field(), total_fields));
 
             // witness[0] must be constant one, emitted by the program.
+            // FIELD-ASSUMPTION: L1-direct-ref (6 sites)
             let one = e.field_const(ark_bn254::Fr::from(1u64));
             e.pinned_write_witness(one);
 

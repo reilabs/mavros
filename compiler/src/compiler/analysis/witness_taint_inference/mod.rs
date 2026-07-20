@@ -347,6 +347,7 @@ mod tests {
     fn witness() -> WitnessShape {
         WitnessShape::Scalar(WitnessType::Witness)
     }
+    // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
     fn fr(n: u64) -> ark_bn254::Fr {
         ark_bn254::Fr::from(n)
     }

@@ -10,6 +10,7 @@
 //! counters) is emitted inline in the generated LLVM module as GEP/load/store
 //! against the vm_ptr — see `codegen/llssa_llvm_codegen.rs`.
 
+// FIELD-ASSUMPTION: L1-direct-ref (1 sites)
 use ark_bn254::Fr;
 use ark_ff::BigInt;
 
@@ -197,6 +198,7 @@ pub unsafe extern "C" fn __field_add(
 // Field division
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// FIELD-ASSUMPTION: L4-inverse
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __field_div(
     result_ptr: *mut u64,

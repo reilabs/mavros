@@ -193,12 +193,15 @@ impl LowerBitRangeOps {
     }
 }
 
+// FIELD-ASSUMPTION: L4-modulus-literal
 fn decompose_canonical_field_bytes(
     b: &mut HLBlockEmitter<'_>,
     value: ValueId,
     flag: ValueId,
 ) -> Vec<ValueId> {
+    // FIELD-ASSUMPTION: L4-modulus-literal
     let modulus_hi = b.field_const(Field::from(0x30644e72e131a029b85045b68181585du128));
+    // FIELD-ASSUMPTION: L4-modulus-literal
     let modulus_lo_m1 = b.field_const(Field::from(0x2833e84879b9709143e1f593f0000000u128));
     let two_to_8 = b.field_const(Field::from(256u128));
     let two_to_64 = b.field_const(two_pow(64));
@@ -244,7 +247,9 @@ fn decompose_canonical_field_bytes(
     let limb3_pure = b.value_of(limbs[3]);
     let limb2_u64 = b.cast_to(CastTarget::U(64), limb2_pure);
     let limb3_u64 = b.cast_to(CastTarget::U(64), limb3_pure);
+    // FIELD-ASSUMPTION: L4-modulus-literal
     let mod_limb2 = b.u_const(64, 0x2833e84879b97091u64 as u128);
+    // FIELD-ASSUMPTION: L4-modulus-literal
     let mod_limb3 = b.u_const(64, 0x43e1f593f0000000u64 as u128);
     let hi_lt = b.lt(mod_limb2, limb2_u64);
     let hi_eq = b.eq(mod_limb2, limb2_u64);
@@ -289,6 +294,7 @@ fn lower_field_low_bits_from_bytes(
     bits: usize,
     flag: ValueId,
 ) -> ValueId {
+    // FIELD-ASSUMPTION: L3-width254
     assert!(bits <= 254, "field BitRange exceeds canonical field width");
     if bits == 0 {
         return b.field_const(Field::ZERO);
@@ -389,6 +395,7 @@ fn lower_pure_field_bit_range_value(
 }
 
 fn lower_pure_field_low_bits(b: &mut HLBlockEmitter<'_>, value: ValueId, bits: usize) -> ValueId {
+    // FIELD-ASSUMPTION: L3-width254
     assert!(bits <= 254, "field BitRange exceeds canonical field width");
     if bits == 0 {
         return b.field_const(Field::ZERO);
@@ -426,6 +433,7 @@ fn lower_pure_byte_low_bits(b: &mut HLBlockEmitter<'_>, byte: ValueId, bits: usi
     b.sub(byte, high_shifted)
 }
 
+// FIELD-ASSUMPTION: L4-two-pow
 fn two_pow(exponent: usize) -> Field {
     Field::from(2).pow([exponent as u64])
 }

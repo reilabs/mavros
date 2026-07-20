@@ -175,6 +175,7 @@ pub trait LLEmitter {
         r
     }
 
+    // FIELD-ASSUMPTION: L3-limb-op
     fn field_to_limbs(&mut self, src: ValueId) -> ValueId {
         let r = self.fresh_value();
         self.emit_ll(LLOp::FieldToLimbs { result: r, src });

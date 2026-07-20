@@ -582,6 +582,7 @@ impl LowerWitnessIntegerArithOps {
     }
 }
 
+// FIELD-ASSUMPTION: L4-two-pow
 fn two_pow(exponent: usize) -> Field {
     Field::from(2).pow([exponent as u64])
 }
@@ -650,6 +651,7 @@ fn narrow_rangecheck_width(range: &IntInterval, default_bits: usize) -> usize {
     width.max(1).min(default_bits)
 }
 
+// FIELD-ASSUMPTION: L4-modulus-query
 fn range_fits_field_injectively(range: &IntInterval) -> bool {
     let Some(lo) = range.lo() else {
         return false;

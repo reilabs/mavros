@@ -687,10 +687,12 @@ fn extract_low_chunk(
     b.cast_to(CastTarget::U(chunk_bits), chunk)
 }
 
+// FIELD-ASSUMPTION: L4-two-pow
 fn two_pow(exponent: usize) -> Field {
     Field::from(2).pow([exponent as u64])
 }
 
+// FIELD-ASSUMPTION: L4-two-pow
 fn two_pow_u128(exponent: usize) -> u128 {
     assert!(
         exponent < MAX_SUPPORTED_UNSIGNED_BITS,

@@ -237,6 +237,8 @@ pub trait HLEmitter {
 
     // -- Constants --
 
+    // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
+    // FIELD-ASSUMPTION: L2-builder
     fn field_const(&mut self, value: ark_bn254::Fr) -> ValueId {
         self.emit_constant(Constant::Field(value))
     }
@@ -676,6 +678,7 @@ impl HLEmitter for HLBlockEmitter<'_> {
 impl HLBlockEmitter<'_> {
     pub(crate) fn default_value(&mut self, typ: &Type) -> ValueId {
         match &typ.expr {
+            // FIELD-ASSUMPTION: L2-builder
             TypeExpr::Field => self.field_const(ark_bn254::Fr::from(0)),
             TypeExpr::U(size) => self.u_const(*size, 0),
             TypeExpr::I(size) => self.i_const(*size, 0),

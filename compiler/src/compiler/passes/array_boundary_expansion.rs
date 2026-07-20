@@ -804,6 +804,7 @@ mod tests {
         ssa::hlssa::builder::{HLEmitter, HLSSABuilder},
     };
 
+    // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
     fn fr(n: u64) -> ark_bn254::Fr {
         ark_bn254::Fr::from(n)
     }

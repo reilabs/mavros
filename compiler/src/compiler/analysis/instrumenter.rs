@@ -114,6 +114,7 @@ impl ValueSignature {
 }
 
 #[derive(Debug, Clone)]
+// FIELD-ASSUMPTION: L4-eval
 pub enum Value {
     U(usize, u128),
     I(usize, u128),
@@ -244,6 +245,7 @@ impl Value {
                         *s,
                     ),
                 ),
+                // FIELD-ASSUMPTION: L4-eval
                 (Value::Field(a), Value::Field(b)) => Value::Field(a + b),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
@@ -324,6 +326,7 @@ impl Value {
                         Self::from_signed(if sb == 0 { 0 } else { sa.wrapping_div(sb) }, *s),
                     )
                 }
+                // FIELD-ASSUMPTION: L4-inverse
                 (Value::Field(a), Value::Field(b)) => Value::Field(if *b == Field::ZERO {
                     Field::ZERO
                 } else {
@@ -601,6 +604,7 @@ impl Value {
         }
     }
 
+    // FIELD-ASSUMPTION: L4-decompose
     fn bit_range_op(
         &self,
         offset: usize,
@@ -827,6 +831,7 @@ impl Value {
         Ok(())
     }
 
+    // FIELD-ASSUMPTION: L4-decompose
     fn to_bits(&self, endianness: &crate::compiler::ssa::hlssa::Endianness, size: usize) -> Value {
         match self {
             Value::Unknown(kind) => Value::Unknown(*kind),

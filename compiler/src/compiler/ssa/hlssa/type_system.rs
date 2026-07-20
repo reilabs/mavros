@@ -273,6 +273,7 @@ impl Type {
     pub fn get_bit_size(&self) -> usize {
         match &self.expr {
             TypeExpr::U(size) | TypeExpr::I(size) => *size,
+            // FIELD-ASSUMPTION: L3-width254
             TypeExpr::Field => 254, // TODO: parametrize
             TypeExpr::WitnessOf(inner) => inner.get_bit_size(),
             _ => panic!("Type is not numeric: {}", self),

@@ -290,6 +290,7 @@ fn zero_constant_of(ty: &Type) -> Option<Constant> {
     match &ty.expr {
         TypeExpr::U(bits) => Some(Constant::U(*bits, 0)),
         TypeExpr::I(bits) => Some(Constant::I(*bits, 0)),
+        // FIELD-ASSUMPTION: L1-direct-ref (1 sites)
         TypeExpr::Field => Some(Constant::Field(ark_bn254::Fr::zero())),
         _ => None,
     }
