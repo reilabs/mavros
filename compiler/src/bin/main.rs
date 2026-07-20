@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf, process::ExitCode};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use clap::{Parser, Subcommand};
 use mavros_compiler::Project;
@@ -44,7 +48,7 @@ pub struct ProgramOptions {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub skip_vm: bool,
 
-    /// Print absolute paths in VM stack traces and WASM debug info instead of paths relative to the current directory.
+    /// Print absolute paths in VM stack traces and WASM debug info instead of paths relative to the Noir package root.
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub absolute_paths: bool,
 
@@ -121,6 +125,14 @@ pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, R1CS
     Ok((driver, r1cs))
 }
 
+fn debug_path_root(driver: &Driver, absolute_paths: bool) -> Option<&Path> {
+    if absolute_paths {
+        None
+    } else {
+        Some(driver.package_root())
+    }
+}
+
 /// Compile phase: compile the Noir project and save R1CS and binary artifacts
 /// to separate files.
 pub fn run_compile(
@@ -168,8 +180,8 @@ pub fn run_compile(
 
     let debug_output = binary_output.with_extension("debug.json");
     if let Some(mut debug_info) = artifact.debug_info {
-        if !absolute_paths {
-            debug_info.relativize_source_paths(&std::env::current_dir()?.canonicalize()?);
+        if let Some(root) = debug_path_root(&driver, absolute_paths) {
+            debug_info.relativize_source_paths(root);
         }
         fs::write(&debug_output, serde_json::to_string_pretty(&debug_info)?)?;
         info!(message = %"VM debug info generated", path = %debug_output.display());
@@ -196,11 +208,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         include_debug_info: args.include_debug_info,
         ..CodeGenOptions::default()
     };
-    let source_path_root = if args.absolute_paths {
-        None
-    } else {
-        Some(std::env::current_dir()?.canonicalize()?)
-    };
+    let source_path_root = debug_path_root(&driver, args.absolute_paths).map(Path::to_path_buf);
     if args.pprint_r1cs {
         use std::io::Write;
         let mut r1cs_file =

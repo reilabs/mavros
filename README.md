@@ -35,7 +35,8 @@ This will produce the following two files inside the project's `target/` directo
 
 Pass `--include-debug-info` to additionally write `target/basic.debug.json`. This standalone,
 versioned source map records VM bytecode word offsets, function names, and Noir source locations;
-the executable bytecode in `basic.json` remains byte-for-byte unchanged.
+the executable bytecode in `basic.json` remains byte-for-byte unchanged. Source paths are relative
+to the Noir package root by default; pass `--absolute-paths` to retain absolute paths.
 
 For advanced usage and the CLI options, run `mavros --help`. To output the witness generation binary
 for WASM-capable platforms, please see the [WASM output](./docs/CONTRIBUTING.md#WASM%20Output)

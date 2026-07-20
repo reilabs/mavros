@@ -116,7 +116,8 @@ Pass `--include-debug-info` to additionally emit `mavros_debug/program.debug.was
 standalone WebAssembly debug companion containing the module structure and DWARF custom sections.
 `program.wasm` remains stripped apart from a tiny `external_debug_info` custom section pointing to
 the relative `program.debug.wasm` URL. Browser developer tools can therefore fetch the sidecar
-automatically when both files are served from the same directory.
+automatically when both files are served from the same directory. DWARF source paths are relative to
+the Noir package root by default; pass `--absolute-paths` to retain absolute paths.
 
 Wasmtime 31 does not follow `external_debug_info` itself. Rust hosts can use
 `mavros_compiler::wasm_runtime::load_wasmtime_module`, which follows the local reference, or
