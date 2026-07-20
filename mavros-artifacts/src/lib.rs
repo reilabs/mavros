@@ -4,6 +4,7 @@ use ark_ff::{AdditiveGroup, BigInt, PrimeField};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracing::error;
 
+// FIELD-ASSUMPTION: L1-alias
 pub type Field = ark_bn254::Fr;
 
 // ---------------------------------------------------------------------------
@@ -15,6 +16,7 @@ pub type LC = Vec<(usize, Field)>;
 mod lc_serde {
     use super::*;
 
+    // FIELD-ASSUMPTION: L1-serde
     pub fn serialize<S>(lc: &[(usize, ark_bn254::Fr)], serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -57,6 +59,7 @@ pub struct R1C {
     pub c: LC,
 }
 
+// FIELD-ASSUMPTION: L4-sign
 fn field_to_string(c: ark_bn254::Fr) -> String {
     if c.into_bigint() > Field::MODULUS_MINUS_ONE_DIV_TWO {
         format!("-{}", -c)
@@ -398,6 +401,7 @@ pub enum InputValueOrdered {
 impl InputValueOrdered {
     pub fn field_sizes(&self) -> Vec<usize> {
         match self {
+            // FIELD-ASSUMPTION: L1-serde
             InputValueOrdered::Field(_) => vec![4],
             InputValueOrdered::String(_) => panic!("Strings are not supported in element_size"),
             InputValueOrdered::Vec(_) => vec![1],

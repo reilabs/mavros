@@ -430,6 +430,7 @@ impl LowerPureGuards {
         let sign_shift = emitter.field_const(two_pow(bits));
         let sign_shifted = emitter.mul(sign, sign_shift);
         let signed_value = emitter.sub(value_field, sign_shifted);
+        // FIELD-ASSUMPTION: L1-direct-ref (7 sites)
         let two = emitter.field_const(ark_bn254::Fr::from(2));
         let two_sign = emitter.mul(two, sign);
         let one = emitter.field_const(ark_bn254::Fr::from(1));
@@ -752,6 +753,7 @@ impl LowerPureGuards {
                 );
             }
             TypeExpr::Field => {
+                // FIELD-ASSUMPTION: L4-modulus-query
                 if max_bits >= <ark_bn254::Fr as ark_ff::PrimeField>::MODULUS_BIT_SIZE as usize {
                     return;
                 }
@@ -854,6 +856,7 @@ impl LowerPureGuards {
     }
 }
 
+// FIELD-ASSUMPTION: L4-two-pow
 fn two_pow(exponent: usize) -> ark_bn254::Fr {
     ark_bn254::Fr::from(2).pow([exponent as u64])
 }

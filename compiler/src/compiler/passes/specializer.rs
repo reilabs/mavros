@@ -46,6 +46,7 @@ pub struct Specializer {
 }
 
 #[derive(Debug, Clone)]
+// FIELD-ASSUMPTION: L4-eval
 enum ConstVal {
     U(usize, u128),
     I(usize, u128),
@@ -120,6 +121,7 @@ impl HLEmitter for SpecializationState<'_> {
     }
 }
 
+// FIELD-ASSUMPTION: L4-eval
 impl symbolic_executor::Value<SpecializationState<'_>> for Val {
     fn ult(&self, b: &Self, ctx: &mut SpecializationState) -> Self {
         let l_const = ctx.const_vals.get(&self.0).cloned();
@@ -202,6 +204,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                 Some(ConstVal::Field(l_val)),
                 Some(ConstVal::Field(r_val)),
             ) => {
+                // FIELD-ASSUMPTION: L4-eval
                 let res = l_val * r_val;
                 let res_v = ctx.field_const(res);
                 ctx.const_vals.insert(res_v, ConstVal::Field(res));
@@ -389,6 +392,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                 let res = a[index as usize];
                 Self(res)
             }
+            // FIELD-ASSUMPTION: L4-decompose
             (Some(ConstVal::BitsOf(v, size, endianness)), Some(ConstVal::U(_, index))) => {
                 let v_const = ctx.const_vals.get(v.as_ref()).cloned();
                 match v_const {
@@ -474,6 +478,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                 ctx.const_vals.insert(res_v, ConstVal::I(bits, res));
                 Self(res_v)
             }
+            // FIELD-ASSUMPTION: L4-decompose
             (Some(ConstVal::Field(f)), TypeExpr::Field, Some(mask)) if offset < 128 => {
                 let v: u128 = f.into_bigint().as_ref()[0] as u128;
                 let res = Field::from((v >> offset) & mask);
@@ -515,6 +520,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                     Self(res)
                 }
             },
+            // FIELD-ASSUMPTION: L4-decompose
             Some(ConstVal::Field(f)) => match cast_target {
                 CastTarget::U(s) | CastTarget::I(s) => {
                     let v: u128 = f.into_bigint().as_ref()[0] as u128;
@@ -562,6 +568,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         Ok(())
     }
 
+    // FIELD-ASSUMPTION: L4-decompose
     fn to_bits(
         &self,
         endianness: Endianness,

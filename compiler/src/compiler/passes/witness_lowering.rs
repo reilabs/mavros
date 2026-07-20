@@ -256,7 +256,7 @@ impl WitnessLowering {
                                 (_, true, _, true) => match kind {
                                     BinaryArithOpKind::Sub => {
                                         let neg_one =
-                                            emitter.field_const(ark_bn254::Fr::from(-1i64));
+                                            emitter.field_const(ark_bn254::Fr::from(-1i64)); // FIELD-ASSUMPTION: L1-direct-ref (3 sites)
                                         let neg_b = emitter.fresh_value();
                                         emitter.emit(OpCode::MulConst {
                                             result: neg_b,

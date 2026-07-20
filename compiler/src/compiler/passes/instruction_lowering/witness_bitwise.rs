@@ -227,6 +227,7 @@ impl LowerWitnessBitwiseOps {
         value: ValueId,
     ) {
         let (bits, cast_target) = integer_bits_and_cast(function_type_info, value, "bitwise not");
+        // FIELD-ASSUMPTION: L4-decompose
         let ones = b.field_const((Field::from(2).pow([bits as u64])) - Field::ONE);
         let value_field = b.cast_to_field(value);
         let not_value = b.sub(ones, value_field);
@@ -257,6 +258,7 @@ impl LowerWitnessBitwiseOps {
             b.cast_to_field(sign_bits)
         };
         let value_field = b.cast_to_field(value);
+        // FIELD-ASSUMPTION: L4-decompose
         let extension = b.field_const(two_pow(to_bits) - two_pow(from_bits));
         let offset = b.mul(sign, extension);
         let extended = b.add(value_field, offset);
@@ -337,6 +339,8 @@ struct U128Limbs {
     hi: ValueId,
 }
 
+// FIELD-ASSUMPTION: L4-decompose
+// FIELD-ASSUMPTION: L4-two-pow
 fn two_pow(exponent: usize) -> Field {
     Field::from(2).pow([exponent as u64])
 }
@@ -462,6 +466,7 @@ fn combine_u32_limbs(b: &mut impl HLEmitter, limbs: U64Limbs) -> ValueId {
 fn combine_u64_fields(b: &mut impl HLEmitter, lo: ValueId, hi: ValueId) -> ValueId {
     let lo = b.cast_to_field(lo);
     let hi = b.cast_to_field(hi);
+    // FIELD-ASSUMPTION: L4-decompose
     let shift = b.field_const(two_pow(64));
     let shifted_hi = b.mul(hi, shift);
     b.add(lo, shifted_hi)

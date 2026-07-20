@@ -19,6 +19,8 @@ use tracing::{instrument, warn};
 
 pub use mavros_artifacts::{ConstraintsLayout, LC, R1C, R1CS, WitnessLayout};
 
+// FIELD-ASSUMPTION: L1-direct-ref (57 sites)
+// FIELD-ASSUMPTION: L4-two-pow
 fn two_pow(exponent: usize) -> ark_bn254::Fr {
     ark_bn254::Fr::from(2).pow([exponent as u64])
 }
@@ -38,6 +40,7 @@ pub struct ArrayData {
 }
 
 #[derive(Clone, Debug)]
+// FIELD-ASSUMPTION: L4-eval
 pub enum Value {
     Const(ark_bn254::Fr),
     LC(LC),
@@ -86,6 +89,7 @@ impl Value {
         Self::wrap_unsigned(v as u128, bits)
     }
 
+    // FIELD-ASSUMPTION: L4-eval
     pub fn add(&self, other: &Value) -> Value {
         match (self, other) {
             (Value::Const(lhs), Value::Const(rhs)) => Value::Const(lhs + rhs),
@@ -138,6 +142,7 @@ impl Value {
 
     pub fn div(&self, other: &Value) -> Value {
         match (self, other) {
+            // FIELD-ASSUMPTION: L4-inverse
             (Value::Const(lhs), Value::Const(rhs)) => Value::Const(lhs / rhs),
             (_, Value::Const(rhs)) => {
                 let inv = Value::Const(ark_bn254::Fr::ONE / rhs);
@@ -211,6 +216,7 @@ impl Value {
         }
     }
 
+    // FIELD-ASSUMPTION: L4-eval
     pub fn mul(&self, other: &Value) -> Value {
         match (self, other) {
             (Value::Const(lhs), Value::Const(rhs)) => Value::Const(lhs * rhs),
@@ -434,6 +440,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
     }
 }
 
+// FIELD-ASSUMPTION: L4-eval
 impl symbolic_executor::Value<R1CGen> for Value {
     fn ult(&self, b: &Self, _ctx: &mut R1CGen) -> Self {
         self.lt(b)
@@ -574,6 +581,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     )));
                 }
             }
+            // FIELD-ASSUMPTION: L4-sign
             CmpKind::Lt => {
                 let a_val = a.expect_constant();
                 let b_val = b.expect_constant();
@@ -634,6 +642,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::mk_array(new_array)
     }
 
+    // FIELD-ASSUMPTION: L4-decompose
     fn bit_range(&self, offset: usize, width: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
         let new_value = self
             .expect_constant()
@@ -799,6 +808,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
 
     fn mem_op(&self, _kind: RefCountOp, _ctx: &mut R1CGen) {}
 
+    // FIELD-ASSUMPTION: L4-decompose
     fn rangecheck(&self, max_bits: usize, _ctx: &mut R1CGen) -> Result<(), AssertionFailure> {
         let self_const = self.expect_constant();
         let check = self_const

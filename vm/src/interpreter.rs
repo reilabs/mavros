@@ -120,6 +120,7 @@ impl Frame {
     }
 
     #[inline(always)]
+    // FIELD-ASSUMPTION: L3-frame
     pub fn read_field(&self, offset: isize) -> Field {
         let a0 = unsafe { *self.data.offset(offset) };
         let a1 = unsafe { *self.data.offset(offset + 1) };
@@ -182,6 +183,7 @@ impl Frame {
     }
 
     #[inline(always)]
+    // FIELD-ASSUMPTION: L3-frame
     pub fn write_field(&self, offset: isize, field: Field) {
         let a0 = field.0.0[0];
         let a1 = field.0.0[1];
@@ -292,6 +294,7 @@ fn fix_multiplicities_section(wit: &mut [Field], witness_layout: WitnessLayout) 
     #[allow(clippy::needless_range_loop)]
     for i in witness_layout.multiplicities_start()..witness_layout.multiplicities_end() {
         // We used this as a *mut u64 when writing multiplicities, so we need to convert to an actual field element
+        // FIELD-ASSUMPTION: L4-low-limb (6 sites)
         wit[i] = Field::from(wit[i].0.0[0]);
     }
 }
@@ -473,6 +476,7 @@ pub fn run_phase2(
         }
     }
 
+    // FIELD-ASSUMPTION: L4-inverse
     let mut running_inv = running_prod.inverse().unwrap();
 
     for tbl in phase1.tables.iter().rev() {

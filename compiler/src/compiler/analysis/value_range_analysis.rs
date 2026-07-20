@@ -110,6 +110,7 @@ impl IntInterval {
 
     /// `[0, p − 1]` — the integer range of a Field element.
     pub fn field_top() -> Self {
+        // FIELD-ASSUMPTION: L4-modulus-query
         Self::closed(BigInt::zero(), bn254_modulus() - BigInt::one())
     }
 
@@ -355,6 +356,7 @@ fn signed_const_to_bigint(bits: usize, encoded: u128) -> BigInt {
     if value < half { value } else { value - two_n }
 }
 
+// FIELD-ASSUMPTION: L4-modulus-query
 /// BN254 field modulus as a `BigInt`. Computed from ark-ff's `MODULUS`
 /// constant — single source of truth for the prime.
 fn bn254_modulus() -> BigInt {

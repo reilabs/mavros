@@ -174,6 +174,7 @@ pub(crate) fn eval_binary(kind: BinaryArithOpKind, a: &Constant, b: &Constant) -
                 Shl | Shr => None,
             }
         }
+        // FIELD-ASSUMPTION: L4-eval
         (Constant::Field(x), Constant::Field(y)) => match kind {
             Add => Some(Constant::Field(*x + *y)),
             Sub => Some(Constant::Field(*x - *y)),
@@ -182,6 +183,7 @@ pub(crate) fn eval_binary(kind: BinaryArithOpKind, a: &Constant, b: &Constant) -
                 if y.is_zero() {
                     None
                 } else {
+                    // FIELD-ASSUMPTION: L4-inverse
                     Some(Constant::Field(*x / *y))
                 }
             }
@@ -248,6 +250,7 @@ pub(crate) fn eval_cast(target: &CastTarget, v: &Constant) -> Option<Constant> {
         | CastTarget::ValueOf
         | CastTarget::Map(_) => None,
         CastTarget::Field => match v {
+            // FIELD-ASSUMPTION: L4-eval
             Constant::U(_, x) | Constant::I(_, x) => Some(Constant::Field(Field::from(*x))),
             Constant::Field(_) => Some(v.clone()),
             Constant::FnPtr(_) | Constant::Blob(_) => None,
