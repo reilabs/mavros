@@ -8,7 +8,7 @@ use crate::{
     abi_helpers::ordered_params_from_btreemap,
     compiler::{Field, codegen::hlssa_to_r1cs::R1CS},
     driver::Driver,
-    vm::interpreter,
+    vm::{bytecode::DebugInfo, interpreter},
 };
 use mavros_artifacts::InputValueOrdered;
 use noirc_abi::input_parser::Format;
@@ -54,8 +54,15 @@ pub fn run_witgen_from_binary(
     binary: &mut [u64],
     r1cs: &R1CS,
     params: &[InputValueOrdered],
+    debug_info: Option<DebugInfo>,
 ) -> Result<interpreter::WitgenResult, interpreter::TrapError> {
-    interpreter::run(binary, r1cs.witness_layout, r1cs.constraints_layout, params)
+    interpreter::run(
+        binary,
+        r1cs.witness_layout,
+        r1cs.constraints_layout,
+        params,
+        debug_info,
+    )
 }
 
 /// Phase 1: execute the VM and produce the pre-commitment witness. Returns
@@ -64,8 +71,15 @@ pub fn run_witgen_phase1(
     binary: &mut [u64],
     r1cs: &R1CS,
     params: &[InputValueOrdered],
+    debug_info: Option<DebugInfo>,
 ) -> Result<interpreter::Phase1Result, interpreter::TrapError> {
-    interpreter::run_phase1(binary, r1cs.witness_layout, r1cs.constraints_layout, params)
+    interpreter::run_phase1(
+        binary,
+        r1cs.witness_layout,
+        r1cs.constraints_layout,
+        params,
+        debug_info,
+    )
 }
 
 /// Phase 2: given real Fiat-Shamir challenges, complete witness generation.
@@ -90,10 +104,19 @@ pub fn compile_bytecode(
     Ok(driver.compile_bytecode(options)?)
 }
 
+/// Compile compact VM bytecode plus optional standalone debug metadata.
+pub fn compile_bytecode_artifact(
+    driver: &mut Driver,
+    options: crate::compiler::codegen::CodeGenOptions,
+) -> Result<crate::driver::BytecodeArtifact, Error> {
+    Ok(driver.compile_bytecode_artifact(options)?)
+}
+
 pub fn run_ad_from_binary(
     binary: &mut [u64],
     r1cs: &R1CS,
     coeffs: &[Field],
+    debug_info: Option<DebugInfo>,
 ) -> Result<
     (
         Vec<Field>,
@@ -103,7 +126,13 @@ pub fn run_ad_from_binary(
     ),
     interpreter::TrapError,
 > {
-    interpreter::run_ad(binary, coeffs, r1cs.witness_layout, r1cs.constraints_layout)
+    interpreter::run_ad(
+        binary,
+        coeffs,
+        r1cs.witness_layout,
+        r1cs.constraints_layout,
+        debug_info,
+    )
 }
 
 pub fn random_ad_coeffs(r1cs: &R1CS) -> Vec<Field> {

@@ -248,10 +248,7 @@ impl TrapError {
 
     pub fn relativize_source_paths(&mut self, root: &std::path::Path) {
         for frame in &mut self.stack_trace {
-            let path = std::path::Path::new(&frame.location.file);
-            if let Ok(relative) = path.strip_prefix(root) {
-                frame.location.file = relative.to_string_lossy().into_owned();
-            }
+            bytecode::relativize_source_path(&mut frame.location.file, root);
         }
     }
 }
@@ -308,8 +305,10 @@ pub fn run_phase1(
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
     ordered_inputs: &[InputValueOrdered],
+    debug_info: Option<bytecode::DebugInfo>,
 ) -> Result<Phase1Result, TrapError> {
     let header = parse_program_header(program);
+    let debug_info = debug_info.unwrap_or_default();
     let entry = *header
         .entry_points
         .get(ENTRY_WITGEN)
@@ -367,7 +366,7 @@ pub fn run_phase1(
 
     let mut program = program.to_vec();
     prepare_dispatch(&mut program, header.code_start);
-    vm.set_debug_context(program.as_ptr(), program.len(), header.debug_info);
+    vm.set_debug_context(program.as_ptr(), program.len(), debug_info);
 
     let pc = unsafe { program.as_mut_ptr().add(entry + 2) };
 
@@ -674,8 +673,15 @@ pub fn run(
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
     ordered_inputs: &[InputValueOrdered],
+    debug_info: Option<bytecode::DebugInfo>,
 ) -> Result<WitgenResult, TrapError> {
-    let phase1 = run_phase1(program, witness_layout, constraints_layout, ordered_inputs)?;
+    let phase1 = run_phase1(
+        program,
+        witness_layout,
+        constraints_layout,
+        ordered_inputs,
+        debug_info,
+    )?;
 
     Ok(run_phase2_with_fake_challenges(
         phase1,
@@ -690,8 +696,10 @@ pub fn run_ad(
     coeffs: &[Field],
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
+    debug_info: Option<bytecode::DebugInfo>,
 ) -> Result<(Vec<Field>, Vec<Field>, Vec<Field>, AllocationInstrumenter), TrapError> {
     let header = parse_program_header(program);
+    let debug_info = debug_info.unwrap_or_default();
     let entry = *header
         .entry_points
         .get(ENTRY_AD)
@@ -723,7 +731,7 @@ pub fn run_ad(
 
     let mut program = program.to_vec();
     prepare_dispatch(&mut program, header.code_start);
-    vm.set_debug_context(program.as_ptr(), program.len(), header.debug_info);
+    vm.set_debug_context(program.as_ptr(), program.len(), debug_info);
 
     let pc = unsafe { program.as_mut_ptr().add(entry + 2) };
 

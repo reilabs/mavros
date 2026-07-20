@@ -16,7 +16,11 @@ use ark_ff::UniformRand as _;
 use mavros_compiler::{
     Project, abi_helpers,
     compiler::Field,
-    compiler::codegen::{CodeGenOptions, hlssa_to_r1cs::R1CS, llssa_to_llvm::WasmCompileOpts},
+    compiler::codegen::{
+        CodeGenOptions,
+        hlssa_to_r1cs::R1CS,
+        llssa_to_llvm::{WasmCompileOpts, wasm_debug_info_path},
+    },
     driver::{Driver, Error as DriverError},
     vm::{TableKind, bytecode::TableInfo, interpreter},
     wasm_runtime,
@@ -37,7 +41,7 @@ use mavros_wasm_layout::{
 };
 use noirc_abi::input_parser::Format;
 use rand::SeedableRng;
-use wasmtime::{Config, Engine, Linker, Memory, Module, Store, WasmBacktraceDetails};
+use wasmtime::{Config, Engine, Linker, Memory, Store, WasmBacktraceDetails};
 
 fn wasm_engine() -> wasmtime::Result<Engine> {
     let mut config = Config::new();
@@ -145,7 +149,7 @@ fn emit(line: &str) {
 fn run_single(root: PathBuf, expect_failure: bool) {
     let checking_codegen = CodeGenOptions {
         check_constraints: true,
-        ..CodeGenOptions::default()
+        include_debug_info: true,
     };
 
     // 1. Compile
@@ -207,15 +211,23 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         }
     };
 
-    // 3. Compile bytecode: a single binary holding both the witgen and AD entry points
-    //    (depends on R1CS).
-    let program_binary = r1cs.as_ref().and_then(|_| {
+    // 3. Compile bytecode: a single binary holding both the witgen and AD entry points, plus its
+    //    standalone debug sidecar (depends on R1CS).
+    let program_artifact = r1cs.as_ref().and_then(|_| {
         emit("START:COMPILE");
-        match driver.compile_bytecode(checking_codegen) {
-            Ok(b) => {
-                let bytes = b.len() * 8;
-                emit(&format!("END:COMPILE:ok:{bytes}"));
-                Some(b)
+        match driver.compile_bytecode_artifact(checking_codegen) {
+            Ok(artifact) => {
+                let bytes = artifact.binary.len() * 8;
+                let debug_bytes = serde_json::to_vec_pretty(
+                    artifact
+                        .debug_info
+                        .as_ref()
+                        .expect("debug info was requested for the VM test artifact"),
+                )
+                .expect("VM debug info must serialize")
+                .len();
+                emit(&format!("END:COMPILE:ok:{bytes}:{debug_bytes}"));
+                Some(artifact)
             }
             Err(_) => {
                 emit("END:COMPILE:fail");
@@ -230,11 +242,17 @@ fn run_single(root: PathBuf, expect_failure: bool) {
     let ordered_params = load_inputs(&driver.package_root().join("Prover.toml"), &driver);
 
     // 4. Run witgen  (depends on COMPILE)
-    let witgen_result = program_binary.as_ref().and_then(|binary| {
+    let witgen_result = program_artifact.as_ref().and_then(|artifact| {
         emit("START:WITGEN_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-        match interpreter::run(binary, r1cs.witness_layout, r1cs.constraints_layout, params) {
+        match interpreter::run(
+            &artifact.binary,
+            r1cs.witness_layout,
+            r1cs.constraints_layout,
+            params,
+            artifact.debug_info.clone(),
+        ) {
             Ok(result) => {
                 emit("END:WITGEN_RUN:ok");
                 Some(result)
@@ -278,10 +296,10 @@ fn run_single(root: PathBuf, expect_failure: bool) {
 
     // 7. Run AD  (depends on COMPILE, independent of witgen). Skipped for expected-failure
     //    tests, so the native AD steps report as not-applicable.
-    let ad_result = program_binary
+    let ad_result = program_artifact
         .as_ref()
         .filter(|_| !expect_failure)
-        .and_then(|binary| {
+        .and_then(|artifact| {
             emit("START:AD_RUN");
             let r1cs = r1cs.as_ref().unwrap();
             let mut rng = rand::rngs::StdRng::seed_from_u64(42);
@@ -289,10 +307,11 @@ fn run_single(root: PathBuf, expect_failure: bool) {
                 .map(|_| ark_bn254::Fr::rand(&mut rng))
                 .collect();
             match interpreter::run_ad(
-                binary,
+                &artifact.binary,
                 &ad_coeffs,
                 r1cs.witness_layout,
                 r1cs.constraints_layout,
+                artifact.debug_info.clone(),
             ) {
                 Ok((ad_a, ad_b, ad_c, ad_instrumenter)) => {
                     emit("END:AD_RUN:ok");
@@ -336,7 +355,8 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.keep().join("program.wasm");
         let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build())
-            .with_debug_path_root(&source_path_root);
+            .with_debug_path_root(&source_path_root)
+            .with_debug_info();
         match driver.compile_llvm_targets(
             false,
             r1cs,
@@ -345,7 +365,17 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         ) {
             Ok(_) if wasm_path.exists() => {
                 let bytes = fs::metadata(&wasm_path).map(|m| m.len()).unwrap_or(0);
-                emit(&format!("END:WASM_COMPILE:ok:{bytes}"));
+                let debug_path = wasm_debug_info_path(&wasm_path);
+                let Ok(debug_metadata) = fs::metadata(&debug_path) else {
+                    eprintln!(
+                        "WASM compile succeeded but debug sidecar was not found at {:?}",
+                        debug_path
+                    );
+                    emit("END:WASM_COMPILE:fail");
+                    return None;
+                };
+                let debug_bytes = debug_metadata.len();
+                emit(&format!("END:WASM_COMPILE:ok:{bytes}:{debug_bytes}"));
                 Some(wasm_path)
             }
             Ok(_) => {
@@ -583,8 +613,7 @@ fn run_wasm(
     let mut store = Store::new(&engine, ());
 
     // Load the WASM module
-    let wasm_bytes = fs::read(wasm_path)?;
-    let module = Module::new(&engine, &wasm_bytes)?;
+    let module = wasm_runtime::load_wasmtime_module(&engine, wasm_path)?;
 
     // Estimate initial memory: linker-reserved stack + module static data + our buffers.
     let initial_estimate = WASM_STACK_SIZE_BYTES + WASM_STATIC_DATA_BYTES + our_data_size;
@@ -895,8 +924,7 @@ fn run_ad_wasm(
     let engine = wasm_engine()?;
     let mut store = Store::new(&engine, ());
 
-    let wasm_bytes = fs::read(wasm_path)?;
-    let module = Module::new(&engine, &wasm_bytes)?;
+    let module = wasm_runtime::load_wasmtime_module(&engine, wasm_path)?;
 
     let initial_estimate = WASM_STACK_SIZE_BYTES + WASM_STATIC_DATA_BYTES + our_data_size;
     let pages = ((initial_estimate as usize + 65535) / 65536) as u32;
@@ -1065,7 +1093,9 @@ struct TestResult {
     rows: Option<usize>,
     cols: Option<usize>,
     binary_bytes: Option<usize>,
+    vm_debug_bytes: Option<usize>,
     wasm_bytes: Option<usize>,
+    wasm_debug_bytes: Option<usize>,
 }
 
 /// Determined purely from child output:
@@ -1290,7 +1320,9 @@ fn ignored_test_result(name: &str) -> TestResult {
         rows: None,
         cols: None,
         binary_bytes: None,
+        vm_debug_bytes: None,
         wasm_bytes: None,
+        wasm_debug_bytes: None,
     }
 }
 
@@ -1301,7 +1333,9 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
     let mut rows = None;
     let mut cols = None;
     let mut binary_bytes = None;
+    let mut vm_debug_bytes = None;
     let mut wasm_bytes = None;
+    let mut wasm_debug_bytes = None;
 
     for line in lines {
         let parts: Vec<&str> = line.split(':').collect();
@@ -1317,9 +1351,11 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
                 }
                 if *key == "COMPILE" && parts.len() >= 4 {
                     binary_bytes = parts[3].parse().ok();
+                    vm_debug_bytes = parts.get(4).and_then(|value| value.parse().ok());
                 }
                 if *key == "WASM_COMPILE" && parts.len() >= 4 {
                     wasm_bytes = parts[3].parse().ok();
+                    wasm_debug_bytes = parts.get(4).and_then(|value| value.parse().ok());
                 }
             }
             ["END", key, "reject"] => {
@@ -1357,7 +1393,9 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
         rows,
         cols,
         binary_bytes,
+        vm_debug_bytes,
         wasm_bytes,
+        wasm_debug_bytes,
     }
 }
 
@@ -1721,33 +1759,114 @@ struct ParsedRow {
     rows: Option<usize>,
     cols: Option<usize>,
     size_bytes: Option<usize>,
+    vm_debug_size_bytes: Option<usize>,
     wasm_size_bytes: Option<usize>,
+    wasm_debug_size_bytes: Option<usize>,
+}
+
+const STATUS_COLUMNS: &[&str] = &[
+    "Test",
+    "Compiled",
+    "R1CS",
+    "Rows",
+    "Cols",
+    "Bytecode Size",
+    "VM Debug Sidecar Size",
+    "WASM Size",
+    "WASM Debug Sidecar Size",
+    "Compile",
+    "Witgen Run VM",
+    "Witgen Correct",
+    "Witgen No Leak",
+    "AD Run VM",
+    "AD Correct",
+    "AD No Leak",
+    "WASM Compile",
+    "Witgen WASM Run",
+    "Witgen WASM Correct",
+    "Witgen WASM No Leak",
+    "AD WASM Run",
+    "AD WASM Correct",
+    "AD WASM No Leak",
+];
+
+/// Frozen schema for baselines generated before debug-sidecar size columns were added. Do not
+/// modify it; add a new compatibility schema if the report layout changes again.
+const LEGACY_STATUS_COLUMNS: &[&str] = &[
+    "Test",
+    "Compiled",
+    "R1CS",
+    "Rows",
+    "Cols",
+    "Bytecode Size",
+    "WASM Size",
+    "Compile",
+    "Witgen Run VM",
+    "Witgen Correct",
+    "Witgen No Leak",
+    "AD Run VM",
+    "AD Correct",
+    "AD No Leak",
+    "WASM Compile",
+    "Witgen WASM Run",
+    "Witgen WASM Correct",
+    "Witgen WASM No Leak",
+    "AD WASM Run",
+    "AD WASM Correct",
+    "AD WASM No Leak",
+];
+
+fn markdown_cells(line: &str) -> Vec<String> {
+    line.split('|')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
     let content =
         fs::read_to_string(path).unwrap_or_else(|_| panic!("Cannot read {}", path.display()));
+    let header = content
+        .lines()
+        .next()
+        .map(markdown_cells)
+        .unwrap_or_default();
     let mut result = Vec::new();
     for line in content.lines().skip(2) {
-        let cells: Vec<String> = line
-            .split('|')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if cells.len() < 21 {
+        let source_cells = markdown_cells(line);
+        if source_cells.len() < header.len() {
             continue;
         }
+        // Normalize both the current schema and the immediately preceding schema into the current
+        // column order. This lets the first PR adding sidecar metrics compare against an older
+        // baseline; the absent baseline metrics become `-` and start participating in growth
+        // reports once both sides have measured values.
+        let cells: Vec<String> = STATUS_COLUMNS
+            .iter()
+            .map(|column| {
+                header
+                    .iter()
+                    .position(|candidate| candidate == column)
+                    .and_then(|index| source_cells.get(index))
+                    .cloned()
+                    .unwrap_or_else(|| "-".to_string())
+            })
+            .collect();
         let rows = cells[3].parse().ok();
         let cols = cells[4].parse().ok();
         let size_bytes = cells[5].parse().ok();
-        let wasm_size_bytes = cells[6].parse().ok();
+        let vm_debug_size_bytes = cells[6].parse().ok();
+        let wasm_size_bytes = cells[7].parse().ok();
+        let wasm_debug_size_bytes = cells[8].parse().ok();
         result.push(ParsedRow {
             name: cells[0].clone(),
             cells,
             rows,
             cols,
             size_bytes,
+            vm_debug_size_bytes,
             wasm_size_bytes,
+            wasm_debug_size_bytes,
         });
     }
     result
@@ -1756,47 +1875,45 @@ fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
 const REGRESSION_COLS: &[(usize, &str)] = &[
     (1, "Compiled"),
     (2, "R1CS"),
-    (7, "Compile"),
-    (8, "Witgen Run VM"),
-    (9, "Witgen Correct"),
-    (10, "Witgen No Leak"),
-    (11, "AD Run VM"),
-    (12, "AD Correct"),
-    (13, "AD No Leak"),
-    (14, "WASM Compile"),
-    (15, "Witgen WASM Run"),
-    (16, "Witgen WASM Correct"),
-    (17, "Witgen WASM No Leak"),
-    (18, "AD WASM Run"),
-    (19, "AD WASM Correct"),
-    (20, "AD WASM No Leak"),
+    (9, "Compile"),
+    (10, "Witgen Run VM"),
+    (11, "Witgen Correct"),
+    (12, "Witgen No Leak"),
+    (13, "AD Run VM"),
+    (14, "AD Correct"),
+    (15, "AD No Leak"),
+    (16, "WASM Compile"),
+    (17, "Witgen WASM Run"),
+    (18, "Witgen WASM Correct"),
+    (19, "Witgen WASM No Leak"),
+    (20, "AD WASM Run"),
+    (21, "AD WASM Correct"),
+    (22, "AD WASM No Leak"),
 ];
 
-/// Verify the table's header matches the column layout the index-based checks assume. Without
-/// this, a stale-format status file (e.g. a baseline from before a column change) still has enough
-/// cells to parse, so the checks would silently compare misaligned columns.
+/// Accept the current table layout and the immediately preceding layout, which the parser
+/// normalizes by column name. Reject anything else instead of silently comparing misaligned data.
 fn validate_layout(path: &Path) {
     let content =
         fs::read_to_string(path).unwrap_or_else(|_| panic!("Cannot read {}", path.display()));
-    let header: Vec<String> = content
+    let header = content
         .lines()
         .next()
-        .unwrap_or_default()
-        .split('|')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .map(markdown_cells)
+        .unwrap_or_default();
+    let current: Vec<String> = STATUS_COLUMNS
+        .iter()
+        .map(|value| value.to_string())
         .collect();
-    for &(col, name) in REGRESSION_COLS {
-        let found = header.get(col).map(String::as_str).unwrap_or("<missing>");
-        assert_eq!(
-            found,
-            name,
-            "Status table {} has an unexpected layout (column {col} is {found:?}, expected {name:?}). \
-             Regenerate the baseline — the regression/growth checks compare columns by position and \
-             cannot align mismatched layouts.",
-            path.display(),
-        );
-    }
+    let legacy: Vec<String> = LEGACY_STATUS_COLUMNS
+        .iter()
+        .map(|value| value.to_string())
+        .collect();
+    assert!(
+        header == current || header == legacy,
+        "Status table {} has an unsupported layout. Regenerate it with this test runner.",
+        path.display(),
+    );
 }
 
 /// A cell counts as "handled" if it passed (✅) or the stage legitimately did not apply (N/A).
@@ -1871,7 +1988,9 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
     let mut constraint_changes = MetricChanges::new("Constraints");
     let mut witness_changes = MetricChanges::new("Witnesses");
     let mut bytecode_changes = MetricChanges::new("Bytecode Size (bytes)");
+    let mut vm_debug_changes = MetricChanges::new("VM Debug Sidecar Size (bytes)");
     let mut wasm_changes = MetricChanges::new("WASM Size (bytes)");
+    let mut wasm_debug_changes = MetricChanges::new("WASM Debug Sidecar Size (bytes)");
 
     for cur in &current {
         // Success rate counts handled cells (✅ or N/A) over every cell. N/A is a legitimate
@@ -1918,8 +2037,14 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
         if let (Some(bs), Some(cs)) = (base.size_bytes, cur.size_bytes) {
             bytecode_changes.record(&cur.name, bs, cs);
         }
+        if let (Some(bs), Some(cs)) = (base.vm_debug_size_bytes, cur.vm_debug_size_bytes) {
+            vm_debug_changes.record(&cur.name, bs, cs);
+        }
         if let (Some(bw), Some(cw)) = (base.wasm_size_bytes, cur.wasm_size_bytes) {
             wasm_changes.record(&cur.name, bw, cw);
+        }
+        if let (Some(bw), Some(cw)) = (base.wasm_debug_size_bytes, cur.wasm_debug_size_bytes) {
+            wasm_debug_changes.record(&cur.name, bw, cw);
         }
     }
 
@@ -1954,7 +2079,9 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
         &constraint_changes,
         &witness_changes,
         &bytecode_changes,
+        &vm_debug_changes,
         &wasm_changes,
+        &wasm_debug_changes,
     ];
     let any_decreases = metrics.iter().any(|m| !m.decreases.is_empty());
     let any_increases = metrics.iter().any(|m| !m.increases.is_empty());
@@ -2069,29 +2196,39 @@ impl MetricChanges {
     }
 }
 
-// The program is a single artifact with both the witgen and AD entry points, so it has one
-// `Size` column and one `Compile` / `WASM Compile` column each. The run/correctness/leak columns
-// stay split because witgen and AD are distinct executions of their respective entry points.
+// The program is a single artifact with both the witgen and AD entry points, so each target has
+// one executable size, one debug-sidecar size, and one compile column. The run/correctness/leak
+// columns stay split because witgen and AD are distinct executions of their respective entry
+// points.
 fn render_markdown(results: &[TestResult]) -> String {
     let mut md = String::new();
-    md.push_str("| Test | Compiled | R1CS | Rows | Cols | Bytecode Size | WASM Size | Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Run VM | AD Correct | AD No Leak | WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak | AD WASM Run | AD WASM Correct | AD WASM No Leak |\n");
-    md.push_str("|------|----------|------|------|------|---------------|-----------|---------|---------------|----------------|----------------|-----------|------------|------------|--------------|-----------------|---------------------|---------------------|-------------|---------------------|---------------------|\n");
+    md.push_str(&format!("| {} |\n", STATUS_COLUMNS.join(" | ")));
+    md.push_str(&format!(
+        "| {} |\n",
+        vec!["---"; STATUS_COLUMNS.len()].join(" | ")
+    ));
 
     for r in results {
         let s = |key: &str| r.steps.get(key).copied().unwrap_or(Status::Skip).emoji();
         let rows = r.rows.map_or("-".to_string(), |v| v.to_string());
         let cols = r.cols.map_or("-".to_string(), |v| v.to_string());
         let size = r.binary_bytes.map_or("-".to_string(), |v| v.to_string());
+        let vm_debug_size = r.vm_debug_bytes.map_or("-".to_string(), |v| v.to_string());
         let wasm_size = r.wasm_bytes.map_or("-".to_string(), |v| v.to_string());
+        let wasm_debug_size = r
+            .wasm_debug_bytes
+            .map_or("-".to_string(), |v| v.to_string());
         md.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             r.name,
             s("COMPILED"),
             s("R1CS"),
             rows,
             cols,
             size,
+            vm_debug_size,
             wasm_size,
+            wasm_debug_size,
             s("COMPILE"),
             s("WITGEN_RUN"),
             s("WITGEN_CORRECT"),
@@ -2130,6 +2267,63 @@ mod tests {
 
         assert_eq!(result.steps["COMPILED"], Status::Pass);
         assert_eq!(result.steps["R1CS"], Status::Skip);
+    }
+
+    #[test]
+    fn parses_executable_and_debug_sidecar_sizes() {
+        let result = parse_child_output(
+            "sizes",
+            TestExpectation::ExecutionSuccess,
+            &lines(&[
+                "START:COMPILE",
+                "END:COMPILE:ok:128:456",
+                "START:WASM_COMPILE",
+                "END:WASM_COMPILE:ok:789:1234",
+            ]),
+        );
+
+        assert_eq!(result.binary_bytes, Some(128));
+        assert_eq!(result.vm_debug_bytes, Some(456));
+        assert_eq!(result.wasm_bytes, Some(789));
+        assert_eq!(result.wasm_debug_bytes, Some(1234));
+
+        let markdown = render_markdown(&[result]);
+        let mut rendered_lines = markdown.lines();
+        assert_eq!(
+            markdown_cells(rendered_lines.next().unwrap()),
+            STATUS_COLUMNS
+        );
+        rendered_lines.next();
+        let row = markdown_cells(rendered_lines.next().unwrap());
+        assert_eq!(row.len(), STATUS_COLUMNS.len());
+        assert_eq!(&row[5..9], ["128", "456", "789", "1234"]);
+    }
+
+    #[test]
+    fn legacy_status_rows_are_normalized_for_baseline_comparisons() {
+        let mut status = tempfile::NamedTempFile::new().unwrap();
+        writeln!(status, "| {} |", LEGACY_STATUS_COLUMNS.join(" | ")).unwrap();
+        writeln!(
+            status,
+            "| {} |",
+            vec!["---"; LEGACY_STATUS_COLUMNS.len()].join(" | ")
+        )
+        .unwrap();
+        writeln!(
+            status,
+            "| example | ✅ | ✅ | 10 | 20 | 30 | 40 | ✅ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ✅ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |"
+        )
+        .unwrap();
+
+        validate_layout(status.path());
+        let rows = parse_status_rows(status.path());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].size_bytes, Some(30));
+        assert_eq!(rows[0].vm_debug_size_bytes, None);
+        assert_eq!(rows[0].wasm_size_bytes, Some(40));
+        assert_eq!(rows[0].wasm_debug_size_bytes, None);
+        assert_eq!(rows[0].cells[9], "✅");
+        assert_eq!(rows[0].cells[16], "✅");
     }
 
     #[test]

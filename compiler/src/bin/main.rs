@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf, process::ExitCode};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use clap::{Parser, Subcommand};
 use mavros_compiler::Project;
@@ -44,11 +48,11 @@ pub struct ProgramOptions {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub skip_vm: bool,
 
-    /// Print absolute paths in VM stack traces and WASM debug info instead of paths relative to the current directory.
+    /// Print absolute paths in VM stack traces and WASM debug info instead of paths relative to the Noir package root.
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub absolute_paths: bool,
 
-    /// Include source metadata in bytecode and WASM artifacts.
+    /// Emit standalone debug-information sidecars for VM and WASM artifacts.
     #[arg(long, global = true, action = clap::ArgAction::SetTrue)]
     pub include_debug_info: bool,
 }
@@ -98,6 +102,7 @@ fn main() -> ExitCode {
             binary_output,
             *draw_graphs,
             args.include_debug_info,
+            args.absolute_paths,
         ),
         None => run(&args),
     };
@@ -120,6 +125,14 @@ pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, R1CS
     Ok((driver, r1cs))
 }
 
+fn debug_path_root(driver: &Driver, absolute_paths: bool) -> Option<&Path> {
+    if absolute_paths {
+        None
+    } else {
+        Some(driver.package_root())
+    }
+}
+
 /// Compile phase: compile the Noir project and save R1CS and binary artifacts
 /// to separate files.
 pub fn run_compile(
@@ -128,17 +141,19 @@ pub fn run_compile(
     binary_output: &PathBuf,
     draw_graphs: bool,
     include_debug_info: bool,
+    absolute_paths: bool,
 ) -> Result<ExitCode, Error> {
     info!(message = %"Compiling Noir project", root = ?path, r1cs_output = ?r1cs_output, binary_output = ?binary_output);
 
     let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs)?;
-    let binary = api::compile_bytecode(
+    let artifact = api::compile_bytecode_artifact(
         &mut driver,
         CodeGenOptions {
             include_debug_info,
             ..CodeGenOptions::default()
         },
     )?;
+    let binary = artifact.binary;
 
     // Ensure output directories exist
     if let Some(parent) = r1cs_output.parent() {
@@ -163,6 +178,17 @@ pub fn run_compile(
     let basic_json = serde_json::to_string_pretty(&basic)?;
     fs::write(binary_output, basic_json)?;
 
+    let debug_output = binary_output.with_extension("debug.json");
+    if let Some(mut debug_info) = artifact.debug_info {
+        if let Some(root) = debug_path_root(&driver, absolute_paths) {
+            debug_info.relativize_source_paths(root);
+        }
+        fs::write(&debug_output, serde_json::to_string_pretty(&debug_info)?)?;
+        info!(message = %"VM debug info generated", path = %debug_output.display());
+    } else if debug_output.exists() {
+        fs::remove_file(debug_output)?;
+    }
+
     info!(
         message = %"Artifacts saved successfully",
         r1cs_output = ?r1cs_output,
@@ -182,11 +208,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         include_debug_info: args.include_debug_info,
         ..CodeGenOptions::default()
     };
-    let source_path_root = if args.absolute_paths {
-        None
-    } else {
-        Some(std::env::current_dir()?.canonicalize()?)
-    };
+    let source_path_root = debug_path_root(&driver, args.absolute_paths).map(Path::to_path_buf);
     if args.pprint_r1cs {
         use std::io::Write;
         let mut r1cs_file =
@@ -229,15 +251,19 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     }
 
     let params = api::read_prover_inputs(driver.package_root(), driver.abi())?;
-    let mut binary = api::compile_bytecode(&mut driver, codegen_options)?;
+    let artifact = api::compile_bytecode_artifact(&mut driver, codegen_options)?;
+    let mut binary = artifact.binary;
+    let vm_debug_info = artifact.debug_info;
 
     let witgen_result =
-        api::run_witgen_from_binary(&mut binary, &r1cs, &params).map_err(|mut error| {
-            if let Some(root) = &source_path_root {
-                error.relativize_source_paths(root);
-            }
-            error
-        })?;
+        api::run_witgen_from_binary(&mut binary, &r1cs, &params, vm_debug_info.clone()).map_err(
+            |mut error| {
+                if let Some(root) = &source_path_root {
+                    error.relativize_source_paths(root);
+                }
+                error
+            },
+        )?;
 
     let correct = api::check_witgen(&r1cs, &witgen_result);
     if !correct {
@@ -300,7 +326,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let ad_coeffs: Vec<Field> = api::random_ad_coeffs(&r1cs);
 
     let (ad_a, ad_b, ad_c, ad_instrumenter) =
-        api::run_ad_from_binary(&mut binary, &r1cs, &ad_coeffs)?;
+        api::run_ad_from_binary(&mut binary, &r1cs, &ad_coeffs, vm_debug_info)?;
 
     let leftover_memory = plotting::plot_memory_chart(
         &ad_instrumenter,

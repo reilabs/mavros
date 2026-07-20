@@ -2261,6 +2261,8 @@ dependencies = [
  "ark-ff",
  "mavros-artifacts",
  "mavros-opcode-gen",
+ "serde",
+ "serde_json",
  "tracing",
 ]
 
