@@ -11,7 +11,7 @@ use mavros_compiler::compiler::Field;
 use mavros_compiler::compiler::codegen::CodeGenOptions;
 use mavros_compiler::compiler::codegen::hlssa_to_r1cs::R1CS;
 use mavros_compiler::compiler::codegen::llssa_to_llvm::WasmCompileOpts;
-use mavros_compiler::driver::Driver;
+use mavros_compiler::driver::{DEFAULT_LOGUP_SOUNDNESS_BITS, Driver};
 use mavros_compiler::plotting;
 
 type Error = Box<dyn std::error::Error>;
@@ -55,6 +55,12 @@ pub struct ProgramOptions {
     /// Emit standalone debug-information sidecars for VM and WASM artifacts.
     #[arg(long, global = true, action = clap::ArgAction::SetTrue)]
     pub include_debug_info: bool,
+
+    /// Target LogUp lookup-argument soundness, in bits of security. The compiler computes the
+    /// minimum number of challenges needed to reach it and reports the result. On bn254 a
+    /// single challenge suffices for any realistic target.
+    #[arg(long, value_name = "BITS", global = true, default_value_t = DEFAULT_LOGUP_SOUNDNESS_BITS)]
+    pub logup_soundness: u32,
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -103,6 +109,7 @@ fn main() -> ExitCode {
             *draw_graphs,
             args.include_debug_info,
             args.absolute_paths,
+            args.logup_soundness,
         ),
         None => run(&args),
     };
@@ -113,9 +120,14 @@ fn main() -> ExitCode {
     })
 }
 
-pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, R1CS), Error> {
+pub fn compile_to_r1cs(
+    root: PathBuf,
+    draw_graphs: bool,
+    logup_soundness: u32,
+) -> Result<(Driver, R1CS), Error> {
     let project = Project::new(root)?;
     let mut driver = Driver::new(project, draw_graphs);
+    driver.set_logup_soundness(logup_soundness);
     driver.run_noir_compiler()?;
     driver.make_struct_access_static()?;
     driver.monomorphize()?;
@@ -142,10 +154,11 @@ pub fn run_compile(
     draw_graphs: bool,
     include_debug_info: bool,
     absolute_paths: bool,
+    logup_soundness: u32,
 ) -> Result<ExitCode, Error> {
     info!(message = %"Compiling Noir project", root = ?path, r1cs_output = ?r1cs_output, binary_output = ?binary_output);
 
-    let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs)?;
+    let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs, logup_soundness)?;
     let artifact = api::compile_bytecode_artifact(
         &mut driver,
         CodeGenOptions {
@@ -203,7 +216,8 @@ pub fn run_compile(
 /// The main execution of the CLI utility (full pipeline). Should be called directly from the
 /// `main` function of the application.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
-    let (mut driver, r1cs) = compile_to_r1cs(args.root.clone(), args.draw_graphs)?;
+    let (mut driver, r1cs) =
+        compile_to_r1cs(args.root.clone(), args.draw_graphs, args.logup_soundness)?;
     let codegen_options = CodeGenOptions {
         include_debug_info: args.include_debug_info,
         ..CodeGenOptions::default()
@@ -416,5 +430,22 @@ mod tests {
             ProgramOptions::try_parse_from(["mavros", "compile", ".", "--include-debug-info"])
                 .unwrap();
         assert!(compile.include_debug_info);
+    }
+
+    #[test]
+    fn logup_soundness_defaults_to_128_and_is_overridable() {
+        let default = ProgramOptions::try_parse_from(["mavros"]).unwrap();
+        assert_eq!(default.logup_soundness, DEFAULT_LOGUP_SOUNDNESS_BITS);
+        assert_eq!(default.logup_soundness, 128);
+
+        let overridden =
+            ProgramOptions::try_parse_from(["mavros", "--logup-soundness", "96"]).unwrap();
+        assert_eq!(overridden.logup_soundness, 96);
+
+        // `global = true`, so it is also accepted after the `compile` subcommand.
+        let on_subcommand =
+            ProgramOptions::try_parse_from(["mavros", "compile", ".", "--logup-soundness", "80"])
+                .unwrap();
+        assert_eq!(on_subcommand.logup_soundness, 80);
     }
 }

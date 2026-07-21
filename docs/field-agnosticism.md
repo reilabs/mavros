@@ -15,7 +15,13 @@ field it is operating over (see #120). This is a multi-stage process that will o
 - [ ] **Phase 5:** Add support for goldilocks through the SSA and the VM using the field
       abstraction. This will need to use `crypto-primitives` as the runtime-switchable backing for
       the field elements. This must support true field width, and not rely on stuffing goldilocks
-      into larger limb counts.
+      into larger limb counts. Two small-field-specific workstreams surface here: multi-limb
+      **integer-arithmetic lowering** (Layer 6 — `u32×u32` barely fits, but `u64`/`u128` overflow
+      the field and need schoolbook limbs + a multi-cell representation) and **LogUp K-challenge
+      replication** (`L4-logup-challenges` — one challenge is unsound on a small field). The
+      user-facing `--logup-soundness=<bits>` flag (default 128) that computes and reports the
+      required challenge count is **already implemented** (byte-identical no-op on bn254); it
+      hard-errors until K-challenge replication lands.
 
 The current state has each site of a field assumption tagged with `// FIELD-ASSUMPTION: <tag>`
 directly in code. The `<tag>` values match the section headings below.
@@ -27,10 +33,13 @@ Repetitive clusters of the same operation get one marker per file with a count.
 
 - **`[ ]` / `[x]`** — migration status.
 - **Phase** — which roadmap phase touches it (P2 = façade/direct-refs, P3 = `FieldConfig` on SSA, P4
-  = monomorphize VM/backend, P5 = goldilocks + per-field width).
+  = monomorphize VM/backend, P5 = goldilocks + per-field width; P5-logup = the LogUp K-challenge
+  replication sub-phase).
 - **Kind** — `type-parametric` (already abstracts over the field via `Field`/`PrimeField`; follows
   the alias automatically once it's generic) vs `hardcoded` (names bn254 / a literal / a fixed width
-  and must be rewritten) vs `representation` (assumes the 4-limb/32-byte physical layout).
+  and must be rewritten) vs `representation` (assumes the 4-limb/32-byte physical layout) vs
+  `algorithmic` (the _lowering strategy_ itself only works with the field's headroom and needs a
+  different algorithm on a small field — Layer 6).
 
 Completion gate (Phase 5): `rg 'ark_bn254|into_bigint\(|\.0\.0|FELT_LIMBS|FIELD_SIZE|\b254\b'` over
 `compiler/ vm/ mavros-artifacts/ opcode-gen/ wasm-runtime/` returns only façade-internal hits.
@@ -287,6 +296,48 @@ Collapse onto one `FieldConfig::two_pow(exp)`:
 - [ ] `compiler/src/compiler/passes/lookup_spilling.rs:690` (returns `Field`; also `two_pow_u128` at
       `:694`).
 
+### `L4-logup-challenges` — Single LogUp Challenge Assumes a Large Field (Hardcoded count, P5-logup)
+
+The LogUp lookup argument proves the log-derivative identity `Σᵢ mᵢ/(α − tᵢ) = Σⱼ flagⱼ/(α − keyⱼ)`
+(width-2 tables fold `(key, value)` into `key + β·value`). It draws **exactly one** challenge
+`alpha` plus an optional column-folding `beta` — sound at `~2⁻²⁵³` on bn254, but only `~log₂ p` bits
+per challenge, which is inadequate on a small field (`~2⁻⁴²` per challenge on goldilocks). Reaching
+a target bits-of-security needs **K independent challenges**.
+
+**Model (see `hlssa_to_r1cs.rs::compute_logup_soundness`).** Clearing denominators gives a nonzero
+polynomial of total degree `≤ D = table_entries + num_lookups` in the challenges, so one challenge
+fails with probability `≤ D/|F|` (Schwartz–Zippel) and K independent challenges give `(D/|F|)^K`:
+
+```
+per_challenge_bits = floor(log2 p) − ceil(log2 D)      (MODULUS_BIT_SIZE − 1 today)
+K                  = ceil(requested_bits / per_challenge_bits)
+```
+
+Computed with integer bit-length arithmetic (never `f64`) and rounded so `achieved_bits` is a
+_lower_ bound. On bn254 `per_challenge ≈ 223`, so `K = 1` for any sane request and the emitted
+circuit is unchanged (byte-identical). **`beta` must be replicated per repetition** (K independent
+`(αₖ, βₖ)` pairs): a shared `beta` leaves the folding-collision term un-amplified and caps security
+regardless of K.
+
+**Status — the `--logup-soundness=<bits>` flag is implemented** (default 128). It computes and
+reports K, and **hard-errors when `K > 1`** because K-challenge replication is not yet built — never
+silently emitting an under-provisioned circuit. K-challenge replication itself is future
+**P5-logup** work; the external Fiat-Shamir prover must be updated in lockstep to squeeze K
+_independent_ challenges (not powers `α, α², …`, which are invalid for this identity) by reading
+`challenges_size` from the serialized `WitnessLayout` (gate behind the P4 header version bump).
+
+- [x] `compiler/src/compiler/codegen/hlssa_to_r1cs.rs` —
+      `compute_logup_soundness`/`logup_soundness_report` + `SoundnessReport` (the formula,
+      unit-tested); `driver.rs::generate_r1cs` reports + guards.
+- [ ] `hlssa_to_r1cs.rs` challenge allocation (`// challenges init`) — allocate K `(αₖ, βₖ)`
+      (`WitnessLayout::next_challenge` is already K-ready); replicate table inverse columns + sum
+      constraints and lookup inverse witnesses ×K.
+- [ ] `vm/src/interpreter.rs:~416` (5 sites) — phase-2 reads `alpha`/`beta` at hardcoded
+      post-commitment indices `[0]`/`[1]`; loop the batch inversion + fills over K
+      (`[2k]`/`[2k+1]`).
+- [ ] `vm/src/bytecode.rs:~694` (~9 sites) and `hlssa_to_llssa.rs:~3893` (4 sites) — AD emitters
+      bind `logup_wit_challenge_off` `{+0,+1}`; loop as `+2k`/`+2k+1`.
+
 ---
 
 ## Layer 5 — Dependency, Header & Field Selection
@@ -305,6 +356,81 @@ Collapse onto one `FieldConfig::two_pow(exp)`:
       `__field_*` symbol names, linker-bound). `wasm-runtime/src/lib.rs` gains a second field impl.
 - [ ] **JS host** — `wasm-runner/src/field.ts` hardcodes bn254 modulus/R/R_INV; needs a goldilocks
       path (Phase 5; out of scope for Rust corpus validation).
+
+---
+
+## Layer 6 — Integer-Arithmetic Lowering Strategy (Algorithmic, P5)
+
+Integer ops currently **spill into the field**: an n-bit integer (and usually the full product/sum
+of two) is computed in **one** `Field` element and range-checked back to width, with place-value
+packing via `two_pow(k)`. This holds only because bn254 (~254 bits) has headroom for every supported
+integer and product. On a small field it breaks at **two** levels, which the constant-swap tags
+(`L4-two-pow`, `L4-modulus-query`, `L3-width254`) understate — these need a genuinely different
+lowering _strategy_, not a different constant.
+
+Let `B = floor(log2 p)` (bn254: 253; goldilocks: 63). For standard widths on goldilocks the break is
+**mostly representational**:
+
+- `u8/u16` and their products (≤ 32 bits): fit — single cell, any field.
+- `u32`: operands fit; `u32 × u32` (max `= p − 2³²`) _fits_ with zero headroom (matches "u32 can
+  technically be made to fit"); bitwise natural-spread (≤ 32 bits) and shl fit. All **fragile** —
+  correct standalone, but a fused `q·divisor + r` reconstruction can tip over.
+- `u64 / u128 / i64`: a bare value's range `≥ p` (`2⁶⁴ − 1 > p`) ⇒ it **cannot be held injectively
+  in one cell**; every recombination into one cell (`combine_u64_fields`, `lower_not`'s `2⁶⁴ − 1`,
+  signed `sign·2⁶⁴` packing) wraps.
+
+So on goldilocks standard widths collapse to **{single-field for n ≤ 32, multi-cell for n ≥ 64}**;
+the "operation-strategy-only" band is empty for standard widths. `range_fits_field_injectively`
+(`witness_integer_arith.rs`) already flips correctly on a small field — **the debt is the missing
+FALSE-case codegen**, not the predicate. Today the only FALSE-case path is unsigned u128 mul, and it
+still packs `lo + cross·2⁶⁴ ≈ 2¹⁹³` into one cell (assumes ~193-bit headroom); everything else
+`assert!`/`panic!`s.
+
+**P5 target — integers wider than the field must be _supported_, not rejected.** The end state is a
+**multi-cell representation** (Option A): an integer whose type range is `≥ p` (`n > B`) is carried
+as `⌈n/h⌉` field cells end-to-end (witness layout, `Cast`, VM frame, opcode stride, serde). The
+integer type-system caps (`MAX_SUPPORTED_*_BITS` = 128/64) stay **field-independent** — a goldilocks
+`u128` is just a wider cell vector, exactly as bn254 already carries a u128 value in one cell but
+its 256-bit _product_ across two. Paired with a **schoolbook engine** for the FALSE branch (split
+operands into `h`-bit limbs with `h ≈ (field_bits − guard)/2`, byte-aligned — bn254 `h = 64` keeps
+today byte-identical, goldilocks `h = 16`; in-field partial products `< 2^{2h} < p`;
+column-accumulate with a witnessed, range-checked carry chain; keep the low result limbs). Sequence
+within P5: multi-cell representation → mul engine → add/sub-carry → divmod → bitwise → signed.
+**Near-term (P3), transitional only:** converge the scattered FALSE-case `assert!`/`panic!`s onto
+one `unimplemented!("multi-limb — P5")` funnel (byte-identical on bn254; on a small field it fails
+loudly until the multi-cell path lands, rather than silently miscompiling). This is a scaffold,
+**not** a width cap — we are not restricting the supported integer widths on any field. **Dominant
+risk:** every witnessed limb/carry must be range-checked or a malicious prover forges the result.
+
+Two tags, distinct from the constant-swap tags:
+
+### `L6-int-op-strategy` — Single-Field Op Assumes the Result Span `< p` (Algorithmic, P5)
+
+A single-field arithmetic op assumes its exact result span fits one cell (one `b.mul`/`b.add`, or a
+`two_pow`-based packing). Fix = multi-limb schoolbook / carry-chain lowering in the FALSE branch.
+
+- [ ] `witness_integer_arith.rs` — `lower_unsigned_mul` (single-field product + the ~193-bit u128
+      fallback), `lower_signed_mul` (no fallback), `lower_unsigned_addsub`, `lower_signed_addsub`,
+      `signed_value_from_encoded`/`encode_signed_value` (sign packing), `lower_unsigned_divmod`.
+- [ ] `witness_bitwise.rs` — `lower_not`, `lower_integer_sext`, `lower_word_bitwise` (spread width).
+
+### `L6-int-representation` — Value Range `≥ p` Assumed to Fit One Cell (Representation, P5 multi-cell)
+
+A value whose type range is `≥ p` (`n > B`), or a fixed limb layout, assumed to fit / recombine into
+one cell. Fix = a **multi-cell (per-limb) representation** carrying the integer across `⌈n/h⌉` field
+cells (the largest P5 sub-piece; touches witness layout, `Cast`, the VM frame, opcode stride,
+serde). Wide integers are supported, not capped away.
+
+- [ ] `compiler/src/compiler/ssa/hlssa/type_system.rs:5-6` — `MAX_SUPPORTED_UNSIGNED_BITS` /
+      `MAX_SUPPORTED_SIGNED_BITS` stay field-independent (the int-type caps); the multi-cell
+      representation carries any width `> B` on a small field.
+- [ ] `witness_integer_arith.rs` — `split_u128_value` (fixed 2×64 layout; limb width becomes `h`).
+- [ ] `witness_bitwise.rs` — `combine_u32_limbs` / `combine_u64_fields` (recombine into one cell;
+      `extract_u128_limbs`/`decompose_u64_input` limb widths must derive from the field size).
+
+The `value_range_analysis.rs` interval domain is over `BigInt` and stays correct on any field — it
+already produces the exact spans the FALSE-case codegen consumes (no new marker; only `field_top` /
+`bn254_modulus` remain `L4-modulus-query`).
 
 ---
 

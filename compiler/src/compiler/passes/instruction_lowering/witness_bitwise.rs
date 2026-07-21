@@ -219,6 +219,9 @@ impl LowerWitnessBitwiseOps {
         });
     }
 
+    // FIELD-ASSUMPTION: L6-int-op-strategy
+    // `not = (2^bits - 1) - value`. The all-ones mask `2^bits - 1` exceeds p at bits=64 on a
+    // small field, so u64/u128 `not` must be done per-limb.
     fn lower_not(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -238,6 +241,9 @@ impl LowerWitnessBitwiseOps {
         });
     }
 
+    // FIELD-ASSUMPTION: L6-int-op-strategy
+    // Sign-extends via `value + sign * (two_pow(to_bits) - two_pow(from_bits))`. The
+    // `two_pow(to_bits)` shift wraps mod p once `to_bits` reaches the field width.
     fn lower_integer_sext(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -422,6 +428,10 @@ fn spread_as_field(b: &mut impl HLEmitter, value: ValueId, bits: u8) -> ValueId 
     b.cast_to_field(spread)
 }
 
+// FIELD-ASSUMPTION: L6-int-op-strategy
+// Bitwise via spread-then-add: the spread of a `bits`-wide value occupies ~2*bits bits (cast
+// to `U(bits*2)`), so on a ~64-bit field even a 32-bit spread nearly saturates p. Small fields
+// need narrower spread limbs (why u64/u128 are already split into 32-bit limbs).
 fn lower_word_bitwise(
     b: &mut impl HLEmitter,
     kind: BinaryArithOpKind,
@@ -455,6 +465,10 @@ fn lower_u64_limb_bitwise(
     }
 }
 
+// FIELD-ASSUMPTION: L6-int-representation (combine_u32_limbs + combine_u64_fields)
+// These recombine limbs into a single field cell (`lo + hi * 2^32` / `lo + hi * 2^64`). The
+// 2^64 recombination exceeds p on a ~64-bit field, so wide results cannot live in one cell and
+// must stay multi-cell; the shift width must derive from the field size.
 fn combine_u32_limbs(b: &mut impl HLEmitter, limbs: U64Limbs) -> ValueId {
     let lo = b.cast_to_field(limbs.lo);
     let hi = b.cast_to_field(limbs.hi);

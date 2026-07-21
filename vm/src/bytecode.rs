@@ -691,6 +691,10 @@ impl VM {
                     out_dc,
                     ad_coeffs,
                     current_wit_off: 0,
+                    // FIELD-ASSUMPTION: L4-logup-challenges (~9 sites)
+                    // The AD pass reads the single challenge at `logup_wit_challenge_off`
+                    // (alpha) and `+1` (beta). For K challenges these become
+                    // `off + 2k`/`off + 2k + 1`, looped over the K inverse-witness copies.
                     logup_wit_challenge_off: witness_layout.challenges_start(),
                     current_wit_multiplicities_off: witness_layout.multiplicities_start(),
                     current_wit_tables_off: witness_layout.tables_data_start(),
