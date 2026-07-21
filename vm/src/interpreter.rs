@@ -411,6 +411,10 @@ pub fn run_phase2(
         phase1.out_wit_post_comm[i] = *challenge;
     }
 
+    // FIELD-ASSUMPTION: L4-logup-challenges (5 sites)
+    // Phase 2 reads the single LogUp challenge at the hardcoded post-commitment indices
+    // [0] (alpha) and [1] (beta) throughout this function. A small field needs K challenges;
+    // these reads become [2k]/[2k+1] inside a `for k in 0..K` loop (see docs/field-agnosticism.md).
     let mut running_prod = Field::from(1);
     for tbl in phase1.tables.iter() {
         let alpha = phase1.out_wit_post_comm[0];

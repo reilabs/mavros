@@ -943,6 +943,13 @@ impl R1CGen {
         self.next_witness
     }
 
+    /// Number of lookup query sites — one term per site on the lookup side of the LogUp
+    /// identity. Together with the table-entry count this is the argument's soundness degree
+    /// `D`. Must be read before [`R1CGen::seal`] consumes `self`.
+    pub fn num_lookups(&self) -> usize {
+        self.lookups.len()
+    }
+
     fn next_witness(&mut self) -> usize {
         let result = self.next_witness;
         self.next_witness += 1;
@@ -1020,6 +1027,10 @@ impl R1CGen {
         }
 
         // challenges init
+        // FIELD-ASSUMPTION: L4-logup-challenges
+        // One `alpha` (+ an optional column-folding `beta`) gives ~log2(p) bits of LogUp
+        // soundness — sound on bn254, but only ~log2(p)/1 on a small field. A goldilocks
+        // target needs K independent (alpha, beta) pairs here (see docs/field-agnosticism.md).
         let alpha = witness_layout.challenges_end();
         witness_layout.challenges_size += 1;
         let beta = if max_width > 1 {
@@ -1190,5 +1201,235 @@ impl R1CGen {
             constraints_layout,
             constraints: result,
         }
+    }
+}
+
+// LOG-UP SOUNDNESS REPORTING AND ESTIMATION
+// ================================================================================================
+
+/// The outcome of sizing the LogUp lookup argument for a requested bits-of-security
+/// target. See `docs/field-agnosticism.md` (`L4-logup-challenges`) for the model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SoundnessReport {
+    /// The requested bits of security (from `--logup-soundness`).
+    pub requested_bits: u32,
+
+    /// `floor(log2 p)` for the working field — a lower bound on `log2|F|`.
+    pub field_bits: u32,
+
+    /// `D = table_entries + num_lookups`, the degree of the cleared-denominator polynomial.
+    pub soundness_degree: usize,
+
+    /// Bits of security a single challenge buys: `floor(log2 p) - ceil(log2 D)`.
+    pub per_challenge_bits: u32,
+
+    /// `K = ceil(requested_bits / per_challenge_bits)` — the minimum number of challenges.
+    pub challenges: u32,
+
+    /// `K * per_challenge_bits` — a lower bound on the security actually delivered.
+    pub achieved_bits: u32,
+
+    /// `Some((k, bits))` when the request forces a nearly-empty extra challenge: dropping to
+    /// `k = challenges - 1` challenges would still deliver `bits` bits, because the request sits in
+    /// the lower half of the final challenge's contribution.
+    pub near_optimal_alternative: Option<(u32, u32)>,
+}
+
+impl SoundnessReport {
+    /// Diagnostic emitted when `challenges > 1` but K-challenge replication is not yet
+    /// implemented, so the requested target cannot be honoured on this field.
+    pub fn unsupported_message(&self) -> String {
+        let mut msg = format!(
+            "--logup-soundness={} bits needs {} LogUp challenges on this field \
+             (~{} bits each; argument degree D = {}), but multi-challenge LogUp is not yet \
+             implemented \u{2014} a single challenge provides only ~{} bits",
+            self.requested_bits,
+            self.challenges,
+            self.per_challenge_bits,
+            self.soundness_degree,
+            self.per_challenge_bits,
+        );
+        if let Some((k, bits)) = self.near_optimal_alternative {
+            msg.push_str(&format!(
+                " (note: lowering --logup-soundness to {bits} would need only {k} challenge(s), \
+                 shedding a nearly-empty extra challenge)"
+            ));
+        }
+        msg
+    }
+}
+
+/// `ceil(log2 n)` for `n >= 1`, computed with integer bit-length arithmetic (never `f64`,
+/// so the emitted circuit stays bit-reproducible across platforms). `n <= 1` -> 0.
+fn ceil_log2(n: usize) -> u32 {
+    if n <= 1 {
+        0
+    } else {
+        usize::BITS - (n - 1).leading_zeros()
+    }
+}
+
+/// Compute the LogUp challenge count for the working field's bit size.
+///
+/// FIELD-ASSUMPTION: L4-logup-challenges
+///
+/// Reads `MODULUS_BIT_SIZE` of the concrete field to size per-challenge soundness. In P3 this
+/// should read `FieldConfig::field_bit_size()` rather than the bn254 alias.
+pub fn logup_soundness_report(
+    requested_bits: u32,
+    degree: usize,
+) -> Result<SoundnessReport, String> {
+    // floor(log2 p): p in [2^(MODULUS_BIT_SIZE-1), 2^MODULUS_BIT_SIZE), so floor(log2 p) =
+    // MODULUS_BIT_SIZE - 1. Using the floor (rather than the bit size) keeps `achieved_bits`
+    // a lower bound and never over-claims security.
+    let field_bits = <crate::compiler::Field as PrimeField>::MODULUS_BIT_SIZE - 1;
+    compute_logup_soundness(requested_bits, field_bits, degree)
+}
+
+/// Pure LogUp soundness computation (unit-tested with synthetic `field_bits`).
+///
+/// LogUp proves a log-derivative rational identity at a random challenge; clearing denominators
+/// yields a nonzero polynomial of total degree `<= D = table_entries + num_lookups`, so one
+/// challenge fails with probability `<= D/|F|` (Schwartz-Zippel). K independent challenges give
+/// `(D/|F|)^K`, i.e. `K * (log2|F| - log2 D)` bits. All rounding is toward *under*-estimating
+/// security (floor `log2 p`, ceil `log2 D`), so we never report more bits than are actually
+/// delivered.
+fn compute_logup_soundness(
+    requested_bits: u32,
+    field_bits: u32,
+    degree: usize,
+) -> Result<SoundnessReport, String> {
+    let d_bits = ceil_log2(degree);
+    if field_bits <= d_bits {
+        return Err(format!(
+            "LogUp soundness: field is too small \u{2014} floor(log2 p) = {field_bits} bits is not \
+             larger than ceil(log2 D) = {d_bits} bits for a lookup argument of degree D = {degree}; \
+             a single challenge distinguishes < 1 bit, so no number of challenges recovers soundness"
+        ));
+    }
+    let per_challenge_bits = field_bits - d_bits;
+    let challenges = requested_bits.div_ceil(per_challenge_bits).max(1);
+    let achieved_bits = challenges * per_challenge_bits;
+
+    // Near-optimal: the request lands in the lower half of the final challenge's
+    // contribution, so it buys a whole extra challenge for less than half its worth.
+    let near_optimal_alternative = if challenges >= 2 {
+        let prev = (challenges - 1) * per_challenge_bits;
+        let gap = requested_bits.saturating_sub(prev);
+        if gap > 0 && gap <= per_challenge_bits / 2 {
+            Some((challenges - 1, prev))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(SoundnessReport {
+        requested_bits,
+        field_bits,
+        soundness_degree: degree,
+        per_challenge_bits,
+        challenges,
+        achieved_bits,
+        near_optimal_alternative,
+    })
+}
+
+#[cfg(test)]
+mod logup_soundness_tests {
+    use super::{compute_logup_soundness, logup_soundness_report};
+
+    #[test]
+    fn bn254_needs_a_single_challenge_for_realistic_targets() {
+        // bn254: floor(log2 p) = 253. A large circuit (D = 2^24 -> ceil(log2 D) = 24)
+        // still buys 229 bits/challenge, so every sane request is a single challenge.
+        let field_bits = 253;
+        let degree = 1 << 24;
+        for requested in [1, 80, 128, 223, 229] {
+            let r = compute_logup_soundness(requested, field_bits, degree).unwrap();
+            assert_eq!(
+                r.challenges, 1,
+                "requested {requested} should need 1 challenge"
+            );
+            assert_eq!(r.per_challenge_bits, 229);
+            assert!(r.near_optimal_alternative.is_none());
+        }
+    }
+
+    #[test]
+    fn live_bn254_alias_yields_a_single_challenge_at_the_default() {
+        // The real field alias (bn254) at the 128-bit default must be a genuine no-op.
+        let r = logup_soundness_report(128, 1 << 20).unwrap();
+        assert_eq!(r.field_bits, 253);
+        assert_eq!(r.challenges, 1);
+    }
+
+    #[test]
+    fn goldilocks_scales_challenges_with_the_target() {
+        // Synthetic goldilocks: floor(log2 p) = 63, D ~= 2^22 -> ceil(log2 D) = 22, so
+        // per-challenge = 41 bits (the sound floor of the informal ~42-bit estimate).
+        let field_bits = 63;
+        let degree = 1 << 22;
+        let pc = 41;
+        assert_eq!(
+            compute_logup_soundness(pc, field_bits, degree)
+                .unwrap()
+                .per_challenge_bits,
+            pc
+        );
+        // K = ceil(requested / 41).
+        assert_eq!(
+            compute_logup_soundness(41, field_bits, degree)
+                .unwrap()
+                .challenges,
+            1
+        );
+        assert_eq!(
+            compute_logup_soundness(42, field_bits, degree)
+                .unwrap()
+                .challenges,
+            2
+        );
+        assert_eq!(
+            compute_logup_soundness(123, field_bits, degree)
+                .unwrap()
+                .challenges,
+            3
+        );
+        assert_eq!(
+            compute_logup_soundness(124, field_bits, degree)
+                .unwrap()
+                .challenges,
+            4
+        );
+        let r128 = compute_logup_soundness(128, field_bits, degree).unwrap();
+        assert_eq!(r128.challenges, 4);
+        assert_eq!(r128.achieved_bits, 164);
+    }
+
+    #[test]
+    fn near_optimal_fires_just_above_a_challenge_boundary() {
+        let field_bits = 63;
+        let degree = 1 << 22; // per-challenge = 41
+        // 128 is 5 above the 3-challenge mark (123); 5 <= 41/2, so warn and suggest 123/K=3.
+        let r = compute_logup_soundness(128, field_bits, degree).unwrap();
+        assert_eq!(r.near_optimal_alternative, Some((3, 123)));
+        // 145 is 22 above the 3-challenge mark; 22 > 41/2 = 20, so no suggestion.
+        let r = compute_logup_soundness(145, field_bits, degree).unwrap();
+        assert_eq!(r.challenges, 4);
+        assert!(r.near_optimal_alternative.is_none());
+        // Exactly on a boundary (123 = 3*41) is a single-challenge overshoot of 0 -> K=3, none.
+        let r = compute_logup_soundness(123, field_bits, degree).unwrap();
+        assert!(r.near_optimal_alternative.is_none());
+    }
+
+    #[test]
+    fn degenerate_when_degree_exceeds_the_field() {
+        // D >= |F|: a single evaluation point can't distinguish the instance; hard error.
+        assert!(compute_logup_soundness(128, 20, 1 << 22).is_err());
+        // Boundary: field_bits == d_bits is still an error (per-challenge would be 0 bits).
+        assert!(compute_logup_soundness(128, 22, 1 << 22).is_err());
+        assert!(compute_logup_soundness(128, 23, 1 << 22).is_ok());
     }
 }
