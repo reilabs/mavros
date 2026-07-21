@@ -20,6 +20,7 @@ use mavros_compiler::{
         CodeGenOptions,
         hlssa_to_r1cs::R1CS,
         llssa_to_llvm::{WasmCompileOpts, wasm_debug_info_path},
+        r1cs_compact,
     },
     driver::{Driver, Error as DriverError},
     vm::{TableKind, bytecode::TableInfo, interpreter},
@@ -52,10 +53,11 @@ fn wasm_engine() -> wasmtime::Result<Engine> {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // Child mode: --run-single <path> [--expect-failure]
+    // Child mode: --run-single <path> [--expect-failure] [--analyze-r1cs]
     if args.len() >= 3 && args[1] == "--run-single" {
         let expect_failure = args[3..].iter().any(|a| a == "--expect-failure");
-        run_single(PathBuf::from(&args[2]), expect_failure);
+        let analyze = args[3..].iter().any(|a| a == "--analyze-r1cs");
+        run_single(PathBuf::from(&args[2]), expect_failure, analyze);
         return;
     }
 
@@ -88,7 +90,11 @@ fn main() {
     // Parent mode
     let output_path = parse_output_arg(&args);
     let jobs = parse_jobs_arg(&args);
-    run_parent(&output_path, jobs, DEFAULT_IGNORED_TESTS);
+    // Opt-in, developer-only: run the report-only R1CS compaction analysis for every test and print
+    // its per-test stats to stdout. Off by default so CI (and the STATUS.md it produces) never pays
+    // for it.
+    let analyze = args.iter().any(|a| a == "--analyze-r1cs");
+    run_parent(&output_path, jobs, DEFAULT_IGNORED_TESTS, analyze);
 }
 
 const DEFAULT_IGNORED_TESTS: &[&str] = &[
@@ -146,7 +152,7 @@ fn emit(line: &str) {
 /// execution_panic tests) the native AD pipeline is skipped: AD output only
 /// feeds proving, and a program whose witgen is expected to trap is never
 /// proven. WASM paths still run as compile/runtime sanity checks.
-fn run_single(root: PathBuf, expect_failure: bool) {
+fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     let checking_codegen = CodeGenOptions {
         check_constraints: true,
         include_debug_info: true,
@@ -193,6 +199,29 @@ fn run_single(root: PathBuf, expect_failure: bool) {
             let rows = r.constraints.len();
             let cols = r.witness_layout.size();
             emit(&format!("END:R1CS:ok:{rows}:{cols}"));
+            // Opt-in, report-only compaction-opportunity analysis: how many algebraic rows/cols a
+            // post-seal compaction pass could remove. It is *not* part of STATUS.md — the parent
+            // captures this `INFO:` line only to echo it to stdout under `--analyze-r1cs`. Kept off
+            // the `END:R1CS` line so the STATUS output and the determinism fingerprint never depend
+            // on the (comparatively expensive) analysis.
+            if analyze {
+                let stats = r1cs_compact::analyze(&r, driver.protected_r1cs_cols());
+                emit(&format!(
+                    "INFO:R1CS_ANALYSIS:total_rows={rows} algebraic_rows={} removable_rows={} \
+                     removable_cols={} dups={} taut={} pins={} merges={} elim={} lin_rows={} \
+                     rounds={}",
+                    stats.algebraic_rows,
+                    stats.removable_rows,
+                    stats.removable_cols,
+                    stats.duplicate_rows,
+                    stats.tautology_rows,
+                    stats.pinned_cols,
+                    stats.merged_cols,
+                    stats.eliminated_cols,
+                    stats.linear_elim_rows,
+                    stats.rounds,
+                ));
+            }
             Some(r)
         }
         // A program whose assertion can never hold is rejected as unsatisfiable while
@@ -1099,6 +1128,10 @@ struct TestResult {
     steps: HashMap<String, Status>,
     rows: Option<usize>,
     cols: Option<usize>,
+    /// The report-only R1CS compaction breakdown captured from the child's `INFO:R1CS_ANALYSIS`
+    /// line, printed to stdout under `--analyze-r1cs`. `None` on a normal run (the analysis did not
+    /// run) — it never feeds STATUS.md.
+    analysis_stats: Option<String>,
     binary_bytes: Option<usize>,
     vm_debug_bytes: Option<usize>,
     wasm_bytes: Option<usize>,
@@ -1189,7 +1222,7 @@ fn collect_test_dirs(base: &Path, prefix: &str, expectation: TestExpectation) ->
     dirs
 }
 
-fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
+fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str], analyze: bool) {
     let mut entries: Vec<TestEntry> = Vec::new();
 
     // 1. Local noir_tests/ directory
@@ -1269,6 +1302,9 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
                     if matches!(entry.expectation, TestExpectation::ExecutionFailure) {
                         cmd.arg("--expect-failure");
                     }
+                    if analyze {
+                        cmd.arg("--analyze-r1cs");
+                    }
                     let mut child = cmd
                         .env(wasm_runtime::WASM_RUNTIME_LIB_ENV, &wasm_runtime_lib)
                         .stdout(Stdio::piped())
@@ -1299,6 +1335,16 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str]) {
         .map(|m| m.into_inner().unwrap().expect("test slot unfilled"))
         .collect();
 
+    // Developer-only: echo the per-test R1CS compaction breakdown to stdout, in test order. Only
+    // present under `--analyze-r1cs`; never written to STATUS.md.
+    if analyze {
+        for r in &results {
+            if let Some(stats) = &r.analysis_stats {
+                println!("{}: {stats}", r.name);
+            }
+        }
+    }
+
     let md = render_markdown(&results);
     fs::write(output_path, &md).expect("Cannot write output file");
     eprintln!("Wrote {}", output_path.display());
@@ -1326,6 +1372,7 @@ fn ignored_test_result(name: &str) -> TestResult {
         steps,
         rows: None,
         cols: None,
+        analysis_stats: None,
         binary_bytes: None,
         vm_debug_bytes: None,
         wasm_bytes: None,
@@ -1339,12 +1386,20 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
     let mut rejected = HashMap::<String, bool>::default();
     let mut rows = None;
     let mut cols = None;
+    let mut analysis_stats = None;
     let mut binary_bytes = None;
     let mut vm_debug_bytes = None;
     let mut wasm_bytes = None;
     let mut wasm_debug_bytes = None;
 
     for line in lines {
+        // Opt-in R1CS compaction breakdown (only emitted under `--analyze-r1cs`). Captured whole so
+        // the parent can echo it to stdout; it never feeds STATUS.md. Handled before the `:`-split
+        // dispatch because its free-form payload is not a `START:`/`END:` record.
+        if let Some(rest) = line.strip_prefix("INFO:R1CS_ANALYSIS:") {
+            analysis_stats = Some(rest.to_string());
+            continue;
+        }
         let parts: Vec<&str> = line.split(':').collect();
         match parts.as_slice() {
             ["START", key] => {
@@ -1399,6 +1454,7 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
         steps,
         rows,
         cols,
+        analysis_stats,
         binary_bytes,
         vm_debug_bytes,
         wasm_bytes,
@@ -1797,16 +1853,71 @@ const STATUS_COLUMNS: &[&str] = &[
     "AD WASM No Leak",
 ];
 
-/// Frozen schema for baselines generated before debug-sidecar size columns were added. Do not
-/// modify it; add a new compatibility schema if the report layout changes again.
-const LEGACY_STATUS_COLUMNS: &[&str] = &[
-    "Test",
+fn markdown_cells(line: &str) -> Vec<String> {
+    line.split('|')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// A parsed STATUS.md: the rows plus the header's column-name → cell-index map. Columns are
+/// looked up by name so a baseline and a current file with different layouts (e.g. a baseline
+/// predating a column addition) can still be compared column-for-column.
+struct StatusTable {
+    columns: HashMap<String, usize>,
+    rows: Vec<ParsedRow>,
+}
+
+impl StatusTable {
+    /// The named cell of `row`, or `None` if this table's layout lacks that column.
+    fn cell<'a>(&self, row: &'a ParsedRow, name: &str) -> Option<&'a str> {
+        self.columns
+            .get(name)
+            .and_then(|&idx| row.cells.get(idx))
+            .map(String::as_str)
+    }
+}
+
+fn parse_status_table(path: &Path) -> StatusTable {
+    let content =
+        fs::read_to_string(path).unwrap_or_else(|_| panic!("Cannot read {}", path.display()));
+    parse_status_content(&content)
+}
+
+fn parse_status_content(content: &str) -> StatusTable {
+    let columns: HashMap<String, usize> =
+        markdown_cells(content.lines().next().unwrap_or_default())
+            .into_iter()
+            .enumerate()
+            .map(|(idx, name)| (name, idx))
+            .collect();
+
+    let mut rows = Vec::new();
+    for line in content.lines().skip(2) {
+        let cells = markdown_cells(line);
+        if cells.len() != columns.len() {
+            continue;
+        }
+        let get = |name: &str| columns.get(name).map(|&idx| cells[idx].as_str());
+        let parse_count = |name: &str| get(name).and_then(|cell| cell.parse::<usize>().ok());
+        rows.push(ParsedRow {
+            name: get("Test").unwrap_or_default().to_string(),
+            rows: parse_count("Rows"),
+            cols: parse_count("Cols"),
+            size_bytes: parse_count("Bytecode Size"),
+            vm_debug_size_bytes: parse_count("VM Debug Sidecar Size"),
+            wasm_size_bytes: parse_count("WASM Size"),
+            wasm_debug_size_bytes: parse_count("WASM Debug Sidecar Size"),
+            cells,
+        });
+    }
+    StatusTable { columns, rows }
+}
+
+/// The stage columns compared by the regression/growth checks, by header name.
+const REGRESSION_COLS: &[&str] = &[
     "Compiled",
     "R1CS",
-    "Rows",
-    "Cols",
-    "Bytecode Size",
-    "WASM Size",
     "Compile",
     "Witgen Run VM",
     "Witgen Correct",
@@ -1823,104 +1934,20 @@ const LEGACY_STATUS_COLUMNS: &[&str] = &[
     "AD WASM No Leak",
 ];
 
-fn markdown_cells(line: &str) -> Vec<String> {
-    line.split('|')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-fn parse_status_rows(path: &Path) -> Vec<ParsedRow> {
-    let content =
-        fs::read_to_string(path).unwrap_or_else(|_| panic!("Cannot read {}", path.display()));
-    let header = content
-        .lines()
-        .next()
-        .map(markdown_cells)
-        .unwrap_or_default();
-    let mut result = Vec::new();
-    for line in content.lines().skip(2) {
-        let source_cells = markdown_cells(line);
-        if source_cells.len() < header.len() {
-            continue;
-        }
-        // Normalize both the current schema and the immediately preceding schema into the current
-        // column order. This lets the first PR adding sidecar metrics compare against an older
-        // baseline; the absent baseline metrics become `-` and start participating in growth
-        // reports once both sides have measured values.
-        let cells: Vec<String> = STATUS_COLUMNS
-            .iter()
-            .map(|column| {
-                header
-                    .iter()
-                    .position(|candidate| candidate == column)
-                    .and_then(|index| source_cells.get(index))
-                    .cloned()
-                    .unwrap_or_else(|| "-".to_string())
-            })
-            .collect();
-        let rows = cells[3].parse().ok();
-        let cols = cells[4].parse().ok();
-        let size_bytes = cells[5].parse().ok();
-        let vm_debug_size_bytes = cells[6].parse().ok();
-        let wasm_size_bytes = cells[7].parse().ok();
-        let wasm_debug_size_bytes = cells[8].parse().ok();
-        result.push(ParsedRow {
-            name: cells[0].clone(),
-            cells,
-            rows,
-            cols,
-            size_bytes,
-            vm_debug_size_bytes,
-            wasm_size_bytes,
-            wasm_debug_size_bytes,
-        });
+/// Verify the table's header carries every column the checks compare. Columns are resolved by
+/// name, so files whose layouts differ (a baseline predating a column addition) still align;
+/// what must never happen silently is a *stage* column going missing entirely — e.g. a renamed
+/// header — which would drop that stage from regression checking.
+fn validate_layout(table: &StatusTable, path: &Path) {
+    for name in REGRESSION_COLS.iter().chain(&["Test", "Rows", "Cols"]) {
+        assert!(
+            table.columns.contains_key(*name),
+            "Status table {} has an unexpected layout: no {name:?} column. Regenerate it — a \
+             misnamed or missing stage column would silently drop that stage from the \
+             regression/growth checks.",
+            path.display(),
+        );
     }
-    result
-}
-
-const REGRESSION_COLS: &[(usize, &str)] = &[
-    (1, "Compiled"),
-    (2, "R1CS"),
-    (9, "Compile"),
-    (10, "Witgen Run VM"),
-    (11, "Witgen Correct"),
-    (12, "Witgen No Leak"),
-    (13, "AD Run VM"),
-    (14, "AD Correct"),
-    (15, "AD No Leak"),
-    (16, "WASM Compile"),
-    (17, "Witgen WASM Run"),
-    (18, "Witgen WASM Correct"),
-    (19, "Witgen WASM No Leak"),
-    (20, "AD WASM Run"),
-    (21, "AD WASM Correct"),
-    (22, "AD WASM No Leak"),
-];
-
-/// Accept the current table layout and the immediately preceding layout, which the parser
-/// normalizes by column name. Reject anything else instead of silently comparing misaligned data.
-fn validate_layout(path: &Path) {
-    let content =
-        fs::read_to_string(path).unwrap_or_else(|_| panic!("Cannot read {}", path.display()));
-    let header = content
-        .lines()
-        .next()
-        .map(markdown_cells)
-        .unwrap_or_default();
-    let current: Vec<String> = STATUS_COLUMNS
-        .iter()
-        .map(|value| value.to_string())
-        .collect();
-    let legacy: Vec<String> = LEGACY_STATUS_COLUMNS
-        .iter()
-        .map(|value| value.to_string())
-        .collect();
-    assert!(
-        header == current || header == legacy,
-        "Status table {} has an unsupported layout. Regenerate it with this test runner.",
-        path.display(),
-    );
 }
 
 /// A cell counts as "handled" if it passed (✅) or the stage legitimately did not apply (N/A).
@@ -1935,22 +1962,23 @@ fn cell_is_handled(cell: &str) -> bool {
 }
 
 fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
-    validate_layout(baseline_path);
-    validate_layout(current_path);
-    let baseline = parse_status_rows(baseline_path);
-    let current = parse_status_rows(current_path);
+    let baseline = parse_status_table(baseline_path);
+    let current = parse_status_table(current_path);
+    validate_layout(&baseline, baseline_path);
+    validate_layout(&current, current_path);
 
     let base_map: HashMap<&str, &ParsedRow> =
-        baseline.iter().map(|r| (r.name.as_str(), r)).collect();
+        baseline.rows.iter().map(|r| (r.name.as_str(), r)).collect();
 
     let mut regressions = Vec::new();
-    for cur in &current {
+    for cur in &current.rows {
         let Some(base) = base_map.get(cur.name.as_str()) else {
             continue;
         };
-        for &(col, col_name) in REGRESSION_COLS {
-            let base_val = &base.cells[col];
-            let cur_val = &cur.cells[col];
+        for &col_name in REGRESSION_COLS {
+            // `validate_layout` guarantees both lookups resolve.
+            let base_val = baseline.cell(base, col_name).unwrap();
+            let cur_val = current.cell(cur, col_name).unwrap();
             // `✅ → N/A` is not a regression: it means the stage stopped being applicable (e.g. a
             // failure test whose rejection now happens earlier), which is still a handled cell.
             if base_val == "✅" && !cell_is_handled(cur_val) {
@@ -1972,13 +2000,13 @@ fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
 }
 
 fn check_growth(baseline_path: &Path, current_path: &Path) {
-    validate_layout(baseline_path);
-    validate_layout(current_path);
-    let baseline = parse_status_rows(baseline_path);
-    let current = parse_status_rows(current_path);
+    let baseline = parse_status_table(baseline_path);
+    let current = parse_status_table(current_path);
+    validate_layout(&baseline, baseline_path);
+    validate_layout(&current, current_path);
 
     let base_map: HashMap<&str, &ParsedRow> =
-        baseline.iter().map(|r| (r.name.as_str(), r)).collect();
+        baseline.rows.iter().map(|r| (r.name.as_str(), r)).collect();
 
     // Track stats for existing tests (tests in both baseline and current)
     let mut new_checkmarks: Vec<(String, &str)> = Vec::new(); // (test_name, col_name)
@@ -1999,13 +2027,13 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
     let mut wasm_changes = MetricChanges::new("WASM Size (bytes)");
     let mut wasm_debug_changes = MetricChanges::new("WASM Debug Sidecar Size (bytes)");
 
-    for cur in &current {
+    for cur in &current.rows {
         // Success rate counts handled cells (✅ or N/A) over every cell. N/A is a legitimate
         // "nothing to run here" outcome, not a gap, so a correctly-rejected expected-failure test
         // scores 100% across its whole row rather than one green cell diluted among thousands.
-        for &(col, _) in REGRESSION_COLS {
+        for &col_name in REGRESSION_COLS {
             total_current_cells += 1;
-            if cell_is_handled(&cur.cells[col]) {
+            if cell_is_handled(current.cell(cur, col_name).unwrap()) {
                 total_current_checkmarks += 1;
             }
         }
@@ -2018,17 +2046,17 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
         // turned green. `new_checkmarks` stays literal-✅ so the report's "turned into
         // checkmarks ✅" list means what it says (a cell that became N/A is handled, but it did
         // not turn green).
-        for &(col, col_name) in REGRESSION_COLS {
+        for &col_name in REGRESSION_COLS {
             existing_total += 1;
-            let base_handled = cell_is_handled(&base.cells[col]);
-            let cur_handled = cell_is_handled(&cur.cells[col]);
-            if base_handled {
+            let base_val = baseline.cell(base, col_name).unwrap();
+            let cur_val = current.cell(cur, col_name).unwrap();
+            if cell_is_handled(base_val) {
                 existing_baseline_checkmarks += 1;
             }
-            if cur_handled {
+            if cell_is_handled(cur_val) {
                 existing_current_checkmarks += 1;
             }
-            if base.cells[col] != "✅" && cur.cells[col] == "✅" {
+            if base_val != "✅" && cur_val == "✅" {
                 new_checkmarks.push((cur.name.clone(), col_name));
             }
         }
@@ -2180,10 +2208,16 @@ impl MetricChanges {
 
     /// Bucket a single test's change as a pre-formatted table row.
     fn record(&mut self, test: &str, before: usize, after: usize) {
-        let pct = (after as f64 - before as f64) / before as f64 * 100.0;
+        // A metric appearing from zero has no meaningful percentage.
+        let pct = if before == 0 {
+            "new".to_string()
+        } else {
+            let pct = (after as f64 - before as f64) / before as f64 * 100.0;
+            format!("{pct:+.1}%")
+        };
         if after > before {
             self.increases.push(format!(
-                "| {} | {} | {} | +{} ({:+.1}%) |",
+                "| {} | {} | {} | +{} ({}) |",
                 test,
                 before,
                 after,
@@ -2192,7 +2226,7 @@ impl MetricChanges {
             ));
         } else if after < before {
             self.decreases.push(format!(
-                "| {} | {} | {} | {} ({:.1}%) |",
+                "| {} | {} | {} | {} ({}) |",
                 test,
                 before,
                 after,
@@ -2303,11 +2337,39 @@ mod tests {
         rendered_lines.next();
         let row = markdown_cells(rendered_lines.next().unwrap());
         assert_eq!(row.len(), STATUS_COLUMNS.len());
+        // Bytecode / VM-debug / WASM / WASM-debug sizes, immediately after the Cols column.
         assert_eq!(&row[5..9], ["128", "456", "789", "1234"]);
     }
 
     #[test]
     fn legacy_status_rows_are_normalized_for_baseline_comparisons() {
+        // A baseline predating the debug-sidecar columns. Its stage columns must still resolve by
+        // name, and the size columns it lacks read as `None`, so it can be compared against a
+        // current-format run across the schema transition.
+        const LEGACY_STATUS_COLUMNS: &[&str] = &[
+            "Test",
+            "Compiled",
+            "R1CS",
+            "Rows",
+            "Cols",
+            "Bytecode Size",
+            "WASM Size",
+            "Compile",
+            "Witgen Run VM",
+            "Witgen Correct",
+            "Witgen No Leak",
+            "AD Run VM",
+            "AD Correct",
+            "AD No Leak",
+            "WASM Compile",
+            "Witgen WASM Run",
+            "Witgen WASM Correct",
+            "Witgen WASM No Leak",
+            "AD WASM Run",
+            "AD WASM Correct",
+            "AD WASM No Leak",
+        ];
+
         let mut status = tempfile::NamedTempFile::new().unwrap();
         writeln!(status, "| {} |", LEGACY_STATUS_COLUMNS.join(" | ")).unwrap();
         writeln!(
@@ -2322,15 +2384,16 @@ mod tests {
         )
         .unwrap();
 
-        validate_layout(status.path());
-        let rows = parse_status_rows(status.path());
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].size_bytes, Some(30));
-        assert_eq!(rows[0].vm_debug_size_bytes, None);
-        assert_eq!(rows[0].wasm_size_bytes, Some(40));
-        assert_eq!(rows[0].wasm_debug_size_bytes, None);
-        assert_eq!(rows[0].cells[9], "✅");
-        assert_eq!(rows[0].cells[16], "✅");
+        let table = parse_status_table(status.path());
+        validate_layout(&table, status.path());
+        assert_eq!(table.rows.len(), 1);
+        let row = &table.rows[0];
+        assert_eq!(row.size_bytes, Some(30));
+        assert_eq!(row.vm_debug_size_bytes, None);
+        assert_eq!(row.wasm_size_bytes, Some(40));
+        assert_eq!(row.wasm_debug_size_bytes, None);
+        assert_eq!(table.cell(row, "Compile"), Some("✅"));
+        assert_eq!(table.cell(row, "WASM Compile"), Some("✅"));
     }
 
     #[test]
@@ -2508,5 +2571,107 @@ mod tests {
 
         assert_eq!(result.steps["WITGEN_RUN"], Status::Fail);
         assert_eq!(result.steps["WITGEN_WASM_RUN"], Status::Fail);
+    }
+
+    #[test]
+    fn r1cs_line_parses_rows_and_cols() {
+        let result = parse_child_output(
+            "ok",
+            TestExpectation::ExecutionSuccess,
+            &lines(&["START:R1CS", "END:R1CS:ok:100:50"]),
+        );
+        assert_eq!(result.rows, Some(100));
+        assert_eq!(result.cols, Some(50));
+        // `END:R1CS` never carries the analysis breakdown; that arrives (opt-in) on a separate line.
+        assert_eq!(result.analysis_stats, None);
+    }
+
+    /// A generic INFO line is invisible to the stage parser; the opt-in `INFO:R1CS_ANALYSIS` line
+    /// is captured for stdout echoing but likewise does not affect stage parsing.
+    #[test]
+    fn info_lines_are_ignored_but_analysis_is_captured() {
+        let result = parse_child_output(
+            "ok",
+            TestExpectation::ExecutionSuccess,
+            &lines(&[
+                "START:R1CS",
+                "INFO:SOMETHING:noise",
+                "INFO:R1CS_ANALYSIS:algebraic_rows=10 removable_rows=2 rounds=3",
+                "END:R1CS:ok:10:5",
+            ]),
+        );
+        assert_eq!(result.steps["R1CS"], Status::Pass);
+        assert_eq!(result.rows, Some(10));
+        assert_eq!(
+            result.analysis_stats.as_deref(),
+            Some("algebraic_rows=10 removable_rows=2 rounds=3")
+        );
+    }
+
+    /// Current-format table: columns resolve by name.
+    #[test]
+    fn status_table_parses_by_header_name() {
+        let table = parse_status_content(
+            "| Test | Compiled | R1CS | Rows | Cols | Bytecode Size | WASM Size | Compile |\n\
+             |------|----------|------|------|------|---------------|-----------|---------|\n\
+             | a/b | ✅ | ✅ | 100 | 50 | 2488 | 186940 | ✅ |\n\
+             | c/d | ✅ | ✅ | 10 | 5 | 100 | 200 | ✅ |\n",
+        );
+        assert_eq!(table.rows.len(), 2);
+        let row = &table.rows[0];
+        assert_eq!(row.name, "a/b");
+        assert_eq!(row.rows, Some(100));
+        assert_eq!(row.cols, Some(50));
+        assert_eq!(row.size_bytes, Some(2488));
+        assert_eq!(table.cell(row, "R1CS"), Some("✅"));
+    }
+
+    /// A baseline that still carries the now-removed `Shrink` column must parse fine: unknown
+    /// columns are resolved by name and simply ignored, so `--check-regression`/`--check-growth`
+    /// keep working against pre-transition baselines.
+    #[test]
+    fn status_table_tolerates_extra_shrink_column() {
+        let table = parse_status_content(
+            "| Test | Compiled | R1CS | Rows | Cols | Shrink | Bytecode Size | WASM Size | Compile |\n\
+             |------|----------|------|------|------|--------|---------------|-----------|---------|\n\
+             | a/b | ✅ | ❌ | 100 | 50 | 8.0% | 2488 | 186940 | ✅ |\n",
+        );
+        let row = &table.rows[0];
+        assert_eq!(row.rows, Some(100));
+        assert_eq!(row.size_bytes, Some(2488));
+        assert_eq!(table.cell(row, "R1CS"), Some("❌"));
+        // The retired column is no longer part of `ParsedRow`, but by-name access still finds its
+        // raw cell when a legacy baseline provides it.
+        assert_eq!(table.cell(row, "Shrink"), Some("8.0%"));
+    }
+
+    /// Rendered output must round-trip through the parser with columns intact.
+    #[test]
+    fn render_markdown_round_trips_through_parser() {
+        let steps: HashMap<String, Status> = STEP_KEYS
+            .iter()
+            .map(|&key| (key.to_string(), Status::Pass))
+            .collect();
+        let results = vec![TestResult {
+            name: "suite/case".to_string(),
+            steps,
+            rows: Some(200),
+            cols: Some(80),
+            analysis_stats: None,
+            binary_bytes: Some(1234),
+            vm_debug_bytes: None,
+            wasm_bytes: None,
+            wasm_debug_bytes: None,
+        }];
+        let md = render_markdown(&results);
+        let table = parse_status_content(&md);
+        for name in REGRESSION_COLS {
+            assert!(table.columns.contains_key(*name), "{name} missing");
+        }
+        let row = &table.rows[0];
+        assert_eq!(row.name, "suite/case");
+        assert_eq!(row.rows, Some(200));
+        assert_eq!(row.wasm_size_bytes, None);
+        assert_eq!(table.cell(row, "AD WASM No Leak"), Some("✅"));
     }
 }
