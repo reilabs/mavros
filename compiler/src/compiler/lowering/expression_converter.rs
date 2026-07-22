@@ -927,6 +927,7 @@ impl<'a> ExpressionConverter<'a> {
                             noirc_frontend::shared::Signedness::Unsigned,
                             bit_size,
                         )) => Constant::U(bit_size.bit_size() as usize, 0),
+                        // FIELD-ASSUMPTION: L1-direct-ref (1 sites)
                         _ => Constant::Field(ark_bn254::Fr::from(0u64)),
                     })
                 } else {
@@ -1088,6 +1089,7 @@ impl<'a> ExpressionConverter<'a> {
         let value = self.convert_expression(&cast.lhs, b).unwrap();
 
         let (src_bits, src_signed) = match cast.lhs.return_type().as_deref() {
+            // FIELD-ASSUMPTION: L3-width254
             Some(AstType::Field) => (254, false),
             Some(AstType::Integer(signedness, bit_size)) => (
                 bit_size.bit_size() as usize,
@@ -1098,6 +1100,7 @@ impl<'a> ExpressionConverter<'a> {
         };
 
         let (target, target_bits) = match &cast.r#type {
+            // FIELD-ASSUMPTION: L3-width254
             AstType::Field => (CastTarget::Field, 254),
             AstType::Integer(signedness, bit_size) => {
                 let bits = bit_size.bit_size() as usize;

@@ -785,6 +785,7 @@ impl LLStruct {
         LLStruct { fields }
     }
 
+    // FIELD-ASSUMPTION: L3-llstruct
     /// 4×i64 struct representing a BN254 field element in Montgomery form.
     pub fn field_elem() -> Self {
         Self::new(vec![

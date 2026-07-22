@@ -123,6 +123,7 @@ impl HostType {
                     }
                 }
             }
+            // FIELD-ASSUMPTION: L3-opcode-width
             HostType::Field => {
                 quote! {
                     unsafe {
@@ -149,6 +150,7 @@ impl HostType {
             | HostType::JumpTarget
             | HostType::FramePosition
             | HostType::BoxedLayout => 1,
+            // FIELD-ASSUMPTION: L3-opcode-width
             HostType::Field => 4, // TODO parameterize
             HostType::Slice(_) => panic!("slice size is not known at compile time"),
             HostType::Tuple(ty) => ty.iter().map(|ty| ty.measure_size()).sum(),
@@ -205,6 +207,7 @@ impl HostType {
                     #offset -= 1;
                 }
             }
+            // FIELD-ASSUMPTION: L3-opcode-width
             HostType::Field => {
                 quote! {
                     #binary.push(#i.0.0[0] as u64);

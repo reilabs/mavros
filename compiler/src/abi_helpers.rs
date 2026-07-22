@@ -57,7 +57,7 @@ fn ordered_param(abi_type: &AbiType, value: &InputValue) -> InputValueOrdered {
             InputValueOrdered::Vec(
                 bytes
                     .iter()
-                    .map(|byte| InputValueOrdered::Field(ark_bn254::Fr::from(*byte as u64)))
+                    .map(|byte| InputValueOrdered::Field(ark_bn254::Fr::from(*byte as u64))) // FIELD-ASSUMPTION: L1-direct-ref (1 sites)
                     .collect(),
             )
         }

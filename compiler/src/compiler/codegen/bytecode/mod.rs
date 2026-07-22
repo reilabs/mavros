@@ -1734,6 +1734,7 @@ fn emit_assert_r1c(
 /// Returns (stride, elem_kind) for an array element type in a lookup opcode.
 fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {
     match &elem_type.expr {
+        // FIELD-ASSUMPTION: L3-felt-limbs
         TypeExpr::Field => (bytecode::FELT_LIMBS, bytecode::ELEM_FIELD),
         TypeExpr::U(bits) => {
             assert!(

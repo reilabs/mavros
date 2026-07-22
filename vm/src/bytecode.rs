@@ -13,6 +13,7 @@ use std::fmt::Display;
 use std::ptr;
 
 /// The number of u64 limbs making up a field element.
+// FIELD-ASSUMPTION: L3-felt-limbs
 pub const FELT_LIMBS: usize = 4;
 
 /// A user-facing source position attached to generated VM code.
@@ -686,6 +687,10 @@ impl VM {
                     out_dc,
                     ad_coeffs,
                     current_wit_off: 0,
+                    // FIELD-ASSUMPTION: L4-logup-challenges (~9 sites)
+                    // The AD pass reads the single challenge at `logup_wit_challenge_off`
+                    // (alpha) and `+1` (beta). For K challenges these become
+                    // `off + 2k`/`off + 2k + 1`, looped over the K inverse-witness copies.
                     logup_wit_challenge_off: witness_layout.challenges_start(),
                     current_wit_multiplicities_off: witness_layout.multiplicities_start(),
                     current_wit_tables_off: witness_layout.tables_data_start(),
@@ -1329,6 +1334,7 @@ mod def {
     }
 
     #[opcode]
+    // FIELD-ASSUMPTION: L4-decompose
     fn truncate_f_to_u(#[out] res: *mut Field, #[frame] a: Field, to_bits: u64) {
         unsafe {
             let limb0 = ark_ff::PrimeField::into_bigint(a).0[0];
@@ -1357,6 +1363,7 @@ mod def {
 
     #[opcode]
     #[inline(never)]
+    // FIELD-ASSUMPTION: L4-inverse
     fn div_field(#[out] res: *mut Field, #[frame] a: Field, #[frame] b: Field) {
         unsafe {
             *res = if b == Field::ZERO { Field::ZERO } else { a / b };
@@ -1854,6 +1861,7 @@ mod def {
         max_bits: usize,
     ) -> (*const u64, Frame) {
         // Convert field to bigint and check if it fits in max_bits
+        // FIELD-ASSUMPTION: L4-decompose
         let bigint = ark_ff::PrimeField::into_bigint(val);
         let check = bigint.to_bits_le().iter().skip(max_bits).all(|b| !b);
         if !check {

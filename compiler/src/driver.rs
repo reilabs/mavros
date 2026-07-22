@@ -25,7 +25,7 @@ use crate::{
         codegen::{
             CodeGenOptions,
             bytecode::CodeGen,
-            hlssa_to_r1cs::{R1CGen, R1CS, R1CSProfile},
+            hlssa_to_r1cs::{R1CGen, R1CS, R1CSProfile, logup_soundness_report},
             llssa_to_llvm::WasmCompileOpts,
         },
         pass_manager::PassManager,
@@ -75,6 +75,11 @@ pub struct BytecodeArtifact {
     pub debug_info: Option<DebugInfo>,
 }
 
+/// Default LogUp bits-of-security target when `--logup-soundness` is not given. On bn254 a
+/// single challenge already exceeds this, so the default is a byte-identical no-op; it becomes
+/// the forward tripwire once a small field (goldilocks) needs more than one challenge.
+pub const DEFAULT_LOGUP_SOUNDNESS_BITS: u32 = 128;
+
 pub struct Driver {
     project: Project,
     initial_ssa: Option<HLSSA>,
@@ -90,6 +95,8 @@ pub struct Driver {
     abi: Option<noirc_abi::Abi>,
     draw_cfg: bool,
     main_is_unconstrained: bool,
+    /// Requested LogUp bits-of-security (from `--logup-soundness`); sizes the challenge count.
+    logup_soundness: u32,
 }
 
 #[derive(Debug)]
@@ -99,6 +106,10 @@ pub enum Error {
     /// satisfied, discovered while symbolically executing the program to generate R1CS. Such a
     /// program will never execute, so it is rejected rather than compiled into constraints.
     UnsatisfiableProgram(String),
+    /// The requested `--logup-soundness` target needs more than one LogUp challenge on this
+    /// field, but multi-challenge LogUp is not yet implemented (see `docs/field-agnosticism.md`,
+    /// `L4-logup-challenges`). Rejected rather than silently emitting an under-provisioned circuit.
+    LogupSoundnessUnsupported(String),
 }
 
 impl std::fmt::Display for Error {
@@ -110,6 +121,7 @@ impl std::fmt::Display for Error {
             Error::UnsatisfiableProgram(message) => {
                 write!(f, "program will never execute: {message}")
             }
+            Error::LogupSoundnessUnsupported(message) => write!(f, "{message}"),
         }
     }
 }
@@ -135,7 +147,15 @@ impl Driver {
             abi: None,
             draw_cfg,
             main_is_unconstrained: false,
+            logup_soundness: DEFAULT_LOGUP_SOUNDNESS_BITS,
         }
+    }
+
+    /// Override the LogUp bits-of-security target (defaults to
+    /// [`DEFAULT_LOGUP_SOUNDNESS_BITS`]). Only the CLI sets this; library/test callers keep
+    /// the default, which is a no-op on bn254.
+    pub fn set_logup_soundness(&mut self, bits: u32) {
+        self.logup_soundness = bits;
     }
 
     pub fn get_debug_output_dir(&self) -> PathBuf {
@@ -458,6 +478,8 @@ impl Driver {
         r1cs_gen
             .run(&r1cs_ssa, &type_info)
             .map_err(|e| Error::UnsatisfiableProgram(e.message))?;
+        // Captured before `seal` consumes `r1cs_gen`; feeds the LogUp soundness degree D.
+        let num_lookups = r1cs_gen.num_lookups();
         let (r1cs, profile) = r1cs_gen.seal_with_profile();
         let mut num_non_zero_terms = 0;
         for r1c in r1cs.constraints.iter() {
@@ -489,6 +511,33 @@ impl Driver {
             total_witness = r1cs.witness_layout.size()
 
         );
+
+        // Report the LogUp challenge count for the requested bits-of-security, and reject targets
+        // that would need more than one challenge (K-challenge replication is not yet implemented).
+        // Only relevant when the program actually has a lookup argument, i.e. at least one
+        // challenge was allocated. On bn254 a single challenge exceeds any sane target, so K is
+        // always 1 here and the emitted circuit is unchanged.
+        if r1cs.witness_layout.challenges_size > 0 {
+            let degree = r1cs.witness_layout.multiplicities_size + num_lookups;
+            let report = logup_soundness_report(self.logup_soundness, degree)
+                .map_err(Error::LogupSoundnessUnsupported)?;
+            info!(
+                message = %"LogUp soundness",
+                requested_bits = report.requested_bits,
+                field_bits = report.field_bits,
+                table_entries = r1cs.witness_layout.multiplicities_size,
+                lookups = num_lookups,
+                soundness_degree_d = report.soundness_degree,
+                per_challenge_bits = report.per_challenge_bits,
+                challenges = report.challenges,
+                achieved_bits = report.achieved_bits,
+            );
+            if report.challenges > 1 {
+                return Err(Error::LogupSoundnessUnsupported(
+                    report.unsupported_message(),
+                ));
+            }
+        }
 
         Ok(r1cs)
     }

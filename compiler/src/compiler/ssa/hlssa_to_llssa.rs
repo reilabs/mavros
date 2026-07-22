@@ -666,6 +666,7 @@ fn lower_constant_to_ll_constant(constant: &Constant) -> LLConstant {
                 value: *val,
             }
         }
+        // FIELD-ASSUMPTION: L2-lower
         Constant::Field(fr) => {
             let values =
                 fr.0.0
@@ -1213,6 +1214,7 @@ fn lower_instruction(
                         };
                         let zero = e.emit_int_const(64, 0);
                         let limbs = e.mk_struct(LLStruct::limbs(), vec![lo, hi, zero, zero]);
+                        // FIELD-ASSUMPTION: L3-limb-op (6 sites)
                         let field_val = e.field_from_limbs(limbs);
                         val_map.insert(*result, field_val);
                     }
@@ -3888,6 +3890,9 @@ fn emit_key_value_ad_lookup_call_body(
     let x_coeff = ad_read_coeff_at_dyn(e, x_cnst_idx);
     let y_coeff = ad_read_coeff_at_dyn(e, y_cnst_idx);
 
+    // FIELD-ASSUMPTION: L4-logup-challenges (4 sites)
+    // The LLSSA AD emitters bind the single challenge at `challenges_start()` (alpha) and
+    // `+1` (beta). K-challenge replication loops these as `challenges_start() + 2k`/`+ 2k + 1`.
     let logup_alpha_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64);
     let logup_beta_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64 + 1);
 
@@ -4400,6 +4405,7 @@ mod tests {
         hb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.test_block(entry);
+            // FIELD-ASSUMPTION: L1-direct-ref (1 sites)
             let c = e.field_const(ark_bn254::Fr::from(7u64));
             e.terminate_return(vec![c]);
         });

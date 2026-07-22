@@ -240,7 +240,7 @@ impl Simplifier {
                         {
                             let inv = fb
                                 .ssa
-                                .add_const(Constant::Field((*denom).inverse().unwrap()));
+                                .add_const(Constant::Field((*denom).inverse().unwrap())); // FIELD-ASSUMPTION: L4-inverse
                             return Some(Rewrite::Replace(vec![OpCode::BinaryArithOp {
                                 kind: BinaryArithOpKind::Mul,
                                 result: *result,
@@ -530,6 +530,7 @@ fn materialize_zero(
     materialize_const(types, result, fb, |t| match t {
         TypeExpr::U(s) => Some(Constant::U(*s, 0)),
         TypeExpr::I(s) => Some(Constant::I(*s, 0)),
+        // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
         TypeExpr::Field => Some(Constant::Field(ark_bn254::Fr::zero())),
         _ => None,
     })

@@ -55,6 +55,7 @@ impl FrameLayouter {
     pub fn alloc_field(&mut self, value: ValueId) -> bytecode::FramePosition {
         self.variables.insert(value, self.next_free);
         let r = self.next_free;
+        // FIELD-ASSUMPTION: L3-felt-limbs
         self.next_free += bytecode::FELT_LIMBS;
         bytecode::FramePosition(r)
     }
@@ -68,6 +69,7 @@ impl FrameLayouter {
 
     pub fn alloc_temp_field(&mut self) -> bytecode::FramePosition {
         let r = self.next_free;
+        // FIELD-ASSUMPTION: L3-felt-limbs
         self.next_free += bytecode::FELT_LIMBS;
         bytecode::FramePosition(r)
     }
@@ -82,6 +84,7 @@ impl FrameLayouter {
     /// Returns the size of `tp` in u`64` cells.
     pub fn type_size(&self, tp: &Type) -> usize {
         match tp.expr {
+            // FIELD-ASSUMPTION: L3-felt-limbs
             TypeExpr::Field => bytecode::FELT_LIMBS,
             TypeExpr::U(bits) => {
                 assert!(bits <= MAX_SUPPORTED_UNSIGNED_BITS);
@@ -225,6 +228,8 @@ pub fn for_each_constant_word(constant: &Constant, visit: &mut impl FnMut(u64)) 
             visit(*val as u64);
         }
         Constant::Field(val) => {
+            // FIELD-ASSUMPTION: L3-felt-limbs
+            // FIELD-ASSUMPTION: L3-frame
             for i in 0..bytecode::FELT_LIMBS {
                 visit(val.0.0[i]);
             }
@@ -268,6 +273,7 @@ impl GlobalFrameLayouter {
 
     fn type_frame_size(typ: &Type) -> usize {
         match &typ.expr {
+            // FIELD-ASSUMPTION: L3-felt-limbs
             TypeExpr::Field => bytecode::FELT_LIMBS,
             TypeExpr::U(bits) => {
                 assert!(*bits <= MAX_SUPPORTED_UNSIGNED_BITS);

@@ -304,7 +304,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
             let r1cs = r1cs.as_ref().unwrap();
             let mut rng = rand::rngs::StdRng::seed_from_u64(42);
             let ad_coeffs: Vec<Field> = (0..r1cs.constraints.len())
-                .map(|_| ark_bn254::Fr::rand(&mut rng))
+                .map(|_| ark_bn254::Fr::rand(&mut rng)) // FIELD-ASSUMPTION: L1-direct-ref (3 sites)
                 .collect();
             match interpreter::run_ad(
                 &artifact.binary,
@@ -496,6 +496,7 @@ fn load_inputs(file_path: &Path, driver: &Driver) -> Option<Vec<interpreter::Inp
 
 // ── WASM Runner ──────────────────────────────────────────────────────
 
+// FIELD-ASSUMPTION: L3-field-size
 const FIELD_SIZE: usize = 32; // 4 x i64 = 32 bytes
 const WASM_STACK_SIZE_BYTES: u32 = 256 * 1024;
 const WASM_STATIC_DATA_BYTES: u32 = 4096;
@@ -535,7 +536,7 @@ fn read_table_info_slot(
     let mults_off = mults_base
         .checked_sub(wasm_witness_ptr)
         .expect("table multiplicities pointer is before witness base")
-        / FIELD_SIZE as u32;
+        / FIELD_SIZE as u32; // FIELD-ASSUMPTION: L3-field-size
     (
         mults_off as usize,
         TableInfo {
@@ -557,6 +558,7 @@ fn read_u32_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr: u
 
 /// Read a field element from WASM memory
 fn read_field_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr: u32) -> Field {
+    // FIELD-ASSUMPTION: L3-frame
     use ark_ff::BigInt;
     let data = memory.data(&store);
     let offset = ptr as usize;
@@ -600,6 +602,7 @@ fn run_wasm(
     let input_fields: Vec<Field> = params.iter().flat_map(flatten_input_value).collect();
 
     let vm_struct_size: u32 = WITGEN_VM_STRUCT_SIZE;
+    // FIELD-ASSUMPTION: L3-field-size
     let witness_bytes = (witness_count * FIELD_SIZE) as u32;
     let constraint_bytes = (constraint_count * FIELD_SIZE) as u32;
     let input_bytes = (input_fields.len() * FIELD_SIZE) as u32;
@@ -663,7 +666,7 @@ fn run_wasm(
     // (matches how Phase 2 uses it: `out_wit_post_comm[wit_base + i]`,
     // where `out_wit_post_comm` starts at challenges_start).
     let mults_cursor_ptr =
-        witness_ptr + (r1cs.witness_layout.multiplicities_start() * FIELD_SIZE) as u32;
+        witness_ptr + (r1cs.witness_layout.multiplicities_start() * FIELD_SIZE) as u32; // FIELD-ASSUMPTION: L3-field-size
     let lookups_a_cursor =
         a_ptr + (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
     let lookups_b_cursor =
@@ -712,7 +715,7 @@ fn run_wasm(
         write_field_to_memory(
             &memory,
             &mut store,
-            inputs_ptr + (i * FIELD_SIZE) as u32,
+            inputs_ptr + (i * FIELD_SIZE) as u32, // FIELD-ASSUMPTION: L3-field-size
             field,
         );
     }
@@ -745,6 +748,7 @@ fn run_wasm(
     let mut out_c = Vec::with_capacity(constraint_count);
 
     for i in 0..witness_count {
+        // FIELD-ASSUMPTION: L3-field-size
         let ptr = witness_ptr + (i * FIELD_SIZE) as u32;
         out_witness.push(read_field_from_memory(&memory, &store, ptr));
     }
@@ -752,7 +756,7 @@ fn run_wasm(
         out_a.push(read_field_from_memory(
             &memory,
             &store,
-            a_ptr + (i * FIELD_SIZE) as u32,
+            a_ptr + (i * FIELD_SIZE) as u32, // FIELD-ASSUMPTION: L3-field-size
         ));
         out_b.push(read_field_from_memory(
             &memory,
@@ -848,6 +852,7 @@ fn witgen_phase2(
         let lo = *multiplicities_wit_off;
         let hi = lo + tbl.length;
         for i in lo..hi {
+            // FIELD-ASSUMPTION: L4-low-limb
             out_wit_pre_comm[i] = Field::from(out_wit_pre_comm[i].0.0[0]);
         }
     }
@@ -915,9 +920,11 @@ fn run_ad_wasm(
     let constraint_count = r1cs.constraints.len();
 
     let vm_struct_size: u32 = AD_VM_STRUCT_SIZE;
+    // FIELD-ASSUMPTION: L3-field-size
     let da_bytes = (witness_count * FIELD_SIZE) as u32;
     let db_bytes = da_bytes;
     let dc_bytes = da_bytes;
+    // FIELD-ASSUMPTION: L3-field-size
     let coeffs_bytes = (constraint_count * FIELD_SIZE) as u32;
     let our_data_size = vm_struct_size + da_bytes + db_bytes + dc_bytes + coeffs_bytes;
 
@@ -974,7 +981,7 @@ fn run_ad_wasm(
         write_field_to_memory(
             &memory,
             &mut store,
-            coeffs_ptr + (i * FIELD_SIZE) as u32,
+            coeffs_ptr + (i * FIELD_SIZE) as u32, // FIELD-ASSUMPTION: L3-field-size
             coeff,
         );
     }
@@ -1043,7 +1050,7 @@ fn run_ad_wasm(
         out_da.push(read_field_from_memory(
             &memory,
             &store,
-            da_ptr + (i * FIELD_SIZE) as u32,
+            da_ptr + (i * FIELD_SIZE) as u32, // FIELD-ASSUMPTION: L3-field-size
         ));
         out_db.push(read_field_from_memory(
             &memory,

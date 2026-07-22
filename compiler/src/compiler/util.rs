@@ -99,6 +99,7 @@ pub mod test {
     use crate::compiler::ssa::{ValueId, hlssa::builder::HLEmitter};
 
     /// Convert the provided `n` into a field value.
+    // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
     pub fn fr(n: u64) -> ark_bn254::Fr {
         ark_bn254::Fr::from(n)
     }

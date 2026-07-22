@@ -110,6 +110,9 @@ impl LowerWitnessIntegerArithOps {
             && integer_bits_and_signedness(lhs_ty).is_some()
     }
 
+    // FIELD-ASSUMPTION: L6-int-op-strategy
+    // The sum/difference is computed in one field element. Sound while `2^(bits+1) < p`; a
+    // u64 sum (65 bits) overflows a ~64-bit field and needs a carry-chain lowering.
     fn lower_unsigned_addsub(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -145,6 +148,12 @@ impl LowerWitnessIntegerArithOps {
         });
     }
 
+    // FIELD-ASSUMPTION: L6-int-op-strategy
+    // The full product is computed in one field element (guarded by
+    // `range_fits_field_injectively`). The only non-single-field path is the u128 fallback
+    // below, and it still packs `lo + cross*2^64` (~2^193) into one cell — so it assumes ~193
+    // bits of headroom. On a small field u32/u64 mul need a schoolbook multi-limb lowering
+    // with per-limb range checks and carries (see docs/field-agnosticism.md, Layer 6).
     fn lower_unsigned_mul(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -209,6 +218,10 @@ impl LowerWitnessIntegerArithOps {
     }
 
     #[allow(clippy::too_many_arguments)]
+    // FIELD-ASSUMPTION: L6-int-op-strategy
+    // Operands are decoded to signed field values and added/subtracted in one field element,
+    // asserting the result range fits injectively. i64 breaks on a ~64-bit field because the
+    // `sign * 2^bits` re-encoding offset alone exceeds p (see `encode_signed_value`).
     fn lower_signed_addsub(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -288,6 +301,10 @@ impl LowerWitnessIntegerArithOps {
         });
     }
 
+    // FIELD-ASSUMPTION: L6-int-op-strategy
+    // Single field mul with no multi-limb fallback at all (unlike unsigned u128). Sound only
+    // while the signed product range fits the field; i32/i64 mul need a schoolbook lowering
+    // on a small field.
     fn lower_signed_mul(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -582,6 +599,7 @@ impl LowerWitnessIntegerArithOps {
     }
 }
 
+// FIELD-ASSUMPTION: L4-two-pow
 fn two_pow(exponent: usize) -> Field {
     Field::from(2).pow([exponent as u64])
 }
@@ -650,6 +668,11 @@ fn narrow_rangecheck_width(range: &IntInterval, default_bits: usize) -> usize {
     width.max(1).min(default_bits)
 }
 
+// FIELD-ASSUMPTION: L4-modulus-query
+// This gate already reads the real modulus and flips correctly on a small field (it returns
+// false for u64xu64, and even for the fragile u32xu32 edge). The debt is not the predicate —
+// it is the missing FALSE-case codegen (only unsigned u128 mul has a fallback). See Layer 6
+// (`L6-int-op-strategy`) in docs/field-agnosticism.md.
 fn range_fits_field_injectively(range: &IntInterval) -> bool {
     let Some(lo) = range.lo() else {
         return false;
@@ -665,6 +688,10 @@ fn range_fits_field_injectively(range: &IntInterval) -> bool {
     hi - lo < p
 }
 
+// FIELD-ASSUMPTION: L6-int-op-strategy (signed encode/decode pair)
+// `signed_value_from_encoded`/`encode_signed_value` pack the sign with `two_pow(bits)` /
+// `two_pow(bits-1)` place-value shifts. These packings wrap mod p once the shift reaches the
+// field width, so i64 sign encoding is unsound on a small field.
 fn signed_value_from_encoded(
     b: &mut HLBlockEmitter<'_>,
     encoded_field: ValueId,
@@ -742,6 +769,9 @@ struct U128Limbs {
     hi: ValueId,
 }
 
+// FIELD-ASSUMPTION: L6-int-representation
+// A fixed 2x64-bit split of a u128. On a small field the limb width must derive from the
+// field size (h ~= field_bits/2), and wide integers become multi-cell values end-to-end.
 fn split_u128_value(b: &mut impl HLEmitter, value: ValueId) -> U128Limbs {
     let value = b.cast_to(CastTarget::U(128), value);
     U128Limbs {
@@ -755,6 +785,10 @@ fn split_u128_limb(b: &mut impl HLEmitter, value: ValueId, offset: usize) -> Val
     b.cast_to(CastTarget::U(64), limb)
 }
 
+// FIELD-ASSUMPTION: L6-int-op-strategy
+// Reconstructs `dividend = q * divisor + r` in one field element; the u128 path recurses into
+// the u128 mul fallback. The reconstruction overflows a small field, and even the fragile
+// u32/u64 `+` fused into `q*divisor + r` can tip past p (needs the multi-limb mul engine).
 #[allow(clippy::too_many_arguments)]
 fn lower_unsigned_divmod(
     b: &mut HLBlockEmitter<'_>,

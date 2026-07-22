@@ -2,6 +2,12 @@ use std::fmt::{Debug, Display, Formatter};
 
 use crate::compiler::ssa::SSAType;
 
+// FIELD-ASSUMPTION: L6-int-representation
+//
+// These bound the integer *type system* (the widest int a Noir program may use); they are
+// field-independent and stay fixed regardless of field size. Integers wider than can fit into the
+// field natively must still be supported. A value whose type range is >= p cannot be held
+// natively in one field cell, so must be carried as multi-cell (limb-based) values end-to-end.
 pub const MAX_SUPPORTED_UNSIGNED_BITS: usize = 128;
 pub const MAX_SUPPORTED_SIGNED_BITS: usize = 64;
 
@@ -273,6 +279,7 @@ impl Type {
     pub fn get_bit_size(&self) -> usize {
         match &self.expr {
             TypeExpr::U(size) | TypeExpr::I(size) => *size,
+            // FIELD-ASSUMPTION: L3-width254
             TypeExpr::Field => 254, // TODO: parametrize
             TypeExpr::WitnessOf(inner) => inner.get_bit_size(),
             _ => panic!("Type is not numeric: {}", self),

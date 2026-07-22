@@ -582,6 +582,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     }
 
     /// The LLVM type for a field element, derived from `LLStruct::field_elem()`.
+    // FIELD-ASSUMPTION: L3-llstruct
     fn field_llvm_type(&self) -> BasicTypeEnum<'ctx> {
         self.convert_struct_type(&LLStruct::field_elem())
     }
@@ -648,6 +649,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let field_lt_type = bool_type.fn_type(&[field_type.into(), field_type.into()], false);
         self.field_lt_fn = Some(self.module.add_function("__field_lt", field_lt_type, None));
 
+        // FIELD-ASSUMPTION: L3-limb-op
         // __field_from_limbs([4 x i64]) -> FieldElem  (raw limbs → Montgomery)
         let field_from_limbs_type = field_type.fn_type(&[limbs_type.into()], false);
         self.field_from_limbs_fn = Some(self.module.add_function(
