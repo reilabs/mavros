@@ -256,7 +256,7 @@ impl WitnessLowering {
                                 (_, true, _, true) => match kind {
                                     BinaryArithOpKind::Sub => {
                                         let neg_one =
-                                            emitter.field_const(ark_bn254::Fr::from(-1i64)); // FIELD-ASSUMPTION: L1-direct-ref (3 sites)
+                                            emitter.field_const(emitter.field().constant(-1i64));
                                         let neg_b = emitter.fresh_value();
                                         emitter.emit(OpCode::MulConst {
                                             result: neg_b,
@@ -296,7 +296,7 @@ impl WitnessLowering {
                                     }
                                     BinaryArithOpKind::Div if a == wit => {
                                         // wit / pure → MulConst(wit, 1/pure)
-                                        let one = emitter.field_const(ark_bn254::Fr::from(1u64));
+                                        let one = emitter.field_const(emitter.field().constant(1u64));
                                         let inv_pure = emitter.fresh_value();
                                         emitter.emit(OpCode::BinaryArithOp {
                                             kind: BinaryArithOpKind::Div,
@@ -320,7 +320,7 @@ impl WitnessLowering {
                                         let lhs_ref = if a == wit { wit } else { pure_refed };
                                         let rhs_ref = if b == wit { wit } else { pure_refed };
                                         let neg_one =
-                                            emitter.field_const(ark_bn254::Fr::from(-1i64));
+                                            emitter.field_const(emitter.field().constant(-1i64));
                                         let neg_rhs = emitter.fresh_value();
                                         emitter.emit(OpCode::MulConst {
                                             result: neg_rhs,

@@ -1,5 +1,7 @@
 use std::{fmt::Debug, hash::Hash};
 
+use mavros_artifacts::FieldConfig;
+
 use crate::compiler::ssa::{
     Block, BlockId, Function, FunctionId, Instruction, Located, SSA, SSAType, SourceLocation,
     Terminator, ValueId,
@@ -82,6 +84,12 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash>
         self.ssa
     }
 
+    /// The field the program operates over, for minting/inspecting field values
+    /// (e.g. `b.field().two_pow(k)`, `b.field().constant(n)`).
+    pub fn field(&self) -> FieldConfig {
+        self.ssa.field()
+    }
+
     /// Get a BlockEditor for a specific block. Upgrade it with
     /// `with_source_location` to emit instructions.
     pub fn block(&mut self, id: BlockId) -> BlockEditor<'_, Op, Ty, C> {
@@ -125,6 +133,13 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Drop
 }
 
 impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEditor<'a, Op, Ty, C> {
+    /// The field the program operates over, for minting/inspecting field values
+    /// (e.g. `b.field().two_pow(k)`, `b.field().constant(n)`). Reached from a [`BlockEmitter`] via
+    /// `Deref`, so emitter-holding pass code can call it directly.
+    pub fn field(&self) -> FieldConfig {
+        self.ssa.field()
+    }
+
     /// Create an editor for an existing block (takes it out of the function).
     pub fn new(
         function: &'a mut Function<Op, Ty>,
@@ -509,6 +524,12 @@ impl<'a, Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSABuilder<
     /// Escape hatch for direct SSA access.
     pub fn ssa(&mut self) -> &mut SSA<Op, Ty, C> {
         self.ssa
+    }
+
+    /// The field the program operates over, for minting/inspecting field values
+    /// (e.g. `b.field().two_pow(k)`, `b.field().constant(n)`).
+    pub fn field(&self) -> FieldConfig {
+        self.ssa.field()
     }
 }
 

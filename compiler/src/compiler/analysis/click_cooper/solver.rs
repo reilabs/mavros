@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use mavros_artifacts::FieldConfig;
+
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
@@ -86,6 +88,9 @@ pub(crate) struct FunctionSolver<'f, 'c, 's> {
     /// A snapshot of the constants that are currently available.
     consts: &'c HLSSAConstantsSnapshot,
 
+    /// The field the program operates over, threaded into the constant-folding transfer functions.
+    field: FieldConfig,
+
     /// Each value's constness in the in-progress fixpoint; a value absent from the map is
     /// implicitly `⊤` (not yet lowered).
     lattice: HashMap<ValueId, Constness>,
@@ -149,7 +154,11 @@ pub(crate) struct FunctionSolver<'f, 'c, 's> {
 }
 
 impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
-    pub(crate) fn new(function: &'f HLFunction, consts: &'c HLSSAConstantsSnapshot) -> Self {
+    pub(crate) fn new(
+        function: &'f HLFunction,
+        consts: &'c HLSSAConstantsSnapshot,
+        field: FieldConfig,
+    ) -> Self {
         let mut uses: HashMap<ValueId, Vec<(BlockId, Option<usize>)>> = HashMap::default();
         for (bid, block) in function.get_blocks() {
             for (idx, instr) in block.get_instructions().enumerate() {
@@ -172,6 +181,7 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
         Self {
             function,
             consts,
+            field,
             lattice: HashMap::default(),
             exec_edges: HashSet::default(),
             exec_preds: HashMap::default(),
@@ -614,9 +624,10 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
                 .collect();
         };
 
+        let field = self.field;
         let value = match fold {
             ScalarFold::Bin { kind, lhs, rhs } => {
-                self.eval2(bid, lhs, rhs, |a, b| eval_binary(kind, a, b))
+                self.eval2(bid, lhs, rhs, |a, b| eval_binary(kind, a, b, field))
             }
             ScalarFold::Cmp { kind, lhs, rhs } => {
                 self.eval2(bid, lhs, rhs, |a, b| eval_cmp(kind, a, b))
@@ -626,7 +637,9 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
             // it is never a lattice `Const` — the fold could never fire (and field-domain
             // multiplication must never inherit integer `Mul` width/overflow rules).
             ScalarFold::MulConst { .. } => Constness::Bottom,
-            ScalarFold::Cast { target, value } => self.eval1(bid, value, |v| eval_cast(target, v)),
+            ScalarFold::Cast { target, value } => {
+                self.eval1(bid, value, |v| eval_cast(target, v, field))
+            }
             ScalarFold::SExt {
                 value,
                 from_bits,
@@ -844,6 +857,7 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
 pub(crate) fn solve_with_writeback(
     function: &HLFunction,
     consts: &HLSSAConstantsSnapshot,
+    field: FieldConfig,
     det: &DetSummaries,
     summaries: Option<&HashMap<FunctionId, FnSummary>>,
     sym_summaries: Option<&SymSummaries>,
@@ -856,7 +870,7 @@ pub(crate) fn solve_with_writeback(
     let mut facts = None;
     let mut converged = false;
     for _ in 0..MAX_WRITEBACK_ROUNDS {
-        let mut solver = FunctionSolver::new(function, consts)
+        let mut solver = FunctionSolver::new(function, consts, field)
             .with_determinism(det)
             .with_param_seeds(param_seeds.clone())
             .with_promotions(&promotions);

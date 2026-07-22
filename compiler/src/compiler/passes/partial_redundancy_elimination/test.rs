@@ -5,7 +5,6 @@ use super::{
     totality::{TotalityOracle, WitnessnessSource},
 };
 use crate::compiler::{
-    Field,
     analysis::{
         click_cooper::{ClickCooper, test::run_in_test},
         flow_analysis::FlowAnalysis,
@@ -21,7 +20,6 @@ use crate::compiler::{
         },
     },
 };
-use ark_ff::Zero;
 
 // EDGE SPLITTING
 // ================================================================================================
@@ -197,7 +195,7 @@ fn field_arithmetic_is_total() {
         Type::witness_of(Type::field()),
     ]);
     let (a, b, wa) = (vals[0], vals[1], vals[2]);
-    let c2 = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let c2 = ssa.add_const(Constant::Field(ssa.field().constant(2u64)));
     let r = ssa.fresh_value();
 
     let (fid, cc, types) = oracle_env(&ssa);
@@ -527,7 +525,7 @@ fn witness_typed_division_is_never_total() {
         Type::witness_of(Type::u(32)),
     ]);
     let (wx, y, wd) = (vals[0], vals[1], vals[2]);
-    let c2f = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let c2f = ssa.add_const(Constant::Field(ssa.field().constant(2u64)));
     let r = ssa.fresh_value();
 
     let (fid, cc, types) = oracle_env(&ssa);
@@ -547,8 +545,8 @@ fn witness_typed_division_is_never_total() {
 fn field_division_uses_the_same_divisor_gate() {
     let (ssa, vals) = main_with_params(&[Type::field(), Type::field()]);
     let (x, d) = (vals[0], vals[1]);
-    let c0 = ssa.add_const(Constant::Field(Field::zero()));
-    let c2 = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let c0 = ssa.add_const(Constant::Field(ssa.field().zero()));
+    let c2 = ssa.add_const(Constant::Field(ssa.field().constant(2u64)));
     let r = ssa.fresh_value();
 
     let (fid, cc, types) = oracle_env(&ssa);
@@ -878,7 +876,7 @@ fn reassociated_chains_deduplicate() {
 fn mul_const_unifies_with_mul() {
     let (mut ssa, vals) = main_with_params(&[Type::field()]);
     let a = vals[0];
-    let c2 = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let c2 = ssa.add_const(Constant::Field(ssa.field().constant(2u64)));
     let (m1, m2) = (ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
@@ -1266,7 +1264,7 @@ fn mismatched_type_leader_does_not_block_same_typed_dedup() {
 fn integrated_dce_sweeps_redirected_definitions() {
     let (mut ssa, vals) = main_with_params(&[Type::field(), Type::field()]);
     let (a, b) = (vals[0], vals[1]);
-    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+    let c5 = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
     let (r1, r2, eq) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
@@ -1601,7 +1599,7 @@ fn tainted_invariant_loop(
     let c0 = ssa.add_const(Constant::U(32, 0));
     let c1 = ssa.add_const(Constant::U(32, 1));
     let c10 = ssa.add_const(Constant::U(32, 10));
-    let c2f = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let c2f = ssa.add_const(Constant::Field(ssa.field().constant(2u64)));
     let (w, i, cond, inv, i2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -1811,8 +1809,8 @@ fn loop_carried_operand_blocks_hoist() {
     let c0 = ssa.add_const(Constant::U(32, 0));
     let c1 = ssa.add_const(Constant::U(32, 1));
     let c10 = ssa.add_const(Constant::U(32, 10));
-    let c1f = ssa.add_const(Constant::Field(Field::from(1u64)));
-    let c2f = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let c1f = ssa.add_const(Constant::Field(ssa.field().constant(1u64)));
+    let c2f = ssa.add_const(Constant::Field(ssa.field().constant(2u64)));
     let (j, acc, jc, x, k, kc, m1, k2, m2, j2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -1926,7 +1924,7 @@ fn outer_body_operand_shape(
     let c2 = if wrapping {
         ssa.add_const(Constant::U(32, 2))
     } else {
-        ssa.add_const(Constant::Field(Field::from(2u64)))
+        ssa.add_const(Constant::Field(ssa.field().constant(2u64)))
     };
     let (j, jc, x, k, kc, m1, k2, m2, j2) = (
         ssa.fresh_value(),
@@ -2103,7 +2101,7 @@ fn call_result_operand_shape(
     let c0 = ssa.add_const(Constant::U(32, 0));
     let c1 = ssa.add_const(Constant::U(32, 1));
     let c10 = ssa.add_const(Constant::U(32, 10));
-    let c2f = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let c2f = ssa.add_const(Constant::Field(ssa.field().constant(2u64)));
     let (j, jc, k, kc, m1, k2, m2, j2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -2247,8 +2245,8 @@ fn aggregate_const_phi_operand_hoists_via_congruence_tier() {
     let c0 = ssa.add_const(Constant::U(32, 0));
     let c1 = ssa.add_const(Constant::U(32, 1));
     let c10 = ssa.add_const(Constant::U(32, 10));
-    let ce1 = ssa.add_const(Constant::Field(Field::from(7u64)));
-    let ce2 = ssa.add_const(Constant::Field(Field::from(9u64)));
+    let ce1 = ssa.add_const(Constant::Field(ssa.field().constant(7u64)));
+    let ce2 = ssa.add_const(Constant::Field(ssa.field().constant(9u64)));
     let (arr0, j, arr, jc, k, kc, x1, k2, x2, j2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),

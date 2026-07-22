@@ -5,10 +5,7 @@
 //! two-limb `u32` decomposition. It also canonicalizes witness integer casts/shifts into the shared
 //! `BitRange` representation where possible.
 
-use ark_ff::{AdditiveGroup as _, Field as _};
-
 use crate::compiler::{
-    Field,
     analysis::types::FunctionTypeInfo,
     ssa::{
         ValueId,
@@ -204,7 +201,7 @@ impl LowerWitnessBitwiseOps {
             }
             BinaryArithOpKind::Xor => {
                 let sum = b.add(lhs_field, rhs_field);
-                let two = b.field_const(Field::from(2));
+                let two = b.field_const(b.field().constant(2));
                 let product = b.mul(lhs_field, rhs_field);
                 let two_product = b.mul(two, product);
                 b.sub(sum, two_product)
@@ -231,7 +228,7 @@ impl LowerWitnessBitwiseOps {
     ) {
         let (bits, cast_target) = integer_bits_and_cast(function_type_info, value, "bitwise not");
         // FIELD-ASSUMPTION: L4-decompose
-        let ones = b.field_const((Field::from(2).pow([bits as u64])) - Field::ONE);
+        let ones = b.field_const(b.field().two_pow(bits) - b.field().one());
         let value_field = b.cast_to_field(value);
         let not_value = b.sub(ones, value_field);
         b.emit(OpCode::Cast {
@@ -242,8 +239,8 @@ impl LowerWitnessBitwiseOps {
     }
 
     // FIELD-ASSUMPTION: L6-int-op-strategy
-    // Sign-extends via `value + sign * (two_pow(to_bits) - two_pow(from_bits))`. The
-    // `two_pow(to_bits)` shift wraps mod p once `to_bits` reaches the field width.
+    // Sign-extends via `value + sign * (field.two_pow(to_bits) - field.two_pow(from_bits))`. The
+    // `field.two_pow(to_bits)` shift wraps mod p once `to_bits` reaches the field width.
     fn lower_integer_sext(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -258,14 +255,14 @@ impl LowerWitnessBitwiseOps {
             "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
         );
         let sign = if context.range(value).is_non_negative_in_signed(from_bits) {
-            b.field_const(Field::ZERO)
+            b.field_const(b.field().zero())
         } else {
             let sign_bits = b.bit_range(value, from_bits - 1, 1);
             b.cast_to_field(sign_bits)
         };
         let value_field = b.cast_to_field(value);
         // FIELD-ASSUMPTION: L4-decompose
-        let extension = b.field_const(two_pow(to_bits) - two_pow(from_bits));
+        let extension = b.field_const(b.field().two_pow(to_bits) - b.field().two_pow(from_bits));
         let offset = b.mul(sign, extension);
         let extended = b.add(value_field, offset);
         b.emit(OpCode::Cast {
@@ -343,12 +340,6 @@ struct U64Limbs {
 struct U128Limbs {
     lo: ValueId,
     hi: ValueId,
-}
-
-// FIELD-ASSUMPTION: L4-decompose
-// FIELD-ASSUMPTION: L4-two-pow
-fn two_pow(exponent: usize) -> Field {
-    Field::from(2).pow([exponent as u64])
 }
 
 fn guarded_rangecheck(
@@ -472,7 +463,7 @@ fn lower_u64_limb_bitwise(
 fn combine_u32_limbs(b: &mut impl HLEmitter, limbs: U64Limbs) -> ValueId {
     let lo = b.cast_to_field(limbs.lo);
     let hi = b.cast_to_field(limbs.hi);
-    let shift = b.field_const(Field::from(1u128 << 32));
+    let shift = b.field_const(b.field().constant(1u128 << 32));
     let shifted_hi = b.mul(hi, shift);
     b.add(lo, shifted_hi)
 }
@@ -481,7 +472,7 @@ fn combine_u64_fields(b: &mut impl HLEmitter, lo: ValueId, hi: ValueId) -> Value
     let lo = b.cast_to_field(lo);
     let hi = b.cast_to_field(hi);
     // FIELD-ASSUMPTION: L4-decompose
-    let shift = b.field_const(two_pow(64));
+    let shift = b.field_const(b.field().two_pow(64));
     let shifted_hi = b.mul(hi, shift);
     b.add(lo, shifted_hi)
 }
@@ -529,7 +520,7 @@ fn extract_u64_limb(b: &mut impl HLEmitter, value: ValueId, offset: usize) -> Va
 
 fn derive_low_u32_limb(b: &mut impl HLEmitter, value: ValueId, hi_field: ValueId) -> ValueId {
     let value_field = b.cast_to_field(value);
-    let shift = b.field_const(Field::from(1u128 << 32));
+    let shift = b.field_const(b.field().constant(1u128 << 32));
     let shifted_hi = b.mul(hi_field, shift);
     let lo_field = b.sub(value_field, shifted_hi);
     b.cast_to(CastTarget::U(32), lo_field)

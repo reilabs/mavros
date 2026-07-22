@@ -230,8 +230,9 @@ pub fn for_each_constant_word(constant: &Constant, visit: &mut impl FnMut(u64)) 
         Constant::Field(val) => {
             // FIELD-ASSUMPTION: L3-felt-limbs
             // FIELD-ASSUMPTION: L3-frame
+            let limbs = val.montgomery_limbs();
             for i in 0..bytecode::FELT_LIMBS {
-                visit(val.0.0[i]);
+                visit(limbs[i]);
             }
         }
         Constant::Blob(blob) => {
