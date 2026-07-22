@@ -1991,9 +1991,8 @@ impl Blob {
 pub enum Constant {
     U(usize, u128),
     I(usize, u128),
-    // FIELD-ASSUMPTION: L1-direct-ref (1 sites)
     // FIELD-ASSUMPTION: L2-ir-const
-    Field(ark_bn254::Fr),
+    Field(mavros_artifacts::FieldElement),
     FnPtr(FunctionId),
     Blob(Blob),
 }

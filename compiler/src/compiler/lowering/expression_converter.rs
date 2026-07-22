@@ -15,6 +15,7 @@ use std::{cell::RefCell, rc::Rc, sync::Arc};
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
+        Field,
         lowering::type_converter::TypeConverter,
         ssa::{
             BlockId, FunctionId, SourceLocation, ValueId,
@@ -927,8 +928,7 @@ impl<'a> ExpressionConverter<'a> {
                             noirc_frontend::shared::Signedness::Unsigned,
                             bit_size,
                         )) => Constant::U(bit_size.bit_size() as usize, 0),
-                        // FIELD-ASSUMPTION: L1-direct-ref (1 sites)
-                        _ => Constant::Field(ark_bn254::Fr::from(0u64)),
+                        _ => Constant::Field(Field::from(0u64)),
                     })
                 } else {
                     None
@@ -1340,8 +1340,9 @@ impl<'a> ExpressionConverter<'a> {
             }
             Literal::Integer(field_element, typ, _location) => match typ {
                 AstType::Field => {
+                    // Boundary: the Noir frontend hands us a raw `ark_bn254::Fr`.
                     let field_val = field_element.into_repr();
-                    Some(Constant::Field(field_val))
+                    Some(Constant::Field(field_val.into()))
                 }
                 AstType::Integer(signedness, bit_size) => {
                     use noirc_frontend::shared::Signedness;

@@ -1247,9 +1247,9 @@ mod tests {
                 let blob = e.emit_constant(Constant::Blob(Blob {
                     elem_type: Type::field(),
                     elements: vec![
-                        Constant::Field(fr(1)),
-                        Constant::Field(fr(2)),
-                        Constant::Field(fr(3)),
+                        Constant::Field(fr(1).into()),
+                        Constant::Field(fr(2).into()),
+                        Constant::Field(fr(3).into()),
                     ],
                 }));
                 let arr = e.mk_seq_of_blob(Type::field(), blob);

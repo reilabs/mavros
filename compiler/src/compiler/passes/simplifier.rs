@@ -1,12 +1,12 @@
 //! Performs both peephole optimization and algebraic simplification on the SSA IR, running until it
 //! reaches an iteration limit or a fixed point.
 
-use ark_ff::Field as _;
 use num_traits::{One, Zero};
 
 use crate::{
     collections::HashMap,
     compiler::{
+        Field,
         analysis::{
             flow_analysis::FlowAnalysis,
             types::{FunctionTypeInfo, Types, const_value_type},
@@ -531,7 +531,7 @@ fn materialize_zero(
         TypeExpr::U(s) => Some(Constant::U(*s, 0)),
         TypeExpr::I(s) => Some(Constant::I(*s, 0)),
         // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
-        TypeExpr::Field => Some(Constant::Field(ark_bn254::Fr::zero())),
+        TypeExpr::Field => Some(Constant::Field(Field::ZERO)),
         _ => None,
     })
 }
@@ -544,7 +544,7 @@ fn materialize_one(
     materialize_const(types, result, fb, |t| match t {
         TypeExpr::U(s) => Some(Constant::U(*s, 1)),
         TypeExpr::I(s) => Some(Constant::I(*s, 1)),
-        TypeExpr::Field => Some(Constant::Field(ark_bn254::Fr::one())),
+        TypeExpr::Field => Some(Constant::Field(Field::ONE)),
         _ => None,
     })
 }

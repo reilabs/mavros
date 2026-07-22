@@ -753,7 +753,9 @@ impl symbolic_executor::Value<R1CGen> for Value {
     }
 
     fn of_field(f: crate::compiler::Field, _ctx: &mut R1CGen) -> Self {
-        Value::Const(ark_bn254::Fr::from(f))
+        // Boundary: the middle-end `FieldElement` becomes the raw `ark_bn254::Fr` this R1CS
+        // evaluator computes coefficients in.
+        Value::Const(f.to_ark())
     }
 
     fn of_blob(_elem_type: Type, elements: Vec<Self>, _ctx: &mut R1CGen) -> Self {
@@ -1056,7 +1058,7 @@ impl R1CGen {
                             a: vec![(y, ark_bn254::Fr::ONE)],
                             b: vec![
                                 (alpha, ark_bn254::Fr::ONE),
-                                (0, -crate::compiler::Field::from(i as u64)),
+                                (0, -ark_bn254::Fr::from(i as u64)),
                             ],
                             c: vec![(m, ark_bn254::Fr::ONE)],
                         });
@@ -1079,18 +1081,18 @@ impl R1CGen {
                         let y = witness_layout.next_table_data();
                         let m = table_info.multiplicities_witness_off + i;
                         result.push(R1C {
-                            a: vec![(beta, crate::compiler::Field::ONE)],
+                            a: vec![(beta, ark_bn254::Fr::ONE)],
                             b: v.clone(),
-                            c: vec![(x, -crate::compiler::Field::ONE)],
+                            c: vec![(x, -ark_bn254::Fr::ONE)],
                         });
                         result.push(R1C {
                             a: vec![(y, ark_bn254::Fr::ONE)],
                             b: vec![
                                 (alpha, ark_bn254::Fr::ONE),
-                                (0, -crate::compiler::Field::from(i as u64)),
-                                (x, -crate::compiler::Field::ONE),
+                                (0, -ark_bn254::Fr::from(i as u64)),
+                                (x, -ark_bn254::Fr::ONE),
                             ],
-                            c: vec![(m, crate::compiler::Field::ONE)],
+                            c: vec![(m, ark_bn254::Fr::ONE)],
                         });
                         sum_lhs.push((y, ark_bn254::Fr::ONE));
                     }
@@ -1120,10 +1122,10 @@ impl R1CGen {
                             a: vec![(y, ark_bn254::Fr::ONE)],
                             b: vec![
                                 (alpha, ark_bn254::Fr::ONE),
-                                (0, -crate::compiler::Field::from(i as u64)),
-                                (beta, crate::compiler::Field::from(spread_val)),
+                                (0, -ark_bn254::Fr::from(i as u64)),
+                                (beta, ark_bn254::Fr::from(spread_val)),
                             ],
-                            c: vec![(m, crate::compiler::Field::ONE)],
+                            c: vec![(m, ark_bn254::Fr::ONE)],
                         });
                         sum_lhs.push((y, ark_bn254::Fr::ONE));
                     }
@@ -1165,16 +1167,13 @@ impl R1CGen {
                     let y = witness_layout.next_lookups_data();
                     // β * value = -x  (defines x = -β*value)
                     result.push(R1C {
-                        a: vec![(beta, crate::compiler::Field::ONE)],
+                        a: vec![(beta, ark_bn254::Fr::ONE)],
                         b: lookup.elements[1].clone(),
-                        c: vec![(x, -crate::compiler::Field::ONE)],
+                        c: vec![(x, -ark_bn254::Fr::ONE)],
                     });
 
                     // y * (α - x - key) = flag
-                    let mut b = vec![
-                        (alpha, ark_bn254::Fr::ONE),
-                        (x, -crate::compiler::Field::ONE),
-                    ];
+                    let mut b = vec![(alpha, ark_bn254::Fr::ONE), (x, -ark_bn254::Fr::ONE)];
                     for (w, coeff) in lookup.elements[0].iter() {
                         b.push((*w, -*coeff));
                     }
@@ -1282,7 +1281,7 @@ pub fn logup_soundness_report(
     // floor(log2 p): p in [2^(MODULUS_BIT_SIZE-1), 2^MODULUS_BIT_SIZE), so floor(log2 p) =
     // MODULUS_BIT_SIZE - 1. Using the floor (rather than the bit size) keeps `achieved_bits`
     // a lower bound and never over-claims security.
-    let field_bits = <crate::compiler::Field as PrimeField>::MODULUS_BIT_SIZE - 1;
+    let field_bits = <ark_bn254::Fr as PrimeField>::MODULUS_BIT_SIZE - 1;
     compute_logup_soundness(requested_bits, field_bits, degree)
 }
 

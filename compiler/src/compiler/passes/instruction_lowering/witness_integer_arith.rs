@@ -1,4 +1,3 @@
-use ark_ff::{AdditiveGroup as _, Field as _, PrimeField};
 use num_bigint::{BigInt, Sign};
 use num_traits::{One, Signed, Zero};
 
@@ -184,7 +183,7 @@ impl LowerWitnessIntegerArithOps {
             b.constrain(flag, high_product, zero);
 
             let cross = b.add(lhs_cross, rhs_cross);
-            let shift = b.field_const(two_pow(64));
+            let shift = b.field_const(Field::two_pow(64));
             let shifted_cross = b.mul(cross, shift);
             let value = b.add(lo_product, shifted_cross);
             guarded_rangecheck(b, value, bits, guard);
@@ -575,7 +574,7 @@ impl LowerWitnessIntegerArithOps {
             sign_u1
         };
         let magnitude_field = b.cast_to_field(magnitude_pure);
-        let two_n_field = b.field_const(two_pow(bits));
+        let two_n_field = b.field_const(Field::two_pow(bits));
         let neg = b.sub(two_n_field, magnitude_field);
         let encoded_if_nonzero = b.select(sign_for_hint, neg, magnitude_field);
         let zero = b.field_const(Field::ZERO);
@@ -597,11 +596,6 @@ impl LowerWitnessIntegerArithOps {
             guard,
         )
     }
-}
-
-// FIELD-ASSUMPTION: L4-two-pow
-fn two_pow(exponent: usize) -> Field {
-    Field::from(2).pow([exponent as u64])
 }
 
 fn guarded_rangecheck(
@@ -680,7 +674,7 @@ fn range_fits_field_injectively(range: &IntInterval) -> bool {
     let Some(hi) = range.hi() else {
         return false;
     };
-    let limbs = <Field as PrimeField>::MODULUS.0;
+    let limbs = Field::MODULUS.0;
     let bytes_le: Vec<u8> = limbs.iter().flat_map(|l| l.to_le_bytes()).collect();
     let p = BigInt::from_bytes_le(Sign::Plus, &bytes_le);
     // All integer representatives in this range have distinct BN254 field
@@ -689,8 +683,8 @@ fn range_fits_field_injectively(range: &IntInterval) -> bool {
 }
 
 // FIELD-ASSUMPTION: L6-int-op-strategy (signed encode/decode pair)
-// `signed_value_from_encoded`/`encode_signed_value` pack the sign with `two_pow(bits)` /
-// `two_pow(bits-1)` place-value shifts. These packings wrap mod p once the shift reaches the
+// `signed_value_from_encoded`/`encode_signed_value` pack the sign with `Field::two_pow(bits)` /
+// `Field::two_pow(bits-1)` place-value shifts. These packings wrap mod p once the shift reaches the
 // field width, so i64 sign encoding is unsound on a small field.
 fn signed_value_from_encoded(
     b: &mut HLBlockEmitter<'_>,
@@ -698,7 +692,7 @@ fn signed_value_from_encoded(
     sign: ValueId,
     bits: usize,
 ) -> ValueId {
-    let sign_shift = b.field_const(two_pow(bits));
+    let sign_shift = b.field_const(Field::two_pow(bits));
     let sign_shifted = b.mul(sign, sign_shift);
     b.sub(encoded_field, sign_shifted)
 }
@@ -733,7 +727,7 @@ fn encode_signed_value(
         sign
     };
 
-    let sign_shift = b.field_const(two_pow(bits));
+    let sign_shift = b.field_const(Field::two_pow(bits));
     let sign_shifted = b.mul(sign, sign_shift);
     let encoded = b.add(signed_value, sign_shifted);
     if !signed_range.fits_in_signed_bits(bits) || known_sign(signed_range, bits).is_none() {
@@ -743,7 +737,7 @@ fn encode_signed_value(
             let neg_diff = b.sub(sign, encoded);
             guarded_rangecheck(b, neg_diff, 1, guard);
         } else {
-            let half = b.field_const(two_pow(bits - 1));
+            let half = b.field_const(Field::two_pow(bits - 1));
             let sign_half = b.mul(sign, half);
             let sign_limb = b.sub(encoded, sign_half);
             guarded_rangecheck(b, sign_limb, bits - 1, guard);

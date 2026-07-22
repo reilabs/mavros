@@ -20,9 +20,8 @@
 //!   Store, Call, Assert, AssertCmp, AssertR1C, Constrain, witness Rangecheck, and failable ops with
 //!   witness inputs.
 
-use ark_ff::Field as _;
-
 use crate::compiler::{
+    Field,
     analysis::types::FunctionTypeInfo,
     ssa::{
         Instruction, ValueId,
@@ -427,13 +426,13 @@ impl LowerPureGuards {
     ) -> ValueId {
         let value_field = emitter.cast_to_field(value);
         let sign = emitter.cast_to_field(sign_u1);
-        let sign_shift = emitter.field_const(two_pow(bits));
+        let sign_shift = emitter.field_const(Field::two_pow(bits));
         let sign_shifted = emitter.mul(sign, sign_shift);
         let signed_value = emitter.sub(value_field, sign_shifted);
         // FIELD-ASSUMPTION: L1-direct-ref (7 sites)
-        let two = emitter.field_const(ark_bn254::Fr::from(2));
+        let two = emitter.field_const(Field::from(2));
         let two_sign = emitter.mul(two, sign);
-        let one = emitter.field_const(ark_bn254::Fr::from(1));
+        let one = emitter.field_const(Field::from(1));
         let factor = emitter.sub(one, two_sign);
         let abs = emitter.mul(signed_value, factor);
         emitter.cast_to(CastTarget::U(bits), abs)
@@ -579,7 +578,7 @@ impl LowerPureGuards {
         let zero_val = match &lhs_type.expr {
             TypeExpr::U(b) => emitter.u_const(*b, 0),
             TypeExpr::I(b) => emitter.i_const(*b, 0),
-            TypeExpr::Field => emitter.field_const(ark_bn254::Fr::from(0u64)),
+            TypeExpr::Field => emitter.field_const(Field::from(0u64)),
             _ => unreachable!(),
         };
         let is_zero = emitter.eq(rhs, zero_val);
@@ -609,7 +608,7 @@ impl LowerPureGuards {
                 let default_val = match &lhs_type.expr {
                     TypeExpr::U(b) => e.u_const(*b, 0),
                     TypeExpr::I(b) => e.i_const(*b, 0),
-                    TypeExpr::Field => e.field_const(ark_bn254::Fr::from(0u64)),
+                    TypeExpr::Field => e.field_const(Field::from(0u64)),
                     _ => unreachable!(),
                 };
                 vec![default_val]
@@ -754,11 +753,11 @@ impl LowerPureGuards {
             }
             TypeExpr::Field => {
                 // FIELD-ASSUMPTION: L4-modulus-query
-                if max_bits >= <ark_bn254::Fr as ark_ff::PrimeField>::MODULUS_BIT_SIZE as usize {
+                if max_bits >= Field::MODULUS_BIT_SIZE as usize {
                     return;
                 }
 
-                let bound = emitter.field_const(two_pow(max_bits));
+                let bound = emitter.field_const(Field::two_pow(max_bits));
                 let in_range = emitter.lt(value, bound);
                 let oob = emitter.not(in_range);
 
@@ -854,9 +853,4 @@ impl LowerPureGuards {
             emitter.u_const(bits, 0)
         }
     }
-}
-
-// FIELD-ASSUMPTION: L4-two-pow
-fn two_pow(exponent: usize) -> ark_bn254::Fr {
-    ark_bn254::Fr::from(2).pow([exponent as u64])
 }

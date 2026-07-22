@@ -14,10 +14,11 @@ use noirc_frontend::{
 };
 use tracing::info;
 
+use mavros_artifacts::Field as RawField;
+
 use crate::{
     Project,
     compiler::{
-        Field,
         analysis::{
             flow_analysis::FlowAnalysis, types::Types,
             witness_taint_inference::WitnessTaintInference,
@@ -478,17 +479,17 @@ impl Driver {
         let mut num_non_zero_terms = 0;
         for r1c in r1cs.constraints.iter() {
             for (_, coeff) in r1c.a.iter() {
-                if *coeff != Field::ZERO {
+                if *coeff != RawField::ZERO {
                     num_non_zero_terms += 1;
                 }
             }
             for (_, coeff) in r1c.b.iter() {
-                if *coeff != Field::ZERO {
+                if *coeff != RawField::ZERO {
                     num_non_zero_terms += 1;
                 }
             }
             for (_, coeff) in r1c.c.iter() {
-                if *coeff != Field::ZERO {
+                if *coeff != RawField::ZERO {
                     num_non_zero_terms += 1;
                 }
             }

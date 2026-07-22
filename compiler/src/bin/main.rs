@@ -5,19 +5,19 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use mavros_compiler::Project;
-use mavros_compiler::api;
-use mavros_compiler::compiler::Field;
-use mavros_compiler::compiler::codegen::CodeGenOptions;
-use mavros_compiler::compiler::codegen::hlssa_to_r1cs::R1CS;
-use mavros_compiler::compiler::codegen::llssa_to_llvm::WasmCompileOpts;
-use mavros_compiler::driver::{DEFAULT_LOGUP_SOUNDNESS_BITS, Driver};
-use mavros_compiler::plotting;
+use mavros_artifacts::Field as RawField;
+use mavros_compiler::{
+    Project, api,
+    compiler::codegen::{CodeGenOptions, hlssa_to_r1cs::R1CS, llssa_to_llvm::WasmCompileOpts},
+    driver::{DEFAULT_LOGUP_SOUNDNESS_BITS, Driver},
+    plotting,
+};
 
-type Error = Box<dyn std::error::Error>;
 use tracing::{error, info, warn};
 use tracing_forest::ForestLayer;
 use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt, util::SubscriberInitExt};
+
+type Error = Box<dyn std::error::Error>;
 
 /// The default Noir project path for the CLI to extract from.
 const DEFAULT_NOIR_PROJECT_PATH: &str = "./";
@@ -337,7 +337,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     )
     .unwrap();
 
-    let ad_coeffs: Vec<Field> = api::random_ad_coeffs(&r1cs);
+    let ad_coeffs: Vec<RawField> = api::random_ad_coeffs(&r1cs);
 
     let (ad_a, ad_b, ad_c, ad_instrumenter) =
         api::run_ad_from_binary(&mut binary, &r1cs, &ad_coeffs, vm_debug_info)?;

@@ -4,7 +4,6 @@
 //! their constraint-level lowering to the later spilling passes.
 
 use crate::compiler::util::ice_non_elided_tuple;
-use ark_ff::Field as _;
 
 use crate::compiler::{
     Field,

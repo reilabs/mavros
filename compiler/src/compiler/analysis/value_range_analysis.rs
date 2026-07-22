@@ -1,7 +1,6 @@
 //! Determines the smallest closed interval over which any numeric value in the SSA can range,
 //! uniformly across all integer types.
 
-use ark_ff::PrimeField;
 use num_bigint::{BigInt, Sign};
 use num_traits::{One, Signed, Zero};
 use tracing::{Level, instrument};
@@ -360,7 +359,7 @@ fn signed_const_to_bigint(bits: usize, encoded: u128) -> BigInt {
 /// BN254 field modulus as a `BigInt`. Computed from ark-ff's `MODULUS`
 /// constant — single source of truth for the prime.
 fn bn254_modulus() -> BigInt {
-    let limbs = <Field as PrimeField>::MODULUS.0;
+    let limbs = Field::MODULUS.0;
     let bytes_le: Vec<u8> = limbs.iter().flat_map(|l| l.to_le_bytes()).collect();
     BigInt::from_bytes_le(Sign::Plus, &bytes_le)
 }

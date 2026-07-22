@@ -1,5 +1,3 @@
-use ark_ff::Field as _;
-
 use crate::compiler::{
     Field,
     ssa::{

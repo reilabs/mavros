@@ -1,5 +1,3 @@
-use ark_ff::{AdditiveGroup as _, Field as _};
-
 use crate::compiler::{
     Field,
     ssa::{
