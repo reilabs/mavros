@@ -25,7 +25,7 @@ use crate::{
         codegen::{
             CodeGenOptions,
             bytecode::CodeGen,
-            hlssa_to_r1cs::{R1CGen, R1CS},
+            hlssa_to_r1cs::{R1CGen, R1CS, R1CSProfile},
             llssa_to_llvm::WasmCompileOpts,
         },
         pass_manager::PassManager,
@@ -82,6 +82,7 @@ pub struct Driver {
     monomorphized_ssa: Option<HLSSA>,
     witness_spilled_ssa: Option<HLSSA>,
     r1cs_ssa: Option<HLSSA>,
+    r1cs_profile: Option<R1CSProfile>,
     /// The final multi-entry-point SSA: the witgen program with the AD program merged in as a
     /// second entry point. All executable artifacts (bytecode, LLVM, WASM) are compiled from
     /// this single SSA.
@@ -129,6 +130,7 @@ impl Driver {
             monomorphized_ssa: None,
             witness_spilled_ssa: None,
             r1cs_ssa: None,
+            r1cs_profile: None,
             program_ssa: None,
             abi: None,
             draw_cfg,
@@ -144,6 +146,10 @@ impl Driver {
     /// directory, not the workspace root). `Prover.toml` is read from here.
     pub fn package_root(&self) -> &std::path::Path {
         self.project.package_root()
+    }
+
+    pub fn r1cs_profile(&self) -> Option<&R1CSProfile> {
+        self.r1cs_profile.as_ref()
     }
 
     fn write_debug_text(&self, path: impl AsRef<Path>, contents: impl Into<String>) {
@@ -452,7 +458,7 @@ impl Driver {
         r1cs_gen
             .run(&r1cs_ssa, &type_info)
             .map_err(|e| Error::UnsatisfiableProgram(e.message))?;
-        let r1cs = r1cs_gen.seal();
+        let (r1cs, profile) = r1cs_gen.seal_with_profile();
         let mut num_non_zero_terms = 0;
         for r1c in r1cs.constraints.iter() {
             for (_, coeff) in r1c.a.iter() {
@@ -472,6 +478,7 @@ impl Driver {
             }
         }
         self.r1cs_ssa = Some(r1cs_ssa);
+        self.r1cs_profile = Some(profile);
         info!(
             message = %"R1CS generated",
             num_constraints = r1cs.constraints.len(),

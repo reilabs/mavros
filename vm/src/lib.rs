@@ -3,5 +3,6 @@ pub mod bytecode;
 pub mod interpreter;
 
 pub use mavros_artifacts::{
-    ConstraintsLayout, Field, InputValueOrdered, LC, R1C, R1CS, TableKind, WitnessLayout,
+    ConstraintsLayout, Field, FlamegraphProfile, InputValueOrdered, LC, R1C, R1CS, TableKind,
+    WitnessLayout,
 };

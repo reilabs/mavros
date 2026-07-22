@@ -11,7 +11,7 @@ branching-interpreter = []
 # When enabled, every opcode handler records an invocation count and an
 # accumulated cycle total (read from the architectural cycle counter). The
 # interpreter prints a sorted per-opcode report after each VM dispatch run.
-# Purely for profiling; adds two timer reads + two atomic adds per opcode.
+# Purely for profiling; adds two timer reads and two counter updates per opcode.
 vm-profile = []
 [dependencies]
 # Dependencies within the Mavros project

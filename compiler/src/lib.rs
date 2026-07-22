@@ -3,6 +3,7 @@ pub mod collections;
 pub mod compiler;
 pub mod driver;
 pub mod error;
+pub mod flamegraph;
 pub mod plotting;
 pub mod project;
 pub mod wasm_debug;

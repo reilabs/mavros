@@ -38,6 +38,33 @@ versioned source map records VM bytecode word offsets, function names, and Noir 
 the executable bytecode in `basic.json` remains byte-for-byte unchanged. Source paths are relative
 to the Noir package root by default; pass `--absolute-paths` to retain absolute paths.
 
+### Per-function FlameGraphs
+
+Run the full compiler and VM pipeline with `--profile` to generate interactive per-function
+FlameGraphs:
+
+```bash
+mavros --root . --profile
+```
+
+The command writes folded-stack inputs and SVGs under `mavros_debug/flamegraphs/` for four
+dimensions: `constraint_size`, `witness_size`, `witgen_time`, and `ad_time`. The two time profiles
+use the VM's deterministic simulated instruction count rather than wall-clock samples, so profiles
+can be compared across machines and runs. Profiling automatically enables the VM debug mapping
+needed to recover Noir function names.
+
+The command also writes `witgen_time.cpuprofile` and `ad_time.cpuprofile`. Load either file from the
+Chrome DevTools Performance panel to inspect it with the DevTools flame chart and call tree. These
+profiles preserve execution order and use deterministic instruction intervals rather than wall-clock
+time. Runs of up to 100,000 instructions contain one sample per instruction; larger runs use
+bounded, deterministic stratified sampling to avoid periodic sampling bias while keeping file size
+practical.
+
+SVG rendering uses Brendan Gregg's [FlameGraph](https://github.com/brendangregg/FlameGraph)
+`flamegraph.pl`. It is pinned and available in `nix develop`; outside the Nix shell, install
+FlameGraph and put `flamegraph.pl` on `PATH`. When the script is unavailable, Mavros still writes
+the folded profiles and Chrome `.cpuprofile` files and skips only the SVGs.
+
 For advanced usage and the CLI options, run `mavros --help`. To output the witness generation binary
 for WASM-capable platforms, please see the [WASM output](./docs/CONTRIBUTING.md#WASM%20Output)
 section in our contributing docs.

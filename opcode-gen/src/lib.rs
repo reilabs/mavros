@@ -731,6 +731,7 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
             // }
             #[cfg(feature = "vm-profile")]
             let __prof_start = read_cycles();
+            vm.record_instruction(pc, frame);
             let mut current_field_offset = 1isize;
             #getters
             #call_and_finish
