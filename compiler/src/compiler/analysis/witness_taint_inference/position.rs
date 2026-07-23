@@ -137,7 +137,7 @@ fn collect_paths(ty: &Type, prefix: &mut Vec<Descent>, out: &mut Vec<Vec<Descent
         | TypeExpr::I(_)
         | TypeExpr::Function
         | TypeExpr::Blob(..) => {}
-        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
+        TypeExpr::Array(inner, _) | TypeExpr::Slice { elem: inner, .. } => {
             prefix.push(Descent::Elem);
             collect_paths(inner, prefix, out);
             prefix.pop();

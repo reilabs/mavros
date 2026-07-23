@@ -208,7 +208,8 @@ pub fn build_graph(
                 }
             }
             Some(Terminator::JmpIf(cond, _, _)) => {
-                // Push the condition into the leaves of the merge-point phi parameters.
+                // Push the condition into the leaves of the merge-point phi parameters — and into
+                // their slice tops
                 let merge = cfg.get_merge_point(*bid);
                 let cond = *cond;
                 for (merge_param, merge_type) in func.get_block(merge).get_parameters() {
@@ -380,8 +381,8 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
                 builder.value_position(*result),
                 builder.value_position(*array),
             );
-            // The written element leaves pick up the index taint and, under witness control flow,
-            // the cfg flag — a conditional set leaves the element witness-dependent.
+            // The written element leaves and any nested slice tops pick up the index taint and, under witness control flow, the cfg
+            // flag — a conditional set leaves the element witness-dependent.
             for path in leaf_paths(&element_type) {
                 let written = builder
                     .value_position(*result)
@@ -419,27 +420,12 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
                 builder.value_position(*result),
                 builder.value_position(*slice),
             );
-
-            // Under witness control flow a conditional push leaves the appended elements
-            // witness-dependent.
-            for path in leaf_paths(&element_type) {
-                let written = builder
-                    .value_position(*result)
-                    .child(Descent::Elem)
-                    .extend(&path);
-                builder.add_cf_taint_to(&written, branch_conditions);
-            }
         }
-        OpCode::SliceLen { .. } => {
-            // No edges: the length is structural metadata, Pure for every slice this analysis
-            // can express. KNOWN LIMITATION (inherited from the previous pass): a slice whose
-            // *length* is witness-dependent has no representation — `leaf_paths` deliberately
-            // excludes container-top levels, so nothing ever taints a slice's top and there is
-            // no source for SliceLen to read. The phi-merge route (a slice merged at a witness
-            // JmpIf) is rejected loudly downstream (`UntaintControlFlow` panics on witness merge
-            // selects over slices); the ref route (a witness-conditional store of a slice
-            // through a ref) would need WitnessOf-slice support throughout untaint/lowering
-            // before this rule can be tightened.
+        OpCode::SliceLen { result, slice } => {
+            builder.graph.add_ge(
+                builder.value_position(*result),
+                builder.value_position(*slice),
+            );
         }
         OpCode::MkSeqOfBlob { .. } => {
             // the blob is compile-time constant data: the result starts Pure. (no edges)
@@ -490,11 +476,11 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             builder.copy_levels(slot.clone(), builder.value_position(*value), pointee);
 
             // A conditional store leaves shared memory witness-dependent. As everywhere, the
-            // taintable leaves include a nested ref's *handle* level: which ref a slot holds after
+            // taintable positions include a nested ref's *handle* level: which ref a slot holds after
             // a conditional ref store is itself witness-dependent (the unification of the
             // candidates' pointees does not capture that).
             //
-            // A store through a witness-selected pointer likewise leaves the written leaves
+            // A store through a witness-selected pointer likewise leaves the written positions
             // witness-dependent — *which* slot received the value depends on the witness — so the
             // pointer's own handle taint flows into them: the dual of Load's `result ≥ ptr`.
             // (Unification spreads this over every alias of the candidate slots, the usual
@@ -668,10 +654,7 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
 /// debug-asserts after every instruction that this list agrees with what `build_instr` applied.
 fn writes_under_witness_cf(op: &OpCode) -> bool {
     match op {
-        OpCode::ArraySet { .. }
-        | OpCode::SlicePush { .. }
-        | OpCode::Store { .. }
-        | OpCode::InitGlobal { .. } => true,
+        OpCode::ArraySet { .. } | OpCode::Store { .. } | OpCode::InitGlobal { .. } => true,
         OpCode::Guard { inner, .. } => writes_under_witness_cf(inner),
         OpCode::Cmp { .. }
         | OpCode::BinaryArithOp { .. }
@@ -686,6 +669,7 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         | OpCode::MkRepeated { .. }
         | OpCode::ArrayGet { .. }
         | OpCode::SliceLen { .. }
+        | OpCode::SlicePush { .. }
         | OpCode::MkSeqOfBlob { .. }
         | OpCode::ToBits { .. }
         | OpCode::ToRadix { .. }
@@ -714,11 +698,11 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
     }
 }
 
-/// Paths to the witness "leaves" of `ty` for the purpose of pushing in a scalar taint: scalar
-/// leaves (descending arrays/slices), and the *root* of any `Ref` (a ref is opaque to leaf-pushing)
+/// Paths to the witness positions of `ty` for the purpose of pushing in a scalar taint: scalar
+/// leaves (descending arrays/slices), and the *root* of any `Ref` (a ref is opaque to leaf-pushing), and the container top of every slic
 /// — the positions a control-flow taint lands on.
 ///
-/// Container-top levels (array/slice roots) are deliberately not leaves: an array's identity is
+/// Array tops are deliberately not leaves: an array's identity is
 /// fully covered by its element taint, and a witness-dependent slice *length* is not expressible
 /// in the current shape model (see the `SliceLen` rule in [`build_instr`]).
 fn leaf_paths(ty: &Type) -> Vec<Vec<Descent>> {
@@ -731,7 +715,13 @@ fn leaf_paths(ty: &Type) -> Vec<Vec<Descent>> {
             | TypeExpr::Function
             | TypeExpr::Blob(..) => out.push(prefix.clone()),
             TypeExpr::Ref(_) => out.push(prefix.clone()),
-            TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
+            TypeExpr::Slice { elem: inner, .. } => {
+                out.push(prefix.clone());
+                prefix.push(Descent::Elem);
+                go(inner, prefix, out);
+                prefix.pop();
+            }
+            TypeExpr::Array(inner, _) => {
                 prefix.push(Descent::Elem);
                 go(inner, prefix, out);
                 prefix.pop();

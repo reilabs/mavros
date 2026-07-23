@@ -47,7 +47,7 @@ fn lower_type(ty: &HLType) -> LLType {
             );
             LLType::Int(*bits as u32)
         }
-        HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => LLType::Ptr,
+        HLTypeExpr::Array(..) | HLTypeExpr::Slice { .. } => LLType::Ptr,
         // In the AD path, WitnessOf values are heap-allocated AD nodes
         HLTypeExpr::WitnessOf(_) => LLType::Ptr,
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
@@ -70,7 +70,7 @@ fn elem_struct(ty: &HLType) -> LLStruct {
             );
             LLStruct::new(vec![LLFieldType::Int(*bits as u32)])
         }
-        HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => LLStruct::new(vec![LLFieldType::Ptr]),
+        HLTypeExpr::Array(..) | HLTypeExpr::Slice { .. } => LLStruct::new(vec![LLFieldType::Ptr]),
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::WitnessOf(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         HLTypeExpr::Ref(_) => LLStruct::new(vec![LLFieldType::Ptr]),
@@ -95,7 +95,7 @@ fn tuple_field_type(ty: &HLType) -> LLFieldType {
             );
             LLFieldType::Int(*bits as u32)
         }
-        HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => LLFieldType::Ptr,
+        HLTypeExpr::Array(..) | HLTypeExpr::Slice { .. } => LLFieldType::Ptr,
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::WitnessOf(_) => LLFieldType::Ptr,
         HLTypeExpr::Ref(_) => LLFieldType::Ptr,
@@ -121,14 +121,14 @@ fn array_info(ty: &HLType) -> (&HLType, usize) {
 
 fn sequence_elem_type(ty: &HLType) -> &HLType {
     match &ty.expr {
-        HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice(inner) => inner.as_ref(),
+        HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice { elem: inner, .. } => inner.as_ref(),
         _ => panic!("Expected array or slice type, got: {}", ty),
     }
 }
 
 fn sequence_rc_struct(ty: &HLType) -> LLStruct {
     match &ty.expr {
-        HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice(inner) => rc_seq_struct(inner),
+        HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice { elem: inner, .. } => rc_seq_struct(inner),
         _ => panic!("Expected array or slice type, got: {}", ty),
     }
 }
@@ -139,7 +139,7 @@ const SEQ_DATA_FIELD: usize = 3;
 
 fn sequence_data_field(ty: &HLType) -> usize {
     match &ty.expr {
-        HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => SEQ_DATA_FIELD,
+        HLTypeExpr::Array(..) | HLTypeExpr::Slice { .. } => SEQ_DATA_FIELD,
         _ => panic!("Expected array or slice type, got: {}", ty),
     }
 }
@@ -147,7 +147,7 @@ fn sequence_data_field(ty: &HLType) -> usize {
 fn sequence_len_value(e: &mut LLBlockEmitter<'_>, ptr: ValueId, ty: &HLType) -> ValueId {
     match &ty.expr {
         HLTypeExpr::Array(_, n) => e.emit_int_const(64, *n as u64),
-        HLTypeExpr::Slice(_) => {
+        HLTypeExpr::Slice { .. } => {
             let rc_struct = sequence_rc_struct(ty);
             let len_ptr = e.struct_field_ptr(ptr, rc_struct, SEQ_LEN_FIELD);
             e.ll_load(len_ptr, LLType::i64())
@@ -209,7 +209,7 @@ fn get_or_create_drop_fn(
 
     // Recursively create drop fns for inner heap-allocated elements first
     match &ty.expr {
-        HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice(inner) => {
+        HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice { elem: inner, .. } => {
             if needs_drop(&inner.expr) {
                 get_or_create_drop_fn(inner, llssa, drop_fns, ad_fns);
             }
@@ -226,7 +226,7 @@ fn get_or_create_drop_fn(
     // Resolve or create the drop function ID
     let fn_id = match &ty.expr {
         HLTypeExpr::WitnessOf(_) => ad_fns.get_drop_fn(llssa),
-        HLTypeExpr::Array(_inner, _) | HLTypeExpr::Slice(_inner) => {
+        HLTypeExpr::Array(_inner, _) | HLTypeExpr::Slice { elem: _inner, .. } => {
             llssa.add_function(format!("drop_{}", ty))
         }
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
@@ -1843,7 +1843,7 @@ fn lower_mk_repeated_slice(
 
 fn rc_struct_for_droppable_type(ty: &HLType) -> LLStruct {
     match &ty.expr {
-        HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice(inner) => rc_seq_struct(inner),
+        HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice { elem: inner, .. } => rc_seq_struct(inner),
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::WitnessOf(_) => LLStruct::ad_node_base(),
         HLTypeExpr::Ref(inner) => rc_ref_cell_struct(inner),
@@ -2262,7 +2262,7 @@ fn lower_rc_bump(
     let val_type = fn_type_info.get_value_type(value);
 
     let rc_struct = match &val_type.expr {
-        HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => sequence_rc_struct(val_type),
+        HLTypeExpr::Array(..) | HLTypeExpr::Slice { .. } => sequence_rc_struct(val_type),
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::Ref(inner) => rc_ref_cell_struct(inner),
         _ => panic!("lower_rc_bump: unexpected type {}", val_type),
@@ -2753,7 +2753,7 @@ fn generate_ad_drop_function(
 fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
     for entry in drop_fns {
         let func = match &entry.ty.expr {
-            HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => {
+            HLTypeExpr::Array(..) | HLTypeExpr::Slice { .. } => {
                 generate_drop_function_for_array(llssa, &entry.ty, drop_fns)
             }
             HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
@@ -2772,7 +2772,7 @@ fn needs_drop(expr: &HLTypeExpr) -> bool {
     matches!(
         expr,
         HLTypeExpr::Array(..)
-            | HLTypeExpr::Slice(..)
+            | HLTypeExpr::Slice { .. }
             | HLTypeExpr::WitnessOf(..)
             | HLTypeExpr::Ref(..)
     )
@@ -3481,7 +3481,7 @@ fn lookup_leaf_count(elem_type: &HLType) -> usize {
             n.checked_mul(inner_count)
                 .expect("Array lookup table length overflow")
         }
-        HLTypeExpr::Slice(_) => {
+        HLTypeExpr::Slice { .. } => {
             panic!("Array lookup over nested slices is not supported in HLSSA->LLSSA lowering")
         }
         _ => panic!("Unsupported array element type in lookup: {}", elem_type),
@@ -3518,7 +3518,7 @@ fn emit_lookup_leaf_loop(
                     let inner_array = e.ll_load(elem_ptr, LLType::Ptr);
                     emit_lookup_leaf_loop(e, inner_array, elem_type, flat_index, on_leaf)
                 }
-                HLTypeExpr::Slice(_) => {
+                HLTypeExpr::Slice { .. } => {
                     panic!(
                         "Array lookup over nested slices is not supported in HLSSA->LLSSA lowering"
                     )

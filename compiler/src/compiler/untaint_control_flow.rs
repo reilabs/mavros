@@ -831,7 +831,7 @@ impl UntaintControlFlow {
                 let result_type = ti.get_value_type(result);
                 let expected_elem_type = match &result_type.expr {
                     TypeExpr::Array(inner, _) => inner.as_ref().clone(),
-                    TypeExpr::Slice(inner) => inner.as_ref().clone(),
+                    TypeExpr::Slice { elem: inner, .. } => inner.as_ref().clone(),
                     _ => panic!("ArraySet on non-array type"),
                 };
                 let mut cast_instrs = Vec::new();
@@ -865,7 +865,7 @@ impl UntaintControlFlow {
                 let ti = type_info.unwrap();
                 let result_slice_type = ti.get_value_type(result);
                 let expected_elem_type = match &result_slice_type.expr {
-                    TypeExpr::Slice(inner) => inner.as_ref().clone(),
+                    TypeExpr::Slice { elem: inner, .. } => inner.as_ref().clone(),
                     _ => panic!("SlicePush on non-slice type"),
                 };
                 let mut cast_instrs = Vec::new();
@@ -1107,7 +1107,18 @@ fn emit_merge_select(
             result
         }
         TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
-        TypeExpr::Slice(_) => panic!("Witness select on Slice type not supported"),
+        TypeExpr::Slice { .. } => {
+            let lhs = emit_value_conversion(lhs, lhs_type, result_type, builder);
+            let rhs = emit_value_conversion(rhs, rhs_type, result_type, builder);
+            let result = result.unwrap_or_else(|| builder.fresh_value());
+            builder.push(OpCode::Select {
+                result,
+                cond,
+                if_t: lhs,
+                if_f: rhs,
+            });
+            result
+        }
         TypeExpr::Function => panic!("Witness select on Function type not supported"),
         TypeExpr::Blob(..) => panic!("Witness select on Blob type not supported"),
     }
@@ -1143,8 +1154,9 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
                 base
             }
         }
-        // A WitnessOf wrapper on the container means the handle/length is witness-dependent;
-        // a wrapper on the element means the elements are. Both are applied faithfully.
+        // For arrays (and refs below), a WitnessOf wrapper on the container means the handle is
+        // witness-dependent and a wrapper on the element means the elements are; both are applied
+        // faithfully
         (TypeExpr::Array(inner, size), WitnessShape::Array(top, inner_wt)) => {
             let base = apply_witness_type(*inner, inner_wt.as_ref()).array_of(size);
             if top.is_witness() {
@@ -1153,13 +1165,10 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
                 base
             }
         }
-        (TypeExpr::Slice(inner), WitnessShape::Array(top, inner_wt)) => {
-            let base = apply_witness_type(*inner, inner_wt.as_ref()).slice_of();
-            if top.is_witness() {
-                Type::witness_of(base)
-            } else {
-                base
-            }
+        // A slice's top taint is deliberately *not* applied due to previous slice purification pass
+        (TypeExpr::Slice { elem: inner, .. }, WitnessShape::Array(_top, inner_wt)) => {
+            let elem_base = apply_witness_type(*inner, inner_wt.as_ref());
+            elem_base.slice_of_with_len(Type::u(32))
         }
         (TypeExpr::Ref(inner), WitnessShape::Ref(top, inner_wt)) => {
             let base = apply_witness_type(*inner, inner_wt.as_ref()).ref_of();

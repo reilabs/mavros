@@ -368,7 +368,7 @@ impl WitnessLowering {
                             let new_array_type = self.witness_lowering_in_type(&array_type);
                             let expected_elem_type = match &new_array_type.expr {
                                 TypeExpr::Array(inner, _) => inner.as_ref().clone(),
-                                TypeExpr::Slice(inner) => inner.as_ref().clone(),
+                                TypeExpr::Slice { elem: inner, .. } => inner.as_ref().clone(),
                                 _ => panic!("ArraySet on non-array type"),
                             };
                             let converted = self.convert_if_needed(
@@ -393,7 +393,7 @@ impl WitnessLowering {
                             let result_slice_type = type_info.get_value_type(result);
                             let new_result_slice_type = self.witness_lowering_in_type(result_slice_type);
                             let expected_elem_type = match &new_result_slice_type.expr {
-                                TypeExpr::Slice(inner) => inner.as_ref().clone(),
+                                TypeExpr::Slice { elem: inner, .. } => inner.as_ref().clone(),
                                 _ => panic!("SlicePush on non-slice type"),
                             };
                             let new_slice = self.convert_if_needed(
@@ -562,7 +562,7 @@ impl WitnessLowering {
                 }
             }
             TypeExpr::Array(inner, size) => self.witness_lowering_in_type(inner).array_of(*size),
-            TypeExpr::Slice(inner) => self.witness_lowering_in_type(inner).slice_of(),
+            TypeExpr::Slice { elem: inner, .. } => self.witness_lowering_in_type(inner).slice_of(),
             TypeExpr::Ref(inner) => self.witness_lowering_in_type(inner).ref_of(),
             TypeExpr::WitnessOf(_) => tp.clone(),
             TypeExpr::Function => tp.clone(),

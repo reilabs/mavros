@@ -644,7 +644,7 @@ pub fn contains_tuple(ty: &Type) -> bool {
     match &ty.expr {
         TypeExpr::Tuple(_) => true,
         TypeExpr::Array(inner, _)
-        | TypeExpr::Slice(inner)
+        | TypeExpr::Slice { elem: inner, .. }
         | TypeExpr::Ref(inner)
         | TypeExpr::WitnessOf(inner) => contains_tuple(inner),
         TypeExpr::Field
@@ -660,7 +660,7 @@ fn slot_count(ty: &Type) -> usize {
     match &ty.expr {
         TypeExpr::Tuple(elements) => elements.iter().map(slot_count).sum(),
         TypeExpr::Array(inner, _)
-        | TypeExpr::Slice(inner)
+        | TypeExpr::Slice { elem: inner, .. }
         | TypeExpr::Ref(inner)
         | TypeExpr::WitnessOf(inner) => slot_count(inner),
         TypeExpr::Field
@@ -694,7 +694,7 @@ fn leaf_types(ty: &Type) -> Vec<Type> {
             .into_iter()
             .map(|leaf| leaf.array_of(*n))
             .collect(),
-        TypeExpr::Slice(inner) => leaf_types(inner)
+        TypeExpr::Slice { elem: inner, .. } => leaf_types(inner)
             .into_iter()
             .map(|leaf| leaf.slice_of())
             .collect(),

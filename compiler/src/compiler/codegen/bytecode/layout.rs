@@ -98,7 +98,7 @@ impl FrameLayouter {
                 1
             }
             TypeExpr::Array(_, _) => constants::POINTER_SIZE_CELLS,
-            TypeExpr::Slice(_) => constants::POINTER_SIZE_CELLS,
+            TypeExpr::Slice { .. } => constants::POINTER_SIZE_CELLS,
             TypeExpr::WitnessOf(_) => constants::POINTER_SIZE_CELLS,
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Ref(_) => constants::POINTER_SIZE_CELLS,

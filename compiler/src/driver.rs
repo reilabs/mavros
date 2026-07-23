@@ -61,6 +61,7 @@ use crate::{
             witness_write_to_fresh::WitnessWriteToFresh,
             witness_write_to_void::WitnessWriteToVoid,
         },
+        purify_witness_slices::PurifyWitnessSlices,
         ssa::{
             DefaultSSAAnnotator,
             hlssa::{Constant, HLSSA},
@@ -345,13 +346,17 @@ impl Driver {
                 // value from every predecessor); collapse them before they reach WTI and codegen.
                 Box::new(TrivialPhiElimination::new()),
                 Box::new(RemoveUnreachableFunctions::new()),
+                // Purify witness-length slices into `(physical, log_len)` tuples. Runs its own
+                // taint inference internally; the elision cleans up the tuples it introduces.
+                Box::new(PurifyWitnessSlices::new()),
+                Box::new(ElideTuples::new()),
+                Box::new(RemoveUnreachableFunctions::new()),
             ],
         )
         .run(&mut ssa);
 
-        let flow_analysis = FlowAnalysis::run(&ssa);
-
         if self.draw_cfg {
+            let flow_analysis = FlowAnalysis::run(&ssa);
             flow_analysis.generate_images(
                 self.get_debug_output_dir().join("initial_state"),
                 &ssa,
@@ -359,6 +364,7 @@ impl Driver {
             );
         }
 
+        let flow_analysis = FlowAnalysis::run(&ssa);
         let mut witness_inference = WitnessTaintInference::new();
         witness_inference.run(&mut ssa, &flow_analysis);
 
@@ -417,6 +423,7 @@ impl Driver {
                 Box::new(SimplifyAsserts::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(InstructionLowering::witness_array_access()),
+                Box::new(InstructionLowering::slice_select()),
                 Box::new(InstructionLowering::witness_integer_ops()),
                 // After the last pre-spilling lowering, run cleanup twice
                 // back-to-back. The first round exposes folds/dedup opportunities

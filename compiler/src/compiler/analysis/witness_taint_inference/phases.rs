@@ -660,6 +660,13 @@ fn specialize_contexts(
         ctx_result.insert(ctx, result);
     }
 
+    if let Some(cid) = clone_of_fn(&ctx_clone, ssa.get_globals_init_fn()) {
+        ssa.set_globals_init_fn(cid);
+    }
+    if let Some(cid) = clone_of_fn(&ctx_clone, ssa.get_globals_deinit_fn()) {
+        ssa.set_globals_deinit_fn(cid);
+    }
+
     // Materialize: re-key shapes onto each clone, register FunctionWitnessType, rewire call
     // targets.
     let mut functions: HashMap<FunctionId, FunctionWitnessType> = HashMap::default();
@@ -719,6 +726,24 @@ fn specialize_contexts(
 
     ssa.set_unique_entrypoint(main_clone_id);
     functions
+}
+
+fn clone_of_fn(
+    ctx_clone: &HashMap<Ctx, (FunctionId, HashMap<ValueId, ValueId>)>,
+    fid: Option<FunctionId>,
+) -> Option<FunctionId> {
+    let fid = fid?;
+    let clones: Vec<FunctionId> = ctx_clone
+        .iter()
+        .filter(|(ctx, _)| ctx.fid == fid)
+        .map(|(_, (cid, _))| *cid)
+        .collect();
+    assert!(
+        clones.len() <= 1,
+        "ICE: globals init/deinit function {fid:?} specialized {} times; should be at most 1",
+        clones.len()
+    );
+    clones.first().copied()
 }
 
 /// The per-function immutable inputs to [`solve_context`] — everything keyed by the context's
@@ -912,7 +937,7 @@ fn go_shape_from(
         | TypeExpr::I(_)
         | TypeExpr::Function
         | TypeExpr::Blob(..) => WitnessShape::Scalar(info),
-        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
+        TypeExpr::Array(inner, _) | TypeExpr::Slice { elem: inner, .. } => {
             path.push(Descent::Elem);
             let c = go_shape_from(owner, path, inner, witness, read);
             path.pop();
