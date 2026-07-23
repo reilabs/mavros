@@ -1,0 +1,6 @@
+[package]
+name = "array_as_str_unchecked"
+type = "bin"
+authors = [""]
+
+[dependencies]

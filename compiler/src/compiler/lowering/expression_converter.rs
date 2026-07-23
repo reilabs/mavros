@@ -1630,6 +1630,21 @@ impl<'a> ExpressionConverter<'a> {
                 // str<N> and [u8; N] have the same SSA representation.
                 self.convert_expression(&call.arguments[0], b)
             }
+            "array_as_str_unchecked" => {
+                let array_type = call.arguments[0]
+                    .return_type()
+                    .expect("array_as_str_unchecked argument must have a known type");
+                let input_type = self.type_converter.convert_type(array_type.as_ref());
+                let output_type = self.type_converter.convert_type(&call.return_type);
+                assert_eq!(
+                    input_type, output_type,
+                    "array_as_str_unchecked input and output representations must match"
+                );
+
+                // [u8; N] and str<N> have the same SSA representation. As specified by
+                // the builtin, this conversion deliberately performs no UTF-8 validation.
+                self.convert_expression(&call.arguments[0], b)
+            }
             "to_le_bits" => {
                 let input = self.convert_expression(&call.arguments[0], b).unwrap();
                 let output_size = match call.return_type {
