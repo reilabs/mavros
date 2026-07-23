@@ -1616,6 +1616,20 @@ impl<'a> ExpressionConverter<'a> {
                 self.convert_expression(&call.arguments[0], b);
                 None
             }
+            "str_as_bytes" => {
+                let string_type = call.arguments[0]
+                    .return_type()
+                    .expect("str_as_bytes argument must have a known type");
+                let input_type = self.type_converter.convert_type(string_type.as_ref());
+                let output_type = self.type_converter.convert_type(&call.return_type);
+                assert_eq!(
+                    input_type, output_type,
+                    "str_as_bytes input and output representations must match"
+                );
+
+                // str<N> and [u8; N] have the same SSA representation.
+                self.convert_expression(&call.arguments[0], b)
+            }
             "to_le_bits" => {
                 let input = self.convert_expression(&call.arguments[0], b).unwrap();
                 let output_size = match call.return_type {
