@@ -320,6 +320,31 @@ pub enum Table {
     Spread(u8),
 }
 
+impl Table {
+    fn row_count(&self) -> usize {
+        match self {
+            Table::Range(bits) => 1usize << bits,
+            Table::OfElems(elements) => elements.len(),
+            Table::Spread(bits) => 1usize << bits,
+        }
+    }
+
+    fn width(&self) -> usize {
+        match self {
+            Table::Range(_) => 1,
+            Table::OfElems(_) | Table::Spread(_) => 2,
+        }
+    }
+
+    fn profile_size(&self) -> (u64, u64) {
+        let rows = self.row_count() as u64;
+        match self {
+            Table::Range(_) | Table::Spread(_) => (rows + 1, 2 * rows),
+            Table::OfElems(_) => (2 * rows + 1, 3 * rows),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct R1CGen {
     constraints: Vec<R1C>,
@@ -329,7 +354,7 @@ pub struct R1CGen {
     function_names: BTreeMap<FunctionId, String>,
     call_stack: Vec<String>,
     profile_root: String,
-    profile: R1CSProfile,
+    profile: Option<R1CSProfile>,
 }
 
 impl symbolic_executor::Context<Value> for R1CGen {
@@ -345,19 +370,23 @@ impl symbolic_executor::Context<Value> for R1CGen {
             !unconstrained,
             "ICE: unconstrained calls should be DCE'd before R1CS gen"
         );
-        self.call_stack.push(
-            self.function_names
-                .get(&func)
-                .cloned()
-                .unwrap_or_else(|| format!("fn{}", func.0)),
-        );
+        if self.profile.is_some() {
+            self.call_stack.push(
+                self.function_names
+                    .get(&func)
+                    .cloned()
+                    .unwrap_or_else(|| format!("fn{}", func.0)),
+            );
+        }
         None
     }
 
     fn on_return(&mut self, _returns: &mut [Value], _return_types: &[Type]) {
-        self.call_stack
-            .pop()
-            .expect("ICE: R1CS profiler call stack underflow");
+        if self.profile.is_some() {
+            self.call_stack
+                .pop()
+                .expect("ICE: R1CS profiler call stack underflow");
+        }
     }
 
     fn on_jmp(&mut self, _target: BlockId, _params: &mut [Value], _param_types: &[&Type]) {}
@@ -372,13 +401,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
             hlssa::LookupTarget::Rangecheck(i) => {
                 // Find or create the rangecheck table of this size. The lookup-sizing analysis
                 // may select several distinct sizes, so multiple range tables can coexist.
-                let existing_table_count = self.tables.len();
                 let table_id = self.find_or_create_range_table(i as u64);
-                if self.tables.len() != existing_table_count {
-                    let length = 1u64 << i;
-                    self.record_constraints(length + 1);
-                    self.record_witnesses(2 * length);
-                }
                 self.record_constraints(1);
                 self.record_witnesses(1);
                 self.lookups.push(LookupConstraint {
@@ -403,11 +426,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                     if let Some(idx) = existing {
                         idx
                     } else {
-                        self.tables.push(Table::Spread(bits));
-                        let length = 1u64 << bits;
-                        self.record_constraints(length + 1);
-                        self.record_witnesses(2 * length);
-                        self.tables.len() - 1
+                        self.add_table(Table::Spread(bits))
                     }
                 };
                 self.record_constraints(2);
@@ -423,11 +442,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 let table_id = if arr.borrow().table_id.is_none() {
                     let mut elems = Vec::new();
                     flatten_array_into_table(&arr.borrow(), &mut elems);
-                    let length = elems.len() as u64;
-                    self.tables.push(Table::OfElems(elems));
-                    self.record_constraints(2 * length + 1);
-                    self.record_witnesses(3 * length);
-                    let idx = self.tables.len() - 1;
+                    let idx = self.add_table(Table::OfElems(elems));
                     arr.borrow_mut().table_id = Some(idx);
                     idx
                 } else {
@@ -925,20 +940,36 @@ impl R1CGen {
             function_names: BTreeMap::new(),
             call_stack: Vec::new(),
             profile_root: "<r1cs>".to_string(),
-            profile: R1CSProfile::default(),
+            profile: None,
         }
     }
 
+    pub fn enable_profile(&mut self) {
+        self.profile = Some(R1CSProfile::default());
+    }
+
     fn record_constraints(&mut self, count: u64) {
-        self.profile
-            .constraints
-            .record(self.call_stack.iter().cloned(), count);
+        if let Some(profile) = &mut self.profile {
+            profile
+                .constraints
+                .record(self.call_stack.iter().cloned(), count);
+        }
     }
 
     fn record_witnesses(&mut self, count: u64) {
-        self.profile
-            .witnesses
-            .record(self.call_stack.iter().cloned(), count);
+        if let Some(profile) = &mut self.profile {
+            profile
+                .witnesses
+                .record(self.call_stack.iter().cloned(), count);
+        }
+    }
+
+    fn add_table(&mut self, table: Table) -> usize {
+        let (constraints, witnesses) = table.profile_size();
+        self.record_constraints(constraints);
+        self.record_witnesses(witnesses);
+        self.tables.push(table);
+        self.tables.len() - 1
     }
 
     /// Return the id of the rangecheck table for `bits`-bit values (i.e. `2^bits` rows), creating
@@ -951,8 +982,7 @@ impl R1CGen {
         {
             idx
         } else {
-            self.tables.push(Table::Range(bits));
-            self.tables.len() - 1
+            self.add_table(Table::Range(bits))
         }
     }
 
@@ -983,12 +1013,14 @@ impl R1CGen {
 
     #[instrument(skip_all, name = "R1CGen::run")]
     pub fn run(&mut self, ssa: &HLSSA, type_info: &TypeInfo) -> Result<(), AssertionFailure> {
-        self.function_names = ssa
-            .iter_functions()
-            .map(|(id, function)| (*id, function.get_name().to_string()))
-            .collect();
         let entry_point = ssa.get_unique_entrypoint_id();
-        self.profile_root = ssa.get_function(entry_point).get_name().to_string();
+        if self.profile.is_some() {
+            self.function_names = ssa
+                .iter_functions()
+                .map(|(id, function)| (*id, function.get_name().to_string()))
+                .collect();
+            self.profile_root = ssa.get_function(entry_point).get_name().to_string();
+        }
         assert!(
             ssa.get_function(entry_point).get_param_types().len() == 0,
             "Main should not have parameters as WitnessWriteToFresh pass should remove them"
@@ -996,7 +1028,7 @@ impl R1CGen {
         let main_params = vec![];
         let executor = SymbolicExecutor::new();
         let result = executor.run(ssa, type_info, entry_point, main_params, self);
-        debug_assert!(result.is_err() || self.call_stack.is_empty());
+        debug_assert!(self.profile.is_none() || result.is_err() || self.call_stack.is_empty());
         result
     }
 
@@ -1022,10 +1054,18 @@ impl R1CGen {
     }
 
     pub fn seal(self) -> R1CS {
-        self.seal_with_profile().0
+        self.seal_impl().0
     }
 
-    pub fn seal_with_profile(mut self) -> (R1CS, R1CSProfile) {
+    pub fn seal_with_profile(self) -> (R1CS, R1CSProfile) {
+        let (r1cs, profile) = self.seal_impl();
+        (
+            r1cs,
+            profile.expect("R1CS profiling must be enabled before sealing with a profile"),
+        )
+    }
+
+    fn seal_impl(mut self) -> (R1CS, Option<R1CSProfile>) {
         // Algebraic section
         let mut witness_layout = WitnessLayout {
             algebraic_size: self.next_witness,
@@ -1049,42 +1089,16 @@ impl R1CGen {
         }
         let mut table_infos = vec![];
         let mut max_width = 0;
-        for table in self.tables.into_iter() {
-            match table {
-                Table::Range(len) => {
-                    let len = 1 << len;
-                    table_infos.push(TableInfo {
-                        multiplicities_witness_off: witness_layout.multiplicities_size
-                            + witness_layout.algebraic_size,
-                        table,
-                        sum_constraint_idx: 0,
-                    });
-                    max_width = max_width.max(1);
-                    witness_layout.multiplicities_size += len;
-                }
-                Table::OfElems(els) => {
-                    let len = els.len();
-                    table_infos.push(TableInfo {
-                        multiplicities_witness_off: witness_layout.multiplicities_size
-                            + witness_layout.algebraic_size,
-                        table: Table::OfElems(els),
-                        sum_constraint_idx: 0,
-                    });
-                    max_width = max_width.max(2);
-                    witness_layout.multiplicities_size += len;
-                }
-                Table::Spread(bits) => {
-                    let len = 1usize << bits;
-                    table_infos.push(TableInfo {
-                        multiplicities_witness_off: witness_layout.multiplicities_size
-                            + witness_layout.algebraic_size,
-                        table,
-                        sum_constraint_idx: 0,
-                    });
-                    max_width = max_width.max(2); // key + spread_value
-                    witness_layout.multiplicities_size += len;
-                }
-            }
+        for table in self.tables {
+            let len = table.row_count();
+            max_width = max_width.max(table.width());
+            table_infos.push(TableInfo {
+                multiplicities_witness_off: witness_layout.multiplicities_size
+                    + witness_layout.algebraic_size,
+                table,
+                sum_constraint_idx: 0,
+            });
+            witness_layout.multiplicities_size += len;
         }
 
         if table_infos.is_empty() {
@@ -1093,14 +1107,16 @@ impl R1CGen {
                 constraints_layout,
                 constraints: result,
             };
-            debug_assert_eq!(
-                self.profile.constraints.total_weight(),
-                r1cs.constraints_layout.size() as u64
-            );
-            debug_assert_eq!(
-                self.profile.witnesses.total_weight(),
-                r1cs.witness_layout.size() as u64
-            );
+            if let Some(profile) = &self.profile {
+                debug_assert_eq!(
+                    profile.constraints.total_weight(),
+                    r1cs.constraints_layout.size() as u64
+                );
+                debug_assert_eq!(
+                    profile.witnesses.total_weight(),
+                    r1cs.witness_layout.size() as u64
+                );
+            }
             return (r1cs, self.profile);
         }
 
@@ -1118,10 +1134,12 @@ impl R1CGen {
         } else {
             usize::MAX // hoping this crashes soon if used
         };
-        self.profile.witnesses.record(
-            [self.profile_root.clone(), "<lookup challenges>".to_string()],
-            witness_layout.challenges_size as u64,
-        );
+        if let Some(profile) = &mut self.profile {
+            profile.witnesses.record(
+                [self.profile_root.clone(), "<lookup challenges>".to_string()],
+                witness_layout.challenges_size as u64,
+            );
+        }
 
         // tables contents init
         for table_info in table_infos.iter_mut() {
@@ -1283,14 +1301,16 @@ impl R1CGen {
             constraints_layout,
             constraints: result,
         };
-        debug_assert_eq!(
-            self.profile.constraints.total_weight(),
-            r1cs.constraints_layout.size() as u64
-        );
-        debug_assert_eq!(
-            self.profile.witnesses.total_weight(),
-            r1cs.witness_layout.size() as u64
-        );
+        if let Some(profile) = &self.profile {
+            debug_assert_eq!(
+                profile.constraints.total_weight(),
+                r1cs.constraints_layout.size() as u64
+            );
+            debug_assert_eq!(
+                profile.witnesses.total_weight(),
+                r1cs.witness_layout.size() as u64
+            );
+        }
         (r1cs, self.profile)
     }
 }

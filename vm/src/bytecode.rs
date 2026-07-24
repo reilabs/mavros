@@ -1,6 +1,8 @@
 #![allow(unused_variables)]
 
-use crate::{ConstraintsLayout, Field, FlamegraphProfile, TableKind, WitnessLayout};
+use crate::{
+    ConstraintsLayout, Field, FlamegraphProfile, FlamegraphStackId, TableKind, WitnessLayout,
+};
 use ark_ff::{AdditiveGroup as _, BigInteger as _};
 use mavros_opcode_gen::interpreter;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -9,6 +11,7 @@ use crate::array::{BoxedLayout, BoxedValue, StructDescriptor};
 use crate::interpreter::{Frame, Handler};
 
 use crate::array::DataType;
+use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::ptr;
 
@@ -138,10 +141,7 @@ impl DebugInfo {
     /// Resolve a word offset in the serialized program to its function and nearest source
     /// location. Callers can pass an address inside an opcode, not only its first word.
     pub fn stack_frame_at(&self, code_offset: usize) -> Option<StackFrame> {
-        let function_index = self
-            .functions
-            .partition_point(|function| function.code_offset <= code_offset)
-            .checked_sub(1)?;
+        let function_index = self.function_index_at(code_offset)?;
         let function = &self.functions[function_index];
         let location_index = function
             .locations
@@ -157,6 +157,18 @@ impl DebugInfo {
                 location.column,
             ),
         })
+    }
+
+    fn function_index_at(&self, code_offset: usize) -> Option<usize> {
+        self.functions
+            .partition_point(|function| function.code_offset <= code_offset)
+            .checked_sub(1)
+    }
+
+    fn function_name(&self, function_index: usize) -> Option<&str> {
+        self.functions
+            .get(function_index)
+            .map(|function| function.name.as_str())
     }
 }
 
@@ -591,6 +603,22 @@ pub union Arrays {
 /// These are indexed by table size in bits, so this covers every width in `0..=32`.
 pub const NUM_TABLE_SIZE_SLOTS: usize = 33;
 
+struct InstructionProfile {
+    profile: FlamegraphProfile,
+    stack_ids: BTreeMap<Vec<usize>, FlamegraphStackId>,
+    stack_scratch: Vec<usize>,
+}
+
+impl Default for InstructionProfile {
+    fn default() -> Self {
+        Self {
+            profile: FlamegraphProfile::default(),
+            stack_ids: BTreeMap::new(),
+            stack_scratch: Vec::new(),
+        }
+    }
+}
+
 pub struct VM {
     pub data: Arrays,
     pub allocation_instrumenter: AllocationInstrumenter,
@@ -610,7 +638,7 @@ pub struct VM {
     program_len: usize,
     debug_info: DebugInfo,
     pub(crate) stack_trace: Vec<StackFrame>,
-    instruction_profile: Option<FlamegraphProfile>,
+    instruction_profile: Option<InstructionProfile>,
     /// Per-opcode `(invocation_count, accumulated_cycles)`, indexed by opcode
     /// discriminant. Written by generated handlers when `vm-profile` is enabled.
     #[cfg(feature = "vm-profile")]
@@ -738,29 +766,84 @@ impl VM {
     }
 
     pub fn enable_instruction_profile(&mut self) {
-        self.instruction_profile = Some(FlamegraphProfile::default());
+        self.instruction_profile = Some(InstructionProfile::default());
     }
 
     pub fn take_instruction_profile(&mut self) -> FlamegraphProfile {
-        self.instruction_profile.take().unwrap_or_default()
+        self.instruction_profile
+            .take()
+            .map(|profile| profile.profile)
+            .unwrap_or_default()
+    }
+
+    #[inline(always)]
+    pub fn instruction_profile_enabled(&self) -> bool {
+        self.instruction_profile.is_some()
     }
 
     /// Count one simulated instruction against its root-first Noir call stack.
     #[inline(always)]
     pub fn record_instruction(&mut self, pc: *const u64, frame: Frame) {
-        if self.instruction_profile.is_none() {
+        let Some(instruction_profile) = self.instruction_profile.as_mut() else {
             return;
+        };
+
+        let program_base = self.program_base;
+        let program_len = self.program_len;
+        let debug_info = &self.debug_info;
+        let stack = &mut instruction_profile.stack_scratch;
+        stack.clear();
+
+        if let Some(offset) = program_offset(program_base, program_len, pc)
+            && let Some(function_index) = debug_info.function_index_at(offset)
+        {
+            stack.push(function_index);
         }
-        let mut stack = self
-            .stack_frames_at(pc, frame)
-            .into_iter()
-            .map(|frame| frame.function)
-            .collect::<Vec<_>>();
+
+        let mut current = frame;
+        while !current.data.is_null() {
+            let parent_data = unsafe { *current.data.offset(-1) as *mut u64 };
+            if parent_data.is_null() {
+                break;
+            }
+
+            let return_pc = unsafe { *current.data.offset(1) as *const u64 };
+            if let Some(return_offset) = program_offset(program_base, program_len, return_pc)
+                && let Some(function_index) =
+                    debug_info.function_index_at(return_offset.saturating_sub(1))
+            {
+                stack.push(function_index);
+            }
+            current = Frame { data: parent_data };
+        }
         stack.reverse();
         if stack.is_empty() {
-            stack.push("<unknown>".to_string());
+            stack.push(usize::MAX);
         }
-        self.instruction_profile.as_mut().unwrap().record(stack, 1);
+
+        let stack_id = if let Some(stack_id) = instruction_profile.stack_ids.get(stack.as_slice()) {
+            *stack_id
+        } else {
+            let names = stack.iter().map(|function_index| {
+                if *function_index == usize::MAX {
+                    "<unknown>".to_string()
+                } else {
+                    debug_info
+                        .function_name(*function_index)
+                        .unwrap_or("<unknown>")
+                        .to_string()
+                }
+            });
+            let stack_id = instruction_profile
+                .profile
+                .intern_stack(names)
+                .expect("instruction profile stack is non-empty");
+            instruction_profile
+                .stack_ids
+                .insert(stack.clone(), stack_id);
+            stack_id
+        };
+        instruction_profile.profile.record_interned(stack_id, 1);
     }
 
     fn stack_frames_at(&self, pc: *const u64, frame: Frame) -> Vec<StackFrame> {
@@ -795,6 +878,14 @@ impl VM {
         self.trapped = true;
         self.stack_trace = self.stack_frames_at(pc, frame);
     }
+}
+
+fn program_offset(program_base: *const u64, program_len: usize, pc: *const u64) -> Option<usize> {
+    if program_base.is_null() {
+        return None;
+    }
+    let offset = unsafe { pc.offset_from(program_base) };
+    (offset >= 0 && (offset as usize) < program_len).then_some(offset as usize)
 }
 
 /// Compute spread of a u32: interleave zero bits between each bit.

@@ -26,6 +26,10 @@ pub struct FlamegraphProfile {
     total_weight: u64,
 }
 
+/// An interned stack in a [`FlamegraphProfile`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlamegraphStackId(usize);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct StackProfile {
     weight: u64,
@@ -62,37 +66,64 @@ impl FlamegraphProfile {
         if weight == 0 {
             return;
         }
+        let Some(stack_id) = self.intern_stack(stack) else {
+            return;
+        };
+        self.record_interned(stack_id, weight);
+    }
+
+    /// Intern a root-first call stack so repeated samples can record it without
+    /// cloning its frame names.
+    pub fn intern_stack<I, S>(&mut self, stack: I) -> Option<FlamegraphStackId>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         let stack = stack.into_iter().map(Into::into).collect::<Vec<_>>();
         if stack.is_empty() {
-            return;
+            return None;
         }
         let next_sample_id = self.sample_stacks.len();
         let sample_id = match self.stacks.entry(stack) {
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                entry.get_mut().weight += weight;
-                entry.get().sample_id
-            }
+            std::collections::btree_map::Entry::Occupied(entry) => entry.get().sample_id,
             std::collections::btree_map::Entry::Vacant(entry) => {
                 self.sample_stacks.push(entry.key().clone());
                 entry.insert(StackProfile {
-                    weight,
+                    weight: 0,
                     sample_id: next_sample_id,
                 });
                 next_sample_id
             }
         };
+        Some(FlamegraphStackId(sample_id))
+    }
+
+    /// Record weight against an already-interned stack.
+    pub fn record_interned(&mut self, stack_id: FlamegraphStackId, weight: u64) {
+        if weight == 0 {
+            return;
+        }
+        let stack = self
+            .sample_stacks
+            .get(stack_id.0)
+            .expect("FlameGraph stack id belongs to this profile");
+        self.stacks
+            .get_mut(stack.as_slice())
+            .expect("interned FlameGraph stack is indexed")
+            .weight += weight;
 
         let segment_end = self.total_weight + weight;
         while self.next_sample_at < segment_end {
+            if self.timeline_samples.len() == MAX_TIMELINE_SAMPLES {
+                self.compact_timeline(self.next_sample_at);
+                continue;
+            }
             let sample_position = self.next_sample_at;
             self.timeline_samples.push(TimelineSample {
                 position: sample_position,
-                stack_id: sample_id,
+                stack_id: stack_id.0,
             });
             self.schedule_next_sample();
-            if self.timeline_samples.len() == MAX_TIMELINE_SAMPLES {
-                self.compact_timeline(sample_position + 1);
-            }
         }
         self.total_weight = segment_end;
     }
@@ -102,12 +133,13 @@ impl FlamegraphProfile {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.stacks.is_empty()
+        self.total_weight == 0
     }
 
     pub fn stacks(&self) -> impl Iterator<Item = (&[String], u64)> {
         self.stacks
             .iter()
+            .filter(|(_, profile)| profile.weight > 0)
             .map(|(stack, profile)| (stack.as_slice(), profile.weight))
     }
 
@@ -119,11 +151,6 @@ impl FlamegraphProfile {
                 self.sample_stacks[sample.stack_id].as_slice(),
             )
         })
-    }
-
-    /// Simulated instruction interval represented by each timeline sample.
-    pub fn sample_interval(&self) -> u64 {
-        self.sample_interval
     }
 
     fn compact_timeline(&mut self, cursor: u64) {
@@ -167,6 +194,9 @@ impl FlamegraphProfile {
     pub fn to_folded(&self) -> String {
         let mut folded = String::new();
         for (stack, profile) in &self.stacks {
+            if profile.weight == 0 {
+                continue;
+            }
             let frames = stack
                 .iter()
                 .map(|frame| sanitize_flamegraph_frame(frame))
@@ -206,7 +236,7 @@ mod flamegraph_profile_tests {
 
         assert_eq!(profile.total_weight(), 10);
         assert_eq!(profile.to_folded(), "main;a helper 1\nmain;z:helper 9\n");
-        assert_eq!(profile.sample_interval(), 1);
+        assert_eq!(profile.sample_interval, 1);
         assert_eq!(
             profile
                 .timeline_samples()
@@ -236,7 +266,7 @@ mod flamegraph_profile_tests {
 
         assert_eq!(profile.total_weight(), 250_001);
         assert_eq!(profile, repeated_profile);
-        assert_eq!(profile.sample_interval(), 4);
+        assert_eq!(profile.sample_interval, 4);
         assert!((62_499..=62_501).contains(&profile.timeline_samples().count()));
         assert!(
             profile
@@ -249,6 +279,32 @@ mod flamegraph_profile_tests {
                 .map(|(position, _)| position)
                 .is_sorted()
         );
+    }
+
+    #[test]
+    fn exactly_the_sample_limit_keeps_every_instruction() {
+        let mut profile = FlamegraphProfile::default();
+        profile.record(["main"], super::MAX_TIMELINE_SAMPLES as u64);
+
+        assert_eq!(
+            profile.timeline_samples().count(),
+            super::MAX_TIMELINE_SAMPLES
+        );
+        assert_eq!(profile.sample_interval, 1);
+
+        profile.record(["main"], 1);
+        assert!(profile.timeline_samples().count() < super::MAX_TIMELINE_SAMPLES);
+        assert_eq!(profile.sample_interval, 2);
+    }
+
+    #[test]
+    fn interned_stacks_record_without_reinterning_names() {
+        let mut profile = FlamegraphProfile::default();
+        let stack = profile.intern_stack(["main", "helper"]).unwrap();
+        profile.record_interned(stack, 2);
+        profile.record_interned(stack, 3);
+
+        assert_eq!(profile.to_folded(), "main;helper 5\n");
     }
 }
 

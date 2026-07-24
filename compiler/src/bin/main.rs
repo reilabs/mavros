@@ -132,10 +132,14 @@ pub fn compile_to_r1cs(
     root: PathBuf,
     draw_graphs: bool,
     logup_soundness: u32,
+    profile: bool,
 ) -> Result<(Driver, R1CS), Error> {
     let project = Project::new(root)?;
     let mut driver = Driver::new(project, draw_graphs);
     driver.set_logup_soundness(logup_soundness);
+    if profile {
+        driver.enable_r1cs_profile();
+    }
     driver.run_noir_compiler()?;
     driver.make_struct_access_static()?;
     driver.monomorphize()?;
@@ -166,7 +170,7 @@ pub fn run_compile(
 ) -> Result<ExitCode, Error> {
     info!(message = %"Compiling Noir project", root = ?path, r1cs_output = ?r1cs_output, binary_output = ?binary_output);
 
-    let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs, logup_soundness)?;
+    let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs, logup_soundness, false)?;
     let artifact = api::compile_bytecode_artifact(
         &mut driver,
         CodeGenOptions {
@@ -224,8 +228,12 @@ pub fn run_compile(
 /// The main execution of the CLI utility (full pipeline). Should be called directly from the
 /// `main` function of the application.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
-    let (mut driver, r1cs) =
-        compile_to_r1cs(args.root.clone(), args.draw_graphs, args.logup_soundness)?;
+    let (mut driver, r1cs) = compile_to_r1cs(
+        args.root.clone(),
+        args.draw_graphs,
+        args.logup_soundness,
+        args.profile,
+    )?;
     let codegen_options = CodeGenOptions {
         include_debug_info: args.include_debug_info || args.profile,
         ..CodeGenOptions::default()

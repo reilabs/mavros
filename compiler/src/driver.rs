@@ -88,6 +88,7 @@ pub struct Driver {
     witness_spilled_ssa: Option<HLSSA>,
     r1cs_ssa: Option<HLSSA>,
     r1cs_profile: Option<R1CSProfile>,
+    r1cs_profiling: bool,
     /// The final multi-entry-point SSA: the witgen program with the AD program merged in as a
     /// second entry point. All executable artifacts (bytecode, LLVM, WASM) are compiled from
     /// this single SSA.
@@ -143,6 +144,7 @@ impl Driver {
             witness_spilled_ssa: None,
             r1cs_ssa: None,
             r1cs_profile: None,
+            r1cs_profiling: false,
             program_ssa: None,
             abi: None,
             draw_cfg,
@@ -156,6 +158,10 @@ impl Driver {
     /// the default, which is a no-op on bn254.
     pub fn set_logup_soundness(&mut self, bits: u32) {
         self.logup_soundness = bits;
+    }
+
+    pub fn enable_r1cs_profile(&mut self) {
+        self.r1cs_profiling = true;
     }
 
     pub fn get_debug_output_dir(&self) -> PathBuf {
@@ -475,12 +481,20 @@ impl Driver {
         let type_info = Types::new().run(&r1cs_ssa, &flow_analysis);
 
         let mut r1cs_gen = R1CGen::new();
+        if self.r1cs_profiling {
+            r1cs_gen.enable_profile();
+        }
         r1cs_gen
             .run(&r1cs_ssa, &type_info)
             .map_err(|e| Error::UnsatisfiableProgram(e.message))?;
         // Captured before `seal` consumes `r1cs_gen`; feeds the LogUp soundness degree D.
         let num_lookups = r1cs_gen.num_lookups();
-        let (r1cs, profile) = r1cs_gen.seal_with_profile();
+        let (r1cs, profile) = if self.r1cs_profiling {
+            let (r1cs, profile) = r1cs_gen.seal_with_profile();
+            (r1cs, Some(profile))
+        } else {
+            (r1cs_gen.seal(), None)
+        };
         let mut num_non_zero_terms = 0;
         for r1c in r1cs.constraints.iter() {
             for (_, coeff) in r1c.a.iter() {
@@ -500,7 +514,7 @@ impl Driver {
             }
         }
         self.r1cs_ssa = Some(r1cs_ssa);
-        self.r1cs_profile = Some(profile);
+        self.r1cs_profile = profile;
         info!(
             message = %"R1CS generated",
             num_constraints = r1cs.constraints.len(),
