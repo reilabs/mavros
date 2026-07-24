@@ -44,6 +44,12 @@ pub fn ice_non_elided_tuple() -> ! {
     panic!("ICE: Tuple encountered after ElideTuples pass")
 }
 
+/// Panic if an `AssertConstant` marker survives its dedicated validation phase.
+#[track_caller]
+pub fn ice_unvalidated_assert_constant() -> ! {
+    panic!("ICE: AssertConstant encountered after assert-constant validation")
+}
+
 pub fn spread_bits(v: u128, bits: usize) -> u128 {
     assert!(
         bits <= 64,

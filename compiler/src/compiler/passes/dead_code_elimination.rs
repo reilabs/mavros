@@ -97,7 +97,9 @@ impl DCE {
                 ..
             } => false,
             OpCode::Call { .. } | OpCode::Store { .. } => true,
-            OpCode::Assert { .. } | OpCode::AssertCmp { .. } => true,
+            OpCode::Assert { .. } | OpCode::AssertConstant { .. } | OpCode::AssertCmp { .. } => {
+                true
+            }
             OpCode::AssertR1C { .. }
             | OpCode::Constrain { .. }
             | OpCode::Lookup { .. }

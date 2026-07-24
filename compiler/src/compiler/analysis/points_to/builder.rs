@@ -564,6 +564,7 @@ impl FnBuilder<'_> {
             | OpCode::WriteWitness { .. }
             | OpCode::DropGlobal { .. }
             | OpCode::Assert { .. }
+            | OpCode::AssertConstant { .. }
             | OpCode::AssertCmp { .. }
             | OpCode::AssertR1C { .. }
             | OpCode::Rangecheck { .. }

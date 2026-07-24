@@ -5,7 +5,7 @@
 //! that only change witness representation (`WitnessOf`, and `Map`s thereof over arrays
 //! and slices), which become identities once the types are stripped.
 
-use crate::compiler::util::ice_non_elided_tuple;
+use crate::compiler::util::{ice_non_elided_tuple, ice_unvalidated_assert_constant};
 use crate::compiler::{
     analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
@@ -146,6 +146,7 @@ impl StripWitnessOf {
             | OpCode::DropGlobal { .. }
             | OpCode::Spread { .. }
             | OpCode::Unspread { .. } => {}
+            OpCode::AssertConstant { .. } => ice_unvalidated_assert_constant(),
             OpCode::Guard { .. } => {
                 panic!("ICE: Found Guard but `LowerGuards` should have removed them")
             }
