@@ -65,6 +65,27 @@ pub fn run_witgen_from_binary(
     )
 }
 
+pub fn run_witgen_profiled_from_binary(
+    binary: &mut [u64],
+    r1cs: &R1CS,
+    params: &[InputValueOrdered],
+    debug_info: Option<DebugInfo>,
+) -> Result<
+    (
+        interpreter::WitgenResult,
+        mavros_artifacts::FlamegraphProfile,
+    ),
+    interpreter::TrapError,
+> {
+    interpreter::run_profiled(
+        binary,
+        r1cs.witness_layout,
+        r1cs.constraints_layout,
+        params,
+        debug_info,
+    )
+}
+
 /// Phase 1: execute the VM and produce the pre-commitment witness. Returns
 /// intermediate state needed by [`run_witgen_phase2`].
 pub fn run_witgen_phase1(
@@ -127,6 +148,30 @@ pub fn run_ad_from_binary(
     interpreter::TrapError,
 > {
     interpreter::run_ad(
+        binary,
+        coeffs,
+        r1cs.witness_layout,
+        r1cs.constraints_layout,
+        debug_info,
+    )
+}
+
+pub fn run_ad_profiled_from_binary(
+    binary: &mut [u64],
+    r1cs: &R1CS,
+    coeffs: &[Field],
+    debug_info: Option<DebugInfo>,
+) -> Result<
+    (
+        Vec<Field>,
+        Vec<Field>,
+        Vec<Field>,
+        crate::vm::bytecode::AllocationInstrumenter,
+        mavros_artifacts::FlamegraphProfile,
+    ),
+    interpreter::TrapError,
+> {
+    interpreter::run_ad_profiled(
         binary,
         coeffs,
         r1cs.witness_layout,

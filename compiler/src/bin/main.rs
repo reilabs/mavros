@@ -56,6 +56,10 @@ pub struct ProgramOptions {
     #[arg(long, global = true, action = clap::ArgAction::SetTrue)]
     pub include_debug_info: bool,
 
+    /// Generate per-function constraint, witness, witgen, and AD FlameGraphs.
+    #[arg(long, conflicts_with = "skip_vm", action = clap::ArgAction::SetTrue)]
+    pub profile: bool,
+
     /// Target LogUp lookup-argument soundness, in bits of security. The compiler computes the
     /// minimum number of challenges needed to reach it and reports the result. On bn254 a
     /// single challenge suffices for any realistic target.
@@ -97,6 +101,10 @@ fn main() -> ExitCode {
         .init();
 
     let result = match &args.command {
+        Some(Command::Compile { .. }) if args.profile => Err(std::io::Error::other(
+            "--profile runs the full pipeline and cannot be combined with the compile subcommand",
+        )
+        .into()),
         Some(Command::Compile {
             path,
             r1cs_output,
@@ -124,10 +132,14 @@ pub fn compile_to_r1cs(
     root: PathBuf,
     draw_graphs: bool,
     logup_soundness: u32,
+    profile: bool,
 ) -> Result<(Driver, R1CS), Error> {
     let project = Project::new(root)?;
     let mut driver = Driver::new(project, draw_graphs);
     driver.set_logup_soundness(logup_soundness);
+    if profile {
+        driver.enable_r1cs_profile();
+    }
     driver.run_noir_compiler()?;
     driver.make_struct_access_static()?;
     driver.monomorphize()?;
@@ -158,7 +170,7 @@ pub fn run_compile(
 ) -> Result<ExitCode, Error> {
     info!(message = %"Compiling Noir project", root = ?path, r1cs_output = ?r1cs_output, binary_output = ?binary_output);
 
-    let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs, logup_soundness)?;
+    let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs, logup_soundness, false)?;
     let artifact = api::compile_bytecode_artifact(
         &mut driver,
         CodeGenOptions {
@@ -216,10 +228,14 @@ pub fn run_compile(
 /// The main execution of the CLI utility (full pipeline). Should be called directly from the
 /// `main` function of the application.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
-    let (mut driver, r1cs) =
-        compile_to_r1cs(args.root.clone(), args.draw_graphs, args.logup_soundness)?;
+    let (mut driver, r1cs) = compile_to_r1cs(
+        args.root.clone(),
+        args.draw_graphs,
+        args.logup_soundness,
+        args.profile,
+    )?;
     let codegen_options = CodeGenOptions {
-        include_debug_info: args.include_debug_info,
+        include_debug_info: args.include_debug_info || args.profile,
         ..CodeGenOptions::default()
     };
     let source_path_root = debug_path_root(&driver, args.absolute_paths).map(Path::to_path_buf);
@@ -269,15 +285,18 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let mut binary = artifact.binary;
     let vm_debug_info = artifact.debug_info;
 
-    let witgen_result =
-        api::run_witgen_from_binary(&mut binary, &r1cs, &params, vm_debug_info.clone()).map_err(
-            |mut error| {
-                if let Some(root) = &source_path_root {
-                    error.relativize_source_paths(root);
-                }
-                error
-            },
-        )?;
+    let witgen_execution = if args.profile {
+        api::run_witgen_profiled_from_binary(&mut binary, &r1cs, &params, vm_debug_info.clone())
+    } else {
+        api::run_witgen_from_binary(&mut binary, &r1cs, &params, vm_debug_info.clone())
+            .map(|result| (result, mavros_artifacts::FlamegraphProfile::default()))
+    };
+    let (witgen_result, witgen_profile) = witgen_execution.map_err(|mut error| {
+        if let Some(root) = &source_path_root {
+            error.relativize_source_paths(root);
+        }
+        error
+    })?;
 
     let correct = api::check_witgen(&r1cs, &witgen_result);
     if !correct {
@@ -339,8 +358,22 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
 
     let ad_coeffs: Vec<Field> = api::random_ad_coeffs(&r1cs);
 
-    let (ad_a, ad_b, ad_c, ad_instrumenter) =
-        api::run_ad_from_binary(&mut binary, &r1cs, &ad_coeffs, vm_debug_info)?;
+    let ad_execution = if args.profile {
+        api::run_ad_profiled_from_binary(&mut binary, &r1cs, &ad_coeffs, vm_debug_info)
+    } else {
+        api::run_ad_from_binary(&mut binary, &r1cs, &ad_coeffs, vm_debug_info).map(
+            |(a, b, c, instrumenter)| {
+                (
+                    a,
+                    b,
+                    c,
+                    instrumenter,
+                    mavros_artifacts::FlamegraphProfile::default(),
+                )
+            },
+        )
+    };
+    let (ad_a, ad_b, ad_c, ad_instrumenter, ad_profile) = ad_execution?;
 
     let leftover_memory = plotting::plot_memory_chart(
         &ad_instrumenter,
@@ -393,6 +426,54 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     )
     .unwrap();
 
+    if args.profile {
+        let r1cs_profile = driver
+            .r1cs_profile()
+            .expect("R1CS generation always records size profiles");
+        let output_dir = api::debug_output_dir(&driver).join("flamegraphs");
+        for (profile, name, title, count_name) in [
+            (
+                &r1cs_profile.constraints,
+                "constraint_size",
+                "R1CS constraints per function",
+                "constraints",
+            ),
+            (
+                &r1cs_profile.witnesses,
+                "witness_size",
+                "R1CS witnesses per function",
+                "witnesses",
+            ),
+            (
+                &witgen_profile,
+                "witgen_time",
+                "Witness generation simulated time",
+                "instructions",
+            ),
+            (
+                &ad_profile,
+                "ad_time",
+                "Automatic differentiation simulated time",
+                "instructions",
+            ),
+        ] {
+            let (folded_path, svg_path) =
+                mavros_compiler::flamegraph::render(profile, &output_dir, name, title, count_name)?;
+            if let Some(svg_path) = svg_path {
+                info!(message = %"FlameGraph generated", path = %svg_path.display());
+            } else {
+                warn!(
+                    message = %"flamegraph.pl was not found; folded profile generated but SVG rendering skipped",
+                    path = %folded_path.display()
+                );
+            }
+        }
+        for (profile, name) in [(&witgen_profile, "witgen_time"), (&ad_profile, "ad_time")] {
+            let path = mavros_compiler::flamegraph::write_cpuprofile(profile, &output_dir, name)?;
+            info!(message = %"Chrome DevTools CPU profile generated", path = %path.display());
+        }
+    }
+
     Ok(ExitCode::SUCCESS)
 }
 
@@ -419,6 +500,11 @@ mod tests {
         let relative = ProgramOptions::try_parse_from(["mavros"]).unwrap();
         assert!(!relative.absolute_paths);
         assert!(!relative.include_debug_info);
+        assert!(!relative.profile);
+
+        let profiled = ProgramOptions::try_parse_from(["mavros", "--profile"]).unwrap();
+        assert!(profiled.profile);
+        assert!(ProgramOptions::try_parse_from(["mavros", "--profile", "--skip-vm"]).is_err());
 
         let absolute =
             ProgramOptions::try_parse_from(["mavros", "--absolute-paths", "--include-debug-info"])

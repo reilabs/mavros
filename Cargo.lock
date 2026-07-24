@@ -2234,6 +2234,7 @@ dependencies = [
  "plotters",
  "rand 0.8.6",
  "rustc-hash",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",

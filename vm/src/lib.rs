@@ -4,5 +4,6 @@ pub mod interpreter;
 
 // FIELD-ASSUMPTION: L1-alias
 pub use mavros_artifacts::{
-    ConstraintsLayout, Field, InputValueOrdered, LC, R1C, R1CS, TableKind, WitnessLayout,
+    ConstraintsLayout, Field, FlamegraphProfile, FlamegraphStackId, InputValueOrdered, LC, R1C,
+    R1CS, TableKind, WitnessLayout,
 };

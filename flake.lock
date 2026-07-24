@@ -18,6 +18,22 @@
         "type": "github"
       }
     },
+    "flamegraph": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1729460925,
+        "narHash": "sha256-9iztXeRavKGSaKQMT11Z/lPPZffhtMslCEh4uOwGRjs=",
+        "owner": "brendangregg",
+        "repo": "FlameGraph",
+        "rev": "41fee1f99f9276008b7cd112fca19dc3ea84ac32",
+        "type": "github"
+      },
+      "original": {
+        "owner": "brendangregg",
+        "repo": "FlameGraph",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1776548001,
@@ -53,6 +69,7 @@
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
+        "flamegraph": "flamegraph",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay"
       }

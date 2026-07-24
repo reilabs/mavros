@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{collections::BTreeMap, fmt::Display};
 
 use ark_ff::{AdditiveGroup, BigInt, PrimeField};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -6,6 +6,307 @@ use tracing::error;
 
 // FIELD-ASSUMPTION: L1-alias
 pub type Field = ark_bn254::Fr;
+
+const MAX_TIMELINE_SAMPLES: usize = 100_000;
+
+/// Aggregated stacks in the folded format consumed by Brendan Gregg's
+/// `flamegraph.pl`, plus a bounded chronological sample stream.
+///
+/// Frames are stored root-first and weights are deterministic integer units
+/// (for example constraints, witnesses, or simulated VM instructions).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlamegraphProfile {
+    stacks: BTreeMap<Vec<String>, StackProfile>,
+    sample_stacks: Vec<Vec<String>>,
+    timeline_samples: Vec<TimelineSample>,
+    sample_interval: u64,
+    next_block_start: u64,
+    next_sample_at: u64,
+    sampler_state: u64,
+    total_weight: u64,
+}
+
+/// An interned stack in a [`FlamegraphProfile`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlamegraphStackId(usize);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StackProfile {
+    weight: u64,
+    sample_id: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TimelineSample {
+    position: u64,
+    stack_id: usize,
+}
+
+impl Default for FlamegraphProfile {
+    fn default() -> Self {
+        Self {
+            stacks: BTreeMap::new(),
+            sample_stacks: Vec::new(),
+            timeline_samples: Vec::new(),
+            sample_interval: 1,
+            next_block_start: 0,
+            next_sample_at: 0,
+            sampler_state: 0x9e37_79b9_7f4a_7c15,
+            total_weight: 0,
+        }
+    }
+}
+
+impl FlamegraphProfile {
+    pub fn record<I, S>(&mut self, stack: I, weight: u64)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        if weight == 0 {
+            return;
+        }
+        let Some(stack_id) = self.intern_stack(stack) else {
+            return;
+        };
+        self.record_interned(stack_id, weight);
+    }
+
+    /// Intern a root-first call stack so repeated samples can record it without
+    /// cloning its frame names.
+    pub fn intern_stack<I, S>(&mut self, stack: I) -> Option<FlamegraphStackId>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let stack = stack.into_iter().map(Into::into).collect::<Vec<_>>();
+        if stack.is_empty() {
+            return None;
+        }
+        let next_sample_id = self.sample_stacks.len();
+        let sample_id = match self.stacks.entry(stack) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.get().sample_id,
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                self.sample_stacks.push(entry.key().clone());
+                entry.insert(StackProfile {
+                    weight: 0,
+                    sample_id: next_sample_id,
+                });
+                next_sample_id
+            }
+        };
+        Some(FlamegraphStackId(sample_id))
+    }
+
+    /// Record weight against an already-interned stack.
+    pub fn record_interned(&mut self, stack_id: FlamegraphStackId, weight: u64) {
+        if weight == 0 {
+            return;
+        }
+        let stack = self
+            .sample_stacks
+            .get(stack_id.0)
+            .expect("FlameGraph stack id belongs to this profile");
+        self.stacks
+            .get_mut(stack.as_slice())
+            .expect("interned FlameGraph stack is indexed")
+            .weight += weight;
+
+        let segment_end = self.total_weight + weight;
+        while self.next_sample_at < segment_end {
+            if self.timeline_samples.len() == MAX_TIMELINE_SAMPLES {
+                self.compact_timeline(self.next_sample_at);
+                continue;
+            }
+            let sample_position = self.next_sample_at;
+            self.timeline_samples.push(TimelineSample {
+                position: sample_position,
+                stack_id: stack_id.0,
+            });
+            self.schedule_next_sample();
+        }
+        self.total_weight = segment_end;
+    }
+
+    pub fn total_weight(&self) -> u64 {
+        self.total_weight
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total_weight == 0
+    }
+
+    pub fn stacks(&self) -> impl Iterator<Item = (&[String], u64)> {
+        self.stacks
+            .iter()
+            .filter(|(_, profile)| profile.weight > 0)
+            .map(|(stack, profile)| (stack.as_slice(), profile.weight))
+    }
+
+    /// Deterministic root-first call-stack samples in execution order.
+    pub fn timeline_samples(&self) -> impl Iterator<Item = (u64, &[String])> {
+        self.timeline_samples.iter().map(|sample| {
+            (
+                sample.position,
+                self.sample_stacks[sample.stack_id].as_slice(),
+            )
+        })
+    }
+
+    fn compact_timeline(&mut self, cursor: u64) {
+        let previous_samples = std::mem::take(&mut self.timeline_samples);
+        self.timeline_samples.reserve(previous_samples.len() / 2);
+        for pair in previous_samples.chunks_exact(2) {
+            let selected = if self.next_random() & 1 == 0 {
+                pair[0]
+            } else {
+                pair[1]
+            };
+            self.timeline_samples.push(selected);
+        }
+        self.sample_interval *= 2;
+        self.next_block_start = cursor.div_ceil(self.sample_interval) * self.sample_interval;
+        self.next_sample_at = self.next_block_start + self.random_sample_offset();
+    }
+
+    fn schedule_next_sample(&mut self) {
+        self.next_block_start += self.sample_interval;
+        self.next_sample_at = self.next_block_start + self.random_sample_offset();
+    }
+
+    fn random_sample_offset(&mut self) -> u64 {
+        if self.sample_interval == 1 {
+            0
+        } else {
+            self.next_random() % self.sample_interval
+        }
+    }
+
+    fn next_random(&mut self) -> u64 {
+        self.sampler_state ^= self.sampler_state >> 12;
+        self.sampler_state ^= self.sampler_state << 25;
+        self.sampler_state ^= self.sampler_state >> 27;
+        self.sampler_state = self.sampler_state.wrapping_mul(0x2545_f491_4f6c_dd1d);
+        self.sampler_state
+    }
+
+    /// Render the already-collapsed input expected by `flamegraph.pl`.
+    pub fn to_folded(&self) -> String {
+        let mut folded = String::new();
+        for (stack, profile) in &self.stacks {
+            if profile.weight == 0 {
+                continue;
+            }
+            let frames = stack
+                .iter()
+                .map(|frame| sanitize_flamegraph_frame(frame))
+                .collect::<Vec<_>>()
+                .join(";");
+            folded.push_str(&frames);
+            folded.push(' ');
+            folded.push_str(&profile.weight.to_string());
+            folded.push('\n');
+        }
+        folded
+    }
+}
+
+fn sanitize_flamegraph_frame(frame: &str) -> String {
+    frame
+        .chars()
+        .map(|character| match character {
+            ';' => ':',
+            '\n' | '\r' => ' ',
+            character => character,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod flamegraph_profile_tests {
+    use super::FlamegraphProfile;
+
+    #[test]
+    fn folded_profiles_are_aggregated_sorted_and_sanitized() {
+        let mut profile = FlamegraphProfile::default();
+        profile.record(["main", "z;helper"], 2);
+        profile.record(["main", "z;helper"], 3);
+        profile.record(["main", "a\nhelper"], 1);
+        profile.record(["main", "z;helper"], 4);
+
+        assert_eq!(profile.total_weight(), 10);
+        assert_eq!(profile.to_folded(), "main;a helper 1\nmain;z:helper 9\n");
+        assert_eq!(profile.sample_interval, 1);
+        assert_eq!(
+            profile
+                .timeline_samples()
+                .map(|(_, stack)| stack.last().unwrap().as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "z;helper",
+                "z;helper",
+                "z;helper",
+                "z;helper",
+                "z;helper",
+                "a\nhelper",
+                "z;helper",
+                "z;helper",
+                "z;helper",
+                "z;helper",
+            ]
+        );
+    }
+
+    #[test]
+    fn timeline_sampling_is_bounded_and_deterministic() {
+        let mut profile = FlamegraphProfile::default();
+        profile.record(["main"], 250_001);
+        let mut repeated_profile = FlamegraphProfile::default();
+        repeated_profile.record(["main"], 250_001);
+
+        assert_eq!(profile.total_weight(), 250_001);
+        assert_eq!(profile, repeated_profile);
+        assert_eq!(profile.sample_interval, 4);
+        assert!((62_499..=62_501).contains(&profile.timeline_samples().count()));
+        assert!(
+            profile
+                .timeline_samples()
+                .all(|(_, stack)| stack == ["main".to_string()])
+        );
+        assert!(
+            profile
+                .timeline_samples()
+                .map(|(position, _)| position)
+                .is_sorted()
+        );
+    }
+
+    #[test]
+    fn exactly_the_sample_limit_keeps_every_instruction() {
+        let mut profile = FlamegraphProfile::default();
+        profile.record(["main"], super::MAX_TIMELINE_SAMPLES as u64);
+
+        assert_eq!(
+            profile.timeline_samples().count(),
+            super::MAX_TIMELINE_SAMPLES
+        );
+        assert_eq!(profile.sample_interval, 1);
+
+        profile.record(["main"], 1);
+        assert!(profile.timeline_samples().count() < super::MAX_TIMELINE_SAMPLES);
+        assert_eq!(profile.sample_interval, 2);
+    }
+
+    #[test]
+    fn interned_stacks_record_without_reinterning_names() {
+        let mut profile = FlamegraphProfile::default();
+        let stack = profile.intern_stack(["main", "helper"]).unwrap();
+        profile.record_interned(stack, 2);
+        profile.record_interned(stack, 3);
+
+        assert_eq!(profile.to_folded(), "main;helper 5\n");
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Linear constraint helpers

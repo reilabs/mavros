@@ -35,6 +35,7 @@ petgraph = { version = "0.6.5" } # Cannot bump as it is currently required to be
 plotters = { version = "0.3.5" }
 rand = { version = "0.8" }
 rustc-hash = { version = "2" }
+serde.workspace = true
 serde_json = { version = "1.0" }
 tempfile.workspace = true
 thiserror.workspace = true
