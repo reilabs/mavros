@@ -22,6 +22,7 @@ use crate::{
             flow_analysis::FlowAnalysis, types::Types,
             witness_taint_inference::WitnessTaintInference,
         },
+        assert_constant,
         codegen::{
             CodeGenOptions,
             bytecode::CodeGen,
@@ -62,7 +63,7 @@ use crate::{
             witness_write_to_void::WitnessWriteToVoid,
         },
         ssa::{
-            DefaultSSAAnnotator,
+            DefaultSSAAnnotator, SourceLocation,
             hlssa::{Constant, HLSSA},
         },
         untaint_control_flow::UntaintControlFlow,
@@ -109,6 +110,8 @@ pub enum Error {
     /// field, but multi-challenge LogUp is not yet implemented (see `docs/field-agnosticism.md`,
     /// `L4-logup-challenges`). Rejected rather than silently emitting an under-provisioned circuit.
     LogupSoundnessUnsupported(String),
+    /// A Noir `assert_constant` operand is dynamic in a reachable calling context.
+    AssertConstantFailed(SourceLocation),
 }
 
 impl std::fmt::Display for Error {
@@ -121,6 +124,12 @@ impl std::fmt::Display for Error {
                 write!(f, "program will never execute: {message}")
             }
             Error::LogupSoundnessUnsupported(message) => write!(f, "{message}"),
+            Error::AssertConstantFailed(location) => {
+                write!(
+                    f,
+                    "assert_constant failed at {location}: value is not compile-time known"
+                )
+            }
         }
     }
 }
@@ -260,6 +269,7 @@ impl Driver {
         pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
         let mut ssa = self.initial_ssa.clone().unwrap();
         pass_manager.run(&mut ssa);
+        assert_constant::validate_and_remove(&mut ssa).map_err(Error::AssertConstantFailed)?;
         self.static_struct_access_ssa = Some(ssa);
         Ok(())
     }

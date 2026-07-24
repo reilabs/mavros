@@ -1,6 +1,6 @@
 //! The interprocedural layer: a return-determinism pass (Phase 0), polymorphic jump-function
-//! summaries (Phase 1), a symbolic-congruence projection over the converged summaries, and 1-CFA
-//! per-context specialization (Phase 2).
+//! summaries (Phase 1), a symbolic-congruence projection over the converged summaries, and bounded
+//! call-string specialization (Phase 2).
 //!
 //! # Phase 0: Return Determinism
 //!
@@ -28,7 +28,7 @@
 //!
 //! [`specialize`] re-solves each reachable `(function, context)` with its entry parameters seeded
 //! by the calling context's argument constants, so two call sites of one helper get distinct
-//! per-context constants. A context is a `k`-limited call string ([`K`]).
+//! per-context constants. A context is a caller-selected, depth-limited call string.
 //!
 //! This is sound without an address-token exclusion as a context's parameter seeds are the **meet**
 //! of the argument constants over _every_ static call path that reaches it. Thus, a per-context
@@ -57,12 +57,6 @@ use crate::{
         },
     },
 };
-
-// CONSTANTS
-// ================================================================================================
-
-/// Call-string depth for the context-sensitive (Phase 2) pass — 1-CFA.
-const K: usize = 1;
 
 // DETERMINISM (PHASE 0)
 // ================================================================================================
@@ -514,6 +508,7 @@ pub(crate) fn specialize(
     sym: &SymSummaries,
     det: &DetSummaries,
     orders: &HashMap<FunctionId, DefOrder>,
+    context_depth: usize,
 ) -> HashMap<(FunctionId, Context), FunctionFacts> {
     let main = ssa.get_unique_entrypoint_id();
 
@@ -577,7 +572,7 @@ pub(crate) fn specialize(
                     results: call_results,
                     function: CallTarget::Static(g),
                     args,
-                    unconstrained: false,
+                    ..
                 } = instr
                 else {
                     continue;
@@ -590,7 +585,7 @@ pub(crate) fn specialize(
 
                 let site = call_results.first().or_else(|| args.first()).copied();
                 let g_ctx = match site {
-                    Some(v) => ctx.push((f, v), K),
+                    Some(v) => ctx.push((f, v), context_depth),
                     None => ctx.clone(),
                 };
                 let g_params = &param_index[&g];

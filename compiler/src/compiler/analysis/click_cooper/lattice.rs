@@ -244,11 +244,8 @@ pub(crate) fn eval_cmp(kind: CmpKind, a: &Constant, b: &Constant) -> Option<Cons
 /// zero-extend or truncate.
 pub(crate) fn eval_cast(target: &CastTarget, v: &Constant) -> Option<Constant> {
     match target {
-        CastTarget::Nop => Some(v.clone()),
-        CastTarget::WitnessOf
-        | CastTarget::ArrayToSlice
-        | CastTarget::ValueOf
-        | CastTarget::Map(_) => None,
+        CastTarget::Nop | CastTarget::ArrayToSlice => Some(v.clone()),
+        CastTarget::WitnessOf | CastTarget::ValueOf | CastTarget::Map(_) => None,
         CastTarget::Field => match v {
             // FIELD-ASSUMPTION: L4-eval
             Constant::U(_, x) | Constant::I(_, x) => Some(Constant::Field(Field::from(*x))),

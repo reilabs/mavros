@@ -1616,6 +1616,11 @@ impl<'a> ExpressionConverter<'a> {
                 self.convert_expression(&call.arguments[0], b);
                 None
             }
+            "assert_constant" => {
+                let value = self.convert_expression(&call.arguments[0], b).unwrap();
+                self.emit_located(b, Some(call.location), |e| e.assert_constant(value));
+                None
+            }
             "str_as_bytes" => {
                 let string_type = call.arguments[0]
                     .return_type()

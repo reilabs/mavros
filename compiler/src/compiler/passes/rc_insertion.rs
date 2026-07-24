@@ -5,7 +5,10 @@
 //! It also handles cases where values die along edges instead of within a block to actually perform
 //! the necessary decrements.
 
-use crate::{collections::HashMap, compiler::util::ice_non_elided_tuple};
+use crate::{
+    collections::HashMap,
+    compiler::util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
+};
 use itertools::Itertools;
 use tracing::{Level, debug, instrument, trace};
 
@@ -754,6 +757,7 @@ impl RCInsertion {
                         // DropGlobal IS the RC drop itself, just pass through.
                         new_instructions.push(instruction);
                     }
+                    OpCode::AssertConstant { .. } => ice_unvalidated_assert_constant(),
                     OpCode::Select {
                         result: _,
                         cond: _,

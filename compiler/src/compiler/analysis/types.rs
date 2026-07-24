@@ -627,6 +627,7 @@ impl Types {
                 args: _,
                 flag: _,
             } => Ok(()),
+            OpCode::AssertConstant { .. } => Ok(()),
             OpCode::MulConst {
                 result,
                 const_val: _,

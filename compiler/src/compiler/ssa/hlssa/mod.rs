@@ -116,6 +116,12 @@ pub enum OpCode {
     Assert {
         value: ValueId,
     },
+    /// Compile-time assertion that `value` is known in every reachable calling context.
+    ///
+    /// This marker is removed after initial constant propagation and must not reach codegen.
+    AssertConstant {
+        value: ValueId,
+    },
     AssertCmp {
         kind: CmpKind,
         lhs: ValueId,
@@ -327,6 +333,7 @@ impl OpCode {
             | OpCode::Store { .. }
             | OpCode::Load { .. }
             | OpCode::Assert { .. }
+            | OpCode::AssertConstant { .. }
             | OpCode::AssertCmp { .. }
             | OpCode::AssertR1C { .. }
             | OpCode::Call { .. }
@@ -466,6 +473,7 @@ impl Instruction for OpCode {
                 format!("v{}{} = *v{}", result.0, annotate_value(*result), ptr.0)
             }
             OpCode::Assert { value } => format!("assert v{}", value.0),
+            OpCode::AssertConstant { value } => format!("assert_constant v{}", value.0),
             OpCode::AssertCmp { kind, lhs, rhs } => {
                 let op_str = match kind {
                     CmpKind::Lt => "<",
@@ -979,6 +987,7 @@ impl Instruction for OpCode {
                 var: c,
             } => vec![b, c].into_iter(),
             Self::Assert { value: c }
+            | Self::AssertConstant { value: c }
             | Self::Load { result: _, ptr: c }
             | Self::WriteWitness {
                 result: _,
@@ -1150,6 +1159,7 @@ impl Instruction for OpCode {
             | Self::MemOp { .. }
             | Self::Store { .. }
             | Self::Assert { .. }
+            | Self::AssertConstant { .. }
             | Self::AssertCmp { .. }
             | Self::AssertR1C { a: _, b: _, c: _ }
             | Self::Rangecheck { .. } => vec![].into_iter(),
@@ -1206,6 +1216,7 @@ impl Instruction for OpCode {
             | Self::MemOp { .. }
             | Self::Store { .. }
             | Self::Assert { .. }
+            | Self::AssertConstant { .. }
             | Self::AssertCmp { .. }
             | Self::AssertR1C { a: _, b: _, c: _ }
             | Self::Rangecheck { .. } => vec![].into_iter(),
@@ -1306,6 +1317,7 @@ impl Instruction for OpCode {
                 sensitivity: c,
             } => vec![b, c].into_iter(),
             Self::Assert { value: c }
+            | Self::AssertConstant { value: c }
             | Self::Load { result: _, ptr: c }
             | Self::WriteWitness {
                 result: _,
@@ -1529,7 +1541,7 @@ impl Instruction for OpCode {
                 variable: a,
                 sensitivity: b,
             } => vec![a, b].into_iter(),
-            Self::Assert { value: a } => vec![a].into_iter(),
+            Self::Assert { value: a } | Self::AssertConstant { value: a } => vec![a].into_iter(),
             Self::WriteWitness {
                 result: a,
                 value: b,

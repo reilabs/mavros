@@ -3915,6 +3915,49 @@ fn interproc_passthrough_seeds_param_and_result() {
     );
 }
 
+/// Context specialization follows unconstrained static calls for callee-local facts. The call
+/// result remains opaque advice, but the callee still receives the caller's exact argument values;
+/// consumers such as `assert_constant` need that distinction.
+#[test]
+fn unconstrained_call_seeds_callee_parameter_contexts() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let helper = ssa.add_function("helper".to_string());
+    let dynamic = ssa.fresh_value();
+    let parameter = ssa.fresh_value();
+    let c7 = ssa.add_const(Constant::Field(Field::from(7u64)));
+
+    {
+        let entry = ssa.get_function_mut(helper).get_entry_mut();
+        entry.push_parameter(parameter, Type::field());
+        entry.set_terminator(Terminator::Return(vec![]));
+    }
+    {
+        let entry = ssa.get_function_mut(main_id).get_entry_mut();
+        entry.push_parameter(dynamic, Type::field());
+        for argument in [c7, dynamic] {
+            entry.push_test_instruction(OpCode::Call {
+                results: vec![],
+                function: CallTarget::Static(helper),
+                args: vec![argument],
+                unconstrained: true,
+            });
+        }
+        entry.set_terminator(Terminator::Return(vec![]));
+    }
+
+    let cc = run_in_test(&ssa);
+    let contexts = cc.contexts_of(helper);
+    assert_eq!(contexts.len(), 2);
+    assert_eq!(
+        contexts
+            .iter()
+            .filter_map(|context| cc.const_of_in(helper, context, parameter))
+            .count(),
+        1
+    );
+}
+
 /// Interprocedural writeback through a summary: a callee that _returns_ a comparison of
 /// congruent operands gets a `Const` summary return-jump (the writeback runs in the polymorphic
 /// summary solve), so the call result folds in the caller's context. Without it the return jump
@@ -5574,6 +5617,7 @@ fn const_array_get_folds_to_scalar() {
     );
     // The aggregate stays internal: never surfaced as a constant.
     assert_eq!(cc.const_of(fid, seq), None);
+    assert!(cc.is_constant(fid, seq));
     assert!(cc.new_const_values(fid).iter().all(|(v, _)| *v != seq));
 }
 
@@ -5609,6 +5653,36 @@ fn const_repeated_array_get_and_slice_len() {
     let cc = run_in_test(&ssa);
 
     assert_eq!(cc.const_of(fid, got).as_deref(), Some(&Constant::U(32, 7)));
+    assert_eq!(cc.const_of(fid, len).as_deref(), Some(&Constant::U(32, 4)));
+}
+
+/// `ArrayToSlice` changes only the static type/shape view. It must preserve the exact aggregate
+/// payload in the internal lattice so projections of a constant array remain foldable.
+#[test]
+fn array_to_slice_preserves_internal_aggregate_constant() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let element = ssa.add_const(Constant::U(32, 7));
+    let (array, slice, len) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+    entry.push_test_instruction(OpCode::MkRepeated {
+        result: array,
+        element,
+        seq_type: SequenceTargetType::Array(4),
+        count: 4,
+        elem_type: Type::u(32),
+    });
+    entry.push_test_instruction(OpCode::Cast {
+        result: slice,
+        value: array,
+        target: CastTarget::ArrayToSlice,
+    });
+    entry.push_test_instruction(OpCode::SliceLen { result: len, slice });
+    entry.set_terminator(Terminator::Return(vec![len]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    assert!(cc.is_constant(fid, slice));
     assert_eq!(cc.const_of(fid, len).as_deref(), Some(&Constant::U(32, 4)));
 }
 

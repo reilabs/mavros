@@ -1,10 +1,10 @@
 //! A Click–Cooper-style combined optimistic analysis.
 //!
 //! An analysis that handles **constants**, **reachability** and **congruence** (using optimistic
-//! AWZ value numbering), plus a context-sensitive **interprocedural** (1-CFA) layer. It is designed
-//! to drive constant/condition propagation and PRE. The combination is _at least_ as precise as
-//! running the factors separately and alternating to a fixpoint (Click & Cooper, _Combining
-//! Analyses, Combining Optimizations_, TOPLAS 1995).
+//! AWZ value numbering), plus a bounded-call-string **interprocedural** layer (1-CFA by default).
+//! It is designed to drive constant/condition propagation and PRE. The combination is _at least_
+//! as precise as running the factors separately and alternating to a fixpoint (Click & Cooper,
+//! _Combining Analyses, Combining Optimizations_, TOPLAS 1995).
 //!
 //! It operates over three kinds of facts:
 //!
@@ -13,7 +13,7 @@
 //!   the reachability state.
 //! - **Interprocedural facts** refine the intraprocedural view across calls: polymorphic
 //!   jump-function summaries (a `return_const` holding for any arguments, a `return Param(i)`
-//!   pass-through) and 1-CFA per-`(function, context)` specialization seeding callee parameters
+//!   pass-through) and per-`(function, context)` specialization seeding callee parameters
 //!   with the caller's argument constants, plus _cross-call congruence_: a constrained static call's
 //!   result is numbered by grafting the callee's symbolic return expression over the actual
 //!   arguments (relating it to an open expression, and ignoring arguments the return does not use),
@@ -22,7 +22,7 @@
 //! - **Conditional facts** are ones derived from asserts, equalities, disequalities, and unpinned
 //!   witness forwarding. They are computed post-convergence over the same reachability state plus
 //!   CFG dominance — once from the intraprocedural facts and once per `(function, context)` from
-//!   the 1-CFA-specialized facts — and are intentionally disjoint from the unconditional view.
+//!   the context-specialized facts — and are intentionally disjoint from the unconditional view.
 //!
 //! **Unconditional facts** are those which hold on any path so that any use (replacing a use,
 //! deleting a pure definition, or pruning an unreachable block) maintains soundness. **Conditional
@@ -126,7 +126,7 @@
 //! - **Determinism / Interprocedural Summaries:** The determinism bits and the `ReturnJump` lattice
 //!   are finite, and a caller is re-queued only when a callee's summary strictly changed, so each
 //!   call-graph worklist reaches a fixpoint.
-//! - **1-CFA Specialization:** Contexts are `K`-limited call strings over finitely many call sites,
+//! - **Context Specialization:** Contexts are depth-limited call strings over finitely many call sites,
 //!   hence finite. Per-context parameter seeds move monotonically down the finite-height constant
 //!   lattice, and a context is re-queued only when newly discovered or its seed lowered.
 //!
@@ -285,7 +285,7 @@ pub struct ClickCooper {
     /// Per-function **intraprocedural** converged facts (parameters and call results `Bottom`).
     functions: HashMap<FunctionId, FunctionFacts>,
 
-    /// Per-`(function, context)` interprocedurally-refined facts (1-CFA), built from the
+    /// Per-`(function, context)` interprocedurally-refined facts, built from the
     /// polymorphic jump-function summaries.
     contexts: HashMap<(FunctionId, Context), FunctionFacts>,
 
@@ -294,7 +294,7 @@ pub struct ClickCooper {
     /// They are intentionally disjoint from the unconditional views above.
     conditional: HashMap<FunctionId, ConditionalFacts>,
 
-    /// Per-`(function, context)` **conditional** facts (the 1-CFA refinement of `conditional`).
+    /// Per-`(function, context)` **conditional** facts (the contextual refinement of `conditional`).
     ///
     /// Disjoint from `contexts`, exactly as `conditional` is from `functions`.
     conditional_contexts: HashMap<(FunctionId, Context), ConditionalFacts>,
@@ -315,7 +315,21 @@ impl Analysis for ClickCooper {
 }
 
 impl ClickCooper {
-    fn run(ssa: &HLSSA, flow: &FlowAnalysis, types: &TypeInfo) -> Self {
+    pub(crate) fn run(ssa: &HLSSA, flow: &FlowAnalysis, types: &TypeInfo) -> Self {
+        Self::run_with_context_depth(ssa, flow, types, 1)
+    }
+
+    /// Run with a caller-selected call-string depth.
+    ///
+    /// Normal optimization consumers use 1-CFA through [`Self::run`]. Validation clients that
+    /// must distinguish a bounded chain of outer call sites may request a deeper context without
+    /// changing the pipeline-wide analysis cost.
+    pub(crate) fn run_with_context_depth(
+        ssa: &HLSSA,
+        flow: &FlowAnalysis,
+        types: &TypeInfo,
+        context_depth: usize,
+    ) -> Self {
         // One snapshot serves all functions: a constant referenced from a function is always
         // interned program-wide.
         let consts = ssa.const_snapshot();
@@ -430,9 +444,9 @@ impl ClickCooper {
             functions.insert(fid, facts);
         }
 
-        // The 1-CFA contextual facts, built from the polymorphic summaries (computed above) plus
-        // the symbolic congruence projection.
-        let contexts = specialize(ssa, &consts, &summaries, &sym, &det, &orders);
+        // The context-specialized facts, built from the polymorphic summaries (computed above)
+        // plus the symbolic congruence projection.
+        let contexts = specialize(ssa, &consts, &summaries, &sym, &det, &orders, context_depth);
 
         // The per-`(function, context)` conditional facts, rebuilt by the same `conditional::build`
         // from each context's specialized facts, so every fact is anchored to context-reachable
@@ -463,7 +477,7 @@ impl ClickCooper {
         self.functions.get(&f)
     }
 
-    /// The context-specialized (1-CFA) facts of `f` under `ctx`, or `None`.
+    /// The context-specialized facts of `f` under `ctx`, or `None`.
     fn facts_in(&self, f: FunctionId, ctx: &Context) -> Option<&FunctionFacts> {
         self.contexts.get(&(f, ctx.clone()))
     }
@@ -496,6 +510,16 @@ impl ClickCooper {
             Some(Constness::Const(_) | Constness::Top | Constness::Bottom) | None => None,
         }
     }
+
+    /// Whether `v` is any exact constant in `facts`, including an internal aggregate `Blob`.
+    fn is_constant_in_facts(
+        consts: &HLSSAConstantsSnapshot,
+        facts: Option<&FunctionFacts>,
+        v: ValueId,
+    ) -> bool {
+        consts.contains_key(&v)
+            || facts.is_some_and(|facts| matches!(facts.lattice.get(&v), Some(Constness::Const(_))))
+    }
 }
 
 /// Unconditional intraprocedural queries — facts that hold in **every** run.
@@ -509,6 +533,13 @@ impl ClickCooper {
     /// excluded.
     pub fn const_of(&self, f: FunctionId, v: ValueId) -> Option<Arc<Constant>> {
         Self::const_in_facts(&self.consts, self.facts(f), v)
+    }
+
+    /// `true` when `v` is provably constant in every run of `f`.
+    ///
+    /// Unlike [`Self::const_of`], this also recognizes internal aggregate constants.
+    pub fn is_constant(&self, f: FunctionId, v: ValueId) -> bool {
+        Self::is_constant_in_facts(&self.consts, self.facts(f), v)
     }
 
     /// The per-value invariance closure ([`ValueStability`]) of `f`, built over the caller's view
@@ -615,7 +646,7 @@ impl ClickCooper {
     }
 }
 
-/// Unconditional interprocedural queries — the 1-CFA per-`(function, context)` refinement.
+/// Unconditional interprocedural queries — the per-`(function, context)` refinement.
 ///
 /// These read the specialized `contexts` map (never the `functions` view), so they are disjoint
 /// from the intraprocedural queries above. They are unconditional facts _within_ their context: a
@@ -630,6 +661,19 @@ impl ClickCooper {
     /// The constant `v` provably holds in `f` under calling context `ctx`, or `None`.
     pub fn const_of_in(&self, f: FunctionId, ctx: &Context, v: ValueId) -> Option<Arc<Constant>> {
         Self::const_in_facts(&self.consts, self.facts_in(f, ctx), v)
+    }
+
+    /// `true` when `v` is provably constant in `f` under calling context `ctx`.
+    ///
+    /// Unlike [`Self::const_of_in`], this also recognizes internal aggregate constants.
+    pub fn is_constant_in(&self, f: FunctionId, ctx: &Context, v: ValueId) -> bool {
+        Self::is_constant_in_facts(&self.consts, self.facts_in(f, ctx), v)
+    }
+
+    /// `true` if `bid` is reachable in `f` under calling context `ctx`.
+    pub fn is_reachable_in(&self, f: FunctionId, ctx: &Context, bid: BlockId) -> bool {
+        self.facts_in(f, ctx)
+            .is_some_and(|facts| facts.reachable.contains(&bid))
     }
 
     /// `true` if `a` and `b` are proven structurally congruent in `f` under context `ctx`.

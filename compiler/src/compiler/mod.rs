@@ -1,4 +1,5 @@
 pub mod analysis;
+pub(crate) mod assert_constant;
 pub mod codegen;
 pub mod located;
 pub mod lowering;

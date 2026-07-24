@@ -467,6 +467,10 @@ pub trait HLEmitter {
         self.emit(OpCode::Assert { value });
     }
 
+    fn assert_constant(&mut self, value: ValueId) {
+        self.emit(OpCode::AssertConstant { value });
+    }
+
     fn assert_cmp(&mut self, kind: CmpKind, lhs: ValueId, rhs: ValueId) {
         self.emit(OpCode::AssertCmp { kind, lhs, rhs });
     }
