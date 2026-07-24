@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use ark_ff::{PrimeField, Zero};
+use ark_ff::Zero;
 
 use crate::compiler::{
     Field,

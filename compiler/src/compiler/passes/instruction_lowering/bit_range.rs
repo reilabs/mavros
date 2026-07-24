@@ -1,8 +1,6 @@
 //! Lowers canonical `BitRange` operations after the witness integer/bitwise passes have emitted
 //! all bit selections.
 
-use ark_ff::{AdditiveGroup as _, Field as _};
-
 use crate::compiler::{
     Field,
     analysis::types::FunctionTypeInfo,
@@ -156,11 +154,11 @@ impl LowerBitRangeOps {
         };
 
         let mut reconstructed = low.unwrap_or_else(|| b.field_const(Field::ZERO));
-        let result_shift = b.field_const(two_pow(offset));
+        let result_shift = b.field_const(Field::two_pow(offset));
         let result_shifted = b.mul(result_field, result_shift);
         reconstructed = b.add(reconstructed, result_shifted);
         if let Some(high) = high {
-            let high_shift = b.field_const(two_pow(offset + width));
+            let high_shift = b.field_const(Field::two_pow(offset + width));
             let high_shifted = b.mul(high, high_shift);
             reconstructed = b.add(reconstructed, high_shifted);
         }
@@ -204,8 +202,8 @@ fn decompose_canonical_field_bytes(
     // FIELD-ASSUMPTION: L4-modulus-literal
     let modulus_lo_m1 = b.field_const(Field::from(0x2833e84879b9709143e1f593f0000000u128));
     let two_to_8 = b.field_const(Field::from(256u128));
-    let two_to_64 = b.field_const(two_pow(64));
-    let two_to_128 = b.field_const(two_pow(128));
+    let two_to_64 = b.field_const(Field::two_pow(64));
+    let two_to_128 = b.field_const(Field::two_pow(128));
     let zero = b.field_const(Field::ZERO);
 
     let pure_value = b.value_of(value);
@@ -284,7 +282,7 @@ fn lower_field_bit_range_from_bytes(
     let low_end = lower_field_low_bits_from_bytes(b, bytes, offset + width, flag);
     let low_start = lower_field_low_bits_from_bytes(b, bytes, offset, flag);
     let selected_shifted = b.sub(low_end, low_start);
-    let divisor = b.field_const(two_pow(offset));
+    let divisor = b.field_const(Field::two_pow(offset));
     b.div(selected_shifted, divisor)
 }
 
@@ -390,7 +388,7 @@ fn lower_pure_field_bit_range_value(
     let low_end = lower_pure_field_low_bits(b, value, offset + width);
     let low_start = lower_pure_field_low_bits(b, value, offset);
     let selected_shifted = b.sub(low_end, low_start);
-    let divisor = b.field_const(two_pow(offset));
+    let divisor = b.field_const(Field::two_pow(offset));
     b.div(selected_shifted, divisor)
 }
 
@@ -431,11 +429,6 @@ fn lower_pure_byte_low_bits(b: &mut HLBlockEmitter<'_>, byte: ValueId, bits: usi
     let high = b.div(byte, divisor);
     let high_shifted = b.mul(high, divisor);
     b.sub(byte, high_shifted)
-}
-
-// FIELD-ASSUMPTION: L4-two-pow
-fn two_pow(exponent: usize) -> Field {
-    Field::from(2).pow([exponent as u64])
 }
 
 fn bit_mask(bits: usize, offset: usize, width: usize) -> u128 {

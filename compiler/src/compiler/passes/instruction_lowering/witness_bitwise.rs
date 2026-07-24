@@ -5,8 +5,6 @@
 //! two-limb `u32` decomposition. It also canonicalizes witness integer casts/shifts into the shared
 //! `BitRange` representation where possible.
 
-use ark_ff::{AdditiveGroup as _, Field as _};
-
 use crate::compiler::{
     Field,
     analysis::types::FunctionTypeInfo,
@@ -242,8 +240,8 @@ impl LowerWitnessBitwiseOps {
     }
 
     // FIELD-ASSUMPTION: L6-int-op-strategy
-    // Sign-extends via `value + sign * (two_pow(to_bits) - two_pow(from_bits))`. The
-    // `two_pow(to_bits)` shift wraps mod p once `to_bits` reaches the field width.
+    // Sign-extends via `value + sign * (Field::two_pow(to_bits) - Field::two_pow(from_bits))`. The
+    // `Field::two_pow(to_bits)` shift wraps mod p once `to_bits` reaches the field width.
     fn lower_integer_sext(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -265,7 +263,7 @@ impl LowerWitnessBitwiseOps {
         };
         let value_field = b.cast_to_field(value);
         // FIELD-ASSUMPTION: L4-decompose
-        let extension = b.field_const(two_pow(to_bits) - two_pow(from_bits));
+        let extension = b.field_const(Field::two_pow(to_bits) - Field::two_pow(from_bits));
         let offset = b.mul(sign, extension);
         let extended = b.add(value_field, offset);
         b.emit(OpCode::Cast {
@@ -346,10 +344,6 @@ struct U128Limbs {
 }
 
 // FIELD-ASSUMPTION: L4-decompose
-// FIELD-ASSUMPTION: L4-two-pow
-fn two_pow(exponent: usize) -> Field {
-    Field::from(2).pow([exponent as u64])
-}
 
 fn guarded_rangecheck(
     b: &mut HLBlockEmitter<'_>,
@@ -481,7 +475,7 @@ fn combine_u64_fields(b: &mut impl HLEmitter, lo: ValueId, hi: ValueId) -> Value
     let lo = b.cast_to_field(lo);
     let hi = b.cast_to_field(hi);
     // FIELD-ASSUMPTION: L4-decompose
-    let shift = b.field_const(two_pow(64));
+    let shift = b.field_const(Field::two_pow(64));
     let shifted_hi = b.mul(hi, shift);
     b.add(lo, shifted_hi)
 }

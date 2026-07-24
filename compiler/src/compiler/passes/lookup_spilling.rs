@@ -1,5 +1,3 @@
-use ark_ff::{AdditiveGroup, Field as _};
-
 use crate::collections::{HashMap, HashSet};
 use crate::compiler::{
     Field,
@@ -401,7 +399,7 @@ impl LookupSpilling {
             };
             self.emit_rangecheck_chunk(b, chunk, key, flag, is_witness);
 
-            let shift = b.field_const(two_pow(offsets[i]));
+            let shift = b.field_const(Field::two_pow(offsets[i]));
             let shifted = b.mul(key, shift);
             rest = b.add(rest, shifted);
         }
@@ -566,10 +564,10 @@ impl LookupSpilling {
                 }
                 spread
             };
-            let key_shift = b.field_const(two_pow(offset));
+            let key_shift = b.field_const(Field::two_pow(offset));
             let shifted_key = b.mul(chunk_key, key_shift);
             rec_key = b.add(rec_key, shifted_key);
-            let spread_shift = b.field_const(two_pow(offset * 2));
+            let spread_shift = b.field_const(Field::two_pow(offset * 2));
             let shifted_spread = b.mul(chunk_spread, spread_shift);
             rec_spread = b.add(rec_spread, shifted_spread);
         }
@@ -685,11 +683,6 @@ fn extract_low_chunk(
     let modulus = b.u_const(value_bits, two_pow_u128(chunk_bits));
     let chunk = b.modulo(shifted, modulus);
     b.cast_to(CastTarget::U(chunk_bits), chunk)
-}
-
-// FIELD-ASSUMPTION: L4-two-pow
-fn two_pow(exponent: usize) -> Field {
-    Field::from(2).pow([exponent as u64])
 }
 
 // FIELD-ASSUMPTION: L4-two-pow

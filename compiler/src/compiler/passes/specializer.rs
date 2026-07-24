@@ -5,7 +5,7 @@
 //! in defunctionalization wherever needed. In some cases, we can call the specialized version
 //! directly instead.
 
-use ark_ff::{AdditiveGroup, BigInteger, PrimeField};
+use ark_ff::BigInteger;
 use tracing::{info, instrument};
 
 use crate::{
@@ -223,10 +223,8 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                 Self(res_v)
             }
 
-            (BinaryArithOpKind::Mul, Some(ConstVal::Field(f)), _) if f == ark_ff::Field::ONE => *b,
-            (BinaryArithOpKind::Mul, _, Some(ConstVal::Field(f))) if f == ark_ff::Field::ONE => {
-                *self
-            }
+            (BinaryArithOpKind::Mul, Some(ConstVal::Field(f)), _) if f == Field::ONE => *b,
+            (BinaryArithOpKind::Mul, _, Some(ConstVal::Field(f))) if f == Field::ONE => *self,
             (BinaryArithOpKind::Mul, Some(ConstVal::Field(f)), _) if f == Field::ZERO => *self,
             (BinaryArithOpKind::Mul, _, Some(ConstVal::Field(f))) if f == Field::ZERO => *b,
 

@@ -7,7 +7,7 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use ark_ff::{AdditiveGroup, BigInt, BigInteger, PrimeField};
+use ark_ff::{BigInt, BigInteger};
 use itertools::Itertools;
 use tracing::{debug, instrument};
 

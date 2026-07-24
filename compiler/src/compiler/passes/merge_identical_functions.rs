@@ -378,6 +378,7 @@ fn canonical_form(
 #[cfg(test)]
 mod tests {
     use super::MergeIdenticalFunctions;
+    use crate::compiler::Field;
     use crate::compiler::ssa::{
         FunctionId, Instruction, Located, SourceLocation, SourcePosition, ValueId,
         hlssa::{CallTarget, Constant, HLSSA, OpCode, Type, builder::HLSSABuilder},
@@ -448,7 +449,7 @@ mod tests {
             let entry = fb.function.get_entry_id();
             let results: Vec<ValueId> = callees.iter().map(|_| fb.fresh_value()).collect();
             // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
-            let arg = fb.emit_const(Constant::Field(ark_bn254::Fr::from(7u64)));
+            let arg = fb.emit_const(Constant::Field(Field::from(7u64)));
             let mut block = fb.test_block(entry);
             for (callee, result) in callees.iter().zip(results) {
                 block.emit_instruction(OpCode::Call {
@@ -865,7 +866,7 @@ mod tests {
             let entry = fb.function.get_entry_id();
             let result = fb.fresh_value();
             let condition = fb.emit_const(Constant::U(1, 1));
-            let arg = fb.emit_const(Constant::Field(ark_bn254::Fr::from(7u64)));
+            let arg = fb.emit_const(Constant::Field(Field::from(7u64)));
             let mut block = fb.test_block(entry);
             block.emit_instruction(OpCode::Guard {
                 condition,

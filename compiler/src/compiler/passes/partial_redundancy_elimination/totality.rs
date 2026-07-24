@@ -47,6 +47,7 @@
 use ark_ff::Zero;
 
 use crate::compiler::{
+    Field,
     analysis::{
         click_cooper::ClickCooper, types::FunctionTypeInfo,
         witness_taint_inference::ApproximateWitnessTaint,
@@ -291,7 +292,7 @@ fn zero_constant_of(ty: &Type) -> Option<Constant> {
         TypeExpr::U(bits) => Some(Constant::U(*bits, 0)),
         TypeExpr::I(bits) => Some(Constant::I(*bits, 0)),
         // FIELD-ASSUMPTION: L1-direct-ref (1 sites)
-        TypeExpr::Field => Some(Constant::Field(ark_bn254::Fr::zero())),
+        TypeExpr::Field => Some(Constant::Field(Field::ZERO)),
         _ => None,
     }
 }

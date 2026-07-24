@@ -7,6 +7,7 @@
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
+        Field,
         analysis::flow_analysis::{CFG, FlowAnalysis},
         pass_manager::{AnalysisId, AnalysisStore, Pass},
         passes::shared::{availability::can_replace, value_replacements::ValueReplacements},
@@ -693,8 +694,7 @@ enum ExprNode {
     Div { lhs: ExprId, rhs: ExprId },
     Mod { lhs: ExprId, rhs: ExprId },
     Sub { lhs: ExprId, rhs: ExprId },
-    // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
-    FConst(ark_bn254::Fr),
+    FConst(Field),
     UConst { bits: usize, value: u128 },
     IConst { bits: usize, value: u128 },
     Variable(u64),
@@ -751,7 +751,7 @@ impl ExprInterner {
         self.intern(ExprNode::Variable(value_id.0))
     }
 
-    fn fconst(&mut self, value: ark_bn254::Fr) -> ExprId {
+    fn fconst(&mut self, value: Field) -> ExprId {
         self.intern(ExprNode::FConst(value))
     }
 
