@@ -9,11 +9,10 @@
 //!    deep assert to constrain the return value against the declared counterpart in the witness.
 //!    It then deinitializes the globals. The blob keeps the entry point's parameter list (and the
 //!    resulting locals pressure in the generated code) constant regardless of input size.
-//! 2. **Pinned Witness Writes:** A single counted loop writes every blob element to the witness,
-//!    pinned so that DCE cannot remove the writes downstream, while accumulating the witness
-//!    values into an array.
-//! 3. **Input Reconstruction:** The original typed input values are rebuilt from slices of that
-//!    witness array via per-type reconstruct functions (which also range-check integers).
+//! 2. **Witness Writes in Public-First Order:** The constant one, public arguments and return values 
+//!    are written pinned so that DCE cannot remove them. Private arguments are written unpinned.
+//! 3. **Input Reconstruction:** The original typed input values are rebuilt from
+//!    witness arrays via per-type reconstruct functions (which also range-check integers).
 //! 4. **Handling of Unconstrained Calls:** Any calls that are unconstrained are modified to write
 //!    the unconstrained result to the witness. It also handles range-checking of integers, and
 //!    recurses into arrays and tuples. This ensures that we bind the untrusted/unconstrained
@@ -35,6 +34,7 @@ use crate::{
 
 pub struct PrepareEntryPoint {
     main_is_unconstrained: bool,
+    main_param_is_public: Vec<bool>,
 }
 
 struct PrepareFnEntry {
@@ -53,19 +53,20 @@ impl Pass for PrepareEntryPoint {
     }
 
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
-        Self::wrap_main(ssa, self.main_is_unconstrained);
+        Self::wrap_main(ssa, self.main_is_unconstrained, &self.main_param_is_public);
         Self::process_unconstrained_calls(ssa);
     }
 }
 
 impl PrepareEntryPoint {
-    pub fn new(main_is_unconstrained: bool) -> Self {
+    pub fn new(main_is_unconstrained: bool, main_param_is_public: Vec<bool>) -> Self {
         Self {
             main_is_unconstrained,
+            main_param_is_public,
         }
     }
 
-    fn wrap_main(ssa: &mut HLSSA, main_is_unconstrained: bool) {
+    fn wrap_main(ssa: &mut HLSSA, main_is_unconstrained: bool, param_is_public: &[bool]) {
         let original_main_id = ssa.get_unique_entrypoint_id();
         let original_main = ssa.get_unique_entrypoint();
         let param_types = original_main.get_param_types();
@@ -84,11 +85,24 @@ impl PrepareEntryPoint {
             Self::get_or_create_reconstruct_fn(typ, ssa, &mut reconstruct_fns);
         }
 
-        let total_fields: usize = param_types
+        let param_widths: Vec<usize> = param_types
             .iter()
-            .chain(return_types.iter())
             .map(Self::flattened_field_count)
-            .sum();
+            .collect();
+        let return_widths: Vec<usize> = return_types
+            .iter()
+            .map(Self::flattened_field_count)
+            .collect();
+        let param_blob_offsets: Vec<usize> = param_widths
+            .iter()
+            .scan(0usize, |off, width| {
+                let current = *off;
+                *off += width;
+                Some(current)
+            })
+            .collect();
+        let returns_blob_start: usize = param_widths.iter().sum();
+        let total_fields: usize = returns_blob_start + return_widths.iter().sum::<usize>();
 
         let wrapper_id = ssa.add_function("wrapper_main".to_string());
         let mut sb = HLSSABuilder::new(ssa);
@@ -105,65 +119,96 @@ impl PrepareEntryPoint {
             let one = e.field_const(ark_bn254::Fr::from(1u64));
             e.pinned_write_witness(one);
 
-            // Write every input field to the witness in blob order, collecting
-            // the witness values into an array for the reconstructions below.
-            // The writes are pinned so they survive DCE even when their results
-            // become unused (e.g. when inter-procedural DCE prunes call args to
-            // original_main).
-            let witness_inputs = (total_fields > 0).then(|| {
-                let initial_array =
-                    Self::emit_default_witness_array(&mut e, &Type::field(), total_fields);
+            let emit_writes = |e: &mut HLBlockEmitter<'_>,
+                                     blob_offset: usize,
+                                     width: usize,
+                                     pinned: bool|
+             -> ValueId {
+                let initial_array = Self::emit_default_witness_array(e, &Type::field(), width);
+                if width == 0 {
+                    return initial_array;
+                }
                 let copied = e.build_counted_loop(
-                    total_fields,
-                    vec![(initial_array, Type::field().array_of(total_fields))],
+                    width,
+                    vec![(initial_array, Type::field().array_of(width))],
                     |e, i, accumulators| {
-                        let elem = e.array_get(blob_param, i);
-                        let witness = e.pinned_write_witness(elem);
+                        let base = e.u_const(32, blob_offset as u128);
+                        let src = e.add(base, i);
+                        let elem = e.array_get(blob_param, src);
+                        let witness = if pinned {
+                            e.pinned_write_witness(elem)
+                        } else {
+                            e.write_witness(elem)
+                        };
                         let updated = e.array_set(accumulators[0], i, witness);
                         vec![updated]
                     },
                 );
                 copied[0]
-            });
+            };
 
-            // Rebuild each typed input value from its slice of the witness array.
-            let mut offset = 0usize;
-            let mut input_value = |e: &mut HLBlockEmitter<'_>, typ: &Type| {
-                let witness_inputs =
-                    witness_inputs.expect("a typed input implies a non-empty input blob");
-                let width = Self::flattened_field_count(typ);
-                let value = match &typ.expr {
+            let mut param_witness_arrays: Vec<Option<ValueId>> = vec![None; param_types.len()];
+
+            for (idx, is_public) in param_is_public.iter().enumerate() {
+                if *is_public {
+                    param_witness_arrays[idx] = Some(emit_writes(
+                        &mut e,
+                        param_blob_offsets[idx],
+                        param_widths[idx],
+                        true,
+                    ));
+                }
+            }
+
+            let mut return_witness_arrays = Vec::with_capacity(return_types.len());
+            let mut return_blob_offset = returns_blob_start;
+            for width in &return_widths {
+                return_witness_arrays.push(emit_writes(
+                    &mut e,
+                    return_blob_offset,
+                    *width,
+                    true,
+                ));
+                return_blob_offset += width;
+            }
+
+            for (idx, is_public) in param_is_public.iter().enumerate() {
+                if !*is_public {
+                    param_witness_arrays[idx] = Some(emit_writes(
+                        &mut e,
+                        param_blob_offsets[idx],
+                        param_widths[idx],
+                        false,
+                    ));
+                }
+            }
+
+            let rebuild_value =
+                |e: &mut HLBlockEmitter<'_>, typ: &Type, witness_array: ValueId| match &typ.expr {
                     TypeExpr::Field => {
-                        let index = e.u_const(32, offset as u128);
-                        e.array_get(witness_inputs, index)
+                        let zero = e.u_const(32, 0);
+                        e.array_get(witness_array, zero)
                     }
                     TypeExpr::U(_)
                     | TypeExpr::I(_)
                     | TypeExpr::Array(_, _)
                     | TypeExpr::Tuple(_) => {
-                        let child = Self::emit_reconstruct_child_input_array(
-                            e,
-                            witness_inputs,
-                            offset,
-                            width,
-                        );
                         let fn_id = Self::find_reconstruct_fn(typ, &reconstruct_fns);
-                        e.call(fn_id, vec![child], 1)[0]
+                        e.call(fn_id, vec![witness_array], 1)[0]
                     }
                     _ => todo!("Not implemented yet"),
                 };
-                offset += width;
-                value
-            };
 
             let mut arg_values = Vec::new();
-            for typ in &param_types {
-                arg_values.push(input_value(&mut e, typ));
+            for (typ, witness_array) in param_types.iter().zip(param_witness_arrays.iter()) {
+                let witness_array =
+                    witness_array.expect("a witness array is emitted for every parameter");
+                arg_values.push(rebuild_value(&mut e, typ, witness_array));
             }
 
             let mut return_input_values = Vec::new();
-            for typ in &return_types {
-                return_input_values.push(input_value(&mut e, typ));
+            for (typ, witness_array) in return_types.iter().zip(return_witness_arrays.iter()) {
+                return_input_values.push(rebuild_value(&mut e, typ, *witness_array));
             }
 
             if let Some(init_fn) = globals_init_fn {
