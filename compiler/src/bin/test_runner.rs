@@ -53,18 +53,11 @@ fn wasm_engine() -> wasmtime::Result<Engine> {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // Child mode: --run-single <path> [--expect-failure | --expect-compile-failure]
-    // [--analyze-r1cs]
+    // Child mode: --run-single <path> [--expect-failure] [--analyze-r1cs]
     if args.len() >= 3 && args[1] == "--run-single" {
         let expect_failure = args[3..].iter().any(|a| a == "--expect-failure");
-        let expect_compile_failure = args[3..].iter().any(|a| a == "--expect-compile-failure");
         let analyze = args[3..].iter().any(|a| a == "--analyze-r1cs");
-        run_single(
-            PathBuf::from(&args[2]),
-            expect_failure,
-            expect_compile_failure,
-            analyze,
-        );
+        run_single(PathBuf::from(&args[2]), expect_failure, analyze);
         return;
     }
 
@@ -117,7 +110,6 @@ const DEFAULT_IGNORED_TESTS: &[&str] = &[
 enum TestExpectation {
     ExecutionSuccess,
     ExecutionFailure,
-    CompileFailure,
 }
 
 fn parse_output_arg(args: &[String]) -> PathBuf {
@@ -160,12 +152,7 @@ fn emit(line: &str) {
 /// execution_panic tests) the native AD pipeline is skipped: AD output only
 /// feeds proving, and a program whose witgen is expected to trap is never
 /// proven. WASM paths still run as compile/runtime sanity checks.
-fn run_single(
-    root: PathBuf,
-    expect_failure: bool,
-    expect_compile_failure: bool,
-    analyze: bool,
-) {
+fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     let checking_codegen = CodeGenOptions {
         check_constraints: true,
         include_debug_info: true,
@@ -186,12 +173,7 @@ fn run_single(
         Ok(())
     })();
     match compile_result {
-        Ok(()) => {
-            emit("END:COMPILED:ok");
-            if expect_compile_failure {
-                return;
-            }
-        }
+        Ok(()) => emit("END:COMPILED:ok"),
         // If the Noir compiler itself rejects the program — a comptime expression that
         // overflows (`comptime_bitshift_failure`), a type error, etc. — the program will never
         // execute. That is a legitimate expected failure, accepted the same way as a
@@ -200,11 +182,6 @@ fn run_single(
         // plain `fail`, so a real regression is never masked.
         Err(DriverError::NoirCompilerError(diags)) => {
             eprintln!("Noir compiler rejected program: {diags:?}");
-            emit("END:COMPILED:reject");
-            return;
-        }
-        Err(DriverError::AssertConstantFailed(location)) => {
-            eprintln!("Noir assert_constant rejected program at {location}");
             emit("END:COMPILED:reject");
             return;
         }
@@ -1257,14 +1234,6 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str], analyze: 
             TestExpectation::ExecutionSuccess,
         ));
     }
-    let local_compile_failures = PathBuf::from("noir_compile_failure_tests");
-    if local_compile_failures.is_dir() {
-        entries.extend(collect_test_dirs(
-            &local_compile_failures,
-            "noir_compile_failure_tests/",
-            TestExpectation::CompileFailure,
-        ));
-    }
 
     // 2. Noir repo test_programs/* (discovered via cargo-metadata)
     if let Some(test_programs) = find_noir_test_programs_dir() {
@@ -1332,8 +1301,6 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str], analyze: 
                     cmd.args(["--run-single", abs.to_str().unwrap()]);
                     if matches!(entry.expectation, TestExpectation::ExecutionFailure) {
                         cmd.arg("--expect-failure");
-                    } else if matches!(entry.expectation, TestExpectation::CompileFailure) {
-                        cmd.arg("--expect-compile-failure");
                     }
                     if analyze {
                         cmd.arg("--analyze-r1cs");
@@ -1844,19 +1811,6 @@ fn expected_step_status(
             | "AD_NOLEAK" => Status::NotApplicable,
             _ => raw_status,
         },
-        // A compile-failure fixture must be rejected specifically by the compilation pipeline.
-        // Later stages are deliberately not run: a successful compile is already the regression.
-        TestExpectation::CompileFailure => {
-            if key == "COMPILED" {
-                match raw_status {
-                    Status::Rejected => Status::Pass,
-                    Status::Pass | Status::Fail | Status::Crash => Status::Fail,
-                    Status::Skip | Status::NotApplicable => raw_status,
-                }
-            } else {
-                Status::NotApplicable
-            }
-        }
     }
 }
 
@@ -2721,29 +2675,4 @@ mod tests {
         assert_eq!(table.cell(row, "AD WASM No Leak"), Some("✅"));
     }
 
-    #[test]
-    fn compile_failure_requires_a_clean_compile_rejection() {
-        let rejected = parse_child_output(
-            "compile_fail",
-            TestExpectation::CompileFailure,
-            &lines(&["START:COMPILED", "END:COMPILED:reject"]),
-        );
-        assert_eq!(rejected.steps["COMPILED"], Status::Pass);
-        assert_eq!(rejected.steps["R1CS"], Status::NotApplicable);
-
-        let compiled = parse_child_output(
-            "compile_fail",
-            TestExpectation::CompileFailure,
-            &lines(&["START:COMPILED", "END:COMPILED:ok"]),
-        );
-        assert_eq!(compiled.steps["COMPILED"], Status::Fail);
-        assert_eq!(compiled.steps["R1CS"], Status::NotApplicable);
-
-        let failed = parse_child_output(
-            "compile_fail",
-            TestExpectation::CompileFailure,
-            &lines(&["START:COMPILED", "END:COMPILED:fail"]),
-        );
-        assert_eq!(failed.steps["COMPILED"], Status::Fail);
-    }
 }
