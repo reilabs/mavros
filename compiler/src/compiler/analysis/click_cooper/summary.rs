@@ -514,6 +514,7 @@ pub(crate) fn specialize(
     det: &DetSummaries,
     orders: &HashMap<FunctionId, DefOrder>,
     context_depth: usize,
+    follow_unconstrained_calls: bool,
 ) -> HashMap<(FunctionId, Context), FunctionFacts> {
     let main = ssa.get_unique_entrypoint_id();
 
@@ -587,11 +588,14 @@ pub(crate) fn specialize(
                     results: call_results,
                     function: CallTarget::Static(g),
                     args,
-                    ..
+                    unconstrained,
                 } = instr
                 else {
                     continue;
                 };
+                if *unconstrained && !follow_unconstrained_calls {
+                    continue;
+                }
 
                 let g = *g;
                 if !summaries.contains_key(&g) {

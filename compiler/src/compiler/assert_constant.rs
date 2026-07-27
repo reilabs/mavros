@@ -49,7 +49,7 @@ pub(crate) fn validate_and_remove(ssa: &mut HLSSA) -> Result<(), SourceLocation>
     let flow = FlowAnalysis::run(ssa);
     let types = Types::new().run(ssa, &flow);
     let context_depth = assertion_context_depth(ssa);
-    let constants = ClickCooper::run_with_context_depth(ssa, &flow, &types, context_depth);
+    let constants = ClickCooper::run_for_assert_constant(ssa, &flow, &types, context_depth);
     let compile_time = CompileTimeValues::new(ssa, &types, &constants, context_depth);
 
     for (fid, bid, value, location) in assertions {

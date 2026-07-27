@@ -315,20 +315,30 @@ impl Analysis for ClickCooper {
 }
 
 impl ClickCooper {
-    pub(crate) fn run(ssa: &HLSSA, flow: &FlowAnalysis, types: &TypeInfo) -> Self {
-        Self::run_with_context_depth(ssa, flow, types, 1)
+    fn run(ssa: &HLSSA, flow: &FlowAnalysis, types: &TypeInfo) -> Self {
+        Self::run_with_options(ssa, flow, types, 1, false)
     }
 
-    /// Run with a caller-selected call-string depth.
+    /// Build the context-sensitive facts needed to validate `assert_constant`.
     ///
-    /// Normal optimization consumers use 1-CFA through [`Self::run`]. Validation clients that
-    /// must distinguish a bounded chain of outer call sites may request a deeper context without
-    /// changing the pipeline-wide analysis cost.
-    pub(crate) fn run_with_context_depth(
+    /// The dedicated validation run may use deeper call strings than the optimizer's 1-CFA view,
+    /// and follows unconstrained static calls so assertions inside their callees see the supplied
+    /// arguments. Unconstrained call results remain opaque.
+    pub(crate) fn run_for_assert_constant(
         ssa: &HLSSA,
         flow: &FlowAnalysis,
         types: &TypeInfo,
         context_depth: usize,
+    ) -> Self {
+        Self::run_with_options(ssa, flow, types, context_depth, true)
+    }
+
+    fn run_with_options(
+        ssa: &HLSSA,
+        flow: &FlowAnalysis,
+        types: &TypeInfo,
+        context_depth: usize,
+        follow_unconstrained_calls: bool,
     ) -> Self {
         // One snapshot serves all functions: a constant referenced from a function is always
         // interned program-wide.
@@ -450,7 +460,16 @@ impl ClickCooper {
 
         // The context-specialized facts, built from the polymorphic summaries (computed above)
         // plus the symbolic congruence projection.
-        let contexts = specialize(ssa, &consts, &summaries, &sym, &det, &orders, context_depth);
+        let contexts = specialize(
+            ssa,
+            &consts,
+            &summaries,
+            &sym,
+            &det,
+            &orders,
+            context_depth,
+            follow_unconstrained_calls,
+        );
 
         // The per-`(function, context)` conditional facts, rebuilt by the same `conditional::build`
         // from each context's specialized facts, so every fact is anchored to context-reachable
@@ -542,7 +561,7 @@ impl ClickCooper {
     /// `true` when `v` is provably constant in every run of `f`.
     ///
     /// Unlike [`Self::const_of`], this also recognizes internal aggregate constants.
-    pub fn is_constant(&self, f: FunctionId, v: ValueId) -> bool {
+    pub(crate) fn is_constant(&self, f: FunctionId, v: ValueId) -> bool {
         Self::is_constant_in_facts(&self.consts, self.facts(f), v)
     }
 
@@ -670,12 +689,12 @@ impl ClickCooper {
     /// `true` when `v` is provably constant in `f` under calling context `ctx`.
     ///
     /// Unlike [`Self::const_of_in`], this also recognizes internal aggregate constants.
-    pub fn is_constant_in(&self, f: FunctionId, ctx: &Context, v: ValueId) -> bool {
+    pub(crate) fn is_constant_in(&self, f: FunctionId, ctx: &Context, v: ValueId) -> bool {
         Self::is_constant_in_facts(&self.consts, self.facts_in(f, ctx), v)
     }
 
     /// `true` if `bid` is reachable in `f` under calling context `ctx`.
-    pub fn is_reachable_in(&self, f: FunctionId, ctx: &Context, bid: BlockId) -> bool {
+    pub(crate) fn is_reachable_in(&self, f: FunctionId, ctx: &Context, bid: BlockId) -> bool {
         self.facts_in(f, ctx)
             .is_some_and(|facts| facts.reachable.contains(&bid))
     }
