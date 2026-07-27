@@ -343,6 +343,16 @@ impl Table {
             Table::OfElems(_) => (2 * rows + 1, 3 * rows),
         }
     }
+
+    fn profile_name(&self) -> String {
+        match self {
+            Table::Range(bits) => format!("<range table: {bits} bits>"),
+            Table::OfElems(elements) => {
+                format!("<array table: {} rows>", elements.len())
+            }
+            Table::Spread(bits) => format!("<spread table: {bits} bits>"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -966,8 +976,15 @@ impl R1CGen {
 
     fn add_table(&mut self, table: Table) -> usize {
         let (constraints, witnesses) = table.profile_size();
-        self.record_constraints(constraints);
-        self.record_witnesses(witnesses);
+        if let Some(profile) = &mut self.profile {
+            let stack = [
+                self.profile_root.clone(),
+                "<lookup tables>".to_string(),
+                table.profile_name(),
+            ];
+            profile.constraints.record(stack.clone(), constraints);
+            profile.witnesses.record(stack, witnesses);
+        }
         self.tables.push(table);
         self.tables.len() - 1
     }
@@ -1312,6 +1329,56 @@ impl R1CGen {
             );
         }
         (r1cs, self.profile)
+    }
+}
+
+#[cfg(test)]
+mod r1cs_profile_tests {
+    use super::{R1CGen, Table};
+
+    #[test]
+    fn shared_table_allocations_are_separate_from_callsite_costs() {
+        let mut generator = R1CGen::new();
+        generator.enable_profile();
+        generator.profile_root = "main".to_string();
+        generator.call_stack = vec!["main".to_string(), "lookup_caller".to_string()];
+
+        generator.add_table(Table::Spread(3));
+        generator.record_constraints(2);
+        generator.record_witnesses(2);
+
+        let profile = generator.profile.unwrap();
+        let constraint_stacks = profile.constraints.stacks().collect::<Vec<_>>();
+        let witness_stacks = profile.witnesses.stacks().collect::<Vec<_>>();
+
+        assert_eq!(
+            constraint_stacks,
+            vec![
+                (
+                    &[
+                        "main".to_string(),
+                        "<lookup tables>".to_string(),
+                        "<spread table: 3 bits>".to_string(),
+                    ][..],
+                    9,
+                ),
+                (&["main".to_string(), "lookup_caller".to_string()][..], 2,),
+            ]
+        );
+        assert_eq!(
+            witness_stacks,
+            vec![
+                (
+                    &[
+                        "main".to_string(),
+                        "<lookup tables>".to_string(),
+                        "<spread table: 3 bits>".to_string(),
+                    ][..],
+                    16,
+                ),
+                (&["main".to_string(), "lookup_caller".to_string()][..], 2,),
+            ]
+        );
     }
 }
 

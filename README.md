@@ -51,7 +51,8 @@ The command writes folded-stack inputs and SVGs under `mavros_debug/flamegraphs/
 dimensions: `constraint_size`, `witness_size`, `witgen_time`, and `ad_time`. The two time profiles
 use the VM's deterministic simulated instruction count rather than wall-clock samples, so profiles
 can be compared across machines and runs. Profiling automatically enables the VM debug mapping
-needed to recover Noir function names.
+needed to recover Noir function names. Shared lookup-table allocations appear under a separate
+`<lookup tables>` branch; the cost of each lookup remains attributed to its callsite.
 
 The command also writes `witgen_time.cpuprofile` and `ad_time.cpuprofile`. Load either file from the
 Chrome DevTools Performance panel to inspect it with the DevTools flame chart and call tree. These
