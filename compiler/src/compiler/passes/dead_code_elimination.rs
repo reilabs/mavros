@@ -193,7 +193,7 @@ impl DCE {
 
         let mut worklist: Vec<WorkItem> = vec![];
 
-        // The interpreter writes the flattened input blob into the entry frame at fixed offsets. So 
+        // The interpreter writes the flattened input blob into the entry frame at fixed offsets. So
         // the blob must survive DCE. The R1CS-side pipeline opts out via `Config::r1cs_gen`.
         if self.config.preserve_entry_params {
             for entry_point in ssa.get_entry_points() {

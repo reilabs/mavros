@@ -9,7 +9,7 @@
 //!    deep assert to constrain the return value against the declared counterpart in the witness.
 //!    It then deinitializes the globals. The blob keeps the entry point's parameter list (and the
 //!    resulting locals pressure in the generated code) constant regardless of input size.
-//! 2. **Witness Writes in Public-First Order:** The constant one, public arguments and return values 
+//! 2. **Witness Writes in Public-First Order:** The constant one, public arguments and return values
 //!    are written pinned so that DCE cannot remove them. Private arguments are written unpinned.
 //! 3. **Input Reconstruction:** The original typed input values are rebuilt from
 //!    witness arrays via per-type reconstruct functions (which also range-check integers).
@@ -120,9 +120,9 @@ impl PrepareEntryPoint {
             e.pinned_write_witness(one);
 
             let emit_writes = |e: &mut HLBlockEmitter<'_>,
-                                     blob_offset: usize,
-                                     width: usize,
-                                     pinned: bool|
+                               blob_offset: usize,
+                               width: usize,
+                               pinned: bool|
              -> ValueId {
                 let initial_array = Self::emit_default_witness_array(e, &Type::field(), width);
                 if width == 0 {
@@ -163,12 +163,7 @@ impl PrepareEntryPoint {
             let mut return_witness_arrays = Vec::with_capacity(return_types.len());
             let mut return_blob_offset = returns_blob_start;
             for width in &return_widths {
-                return_witness_arrays.push(emit_writes(
-                    &mut e,
-                    return_blob_offset,
-                    *width,
-                    true,
-                ));
+                return_witness_arrays.push(emit_writes(&mut e, return_blob_offset, *width, true));
                 return_blob_offset += width;
             }
 
