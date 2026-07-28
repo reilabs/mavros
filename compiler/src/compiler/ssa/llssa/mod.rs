@@ -264,6 +264,11 @@ pub enum LLOp {
         global_id: usize,
     },
 
+    /// Address of the VM struct region (`__mavros_vm`).
+    VmAddr {
+        result: ValueId,
+    },
+
     // ── Trap ────────────────────────────────────────────────────────────
     Trap,
 }
@@ -272,7 +277,7 @@ impl Instruction for LLOp {
     fn get_inputs(&self) -> impl Iterator<Item = &ValueId> {
         match self {
             // No inputs (globals / traps / etc.)
-            LLOp::GlobalAddr { .. } | LLOp::Trap => vec![].into_iter(),
+            LLOp::GlobalAddr { .. } | LLOp::VmAddr { .. } | LLOp::Trap => vec![].into_iter(),
             LLOp::ConstDataPtr { blob, .. } => vec![blob].into_iter(),
 
             // Unary
@@ -346,7 +351,8 @@ impl Instruction for LLOp {
             | LLOp::ArrayElemPtr { result, .. }
             | LLOp::ConstDataPtr { result, .. }
             | LLOp::Select { result, .. }
-            | LLOp::GlobalAddr { result, .. } => vec![result].into_iter(),
+            | LLOp::GlobalAddr { result, .. }
+            | LLOp::VmAddr { result } => vec![result].into_iter(),
 
             // Multi-result
             LLOp::Call { results, .. } => results.iter().collect::<Vec<_>>().into_iter(),
@@ -385,7 +391,8 @@ impl Instruction for LLOp {
             | LLOp::ArrayElemPtr { result, .. }
             | LLOp::ConstDataPtr { result, .. }
             | LLOp::Select { result, .. }
-            | LLOp::GlobalAddr { result, .. } => vec![result].into_iter(),
+            | LLOp::GlobalAddr { result, .. }
+            | LLOp::VmAddr { result } => vec![result].into_iter(),
             LLOp::Call { results, .. } => results.iter_mut().collect::<Vec<_>>().into_iter(),
             LLOp::Unspread {
                 result_odd,
@@ -401,7 +408,7 @@ impl Instruction for LLOp {
     fn get_inputs_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
         match self {
             // No inputs
-            LLOp::GlobalAddr { .. } | LLOp::Trap => vec![].into_iter(),
+            LLOp::GlobalAddr { .. } | LLOp::VmAddr { .. } | LLOp::Trap => vec![].into_iter(),
             LLOp::ConstDataPtr { blob, .. } => vec![blob].into_iter(),
 
             // Unary
@@ -456,7 +463,7 @@ impl Instruction for LLOp {
 
     fn get_operands_mut(&mut self) -> impl Iterator<Item = &mut ValueId> {
         match self {
-            LLOp::GlobalAddr { result, .. } => vec![result].into_iter(),
+            LLOp::GlobalAddr { result, .. } | LLOp::VmAddr { result } => vec![result].into_iter(),
             LLOp::ConstDataPtr { result, blob, .. } => vec![result, blob].into_iter(),
 
             LLOp::Trap => vec![].into_iter(),
@@ -757,6 +764,9 @@ impl Instruction for LLOp {
             }
             LLOp::GlobalAddr { result, global_id } => {
                 format!("{} = global_addr g{}", v(*result), global_id)
+            }
+            LLOp::VmAddr { result } => {
+                format!("{} = vm_addr", v(*result))
             }
             LLOp::Trap => "trap".to_string(),
         }

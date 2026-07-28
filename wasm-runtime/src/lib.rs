@@ -8,7 +8,7 @@
 //!
 //! VM struct access (forward-pass writes, AD accumulators, AD witness/coeff
 //! counters) is emitted inline in the generated LLVM module as GEP/load/store
-//! against the vm_ptr — see `codegen/llssa_llvm_codegen.rs`.
+//! against the VM struct global — see `codegen/llssa_to_llvm.rs`.
 
 // FIELD-ASSUMPTION: L1-direct-ref (1 sites)
 use ark_bn254::Fr;

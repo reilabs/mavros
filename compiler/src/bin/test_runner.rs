@@ -29,14 +29,14 @@ use mavros_wasm_layout::{
     AD_COEFFS_BASE_PTR_OFFSET, AD_COEFFS_PTR_OFFSET, AD_CURRENT_CNST_TABLES_OFF_OFFSET,
     AD_CURRENT_LOOKUP_WIT_OFF_OFFSET, AD_CURRENT_WIT_MULTIPLICITIES_OFF_OFFSET,
     AD_CURRENT_WIT_OFF_OFFSET, AD_CURRENT_WIT_TABLES_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET,
-    AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET, AD_VM_STRUCT_SIZE, TABLE_INFO_INV_CNST_OFF_OFFSET,
+    AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET, TABLE_INFO_INV_CNST_OFF_OFFSET,
     TABLE_INFO_INV_WIT_OFF_OFFSET, TABLE_INFO_KIND_OFFSET, TABLE_INFO_LENGTH_OFFSET,
     TABLE_INFO_MULTS_BASE_PTR_OFFSET, TABLE_INFO_NUM_INDICES_OFFSET, TABLE_INFO_SLOT_SIZE,
-    WITGEN_A_BASE_PTR_OFFSET, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET,
-    WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET, WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET,
-    WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET, WITGEN_LOOKUPS_B_PTR_OFFSET,
-    WITGEN_LOOKUPS_C_PTR_OFFSET, WITGEN_MULTS_CURSOR_PTR_OFFSET, WITGEN_TABLES_CAP_OFFSET,
-    WITGEN_TABLES_LEN_OFFSET, WITGEN_TABLES_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE,
+    VM_GLOBAL_SYMBOL, WITGEN_A_BASE_PTR_OFFSET, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET,
+    WITGEN_C_PTR_OFFSET, WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET,
+    WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET, WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET,
+    WITGEN_LOOKUPS_B_PTR_OFFSET, WITGEN_LOOKUPS_C_PTR_OFFSET, WITGEN_MULTS_CURSOR_PTR_OFFSET,
+    WITGEN_TABLES_CAP_OFFSET, WITGEN_TABLES_LEN_OFFSET, WITGEN_TABLES_PTR_OFFSET,
     WITGEN_WITNESS_PTR_OFFSET,
 };
 use noirc_abi::input_parser::Format;
@@ -47,6 +47,21 @@ fn wasm_engine() -> wasmtime::Result<Engine> {
     let mut config = Config::new();
     config.wasm_backtrace_details(WasmBacktraceDetails::Enable);
     Engine::new(&config)
+}
+
+/// Read an exported wasm global holding a linear-memory address (e.g.
+/// `__data_end` or the VM struct address).
+fn read_addr_global(
+    instance: &wasmtime::Instance,
+    store: &mut Store<()>,
+    name: &str,
+) -> Result<u32, Box<dyn std::error::Error>> {
+    Ok(instance
+        .get_global(&mut *store, name)
+        .ok_or_else(|| format!("{name} global not found in WASM module"))?
+        .get(&mut *store)
+        .i32()
+        .ok_or_else(|| format!("{name} is not i32"))? as u32)
 }
 
 fn main() {
@@ -601,15 +616,13 @@ fn run_wasm(
     let constraint_count = r1cs.constraints.len();
     let input_fields: Vec<Field> = params.iter().flat_map(flatten_input_value).collect();
 
-    let vm_struct_size: u32 = WITGEN_VM_STRUCT_SIZE;
     // FIELD-ASSUMPTION: L3-field-size
     let witness_bytes = (witness_count * FIELD_SIZE) as u32;
     let constraint_bytes = (constraint_count * FIELD_SIZE) as u32;
     let input_bytes = (input_fields.len() * FIELD_SIZE) as u32;
     let tables_cap = r1cs.constraints_layout.tables_data_size as u32;
     let table_info_bytes = tables_cap * TABLE_INFO_SLOT_SIZE;
-    let our_data_size =
-        vm_struct_size + witness_bytes + 3 * constraint_bytes + input_bytes + table_info_bytes;
+    let our_data_size = witness_bytes + 3 * constraint_bytes + input_bytes + table_info_bytes;
 
     // Create wasmtime engine and store
     let engine = wasm_engine()?;
@@ -629,21 +642,16 @@ fn run_wasm(
     linker.define(&store, "env", "memory", memory)?;
     let instance = linker.instantiate(&mut store, &module)?;
 
-    // Read __data_end from the WASM module to find where the module's static data ends.
-    // Our VM struct and buffers must be placed AFTER this to avoid colliding with the
-    // module's data segment (which contains allocator metadata, etc.).
-    let data_end_global = instance
-        .get_global(&mut store, "__data_end")
-        .ok_or("__data_end global not found in WASM module")?;
-    let data_end = data_end_global
-        .get(&mut store)
-        .i32()
-        .ok_or("__data_end is not i32")? as u32;
+    // The VM struct is reserved inside the module's data segment; its address
+    // comes from the exported global. Our buffers must be placed AFTER
+    // __data_end to avoid colliding with the module's data segment (which
+    // contains the VM struct, allocator metadata, etc.).
+    let vm_struct_ptr = read_addr_global(&instance, &mut store, VM_GLOBAL_SYMBOL)?;
+    let data_end = read_addr_global(&instance, &mut store, "__data_end")?;
     let data_offset = (data_end + 15) & !15; // align to 16 bytes
 
     // Calculate memory layout after the module's data
-    let vm_struct_ptr = data_offset;
-    let witness_ptr = vm_struct_ptr + vm_struct_size;
+    let witness_ptr = data_offset;
     let a_ptr = witness_ptr + witness_bytes;
     let b_ptr = a_ptr + constraint_bytes;
     let c_ptr = b_ptr + constraint_bytes;
@@ -724,7 +732,7 @@ fn run_wasm(
         .get_func(&mut store, "mavros_main")
         .ok_or("mavros_main not found")?;
 
-    let args = vec![wasmtime::Val::I32(vm_struct_ptr as i32)];
+    let args = vec![];
 
     // Call the function
     let mut results = vec![];
@@ -919,14 +927,13 @@ fn run_ad_wasm(
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
 
-    let vm_struct_size: u32 = AD_VM_STRUCT_SIZE;
     // FIELD-ASSUMPTION: L3-field-size
     let da_bytes = (witness_count * FIELD_SIZE) as u32;
     let db_bytes = da_bytes;
     let dc_bytes = da_bytes;
     // FIELD-ASSUMPTION: L3-field-size
     let coeffs_bytes = (constraint_count * FIELD_SIZE) as u32;
-    let our_data_size = vm_struct_size + da_bytes + db_bytes + dc_bytes + coeffs_bytes;
+    let our_data_size = da_bytes + db_bytes + dc_bytes + coeffs_bytes;
 
     let engine = wasm_engine()?;
     let mut store = Store::new(&engine, ());
@@ -942,18 +949,12 @@ fn run_ad_wasm(
     linker.define(&store, "env", "memory", memory)?;
     let instance = linker.instantiate(&mut store, &module)?;
 
-    let data_end_global = instance
-        .get_global(&mut store, "__data_end")
-        .ok_or("__data_end global not found in WASM module")?;
-    let data_end = data_end_global
-        .get(&mut store)
-        .i32()
-        .ok_or("__data_end is not i32")? as u32;
+    let vm_struct_ptr = read_addr_global(&instance, &mut store, VM_GLOBAL_SYMBOL)?;
+    let data_end = read_addr_global(&instance, &mut store, "__data_end")?;
     let data_offset = (data_end + 15) & !15;
 
     // Layout buffers
-    let vm_struct_ptr = data_offset;
-    let da_ptr = vm_struct_ptr + vm_struct_size;
+    let da_ptr = data_offset;
     let db_ptr = da_ptr + da_bytes;
     let dc_ptr = db_ptr + db_bytes;
     let coeffs_ptr = dc_ptr + dc_bytes;
@@ -1026,8 +1027,7 @@ fn run_ad_wasm(
         .get_func(&mut store, "mavros_ad_main")
         .ok_or("mavros_ad_main not found")?;
 
-    // AD main takes only vm_ptr (no input parameters)
-    let args = vec![wasmtime::Val::I32(vm_struct_ptr as i32)];
+    let args = vec![];
     let mut results = vec![];
     func.call(&mut store, &args, &mut results)?;
 

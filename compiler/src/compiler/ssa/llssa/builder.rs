@@ -13,8 +13,13 @@ pub trait LLEmitter {
     fn fresh_value(&mut self) -> ValueId;
     fn emit_ll(&mut self, instruction: LLOp);
     fn emit_located_ll(&mut self, instruction: LocatedLLOp);
-    fn vm_ptr(&mut self) -> ValueId;
     fn emit_constant(&mut self, value: Constant) -> ValueId;
+
+    fn vm_ptr(&mut self) -> ValueId {
+        let r = self.fresh_value();
+        self.emit_ll(LLOp::VmAddr { result: r });
+        r
+    }
 
     // -- Constant --
 
@@ -434,15 +439,6 @@ impl LLEmitter for LLInstrBuilder<'_> {
         self.push_located(instruction);
     }
 
-    fn vm_ptr(&mut self) -> ValueId {
-        self.function
-            .get_entry()
-            .get_parameters()
-            .next()
-            .expect("LLSSA functions must have a VM pointer entry parameter")
-            .0
-    }
-
     fn emit_constant(&mut self, value: Constant) -> ValueId {
         self.ssa.add_const(value)
     }
@@ -459,23 +455,6 @@ impl LLEmitter for LLBlockEmitter<'_> {
 
     fn emit_located_ll(&mut self, instruction: LocatedLLOp) {
         self.emit_located_instruction(instruction);
-    }
-
-    fn vm_ptr(&mut self) -> ValueId {
-        if self.block_id == self.function.get_entry_id() {
-            self.block
-                .get_parameters()
-                .next()
-                .expect("LLSSA functions must have a VM pointer entry parameter")
-                .0
-        } else {
-            self.function
-                .get_entry()
-                .get_parameters()
-                .next()
-                .expect("LLSSA functions must have a VM pointer entry parameter")
-                .0
-        }
     }
 
     fn emit_constant(&mut self, value: Constant) -> ValueId {
