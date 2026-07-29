@@ -24,25 +24,6 @@ use crate::{
     },
 };
 
-// CONSTANTS
-// ================================================================================================
-
-/// Upper bound on the call-string depth used by the validation run.
-///
-/// [`assertion_context_depth`] derives a depth that keeps every call site on an acyclic path to an
-/// assertion distinct. That bound is correct for precision but says nothing about cost: the
-/// specialization worklist materializes one `FunctionFacts` per `(function, context)` pair, and the
-/// number of distinct depth-`k` call strings grows with the call graph's branching factor. An
-/// `assert_constant` inside a widely-used helper would otherwise make the relevant slice most of
-/// the program and blow the analysis up.
-///
-/// Exceeding the cap only costs precision, never soundness: a shorter call string merges outer call
-/// sites, so a context's parameter seeds become the *meet* over more paths, which can only move
-/// seeds down the lattice and make an assertion more likely to be rejected. Rejections are reported
-/// with [`SourceLocation`], and a program hitting the cap fails closed rather than silently
-/// accepting.
-const MAX_ASSERTION_CONTEXT_DEPTH: usize = 8;
-
 /// Validate every reachable `AssertConstant` and erase all successfully validated markers.
 ///
 /// On failure returns every failing assertion's source location, in program order, so a user fixing
@@ -109,8 +90,8 @@ pub(crate) fn validate_and_remove(ssa: &mut HLSSA) -> Result<(), Vec<SourceLocat
 /// an assertion bounds every simple path through that relevant call-graph slice; recursion still
 /// folds to a finite context, as required for termination.
 ///
-/// The result is capped at [`MAX_ASSERTION_CONTEXT_DEPTH`], which trades precision for a bounded
-/// number of specialized contexts — see that constant for why the trade is sound.
+/// The depth is deliberately uncapped: truncating it would reintroduce exactly the call-site
+/// merging this function exists to prevent.
 fn assertion_context_depth(ssa: &HLSSA) -> usize {
     // Reverse static call edges, built once. The transitive-caller closure below would otherwise
     // rescan every function body on each round, making the fixpoint quadratic in the program size.
@@ -144,10 +125,7 @@ fn assertion_context_depth(ssa: &HLSSA) -> usize {
         }
     }
 
-    relevant
-        .len()
-        .saturating_sub(1)
-        .clamp(1, MAX_ASSERTION_CONTEXT_DEPTH)
+    relevant.len().saturating_sub(1).max(1)
 }
 
 /// An interned [`Context`], or the unconditional (context-free) view.
@@ -206,10 +184,20 @@ struct Query {
 /// yielding a fixed answer if the recursion re-enters the same query. `T::default()` is that
 /// cycle-breaking answer, chosen so it is the conservative one for each fact — `false` for "is a
 /// compile-time value", `None` for "has a static length".
-#[derive(Default)]
 struct QueryCache<T> {
     done: RefCell<HashMap<Query, T>>,
     in_progress: RefCell<HashSet<Query>>,
+}
+
+// Hand-written rather than derived: `#[derive(Default)]` would add a spurious `T: Default` bound on
+// the struct itself, which the tables do not need.
+impl<T> Default for QueryCache<T> {
+    fn default() -> Self {
+        Self {
+            done: RefCell::new(HashMap::default()),
+            in_progress: RefCell::new(HashSet::default()),
+        }
+    }
 }
 
 impl<T: Copy + Default> QueryCache<T> {
