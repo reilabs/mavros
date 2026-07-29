@@ -323,7 +323,14 @@ impl ClickCooper {
     ///
     /// The dedicated validation run may use deeper call strings than the optimizer's 1-CFA view,
     /// and follows unconstrained static calls so assertions inside their callees see the supplied
-    /// arguments. Unconstrained call results remain opaque.
+    /// arguments.
+    ///
+    /// `follow_unconstrained_calls` widens **only** the seeding path in [`specialize`]: an
+    /// unconstrained call's arguments now flow into the callee's context. It does not touch the
+    /// results channel — `Solver::eval_call` returns `Bottom` for every result of an unconstrained
+    /// call regardless of this flag, because those results are advice rather than
+    /// circuit-constrained. So an assertion on an unconstrained call's *result* still fails, while
+    /// an assertion on a constant *argument* inside its callee now succeeds.
     pub(crate) fn run_for_assert_constant(
         ssa: &HLSSA,
         flow: &FlowAnalysis,

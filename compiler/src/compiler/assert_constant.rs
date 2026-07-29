@@ -18,14 +18,36 @@ use crate::{
             value_definitions::{FunctionValueDefinitions, ValueDefinition},
         },
         ssa::{
-            FunctionId, SourceLocation, Terminator, ValueId,
+            BlockId, FunctionId, SourceLocation, Terminator, ValueId,
             hlssa::{CallTarget, CastTarget, HLSSA, OpCode, SequenceTargetType, TypeExpr},
         },
     },
 };
 
+// CONSTANTS
+// ================================================================================================
+
+/// Upper bound on the call-string depth used by the validation run.
+///
+/// [`assertion_context_depth`] derives a depth that keeps every call site on an acyclic path to an
+/// assertion distinct. That bound is correct for precision but says nothing about cost: the
+/// specialization worklist materializes one `FunctionFacts` per `(function, context)` pair, and the
+/// number of distinct depth-`k` call strings grows with the call graph's branching factor. An
+/// `assert_constant` inside a widely-used helper would otherwise make the relevant slice most of
+/// the program and blow the analysis up.
+///
+/// Exceeding the cap only costs precision, never soundness: a shorter call string merges outer call
+/// sites, so a context's parameter seeds become the *meet* over more paths, which can only move
+/// seeds down the lattice and make an assertion more likely to be rejected. Rejections are reported
+/// with [`SourceLocation`], and a program hitting the cap fails closed rather than silently
+/// accepting.
+const MAX_ASSERTION_CONTEXT_DEPTH: usize = 8;
+
 /// Validate every reachable `AssertConstant` and erase all successfully validated markers.
-pub(crate) fn validate_and_remove(ssa: &mut HLSSA) -> Result<(), SourceLocation> {
+///
+/// On failure returns every failing assertion's source location, in program order, so a user fixing
+/// several at once sees them all in one compile rather than one per rebuild.
+pub(crate) fn validate_and_remove(ssa: &mut HLSSA) -> Result<(), Vec<SourceLocation>> {
     let assertions: Vec<_> = ssa
         .iter_functions()
         .flat_map(|(fid, function)| {
@@ -46,23 +68,25 @@ pub(crate) fn validate_and_remove(ssa: &mut HLSSA) -> Result<(), SourceLocation>
         return Ok(());
     }
 
-    let flow = FlowAnalysis::run(ssa);
-    let types = Types::new().run(ssa, &flow);
-    let context_depth = assertion_context_depth(ssa);
-    let constants = ClickCooper::run_for_assert_constant(ssa, &flow, &types, context_depth);
-    let compile_time = CompileTimeValues::new(ssa, &types, &constants, context_depth);
+    // Scoped so `compile_time` and `constants` release their borrow of `ssa` before the erasure
+    // walk below takes it mutably.
+    {
+        let flow = FlowAnalysis::run(ssa);
+        let types = Types::new().run(ssa, &flow);
+        let context_depth = assertion_context_depth(ssa);
+        let constants = ClickCooper::run_for_assert_constant(ssa, &flow, &types, context_depth);
+        let compile_time = CompileTimeValues::new(ssa, &types, &constants, context_depth);
 
-    for (fid, bid, value, location) in assertions {
-        let valid = constants.contexts_of(fid).iter().all(|context| {
-            !constants.is_reachable_in(fid, context, bid)
-                || compile_time.is_compile_time_value(fid, Some(context), value)
-        });
-        if !valid {
-            return Err(location);
+        let failures: Vec<SourceLocation> = assertions
+            .iter()
+            .filter(|(fid, bid, value, _)| !compile_time.assertion_holds(*fid, *bid, *value))
+            .map(|(_, _, _, location)| location.clone())
+            .collect();
+        if !failures.is_empty() {
+            return Err(failures);
         }
     }
 
-    drop(compile_time);
     for (_, function) in ssa.iter_functions_mut() {
         for (_, block) in function.get_blocks_mut() {
             let instructions = block.take_instructions();
@@ -84,54 +108,127 @@ pub(crate) fn validate_and_remove(ssa: &mut HLSSA) -> Result<(), SourceLocation>
 /// merge distinct outer call sites at a shared inner call. The number of functions that can reach
 /// an assertion bounds every simple path through that relevant call-graph slice; recursion still
 /// folds to a finite context, as required for termination.
+///
+/// The result is capped at [`MAX_ASSERTION_CONTEXT_DEPTH`], which trades precision for a bounded
+/// number of specialized contexts — see that constant for why the trade is sound.
 fn assertion_context_depth(ssa: &HLSSA) -> usize {
-    let mut relevant: HashSet<FunctionId> = ssa
-        .iter_functions()
-        .filter(|(_, function)| {
-            function.get_blocks().any(|(_, block)| {
-                block
-                    .get_instructions()
-                    .any(|op| matches!(op, OpCode::AssertConstant { .. }))
-            })
-        })
-        .map(|(fid, _)| *fid)
-        .collect();
+    // Reverse static call edges, built once. The transitive-caller closure below would otherwise
+    // rescan every function body on each round, making the fixpoint quadratic in the program size.
+    let mut callers: HashMap<FunctionId, Vec<FunctionId>> = HashMap::default();
+    let mut relevant: HashSet<FunctionId> = HashSet::default();
 
-    loop {
-        let mut changed = false;
-        for (fid, function) in ssa.iter_functions() {
-            if relevant.contains(fid) {
-                continue;
+    for (fid, function) in ssa.iter_functions() {
+        for (_, block) in function.get_blocks() {
+            for op in block.get_instructions() {
+                match op {
+                    OpCode::AssertConstant { .. } => {
+                        relevant.insert(*fid);
+                    }
+                    OpCode::Call {
+                        function: CallTarget::Static(callee),
+                        ..
+                    } => callers.entry(*callee).or_default().push(*fid),
+                    _ => {}
+                }
             }
-            let calls_relevant = function.get_blocks().any(|(_, block)| {
-                block.get_instructions().any(|op| {
-                    matches!(
-                        op,
-                        OpCode::Call {
-                            function: crate::compiler::ssa::hlssa::CallTarget::Static(callee),
-                            ..
-                        } if relevant.contains(callee)
-                    )
-                })
-            });
-            if calls_relevant {
-                relevant.insert(*fid);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
         }
     }
 
-    relevant.len().saturating_sub(1).max(1)
+    // Transitive callers of any asserting function, by worklist over the reverse edges.
+    let mut worklist: Vec<FunctionId> = relevant.iter().copied().collect();
+    while let Some(callee) = worklist.pop() {
+        for caller in callers.get(&callee).into_iter().flatten() {
+            if relevant.insert(*caller) {
+                worklist.push(*caller);
+            }
+        }
+    }
+
+    relevant
+        .len()
+        .saturating_sub(1)
+        .clamp(1, MAX_ASSERTION_CONTEXT_DEPTH)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// An interned [`Context`], or the unconditional (context-free) view.
+///
+/// A `Context` is a call string of up to [`MAX_ASSERTION_CONTEXT_DEPTH`] sites, so using it
+/// directly in a memo key would clone a `Vec` on every lookup along the hottest recursion path.
+/// Interning makes the key `Copy` and the memo entries flat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ContextId {
+    /// The unconditional view, used for functions the specializer never reached.
+    Unconditional,
+    /// An index into [`ContextInterner::contexts`].
+    Interned(usize),
+}
+
+/// Assigns a stable [`ContextId`] to each distinct [`Context`].
+///
+/// Contexts are append-only, so an id is an index into `contexts` and stays valid for the lifetime
+/// of the interner.
+#[derive(Default)]
+struct ContextInterner {
+    contexts: Vec<Context>,
+    ids: HashMap<Context, usize>,
+}
+
+impl ContextInterner {
+    fn intern(&mut self, context: Context) -> ContextId {
+        if let Some(id) = self.ids.get(&context) {
+            return ContextId::Interned(*id);
+        }
+        let id = self.contexts.len();
+        self.contexts.push(context.clone());
+        self.ids.insert(context, id);
+        ContextId::Interned(id)
+    }
+
+    fn resolve(&self, id: ContextId) -> Option<&Context> {
+        match id {
+            ContextId::Unconditional => None,
+            ContextId::Interned(index) => Some(&self.contexts[index]),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Query {
     function: FunctionId,
-    context: Option<Context>,
+    context: ContextId,
     value: ValueId,
+}
+
+/// A memo table for a recursive per-[`Query`] fact, with cycle breaking.
+///
+/// Both queries below walk value definitions, which can be cyclic, so each needs the same
+/// scaffolding: return a memoized answer, otherwise mark the query in-progress and recurse,
+/// yielding a fixed answer if the recursion re-enters the same query. `T::default()` is that
+/// cycle-breaking answer, chosen so it is the conservative one for each fact — `false` for "is a
+/// compile-time value", `None` for "has a static length".
+#[derive(Default)]
+struct QueryCache<T> {
+    done: RefCell<HashMap<Query, T>>,
+    in_progress: RefCell<HashSet<Query>>,
+}
+
+impl<T: Copy + Default> QueryCache<T> {
+    /// The cached value of `query`, else `compute()` memoized under it.
+    ///
+    /// Returns `T::default()` without calling `compute` when `query` is already being computed
+    /// further up the stack.
+    fn get_or_compute(&self, query: Query, compute: impl FnOnce() -> T) -> T {
+        if let Some(result) = self.done.borrow().get(&query) {
+            return *result;
+        }
+        if !self.in_progress.borrow_mut().insert(query) {
+            return T::default();
+        }
+        let result = compute();
+        self.in_progress.borrow_mut().remove(&query);
+        self.done.borrow_mut().insert(query, result);
+        result
+    }
 }
 
 /// A non-materializing compile-time-value query layered over ClickCooper.
@@ -147,10 +244,11 @@ struct CompileTimeValues<'a> {
     context_depth: usize,
     definitions: HashMap<FunctionId, FunctionValueDefinitions>,
     global_initializers: HashMap<usize, (FunctionId, ValueId)>,
-    memo: RefCell<HashMap<Query, bool>>,
-    active: RefCell<HashSet<Query>>,
-    length_memo: RefCell<HashMap<Query, Option<usize>>>,
-    length_active: RefCell<HashSet<Query>>,
+    contexts: RefCell<ContextInterner>,
+    /// Memoizes [`Self::is_compile_time_value`]; a cycle answers `false`.
+    is_constant: QueryCache<bool>,
+    /// Memoizes [`Self::static_sequence_length`]; a cycle answers `None`.
+    lengths: QueryCache<Option<usize>>,
 }
 
 impl<'a> CompileTimeValues<'a> {
@@ -172,10 +270,41 @@ impl<'a> CompileTimeValues<'a> {
             context_depth,
             definitions,
             global_initializers,
-            memo: RefCell::new(HashMap::default()),
-            active: RefCell::new(HashSet::default()),
-            length_memo: RefCell::new(HashMap::default()),
-            length_active: RefCell::new(HashSet::default()),
+            contexts: RefCell::new(ContextInterner::default()),
+            is_constant: QueryCache::default(),
+            lengths: QueryCache::default(),
+        }
+    }
+
+    /// Whether the `AssertConstant` on `value` at `fid`/`bid` holds in every context reaching it.
+    fn assertion_holds(&self, fid: FunctionId, bid: BlockId, value: ValueId) -> bool {
+        self.in_every_context(fid, |context| {
+            !self.is_reachable(fid, context, bid) || self.is_compile_time_value(fid, context, value)
+        })
+    }
+
+    /// Intern `context` for use as a memo key.
+    fn intern(&self, context: Context) -> ContextId {
+        self.contexts.borrow_mut().intern(context)
+    }
+
+    /// The [`Context`] behind `id`, cloned out of the interner.
+    ///
+    /// Cloned rather than borrowed because the interner sits behind a [`RefCell`] that the
+    /// recursive callers below re-enter to intern callee contexts.
+    fn context_of(&self, id: ContextId) -> Option<Context> {
+        self.contexts.borrow().resolve(id).cloned()
+    }
+
+    /// Whether `bid` is reachable in `fid` under `context`.
+    ///
+    /// Under [`ContextId::Unconditional`] there is no specialized reachability to consult, so every
+    /// block counts as reachable — the conservative answer, since it only ever forces more
+    /// assertions to be proven.
+    fn is_reachable(&self, fid: FunctionId, context: ContextId, bid: BlockId) -> bool {
+        match self.context_of(context) {
+            Some(context) => self.constants.is_reachable_in(fid, &context, bid),
+            None => true,
         }
     }
 
@@ -209,124 +338,105 @@ impl<'a> CompileTimeValues<'a> {
         }
     }
 
-    fn is_compile_time_value(
-        &self,
-        fid: FunctionId,
-        context: Option<&Context>,
-        value: ValueId,
-    ) -> bool {
+    fn is_compile_time_value(&self, fid: FunctionId, context: ContextId, value: ValueId) -> bool {
         let query = Query {
             function: fid,
-            context: context.cloned(),
+            context,
             value,
         };
-        if let Some(result) = self.memo.borrow().get(&query) {
-            return *result;
-        }
-        if !self.active.borrow_mut().insert(query.clone()) {
-            return false;
-        }
-
-        let known_by_analysis = match context {
-            Some(context) => self.constants.is_constant_in(fid, context, value),
-            None => self.constants.is_constant(fid, value),
-        };
-        let result = known_by_analysis
-            || match self.definition(fid, value) {
-                Some(OpCode::MkSeq { elems, .. }) => elems
-                    .iter()
-                    .all(|value| self.is_compile_time_value(fid, context, *value)),
-                Some(OpCode::MkRepeated { element, .. }) => {
-                    self.is_compile_time_value(fid, context, *element)
-                }
-                Some(OpCode::MkSeqOfBlob { blob, .. }) => {
-                    self.is_compile_time_value(fid, context, *blob)
-                }
-                Some(OpCode::Cast {
-                    value,
-                    target: CastTarget::ArrayToSlice | CastTarget::Nop,
-                    ..
-                }) => self.is_compile_time_value(fid, context, *value),
-                Some(OpCode::ArraySet {
-                    array,
-                    index,
-                    value,
-                    ..
-                }) => {
-                    self.is_compile_time_value(fid, context, *array)
-                        && self.is_compile_time_value(fid, context, *index)
-                        && self.is_compile_time_value(fid, context, *value)
-                }
-                Some(OpCode::SlicePush { slice, values, .. }) => {
-                    self.is_compile_time_value(fid, context, *slice)
-                        && values
-                            .iter()
-                            .all(|value| self.is_compile_time_value(fid, context, *value))
-                }
-                Some(OpCode::SliceLen { slice, .. }) => {
-                    self.static_sequence_length(fid, context, *slice).is_some()
-                }
-                Some(OpCode::ReadGlobal { offset, .. }) => self
-                    .global_initializer(*offset)
-                    .is_some_and(|(init_fid, initializer)| {
-                        self.in_every_context(init_fid, |context| {
-                            self.is_compile_time_value(init_fid, context, initializer)
-                        })
-                    }),
-                Some(OpCode::Call {
-                    results,
-                    function: CallTarget::Static(callee),
-                    args,
-                    unconstrained: false,
-                }) => self
-                    .static_call_result(fid, context, value, results, *callee, args)
-                    .is_some_and(|(callee, callee_context, result_index)| {
-                        let returns =
-                            self.reachable_return_values(callee, &callee_context, result_index);
-                        let Some(first) = returns.first() else {
-                            return false;
-                        };
-                        self.is_compile_time_value(callee, Some(&callee_context), *first)
-                            && returns.iter().skip(1).all(|value| {
-                                self.is_compile_time_value(callee, Some(&callee_context), *value)
-                                    && self.constants.known_equal_in(
-                                        callee,
-                                        &callee_context,
-                                        *first,
-                                        *value,
-                                    )
-                            })
-                    }),
-                _ => false,
+        self.is_constant.get_or_compute(query, || {
+            let known_by_analysis = match self.context_of(context) {
+                Some(context) => self.constants.is_constant_in(fid, &context, value),
+                None => self.constants.is_constant(fid, value),
             };
-
-        self.active.borrow_mut().remove(&query);
-        self.memo.borrow_mut().insert(query, result);
-        result
+            known_by_analysis
+                || match self.definition(fid, value) {
+                    Some(OpCode::MkSeq { elems, .. }) => elems
+                        .iter()
+                        .all(|value| self.is_compile_time_value(fid, context, *value)),
+                    Some(OpCode::MkRepeated { element, .. }) => {
+                        self.is_compile_time_value(fid, context, *element)
+                    }
+                    Some(OpCode::MkSeqOfBlob { blob, .. }) => {
+                        self.is_compile_time_value(fid, context, *blob)
+                    }
+                    Some(OpCode::Cast {
+                        value,
+                        target: CastTarget::ArrayToSlice | CastTarget::Nop,
+                        ..
+                    }) => self.is_compile_time_value(fid, context, *value),
+                    Some(OpCode::ArraySet {
+                        array,
+                        index,
+                        value,
+                        ..
+                    }) => {
+                        self.is_compile_time_value(fid, context, *array)
+                            && self.is_compile_time_value(fid, context, *index)
+                            && self.is_compile_time_value(fid, context, *value)
+                    }
+                    Some(OpCode::SlicePush { slice, values, .. }) => {
+                        self.is_compile_time_value(fid, context, *slice)
+                            && values
+                                .iter()
+                                .all(|value| self.is_compile_time_value(fid, context, *value))
+                    }
+                    Some(OpCode::SliceLen { slice, .. }) => {
+                        self.static_sequence_length(fid, context, *slice).is_some()
+                    }
+                    Some(OpCode::ReadGlobal { offset, .. }) => self
+                        .global_initializer(*offset)
+                        .is_some_and(|(init_fid, initializer)| {
+                            self.in_every_context(init_fid, |context| {
+                                self.is_compile_time_value(init_fid, context, initializer)
+                            })
+                        }),
+                    Some(OpCode::Call {
+                        results,
+                        function: CallTarget::Static(callee),
+                        args,
+                        unconstrained: false,
+                    }) => self
+                        .static_call_result(fid, context, value, results, *callee, args)
+                        .is_some_and(|(callee, callee_context, result_index)| {
+                            let returns =
+                                self.reachable_return_values(callee, &callee_context, result_index);
+                            let Some(first) = returns.first() else {
+                                return false;
+                            };
+                            let callee_id = self.intern(callee_context.clone());
+                            self.is_compile_time_value(callee, callee_id, *first)
+                                && returns.iter().skip(1).all(|value| {
+                                    self.is_compile_time_value(callee, callee_id, *value)
+                                        && self.constants.known_equal_in(
+                                            callee,
+                                            &callee_context,
+                                            *first,
+                                            *value,
+                                        )
+                                })
+                        }),
+                    _ => false,
+                }
+        })
     }
 
     fn static_sequence_length(
         &self,
         fid: FunctionId,
-        context: Option<&Context>,
+        context: ContextId,
         value: ValueId,
     ) -> Option<usize> {
-        let key = Query {
+        let query = Query {
             function: fid,
-            context: context.cloned(),
+            context,
             value,
         };
-        if let Some(result) = self.length_memo.borrow().get(&key) {
-            return *result;
-        }
-        if !self.length_active.borrow_mut().insert(key.clone()) {
-            return None;
-        }
-
-        let types = self.types.get_function(fid);
-        let result = if let TypeExpr::Array(_, len) = &types.get_value_type(value).expr {
-            Some(*len)
-        } else {
+        self.lengths.get_or_compute(query, || {
+            let types = self.types.get_function(fid);
+            if let TypeExpr::Array(_, len) = &types.get_value_type(value).expr {
+                return Some(*len);
+            }
             match self.definition(fid, value) {
                 Some(OpCode::Cast {
                     value,
@@ -346,11 +456,9 @@ impl<'a> CompileTimeValues<'a> {
                 Some(OpCode::SlicePush { slice, values, .. }) => self
                     .static_sequence_length(fid, context, *slice)
                     .and_then(|len| len.checked_add(values.len())),
-                Some(OpCode::Select { if_t, if_f, .. }) => {
-                    let then_len = self.static_sequence_length(fid, context, *if_t)?;
-                    let else_len = self.static_sequence_length(fid, context, *if_f)?;
-                    (then_len == else_len).then_some(then_len)
-                }
+                // No `Select` arm: its result type is the *arithmetic* join of its operands
+                // (`Type::get_arithmetic_result_type`), which is scalar-only, so a `Select` never
+                // carries a sequence whose length could be asked for here.
                 Some(OpCode::ReadGlobal { offset, .. }) => self
                     .global_initializer(*offset)
                     .and_then(|(init_fid, initializer)| {
@@ -379,19 +487,16 @@ impl<'a> CompileTimeValues<'a> {
                     .and_then(|(callee, callee_context, result_index)| {
                         let returns =
                             self.reachable_return_values(callee, &callee_context, result_index);
-                        let mut lengths = returns.iter().map(|value| {
-                            self.static_sequence_length(callee, Some(&callee_context), *value)
-                        });
+                        let callee_id = self.intern(callee_context);
+                        let mut lengths = returns
+                            .iter()
+                            .map(|value| self.static_sequence_length(callee, callee_id, *value));
                         let first = lengths.next()??;
                         lengths.all(|length| length == Some(first)).then_some(first)
                     }),
                 _ => None,
             }
-        };
-
-        self.length_active.borrow_mut().remove(&key);
-        self.length_memo.borrow_mut().insert(key, result);
-        result
+        })
     }
 
     fn global_initializer(&self, offset: u64) -> Option<(FunctionId, ValueId)> {
@@ -402,23 +507,36 @@ impl<'a> CompileTimeValues<'a> {
 
     /// Apply `predicate` to every known context of `fid`, falling back to the unconditional view
     /// for synthetic/unreachable functions that have no context.
+    ///
+    /// The fallback is load-bearing, not a convenience: a bare `all` over an empty context set
+    /// returns `true`, which would accept an assertion the analysis never examined. Every
+    /// context-quantified query must route through here so that case is decided rather than
+    /// vacuously passed.
     fn in_every_context(
         &self,
         fid: FunctionId,
-        mut predicate: impl FnMut(Option<&Context>) -> bool,
+        mut predicate: impl FnMut(ContextId) -> bool,
     ) -> bool {
         let contexts = self.constants.contexts_of(fid);
         if contexts.is_empty() {
-            predicate(None)
+            predicate(ContextId::Unconditional)
         } else {
-            contexts.iter().all(|context| predicate(Some(context)))
+            contexts
+                .into_iter()
+                .all(|context| predicate(self.intern(context)))
         }
     }
 
+    /// Resolve a static call result to the callee, its context, and the result's position.
+    ///
+    /// Returns `None` under [`ContextId::Unconditional`]: extending a call string requires a caller
+    /// context to extend, and the context-free view has none. That treats every call result as
+    /// non-constant, which is deliberately fail-closed — it only ever rejects an assertion the
+    /// context-sensitive view would have had to prove anyway.
     fn static_call_result(
         &self,
         caller: FunctionId,
-        caller_context: Option<&Context>,
+        caller_context: ContextId,
         queried_result: ValueId,
         results: &[ValueId],
         callee: FunctionId,
@@ -427,7 +545,7 @@ impl<'a> CompileTimeValues<'a> {
         let result_index = results
             .iter()
             .position(|result| *result == queried_result)?;
-        let caller_context = caller_context?;
+        let caller_context = self.context_of(caller_context)?;
         let site = results.first().or_else(|| args.first()).copied()?;
         Some((
             callee,
@@ -800,6 +918,40 @@ mod tests {
         );
         entry.push_instruction(assert_constant(len));
         entry.set_terminator(Terminator::Return(vec![]));
+
+        validate_and_remove(&mut ssa).unwrap();
+    }
+
+    /// A function no call reaches gets no specialized context. Deciding it by `all` over that empty
+    /// context set would vacuously accept and erase the marker unexamined.
+    #[test]
+    fn rejects_dynamic_assertion_in_a_function_with_no_contexts() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        // `add_asserting_helper` asserts its parameter, which is dynamic in the context-free view.
+        // Deliberately never called, so `specialize` never reaches it.
+        add_asserting_helper(&mut ssa);
+        ssa.get_unique_entrypoint_mut()
+            .get_entry_mut()
+            .set_terminator(Terminator::Return(vec![]));
+
+        assert!(validate_and_remove(&mut ssa).is_err());
+    }
+
+    /// The counterpart: an uncalled function whose assertion is constant regardless of context is
+    /// still accepted, so the fix above rejects only what it must.
+    #[test]
+    fn accepts_constant_assertion_in_a_function_with_no_contexts() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let helper = ssa.add_function("uncalled".to_string());
+        let five = ssa.add_const(Constant::Field(Field::from(5u64)));
+        {
+            let entry = ssa.get_function_mut(helper).get_entry_mut();
+            entry.push_instruction(assert_constant(five));
+            entry.set_terminator(Terminator::Return(vec![]));
+        }
+        ssa.get_unique_entrypoint_mut()
+            .get_entry_mut()
+            .set_terminator(Terminator::Return(vec![]));
 
         validate_and_remove(&mut ssa).unwrap();
     }

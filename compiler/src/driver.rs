@@ -113,8 +113,10 @@ pub enum Error {
     /// field, but multi-challenge LogUp is not yet implemented (see `docs/field-agnosticism.md`,
     /// `L4-logup-challenges`). Rejected rather than silently emitting an under-provisioned circuit.
     LogupSoundnessUnsupported(String),
-    /// A Noir `assert_constant` operand is dynamic in a reachable calling context.
-    AssertConstantFailed(SourceLocation),
+    /// One or more Noir `assert_constant` operands are dynamic in a reachable calling context.
+    ///
+    /// Carries every failing assertion so a single compile reports them all.
+    AssertConstantFailed(Vec<SourceLocation>),
 }
 
 impl std::fmt::Display for Error {
@@ -127,11 +129,17 @@ impl std::fmt::Display for Error {
                 write!(f, "program will never execute: {message}")
             }
             Error::LogupSoundnessUnsupported(message) => write!(f, "{message}"),
-            Error::AssertConstantFailed(location) => {
-                write!(
-                    f,
-                    "assert_constant failed at {location}: value is not compile-time known"
-                )
+            Error::AssertConstantFailed(locations) => {
+                for (i, location) in locations.iter().enumerate() {
+                    if i > 0 {
+                        writeln!(f)?;
+                    }
+                    write!(
+                        f,
+                        "assert_constant failed at {location}: value is not compile-time known"
+                    )?;
+                }
+                Ok(())
             }
         }
     }
