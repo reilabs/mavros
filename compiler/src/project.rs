@@ -47,6 +47,10 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
         include_str!("../../mavros_stdlib/replacements/blake3.nr"),
     ),
     (
+        "std/mavros/replacements/embedded_curve_add.nr",
+        include_str!("../../mavros_stdlib/replacements/embedded_curve_add.nr"),
+    ),
+    (
         "std/mavros/replacements/multi_scalar_mul.nr",
         include_str!("../../mavros_stdlib/replacements/multi_scalar_mul.nr"),
     ),
@@ -71,6 +75,7 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
 /// pairing all apply natively, and the mavros pipeline never sees a lowlevel call for it.
 const FOREIGN_REPLACEMENTS: &[&str] = &[
     "blake3",
+    "embedded_curve_add",
     "multi_scalar_mul",
     "poseidon2_permutation",
     "sha256_compression",

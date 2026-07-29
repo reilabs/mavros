@@ -99,6 +99,17 @@ fn to_affine(point: JacobianPoint) -> EmbeddedCurvePoint {
     }
 }
 
+pub(crate) fn point_is_valid(point: EmbeddedCurvePoint) -> bool {
+    point.is_infinite() | (point.y * point.y == point.x * point.x * point.x - 17)
+}
+
+pub(crate) fn add_affine(
+    lhs: EmbeddedCurvePoint,
+    rhs: EmbeddedCurvePoint,
+) -> EmbeddedCurvePoint {
+    to_affine(add(from_affine(lhs), from_affine(rhs)))
+}
+
 fn scalar_is_valid(lo: u128, hi: u128) -> bool {
     (hi < GRUMPKIN_SCALAR_MODULUS_HI)
         | ((hi == GRUMPKIN_SCALAR_MODULUS_HI) & (lo < GRUMPKIN_SCALAR_MODULUS_LO))
@@ -141,9 +152,7 @@ pub fn multi_scalar_mul<let N: u32>(
         let lo = if predicate { scalars[i].lo } else { 0 };
         let hi = if predicate { scalars[i].hi } else { 0 };
 
-        let point_is_valid =
-            point.is_infinite() | (point.y * point.y == point.x * point.x * point.x - 17);
-        assert(point_is_valid);
+        assert(point_is_valid(point));
 
         scalar_lo[i] = checked_limb(lo);
         scalar_hi[i] = checked_limb(hi);
