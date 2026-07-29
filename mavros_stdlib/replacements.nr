@@ -4,5 +4,6 @@
 //! of the frontend treats them as ordinary functions.
 
 pub mod blake3;
+pub mod multi_scalar_mul;
 pub mod poseidon2_permutation;
 pub mod sha256_compression;
