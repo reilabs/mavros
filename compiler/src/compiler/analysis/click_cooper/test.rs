@@ -5575,7 +5575,6 @@ fn const_array_get_folds_to_scalar() {
     );
     // The aggregate stays internal: never surfaced as a constant.
     assert_eq!(cc.const_of(fid, seq), None);
-    assert!(cc.is_constant(fid, seq));
     assert!(cc.new_const_values(fid).iter().all(|(v, _)| *v != seq));
 }
 

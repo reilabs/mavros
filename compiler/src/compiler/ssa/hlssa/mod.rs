@@ -118,7 +118,7 @@ pub enum OpCode {
     },
     /// Compile-time assertion that `value` is known in every reachable calling context.
     ///
-    /// This marker is removed after initial constant propagation and must not reach codegen.
+    /// This marker is removed after witness-taint inference and must not reach later passes.
     AssertConstant {
         value: ValueId,
     },

@@ -290,7 +290,6 @@ impl Driver {
         pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
         let mut ssa = self.initial_ssa.clone().unwrap();
         pass_manager.run(&mut ssa);
-        assert_constant::validate_and_remove(&mut ssa).map_err(Error::AssertConstantFailed)?;
         self.static_struct_access_ssa = Some(ssa);
         Ok(())
     }
@@ -392,6 +391,8 @@ impl Driver {
 
         let mut witness_inference = WitnessTaintInference::new();
         witness_inference.run(&mut ssa, &flow_analysis);
+        assert_constant::validate_and_remove(&mut ssa, &witness_inference)
+            .map_err(Error::AssertConstantFailed)?;
 
         self.write_debug_text(
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),

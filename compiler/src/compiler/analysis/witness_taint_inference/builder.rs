@@ -27,7 +27,7 @@ use crate::compiler::{
         hlssa::{CallTarget, CastTarget, HLFunction, OpCode, Radix, Type, TypeExpr},
         traits::Instruction,
     },
-    util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
+    util::ice_non_elided_tuple,
 };
 
 // GRAPH BUILDER
@@ -602,13 +602,13 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
         }
         OpCode::DropGlobal { .. }
         | OpCode::Assert { .. }
+        | OpCode::AssertConstant { .. }
         | OpCode::AssertCmp { .. }
         | OpCode::AssertR1C { .. }
         | OpCode::Rangecheck { .. }
         | OpCode::MemOp { .. } => {
             // no taint flow
         }
-        OpCode::AssertConstant { .. } => ice_unvalidated_assert_constant(),
         OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } | OpCode::MkTuple { .. } => {
             ice_non_elided_tuple()
         }
@@ -696,6 +696,7 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         | OpCode::ReadGlobal { .. }
         | OpCode::DropGlobal { .. }
         | OpCode::Assert { .. }
+        | OpCode::AssertConstant { .. }
         | OpCode::AssertCmp { .. }
         | OpCode::AssertR1C { .. }
         | OpCode::Rangecheck { .. }
@@ -712,7 +713,6 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         | OpCode::DLookup { .. }
         | OpCode::Todo { .. }
         | OpCode::Alloc { .. } => false,
-        OpCode::AssertConstant { .. } => ice_unvalidated_assert_constant(),
     }
 }
 
