@@ -3,8 +3,8 @@
 // The embedded curve for BN254 is Grumpkin, with equation y^2 = x^3 - 17.
 // Scalars are represented by two 128-bit little-endian limbs. The implementation
 // uses a binary Straus MSM in Jacobian coordinates: one doubling per scalar bit,
-// followed by one conditional addition per input point. Keeping the accumulator
-// projective avoids an inversion for every group operation.
+// followed by one conditional mixed addition per input point. Keeping the
+// accumulator projective avoids an inversion for every group operation.
 
 use crate::embedded_curve_ops::{EmbeddedCurvePoint, EmbeddedCurveScalar};
 
@@ -51,15 +51,25 @@ fn double(point: JacobianPoint) -> JacobianPoint {
     JacobianPoint { x, y, z }
 }
 
-// Complete wrapper around the standard Jacobian addition formula. The formula
-// itself handles distinct finite points; explicit selections cover equality,
-// inverses, and either input being infinity.
-fn add(lhs: JacobianPoint, rhs: JacobianPoint) -> JacobianPoint {
+// Complete Jacobian addition, specialised to an `rhs` that came straight from
+// `from_affine` and therefore has z of either 0 (infinity) or 1. That lets
+// rhs_z2 collapse to rhs.z (z^2 == z) and lhs_s to lhs.y * rhs.z (z * z^2 == z),
+// saving three multiplications per call over the general formula. The infinity
+// case is still covered by the `rhs_infinite` selection, so this stays complete.
+//
+// The generic formula is only valid for distinct finite points; the explicit
+// selections cover equality, inverses, and either input being infinity. The
+// `same_point` arm doubles `lhs`, which is why a doubling is evaluated on every
+// addition: in a circuit both arms of a selection are always computed. `lhs ==
+// rhs` really is reachable in the MSM loop (for a scalar with a leading `0b11`
+// the accumulator equals the base when the second bit is consumed), so that
+// branch is load-bearing and cannot be dropped.
+fn add_mixed(lhs: JacobianPoint, rhs: JacobianPoint) -> JacobianPoint {
     let lhs_z2 = lhs.z * lhs.z;
-    let rhs_z2 = rhs.z * rhs.z;
+    let rhs_z2 = rhs.z;
     let lhs_u = lhs.x * rhs_z2;
     let rhs_u = rhs.x * lhs_z2;
-    let lhs_s = lhs.y * rhs.z * rhs_z2;
+    let lhs_s = lhs.y * rhs.z;
     let rhs_s = rhs.y * lhs.z * lhs_z2;
 
     let h = rhs_u - lhs_u;
@@ -99,6 +109,11 @@ fn to_affine(point: JacobianPoint) -> EmbeddedCurvePoint {
     }
 }
 
+// The upstream black box also rejects points outside the prime-order subgroup.
+// Grumpkin has cofactor 1, so its group order is the full curve order and every
+// on-curve point is already in the subgroup; the curve equation alone is
+// therefore equivalent to the upstream check. A curve with cofactor > 1 (Baby
+// JubJub, JubJub, Bandersnatch) would need an explicit subgroup check here.
 pub(crate) fn point_is_valid(point: EmbeddedCurvePoint) -> bool {
     point.is_infinite() | (point.y * point.y == point.x * point.x * point.x - 17)
 }
@@ -107,7 +122,8 @@ pub(crate) fn add_affine(
     lhs: EmbeddedCurvePoint,
     rhs: EmbeddedCurvePoint,
 ) -> EmbeddedCurvePoint {
-    to_affine(add(from_affine(lhs), from_affine(rhs)))
+    // `from_affine` always yields z in {0, 1}, so the mixed form applies here too.
+    to_affine(add_mixed(from_affine(lhs), from_affine(rhs)))
 }
 
 fn scalar_is_valid(lo: u128, hi: u128) -> bool {
@@ -174,7 +190,8 @@ pub fn multi_scalar_mul<let N: u32>(
             } else {
                 ((scalar_hi[i] >> (bit_index - 128) as u128) & 1) == 1
             };
-            let sum = add(accumulator, bases[i]);
+            // `bases` is built by `from_affine`, so every base has z in {0, 1}.
+            let sum = add_mixed(accumulator, bases[i]);
             accumulator = select_point(bit, sum, accumulator);
         }
     }
