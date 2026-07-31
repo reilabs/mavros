@@ -834,7 +834,7 @@ impl Value {
     // FIELD-ASSUMPTION: L4-decompose
     fn to_bits(&self, endianness: &crate::compiler::ssa::hlssa::Endianness, size: usize) -> Value {
         match self {
-            Value::Unknown(kind) => Value::Unknown(*kind),
+            Value::Unknown(_) => Value::array(vec![Value::Unknown(ScalarKind::U(1)); size]),
             Value::WitnessOf(inner) => {
                 let result = inner.to_bits(endianness, size);
                 match result {
@@ -2308,15 +2308,35 @@ impl Analysis for Summary {
 
 #[cfg(test)]
 mod tests {
-    use super::CostEstimator;
+    use super::{CostEstimator, ScalarKind, Value};
     use crate::compiler::{
         Field,
         analysis::{flow_analysis::FlowAnalysis, types::Types},
         ssa::{
             Terminator,
-            hlssa::{Constant, HLSSA, OpCode},
+            hlssa::{Constant, Endianness, HLSSA, OpCode},
         },
     };
+
+    /// `ToBits` always produces an array, including when the input's concrete value is unknown.
+    /// Keeping that shape is especially important for witnessed unknowns: the witness wrapper
+    /// maps over the result to mark each output bit as witness-derived.
+    #[test]
+    fn witnessed_unknown_to_bits_preserves_array_shape() {
+        let value = Value::WitnessOf(Box::new(Value::Unknown(ScalarKind::Field)));
+
+        let result = value.to_bits(&Endianness::Little, 4);
+
+        let Value::Array(bits) = result else {
+            panic!("ToBits of a witnessed unknown must produce an array");
+        };
+        assert_eq!(bits.len(), 4);
+        assert!(bits.iter().all(|bit| matches!(
+            bit,
+            Value::WitnessOf(inner)
+                if matches!(inner.as_ref(), Value::Unknown(ScalarKind::U(1)))
+        )));
+    }
 
     /// Run the cost estimator over `ssa` with freshly-computed dependencies, then `summarize` it —
     /// exactly the path `Summary::compute` drives. The estimator absorbs static assertion failures
