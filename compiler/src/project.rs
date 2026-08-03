@@ -1,5 +1,6 @@
 use std::{
     fmt::Debug,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -187,13 +188,61 @@ fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
         file_manager.add_file_with_source_canonical_path(Path::new(&path), source);
     }
 
-    // 3. Add workspace files
+    // 3. Rewrite calls to Noir's secp256r1 black box to the circuit implementation. Source files
+    // are inserted first so nargo's subsequent bulk insertion preserves these overrides.
+    for package in &workspace.members {
+        add_ecdsa_rewritten_sources(&package.root_dir.join("src"), &mut file_manager);
+        add_dependency_compatibility_overrides(package, &mut file_manager);
+    }
+
+    // 4. Add all remaining workspace and dependency files.
     nargo::insert_all_files_for_workspace_into_file_manager(workspace, &mut file_manager);
     let mut parsed_files = nargo::parse_all(&file_manager);
 
-    // 4. Rewrite replaced foreign functions to call their pure-Noir implementations
+    // 5. Rewrite replaced foreign functions to call their pure-Noir implementations
     replace_foreign_functions(&mut parsed_files);
     (file_manager, parsed_files)
+}
+
+fn add_dependency_compatibility_overrides(package: &Package, file_manager: &mut FileManager) {
+    for dependency in package.dependencies.values() {
+        let dependency = dependency.package();
+        if dependency.name.to_string() == "bignum" {
+            let path = dependency.root_dir.join("src/fns/expressions.nr");
+            if let Ok(source) = fs::read_to_string(&path) {
+                // This assertion is explicitly only a debugging check upstream; the same
+                // relation is constrained by the range checks emitted immediately afterwards.
+                // Unconstrained hint functions are evaluated even under a false circuit guard,
+                // so the debug assertion must not make an inactive branch trap.
+                let rewritten = source.replace("    assert(__is_zero(remainder));\n", "");
+                file_manager.add_file_with_source_canonical_path(&path, rewritten);
+            }
+        }
+        add_dependency_compatibility_overrides(dependency, file_manager);
+    }
+}
+
+fn add_ecdsa_rewritten_sources(dir: &Path, file_manager: &mut FileManager) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            add_ecdsa_rewritten_sources(&path, file_manager);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("nr") {
+            let Ok(source) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let rewritten = source.replace(
+                "std::ecdsa_secp256r1::verify_signature",
+                "mavros_ecdsa::verify_signature",
+            );
+            if rewritten != source {
+                file_manager.add_file_with_source_canonical_path(&path, rewritten);
+            }
+        }
+    }
 }
 
 impl Project {
@@ -201,7 +250,20 @@ impl Project {
         // Workspace loading was done based on https://github.com/noir-lang/noir/blob/c3a43abf9be80c6f89560405b65f5241ed67a6b2/tooling/nargo_cli/src/cli/mod.rs#L180
         let toml_path = nargo_toml::get_package_manifest(&project_root)?;
 
-        let nargo_workspace = nargo_toml::resolve_workspace_from_toml(&toml_path, All, None)?;
+        let mut nargo_workspace = nargo_toml::resolve_workspace_from_toml(&toml_path, All, None)?;
+
+        let ecdsa_manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mavros_stdlib/ecdsa_dependencies/Nargo.toml");
+        let ecdsa_workspace = nargo_toml::resolve_workspace_from_toml(&ecdsa_manifest, All, None)?;
+        let ecdsa_package = ecdsa_workspace.members[0].clone();
+        for package in &mut nargo_workspace.members {
+            package
+                .dependencies
+                .entry(ecdsa_package.name.clone())
+                .or_insert_with(|| Dependency::Local {
+                    package: ecdsa_package.clone(),
+                });
+        }
 
         let (nargo_file_manager, nargo_parsed_files) = parse_workspace(&nargo_workspace);
 

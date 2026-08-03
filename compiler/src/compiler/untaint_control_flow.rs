@@ -692,9 +692,45 @@ impl UntaintControlFlow {
             OpCode::Call {
                 results: ret,
                 function: CallTarget::Static(tgt),
-                mut args,
+                args,
                 unconstrained: false,
             } => {
+                // Witness inference can join a callee parameter across call sites. In
+                // particular, a pure composite argument such as `Array<u128>` may call a
+                // specialization whose parameter is `Array<WitnessOf(u128)>`. Treat calls as
+                // typed-slot boundaries just like jumps and returns: without the conversion,
+                // codegen copies raw limbs into a boxed-witness array and AD later interprets
+                // those limbs as pointers.
+                let mut args = if let Some(ti) = type_info {
+                    let expected_types: Vec<_> = ssa
+                        .get_function(tgt)
+                        .get_entry()
+                        .get_parameters()
+                        .take(args.len())
+                        .map(|(_, typ)| typ.clone())
+                        .collect();
+                    assert_eq!(
+                        expected_types.len(),
+                        args.len(),
+                        "ICE: constrained call has more arguments than callee parameters"
+                    );
+
+                    let mut cast_instrs = Vec::new();
+                    let converted = {
+                        let mut builder =
+                            HLInstrBuilder::new(function, ssa, &mut cast_instrs, location.clone());
+                        args.into_iter()
+                            .zip(expected_types.iter())
+                            .map(|(arg, expected_type)| {
+                                convert_if_needed(arg, expected_type, ti, &mut builder)
+                            })
+                            .collect()
+                    };
+                    flush_conversion_instrs_located(new_instructions, block_taint, cast_instrs);
+                    converted
+                } else {
+                    args
+                };
                 if let Some(arg) = block_taint {
                     args.push(arg);
                 }

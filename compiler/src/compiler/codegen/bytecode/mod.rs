@@ -1736,13 +1736,9 @@ fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {
     match &elem_type.expr {
         // FIELD-ASSUMPTION: L3-felt-limbs
         TypeExpr::Field => (bytecode::FELT_LIMBS, bytecode::ELEM_FIELD),
-        TypeExpr::U(bits) => {
-            assert!(
-                *bits <= 64,
-                "Array lookup unsupported for {elem_type} (>64 bits)"
-            );
-            (1, bytecode::ELEM_WORD)
-        }
+        TypeExpr::U(bits) if *bits <= 64 => (1, bytecode::ELEM_WORD),
+        TypeExpr::U(128) => (2, bytecode::ELEM_U128),
+        TypeExpr::U(_) => panic!("Array lookup unsupported for {elem_type}"),
         TypeExpr::I(bits) => {
             assert!(
                 *bits <= MAX_SUPPORTED_SIGNED_BITS,
