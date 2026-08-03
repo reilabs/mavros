@@ -489,11 +489,9 @@ impl Driver {
             .map_err(|e| Error::UnsatisfiableProgram(e.message))?;
         // Captured before `seal` consumes `r1cs_gen`; feeds the LogUp soundness degree D.
         let num_lookups = r1cs_gen.num_lookups();
-        let (r1cs, profile) = if self.r1cs_profiling {
-            let (r1cs, profile) = r1cs_gen.seal_with_profile();
-            (r1cs, Some(profile))
-        } else {
-            (r1cs_gen.seal(), None)
+        let (r1cs, profile) = match r1cs_gen.seal_with_profile() {
+            Ok((r1cs, profile)) => (r1cs, Some(profile)),
+            Err(error) => (error.into_r1cs(), None),
         };
         let mut num_non_zero_terms = 0;
         for r1c in r1cs.constraints.iter() {

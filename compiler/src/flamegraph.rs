@@ -89,7 +89,7 @@ pub fn render(
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn();
     let mut child = match child {
         Ok(child) => child,
@@ -113,9 +113,8 @@ pub fn render(
     let output = child.wait_with_output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
-            "flamegraph.pl failed for {}: {}",
-            folded_path.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            "flamegraph.pl failed for {}",
+            folded_path.display()
         ))
         .into());
     }
@@ -179,7 +178,9 @@ fn cpuprofile(profile: &FlamegraphProfile) -> SerializedCpuProfile {
     let mut time_deltas = Vec::new();
     let mut previous_timestamp = 0;
     for (position, stack) in profile.timeline_samples() {
-        let node_id = leaf_by_stack[stack];
+        let node_id = *leaf_by_stack
+            .get(stack)
+            .expect("nonzero timeline samples reference a recorded stack");
         nodes[(node_id - 1) as usize].hit_count += 1;
         samples.push(node_id);
         let timestamp = position + 1;

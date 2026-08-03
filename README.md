@@ -38,7 +38,7 @@ versioned source map records VM bytecode word offsets, function names, and Noir 
 the executable bytecode in `basic.json` remains byte-for-byte unchanged. Source paths are relative
 to the Noir package root by default; pass `--absolute-paths` to retain absolute paths.
 
-### Per-function FlameGraphs
+### Per-Function FlameGraphs
 
 Run the full compiler and VM pipeline with `--profile` to generate interactive per-function
 FlameGraphs:

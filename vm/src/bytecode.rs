@@ -609,6 +609,11 @@ struct InstructionProfile {
     stack_scratch: Vec<usize>,
 }
 
+// Sentinel used only in cached profile stack keys. Real function indices address
+// `DebugInfo::functions`, so they can never reach `usize::MAX`; callers must check
+// this value before attempting a function-name lookup.
+const UNKNOWN_FUNCTION_INDEX: usize = usize::MAX;
+
 impl Default for InstructionProfile {
     fn default() -> Self {
         Self {
@@ -758,11 +763,7 @@ impl VM {
     }
 
     fn program_offset(&self, pc: *const u64) -> Option<usize> {
-        if self.program_base.is_null() {
-            return None;
-        }
-        let offset = unsafe { pc.offset_from(self.program_base) };
-        (offset >= 0 && (offset as usize) < self.program_len).then_some(offset as usize)
+        program_offset(self.program_base, self.program_len, pc)
     }
 
     pub fn enable_instruction_profile(&mut self) {
@@ -782,11 +783,13 @@ impl VM {
     }
 
     /// Count one simulated instruction against its root-first Noir call stack.
-    #[inline(always)]
+    #[cold]
+    #[inline(never)]
     pub fn record_instruction(&mut self, pc: *const u64, frame: Frame) {
-        let Some(instruction_profile) = self.instruction_profile.as_mut() else {
-            return;
-        };
+        let instruction_profile = self
+            .instruction_profile
+            .as_mut()
+            .expect("instruction profiling is enabled before recording instructions");
 
         let program_base = self.program_base;
         let program_len = self.program_len;
@@ -818,14 +821,14 @@ impl VM {
         }
         stack.reverse();
         if stack.is_empty() {
-            stack.push(usize::MAX);
+            stack.push(UNKNOWN_FUNCTION_INDEX);
         }
 
         let stack_id = if let Some(stack_id) = instruction_profile.stack_ids.get(stack.as_slice()) {
             *stack_id
         } else {
             let names = stack.iter().map(|function_index| {
-                if *function_index == usize::MAX {
+                if *function_index == UNKNOWN_FUNCTION_INDEX {
                     "<unknown>".to_string()
                 } else {
                     debug_info
@@ -2808,9 +2811,28 @@ mod tests {
         SourceLocation::new(format!("src/{function}.nr"), line, 7)
     }
 
+    fn empty_witgen_vm() -> VM {
+        VM::new_witgen(
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            0,
+            0,
+            ptr::null_mut(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
     #[test]
-    fn source_map_drives_trap_stack_trace() {
+    fn source_map_drives_deep_instruction_profile_and_trap_stack_trace() {
         let caller_location = location("main", 10);
+        let middle_location = location("middle", 17);
         let callee_location = location("helper", 24);
         let program = Program {
             functions: vec![
@@ -2819,6 +2841,12 @@ mod tests {
                     frame_size: 3,
                     code: vec![OpCode::Nop {}, OpCode::Ret {}],
                     source_locations: vec![caller_location.clone(), caller_location.clone()],
+                },
+                Function {
+                    name: "middle".to_string(),
+                    frame_size: 3,
+                    code: vec![OpCode::Nop {}, OpCode::Ret {}],
+                    source_locations: vec![middle_location.clone(), middle_location.clone()],
                 },
                 Function {
                     name: "helper".to_string(),
@@ -2834,33 +2862,25 @@ mod tests {
         };
         let (binary, debug_info) = program.to_binary_and_debug_info();
         let main_opcode = debug_info.functions[0].locations[0].code_offset;
-        let helper_opcode = debug_info.functions[1].locations[0].code_offset;
+        let middle_opcode = debug_info.functions[1].locations[0].code_offset;
+        let helper_opcode = debug_info.functions[2].locations[0].code_offset;
 
-        let mut vm = VM::new_witgen(
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            0,
-            0,
-            ptr::null_mut(),
-            Vec::new(),
-            Vec::new(),
-        );
+        let mut vm = empty_witgen_vm();
         vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
 
         let caller = Frame::base_frame(3, &mut vm);
-        let callee = Frame::push(3, caller, &mut vm);
+        let middle = Frame::push(3, caller, &mut vm);
+        let callee = Frame::push(3, middle, &mut vm);
         unsafe {
-            *callee.data.offset(1) = binary.as_ptr().add(main_opcode + 1) as u64;
+            *middle.data.offset(1) = binary.as_ptr().add(main_opcode + 1) as u64;
+            *callee.data.offset(1) = binary.as_ptr().add(middle_opcode + 1) as u64;
         }
         vm.enable_instruction_profile();
         vm.record_instruction(unsafe { binary.as_ptr().add(helper_opcode) }, callee);
-        assert_eq!(vm.take_instruction_profile().to_folded(), "main;helper 1\n");
+        assert_eq!(
+            vm.take_instruction_profile().to_folded(),
+            "main;middle;helper 1\n"
+        );
         vm.capture_trap(unsafe { binary.as_ptr().add(helper_opcode) }, callee);
 
         assert_eq!(
@@ -2871,15 +2891,34 @@ mod tests {
                     location: callee_location,
                 },
                 StackFrame {
+                    function: "middle".to_string(),
+                    location: middle_location,
+                },
+                StackFrame {
                     function: "main".to_string(),
                     location: caller_location,
                 },
             ]
         );
 
-        let caller = callee.pop(&mut vm);
+        let middle = callee.pop(&mut vm);
+        let caller = middle.pop(&mut vm);
         let root = caller.pop(&mut vm);
         assert!(root.data.is_null());
+    }
+
+    #[test]
+    fn instruction_profile_uses_unknown_without_debug_context() {
+        let mut vm = empty_witgen_vm();
+        vm.enable_instruction_profile();
+        vm.record_instruction(
+            ptr::null(),
+            Frame {
+                data: ptr::null_mut(),
+            },
+        );
+
+        assert_eq!(vm.take_instruction_profile().to_folded(), "<unknown> 1\n");
     }
 
     #[test]

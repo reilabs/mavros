@@ -429,7 +429,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     if args.profile {
         let r1cs_profile = driver
             .r1cs_profile()
-            .expect("R1CS generation always records size profiles");
+            .expect("--profile enables R1CS size profiling");
         let output_dir = api::debug_output_dir(&driver).join("flamegraphs");
         for (profile, name, title, count_name) in [
             (
@@ -533,5 +533,60 @@ mod tests {
             ProgramOptions::try_parse_from(["mavros", "compile", ".", "--logup-soundness", "80"])
                 .unwrap();
         assert_eq!(on_subcommand.logup_soundness, 80);
+    }
+
+    #[test]
+    fn profile_run_writes_all_supported_artifacts() {
+        let project = tempfile::tempdir().unwrap();
+        fs::create_dir(project.path().join("src")).unwrap();
+        fs::write(
+            project.path().join("Nargo.toml"),
+            "[package]\nname = \"profile_smoke_test\"\ntype = \"bin\"\nauthors = []\n\n[dependencies]\n",
+        )
+        .unwrap();
+        fs::write(project.path().join("Prover.toml"), "x = \"1\"\n").unwrap();
+        fs::write(
+            project.path().join("src/main.nr"),
+            "fn main(x: Field) { assert_eq(x, 1); }\n",
+        )
+        .unwrap();
+
+        let root = project.path().to_str().unwrap();
+        let options =
+            ProgramOptions::try_parse_from(["mavros", "--root", root, "--profile"]).unwrap();
+        assert_eq!(run(&options).unwrap(), ExitCode::SUCCESS);
+
+        let output_dir = project.path().join("mavros_debug/flamegraphs");
+        for filename in [
+            "constraint_size.folded",
+            "witness_size.folded",
+            "witgen_time.folded",
+            "ad_time.folded",
+            "witgen_time.cpuprofile",
+            "ad_time.cpuprofile",
+        ] {
+            assert!(
+                output_dir.join(filename).is_file(),
+                "expected profiling artifact {filename}"
+            );
+        }
+
+        let flamegraph_available = std::process::Command::new("flamegraph.pl")
+            .arg("--help")
+            .output()
+            .is_ok();
+        if flamegraph_available {
+            for filename in [
+                "constraint_size.svg",
+                "witness_size.svg",
+                "witgen_time.svg",
+                "ad_time.svg",
+            ] {
+                assert!(
+                    output_dir.join(filename).is_file(),
+                    "expected rendered FlameGraph {filename}"
+                );
+            }
+        }
     }
 }

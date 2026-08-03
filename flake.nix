@@ -3,27 +3,14 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay.url = "github:oxalica/rust-overlay";
-    flamegraph = {
-      url = "github:brendangregg/FlameGraph";
-      flake = false;
-    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay, flamegraph }:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
         llvmPackages = pkgs.llvmPackages_22;
-        flamegraphTool = pkgs.stdenvNoCC.mkDerivation {
-          pname = "brendangregg-flamegraph";
-          version = "unstable";
-          src = flamegraph;
-          dontBuild = true;
-          installPhase = ''
-            install -Dm755 flamegraph.pl $out/bin/flamegraph.pl
-          '';
-        };
         noBrew = pkgs.writeShellScriptBin "brew" ''
           echo "brew is intentionally unavailable inside this Nix dev shell" >&2
           exit 127
@@ -63,7 +50,7 @@
             dprint
             git
             graphviz
-            flamegraphTool
+            flamegraph
             nodejs_25
             pkg-config
           ];
