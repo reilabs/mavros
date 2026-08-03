@@ -1,7 +1,6 @@
 //! Performs both peephole optimization and algebraic simplification on the SSA IR, running until it
 //! reaches an iteration limit or a fixed point.
 
-use ark_ff::Field as _;
 use num_traits::{One, Zero};
 
 use crate::{
@@ -527,11 +526,11 @@ fn materialize_zero(
     result: ValueId,
     fb: &mut HLFunctionBuilder<'_>,
 ) -> Option<Rewrite> {
-    materialize_const(types, result, fb, |t| match t {
+    let field = fb.field();
+    materialize_const(types, result, fb, move |t| match t {
         TypeExpr::U(s) => Some(Constant::U(*s, 0)),
         TypeExpr::I(s) => Some(Constant::I(*s, 0)),
-        // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
-        TypeExpr::Field => Some(Constant::Field(ark_bn254::Fr::zero())),
+        TypeExpr::Field => Some(Constant::Field(field.zero())),
         _ => None,
     })
 }
@@ -541,10 +540,11 @@ fn materialize_one(
     result: ValueId,
     fb: &mut HLFunctionBuilder<'_>,
 ) -> Option<Rewrite> {
-    materialize_const(types, result, fb, |t| match t {
+    let field = fb.field();
+    materialize_const(types, result, fb, move |t| match t {
         TypeExpr::U(s) => Some(Constant::U(*s, 1)),
         TypeExpr::I(s) => Some(Constant::I(*s, 1)),
-        TypeExpr::Field => Some(Constant::Field(ark_bn254::Fr::one())),
+        TypeExpr::Field => Some(Constant::Field(field.one())),
         _ => None,
     })
 }

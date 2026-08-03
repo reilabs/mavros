@@ -44,7 +44,7 @@
 //! exception: the element-wise `Map` cast does not trap but is answered `false` anyway (it is never
 //! worth materializing at a new point, and the motion candidate filter excludes it too).
 
-use ark_ff::Zero;
+use mavros_artifacts::FieldConfig;
 
 use crate::compiler::{
     analysis::{
@@ -198,6 +198,7 @@ impl<'a> TotalityOracle<'a> {
         if self.is_witness(divisor) {
             return false;
         }
+        let field = self.ssa.field();
         let ty = self.value_type(divisor);
 
         // `div_s64`/`mod_s64` sign-extend to i64, where MIN / -1 overflows. Only 64-bit operands
@@ -205,7 +206,7 @@ impl<'a> TotalityOracle<'a> {
         let minus_one_hazard = ty.is_i() && ty.get_bit_size() == 64;
 
         if let Some(c) = self.cc.const_of(self.fid, divisor) {
-            return !constant_is_zero(&c) && !(minus_one_hazard && constant_is_all_ones(&c));
+            return !constant_is_zero(&c, field) && !(minus_one_hazard && constant_is_all_ones(&c));
         }
         if minus_one_hazard {
             return false;
@@ -213,7 +214,7 @@ impl<'a> TotalityOracle<'a> {
 
         // Non-constant divisor: the disequality channel. A branch fact against zero can only exist
         // if the zero of the divisor's type is already interned.
-        let Some(zero) = zero_constant_of(ty) else {
+        let Some(zero) = zero_constant_of(ty, field) else {
             return false;
         };
         let Some(zero_id) = self.ssa.find_const(&zero) else {
@@ -286,21 +287,20 @@ pub enum WitnessnessSource<'a> {
 // ================================================================================================
 
 /// The zero constant of a scalar type, or `None` for non-scalar types.
-fn zero_constant_of(ty: &Type) -> Option<Constant> {
+fn zero_constant_of(ty: &Type, field: FieldConfig) -> Option<Constant> {
     match &ty.expr {
         TypeExpr::U(bits) => Some(Constant::U(*bits, 0)),
         TypeExpr::I(bits) => Some(Constant::I(*bits, 0)),
-        // FIELD-ASSUMPTION: L1-direct-ref (1 sites)
-        TypeExpr::Field => Some(Constant::Field(ark_bn254::Fr::zero())),
+        TypeExpr::Field => Some(Constant::Field(field.zero())),
         _ => None,
     }
 }
 
 /// `true` if `c` is the zero of its scalar domain (`FnPtr`/`Blob` constants have none).
-fn constant_is_zero(c: &Constant) -> bool {
+fn constant_is_zero(c: &Constant, field: FieldConfig) -> bool {
     match c {
         Constant::U(_, v) | Constant::I(_, v) => *v == 0,
-        Constant::Field(f) => f.is_zero(),
+        Constant::Field(f) => *f == field.zero(),
         Constant::FnPtr(_) | Constant::Blob(_) => false,
     }
 }

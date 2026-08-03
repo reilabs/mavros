@@ -1,14 +1,9 @@
-use ark_ff::{AdditiveGroup as _, Field as _};
-
-use crate::compiler::{
-    Field,
-    ssa::{
-        ValueId,
-        hlssa::{
-            BinaryArithOpKind, CastTarget, Endianness, LookupTarget, OpCode, Radix,
-            SequenceTargetType, Type, TypeExpr,
-            builder::{HLBlockEmitter, HLEmitter},
-        },
+use crate::compiler::ssa::{
+    ValueId,
+    hlssa::{
+        BinaryArithOpKind, CastTarget, Endianness, LookupTarget, OpCode, Radix, SequenceTargetType,
+        Type, TypeExpr,
+        builder::{HLBlockEmitter, HLEmitter},
     },
 };
 
@@ -187,7 +182,7 @@ impl LowerWitnessFieldOps {
         let rhs_pure = if rhs_witness { b.value_of(rhs) } else { rhs };
 
         let lhs_gated_hint = b.mul(lhs_pure, condition_pure);
-        let one = b.field_const(Field::ONE);
+        let one = b.field_const(b.field().one());
         let one_minus_condition = b.sub(one, condition_pure);
         let rhs_when_active = b.mul(rhs_pure, condition_pure);
         let safe_rhs_hint = b.add(rhs_when_active, one_minus_condition);
@@ -300,13 +295,13 @@ impl LowerWitnessFieldOps {
         let pure_value = b.value_of(value);
         let hint = b.to_radix(pure_value, radix, endianness, count);
         let mut witnesses = vec![ValueId(0); count];
-        let mut current_sum = b.field_const(Field::ZERO);
+        let mut current_sum = b.field_const(b.field().zero());
         let guard_field = guard
             .map(|condition| b.ensure_field(condition, context.types().get_value_type(condition)));
-        let flag = guard_field.unwrap_or_else(|| b.field_const(Field::ONE));
+        let flag = guard_field.unwrap_or_else(|| b.field_const(b.field().one()));
         // `radix` is always `Bytes` here: a dynamic radix was asserted `== 256` and normalized to
         // `Bytes` above, so each digit is a static 8-bit rangecheck. No `DynRangecheck` is emitted.
-        let radix_val = b.field_const(Field::from(256));
+        let radix_val = b.field_const(b.field().constant(256));
         let rangecheck_type = LookupTarget::Rangecheck(8);
         let visit_order: Box<dyn Iterator<Item = usize>> = match endianness {
             Endianness::Little => Box::new((0..count).rev()),
@@ -324,10 +319,10 @@ impl LowerWitnessFieldOps {
         }
         if let Some(flag) = guard_field {
             let diff = b.sub(current_sum, value);
-            let zero = b.field_const(Field::ZERO);
+            let zero = b.field_const(b.field().zero());
             b.constrain(diff, flag, zero);
         } else {
-            let constrain_one = b.field_const(Field::ONE);
+            let constrain_one = b.field_const(b.field().one());
             b.constrain(current_sum, constrain_one, value);
         }
         let byte_elems: Vec<ValueId> = witnesses
@@ -354,10 +349,10 @@ impl LowerWitnessFieldOps {
         let value_field = b.ensure_field(value, context.types().get_value_type(value));
         let flag = guard
             .map(|condition| b.ensure_field(condition, context.types().get_value_type(condition)))
-            .unwrap_or_else(|| b.field_const(Field::ONE));
+            .unwrap_or_else(|| b.field_const(b.field().one()));
 
         if max_bits == 0 {
-            let zero = b.field_const(Field::ZERO);
+            let zero = b.field_const(b.field().zero());
             b.constrain(flag, value_field, zero);
             return;
         }

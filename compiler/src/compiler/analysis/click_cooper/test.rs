@@ -1,5 +1,6 @@
+use mavros_artifacts::FieldConfig;
+
 use crate::compiler::{
-    Field,
     analysis::{
         click_cooper::ClickCooper, flow_analysis::FlowAnalysis, shared::call_string::Context,
         types::Types,
@@ -3840,7 +3841,7 @@ fn interproc_constant_return_folds_at_call_site() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
-    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+    let c5 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(5u64)));
     let r = ssa.fresh_value();
 
     {
@@ -3865,7 +3866,7 @@ fn interproc_constant_return_folds_at_call_site() {
     let cc = run_in_test(&ssa);
     assert_eq!(
         cc.const_of_in(main_id, &Context::empty(), r).as_deref(),
-        Some(&Constant::Field(Field::from(5u64)))
+        Some(&Constant::Field(FieldConfig::bn254().constant(5u64)))
     );
     // The intraprocedural view (what SCS reads) never folds a call result.
     assert_eq!(cc.const_of(main_id, r), None);
@@ -3879,7 +3880,7 @@ fn interproc_passthrough_seeds_param_and_result() {
     let main_id = ssa.get_unique_entrypoint_id();
     let id = ssa.add_function("id".to_string());
     let p = ssa.fresh_value();
-    let c7 = ssa.add_const(Constant::Field(Field::from(7u64)));
+    let c7 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(7u64)));
     let r = ssa.fresh_value();
 
     {
@@ -3905,13 +3906,13 @@ fn interproc_passthrough_seeds_param_and_result() {
     let cc = run_in_test(&ssa);
     assert_eq!(
         cc.const_of_in(main_id, &Context::empty(), r).as_deref(),
-        Some(&Constant::Field(Field::from(7u64)))
+        Some(&Constant::Field(FieldConfig::bn254().constant(7u64)))
     );
     let ctxs = cc.contexts_of(id);
     assert_eq!(ctxs.len(), 1);
     assert_eq!(
         cc.const_of_in(id, &ctxs[0], p).as_deref(),
-        Some(&Constant::Field(Field::from(7u64)))
+        Some(&Constant::Field(FieldConfig::bn254().constant(7u64)))
     );
 }
 
@@ -4139,7 +4140,7 @@ fn context_parameterized_conditional_queries() {
     let main_id = ssa.get_unique_entrypoint_id();
     let id = ssa.add_function("id".to_string());
     let p = ssa.fresh_value();
-    let c7 = ssa.add_const(Constant::Field(Field::from(7u64)));
+    let c7 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(7u64)));
     let r = ssa.fresh_value();
 
     {
@@ -4170,7 +4171,7 @@ fn context_parameterized_conditional_queries() {
     assert_eq!(cc.const_in_block(id, entry_id, p), None);
     assert_eq!(
         cc.const_in_block_in(id, &ctx, entry_id, p).as_deref(),
-        Some(&Constant::Field(Field::from(7u64)))
+        Some(&Constant::Field(FieldConfig::bn254().constant(7u64)))
     );
 }
 
@@ -4184,7 +4185,7 @@ fn asserted_const_refines_per_context() {
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let (x, p) = (ssa.fresh_value(), ssa.fresh_value());
-    let c7 = ssa.add_const(Constant::Field(Field::from(7u64)));
+    let c7 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(7u64)));
     let x0 = ssa.fresh_value();
 
     let after = {
@@ -4226,7 +4227,7 @@ fn asserted_const_refines_per_context() {
     // In the context `p` is the constant 7, so the same assert pins `x` to it...
     assert_eq!(
         cc.asserted_const_in(g, &ctx, pp, x).as_deref(),
-        Some(&Constant::Field(Field::from(7u64)))
+        Some(&Constant::Field(FieldConfig::bn254().constant(7u64)))
     );
     // ...and the pair has migrated out of the per-context eq channel.
     assert!(!cc.asserted_equal_in(g, &ctx, pp, x, p));
@@ -4621,7 +4622,7 @@ fn asserted_const_migrates_to_unconditional_channel() {
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let x = ssa.fresh_value();
-    let c7 = ssa.add_const(Constant::Field(Field::from(7u64)));
+    let c7 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(7u64)));
 
     let after = {
         let hf = ssa.get_function_mut(g);
@@ -4657,7 +4658,7 @@ fn asserted_const_migrates_to_unconditional_channel() {
     // Intraprocedurally `x` is opaque, so the assert pins it conditionally.
     assert_eq!(
         cc.asserted_const(g, pp, x).as_deref(),
-        Some(&Constant::Field(Field::from(7u64)))
+        Some(&Constant::Field(FieldConfig::bn254().constant(7u64)))
     );
     // In the context the seed already proves `x = 7` unconditionally: the conditional entry is
     // gone...
@@ -4665,7 +4666,7 @@ fn asserted_const_migrates_to_unconditional_channel() {
     // ...because the unconditional channel now carries it.
     assert_eq!(
         cc.const_of_in(g, &ctx, x).as_deref(),
-        Some(&Constant::Field(Field::from(7u64)))
+        Some(&Constant::Field(FieldConfig::bn254().constant(7u64)))
     );
 }
 
@@ -4683,8 +4684,8 @@ fn context_constant_can_split_congruence() {
     let main_id = ssa.get_unique_entrypoint_id();
     let f = ssa.add_function("f".to_string());
     let g = ssa.add_function("g".to_string());
-    let c3 = ssa.add_const(Constant::Field(Field::from(3u64)));
-    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+    let c3 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(3u64)));
+    let c5 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(5u64)));
     let (p, m) = (ssa.fresh_value(), ssa.fresh_value());
     let (a, w, x, y, eq, r) = (
         ssa.fresh_value(),
@@ -4787,8 +4788,8 @@ fn interproc_two_call_sites_are_distinguished() {
     let main_id = ssa.get_unique_entrypoint_id();
     let id = ssa.add_function("id".to_string());
     let p = ssa.fresh_value();
-    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
-    let c7 = ssa.add_const(Constant::Field(Field::from(7u64)));
+    let c5 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(5u64)));
+    let c7 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(7u64)));
     let (r5, r7) = (ssa.fresh_value(), ssa.fresh_value());
 
     {
@@ -4820,11 +4821,11 @@ fn interproc_two_call_sites_are_distinguished() {
     let cc = run_in_test(&ssa);
     assert_eq!(
         cc.const_of_in(main_id, &Context::empty(), r5).as_deref(),
-        Some(&Constant::Field(Field::from(5u64)))
+        Some(&Constant::Field(FieldConfig::bn254().constant(5u64)))
     );
     assert_eq!(
         cc.const_of_in(main_id, &Context::empty(), r7).as_deref(),
-        Some(&Constant::Field(Field::from(7u64)))
+        Some(&Constant::Field(FieldConfig::bn254().constant(7u64)))
     );
     let ctxs = cc.contexts_of(id);
     assert_eq!(ctxs.len(), 2, "two call sites → two contexts");
@@ -4833,8 +4834,8 @@ fn interproc_two_call_sites_are_distinguished() {
         .filter_map(|ctx| cc.const_of_in(id, ctx, p).map(|c| (*c).clone()))
         .collect();
     assert_eq!(seen.len(), 2);
-    assert!(seen.contains(&Constant::Field(Field::from(5u64))));
-    assert!(seen.contains(&Constant::Field(Field::from(7u64))));
+    assert!(seen.contains(&Constant::Field(FieldConfig::bn254().constant(5u64))));
+    assert!(seen.contains(&Constant::Field(FieldConfig::bn254().constant(7u64))));
 }
 
 /// An unconstrained call's result is advice, not circuit-constrained: it never folds (even when
@@ -4844,7 +4845,7 @@ fn unconstrained_call_result_is_opaque() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
-    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+    let c5 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(5u64)));
     let (r1, r2) = (ssa.fresh_value(), ssa.fresh_value());
 
     {
@@ -4908,7 +4909,7 @@ fn cross_call_congruence_for_deterministic_callee() {
             .set_terminator(Terminator::Return(vec![psum]));
     }
 
-    let c1 = ssa.add_const(Constant::Field(Field::from(1u64)));
+    let c1 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(1u64)));
     let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
     let (r1, r2, r3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
@@ -5046,7 +5047,7 @@ fn cross_call_congruence_is_transitive() {
             .set_terminator(Terminator::Return(vec![ores]));
     }
 
-    let c1 = ssa.add_const(Constant::Field(Field::from(1u64)));
+    let c1 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(1u64)));
     let x = ssa.fresh_value();
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
     let (r1, r2) = (ssa.fresh_value(), ssa.fresh_value());
@@ -5920,7 +5921,7 @@ fn symbolic_jump_ignores_dead_argument() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let f = ssa.add_function("f".to_string());
-    let c1 = ssa.add_const(Constant::Field(Field::from(1u64)));
+    let c1 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(1u64)));
     let (x, y, fa) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     // f(x, y) = x + 1  (y is dead).
@@ -5982,8 +5983,8 @@ fn symbolic_jump_relates_call_to_open_expression() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let f = ssa.add_function("f".to_string());
-    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
-    let c6 = ssa.add_const(Constant::Field(Field::from(6u64)));
+    let c5 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(5u64)));
+    let c6 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(6u64)));
     let (x, fa) = (ssa.fresh_value(), ssa.fresh_value());
 
     // f(x) = x + 5
@@ -6047,8 +6048,8 @@ fn symbolic_jump_depth_two_grafts_via_synthetic() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let f = ssa.add_function("f".to_string());
-    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
-    let c2 = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let c5 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(5u64)));
+    let c2 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(2u64)));
     let (x, ft, fa) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     // f(x) = (x + 5) * 2
@@ -6129,8 +6130,8 @@ fn symbolic_jump_dead_argument_behind_depth_two() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let f = ssa.add_function("f".to_string());
-    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
-    let c2 = ssa.add_const(Constant::Field(Field::from(2u64)));
+    let c5 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(5u64)));
+    let c2 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(2u64)));
     let (x, y, ft, fa) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -6203,9 +6204,9 @@ fn symbolic_jump_depth_over_cap_falls_back_to_calldet() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let f = ssa.add_function("f".to_string());
-    let c1 = ssa.add_const(Constant::Field(Field::from(1u64)));
-    let c2 = ssa.add_const(Constant::Field(Field::from(2u64)));
-    let c3 = ssa.add_const(Constant::Field(Field::from(3u64)));
+    let c1 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(1u64)));
+    let c2 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(2u64)));
+    let c3 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(3u64)));
     let (x, ft, fu, fa) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -6299,7 +6300,7 @@ fn symbolic_jump_nested_call_falls_back_to_calldet() {
     let main_id = ssa.get_unique_entrypoint_id();
     let h = ssa.add_function("h".to_string());
     let g = ssa.add_function("g".to_string());
-    let c1 = ssa.add_const(Constant::Field(Field::from(1u64)));
+    let c1 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(1u64)));
 
     let (hx, hr) = (ssa.fresh_value(), ssa.fresh_value());
     // h(x) = x + 1
@@ -6484,8 +6485,8 @@ fn symbolic_jump_synthetic_does_not_collide_with_callee_only_constant() {
 
     // Caller-side constants used to _synthesize_ Field(5) without naming the callee-only constant,
     // so the caller has a value in `C`'s constant class without referencing `C`'s id.
-    let two = ssa.add_const(Constant::Field(Field::from(2u64)));
-    let three = ssa.add_const(Constant::Field(Field::from(3u64)));
+    let two = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(2u64)));
+    let three = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(3u64)));
 
     // `f`'s formal, then every caller value — all minted before the callee-only constant so its id
     // is exactly one above the caller's local maximum (the single-synthetic window).
@@ -6497,7 +6498,7 @@ fn symbolic_jump_synthetic_does_not_collide_with_callee_only_constant() {
 
     // The callee-only constant, interned last. Field(5) so the caller's `2 + 3` folds into its
     // class.
-    let c = ssa.add_const(Constant::Field(Field::from(5u64)));
+    let c = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(5u64)));
 
     // `f`'s internal op results.
     let (ft, fa) = (ssa.fresh_value(), ssa.fresh_value());

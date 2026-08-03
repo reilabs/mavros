@@ -1,7 +1,7 @@
 //! Determines the smallest closed interval over which any numeric value in the SSA can range,
 //! uniformly across all integer types.
 
-use ark_ff::PrimeField;
+use mavros_artifacts::FieldConfig;
 use num_bigint::{BigInt, Sign};
 use num_traits::{One, Signed, Zero};
 use tracing::{Level, instrument};
@@ -109,18 +109,18 @@ impl IntInterval {
     }
 
     /// `[0, p − 1]` — the integer range of a Field element.
-    pub fn field_top() -> Self {
+    pub fn field_top(field: FieldConfig) -> Self {
         // FIELD-ASSUMPTION: L4-modulus-query
-        Self::closed(BigInt::zero(), bn254_modulus() - BigInt::one())
+        Self::closed(BigInt::zero(), field_modulus(field) - BigInt::one())
     }
 
     /// Initial bound for a value of the given declared type, looking through
     /// `WitnessOf`. Non-numeric types get TOP.
-    pub fn for_type(ty: &Type) -> Self {
+    pub fn for_type(ty: &Type, field: FieldConfig) -> Self {
         match &ty.strip_witness().expr {
             TypeExpr::U(n) => Self::unsigned_full(*n),
             TypeExpr::I(n) => Self::signed_full(*n),
-            TypeExpr::Field => Self::field_top(),
+            TypeExpr::Field => Self::field_top(field),
             _ => Self::top(),
         }
     }
@@ -357,10 +357,10 @@ fn signed_const_to_bigint(bits: usize, encoded: u128) -> BigInt {
 }
 
 // FIELD-ASSUMPTION: L4-modulus-query
-/// BN254 field modulus as a `BigInt`. Computed from ark-ff's `MODULUS`
-/// constant — single source of truth for the prime.
-fn bn254_modulus() -> BigInt {
-    let limbs = <Field as PrimeField>::MODULUS.0;
+/// The modulus of the configured field as a `BigInt`, read through the [`FieldConfig`] instance API
+/// so that no concrete prime is named. Shared with the integer-lowering width gates.
+pub fn field_modulus(field: FieldConfig) -> BigInt {
+    let limbs = field.modulus_limbs();
     let bytes_le: Vec<u8> = limbs.iter().flat_map(|l| l.to_le_bytes()).collect();
     BigInt::from_bytes_le(Sign::Plus, &bytes_le)
 }
@@ -439,6 +439,10 @@ impl ValueRangeAnalysis {
             functions: HashMap::default(),
         };
 
+        // The configured field, threaded through the interval algebra so that no
+        // static field is named.
+        let field = ssa.field();
+
         // Constants are module-level singletons; pre-compute their bounds once.
         let constant_bounds = compute_constant_bounds(ssa);
 
@@ -446,7 +450,7 @@ impl ValueRangeAnalysis {
             let func_cfg = cfg.get_function_cfg(*function_id);
             let func_types = types.get_function(*function_id);
             let function_ranges =
-                self.run_function(function, func_cfg, func_types, &constant_bounds);
+                self.run_function(function, func_cfg, func_types, &constant_bounds, field);
             result.functions.insert(*function_id, function_ranges);
         }
         result
@@ -459,6 +463,7 @@ impl ValueRangeAnalysis {
         cfg: &CFG,
         types: &FunctionTypeInfo,
         constant_bounds: &HashMap<ValueId, IntInterval>,
+        field: FieldConfig,
     ) -> FunctionValueRanges {
         let mut bounds: HashMap<ValueId, IntInterval> = constant_bounds.clone();
 
@@ -466,11 +471,14 @@ impl ValueRangeAnalysis {
         // Iteration only narrows from there.
         for (_block_id, block) in function.get_blocks() {
             for (vid, ty) in block.get_parameters() {
-                bounds.insert(*vid, IntInterval::for_type(ty));
+                bounds.insert(*vid, IntInterval::for_type(ty, field));
             }
             for instr in block.get_instructions() {
                 for vid in instr.get_results() {
-                    bounds.insert(*vid, IntInterval::for_type(types.get_value_type(*vid)));
+                    bounds.insert(
+                        *vid,
+                        IntInterval::for_type(types.get_value_type(*vid), field),
+                    );
                 }
             }
         }
@@ -508,13 +516,14 @@ impl ValueRangeAnalysis {
                                 });
                             }
                         }
-                        let new_range = joined.unwrap_or_else(|| IntInterval::for_type(param_type));
+                        let new_range =
+                            joined.unwrap_or_else(|| IntInterval::for_type(param_type, field));
                         Self::overwrite(&mut bounds, *param_id, new_range, &mut changed);
                     }
                 }
 
                 for instr in block.get_instructions() {
-                    self.transfer(instr, types, &mut bounds, &mut changed);
+                    self.transfer(instr, types, &mut bounds, &mut changed, field);
                 }
             }
 
@@ -544,13 +553,14 @@ impl ValueRangeAnalysis {
         types: &FunctionTypeInfo,
         bounds: &mut HashMap<ValueId, IntInterval>,
         changed: &mut bool,
+        field: FieldConfig,
     ) {
         use BinaryArithOpKind::*;
         let get = |bounds: &HashMap<ValueId, IntInterval>, v: ValueId| -> IntInterval {
             bounds.get(&v).cloned().unwrap_or_else(IntInterval::top)
         };
         let cap_to_type = |result: ValueId, r: IntInterval| {
-            r.intersect(&IntInterval::for_type(types.get_value_type(result)))
+            r.intersect(&IntInterval::for_type(types.get_value_type(result), field))
         };
 
         match instr {
@@ -569,7 +579,7 @@ impl ValueRangeAnalysis {
                         if in_r.is_non_negative() {
                             in_r
                         } else {
-                            IntInterval::field_top()
+                            IntInterval::field_top(field)
                         }
                     }
                     CastTarget::U(n) => {
@@ -614,7 +624,7 @@ impl ValueRangeAnalysis {
             OpCode::BitRange { result, width, .. } => {
                 let result_ty = types.get_value_type(*result);
                 let raw = match result_ty.strip_witness().expr {
-                    TypeExpr::I(bits) if *width >= bits => IntInterval::for_type(result_ty),
+                    TypeExpr::I(bits) if *width >= bits => IntInterval::for_type(result_ty, field),
                     _ => IntInterval::unsigned_full(*width),
                 };
                 Self::overwrite(bounds, *result, cap_to_type(*result, raw), changed);
@@ -634,7 +644,12 @@ impl ValueRangeAnalysis {
                 result,
                 result_type,
             } => {
-                Self::overwrite(bounds, *result, IntInterval::for_type(result_type), changed);
+                Self::overwrite(
+                    bounds,
+                    *result,
+                    IntInterval::for_type(result_type, field),
+                    changed,
+                );
             }
 
             OpCode::Cmp { result, .. } => {
@@ -652,7 +667,7 @@ impl ValueRangeAnalysis {
                         let mask = (BigInt::one() << *n) - BigInt::one();
                         match (&in_r.lo, &in_r.hi) {
                             (Some(lo), Some(hi)) => IntInterval::closed(&mask - hi, &mask - lo),
-                            _ => IntInterval::for_type(result_ty),
+                            _ => IntInterval::for_type(result_ty, field),
                         }
                     }
                     TypeExpr::I(_) => {
@@ -662,10 +677,10 @@ impl ValueRangeAnalysis {
                             (Some(lo), Some(hi)) => {
                                 IntInterval::closed(-hi - BigInt::one(), -lo - BigInt::one())
                             }
-                            _ => IntInterval::for_type(result_ty),
+                            _ => IntInterval::for_type(result_ty, field),
                         }
                     }
-                    _ => IntInterval::for_type(result_ty),
+                    _ => IntInterval::for_type(result_ty, field),
                 };
                 Self::overwrite(bounds, *result, cap_to_type(*result, r), changed);
             }
@@ -692,13 +707,13 @@ impl ValueRangeAnalysis {
                                 if d_lo == d_hi && d_lo.is_positive() {
                                     l.div_const_pos(d_lo)
                                 } else {
-                                    IntInterval::for_type(result_ty)
+                                    IntInterval::for_type(result_ty, field)
                                 }
                             } else {
-                                IntInterval::for_type(result_ty)
+                                IntInterval::for_type(result_ty, field)
                             }
                         } else {
-                            IntInterval::for_type(result_ty)
+                            IntInterval::for_type(result_ty, field)
                         }
                     }
                     Mod => {
@@ -712,10 +727,10 @@ impl ValueRangeAnalysis {
                                 (Some(lo), Some(hi)) if lo.is_positive() => {
                                     IntInterval::closed(BigInt::zero(), hi - BigInt::one())
                                 }
-                                _ => IntInterval::for_type(result_ty),
+                                _ => IntInterval::for_type(result_ty, field),
                             }
                         } else {
-                            IntInterval::for_type(result_ty)
+                            IntInterval::for_type(result_ty, field)
                         }
                     }
                     And | Or | Xor => {
@@ -741,13 +756,13 @@ impl ValueRangeAnalysis {
                                     }
                                     _ => unreachable!(),
                                 },
-                                _ => IntInterval::for_type(result_ty),
+                                _ => IntInterval::for_type(result_ty, field),
                             }
                         } else {
-                            IntInterval::for_type(result_ty)
+                            IntInterval::for_type(result_ty, field)
                         }
                     }
-                    Shl | Shr => IntInterval::for_type(result_ty),
+                    Shl | Shr => IntInterval::for_type(result_ty, field),
                 };
                 Self::overwrite(bounds, *result, cap_to_type(*result, raw), changed);
             }
@@ -771,13 +786,13 @@ impl ValueRangeAnalysis {
             }
 
             OpCode::Guard { inner, .. } => {
-                self.transfer(inner, types, bounds, changed);
+                self.transfer(inner, types, bounds, changed, field);
             }
 
             // Other opcodes: keep the type-based default bound.
             _ => {
                 for vid in instr.get_results() {
-                    let r = IntInterval::for_type(types.get_value_type(*vid));
+                    let r = IntInterval::for_type(types.get_value_type(*vid), field);
                     Self::overwrite(bounds, *vid, r, changed);
                 }
             }

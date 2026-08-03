@@ -5,8 +5,10 @@
 //! in defunctionalization wherever needed. In some cases, we can call the specialized version
 //! directly instead.
 
-use ark_ff::{AdditiveGroup, BigInteger, PrimeField};
+use ark_ff::BigInteger;
 use tracing::{info, instrument};
+
+use mavros_artifacts::FieldConfig;
 
 use crate::{
     collections::{HashMap, HashSet},
@@ -56,9 +58,9 @@ enum ConstVal {
     BitsOf(Box<ValueId>, usize, Endianness),
 }
 
-fn const_val_as_field(value: &ConstVal) -> Option<Field> {
+fn const_val_as_field(value: &ConstVal, field: FieldConfig) -> Option<Field> {
     match value {
-        ConstVal::U(_, v) | ConstVal::I(_, v) => Some(Field::from(*v)),
+        ConstVal::U(_, v) | ConstVal::I(_, v) => Some(field.constant(*v)),
         ConstVal::Field(f) => Some(*f),
         _ => None,
     }
@@ -71,7 +73,11 @@ fn r1c_consts(
     b: &Val,
     c: &Val,
 ) -> Option<(Field, Field, Field)> {
-    let field_const = |v: &Val| ctx.const_vals.get(&v.0).and_then(const_val_as_field);
+    let field_const = |v: &Val| {
+        ctx.const_vals
+            .get(&v.0)
+            .and_then(|cv| const_val_as_field(cv, ctx.field()))
+    };
     Some((field_const(a)?, field_const(b)?, field_const(c)?))
 }
 
@@ -118,6 +124,10 @@ impl HLEmitter for SpecializationState<'_> {
 
     fn emit_constant(&mut self, value: Constant) -> ValueId {
         self.ssa.add_const(value)
+    }
+
+    fn field(&self) -> FieldConfig {
+        self.ssa.field()
     }
 }
 
@@ -223,20 +233,24 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                 Self(res_v)
             }
 
-            (BinaryArithOpKind::Mul, Some(ConstVal::Field(f)), _) if f == ark_ff::Field::ONE => *b,
-            (BinaryArithOpKind::Mul, _, Some(ConstVal::Field(f))) if f == ark_ff::Field::ONE => {
+            (BinaryArithOpKind::Mul, Some(ConstVal::Field(f)), _) if f == ctx.field().one() => *b,
+            (BinaryArithOpKind::Mul, _, Some(ConstVal::Field(f))) if f == ctx.field().one() => {
                 *self
             }
-            (BinaryArithOpKind::Mul, Some(ConstVal::Field(f)), _) if f == Field::ZERO => *self,
-            (BinaryArithOpKind::Mul, _, Some(ConstVal::Field(f))) if f == Field::ZERO => *b,
+            (BinaryArithOpKind::Mul, Some(ConstVal::Field(f)), _) if f == ctx.field().zero() => {
+                *self
+            }
+            (BinaryArithOpKind::Mul, _, Some(ConstVal::Field(f))) if f == ctx.field().zero() => *b,
 
             (BinaryArithOpKind::Mul, None, None) => {
                 let res = ctx.mul(self.0, b.0);
                 Self(res)
             }
 
-            (BinaryArithOpKind::Add, Some(ConstVal::Field(f)), _) if f == Field::ZERO => *b,
-            (BinaryArithOpKind::Add, _, Some(ConstVal::Field(f))) if f == Field::ZERO => *self,
+            (BinaryArithOpKind::Add, Some(ConstVal::Field(f)), _) if f == ctx.field().zero() => *b,
+            (BinaryArithOpKind::Add, _, Some(ConstVal::Field(f))) if f == ctx.field().zero() => {
+                *self
+            }
 
             (BinaryArithOpKind::Add, _, _) => Self(ctx.add(self.0, b.0)),
             (BinaryArithOpKind::Sub, _, _) => Self(ctx.sub(self.0, b.0)),
@@ -481,7 +495,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
             // FIELD-ASSUMPTION: L4-decompose
             (Some(ConstVal::Field(f)), TypeExpr::Field, Some(mask)) if offset < 128 => {
                 let v: u128 = f.into_bigint().as_ref()[0] as u128;
-                let res = Field::from((v >> offset) & mask);
+                let res = ctx.field().constant((v >> offset) & mask);
                 let res_v = ctx.field_const(res);
                 ctx.const_vals.insert(res_v, ConstVal::Field(res));
                 Self(res_v)
@@ -509,7 +523,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                     Self(res_v)
                 }
                 CastTarget::Field => {
-                    let res = Field::from(v);
+                    let res = ctx.field().constant(v);
                     let res_v = ctx.field_const(res);
                     ctx.const_vals.insert(res_v, ConstVal::Field(res));
                     Self(res_v)

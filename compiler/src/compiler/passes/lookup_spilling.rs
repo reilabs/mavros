@@ -1,8 +1,8 @@
-use ark_ff::{AdditiveGroup, Field as _};
-
 use crate::collections::{HashMap, HashSet};
+
+use mavros_artifacts::FieldConfig;
+
 use crate::compiler::{
-    Field,
     analysis::{
         flow_analysis::FlowAnalysis,
         lookup_sizing::{Chunk, LookupSizing, TableKind},
@@ -45,9 +45,9 @@ struct HelperKey {
 
 /// Whether `flag` is the literal constant `1` (an unconditional lookup). Such a flag lets the
 /// spilled bit-bounds take their free algebraic form; see [`HelperKey::flag_is_const_one`].
-fn flag_is_const_one(consts: &HLSSAConstantsSnapshot, flag: ValueId) -> bool {
+fn flag_is_const_one(consts: &HLSSAConstantsSnapshot, flag: ValueId, field: FieldConfig) -> bool {
     match consts.get(&flag).map(|c| &**c) {
-        Some(Constant::Field(f)) => *f == Field::ONE,
+        Some(Constant::Field(f)) => *f == field.one(),
         Some(Constant::U(_, v)) => *v == 1,
         _ => false,
     }
@@ -73,6 +73,7 @@ impl LookupSpilling {
         types: &FunctionTypeInfo,
         sizing: &LookupSizing,
         consts: &HLSSAConstantsSnapshot,
+        field: FieldConfig,
     ) -> Option<HelperKey> {
         match instr {
             OpCode::Lookup {
@@ -90,7 +91,7 @@ impl LookupSpilling {
                 if width == 1 {
                     return None; // 1-bit rangechecks are lowered inline (algebraic), no helper.
                 }
-                let uncond = flag_is_const_one(consts, *flag);
+                let uncond = flag_is_const_one(consts, *flag, field);
                 let plan = sizing.decompose_rangecheck(width, !uncond);
                 if is_direct_passthrough(&plan, width, TableKind::Range) {
                     return None;
@@ -109,7 +110,7 @@ impl LookupSpilling {
                 args,
                 flag,
             } => {
-                let uncond = flag_is_const_one(consts, *flag);
+                let uncond = flag_is_const_one(consts, *flag, field);
                 let plan = sizing.decompose_spread(*bits, !uncond);
                 if is_direct_passthrough(&plan, *bits, TableKind::Spread) {
                     return None;
@@ -150,7 +151,7 @@ impl LookupSpilling {
                     // An unconditional helper bakes `flag = 1` so the spilled bit-bounds take their
                     // free algebraic form; a conditional helper takes the flag as a parameter.
                     let flag = if key.flag_is_const_one {
-                        e.field_const(Field::ONE)
+                        e.field_const(e.field().one())
                     } else {
                         e.add_parameter(key.flag_type.clone())
                     };
@@ -170,7 +171,7 @@ impl LookupSpilling {
                     let key_is_witness = key.value_type.is_witness_of();
                     let key_inner_is_field = key.value_type.strip_witness().is_field();
                     let flag_field = if key.flag_is_const_one {
-                        e.field_const(Field::ONE)
+                        e.field_const(e.field().one())
                     } else {
                         let flag = e.add_parameter(key.flag_type.clone());
                         e.ensure_field(flag, &key.flag_type)
@@ -223,7 +224,7 @@ impl LookupSpilling {
                 target: LookupTarget::Rangecheck(_),
                 args,
                 flag,
-            } => match self.helper_key_for(instr, types, sizing, consts) {
+            } => match self.helper_key_for(instr, types, sizing, consts, e.field()) {
                 Some(key) => {
                     let helper = cache[&key];
                     // Unconditional helpers bake `flag = 1` and take no flag parameter.
@@ -241,7 +242,7 @@ impl LookupSpilling {
                 target: LookupTarget::Spread(_),
                 args,
                 flag,
-            } => match self.helper_key_for(instr, types, sizing, consts) {
+            } => match self.helper_key_for(instr, types, sizing, consts, e.field()) {
                 Some(key) => {
                     let helper = cache[&key];
                     let call_args = if key.flag_is_const_one {
@@ -282,7 +283,8 @@ impl Pass for LookupSpilling {
             let fti = types.get_function(fid);
             for (_bid, block) in ssa.get_function(fid).get_blocks() {
                 for instr in block.get_instructions() {
-                    if let Some(key) = self.helper_key_for(instr, fti, sizing, &consts) {
+                    if let Some(key) = self.helper_key_for(instr, fti, sizing, &consts, ssa.field())
+                    {
                         if seen.insert(key.clone()) {
                             needed.push(key);
                         }
@@ -369,7 +371,7 @@ impl LookupSpilling {
         // `gated` mirrors the per-bit free/witnessed split in `spill_one_bit_rangecheck`: an
         // unconditional lookup (flag baked to the constant 1) bit-bounds for free, so its plan may
         // use width-1 chunks the cost model also priced for free.
-        let gated = flag != b.field_const(Field::ONE);
+        let gated = flag != b.field_const(b.field().one());
         let plan = sizing.decompose_rangecheck(bits as u8, gated);
 
         let pure = if is_witness { b.value_of(value) } else { value };
@@ -388,7 +390,7 @@ impl LookupSpilling {
         // Extract every chunk above the lowest and accumulate `rest`; the lowest chunk (offset 0) is
         // derived below as `value - rest`, a linear combination needing no reconstruction
         // constraint. Always unrolled — a counted-loop fast path for uniform runs is future work.
-        let mut rest = b.field_const(Field::ZERO);
+        let mut rest = b.field_const(b.field().zero());
         for i in 1..plan.len() {
             let chunk = plan[i];
             let raw_u =
@@ -401,7 +403,7 @@ impl LookupSpilling {
             };
             self.emit_rangecheck_chunk(b, chunk, key, flag, is_witness);
 
-            let shift = b.field_const(two_pow(offsets[i]));
+            let shift = b.field_const(b.field().two_pow(offsets[i]));
             let shifted = b.mul(key, shift);
             rest = b.add(rest, shifted);
         }
@@ -413,7 +415,7 @@ impl LookupSpilling {
 
     /// 1-bit rangecheck, lowered algebraically as `b·(b-1) = 0` rather than a table lookup.
     fn spill_one_bit_rangecheck(&self, b: &mut HLBlockEmitter<'_>, value: ValueId, flag: ValueId) {
-        let one = b.field_const(Field::ONE);
+        let one = b.field_const(b.field().one());
         if flag == one {
             b.constrain(value, value, value);
             return;
@@ -423,7 +425,7 @@ impl LookupSpilling {
         let square = b.write_witness(square_hint);
         b.constrain(value, value, square);
         let diff = b.sub(square, value);
-        let zero = b.field_const(Field::ZERO);
+        let zero = b.field_const(b.field().zero());
         b.constrain(flag, diff, zero);
     }
 
@@ -485,10 +487,10 @@ impl LookupSpilling {
 
         // `gated` mirrors `spill_one_bit_rangecheck`: an unconditional spread (flag baked to 1)
         // bit-bounds for free, so its plan may use the free width-1 chunks (see the rangecheck path).
-        let gated = flag_field != b.field_const(Field::ONE);
+        let gated = flag_field != b.field_const(b.field().one());
         let mut plan = sizing.decompose_spread(bits, gated);
 
-        let zero = b.field_const(Field::ZERO);
+        let zero = b.field_const(b.field().zero());
 
         // Single chunk: the whole value, looked up directly (full, or partial with a gap). The key
         // is the value itself, so there is no reconstruction to constrain.
@@ -566,10 +568,10 @@ impl LookupSpilling {
                 }
                 spread
             };
-            let key_shift = b.field_const(two_pow(offset));
+            let key_shift = b.field_const(b.field().two_pow(offset));
             let shifted_key = b.mul(chunk_key, key_shift);
             rec_key = b.add(rec_key, shifted_key);
-            let spread_shift = b.field_const(two_pow(offset * 2));
+            let spread_shift = b.field_const(b.field().two_pow(offset * 2));
             let shifted_spread = b.mul(chunk_spread, spread_shift);
             rec_spread = b.add(rec_spread, shifted_spread);
         }
@@ -596,7 +598,7 @@ impl LookupSpilling {
     /// `(2^width - 1) - key`, the complement looked up by the "2-larger" trick to bound `key` to
     /// exactly `width` bits.
     fn partial_gap(&self, b: &mut HLBlockEmitter<'_>, chunk: Chunk, key: ValueId) -> ValueId {
-        let bound = b.field_const(Field::from((1u128 << chunk.width) - 1));
+        let bound = b.field_const(b.field().constant((1u128 << chunk.width) - 1));
         b.sub(bound, key)
     }
 
@@ -685,11 +687,6 @@ fn extract_low_chunk(
     let modulus = b.u_const(value_bits, two_pow_u128(chunk_bits));
     let chunk = b.modulo(shifted, modulus);
     b.cast_to(CastTarget::U(chunk_bits), chunk)
-}
-
-// FIELD-ASSUMPTION: L4-two-pow
-fn two_pow(exponent: usize) -> Field {
-    Field::from(2).pow([exponent as u64])
 }
 
 // FIELD-ASSUMPTION: L4-two-pow

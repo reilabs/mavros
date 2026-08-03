@@ -37,6 +37,8 @@
 
 use std::{collections::VecDeque, sync::Arc};
 
+use mavros_artifacts::FieldConfig;
+
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
@@ -214,6 +216,9 @@ pub(crate) fn compute_summaries(
     // Polymorphic over call sites: callees folded via their current summaries, parameters `Bottom`.
     let fids: Vec<FunctionId> = ssa.get_function_ids().collect();
 
+    // The field the program operates over, threaded into each polymorphic solve.
+    let field = ssa.field();
+
     // The worklist discards each round's `FunctionFacts`, but a function's *last* analysis runs
     // against converged callee summaries (any callee change re-queues it), so those facts are
     // exactly what the symbolic post-pass would recompute. Retain the sym-relevant slice as we go —
@@ -230,7 +235,7 @@ pub(crate) fn compute_summaries(
                 // Arity 0: nothing flows out and the symbolic pass skips it — no solve, no cache.
                 return FnSummary::default();
             }
-            let facts = solve_polymorphic(func, consts, det, summaries);
+            let facts = solve_polymorphic(func, consts, field, det, summaries);
             let summary = summarize_returns(ssa, consts, f, &facts);
 
             // Keep only what `compute_sym_summaries` reads; drop `lattice`/`exec_edges`/`block_facts`.
@@ -517,6 +522,9 @@ pub(crate) fn specialize(
 ) -> HashMap<(FunctionId, Context), FunctionFacts> {
     let main = ssa.get_unique_entrypoint_id();
 
+    // The field the program operates over, threaded into each context's solve.
+    let field = ssa.field();
+
     // Entry-parameter values per function, collected once and borrowed throughout: the worklist
     // would otherwise re-walk a function's parameters on every dequeue and every visited call site.
     let param_index: HashMap<FunctionId, Vec<ValueId>> = ssa
@@ -559,8 +567,15 @@ pub(crate) fn specialize(
         // symbolic channel is on here, so a call's grafted return expression can refine per-context
         // congruence too.
         let func = ssa.get_function(f);
-        let mut facts =
-            solve_with_writeback(func, consts, det, Some(summaries), Some(sym), &seed_map);
+        let mut facts = solve_with_writeback(
+            func,
+            consts,
+            field,
+            det,
+            Some(summaries),
+            Some(sym),
+            &seed_map,
+        );
 
         // Build the dominance-aware congruence leaders so `leader_in` yields a legal redirect
         // target.
@@ -652,12 +667,14 @@ pub(crate) type SymSolveCache = HashMap<FunctionId, SymSolveFacts>;
 fn solve_polymorphic(
     func: &HLFunction,
     consts: &HLSSAConstantsSnapshot,
+    field: FieldConfig,
     det: &DetSummaries,
     summaries: &HashMap<FunctionId, FnSummary>,
 ) -> FunctionFacts {
     solve_with_writeback(
         func,
         consts,
+        field,
         det,
         Some(summaries),
         None,
