@@ -1,13 +1,8 @@
-use ark_ff::{AdditiveGroup as _, Field as _};
-
-use crate::compiler::{
-    Field,
-    ssa::{
-        ValueId,
-        hlssa::{
-            CmpKind, OpCode, TypeExpr,
-            builder::{HLBlockEmitter, HLEmitter},
-        },
+use crate::compiler::ssa::{
+    ValueId,
+    hlssa::{
+        CmpKind, OpCode, TypeExpr,
+        builder::{HLBlockEmitter, HLEmitter},
     },
 };
 
@@ -105,7 +100,7 @@ impl LowerWitnessAssertOps {
     ) {
         let cond_field = guard
             .map(|condition| b.ensure_field(condition, context.types().get_value_type(condition)))
-            .unwrap_or_else(|| b.field_const(Field::ONE));
+            .unwrap_or_else(|| b.field_const(b.field().one()));
         b.constrain(cond_field, value_field, cond_field);
     }
 
@@ -124,10 +119,10 @@ impl LowerWitnessAssertOps {
         if let Some(condition) = guard {
             let cond_field = b.ensure_field(condition, context.types().get_value_type(condition));
             let diff = b.sub(lhs_field, rhs_field);
-            let zero = b.field_const(Field::ZERO);
+            let zero = b.field_const(b.field().zero());
             b.constrain(cond_field, diff, zero);
         } else {
-            let one = b.field_const(Field::ONE);
+            let one = b.field_const(b.field().one());
             b.constrain(lhs_field, one, rhs_field);
         }
     }
@@ -180,7 +175,7 @@ impl LowerWitnessAssertOps {
         let lhs_field = b.ensure_field(lhs, &lhs_type.strip_witness());
         let rhs_field = b.ensure_field(rhs, &rhs_type.strip_witness());
         let diff = b.sub(rhs_field, lhs_field);
-        let one = b.field_const(Field::ONE);
+        let one = b.field_const(b.field().one());
         let diff_minus_one = b.sub(diff, one);
         self.emit_rangecheck(b, guard, diff_minus_one, bits);
     }
@@ -226,7 +221,7 @@ impl LowerWitnessAssertOps {
             let product = b.mul(a_field, b_field);
             let diff = b.sub(product, c_field);
             let cond_field = b.ensure_field(condition, context.types().get_value_type(condition));
-            let zero = b.field_const(Field::ZERO);
+            let zero = b.field_const(b.field().zero());
             b.constrain(cond_field, diff, zero);
         } else {
             b.constrain(a_field, b_field, c_field);

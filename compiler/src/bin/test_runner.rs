@@ -10,12 +10,12 @@ use std::{
 };
 
 use cargo_metadata::MetadataCommand;
-use mavros_compiler::collections::HashMap;
 
 use ark_ff::UniformRand as _;
+use mavros_artifacts::Field as RawField;
 use mavros_compiler::{
     Project, abi_helpers,
-    compiler::Field,
+    collections::HashMap,
     compiler::codegen::{
         CodeGenOptions,
         hlssa_to_r1cs::R1CS,
@@ -303,7 +303,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
             emit("START:AD_RUN");
             let r1cs = r1cs.as_ref().unwrap();
             let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-            let ad_coeffs: Vec<Field> = (0..r1cs.constraints.len())
+            let ad_coeffs: Vec<RawField> = (0..r1cs.constraints.len())
                 .map(|_| ark_bn254::Fr::rand(&mut rng)) // FIELD-ASSUMPTION: L1-direct-ref (3 sites)
                 .collect();
             match interpreter::run_ad(
@@ -445,7 +445,7 @@ fn run_single(root: PathBuf, expect_failure: bool) {
         emit("START:AD_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        let ad_coeffs: Vec<Field> = (0..r1cs.constraints.len())
+        let ad_coeffs: Vec<RawField> = (0..r1cs.constraints.len())
             .map(|_| ark_bn254::Fr::rand(&mut rng))
             .collect();
         match run_ad_wasm(wasm_path, r1cs, &ad_coeffs) {
@@ -503,11 +503,11 @@ const WASM_STATIC_DATA_BYTES: u32 = 4096;
 
 /// Output from running WASM witgen
 struct WasmResult {
-    out_wit_pre_comm: Vec<Field>,
-    out_wit_post_comm: Vec<Field>,
-    out_a: Vec<Field>,
-    out_b: Vec<Field>,
-    out_c: Vec<Field>,
+    out_wit_pre_comm: Vec<RawField>,
+    out_wit_post_comm: Vec<RawField>,
+    out_a: Vec<RawField>,
+    out_b: Vec<RawField>,
+    out_c: Vec<RawField>,
     live_bytes: usize,
 }
 
@@ -519,7 +519,7 @@ fn read_table_info_slot(
     store: impl wasmtime::AsContext,
     tables_ptr: u32,
     wasm_witness_ptr: u32,
-    host_witness_base: *mut Field,
+    host_witness_base: *mut RawField,
     table_idx: u32,
 ) -> (usize, TableInfo) {
     let slot_base = tables_ptr + table_idx * TABLE_INFO_SLOT_SIZE;
@@ -557,7 +557,7 @@ fn read_u32_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr: u
 }
 
 /// Read a field element from WASM memory
-fn read_field_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr: u32) -> Field {
+fn read_field_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr: u32) -> RawField {
     // FIELD-ASSUMPTION: L3-frame
     use ark_ff::BigInt;
     let data = memory.data(&store);
@@ -571,7 +571,7 @@ fn read_field_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr:
 
 /// Write a field element to WASM memory (writes Montgomery form)
 /// Flatten an InputValueOrdered into a list of Field elements
-fn flatten_input_value(value: &interpreter::InputValueOrdered) -> Vec<Field> {
+fn flatten_input_value(value: &interpreter::InputValueOrdered) -> Vec<RawField> {
     let mut result = Vec::new();
     match value {
         interpreter::InputValueOrdered::Field(elem) => result.push(*elem),
@@ -599,7 +599,7 @@ fn run_wasm(
 ) -> Result<WasmResult, Box<dyn std::error::Error>> {
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
-    let input_fields: Vec<Field> = params.iter().flat_map(flatten_input_value).collect();
+    let input_fields: Vec<RawField> = params.iter().flat_map(flatten_input_value).collect();
 
     let vm_struct_size: u32 = WITGEN_VM_STRUCT_SIZE;
     // FIELD-ASSUMPTION: L3-field-size
@@ -834,11 +834,11 @@ fn run_wasm(
 
 fn witgen_phase2(
     r1cs: &R1CS,
-    mut out_wit_pre_comm: Vec<Field>,
-    out_wit_post_comm: Vec<Field>,
-    out_a: Vec<Field>,
-    out_b: Vec<Field>,
-    out_c: Vec<Field>,
+    mut out_wit_pre_comm: Vec<RawField>,
+    out_wit_post_comm: Vec<RawField>,
+    out_a: Vec<RawField>,
+    out_b: Vec<RawField>,
+    out_c: Vec<RawField>,
     runtime_tables: Vec<(usize, TableInfo)>,
 ) -> interpreter::WitgenResult {
     use mavros_compiler::vm::bytecode::AllocationInstrumenter;
@@ -853,7 +853,7 @@ fn witgen_phase2(
         let hi = lo + tbl.length;
         for i in lo..hi {
             // FIELD-ASSUMPTION: L4-low-limb
-            out_wit_pre_comm[i] = Field::from(out_wit_pre_comm[i].0.0[0]);
+            out_wit_pre_comm[i] = RawField::from(out_wit_pre_comm[i].0.0[0]);
         }
     }
 
@@ -889,9 +889,9 @@ fn witgen_phase2(
 
 /// Output from running AD WASM
 struct AdWasmResult {
-    out_da: Vec<Field>,
-    out_db: Vec<Field>,
-    out_dc: Vec<Field>,
+    out_da: Vec<RawField>,
+    out_db: Vec<RawField>,
+    out_dc: Vec<RawField>,
     live_bytes: usize,
 }
 
@@ -900,7 +900,7 @@ fn write_field_to_memory(
     memory: &Memory,
     mut store: impl wasmtime::AsContextMut,
     ptr: u32,
-    field: &Field,
+    field: &RawField,
 ) {
     let limbs = field.0.0;
     let offset = ptr as usize;
@@ -914,7 +914,7 @@ fn write_field_to_memory(
 fn run_ad_wasm(
     wasm_path: &Path,
     r1cs: &R1CS,
-    coeffs: &[Field],
+    coeffs: &[RawField],
 ) -> Result<AdWasmResult, Box<dyn std::error::Error>> {
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();

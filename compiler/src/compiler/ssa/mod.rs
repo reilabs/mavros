@@ -10,6 +10,7 @@ pub mod traits;
 
 use bimap::BiHashMap;
 use itertools::Itertools;
+use mavros_artifacts::FieldConfig;
 use std::{
     fmt::Debug,
     hash::Hash,
@@ -95,6 +96,12 @@ pub struct SSA<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> {
     /// Bidirectional mapping between constant `ValueId`s and their values. The bijection is
     /// maintained by routing all insertions through [`SSA::add_const`], which interns by value.
     constants: SSAConstants<C>,
+
+    /// The field the program operates over. The middle-end mints and inspects field values through
+    /// this instance (see [`SSA::field`]) so no pass names a concrete prime; a future `--field`
+    /// selector will seed it from the [`Driver`](crate::driver::Driver) (mirroring `logup_soundness`),
+    /// but bn254 is the only field today so construction defaults to [`FieldConfig::bn254`].
+    field: FieldConfig,
 }
 
 impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Clone for SSA<Op, Ty, C> {
@@ -110,6 +117,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Clone for SSA<O
             next_function_id: self.next_function_id,
             next_value_id: AtomicU64::new(self.next_value_id.load(Ordering::Relaxed)),
             constants: RwLock::new(self.constants.read().unwrap().clone()),
+            field: self.field,
         }
     }
 }
@@ -128,6 +136,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
             next_function_id: 0,
             next_value_id: AtomicU64::new(0),
             constants: RwLock::new(BiHashMap::default()),
+            field: FieldConfig::bn254(),
         }
     }
 
@@ -136,6 +145,15 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
         let main_id = ssa.add_function(name);
         ssa.add_entry_point(main_id);
         ssa
+    }
+
+    /// The field the program operates over.
+    ///
+    /// Field values are minted and inspected through this instance (e.g. `ssa.field().two_pow(k)`,
+    /// `ssa.field().zero()`) rather than static `Field::` associated items, so the middle-end names
+    /// no concrete prime. Returns by value as [`FieldConfig`] is `Copy`.
+    pub fn field(&self) -> FieldConfig {
+        self.field
     }
 }
 
@@ -157,6 +175,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
                 next_function_id: self.next_function_id,
                 next_value_id: self.next_value_id,
                 constants: self.constants,
+                field: self.field,
             },
             self.functions,
             self.global_types,
@@ -377,6 +396,10 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
         assert_eq!(
             self.global_types, other.global_types,
             "Cannot merge SSAs with diverging global types"
+        );
+        assert_eq!(
+            self.field, other.field,
+            "Cannot merge SSAs configured over different fields"
         );
 
         let mut other_fn_ids: Vec<FunctionId> = other.functions.keys().copied().collect();

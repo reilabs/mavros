@@ -1,8 +1,12 @@
+pub mod field;
+
 use std::fmt::Display;
 
 use ark_ff::{AdditiveGroup, BigInt, PrimeField};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracing::error;
+
+pub use field::{Bn254Field, FieldConfig, FieldElement, FieldId, MavrosField};
 
 // FIELD-ASSUMPTION: L1-alias
 pub type Field = ark_bn254::Fr;

@@ -2,10 +2,9 @@
 
 use std::sync::{Arc, OnceLock};
 
-use ark_ff::{PrimeField, Zero};
+use mavros_artifacts::FieldConfig;
 
 use crate::compiler::{
-    Field,
     ssa::hlssa::{
         BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, MAX_SUPPORTED_SIGNED_BITS,
         SliceOpDir, Type,
@@ -74,7 +73,12 @@ pub(crate) fn bool_constant(value: bool) -> Arc<Constant> {
 ///
 /// Integer results must fit the operand width: an overflowing pure op is an erroneous evaluation
 /// with a backend-specific residue, so an overflowing fold is refused rather than guessed at.
-pub(crate) fn eval_binary(kind: BinaryArithOpKind, a: &Constant, b: &Constant) -> Option<Constant> {
+pub(crate) fn eval_binary(
+    kind: BinaryArithOpKind,
+    a: &Constant,
+    b: &Constant,
+    field: FieldConfig,
+) -> Option<Constant> {
     use BinaryArithOpKind::*;
     match (a, b) {
         (Constant::U(s1, x), Constant::U(s2, y)) => {
@@ -180,7 +184,7 @@ pub(crate) fn eval_binary(kind: BinaryArithOpKind, a: &Constant, b: &Constant) -
             Sub => Some(Constant::Field(*x - *y)),
             Mul => Some(Constant::Field(*x * *y)),
             Div => {
-                if y.is_zero() {
+                if *y == field.zero() {
                     None
                 } else {
                     // FIELD-ASSUMPTION: L4-inverse
@@ -242,7 +246,7 @@ pub(crate) fn eval_cmp(kind: CmpKind, a: &Constant, b: &Constant) -> Option<Cons
 /// HLSSA casts are raw-bits conversions (sign extension is the separate `SExt` op). Integers
 /// zero-extend into fields, fields truncate to their low bits, and integer-to-integer casts
 /// zero-extend or truncate.
-pub(crate) fn eval_cast(target: &CastTarget, v: &Constant) -> Option<Constant> {
+pub(crate) fn eval_cast(target: &CastTarget, v: &Constant, field: FieldConfig) -> Option<Constant> {
     match target {
         CastTarget::Nop => Some(v.clone()),
         CastTarget::WitnessOf
@@ -251,7 +255,7 @@ pub(crate) fn eval_cast(target: &CastTarget, v: &Constant) -> Option<Constant> {
         | CastTarget::Map(_) => None,
         CastTarget::Field => match v {
             // FIELD-ASSUMPTION: L4-eval
-            Constant::U(_, x) | Constant::I(_, x) => Some(Constant::Field(Field::from(*x))),
+            Constant::U(_, x) | Constant::I(_, x) => Some(Constant::Field(field.constant(*x))),
             Constant::Field(_) => Some(v.clone()),
             Constant::FnPtr(_) | Constant::Blob(_) => None,
         },

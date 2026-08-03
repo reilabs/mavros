@@ -14,10 +14,11 @@ use noirc_frontend::{
 };
 use tracing::info;
 
+use mavros_artifacts::Field as RawField;
+
 use crate::{
     Project,
     compiler::{
-        Field,
         analysis::{
             flow_analysis::FlowAnalysis, types::Types,
             witness_taint_inference::WitnessTaintInference,
@@ -474,21 +475,23 @@ impl Driver {
             .map_err(|e| Error::UnsatisfiableProgram(e.message))?;
         // Captured before `seal` consumes `r1cs_gen`; feeds the LogUp soundness degree D.
         let num_lookups = r1cs_gen.num_lookups();
+        // Captured before `r1cs_ssa` is stored away; sizes the LogUp per-challenge soundness.
+        let field = r1cs_ssa.field();
         let r1cs = r1cs_gen.seal();
         let mut num_non_zero_terms = 0;
         for r1c in r1cs.constraints.iter() {
             for (_, coeff) in r1c.a.iter() {
-                if *coeff != Field::ZERO {
+                if *coeff != RawField::ZERO {
                     num_non_zero_terms += 1;
                 }
             }
             for (_, coeff) in r1c.b.iter() {
-                if *coeff != Field::ZERO {
+                if *coeff != RawField::ZERO {
                     num_non_zero_terms += 1;
                 }
             }
             for (_, coeff) in r1c.c.iter() {
-                if *coeff != Field::ZERO {
+                if *coeff != RawField::ZERO {
                     num_non_zero_terms += 1;
                 }
             }
@@ -512,7 +515,7 @@ impl Driver {
         // always 1 here and the emitted circuit is unchanged.
         if r1cs.witness_layout.challenges_size > 0 {
             let degree = r1cs.witness_layout.multiplicities_size + num_lookups;
-            let report = logup_soundness_report(self.logup_soundness, degree)
+            let report = logup_soundness_report(field, self.logup_soundness, degree)
                 .map_err(Error::LogupSoundnessUnsupported)?;
             info!(
                 message = %"LogUp soundness",

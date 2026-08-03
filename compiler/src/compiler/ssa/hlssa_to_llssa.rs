@@ -668,14 +668,14 @@ fn lower_constant_to_ll_constant(constant: &Constant) -> LLConstant {
         }
         // FIELD-ASSUMPTION: L2-lower
         Constant::Field(fr) => {
-            let values =
-                fr.0.0
-                    .iter()
-                    .map(|&limb| LLConstant::Int {
-                        bits: 64,
-                        value: limb as u128,
-                    })
-                    .collect();
+            let values = fr
+                .montgomery_limbs()
+                .iter()
+                .map(|&limb| LLConstant::Int {
+                    bits: 64,
+                    value: limb as u128,
+                })
+                .collect();
             LLConstant::Struct {
                 layout: LLStruct::field_elem(),
                 values,

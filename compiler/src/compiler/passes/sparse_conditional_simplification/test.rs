@@ -1,6 +1,5 @@
 use super::*;
 use crate::compiler::{
-    Field,
     analysis::click_cooper::test::run_in_test,
     ssa::SourcePosition,
     ssa::hlssa::{BinaryArithOpKind, CastTarget, CmpKind, Constant, SequenceTargetType, Type},
@@ -84,7 +83,7 @@ fn folds_constants_and_prunes_dead_branch() {
 #[test]
 fn folds_phi_of_agreeing_constants() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c7 = ssa.add_const(Constant::Field(Field::from(7u64)));
+    let c7 = ssa.add_const(Constant::Field(ssa.field().constant(7u64)));
     let (cond, m_param) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -195,7 +194,7 @@ fn does_not_fold_overflow() {
 #[test]
 fn does_not_fold_witness_casts() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+    let c5 = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
     let (wit, doubled) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -755,7 +754,7 @@ fn asserted_const_substituted_after_assert() {
 #[test]
 fn asserted_const_substituted_after_assert_cmp_eq() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::Field(Field::from(5u64)));
+    let c5 = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
     let x = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
