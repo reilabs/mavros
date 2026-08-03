@@ -59,6 +59,12 @@ impl LowerWitnessFieldOps {
                 self.lower_select(b, context, *result, *cond, *if_t, *if_f);
                 true
             }
+            OpCode::ToBits {
+                result,
+                value,
+                endianness,
+                count,
+            } => self.lower_to_bits(b, context, guard, *result, *value, *endianness, *count),
             OpCode::ToRadix {
                 result,
                 value,
@@ -252,6 +258,80 @@ impl LowerWitnessFieldOps {
         }
     }
 
+    fn lower_to_bits(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        context: &LoweringContext<'_>,
+        guard: Option<ValueId>,
+        result: ValueId,
+        value: ValueId,
+        endianness: Endianness,
+        count: usize,
+    ) -> bool {
+        if !context.types().get_value_type(value).is_witness_of() {
+            return false;
+        }
+
+        // Compute the decomposition in witgen, then bind each hinted bit to a fresh circuit
+        // witness. WitnessWriteToFresh removes this hint chain from the R1CS pipeline later.
+        let pure_value = b.value_of(value);
+        // Witgen has one canonical representation for bit decomposition. Reverse the indices
+        // below when the source operation requested big-endian output.
+        let hint = b.to_bits(pure_value, Endianness::Little, count);
+        let mut witnesses = vec![ValueId(0); count];
+
+        let guard_field = guard
+            .map(|condition| b.ensure_field(condition, context.types().get_value_type(condition)));
+        let flag = guard_field.unwrap_or_else(|| b.field_const(Field::ONE));
+        let rangecheck_type = LookupTarget::Rangecheck(1);
+        let two = b.field_const(Field::from(2));
+        let mut recomposed = b.field_const(Field::ZERO);
+
+        // Horner evaluation must visit the most-significant output bit first. The output array
+        // itself retains the endianness requested by the source program.
+        let visit_order: Box<dyn Iterator<Item = usize>> = match endianness {
+            Endianness::Little => Box::new((0..count).rev()),
+            Endianness::Big => Box::new(0..count),
+        };
+        for i in visit_order {
+            let hint_index = match endianness {
+                Endianness::Little => i,
+                Endianness::Big => count - i - 1,
+            };
+            let idx = b.u_const(32, hint_index as u128);
+            let bit = b.array_get(hint, idx);
+            let bit_field = b.cast_to_field(bit);
+            let bit_witness = b.write_witness(bit_field);
+            b.lookup_rngchk(rangecheck_type, bit_witness, flag);
+            let shifted = b.mul(recomposed, two);
+            recomposed = b.add(shifted, bit_witness);
+            witnesses[i] = bit_witness;
+        }
+
+        // Bind the decomposition to the input. Under a guard, the equality and one-bit lookups
+        // are active only when the guarded operation executes.
+        if let Some(flag) = guard_field {
+            let diff = b.sub(recomposed, value);
+            let zero = b.field_const(Field::ZERO);
+            b.constrain(diff, flag, zero);
+        } else {
+            let one = b.field_const(Field::ONE);
+            b.constrain(recomposed, one, value);
+        }
+
+        let bit_elems = witnesses
+            .into_iter()
+            .map(|bit| b.cast_to(CastTarget::U(1), bit))
+            .collect();
+        b.emit(OpCode::MkSeq {
+            result,
+            elems: bit_elems,
+            seq_type: SequenceTargetType::Array(count),
+            elem_type: Type::witness_of(Type::u(1)),
+        });
+        true
+    }
+
     fn lower_to_radix(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -374,5 +454,117 @@ fn cast_target_for_integer_type(ty: &Type) -> CastTarget {
         TypeExpr::U(bits) => CastTarget::U(bits),
         TypeExpr::I(bits) => CastTarget::I(bits),
         other => panic!("expected integer type, got {:?}", other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::{
+        pass_manager::{AnalysisStore, Pass},
+        passes::instruction_lowering::InstructionLowering,
+        ssa::{Terminator, hlssa::HLSSA},
+    };
+
+    fn lowered_to_bits(guarded: bool) -> (HLSSA, ValueId) {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let value = ssa.fresh_value();
+        let condition = guarded.then(|| ssa.fresh_value());
+        let result = ssa.fresh_value();
+        let function = ssa.get_unique_entrypoint_mut();
+        function.add_return_type(Type::witness_of(Type::u(1)).array_of(3));
+        let entry = function.get_entry_mut();
+        entry.push_parameter(value, Type::witness_of(Type::field()));
+        if let Some(condition) = condition {
+            entry.push_parameter(condition, Type::witness_of(Type::u(1)));
+        }
+        let to_bits = OpCode::ToBits {
+            result,
+            value,
+            endianness: Endianness::Little,
+            count: 3,
+        };
+        entry.push_test_instruction(if let Some(condition) = condition {
+            OpCode::Guard {
+                condition,
+                inner: Box::new(to_bits),
+            }
+        } else {
+            to_bits
+        });
+        entry.set_terminator(Terminator::Return(vec![result]));
+
+        InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
+        (ssa, result)
+    }
+
+    fn assert_constrained_bit_decomposition(ssa: &HLSSA, result: ValueId) {
+        let instructions: Vec<_> = ssa
+            .get_unique_entrypoint()
+            .get_entry()
+            .get_instructions()
+            .collect();
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|op| matches!(op, OpCode::ToBits { .. }))
+                .count(),
+            1,
+            "the pure witgen hint must remain"
+        );
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|op| matches!(op, OpCode::WriteWitness { .. }))
+                .count(),
+            3
+        );
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|op| matches!(
+                    op,
+                    OpCode::Lookup {
+                        target: LookupTarget::Rangecheck(1),
+                        ..
+                    }
+                ))
+                .count(),
+            3
+        );
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|op| matches!(op, OpCode::Constrain { .. }))
+                .count(),
+            1
+        );
+        assert!(instructions.iter().any(|op| matches!(
+            op,
+            OpCode::MkSeq {
+                result: r,
+                elems,
+                seq_type: SequenceTargetType::Array(3),
+                elem_type,
+            } if *r == result && elems.len() == 3 && *elem_type == Type::witness_of(Type::u(1))
+        )));
+    }
+
+    #[test]
+    fn witnessed_to_bits_is_lowered_to_constrained_bit_witnesses() {
+        let (ssa, result) = lowered_to_bits(false);
+        assert_constrained_bit_decomposition(&ssa, result);
+    }
+
+    #[test]
+    fn guarded_witnessed_to_bits_keeps_its_constraints() {
+        let (ssa, result) = lowered_to_bits(true);
+        assert_constrained_bit_decomposition(&ssa, result);
+        assert!(
+            ssa.get_unique_entrypoint()
+                .get_entry()
+                .get_instructions()
+                .all(|op| !matches!(op, OpCode::Guard { .. }))
+        );
     }
 }

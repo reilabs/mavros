@@ -75,7 +75,6 @@ impl LowerSideEffectFreeGuards {
             | OpCode::SlicePush { .. }
             | OpCode::SliceLen { .. }
             | OpCode::Select { .. }
-            | OpCode::ToBits { .. }
             | OpCode::WriteWitness { .. }
             | OpCode::FreshWitness { .. }
             | OpCode::NextDCoeff { .. }
@@ -87,6 +86,7 @@ impl LowerSideEffectFreeGuards {
             | OpCode::Spread { .. }
             | OpCode::Unspread { .. }
             | OpCode::Todo { .. } => true,
+            OpCode::ToBits { value, .. } => !type_info.get_value_type(*value).is_witness_of(),
             OpCode::ToRadix { value, .. } => !type_info.get_value_type(*value).is_witness_of(),
             OpCode::Store { .. }
             | OpCode::Assert { .. }

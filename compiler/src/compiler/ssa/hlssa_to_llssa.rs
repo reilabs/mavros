@@ -1443,6 +1443,23 @@ fn lower_instruction(
             e.call(drop_fn_id, vec![ll_value], 0);
         }
 
+        OpCode::ToBits {
+            result,
+            value,
+            endianness,
+            count,
+        } if matches!(fn_type_info.get_value_type(*value).expr, HLTypeExpr::Field) => {
+            lower_to_bits(e, val_map, *result, *value, *endianness, *count);
+        }
+
+        OpCode::ToBits { value, .. } => {
+            panic!(
+                "HLSSA->LLSSA lowering: ToBits only supports pure Field inputs, got {}: {:?}",
+                fn_type_info.get_value_type(*value),
+                instruction
+            );
+        }
+
         // Supported ToRadix: Radix::Bytes on a pure Field input.
         // All other ToRadix shapes are rejected by the explicit catch-all below.
         OpCode::ToRadix {
@@ -1920,6 +1937,62 @@ fn lower_to_bytes(
         let idx = e.emit_int_const(64, i as u64);
         let elem_ptr = e.array_elem_ptr(data, es.clone(), idx);
         e.ll_store(elem_ptr, bytes_le[src_idx]);
+    }
+
+    val_map.insert(result, arr);
+}
+
+fn lower_to_bits(
+    e: &mut LLBlockEmitter<'_>,
+    val_map: &mut HashMap<ValueId, ValueId>,
+    result: ValueId,
+    value: ValueId,
+    endianness: Endianness,
+    count: usize,
+) {
+    let ll_value = val_map[&value];
+    let limbs_val = e.field_to_limbs(ll_value);
+    let limbs = [
+        e.extract_field(limbs_val, LLStruct::limbs(), 0),
+        e.extract_field(limbs_val, LLStruct::limbs(), 1),
+        e.extract_field(limbs_val, LLStruct::limbs(), 2),
+        e.extract_field(limbs_val, LLStruct::limbs(), 3),
+    ];
+
+    let zero_bit = e.emit_int_const(1, 0);
+    let mut bits_le = Vec::with_capacity(count);
+    for i in 0..count {
+        if i >= 256 {
+            bits_le.push(zero_bit);
+            continue;
+        }
+        let limb_idx = i / 64;
+        let bit_offset = i % 64;
+        let shifted = if bit_offset == 0 {
+            limbs[limb_idx]
+        } else {
+            let shift = e.emit_int_const(64, bit_offset as u64);
+            e.int_arith(IntArithOp::UShr, limbs[limb_idx], shift)
+        };
+        bits_le.push(e.truncate(shifted, 1));
+    }
+
+    let u1_type = HLType::u(1);
+    let rc_struct = rc_seq_struct(&u1_type);
+    let es = elem_struct(&u1_type);
+    let len = e.emit_int_const(64, count as u64);
+    let arr = e.heap_alloc(rc_struct.clone(), Some(len));
+    init_rc_sequence_header(e, arr, rc_struct.clone(), len);
+
+    let data = e.struct_field_ptr(arr, rc_struct, SEQ_DATA_FIELD);
+    for i in 0..count {
+        let src_idx = match endianness {
+            Endianness::Big => count - 1 - i,
+            Endianness::Little => i,
+        };
+        let idx = e.emit_int_const(64, i as u64);
+        let elem_ptr = e.array_elem_ptr(data, es.clone(), idx);
+        e.ll_store(elem_ptr, bits_le[src_idx]);
     }
 
     val_map.insert(result, arr);
@@ -4348,6 +4421,7 @@ fn generate_drngchk_ad_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::Field;
     use crate::compiler::ssa::DefaultSSAAnnotator;
     use crate::compiler::ssa::llssa::builder::LLSSABuilder;
 
@@ -4483,6 +4557,45 @@ mod tests {
         assert!(
             dump.contains("memcpy"),
             "expected memcpy from const data in LLSSA dump:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn field_to_bits_lowers_to_limb_extraction_and_an_array() {
+        use crate::compiler::analysis::types::Types;
+        use crate::compiler::ssa::hlssa::builder::{HLEmitter, HLSSABuilder};
+
+        let mut hlssa = HLSSA::with_main("to_bits_test".to_string());
+        let main_id = hlssa.get_unique_entrypoint_id();
+        hlssa
+            .get_function_mut(main_id)
+            .add_return_type(HLType::u(1).array_of(5));
+
+        let mut hb = HLSSABuilder::new(&mut hlssa);
+        hb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.test_block(entry);
+            let value = e.field_const(Field::from(13));
+            let bits = e.to_bits(value, Endianness::Big, 5);
+            e.terminate_return(vec![bits]);
+        });
+
+        let flow = FlowAnalysis::run(&hlssa);
+        let types = Types::new().run(&hlssa, &flow);
+        let llssa = lower_inner(&hlssa, &flow, &types, None, CodeGenOptions::default());
+        let dump = llssa.to_string(&DefaultSSAAnnotator);
+
+        assert!(
+            dump.contains("field.to_limbs"),
+            "expected field limb extraction in LLSSA dump:\n{dump}"
+        );
+        assert!(
+            dump.contains("heap_alloc"),
+            "expected an allocated bit array in LLSSA dump:\n{dump}"
+        );
+        assert!(
+            dump.contains("trunc"),
+            "expected limb values to be truncated to bits in LLSSA dump:\n{dump}"
         );
     }
 }
