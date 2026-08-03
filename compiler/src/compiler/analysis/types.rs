@@ -33,7 +33,9 @@ fn push_witness_of_to_leaves(t: Type) -> Type {
         TypeExpr::WitnessOf(_) => t,
         TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => Type::witness_of(t),
         TypeExpr::Array(inner, n) => push_witness_of_to_leaves(*inner).array_of(n),
-        TypeExpr::Slice(inner) => push_witness_of_to_leaves(*inner).slice_of(),
+        TypeExpr::Slice { elem: inner, len } => {
+            push_witness_of_to_leaves(*inner).slice_of_with_len(*len)
+        }
         TypeExpr::Tuple(fields) => {
             Type::tuple_of(fields.into_iter().map(push_witness_of_to_leaves).collect())
         }
@@ -45,7 +47,7 @@ fn push_witness_of_to_leaves(t: Type) -> Type {
 fn replace_array_element_type(container: &Type, element_type: Type) -> Type {
     match &container.expr {
         TypeExpr::Array(_, size) => element_type.array_of(*size),
-        TypeExpr::Slice(_) => element_type.slice_of(),
+        TypeExpr::Slice { len, .. } => element_type.slice_of_with_len(*len.clone()),
         TypeExpr::WitnessOf(inner) => {
             Type::witness_of_collapsed(replace_array_element_type(inner, element_type))
         }
@@ -409,9 +411,96 @@ impl Types {
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
-            OpCode::SliceLen { result, slice: _ } => {
-                // Result is always u32
-                function_info.values.insert(*result, Type::u(32));
+            OpCode::SlicePop {
+                result_slice,
+                result_elem,
+                slice,
+                dir: _,
+            } => {
+                let slice_type = function_info.values.get(slice).ok_or_else(|| {
+                    format!("Slice value {:?} not found in type assignments", slice)
+                })?;
+                let elem_type = slice_type.get_array_element();
+                function_info
+                    .values
+                    .insert(*result_slice, slice_type.clone());
+                function_info.values.insert(*result_elem, elem_type);
+                Ok(())
+            }
+            OpCode::SliceInsert {
+                result,
+                slice,
+                index,
+                value,
+            } => {
+                let slice_type = function_info.values.get(slice).ok_or_else(|| {
+                    format!("Slice value {:?} not found in type assignments", slice)
+                })?;
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+                let index_type = function_info.values.get(index).ok_or_else(|| {
+                    format!("Index value {:?} not found in type assignments", index)
+                })?;
+
+                let elem_type = slice_type.get_array_element();
+                let result_elem_type = if index_type.is_witness_of() {
+                    push_witness_of_to_leaves(Type::join(&elem_type, value_type))
+                } else {
+                    Type::join(&elem_type, value_type)
+                };
+                let result_type = if result_elem_type == elem_type {
+                    slice_type.clone()
+                } else {
+                    replace_array_element_type(slice_type, result_elem_type)
+                };
+                function_info.values.insert(*result, result_type);
+                Ok(())
+            }
+            OpCode::SliceRemove {
+                result_slice,
+                result_elem,
+                slice,
+                index,
+            } => {
+                let slice_type = function_info.values.get(slice).ok_or_else(|| {
+                    format!("Slice value {:?} not found in type assignments", slice)
+                })?;
+                let index_type = function_info.values.get(index).ok_or_else(|| {
+                    format!("Index value {:?} not found in type assignments", index)
+                })?;
+
+                let elem_type = slice_type.get_array_element();
+                // A witness-index shift makes every surviving element (and the removed one) a
+                // select result.
+                let result_elem_type = if index_type.is_witness_of() {
+                    push_witness_of_to_leaves(elem_type.clone())
+                } else {
+                    elem_type.clone()
+                };
+                let result_slice_type = if result_elem_type == elem_type {
+                    slice_type.clone()
+                } else {
+                    replace_array_element_type(slice_type, result_elem_type.clone())
+                };
+                function_info
+                    .values
+                    .insert(*result_slice, result_slice_type);
+                function_info.values.insert(*result_elem, result_elem_type);
+                Ok(())
+            }
+            OpCode::SliceLen { result, slice } => {
+                let slice_type = function_info.values.get(slice).ok_or_else(|| {
+                    format!("Slice value {:?} not found in type assignments", slice)
+                })?;
+                let peeled = slice_type.peel_witness();
+                let len_type = if peeled.is_slice() {
+                    peeled.get_slice_len().clone()
+                } else {
+                    Type::u(32)
+                };
+                function_info.values.insert(*result, len_type);
                 Ok(())
             }
             OpCode::Select {
@@ -435,10 +524,11 @@ impl Types {
                 // Alternatives must match (after potential WitnessCastInsertion).
                 // The matched alternative type comes from unifying the two branches.
                 let alt_type = then_type.get_arithmetic_result_type(otherwise_type);
-                // If cond is WitnessOf and alternatives are not already WitnessOf,
-                // the result is WitnessOf(alt_type). Otherwise result = alt_type.
+                // If cond is WitnessOf and alternatives are not already WitnessOf, the witness
+                // influence lands on the result's leaves: scalars/refs get wrapped, containers
+                // don't. Note that slice len is not tainted as it was purified in a previous pass
                 let result_type = if cond_type.is_witness_of() && !alt_type.is_witness_of() {
-                    Type::witness_of(alt_type)
+                    push_witness_of_to_leaves(alt_type)
                 } else {
                     alt_type
                 };

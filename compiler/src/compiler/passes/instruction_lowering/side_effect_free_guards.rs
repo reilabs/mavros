@@ -88,6 +88,10 @@ impl LowerSideEffectFreeGuards {
             | OpCode::Unspread { .. }
             | OpCode::Todo { .. } => true,
             OpCode::ToRadix { value, .. } => !type_info.get_value_type(*value).is_witness_of(),
+            // Pop from empty must fail
+            OpCode::SlicePop { .. } => false,
+            // OOB insert/remove must fail
+            OpCode::SliceInsert { .. } | OpCode::SliceRemove { .. } => false,
             OpCode::Store { .. }
             | OpCode::Assert { .. }
             | OpCode::AssertCmp { .. }

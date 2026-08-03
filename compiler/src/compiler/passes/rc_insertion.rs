@@ -731,6 +731,15 @@ impl RCInsertion {
                         live_vals.extend(values.iter().copied());
                         currently_live.extend(live_vals);
                     }
+                    OpCode::SlicePop { .. } => {
+                        panic!("ICE: SlicePop must be lowered before rc insertion")
+                    }
+                    OpCode::SliceInsert { .. } => {
+                        panic!("ICE: SliceInsert must be lowered before rc insertion")
+                    }
+                    OpCode::SliceRemove { .. } => {
+                        panic!("ICE: SliceRemove must be lowered before rc insertion")
+                    }
                     OpCode::InitGlobal {
                         global: _,
                         value: v,
@@ -950,7 +959,7 @@ impl RCInsertion {
         match &value_type.expr {
             TypeExpr::Ref(_) => true,
             TypeExpr::Array(_, _) => true,
-            TypeExpr::Slice(_) => true,
+            TypeExpr::Slice { .. } => true,
             TypeExpr::Field => false,
             TypeExpr::U(_) => false,
             TypeExpr::I(_) => false,

@@ -120,6 +120,9 @@ impl DCE {
             | OpCode::ArrayGet { .. }
             | OpCode::ArraySet { .. }
             | OpCode::SlicePush { .. }
+            | OpCode::SlicePop { .. }
+            | OpCode::SliceInsert { .. }
+            | OpCode::SliceRemove { .. }
             | OpCode::SliceLen { .. }
             | OpCode::MkSeq { .. }
             | OpCode::MkSeqOfBlob { .. }

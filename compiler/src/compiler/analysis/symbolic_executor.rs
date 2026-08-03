@@ -459,6 +459,15 @@ impl SymbolicExecutor {
                         let vals: Vec<_> = values.iter().map(|v| scope[v].clone()).collect();
                         scope.insert(*result, ctx.slice_push(sl, &vals, *dir));
                     }
+                    OpCode::SlicePop { .. } => {
+                        panic!("ICE: SlicePop must be lowered before symbolic execution")
+                    }
+                    OpCode::SliceInsert { .. } => {
+                        panic!("ICE: SliceInsert must be lowered before symbolic execution")
+                    }
+                    OpCode::SliceRemove { .. } => {
+                        panic!("ICE: SliceRemove must be lowered before symbolic execution")
+                    }
                     OpCode::SliceLen {
                         result: r,
                         slice: sl,

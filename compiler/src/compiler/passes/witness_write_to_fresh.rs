@@ -75,6 +75,9 @@ impl WitnessWriteToFresh {
                         | OpCode::ArrayGet { .. }
                         | OpCode::ArraySet { .. }
                         | OpCode::SlicePush { .. }
+                        | OpCode::SlicePop { .. }
+                        | OpCode::SliceInsert { .. }
+                        | OpCode::SliceRemove { .. }
                         | OpCode::SliceLen { .. }
                         | OpCode::Select { .. }
                         | OpCode::ToBits { .. }

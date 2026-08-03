@@ -171,7 +171,7 @@ impl Value {
                 let elem_unknown = Value::unknown_from_type(elem);
                 Value::array(vec![elem_unknown; *n])
             }
-            TypeExpr::Slice(_) => Value::UnknownSlice,
+            TypeExpr::Slice { .. } => Value::UnknownSlice,
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Ref(inner) => {
                 Value::Pointer(Rc::new(RefCell::new(Value::unknown_from_type(inner))))
@@ -1922,11 +1922,13 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         pushed_values: &[SpecSplitValue],
         dir: SliceOpDir,
     ) -> SpecSplitValue {
-        assert_eq!(dir, SliceOpDir::Back); // TODO
         let new_unspec = match &slice.unspecialized {
             Value::Array(values) => {
-                let mut new_values = values.as_ref().clone();
-                new_values.extend(pushed_values.iter().map(|v| v.unspecialized.clone()));
+                let pushed = pushed_values.iter().map(|v| v.unspecialized.clone());
+                let new_values = match dir {
+                    SliceOpDir::Front => pushed.chain(values.as_ref().iter().cloned()).collect(),
+                    SliceOpDir::Back => values.as_ref().iter().cloned().chain(pushed).collect(),
+                };
                 Value::array(new_values)
             }
             Value::UnknownSlice => Value::UnknownSlice,
@@ -1934,8 +1936,11 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         };
         let new_spec = match &slice.specialized {
             Value::Array(values) => {
-                let mut new_values = values.as_ref().clone();
-                new_values.extend(pushed_values.iter().map(|v| v.specialized.clone()));
+                let pushed = pushed_values.iter().map(|v| v.specialized.clone());
+                let new_values = match dir {
+                    SliceOpDir::Front => pushed.chain(values.as_ref().iter().cloned()).collect(),
+                    SliceOpDir::Back => values.as_ref().iter().cloned().chain(pushed).collect(),
+                };
                 Value::array(new_values)
             }
             Value::UnknownSlice => Value::UnknownSlice,
@@ -2314,7 +2319,7 @@ impl CostEstimator {
                 let elem_sig = self.type_to_unknown_sig(elem);
                 ValueSignature::Array(vec![elem_sig; *len])
             }
-            TypeExpr::Slice(elem) => {
+            TypeExpr::Slice { elem, .. } => {
                 let elem_sig = self.type_to_unknown_sig(elem);
                 ValueSignature::Array(vec![elem_sig; 0])
             }

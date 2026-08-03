@@ -22,12 +22,13 @@
 //!
 //! #### Positions, Not Values
 //!
-//! Witness-ness is attributed per 'level' of a type, **not** per value: a `Ref<Array<Field>>`, for
-//! example, has independent taint at the ref level, the array level, and the field level (mirroring
-//! `WitnessShape::{Scalar, Array, Ref}`). A position is `(owner, path)` where the path descends
-//! through `Deref`/`Elem`, and owner is a parameter slot, a return slot, an SSA value, the
-//! function's cfg flag, a global, or the synthetic always-Witness source Top. Edges then connect
-//! positions level-for-level.
+//! Witness-ness is attributed per 'level' of a type, **not** per value: a `Ref<Slice<Field>>`,
+//! for example, has independent taint at the ref level, the slice's length, and the field level
+//! (mirroring `WitnessShape::{Scalar, Array, Slice, Ref}`). Containers themselves carry no taint
+//! slot. A position is `(owner, path)` where
+//! the path descends through `Deref`/`Elem` — plus a terminal `Len` level for each slice — and
+//! owner is a parameter slot, a return slot, an SSA value, the function's cfg flag, a global, or
+//! the synthetic always-Witness source Top. Edges then connect positions level-for-level.
 //!
 //! #### Two Phases and the Safety of Summaries
 //!

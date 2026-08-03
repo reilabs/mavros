@@ -77,6 +77,9 @@ pub enum Descent {
 
     /// Through an `Array<T>`/`Slice<T>` to its element `T`.
     Elem,
+
+    /// To a `Slice<T>`'s *length*
+    Len,
 }
 
 /// What a [`Position`] belongs to.
@@ -137,7 +140,15 @@ fn collect_paths(ty: &Type, prefix: &mut Vec<Descent>, out: &mut Vec<Vec<Descent
         | TypeExpr::I(_)
         | TypeExpr::Function
         | TypeExpr::Blob(..) => {}
-        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
+        TypeExpr::Slice { elem: inner, .. } => {
+            prefix.push(Descent::Len);
+            out.push(prefix.clone());
+            prefix.pop();
+            prefix.push(Descent::Elem);
+            collect_paths(inner, prefix, out);
+            prefix.pop();
+        }
+        TypeExpr::Array(inner, _) => {
             prefix.push(Descent::Elem);
             collect_paths(inner, prefix, out);
             prefix.pop();

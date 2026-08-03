@@ -50,7 +50,8 @@ pub type WitnessInfo = WitnessType;
 #[derive(PartialEq, Eq, Debug, Clone, Hash)]
 pub enum WitnessShape {
     Scalar(WitnessInfo),
-    Array(WitnessInfo, Box<WitnessShape>),
+    Array(Box<WitnessShape>),
+    Slice(WitnessInfo, Box<WitnessShape>),
     Ref(WitnessInfo, Box<WitnessShape>),
 }
 
@@ -58,8 +59,11 @@ impl Display for WitnessShape {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WitnessShape::Scalar(info) => write!(f, "{info}"),
-            WitnessShape::Array(info, inner) => {
-                write!(f, "[{info} of {inner}]")
+            WitnessShape::Array(inner) => {
+                write!(f, "[{inner}]")
+            }
+            WitnessShape::Slice(len, elem) => {
+                write!(f, "[len:{len} of {elem}]")
             }
             WitnessShape::Ref(info, inner) => {
                 write!(f, "[*{info} of {inner}]")
@@ -75,8 +79,11 @@ impl WitnessShape {
             (WitnessShape::Scalar(t1), WitnessShape::Scalar(t2)) => {
                 WitnessShape::Scalar(t1.join(*t2))
             }
-            (WitnessShape::Array(t1, inner1), WitnessShape::Array(t2, inner2)) => {
-                WitnessShape::Array(t1.join(*t2), Box::new(inner1.join(inner2)))
+            (WitnessShape::Array(inner1), WitnessShape::Array(inner2)) => {
+                WitnessShape::Array(Box::new(inner1.join(inner2)))
+            }
+            (WitnessShape::Slice(l1, e1), WitnessShape::Slice(l2, e2)) => {
+                WitnessShape::Slice(l1.join(*l2), Box::new(e1.join(e2)))
             }
             (WitnessShape::Ref(t1, inner1), WitnessShape::Ref(t2, inner2)) => {
                 WitnessShape::Ref(t1.join(*t2), Box::new(inner1.join(inner2)))
@@ -91,7 +98,7 @@ impl WitnessShape {
     pub fn toplevel_info(&self) -> WitnessType {
         match self {
             WitnessShape::Scalar(info) => *info,
-            WitnessShape::Array(info, _) => *info,
+            WitnessShape::Array(_) | WitnessShape::Slice(_, _) => WitnessType::Pure,
             WitnessShape::Ref(info, _) => *info,
         }
     }
@@ -100,15 +107,16 @@ impl WitnessShape {
     pub fn contains_witness(&self) -> bool {
         match self {
             WitnessShape::Scalar(info) => info.is_witness(),
-            WitnessShape::Array(info, inner) | WitnessShape::Ref(info, inner) => {
-                info.is_witness() || inner.contains_witness()
-            }
+            WitnessShape::Array(inner) => inner.contains_witness(),
+            WitnessShape::Ref(info, inner) => info.is_witness() || inner.contains_witness(),
+            WitnessShape::Slice(len, elem) => len.is_witness() || elem.contains_witness(),
         }
     }
 
     pub fn child_witness_type(&self) -> Option<WitnessShape> {
         match self {
-            WitnessShape::Array(_, inner) => Some(*inner.clone()),
+            WitnessShape::Array(inner) => Some(*inner.clone()),
+            WitnessShape::Slice(_, elem) => Some(*elem.clone()),
             WitnessShape::Ref(_, inner) => Some(*inner.clone()),
             WitnessShape::Scalar(_) => None,
         }

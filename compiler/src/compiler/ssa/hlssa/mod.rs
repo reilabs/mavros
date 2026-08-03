@@ -149,6 +149,24 @@ pub enum OpCode {
         slice: ValueId,
         values: Vec<ValueId>,
     },
+    SlicePop {
+        dir: SliceOpDir,
+        result_slice: ValueId,
+        result_elem: ValueId,
+        slice: ValueId,
+    },
+    SliceInsert {
+        result: ValueId,
+        slice: ValueId,
+        index: ValueId,
+        value: ValueId,
+    },
+    SliceRemove {
+        result_slice: ValueId,
+        result_elem: ValueId,
+        slice: ValueId,
+        index: ValueId,
+    },
     SliceLen {
         result: ValueId,
         slice: ValueId,
@@ -333,6 +351,9 @@ impl OpCode {
             | OpCode::ArrayGet { .. }
             | OpCode::ArraySet { .. }
             | OpCode::SlicePush { .. }
+            | OpCode::SlicePop { .. }
+            | OpCode::SliceInsert { .. }
+            | OpCode::SliceRemove { .. }
             | OpCode::SliceLen { .. }
             | OpCode::ToBits { .. }
             | OpCode::ToRadix { .. }
@@ -561,6 +582,57 @@ impl Instruction for OpCode {
                     dir_str,
                     slice.0,
                     values_str
+                )
+            }
+            OpCode::SlicePop {
+                dir,
+                result_slice,
+                result_elem,
+                slice,
+            } => {
+                let dir_str = match dir {
+                    SliceOpDir::Front => "front",
+                    SliceOpDir::Back => "back",
+                };
+                format!(
+                    "v{}{}, v{}{} = slice_pop_{}(v{})",
+                    result_slice.0,
+                    annotate_value(*result_slice),
+                    result_elem.0,
+                    annotate_value(*result_elem),
+                    dir_str,
+                    slice.0
+                )
+            }
+            OpCode::SliceInsert {
+                result,
+                slice,
+                index,
+                value,
+            } => {
+                format!(
+                    "v{}{} = slice_insert(v{}, v{}, v{})",
+                    result.0,
+                    annotate_value(*result),
+                    slice.0,
+                    index.0,
+                    value.0
+                )
+            }
+            OpCode::SliceRemove {
+                result_slice,
+                result_elem,
+                slice,
+                index,
+            } => {
+                format!(
+                    "v{}{}, v{}{} = slice_remove(v{}, v{})",
+                    result_slice.0,
+                    annotate_value(*result_slice),
+                    result_elem.0,
+                    annotate_value(*result_elem),
+                    slice.0,
+                    index.0
                 )
             }
             OpCode::SliceLen { result, slice } => {
@@ -942,6 +1014,24 @@ impl Instruction for OpCode {
                 value: v,
                 ..
             } => vec![v].into_iter(),
+            Self::SlicePop {
+                result_slice: _,
+                result_elem: _,
+                slice: b,
+                ..
+            } => vec![b].into_iter(),
+            Self::SliceInsert {
+                result: _,
+                slice: s,
+                index: i,
+                value: v,
+            } => vec![s, i, v].into_iter(),
+            Self::SliceRemove {
+                result_slice: _,
+                result_elem: _,
+                slice: s,
+                index: i,
+            } => vec![s, i].into_iter(),
             Self::ArraySet {
                 result: _,
                 array: b,
@@ -1159,6 +1249,17 @@ impl Instruction for OpCode {
                 result_even,
                 ..
             } => vec![result_odd, result_even].into_iter(),
+            Self::SlicePop {
+                result_slice,
+                result_elem,
+                ..
+            } => vec![result_slice, result_elem].into_iter(),
+            Self::SliceInsert { result, .. } => vec![result].into_iter(),
+            Self::SliceRemove {
+                result_slice,
+                result_elem,
+                ..
+            } => vec![result_slice, result_elem].into_iter(),
             Self::ToBits { result: r, .. } => vec![r].into_iter(),
             Self::ToRadix { result: r, .. } => vec![r].into_iter(),
             Self::ReadGlobal { result: r, .. } => vec![r].into_iter(),
@@ -1215,6 +1316,17 @@ impl Instruction for OpCode {
                 result_even,
                 ..
             } => vec![result_odd, result_even].into_iter(),
+            Self::SlicePop {
+                result_slice,
+                result_elem,
+                ..
+            } => vec![result_slice, result_elem].into_iter(),
+            Self::SliceInsert { result, .. } => vec![result].into_iter(),
+            Self::SliceRemove {
+                result_slice,
+                result_elem,
+                ..
+            } => vec![result_slice, result_elem].into_iter(),
             Self::ToBits { result: r, .. } => vec![r].into_iter(),
             Self::ToRadix { result: r, .. } => vec![r].into_iter(),
             Self::ReadGlobal { result: r, .. } => vec![r].into_iter(),
@@ -1273,6 +1385,24 @@ impl Instruction for OpCode {
                 value: v,
                 ..
             } => vec![v].into_iter(),
+            Self::SlicePop {
+                result_slice: _,
+                result_elem: _,
+                slice: b,
+                ..
+            } => vec![b].into_iter(),
+            Self::SliceInsert {
+                result: _,
+                slice: s,
+                index: i,
+                value: v,
+            } => vec![s, i, v].into_iter(),
+            Self::SliceRemove {
+                result_slice: _,
+                result_elem: _,
+                slice: s,
+                index: i,
+            } => vec![s, i].into_iter(),
             Self::ArraySet {
                 result: _,
                 array: b,
@@ -1609,6 +1739,24 @@ impl Instruction for OpCode {
                 value: v,
                 ..
             } => vec![a, b, v].into_iter(),
+            Self::SlicePop {
+                result_slice: a,
+                result_elem: b,
+                slice: c,
+                ..
+            } => vec![a, b, c].into_iter(),
+            Self::SliceInsert {
+                result: a,
+                slice: b,
+                index: i,
+                value: v,
+            } => vec![a, b, i, v].into_iter(),
+            Self::SliceRemove {
+                result_slice: a,
+                result_elem: b,
+                slice: c,
+                index: i,
+            } => vec![a, b, c, i].into_iter(),
             Self::ToBits {
                 result: r,
                 value: v,
@@ -1832,7 +1980,7 @@ impl CastTarget {
                 );
                 Self::conversion_impl(s, t, strip).map(|inner| CastTarget::Map(Box::new(inner)))
             }
-            (TypeExpr::Slice(s), TypeExpr::Slice(t)) => {
+            (TypeExpr::Slice { elem: s, .. }, TypeExpr::Slice { elem: t, .. }) => {
                 Self::conversion_impl(s, t, strip).map(|inner| CastTarget::Map(Box::new(inner)))
             }
             _ => panic!(
@@ -1878,7 +2026,7 @@ impl CastTarget {
             },
             CastTarget::Map(inner) => match &value_type.expr {
                 TypeExpr::Array(elem, len) => inner.result_type(elem).array_of(*len),
-                TypeExpr::Slice(elem) => inner.result_type(elem).slice_of(),
+                TypeExpr::Slice { elem, .. } => inner.result_type(elem).slice_of(),
                 _ => panic!("Map cast on non-sequence type {:?}", value_type),
             },
         }
