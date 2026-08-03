@@ -277,10 +277,10 @@ impl LowerWitnessFieldOps {
 
         let guard_field = guard
             .map(|condition| b.ensure_field(condition, context.types().get_value_type(condition)));
-        let flag = guard_field.unwrap_or_else(|| b.field_const(Field::ONE));
+        let flag = guard_field.unwrap_or_else(|| b.field_const(b.field().one()));
         let rangecheck_type = LookupTarget::Rangecheck(1);
-        let two = b.field_const(Field::from(2));
-        let mut recomposed = b.field_const(Field::ZERO);
+        let two = b.field_const(b.field().constant(2));
+        let mut recomposed = b.field_const(b.field().zero());
 
         // Horner evaluation must visit the most-significant output bit first. The output array
         // itself retains the endianness requested by the source program.
@@ -307,10 +307,10 @@ impl LowerWitnessFieldOps {
         // are active only when the guarded operation executes.
         if let Some(flag) = guard_field {
             let diff = b.sub(recomposed, value);
-            let zero = b.field_const(Field::ZERO);
+            let zero = b.field_const(b.field().zero());
             b.constrain(diff, flag, zero);
         } else {
-            let one = b.field_const(Field::ONE);
+            let one = b.field_const(b.field().one());
             b.constrain(recomposed, one, value);
         }
 
