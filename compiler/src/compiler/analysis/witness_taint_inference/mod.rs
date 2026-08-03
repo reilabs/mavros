@@ -334,22 +334,28 @@ impl ApproximateWitnessTaint {
 
 #[cfg(test)]
 mod tests {
+    use mavros_artifacts::FieldConfig;
+
     use super::*;
-    use crate::compiler::analysis::witness_info::{WitnessShape, WitnessType};
-    use crate::compiler::ssa::hlssa::{
-        Type,
-        builder::{HLEmitter, HLSSABuilder},
+    use crate::compiler::{
+        Field,
+        analysis::witness_info::{WitnessShape, WitnessType},
+        ssa::hlssa::{
+            Type,
+            builder::{HLEmitter, HLSSABuilder},
+        },
     };
 
     fn pure() -> WitnessShape {
         WitnessShape::Scalar(WitnessType::Pure)
     }
+
     fn witness() -> WitnessShape {
         WitnessShape::Scalar(WitnessType::Witness)
     }
-    // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
-    fn fr(n: u64) -> ark_bn254::Fr {
-        ark_bn254::Fr::from(n)
+
+    fn fr(n: u64) -> Field {
+        FieldConfig::bn254().constant(n)
     }
 
     /// Run the pass and return the full inference (to inspect non-main clones).

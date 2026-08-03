@@ -1,13 +1,8 @@
-use ark_ff::Field as _;
-
-use crate::compiler::{
-    Field,
-    ssa::{
-        ValueId,
-        hlssa::{
-            CastTarget, CmpKind, OpCode, TypeExpr,
-            builder::{HLBlockEmitter, HLEmitter},
-        },
+use crate::compiler::ssa::{
+    ValueId,
+    hlssa::{
+        CastTarget, CmpKind, OpCode, TypeExpr,
+        builder::{HLBlockEmitter, HLEmitter},
     },
 };
 
@@ -89,7 +84,7 @@ impl LowerWitnessCompareOps {
         });
 
         let result_field = b.cast_to_field(result);
-        let one = b.field_const(Field::ONE);
+        let one = b.field_const(b.field().one());
         let not_result = b.sub(one, result_field);
         let quotient = b.div(not_result, diff);
         let quotient_plus_result = b.add(quotient, result_field);
@@ -188,7 +183,7 @@ impl LowerWitnessCompareOps {
         let rhs_type = context.types().get_value_type(rhs);
         let lhs_field = b.ensure_field(lhs, &lhs_type.strip_witness());
         let rhs_field = b.ensure_field(rhs, &rhs_type.strip_witness());
-        let one = b.field_const(Field::ONE);
+        let one = b.field_const(b.field().one());
         let true_delta = b.sub(rhs_field, lhs_field);
         let true_delta = b.sub(true_delta, one);
         let false_delta = b.sub(lhs_field, rhs_field);

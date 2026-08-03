@@ -320,6 +320,9 @@ impl ClickCooper {
         // interned program-wide.
         let consts = ssa.const_snapshot();
 
+        // The field the program operates over, threaded into the solver's constant-folding.
+        let field = ssa.field();
+
         // Phase 0: per-`(callee, return)` determinism, used below to value-number deterministic
         // static-call results cross-call. It refines only congruence, not reachability and not the
         // constant lattice _directly_ — though a refined congruence can still reach the lattice
@@ -417,6 +420,7 @@ impl ClickCooper {
             let mut facts = solve_with_writeback(
                 function,
                 &consts,
+                field,
                 &det,
                 None,
                 Some(&sym),
