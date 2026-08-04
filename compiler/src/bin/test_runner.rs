@@ -174,14 +174,18 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     })();
     match compile_result {
         Ok(()) => emit("END:COMPILED:ok"),
-        // If the Noir compiler itself rejects the program — a comptime expression that
-        // overflows (`comptime_bitshift_failure`), a type error, etc. — the program will never
-        // execute. That is a legitimate expected failure, accepted the same way as a
-        // statically-unsatisfiable R1CS, so it gets the `reject` marker regardless of which
-        // compile sub-step surfaced it. Any other error is a mavros-side problem and stays a
-        // plain `fail`, so a real regression is never masked.
+        // If compilation proves the program invalid — in the Noir frontend or a Mavros
+        // compile-time validation pass — the program will never execute. That is a legitimate
+        // expected failure, accepted the same way as a statically-unsatisfiable R1CS, so it gets
+        // the `reject` marker. Any unsupported/internal compiler error stays a plain `fail`, so a
+        // real regression is never masked.
         Err(DriverError::NoirCompilerError(diags)) => {
             eprintln!("Noir compiler rejected program: {diags:?}");
+            emit("END:COMPILED:reject");
+            return;
+        }
+        Err(error @ DriverError::AssertConstantFailed(_)) => {
+            eprintln!("Mavros compiler rejected program: {error}");
             emit("END:COMPILED:reject");
             return;
         }
@@ -1151,9 +1155,9 @@ enum Status {
     Crash,
     Skip,
     NotApplicable,
-    /// The compiler cleanly rejected the program as unsatisfiable (an assertion that can never
-    /// hold). For an execution_failure test this is the expected outcome; for an
-    /// execution_success test it is a genuine failure.
+    /// The compiler cleanly rejected the program (for example, a dynamic `assert_constant` or an
+    /// assertion that can never hold). For an execution_failure test this is the expected outcome;
+    /// for an execution_success test it is a genuine failure.
     Rejected,
 }
 
@@ -1208,7 +1212,7 @@ fn collect_test_dirs(base: &Path, prefix: &str, expectation: TestExpectation) ->
     let mut dirs: Vec<TestEntry> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.is_dir())
+        .filter(|p| p.is_dir() && p.join("Nargo.toml").is_file())
         .map(|p| {
             let test_name = p.file_name().unwrap().to_string_lossy().into_owned();
             TestEntry {
@@ -1235,7 +1239,19 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str], analyze: 
         ));
     }
 
-    // 2. Noir repo test_programs/* (discovered via cargo-metadata)
+    // 2. Local programs expected to be rejected during compilation. Keeping these separate from
+    // `noir_tests` lets the same child runner exercise frontend and Mavros-specific compile-time
+    // failures without treating a clean rejection as a regression.
+    let local_compile_failure_tests = PathBuf::from("noir_compile_failure_tests");
+    if local_compile_failure_tests.is_dir() {
+        entries.extend(collect_test_dirs(
+            &local_compile_failure_tests,
+            "noir_compile_failure_tests/",
+            TestExpectation::ExecutionFailure,
+        ));
+    }
+
+    // 3. Noir repo test_programs/* (discovered via cargo-metadata)
     if let Some(test_programs) = find_noir_test_programs_dir() {
         eprintln!("Found noir test_programs at: {}", test_programs.display());
         entries.extend(collect_test_dirs(
@@ -1431,7 +1447,7 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
     }
 
     // A program can be cleanly rejected at the first stage where it is proven it will never
-    // execute — the Noir frontend (COMPILED) or R1CS generation. That rejection preempts every
+    // execute — compilation (COMPILED) or R1CS generation. That rejection preempts every
     // later stage, so we track which stage it happened at (by position in the pipeline) and
     // report all later stages N/A rather than ➖ Skip — otherwise the success-rate denominator
     // (which counts every non-N/A cell) would count them against an otherwise handled test.
@@ -1777,8 +1793,9 @@ fn expected_step_status(
             other => other,
         },
         // A program proven to never execute is rejected cleanly at the first stage that can
-        // prove it: the Noir frontend (`COMPILED`, e.g. a comptime overflow) or R1CS generation
-        // (`R1CS`, a statically-unsatisfiable assertion — `Err(UnsatisfiableProgram)`). The
+        // prove it: compilation (`COMPILED`, e.g. a comptime overflow or dynamic
+        // `assert_constant`) or R1CS generation (`R1CS`, a statically-unsatisfiable assertion —
+        // `Err(UnsatisfiableProgram)`). The
         // child reports that with a `reject` marker. For an expected-failure test that
         // rejection is exactly the success, so: stages before it keep their real status (they
         // genuinely ran), the rejecting stage itself reads ✅, and every later stage is

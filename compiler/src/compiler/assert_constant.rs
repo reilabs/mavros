@@ -3,74 +3,103 @@
 //! Lowering preserves each assertion as an [`OpCode::AssertConstant`] marker until witness-taint
 //! inference has specialized functions for their concrete calling contexts. An assertion succeeds
 //! exactly when its operand is `Pure` at every level in every specialized context.
+//!
+//! WTI intentionally omits unconstrained-only callees. Assertions that exist only in those
+//! functions are therefore outside this validation; successful validation still removes their
+//! markers so later passes never need to interpret the compiler-only opcode.
 
-use std::collections::BTreeSet;
+use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 
 use crate::compiler::{
     analysis::witness_taint_inference::WitnessTaintInference,
+    pass_manager::{AnalysisStore, Pass},
     ssa::{
         SourceLocation,
         hlssa::{HLSSA, OpCode},
     },
 };
 
-/// Validate every specialized `AssertConstant` and erase all successfully validated markers.
+/// Validate every `AssertConstant` against WTI and erase all markers when validation succeeds.
 ///
 /// Constants are intentionally absent from the per-function value-shape map, so a missing value
-/// shape is `Pure`. Aggregate shapes are checked recursively: a container is constant only when
+/// shape is `Pure`. Aggregate shapes are checked recursively: a container is accepted only when
 /// none of its levels contains a witness.
-pub(crate) fn validate_and_remove(
-    ssa: &mut HLSSA,
-    witness_inference: &WitnessTaintInference,
-) -> Result<(), Vec<SourceLocation>> {
-    let failures: BTreeSet<SourceLocation> = ssa
-        .iter_functions()
-        .filter_map(|(fid, function)| {
-            witness_inference
-                .try_get_function_witness_type(*fid)
-                .map(|witness_types| (function, witness_types))
-        })
-        .flat_map(|(function, witness_types)| {
-            function.get_blocks().flat_map(move |(_, block)| {
-                block
-                    .get_instructions_with_source_locations()
-                    .filter_map(move |(op, location)| {
-                        let OpCode::AssertConstant { value } = op else {
-                            return None;
-                        };
-                        witness_types
-                            .try_get_value_witness_type(*value)
-                            .is_some_and(|shape| shape.contains_witness())
-                            .then(|| location.clone())
-                    })
-            })
-        })
-        .collect();
+pub(crate) struct AssertConstantValidation {
+    witness_inference: Rc<WitnessTaintInference>,
+    failures: Rc<RefCell<Option<Vec<SourceLocation>>>>,
+}
 
-    if !failures.is_empty() {
-        return Err(failures.into_iter().collect());
-    }
-
-    for (_, function) in ssa.iter_functions_mut() {
-        for (_, block) in function.get_blocks_mut() {
-            let instructions = block.take_instructions();
-            block.put_instructions(
-                instructions
-                    .into_iter()
-                    .filter(|op| !matches!(&**op, OpCode::AssertConstant { .. }))
-                    .collect(),
-            );
+impl AssertConstantValidation {
+    pub(crate) fn new(
+        witness_inference: Rc<WitnessTaintInference>,
+        failures: Rc<RefCell<Option<Vec<SourceLocation>>>>,
+    ) -> Self {
+        Self {
+            witness_inference,
+            failures,
         }
     }
-    Ok(())
+}
+
+impl Pass for AssertConstantValidation {
+    fn name(&self) -> &'static str {
+        "assert_constant_validation"
+    }
+
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+        let failures: Vec<SourceLocation> = ssa
+            .iter_functions()
+            .filter_map(|(fid, function)| {
+                self.witness_inference
+                    .try_get_function_witness_type(*fid)
+                    .map(|witness_types| (function, witness_types))
+            })
+            .flat_map(|(function, witness_types)| {
+                function.get_blocks().flat_map(move |(_, block)| {
+                    block.get_instructions_with_source_locations().filter_map(
+                        move |(op, location)| {
+                            let OpCode::AssertConstant { value } = op else {
+                                return None;
+                            };
+                            witness_types
+                                .try_get_value_witness_type(*value)
+                                .is_some_and(|shape| shape.contains_witness())
+                                .then(|| location.clone())
+                        },
+                    )
+                })
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+
+        if failures.is_empty() {
+            for (_, function) in ssa.iter_functions_mut() {
+                for (_, block) in function.get_blocks_mut() {
+                    let instructions = block.take_instructions();
+                    block.put_instructions(
+                        instructions
+                            .into_iter()
+                            .filter(|op| !matches!(&**op, OpCode::AssertConstant { .. }))
+                            .collect(),
+                    );
+                }
+            }
+        }
+
+        *self.failures.borrow_mut() = Some(failures);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::validate_and_remove;
+    use std::{cell::RefCell, rc::Rc};
+
+    use super::AssertConstantValidation;
     use crate::compiler::{
         Field,
         analysis::{flow_analysis::FlowAnalysis, witness_taint_inference::WitnessTaintInference},
+        pass_manager::PassManager,
         ssa::{
             FunctionId, SourceLocation, Terminator, ValueId,
             hlssa::{CallTarget, CastTarget, Constant, HLSSA, OpCode, SequenceTargetType, Type},
@@ -85,7 +114,23 @@ mod tests {
         let flow = FlowAnalysis::run(ssa);
         let mut witness_inference = WitnessTaintInference::new();
         witness_inference.run(ssa, &flow);
-        validate_and_remove(ssa, &witness_inference)
+        let witness_inference = Rc::new(witness_inference);
+        let failures = Rc::new(RefCell::new(None));
+        PassManager::new(
+            "assert_constant_validation_test".to_string(),
+            false,
+            vec![Box::new(AssertConstantValidation::new(
+                witness_inference,
+                Rc::clone(&failures),
+            ))],
+        )
+        .run(ssa);
+        let failures = failures.borrow_mut().take().unwrap();
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures)
+        }
     }
 
     fn add_asserting_helper(ssa: &mut HLSSA) -> FunctionId {
