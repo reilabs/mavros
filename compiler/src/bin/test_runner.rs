@@ -2691,5 +2691,4 @@ mod tests {
         assert_eq!(row.wasm_size_bytes, None);
         assert_eq!(table.cell(row, "AD WASM No Leak"), Some("✅"));
     }
-
 }
