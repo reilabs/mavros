@@ -94,8 +94,11 @@ jobs:
           path: |
             ~/.cargo/registry
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          # `flake.lock` pins rustc and LLVM, so it belongs in the part of the key shared with
+          # `restore-keys` -- otherwise the prefix match happily restores a cache built with a
+          # different toolchain.
+          key: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-
 
       - name: Build Test Runner
         run: make build-test-runner
@@ -129,8 +132,11 @@ jobs:
           path: |
             ~/.cargo/registry
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          # `flake.lock` pins rustc and LLVM, so it belongs in the part of the key shared with
+          # `restore-keys` -- otherwise the prefix match happily restores a cache built with a
+          # different toolchain.
+          key: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-
 
       - name: Run Unit Tests
         run: make unit-test
@@ -170,8 +176,11 @@ jobs:
           path: |
             ~/.cargo/registry
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          # `flake.lock` pins rustc and LLVM, so it belongs in the part of the key shared with
+          # `restore-keys` -- otherwise the prefix match happily restores a cache built with a
+          # different toolchain.
+          key: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-
 
       - name: Build Test Runner
         run: make build-test-runner
