@@ -1570,18 +1570,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .write_to_file(&self.module, FileType::Object, &obj_path)
             .unwrap();
 
-        let wasm_ld = std::env::var("LLVM_SYS_180_PREFIX")
-            .map(|prefix| {
-                let path = std::path::PathBuf::from(&prefix)
-                    .join("bin")
-                    .join("wasm-ld");
-                if path.exists() {
-                    path.to_string_lossy().to_string()
-                } else {
-                    "wasm-ld".to_string()
-                }
-            })
-            .unwrap_or_else(|_| "wasm-ld".to_string());
+        // `WASM_LD` is set by the nix devshell to the lld that ships with the LLVM we build
+        // against, so the linker tracks the toolchain. Outside nix we fall back to whatever
+        // `wasm-ld` is on `$PATH`.
+        let wasm_ld = std::env::var("WASM_LD")
+            .ok()
+            .filter(|path| std::path::Path::new(path).exists())
+            .unwrap_or_else(|| "wasm-ld".to_string());
 
         let output = Command::new(&wasm_ld)
             .arg("--no-entry")
