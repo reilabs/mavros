@@ -50,6 +50,7 @@
             dprint
             git
             graphviz
+            flamegraph
             nodejs_25
             pkg-config
           ];

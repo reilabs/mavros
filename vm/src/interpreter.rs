@@ -310,6 +310,44 @@ pub fn run_phase1(
     ordered_inputs: &[InputValueOrdered],
     debug_info: Option<bytecode::DebugInfo>,
 ) -> Result<Phase1Result, TrapError> {
+    run_phase1_impl(
+        program,
+        witness_layout,
+        constraints_layout,
+        ordered_inputs,
+        debug_info,
+        false,
+    )
+    .map(|(result, _)| result)
+}
+
+/// Profiled phase 1 execution. The returned weights are simulated VM
+/// instructions, which are deterministic across machines and runs.
+pub fn run_phase1_profiled(
+    program: &[u64],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    ordered_inputs: &[InputValueOrdered],
+    debug_info: Option<bytecode::DebugInfo>,
+) -> Result<(Phase1Result, crate::FlamegraphProfile), TrapError> {
+    run_phase1_impl(
+        program,
+        witness_layout,
+        constraints_layout,
+        ordered_inputs,
+        debug_info,
+        true,
+    )
+}
+
+fn run_phase1_impl(
+    program: &[u64],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    ordered_inputs: &[InputValueOrdered],
+    debug_info: Option<bytecode::DebugInfo>,
+    profile: bool,
+) -> Result<(Phase1Result, crate::FlamegraphProfile), TrapError> {
     let header = parse_program_header(program);
     let debug_info = debug_info.unwrap_or_default();
     let entry = *header
@@ -370,6 +408,9 @@ pub fn run_phase1(
     let mut program = program.to_vec();
     prepare_dispatch(&mut program, header.code_start);
     vm.set_debug_context(program.as_ptr(), program.len(), debug_info);
+    if profile {
+        vm.enable_instruction_profile();
+    }
 
     let pc = unsafe { program.as_mut_ptr().add(entry + 2) };
 
@@ -385,16 +426,20 @@ pub fn run_phase1(
     }
 
     fix_multiplicities_section(&mut out_wit_pre_comm, witness_layout);
+    let instruction_profile = vm.take_instruction_profile();
 
-    Ok(Phase1Result {
-        out_wit_pre_comm,
-        out_wit_post_comm,
-        out_a,
-        out_b,
-        out_c,
-        tables: vm.tables,
-        instrumenter: vm.allocation_instrumenter,
-    })
+    Ok((
+        Phase1Result {
+            out_wit_pre_comm,
+            out_wit_post_comm,
+            out_a,
+            out_b,
+            out_c,
+            tables: vm.tables,
+            instrumenter: vm.allocation_instrumenter,
+        },
+        instruction_profile,
+    ))
 }
 
 /// Phase 2 of witness generation: uses real Fiat-Shamir challenges to
@@ -698,6 +743,29 @@ pub fn run(
     ))
 }
 
+/// Run witness generation with deterministic per-call-stack instruction
+/// counting suitable for a FlameGraph.
+pub fn run_profiled(
+    program: &[u64],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    ordered_inputs: &[InputValueOrdered],
+    debug_info: Option<bytecode::DebugInfo>,
+) -> Result<(WitgenResult, crate::FlamegraphProfile), TrapError> {
+    let (phase1, profile) = run_phase1_profiled(
+        program,
+        witness_layout,
+        constraints_layout,
+        ordered_inputs,
+        debug_info,
+    )?;
+
+    Ok((
+        run_phase2_with_fake_challenges(phase1, witness_layout, constraints_layout),
+        profile,
+    ))
+}
+
 #[instrument(skip_all, name = "Interpreter::run_ad")]
 pub fn run_ad(
     program: &[u64],
@@ -706,6 +774,62 @@ pub fn run_ad(
     constraints_layout: ConstraintsLayout,
     debug_info: Option<bytecode::DebugInfo>,
 ) -> Result<(Vec<Field>, Vec<Field>, Vec<Field>, AllocationInstrumenter), TrapError> {
+    run_ad_impl(
+        program,
+        coeffs,
+        witness_layout,
+        constraints_layout,
+        debug_info,
+        false,
+    )
+    .map(|(a, b, c, instrumenter, _)| (a, b, c, instrumenter))
+}
+
+/// Run automatic differentiation with deterministic per-call-stack
+/// instruction counting suitable for a FlameGraph.
+pub fn run_ad_profiled(
+    program: &[u64],
+    coeffs: &[Field],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    debug_info: Option<bytecode::DebugInfo>,
+) -> Result<
+    (
+        Vec<Field>,
+        Vec<Field>,
+        Vec<Field>,
+        AllocationInstrumenter,
+        crate::FlamegraphProfile,
+    ),
+    TrapError,
+> {
+    run_ad_impl(
+        program,
+        coeffs,
+        witness_layout,
+        constraints_layout,
+        debug_info,
+        true,
+    )
+}
+
+fn run_ad_impl(
+    program: &[u64],
+    coeffs: &[Field],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    debug_info: Option<bytecode::DebugInfo>,
+    profile: bool,
+) -> Result<
+    (
+        Vec<Field>,
+        Vec<Field>,
+        Vec<Field>,
+        AllocationInstrumenter,
+        crate::FlamegraphProfile,
+    ),
+    TrapError,
+> {
     let header = parse_program_header(program);
     let debug_info = debug_info.unwrap_or_default();
     let entry = *header
@@ -740,6 +864,9 @@ pub fn run_ad(
     let mut program = program.to_vec();
     prepare_dispatch(&mut program, header.code_start);
     vm.set_debug_context(program.as_ptr(), program.len(), debug_info);
+    if profile {
+        vm.enable_instruction_profile();
+    }
 
     let pc = unsafe { program.as_mut_ptr().add(entry + 2) };
 
@@ -754,7 +881,14 @@ pub fn run_ad(
         });
     }
 
-    Ok((out_da, out_db, out_dc, vm.allocation_instrumenter))
+    let instruction_profile = vm.take_instruction_profile();
+    Ok((
+        out_da,
+        out_db,
+        out_dc,
+        vm.allocation_instrumenter,
+        instruction_profile,
+    ))
 }
 
 fn flatten_param_vec(vec: &[InputValueOrdered]) -> Vec<Field> {
