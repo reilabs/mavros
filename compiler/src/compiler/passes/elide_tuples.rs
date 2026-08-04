@@ -551,6 +551,62 @@ fn lower_instruction(
                 slice: slices[0],
             });
         }
+        OpCode::SlicePop {
+            dir,
+            result_slice,
+            result_elem,
+            slice,
+        } => {
+            let slices = components(value_map, *slice);
+            let result_slices = components(value_map, *result_slice);
+            let result_elems = components(value_map, *result_elem);
+            for ((s, rs), re) in slices.into_iter().zip(result_slices).zip(result_elems) {
+                out.push(OpCode::SlicePop {
+                    dir: *dir,
+                    result_slice: rs,
+                    result_elem: re,
+                    slice: s,
+                });
+            }
+        }
+        OpCode::SliceInsert {
+            result,
+            slice,
+            index,
+            value,
+        } => {
+            let idx = single(value_map, *index);
+            let slices = components(value_map, *slice);
+            let values = components(value_map, *value);
+            let results = components(value_map, *result);
+            for ((s, v), r) in slices.into_iter().zip(values).zip(results) {
+                out.push(OpCode::SliceInsert {
+                    result: r,
+                    slice: s,
+                    index: idx,
+                    value: v,
+                });
+            }
+        }
+        OpCode::SliceRemove {
+            result_slice,
+            result_elem,
+            slice,
+            index,
+        } => {
+            let idx = single(value_map, *index);
+            let slices = components(value_map, *slice);
+            let result_slices = components(value_map, *result_slice);
+            let result_elems = components(value_map, *result_elem);
+            for ((s, rs), re) in slices.into_iter().zip(result_slices).zip(result_elems) {
+                out.push(OpCode::SliceRemove {
+                    result_slice: rs,
+                    result_elem: re,
+                    slice: s,
+                    index: idx,
+                });
+            }
+        }
         OpCode::Todo {
             payload,
             results,
