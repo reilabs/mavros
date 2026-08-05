@@ -253,9 +253,9 @@ impl LowerWitnessFieldOps {
         }
     }
 
-    /// Lower the raw bit-decomposition builtin. This intentionally adds no canonicity check:
-    /// Noir's user-facing `to_le_bits`/`to_be_bits` wrappers provide that check at the language
-    /// level when required.
+    /// Lower the bit-decomposition builtin. The builtin is designed to provide a raw decomposition,
+    /// so this intentionally adds no canonicity check. That check is provided in unconstrained Noir
+    /// code by the user-facing `to_le_bits`/`to_be_bits` wrappers.
     // FIELD-ASSUMPTION: L4-decompose
     fn lower_to_bits(
         &self,
@@ -332,8 +332,9 @@ impl LowerWitnessFieldOps {
         true
     }
 
-    /// Lower the raw radix-decomposition builtin. As with `lower_to_bits`, canonicity belongs to
-    /// the user-facing Noir wrapper rather than this primitive decomposition.
+    /// Lower the radix-decomposition builtin. Like `lower_to_bits`, this is designed to provide a
+    /// raw decomposition with no canonicity check; unconstrained Noir code in the user-facing
+    /// `to_le_bytes`/`to_be_bytes` wrappers provides that check.
     // FIELD-ASSUMPTION: L4-decompose
     fn lower_to_radix(
         &self,
