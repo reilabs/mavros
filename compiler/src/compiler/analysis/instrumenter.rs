@@ -847,7 +847,7 @@ impl Value {
     }
 
     // FIELD-ASSUMPTION: L4-decompose
-    fn to_bits(&self, endianness: &crate::compiler::ssa::hlssa::Endianness, size: usize) -> Value {
+    fn to_bits(&self, endianness: &Endianness, size: usize) -> Value {
         match self {
             Value::Unknown(_) => Value::array(vec![Value::Unknown(ScalarKind::U(1)); size]),
             Value::WitnessOf(inner) => {
@@ -863,12 +863,18 @@ impl Value {
                 }
             }
             Value::U(_, v) => {
-                let mut r = vec![];
-                for i in 0..size {
-                    let bit = (v >> i) & 1;
-                    let bit = Value::U(1, bit);
-                    r.push(bit);
-                }
+                let mut r = (0..size)
+                    .map(|i| {
+                        Value::U(
+                            1,
+                            if i < u128::BITS as usize {
+                                (v >> i) & 1
+                            } else {
+                                0
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 if *endianness == Endianness::Big {
                     r.reverse();
                 }
@@ -876,8 +882,10 @@ impl Value {
             }
             Value::Field(f) => {
                 let bigint = f.into_bigint();
-                let bits = bigint.to_bits_le().into_iter().take(size);
-                let mut bits = bits.map(|b| Value::U(1, b as u128)).collect::<Vec<_>>();
+                let raw_bits = bigint.to_bits_le();
+                let mut bits = (0..size)
+                    .map(|i| Value::U(1, raw_bits.get(i).copied().unwrap_or(false) as u128))
+                    .collect::<Vec<_>>();
                 if *endianness == Endianness::Big {
                     bits.reverse();
                 }
@@ -2358,9 +2366,11 @@ mod tests {
     use super::{CostEstimator, ScalarKind, Value};
     use crate::compiler::{
         analysis::{flow_analysis::FlowAnalysis, types::Types},
+        pass_manager::{AnalysisStore, Pass},
+        passes::instruction_lowering::InstructionLowering,
         ssa::{
             Terminator,
-            hlssa::{Constant, Endianness, HLSSA, OpCode},
+            hlssa::{Constant, Endianness, HLSSA, OpCode, Radix, Type},
         },
     };
 
@@ -2382,6 +2392,103 @@ mod tests {
             Value::WitnessOf(inner)
                 if matches!(inner.as_ref(), Value::Unknown(ScalarKind::U(1)))
         )));
+    }
+
+    #[test]
+    fn integer_to_bits_zero_pads_past_u128() {
+        let Value::Array(bits) = Value::U(8, 5).to_bits(&Endianness::Little, 130) else {
+            panic!("ToBits must produce an array");
+        };
+
+        assert_eq!(bits.len(), 130);
+        assert!(matches!(bits[0], Value::U(1, 1)));
+        assert!(matches!(bits[1], Value::U(1, 0)));
+        assert!(matches!(bits[2], Value::U(1, 1)));
+        assert!(bits[128..].iter().all(|bit| matches!(bit, Value::U(1, 0))));
+    }
+
+    #[test]
+    fn field_to_bits_zero_pads_before_big_endian_output() {
+        let ssa = HLSSA::with_main("main".to_string());
+        let value = Value::Field(ssa.field().constant(5));
+        let Value::Array(bits) = value.to_bits(&Endianness::Big, 260) else {
+            panic!("ToBits must produce an array");
+        };
+
+        assert_eq!(bits.len(), 260);
+        assert!(bits[..257].iter().all(|bit| matches!(bit, Value::U(1, 0))));
+        assert!(matches!(bits[257], Value::U(1, 1)));
+        assert!(matches!(bits[258], Value::U(1, 0)));
+        assert!(matches!(bits[259], Value::U(1, 1)));
+    }
+
+    /// Witness lowering makes the decomposition cost visible as one one-bit rangecheck per bit
+    /// plus one recomposition constraint. `SpecSplitValue::to_bits` must not charge it again.
+    #[test]
+    fn lowered_witness_to_bits_cost_is_explicit() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let value = ssa.fresh_value();
+        let result = ssa.fresh_value();
+        let function = ssa.get_unique_entrypoint_mut();
+        function.add_return_type(Type::witness_of(Type::u(1)).array_of(3));
+        let entry = function.get_entry_mut();
+        entry.push_parameter(value, Type::witness_of(Type::field()));
+        entry.push_test_instruction(OpCode::ToBits {
+            result,
+            value,
+            endianness: Endianness::Little,
+            count: 3,
+        });
+        entry.set_terminator(Terminator::Return(vec![result]));
+
+        InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
+        let flow = FlowAnalysis::run(&ssa);
+        let type_info = Types::new().run(&ssa, &flow);
+        let costs = CostEstimator::new().run(&ssa, &type_info);
+        let function_cost = costs
+            .functions
+            .values()
+            .next()
+            .expect("main must be costed");
+
+        assert_eq!(function_cost.raw.recurring_constraints(), 4);
+        assert_eq!(function_cost.specialized.recurring_constraints(), 4);
+    }
+
+    /// `ToRadix` follows the same accounting path: the pure hint is free, while each lowered
+    /// byte rangecheck and the recomposition constraint are recorded explicitly.
+    #[test]
+    fn lowered_witness_to_radix_cost_is_explicit() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let value = ssa.fresh_value();
+        let result = ssa.fresh_value();
+        let function = ssa.get_unique_entrypoint_mut();
+        function.add_return_type(Type::witness_of(Type::u(8)).array_of(3));
+        let entry = function.get_entry_mut();
+        entry.push_parameter(value, Type::witness_of(Type::field()));
+        entry.push_test_instruction(OpCode::ToRadix {
+            result,
+            value,
+            radix: Radix::Bytes,
+            endianness: Endianness::Little,
+            count: 3,
+        });
+        entry.set_terminator(Terminator::Return(vec![result]));
+
+        InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
+        let flow = FlowAnalysis::run(&ssa);
+        let type_info = Types::new().run(&ssa, &flow);
+        let costs = CostEstimator::new().run(&ssa, &type_info);
+        let function_cost = costs
+            .functions
+            .values()
+            .next()
+            .expect("main must be costed");
+
+        for instrumenter in [&function_cost.raw, &function_cost.specialized] {
+            assert_eq!(instrumenter.constrains, 1);
+            assert_eq!(instrumenter.rangecheck_lookups.get(&(8, true)), Some(&3));
+        }
     }
 
     /// Run the cost estimator over `ssa` with freshly-computed dependencies, then `summarize` it —

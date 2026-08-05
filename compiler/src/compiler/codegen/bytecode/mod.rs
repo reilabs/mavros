@@ -1284,14 +1284,22 @@ impl CodeGen {
                 hlssa::OpCode::ToBits {
                     result: r,
                     value,
-                    endianness: Endianness::Little,
+                    endianness,
                     count,
                 } => {
-                    emitter.push_op(bytecode::OpCode::ToBitsLe {
-                        res: layouter.alloc_value(*r, &type_info.get_value_type(*r)),
-                        val: layouter.get_value(*value),
-                        count: *count as u64,
-                    });
+                    let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
+                    match endianness {
+                        Endianness::Big => emitter.push_op(bytecode::OpCode::ToBitsBe {
+                            res,
+                            val: layouter.get_value(*value),
+                            count: *count as u64,
+                        }),
+                        Endianness::Little => emitter.push_op(bytecode::OpCode::ToBitsLe {
+                            res,
+                            val: layouter.get_value(*value),
+                            count: *count as u64,
+                        }),
+                    }
                 }
                 hlssa::OpCode::ToRadix {
                     result: r,

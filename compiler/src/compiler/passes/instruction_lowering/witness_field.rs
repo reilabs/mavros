@@ -253,6 +253,10 @@ impl LowerWitnessFieldOps {
         }
     }
 
+    /// Lower the raw bit-decomposition builtin. This intentionally adds no canonicity check:
+    /// Noir's user-facing `to_le_bits`/`to_be_bits` wrappers provide that check at the language
+    /// level when required.
+    // FIELD-ASSUMPTION: L4-decompose
     fn lower_to_bits(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -266,13 +270,18 @@ impl LowerWitnessFieldOps {
         if !context.types().get_value_type(value).is_witness_of() {
             return false;
         }
+        // This limit is tied to the active field. Supporting wider decompositions will require
+        // deciding how their leading zeroes participate in the field-agnostic lowering contract.
+        assert!(
+            count <= b.field().field_bit_size() as usize,
+            "witness ToBits width {count} exceeds field bit size {}",
+            b.field().field_bit_size()
+        );
 
         // Compute the decomposition in witgen, then bind each hinted bit to a fresh circuit
         // witness. WitnessWriteToFresh removes this hint chain from the R1CS pipeline later.
         let pure_value = b.value_of(value);
-        // Witgen has one canonical representation for bit decomposition. Reverse the indices
-        // below when the source operation requested big-endian output.
-        let hint = b.to_bits(pure_value, Endianness::Little, count);
+        let hint = b.to_bits(pure_value, endianness, count);
         let mut witnesses = vec![ValueId(0); count];
 
         let guard_field = guard
@@ -289,11 +298,7 @@ impl LowerWitnessFieldOps {
             Endianness::Big => Box::new(0..count),
         };
         for i in visit_order {
-            let hint_index = match endianness {
-                Endianness::Little => i,
-                Endianness::Big => count - i - 1,
-            };
-            let idx = b.u_const(32, hint_index as u128);
+            let idx = b.u_const(32, i as u128);
             let bit = b.array_get(hint, idx);
             let bit_field = b.cast_to_field(bit);
             let bit_witness = b.write_witness(bit_field);
@@ -327,6 +332,9 @@ impl LowerWitnessFieldOps {
         true
     }
 
+    /// Lower the raw radix-decomposition builtin. As with `lower_to_bits`, canonicity belongs to
+    /// the user-facing Noir wrapper rather than this primitive decomposition.
+    // FIELD-ASSUMPTION: L4-decompose
     fn lower_to_radix(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -371,6 +379,14 @@ impl LowerWitnessFieldOps {
             });
             return true;
         }
+
+        // Unlike bits, the top byte may be only partially occupied (BN254 therefore needs 32
+        // bytes). Wider zero-padded decompositions need an explicit field-agnostic contract.
+        let max_bytes = (b.field().field_bit_size() as usize).div_ceil(8);
+        assert!(
+            count <= max_bytes,
+            "witness ToRadix byte count {count} exceeds field byte width {max_bytes}"
+        );
 
         let pure_value = b.value_of(value);
         let hint = b.to_radix(pure_value, radix, endianness, count);
@@ -461,7 +477,7 @@ mod tests {
         ssa::{Terminator, hlssa::HLSSA},
     };
 
-    fn lowered_to_bits(guarded: bool) -> (HLSSA, ValueId) {
+    fn lowered_to_bits(guarded: bool, endianness: Endianness) -> (HLSSA, ValueId) {
         let mut ssa = HLSSA::with_main("main".to_string());
         let value = ssa.fresh_value();
         let condition = guarded.then(|| ssa.fresh_value());
@@ -476,7 +492,7 @@ mod tests {
         let to_bits = OpCode::ToBits {
             result,
             value,
-            endianness: Endianness::Little,
+            endianness,
             count: 3,
         };
         entry.push_test_instruction(if let Some(condition) = condition {
@@ -547,13 +563,31 @@ mod tests {
 
     #[test]
     fn witnessed_to_bits_is_lowered_to_constrained_bit_witnesses() {
-        let (ssa, result) = lowered_to_bits(false);
+        let (ssa, result) = lowered_to_bits(false, Endianness::Little);
         assert_constrained_bit_decomposition(&ssa, result);
     }
 
     #[test]
+    fn witnessed_big_endian_to_bits_keeps_big_endian_witgen_hint() {
+        let (ssa, result) = lowered_to_bits(false, Endianness::Big);
+        assert_constrained_bit_decomposition(&ssa, result);
+        assert!(
+            ssa.get_unique_entrypoint()
+                .get_entry()
+                .get_instructions()
+                .any(|op| matches!(
+                    op,
+                    OpCode::ToBits {
+                        endianness: Endianness::Big,
+                        ..
+                    }
+                ))
+        );
+    }
+
+    #[test]
     fn guarded_witnessed_to_bits_keeps_its_constraints() {
-        let (ssa, result) = lowered_to_bits(true);
+        let (ssa, result) = lowered_to_bits(true, Endianness::Little);
         assert_constrained_bit_decomposition(&ssa, result);
         assert!(
             ssa.get_unique_entrypoint()
