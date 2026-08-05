@@ -420,80 +420,10 @@ impl WitnessLowering {
                                 values: new_values,
                             });
                         }
-                        OpCode::SlicePop {
-                            dir,
-                            result_slice,
-                            result_elem,
-                            slice,
-                        } => {
-                            let result_slice_type = type_info.get_value_type(result_slice);
-                            let new_result_slice_type =
-                                self.witness_lowering_in_type(result_slice_type);
-                            let new_slice = self.convert_if_needed(
-                                slice,
-                                &new_result_slice_type,
-                                type_info,
-                                &mut emitter,
-                            );
-                            emitter.emit(OpCode::SlicePop {
-                                dir,
-                                result_slice,
-                                result_elem,
-                                slice: new_slice,
-                            });
-                        }
-                        OpCode::SliceInsert {
-                            result,
-                            slice,
-                            index,
-                            value,
-                        } => {
-                            let result_type = type_info.get_value_type(result);
-                            let new_result_type = self.witness_lowering_in_type(result_type);
-                            let expected_elem_type = match &new_result_type.expr {
-                                TypeExpr::Slice(inner) => inner.as_ref().clone(),
-                                _ => panic!("SliceInsert on non-slice type"),
-                            };
-                            let new_slice = self.convert_if_needed(
-                                slice,
-                                &new_result_type,
-                                type_info,
-                                &mut emitter,
-                            );
-                            let new_value = self.convert_if_needed(
-                                value,
-                                &expected_elem_type,
-                                type_info,
-                                &mut emitter,
-                            );
-                            emitter.emit(OpCode::SliceInsert {
-                                result,
-                                slice: new_slice,
-                                index,
-                                value: new_value,
-                            });
-                        }
-                        OpCode::SliceRemove {
-                            result_slice,
-                            result_elem,
-                            slice,
-                            index,
-                        } => {
-                            let result_slice_type = type_info.get_value_type(result_slice);
-                            let new_result_slice_type =
-                                self.witness_lowering_in_type(result_slice_type);
-                            let new_slice = self.convert_if_needed(
-                                slice,
-                                &new_result_slice_type,
-                                type_info,
-                                &mut emitter,
-                            );
-                            emitter.emit(OpCode::SliceRemove {
-                                result_slice,
-                                result_elem,
-                                slice: new_slice,
-                                index,
-                            });
+                        OpCode::SlicePop { .. }
+                        | OpCode::SliceInsert { .. }
+                        | OpCode::SliceRemove { .. } => {
+                            panic!("ICE: slice pop/insert/remove survived to witness lowering")
                         }
                         OpCode::Select {
                             result: r,
