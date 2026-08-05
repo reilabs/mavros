@@ -1942,7 +1942,6 @@ fn lower_to_bytes(
     val_map.insert(result, arr);
 }
 
-// FIELD-ASSUMPTION: L3-limb-op
 fn lower_to_bits(
     e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
