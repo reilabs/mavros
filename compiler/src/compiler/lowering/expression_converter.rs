@@ -1624,7 +1624,9 @@ impl<'a> ExpressionConverter<'a> {
                 None
             }
             "assert_constant" => {
-                let value = self.convert_expression(&call.arguments[0], b).unwrap();
+                let value = self
+                    .convert_expression(&call.arguments[0], b)
+                    .expect("assert_constant argument must produce a value");
                 self.emit_located(b, Some(call.location), |e| e.assert_constant(value));
                 None
             }

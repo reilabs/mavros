@@ -374,14 +374,21 @@ impl OpCode {
         self.scalar_fold().is_some()
     }
 
-    /// `true` if `self` is a fact-establishing assert (`Assert` / `AssertCmp`).
+    /// `true` if `self` must receive the conservative treatment used for assertions.
     ///
     /// The single classifier shared by every consumer that must treat asserts specially: the
     /// conditional analysis records their facts (`click_cooper/conditional.rs` Step 1), and
     /// consumers of its anticipated channel must never rewrite their inputs (Gate 3). A future
     /// establisher opcode must be added here _and_ have its fact recorded in Step 1.
+    ///
+    /// `AssertConstant` does not establish a runtime fact, but is included conservatively so its
+    /// temporary presence does not change ClickCooper's treatment of assert operands. Revisit this
+    /// when the analyses gain explicit support: https://github.com/reilabs/mavros/issues/260.
     pub fn is_assert(&self) -> bool {
-        matches!(self, OpCode::Assert { .. } | OpCode::AssertCmp { .. })
+        matches!(
+            self,
+            OpCode::Assert { .. } | OpCode::AssertConstant { .. } | OpCode::AssertCmp { .. }
+        )
     }
 }
 

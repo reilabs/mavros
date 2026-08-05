@@ -47,34 +47,42 @@ impl Pass for AssertConstantValidation {
     }
 
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
-        let failures: Vec<SourceLocation> = ssa
-            .iter_functions()
-            .filter_map(|(fid, function)| {
-                self.witness_inference
-                    .try_get_function_witness_type(*fid)
-                    .map(|witness_types| (function, witness_types))
-            })
-            .flat_map(|(function, witness_types)| {
-                function.get_blocks().flat_map(move |(_, block)| {
-                    block.get_instructions_with_source_locations().filter_map(
-                        move |(op, location)| {
-                            let OpCode::AssertConstant { value } = op else {
-                                return None;
-                            };
-                            witness_types
-                                .try_get_value_witness_type(*value)
-                                .is_some_and(|shape| shape.contains_witness())
-                                .then(|| location.clone())
-                        },
-                    )
-                })
-            })
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let mut failures = BTreeSet::new();
+        let mut functions_with_markers = Vec::new();
+
+        for (fid, function) in ssa.iter_functions() {
+            let witness_types = self.witness_inference.try_get_function_witness_type(*fid);
+            let mut has_marker = false;
+
+            for (_, block) in function.get_blocks() {
+                for (op, location) in block.get_instructions_with_source_locations() {
+                    assert!(
+                        !matches!(op, OpCode::Guard { .. }),
+                        "ICE: Guard reached assert_constant validation before witness taint inference"
+                    );
+                    let OpCode::AssertConstant { value } = op else {
+                        continue;
+                    };
+                    has_marker = true;
+                    if witness_types
+                        .and_then(|types| types.try_get_value_witness_type(*value))
+                        .is_some_and(|shape| shape.contains_witness())
+                    {
+                        failures.insert(location.clone());
+                    }
+                }
+            }
+
+            if has_marker {
+                functions_with_markers.push(*fid);
+            }
+        }
+
+        let failures: Vec<_> = failures.into_iter().collect();
 
         if failures.is_empty() {
-            for (_, function) in ssa.iter_functions_mut() {
+            for fid in functions_with_markers {
+                let function = ssa.get_function_mut(fid);
                 for (_, block) in function.get_blocks_mut() {
                     let instructions = block.take_instructions();
                     block.put_instructions(
@@ -101,13 +109,21 @@ mod tests {
         analysis::{flow_analysis::FlowAnalysis, witness_taint_inference::WitnessTaintInference},
         pass_manager::PassManager,
         ssa::{
-            FunctionId, SourceLocation, Terminator, ValueId,
+            FunctionId, SourceLocation, SourcePosition, Terminator, ValueId,
             hlssa::{CallTarget, CastTarget, Constant, HLSSA, OpCode, SequenceTargetType, Type},
         },
     };
 
     fn assert_constant(value: ValueId) -> crate::compiler::ssa::Located<OpCode> {
         OpCode::AssertConstant { value }.locate(SourceLocation::test())
+    }
+
+    fn assert_constant_at(value: ValueId, line: u64) -> crate::compiler::ssa::Located<OpCode> {
+        OpCode::AssertConstant { value }.locate(SourceLocation::new(
+            "assert_constant.nr",
+            SourcePosition::new(line, 1),
+            SourcePosition::new(line, 20),
+        ))
     }
 
     fn validate(ssa: &mut HLSSA) -> Result<(), Vec<SourceLocation>> {
@@ -238,6 +254,8 @@ mod tests {
 
     #[test]
     fn accepts_static_sequence_length_with_witness_elements() {
+        // Once witness-length slices are supported, this test must also cover a genuinely dynamic
+        // slice length and require validation to reject it.
         let mut ssa = HLSSA::with_main("main".to_string());
         let five = ssa.add_const(Constant::Field(Field::from(5u64)));
         let dynamic = witness(&mut ssa, five);
@@ -270,5 +288,60 @@ mod tests {
         entry.set_terminator(Terminator::Return(vec![]));
 
         validate(&mut ssa).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_direct_witness_and_preserves_markers_on_failure() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let five = ssa.add_const(Constant::Field(Field::from(5u64)));
+        let dynamic = witness(&mut ssa, five);
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+        entry.push_instruction(assert_constant(dynamic));
+        entry.set_terminator(Terminator::Return(vec![]));
+
+        assert_eq!(validate(&mut ssa).unwrap_err().len(), 1);
+        assert!(ssa.iter_functions().any(|(_, function)| {
+            function.get_blocks().any(|(_, block)| {
+                block
+                    .get_instructions()
+                    .any(|op| matches!(op, OpCode::AssertConstant { .. }))
+            })
+        }));
+    }
+
+    #[test]
+    fn reports_every_failing_assertion() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let five = ssa.add_const(Constant::Field(Field::from(5u64)));
+        let dynamic = witness(&mut ssa, five);
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+        entry.push_instruction(assert_constant_at(dynamic, 10));
+        entry.push_instruction(assert_constant_at(dynamic, 20));
+        entry.set_terminator(Terminator::Return(vec![]));
+
+        let failures = validate(&mut ssa).unwrap_err();
+        assert_eq!(failures.len(), 2);
+        assert_eq!(failures[0].start.line, 10);
+        assert_eq!(failures[1].start.line, 20);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "ICE: Guard reached assert_constant validation before witness taint inference"
+    )]
+    fn rejects_a_guard_before_witness_taint_inference() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let five = ssa.add_const(Constant::Field(Field::from(5u64)));
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+        entry.push_instruction(
+            OpCode::Guard {
+                condition: five,
+                inner: Box::new(OpCode::AssertConstant { value: five }),
+            }
+            .locate(SourceLocation::test()),
+        );
+        entry.set_terminator(Terminator::Return(vec![]));
+
+        let _ = validate(&mut ssa);
     }
 }

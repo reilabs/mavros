@@ -25,7 +25,6 @@ use crate::{
             flow_analysis::FlowAnalysis, types::Types,
             witness_taint_inference::WitnessTaintInference,
         },
-        assert_constant,
         codegen::{
             CodeGenOptions,
             bytecode::CodeGen,
@@ -37,6 +36,7 @@ use crate::{
             arg_promotion::ArgPromotion,
             array_boundary_expansion::ArrayBoundaryExpansion,
             array_sroa::ArraySroa,
+            assert_constant::AssertConstantValidation,
             common_subexpression_elimination::CSE,
             dead_code_elimination::{self, DCE},
             deduplicate_phis::DeduplicatePhis,
@@ -398,7 +398,7 @@ impl Driver {
         PassManager::new(
             "assert_constant_validation".to_string(),
             self.draw_cfg,
-            vec![Box::new(assert_constant::AssertConstantValidation::new(
+            vec![Box::new(AssertConstantValidation::new(
                 Rc::clone(&witness_inference),
                 Rc::clone(&failures),
             ))],
