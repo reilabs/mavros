@@ -937,7 +937,7 @@ fn go_shape_from(
         | TypeExpr::I(_)
         | TypeExpr::Function
         | TypeExpr::Blob(..) => WitnessShape::Scalar(info),
-        TypeExpr::Slice { elem: inner, .. } => {
+        TypeExpr::Slice(inner) => {
             path.push(Descent::Len);
             let len = if read
                 && witness.contains(&Position {

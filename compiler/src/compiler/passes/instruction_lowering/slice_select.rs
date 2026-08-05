@@ -32,7 +32,7 @@ fn emit_elem_select(
                 emit_elem_select(b, cond, lhs_elem, rhs_elem, &elem_type)
             })
         }
-        TypeExpr::Slice { .. } => {
+        TypeExpr::Slice(_) => {
             panic!("LowerSliceSelect: nested slice is not allowed")
         }
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),

@@ -760,7 +760,7 @@ fn leaf_paths(ty: &Type) -> Vec<Vec<Descent>> {
             | TypeExpr::Function
             | TypeExpr::Blob(..) => out.push(prefix.clone()),
             TypeExpr::Ref(_) => out.push(prefix.clone()),
-            TypeExpr::Slice { elem: inner, .. } => {
+            TypeExpr::Slice(inner) => {
                 prefix.push(Descent::Len);
                 out.push(prefix.clone());
                 prefix.pop();

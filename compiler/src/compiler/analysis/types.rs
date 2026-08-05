@@ -33,9 +33,7 @@ fn push_witness_of_to_leaves(t: Type) -> Type {
         TypeExpr::WitnessOf(_) => t,
         TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => Type::witness_of(t),
         TypeExpr::Array(inner, n) => push_witness_of_to_leaves(*inner).array_of(n),
-        TypeExpr::Slice { elem: inner, len } => {
-            push_witness_of_to_leaves(*inner).slice_of_with_len(*len)
-        }
+        TypeExpr::Slice(inner) => push_witness_of_to_leaves(*inner).slice_of(),
         TypeExpr::Tuple(fields) => {
             Type::tuple_of(fields.into_iter().map(push_witness_of_to_leaves).collect())
         }
@@ -47,7 +45,7 @@ fn push_witness_of_to_leaves(t: Type) -> Type {
 fn replace_array_element_type(container: &Type, element_type: Type) -> Type {
     match &container.expr {
         TypeExpr::Array(_, size) => element_type.array_of(*size),
-        TypeExpr::Slice { len, .. } => element_type.slice_of_with_len(*len.clone()),
+        TypeExpr::Slice(_) => element_type.slice_of(),
         TypeExpr::WitnessOf(inner) => {
             Type::witness_of_collapsed(replace_array_element_type(inner, element_type))
         }
@@ -491,16 +489,10 @@ impl Types {
                 Ok(())
             }
             OpCode::SliceLen { result, slice } => {
-                let slice_type = function_info.values.get(slice).ok_or_else(|| {
+                function_info.values.get(slice).ok_or_else(|| {
                     format!("Slice value {:?} not found in type assignments", slice)
                 })?;
-                let peeled = slice_type.peel_witness();
-                let len_type = if peeled.is_slice() {
-                    peeled.get_slice_len().clone()
-                } else {
-                    Type::u(32)
-                };
-                function_info.values.insert(*result, len_type);
+                function_info.values.insert(*result, Type::u(32));
                 Ok(())
             }
             OpCode::Select {

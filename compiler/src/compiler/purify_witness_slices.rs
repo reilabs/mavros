@@ -68,8 +68,8 @@ impl Pass for PurifyWitnessSlices {
 
 fn purify_type(ty: &Type, shape: &WitnessShape) -> Type {
     match (&ty.expr, shape) {
-        (TypeExpr::Slice { elem, len }, WitnessShape::Slice(len_type, inner)) => {
-            let physical = purify_type(elem, inner).slice_of_with_len(len.as_ref().clone());
+        (TypeExpr::Slice(elem), WitnessShape::Slice(len_type, inner)) => {
+            let physical = purify_type(elem, inner).slice_of();
             if len_type.is_witness() {
                 Type::tuple_of(vec![physical.clone(), Type::u(32), Type::u(32)])
             } else {

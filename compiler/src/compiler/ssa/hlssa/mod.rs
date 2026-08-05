@@ -1980,7 +1980,7 @@ impl CastTarget {
                 );
                 Self::conversion_impl(s, t, strip).map(|inner| CastTarget::Map(Box::new(inner)))
             }
-            (TypeExpr::Slice { elem: s, .. }, TypeExpr::Slice { elem: t, .. }) => {
+            (TypeExpr::Slice(s), TypeExpr::Slice(t)) => {
                 Self::conversion_impl(s, t, strip).map(|inner| CastTarget::Map(Box::new(inner)))
             }
             _ => panic!(
@@ -2026,7 +2026,7 @@ impl CastTarget {
             },
             CastTarget::Map(inner) => match &value_type.expr {
                 TypeExpr::Array(elem, len) => inner.result_type(elem).array_of(*len),
-                TypeExpr::Slice { elem, .. } => inner.result_type(elem).slice_of(),
+                TypeExpr::Slice(elem) => inner.result_type(elem).slice_of(),
                 _ => panic!("Map cast on non-sequence type {:?}", value_type),
             },
         }

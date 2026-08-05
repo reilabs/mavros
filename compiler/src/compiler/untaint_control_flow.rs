@@ -831,7 +831,7 @@ impl UntaintControlFlow {
                 let result_type = ti.get_value_type(result);
                 let expected_elem_type = match &result_type.expr {
                     TypeExpr::Array(inner, _) => inner.as_ref().clone(),
-                    TypeExpr::Slice { elem: inner, .. } => inner.as_ref().clone(),
+                    TypeExpr::Slice(inner) => inner.as_ref().clone(),
                     _ => panic!("ArraySet on non-array type"),
                 };
                 let mut cast_instrs = Vec::new();
@@ -865,7 +865,7 @@ impl UntaintControlFlow {
                 let ti = type_info.unwrap();
                 let result_slice_type = ti.get_value_type(result);
                 let expected_elem_type = match &result_slice_type.expr {
-                    TypeExpr::Slice { elem: inner, .. } => inner.as_ref().clone(),
+                    TypeExpr::Slice(inner) => inner.as_ref().clone(),
                     _ => panic!("SlicePush on non-slice type"),
                 };
                 let mut cast_instrs = Vec::new();
@@ -1107,7 +1107,7 @@ fn emit_merge_select(
             result
         }
         TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
-        TypeExpr::Slice { .. } => {
+        TypeExpr::Slice(_) => {
             let lhs = emit_value_conversion(lhs, lhs_type, result_type, builder);
             let rhs = emit_value_conversion(rhs, rhs_type, result_type, builder);
             let result = result.unwrap_or_else(|| builder.fresh_value());
@@ -1158,9 +1158,9 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
             apply_witness_type(*inner, inner_wt.as_ref()).array_of(size)
         }
         // A slice's `top`/`len` taint is deliberately *not* applied due to previous slice purification pass
-        (TypeExpr::Slice { elem: inner, .. }, WitnessShape::Slice(_, inner_wt)) => {
+        (TypeExpr::Slice(inner), WitnessShape::Slice(_, inner_wt)) => {
             let elem_base = apply_witness_type(*inner, inner_wt.as_ref());
-            elem_base.slice_of_with_len(Type::u(32))
+            elem_base.slice_of()
         }
         (TypeExpr::Ref(inner), WitnessShape::Ref(top, inner_wt)) => {
             let base = apply_witness_type(*inner, inner_wt.as_ref()).ref_of();

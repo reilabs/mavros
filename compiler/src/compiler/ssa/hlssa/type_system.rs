@@ -18,7 +18,7 @@ pub enum TypeExpr {
     I(usize),
     WitnessOf(Box<Type>),
     Array(Box<Type>, usize),
-    Slice { elem: Box<Type>, len: Box<Type> },
+    Slice(Box<Type>),
     Ref(Box<Type>),
     Tuple(Vec<Type>),
     Function,
@@ -38,7 +38,7 @@ impl Display for Type {
             TypeExpr::I(size) => write!(f, "i{}", size),
             TypeExpr::WitnessOf(inner) => write!(f, "WitnessOf({})", inner),
             TypeExpr::Array(inner, size) => write!(f, "Array<{}, {}>", inner, size),
-            TypeExpr::Slice { elem, len } => write!(f, "Slice<{}, {}>", elem, len),
+            TypeExpr::Slice(elem) => write!(f, "Slice<{}>", elem),
             TypeExpr::Ref(inner) => write!(f, "Ref<{}>", inner),
             TypeExpr::Tuple(elements) => write!(
                 f,
@@ -103,15 +103,8 @@ impl Type {
     }
 
     pub fn slice_of(self) -> Self {
-        self.slice_of_with_len(Type::u(32))
-    }
-
-    pub fn slice_of_with_len(self, len: Type) -> Self {
         Type {
-            expr: TypeExpr::Slice {
-                elem: Box::new(self),
-                len: Box::new(len),
-            },
+            expr: TypeExpr::Slice(Box::new(self)),
         }
     }
 
@@ -170,11 +163,11 @@ impl Type {
     }
 
     pub fn is_slice(&self) -> bool {
-        matches!(self.expr, TypeExpr::Slice { .. })
+        matches!(self.expr, TypeExpr::Slice(_))
     }
 
     pub fn is_array_or_slice(&self) -> bool {
-        matches!(self.expr, TypeExpr::Array(_, _) | TypeExpr::Slice { .. })
+        matches!(self.expr, TypeExpr::Array(_, _) | TypeExpr::Slice(_))
     }
 
     pub fn is_witness_of(&self) -> bool {
@@ -202,7 +195,7 @@ impl Type {
             self.expr,
             TypeExpr::WitnessOf(_)
                 | TypeExpr::Array(_, _)
-                | TypeExpr::Slice { .. }
+                | TypeExpr::Slice(_)
                 | TypeExpr::Ref(_)
                 | TypeExpr::Tuple(_)
         )
@@ -236,17 +229,10 @@ impl Type {
     pub fn get_array_element(&self) -> Self {
         match &self.expr {
             TypeExpr::Array(inner, _) => *inner.clone(),
-            TypeExpr::Slice { elem, .. } => *elem.clone(),
+            TypeExpr::Slice(elem) => *elem.clone(),
             TypeExpr::Blob(inner, _) => *inner.clone(),
             TypeExpr::WitnessOf(inner) => Type::witness_of_collapsed(inner.get_array_element()),
             _ => panic!("Type is not an array: {}", self),
-        }
-    }
-
-    pub fn get_slice_len(&self) -> &Type {
-        match &self.expr {
-            TypeExpr::Slice { len, .. } => len,
-            _ => panic!("Type is not a slice: {}", self),
         }
     }
 
@@ -346,11 +332,8 @@ impl Type {
             TypeExpr::Array(inner, size) => Type {
                 expr: TypeExpr::Array(Box::new(inner.strip_all_witness()), *size),
             },
-            TypeExpr::Slice { elem, len } => Type {
-                expr: TypeExpr::Slice {
-                    elem: Box::new(elem.strip_all_witness()),
-                    len: Box::new(len.strip_all_witness()),
-                },
+            TypeExpr::Slice(elem) => Type {
+                expr: TypeExpr::Slice(Box::new(elem.strip_all_witness())),
             },
             TypeExpr::Ref(inner) => Type {
                 expr: TypeExpr::Ref(Box::new(inner.strip_all_witness())),
@@ -387,9 +370,7 @@ impl Type {
             (TypeExpr::U(n), TypeExpr::U(m)) => n == m,
             (TypeExpr::I(n), TypeExpr::I(m)) => n == m,
             (TypeExpr::Array(x, n), TypeExpr::Array(y, m)) => n == m && x.is_subtype_of(y),
-            (TypeExpr::Slice { elem: ex, len: lx }, TypeExpr::Slice { elem: ey, len: ly }) => {
-                ex.is_subtype_of(ey) && lx.is_subtype_of(ly)
-            }
+            (TypeExpr::Slice(ex), TypeExpr::Slice(ey)) => ex.is_subtype_of(ey),
             (TypeExpr::Tuple(xs), TypeExpr::Tuple(ys)) => {
                 xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| x.is_subtype_of(y))
             }
@@ -439,14 +420,7 @@ impl Type {
                 );
                 Type::join(x, y).array_of(*n)
             }
-            (TypeExpr::Slice { elem: ex, len: lx }, TypeExpr::Slice { elem: ey, len: ly }) => {
-                Type {
-                    expr: TypeExpr::Slice {
-                        elem: Box::new(Type::join(ex, ey)),
-                        len: Box::new(Type::join(lx, ly)),
-                    },
-                }
-            }
+            (TypeExpr::Slice(ex), TypeExpr::Slice(ey)) => Type::join(ex, ey).slice_of(),
             (TypeExpr::Tuple(xs), TypeExpr::Tuple(ys)) => {
                 assert_eq!(
                     xs.len(),
@@ -498,7 +472,7 @@ impl Type {
             (TypeExpr::Field, _) | (_, TypeExpr::Field) => Type::field(),
             (TypeExpr::U(size1), TypeExpr::U(size2)) => Type::u(*size1.max(size2)),
             (TypeExpr::I(size1), TypeExpr::I(size2)) => Type::i(*size1.max(size2)),
-            (TypeExpr::Slice { .. }, TypeExpr::Slice { .. }) if self == other => self.clone(),
+            (TypeExpr::Slice(_), TypeExpr::Slice(_)) if self == other => self.clone(),
             _ => panic!("Cannot perform arithmetic on types {} and {}", self, other),
         }
     }
@@ -509,7 +483,7 @@ impl Type {
         match &self.expr {
             TypeExpr::Ref(_) => true,
             TypeExpr::Array(inner, _) => inner.contains_ptrs(),
-            TypeExpr::Slice { elem, .. } => elem.contains_ptrs(),
+            TypeExpr::Slice(elem) => elem.contains_ptrs(),
             TypeExpr::WitnessOf(inner) => inner.contains_ptrs(),
             TypeExpr::Field => false,
             TypeExpr::U(_) => false,

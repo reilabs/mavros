@@ -743,7 +743,7 @@ impl HLBlockEmitter<'_> {
                     .collect();
                 self.mk_tuple(elems, element_types.clone())
             }
-            TypeExpr::Slice { elem, .. } => {
+            TypeExpr::Slice(elem) => {
                 self.mk_seq(Vec::new(), SequenceTargetType::Slice, elem.as_ref().clone())
             }
             TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
