@@ -20,6 +20,11 @@
 | noir_tests/array_of_structs_3 | ✅ | ✅ | 21 | 22 | 25840 | 13734 | 61389 | 232657 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/array_of_structs_4 | ✅ | ✅ | 32 | 33 | 45824 | 26516 | 91083 | 268220 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/array_of_structs_mini | ✅ | ✅ | 1 | 2 | 4744 | 2888 | 27918 | 194256 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/assert_constant | ✅ | ✅ | 0 | 2 | 161464 | 2106 | 185102 | 350789 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ |
+| noir_tests/assert_constant_large_value | ✅ | ✅ | 1 | 2 | 2608 | 2210 | 27497 | 193267 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/assert_constant_large_value_control | ✅ | ✅ | 1 | 2 | 2400 | 1888 | 26818 | 192462 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/assert_constant_unconstrained_divergence | ✅ | ✅ | 0 | 2 | 952 | 744 | 24939 | 189827 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/assert_constant_unit | ✅ | ✅ | 0 | 1 | 352 | 1038 | 24790 | 189775 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/big_tuple | ✅ | ✅ | 1 | 3 | 7224 | 6336 | 35174 | 201068 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/binary_wit | ✅ | ✅ | 361 | 611 | 33232 | 7379 | 82223 | 250478 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/cast_signed_unsigned | ✅ | ✅ | 76 | 122 | 22032 | 9302 | 60949 | 229720 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -72,6 +77,8 @@
 | noir_tests/unconstrained_cross_block | ✅ | ✅ | 1 | 3 | 3032 | 3234 | 26714 | 192576 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/unconstrained_sqrt | ✅ | ✅ | 1 | 3 | 2848 | 2858 | 30199 | 196211 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/witness_array_select | ✅ | ✅ | 6 | 9 | 5664 | 3912 | 39667 | 205430 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_compile_failure_tests/assert_constant_dynamic_context | ✅ | N/A | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| noir_compile_failure_tests/assert_constant_dynamic_tuple | ✅ | N/A | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
 | noir/test_programs/execution_success/a_1327_concrete_in_generic | ✅ | ✅ | 2 | 4 | 4960 | 5465 | 27684 | 194985 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/a_1_mul | ✅ | ✅ | 78 | 146 | 9136 | 2970 | 42221 | 209195 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/a_2_div | ✅ | ✅ | 85 | 160 | 9496 | 3692 | 42921 | 209920 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -100,7 +107,7 @@
 | noir/test_programs/execution_success/array_set_not_deduplicated | ✅ | ✅ | 1 | 2 | 2184 | 4168 | 26863 | 192727 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/array_sort | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
 | noir/test_programs/execution_success/array_to_vector | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
-| noir/test_programs/execution_success/array_to_vector_constant_length | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/array_to_vector_constant_length | ✅ | ✅ | 0 | 2 | 1344 | 1331 | 24939 | 190009 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/array_with_refs_from_param | ✅ | ✅ | 3 | 3 | 4736 | 4004 | 32646 | 199107 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/array_with_refs_return | ✅ | ✅ | 23 | 42 | 10280 | 7203 | 41072 | 209587 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/as_str_unchecked_with_broken_bytes | ✅ | ✅ | 0 | 1 | 1976 | 3829 | 25680 | 192079 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
