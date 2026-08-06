@@ -1,0 +1,6 @@
+[package]
+name = "signed_call_boundary"
+type = "bin"
+authors = [""]
+
+[dependencies]

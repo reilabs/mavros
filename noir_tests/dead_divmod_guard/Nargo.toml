@@ -1,0 +1,6 @@
+[package]
+name = "dead_divmod_guard"
+type = "bin"
+authors = [""]
+
+[dependencies]

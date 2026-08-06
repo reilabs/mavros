@@ -1,0 +1,6 @@
+[package]
+name = "signed_array"
+type = "bin"
+authors = [""]
+
+[dependencies]

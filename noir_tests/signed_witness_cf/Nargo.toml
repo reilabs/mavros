@@ -1,0 +1,6 @@
+[package]
+name = "signed_witness_cf"
+type = "bin"
+authors = [""]
+
+[dependencies]

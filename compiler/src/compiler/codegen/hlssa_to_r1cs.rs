@@ -110,6 +110,35 @@ impl Value {
         Self::wrap_unsigned(v as u128, bits)
     }
 
+    /// Report an undefined `Div`/`Mod` reaching the R1CS constant folds as a compiler bug.
+    ///
+    /// `LowerPureGuards` asserts every integer `Div`/`Mod` is defined immediately before the op,
+    /// so an undefined one makes the program unsatisfiable and `R1CGen` rejects it at that assert —
+    /// which precedes the division in the instruction stream — before this fold is ever asked for
+    /// a quotient. Reaching here means that ordering broke, so say so instead of surfacing Rust's
+    /// bare "attempt to divide by zero" from inside codegen, or — for `INT_MIN / -1` — instead of
+    /// silently wrapping to a plausible-looking answer.
+    #[track_caller]
+    fn ice_undefined_divmod(kind: BinaryArithOpKind, bits: usize, signed: bool) -> ! {
+        let sign = if signed { 'i' } else { 'u' };
+        panic!(
+            "ICE: undefined {kind:?} reached the R1CS constant fold on {sign}{bits}; \
+             LowerPureGuards should have rejected the program at the preceding assertion"
+        )
+    }
+
+    /// Whether `lhs / rhs` (or `lhs % rhs`) on `bits`-wide signed operands is undefined: a zero
+    /// divisor, or `INT_MIN / -1`.
+    ///
+    /// Mirrors `emit_divmod_failure_cond`, which is what makes such a program unsatisfiable before
+    /// this fold ever runs. `checked_div` cannot stand in for the second case here: `lhs` is a
+    /// decoded `i128`, so the narrower type's `INT_MIN / -1` has a perfectly representable `i128`
+    /// quotient and would fold silently, wrapping back to `INT_MIN` on the way through
+    /// [`Value::encode_signed`].
+    fn signed_divmod_undefined(lhs: i128, rhs: i128, bits: usize) -> bool {
+        rhs == 0 || (rhs == -1 && lhs == -(1i128 << (bits - 1)))
+    }
+
     // FIELD-ASSUMPTION: L4-eval
     pub fn add(&self, other: &Value) -> Value {
         match (self, other) {
@@ -162,6 +191,20 @@ impl Value {
     }
 
     pub fn div(&self, other: &Value) -> Value {
+        // Zero has no inverse, and arkworks' `Div` unwraps one, so both arms below panic on a zero
+        // divisor. `LowerPureGuards` now asserts every field division is defined, so `R1CGen`
+        // rejects the program at that assertion — which precedes the division — before either arm
+        // runs. Say which invariant broke rather than surfacing arkworks' unwrap from inside
+        // codegen.
+        // FIELD-ASSUMPTION: L4-eval
+        if let Value::Const(rhs) = other
+            && *rhs == ark_bn254::Fr::ZERO
+        {
+            panic!(
+                "ICE: zero divisor reached the R1CS field division fold; \
+                 LowerPureGuards should have rejected the program at the preceding assertion"
+            );
+        }
         match (self, other) {
             // FIELD-ASSUMPTION: L4-inverse
             (Value::Const(lhs), Value::Const(rhs)) => Value::Const(lhs / rhs),
@@ -551,8 +594,12 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     BinaryArithOpKind::Add => a.wrapping_add(b),
                     BinaryArithOpKind::Sub => a.wrapping_sub(b),
                     BinaryArithOpKind::Mul => a.wrapping_mul(b),
-                    BinaryArithOpKind::Div => a / b,
-                    BinaryArithOpKind::Mod => a % b,
+                    BinaryArithOpKind::Div => a.checked_div(b).unwrap_or_else(|| {
+                        Self::ice_undefined_divmod(binary_arith_op_kind, *bits, false)
+                    }),
+                    BinaryArithOpKind::Mod => a.checked_rem(b).unwrap_or_else(|| {
+                        Self::ice_undefined_divmod(binary_arith_op_kind, *bits, false)
+                    }),
                     BinaryArithOpKind::And => a & b,
                     BinaryArithOpKind::Or => a | b,
                     BinaryArithOpKind::Xor => a ^ b,
@@ -590,15 +637,36 @@ impl symbolic_executor::Value<R1CGen> for Value {
                         Self::wrap_unsigned(a as u128, *bits)
                             ^ Self::wrap_unsigned(b as u128, *bits)
                     }
+                    // Left shift is the same map on bits whatever the sign, so this stays on the
+                    // raw encoding. Note it does *not* mask the shift count the way `Shr` below
+                    // does: `wrapping_shl` on a `u128` masks to 127, not to `bits - 1`. Left for
+                    // now as backends do not agree on behavior here.
                     BinaryArithOpKind::Shl => {
                         let raw = Self::wrap_unsigned(a as u128, *bits).wrapping_shl(b_bits);
                         Self::wrap_unsigned(raw, *bits)
                     }
+                    // Arithmetic, not logical. `a` is already the decoded signed value, so
+                    // shifting it directly sign-fills; the previous `wrap_unsigned(..)` re-encoded
+                    // to raw bits first and so zero-filled. The shift count is masked to
+                    // `bits - 1` to match the VM's `ashr_u64` and LLVM's `AShr` — the right-shift
+                    // trio does agree, unlike `Shl` above.
                     BinaryArithOpKind::Shr => {
-                        Self::wrap_unsigned(a as u128, *bits).wrapping_shr(b_bits)
+                        Self::encode_signed(a >> (b_bits & (*bits as u32 - 1)), *bits)
                     }
-                    BinaryArithOpKind::Div => Self::encode_signed(a / b, *bits),
-                    BinaryArithOpKind::Mod => Self::encode_signed(a % b, *bits),
+                    // `INT_MIN / -1` is undefined for the same reason a zero divisor is, and is
+                    // guarded identically by `LowerPureGuards`, so it ICEs identically here.
+                    BinaryArithOpKind::Div => {
+                        if Self::signed_divmod_undefined(a, b, *bits) {
+                            Self::ice_undefined_divmod(binary_arith_op_kind, *bits, true);
+                        }
+                        Self::encode_signed(a / b, *bits)
+                    }
+                    BinaryArithOpKind::Mod => {
+                        if Self::signed_divmod_undefined(a, b, *bits) {
+                            Self::ice_undefined_divmod(binary_arith_op_kind, *bits, true);
+                        }
+                        Self::encode_signed(a % b, *bits)
+                    }
                 };
                 Value::Const(ark_bn254::Fr::from(result))
             }

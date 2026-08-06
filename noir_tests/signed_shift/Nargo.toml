@@ -1,0 +1,6 @@
+[package]
+name = "signed_shift"
+type = "bin"
+authors = [""]
+
+[dependencies]

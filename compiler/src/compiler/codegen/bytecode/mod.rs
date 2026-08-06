@@ -672,12 +672,23 @@ impl CodeGen {
                     lhs: op1,
                     rhs: op2,
                 } => match &type_info.get_value_type(*val).expr {
-                    TypeExpr::U(bits) | TypeExpr::I(bits) if *bits <= 64 => {
+                    TypeExpr::U(bits) if *bits <= 64 => {
                         let result = layouter.alloc_int(*val, *bits);
                         emitter.push_op(bytecode::OpCode::UshrU64 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
+                        });
+                    }
+                    // Sign-fill, matching Noir and `IntArithOp::AShr` on the LLVM side. Needs
+                    // `bits` because the sign lives at `bits - 1`, not at 63.
+                    TypeExpr::I(bits) if *bits <= 64 => {
+                        let result = layouter.alloc_int(*val, *bits);
+                        emitter.push_op(bytecode::OpCode::AshrU64 {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
+                            bits: *bits as u64,
                         });
                     }
                     TypeExpr::U(128) => {

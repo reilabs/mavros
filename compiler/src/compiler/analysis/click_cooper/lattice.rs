@@ -156,18 +156,17 @@ pub(crate) fn eval_binary(
                         Add => xa.checked_add(ya)?,
                         Sub => xa.checked_sub(ya)?,
                         Mul => xa.checked_mul(ya)?,
-                        Div => {
-                            if ya == 0 {
-                                return None;
-                            }
-                            xa.checked_div(ya)?
+                        // `INT_MIN / -1` overflows: the mathematical quotient is one past the
+                        // top of the type. `INT_MIN % -1` is defined in terms of that same
+                        // quotient, so it is equally undefined even though the remainder it
+                        // would produce (0) is perfectly representable — which is exactly why
+                        // the `fits_signed` check below catches the division but not the
+                        // remainder. Noir rejects both, so neither may fold.
+                        Div | Mod if ya == 0 || (ya == -1 && xa == -(1i128 << (s - 1))) => {
+                            return None;
                         }
-                        Mod => {
-                            if ya == 0 {
-                                return None;
-                            }
-                            xa.checked_rem(ya)?
-                        }
+                        Div => xa.checked_div(ya)?,
+                        Mod => xa.checked_rem(ya)?,
                         And | Or | Xor | Shl | Shr => unreachable!(),
                     };
                     if !fits_signed(s, v) {
@@ -175,7 +174,37 @@ pub(crate) fn eval_binary(
                     }
                     Some(Constant::I(s, encode_signed(s, v)))
                 }
-                Shl | Shr => None,
+                Shl | Shr => {
+                    let xa = decode_signed(s, *x);
+                    let ya = decode_signed(s, *y);
+
+                    // Mirror the unsigned arm: only fold an unambiguously in-range amount.
+                    // Out-of-range shifts are a runtime error in Noir, and the implementations
+                    // that do evaluate them disagree — the backends mask the count to `bits - 1`
+                    // while the cost interpreter saturates to `0`/`-1`. Declining to fold keeps
+                    // this analysis out of that argument entirely. `ya` is decoded, so a shift
+                    // amount whose raw bits set the sign bit reads negative and is refused here
+                    // rather than wrapping into a plausible-looking small shift.
+                    if ya < 0 || ya >= s as i128 {
+                        return None;
+                    }
+
+                    let v = match kind {
+                        // Arithmetic: `xa` is the decoded value, so this sign-fills. It cannot
+                        // overflow — the magnitude only ever shrinks — so it always folds.
+                        Shr => xa >> ya,
+                        // Also mirroring the unsigned arm, which refuses an `Shl` whose result
+                        // leaves the width. Where this does fold it agrees with the wrapping
+                        // fold in `hlssa_to_r1cs`, since they overlap only on the cases that do
+                        // not overflow.
+                        Shl => xa.checked_shl(ya as u32)?,
+                        Add | Sub | Mul | Div | Mod | And | Or | Xor => unreachable!(),
+                    };
+                    if !fits_signed(s, v) {
+                        return None;
+                    }
+                    Some(Constant::I(s, encode_signed(s, v)))
+                }
             }
         }
         // FIELD-ASSUMPTION: L4-eval
@@ -429,4 +458,89 @@ pub(crate) fn eval_mk_repeated(
         elem_type.clone(),
         vec![element.clone(); count],
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An `i8` constant, written as the value it denotes rather than its raw bits.
+    fn i8c(v: i128) -> Constant {
+        Constant::I(8, encode_signed(8, v))
+    }
+
+    /// Fold two `i8` constants, decoding the result back to the value it denotes.
+    /// `None` means the fold was refused.
+    fn fold(kind: BinaryArithOpKind, a: i128, b: i128) -> Option<i128> {
+        match eval_binary(kind, &i8c(a), &i8c(b), FieldConfig::bn254()) {
+            Some(Constant::I(s, raw)) => Some(decode_signed(s, raw)),
+            Some(other) => panic!("expected a signed constant, got {other:?}"),
+            None => None,
+        }
+    }
+
+    #[test]
+    fn signed_shr_sign_fills() {
+        use BinaryArithOpKind::Shr;
+        assert_eq!(fold(Shr, -8, 1), Some(-4));
+        assert_eq!(fold(Shr, -8, 2), Some(-2));
+        assert_eq!(fold(Shr, -8, 3), Some(-1));
+        // Sign-fill saturates at -1 however far it goes, within range.
+        assert_eq!(fold(Shr, -8, 7), Some(-1));
+        // -1 is all-ones, so it is a fixed point.
+        assert_eq!(fold(Shr, -1, 5), Some(-1));
+        // Non-negative values behave like a logical shift.
+        assert_eq!(fold(Shr, 8, 1), Some(4));
+        assert_eq!(fold(Shr, 0, 5), Some(0));
+        // Rounds toward negative infinity, unlike signed division which truncates
+        // toward zero: -7 >> 1 is -4 but -7 / 2 is -3.
+        assert_eq!(fold(Shr, -7, 1), Some(-4));
+        assert_eq!(fold(BinaryArithOpKind::Div, -7, 2), Some(-3));
+    }
+
+    #[test]
+    fn shifts_refuse_out_of_range_amounts() {
+        use BinaryArithOpKind::{Shl, Shr};
+        // At or past the width.
+        assert_eq!(fold(Shr, -8, 8), None);
+        assert_eq!(fold(Shl, 1, 8), None);
+        // A negative amount. This is the case that matters: as raw bits `-1` is
+        // 0xFF, which would read as a shift by 255 if it were not decoded, and
+        // masking that to the width would produce a plausible-looking shift by 7.
+        assert_eq!(fold(Shr, -8, -1), None);
+        assert_eq!(fold(Shl, 1, -1), None);
+    }
+
+    #[test]
+    fn signed_shl_refuses_to_leave_the_width() {
+        use BinaryArithOpKind::Shl;
+        assert_eq!(fold(Shl, -8, 1), Some(-16));
+        assert_eq!(fold(Shl, 1, 6), Some(64));
+        // 1 << 7 is 128, one past i8::MAX.
+        assert_eq!(fold(Shl, 1, 7), None);
+        assert_eq!(fold(Shl, 2, 6), None);
+    }
+
+    #[test]
+    fn int_min_over_minus_one_never_folds() {
+        use BinaryArithOpKind::{Div, Mod};
+        // The quotient overflows, and the remainder is defined in terms of it —
+        // so neither may fold, even though the remainder itself would be 0.
+        assert_eq!(fold(Div, -128, -1), None);
+        assert_eq!(fold(Mod, -128, -1), None);
+        // The same operands are fine anywhere off that exact pair.
+        assert_eq!(fold(Div, -127, -1), Some(127));
+        assert_eq!(fold(Mod, -127, -1), Some(0));
+        assert_eq!(fold(Div, -128, 1), Some(-128));
+        assert_eq!(fold(Mod, -128, 2), Some(0));
+    }
+
+    #[test]
+    fn division_by_zero_never_folds() {
+        use BinaryArithOpKind::{Div, Mod};
+        assert_eq!(fold(Div, 5, 0), None);
+        assert_eq!(fold(Mod, 5, 0), None);
+        assert_eq!(fold(Div, -5, 0), None);
+        assert_eq!(fold(Mod, -5, 0), None);
+    }
 }

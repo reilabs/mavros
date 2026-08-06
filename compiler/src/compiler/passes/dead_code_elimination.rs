@@ -6,18 +6,80 @@
 //!
 //! TODO Refactor to use the existing liveness analysis (#157).
 
+use mavros_artifacts::FieldConfig;
+
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
-        analysis::flow_analysis::{CFG, FlowAnalysis},
+        analysis::{
+            flow_analysis::{CFG, FlowAnalysis},
+            types::{TypeInfo, Types},
+        },
         pass_manager::{AnalysisId, AnalysisStore, Pass},
+        passes::shared::divmod_guard::{divmod_can_fail, emit_divmod_is_defined_assert},
         ssa::{
-            BlockId, FunctionId, Instruction, Terminator, ValueId,
-            hlssa::{CallTarget, HLFunction, HLSSA, OpCode},
+            BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
+            hlssa::{
+                BinaryArithOpKind, CallTarget, Constant, HLFunction, HLSSA, LocatedOpCode, OpCode,
+                builder::HLEmitter,
+            },
         },
         util::ice_non_elided_tuple,
     },
 };
+
+/// An [`HLEmitter`] that appends into a plain instruction vector.
+///
+/// DCE's sweep builds each block's new instruction list by hand rather than through a
+/// `HLBlockEmitter`, but the divmod check has to be built exactly the way every other pass builds
+/// it (see [`crate::compiler::passes::shared::divmod_guard`]). This adapter bridges the two so
+/// there is only ever one definition of the check.
+struct VecEmitter<'a, 'b> {
+    ssa: &'a HLSSA,
+    out: &'b mut Vec<LocatedOpCode>,
+    location: SourceLocation,
+}
+
+impl HLEmitter for VecEmitter<'_, '_> {
+    fn fresh_value(&mut self) -> ValueId {
+        self.ssa.fresh_value()
+    }
+
+    fn emit(&mut self, instruction: OpCode) {
+        let located = instruction.locate(self.location.clone());
+        self.out.push(located);
+    }
+
+    fn emit_located(&mut self, instruction: LocatedOpCode) {
+        self.out.push(instruction);
+    }
+
+    fn emit_constant(&mut self, value: Constant) -> ValueId {
+        self.ssa.add_const(value)
+    }
+
+    fn field(&self) -> FieldConfig {
+        self.ssa.field()
+    }
+}
+
+/// The operands of an unguarded `Div`/`Mod`, which is the only instruction DCE may not simply
+/// delete when its result goes dead.
+///
+/// Deliberately matches only at the top level: a `Guard`-wrapped division must keep today's
+/// behaviour, because inside an inactive branch it is required *not* to fail and
+/// `lower_divmod_guard` already encodes that.
+fn unguarded_divmod_operands(instruction: &OpCode) -> Option<(ValueId, ValueId)> {
+    match instruction {
+        OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::Div | BinaryArithOpKind::Mod,
+            lhs,
+            rhs,
+            ..
+        } => Some((*lhs, *rhs)),
+        _ => None,
+    }
+}
 
 pub struct DCE {
     config: Config,
@@ -46,6 +108,20 @@ pub struct Config {
     /// Remove this option once untaint_control_flow properly handles multiple jumps into merge
     /// blocks.
     pub preserve_all_blocks: bool,
+
+    /// Whether an unguarded `Div`/`Mod` whose quotient is dead is replaced by its failure check
+    /// instead of being deleted outright.
+    ///
+    /// **Only ever true before witness lowering**. From `spill_witness` onward the IR also contains
+    /// divisions the compiler generated itself — `lower_unsigned_divmod` computes its quotient and
+    /// remainder *hints* with ordinary `Div`/`Mod` on `value_of(..)` operands. Those are not user
+    /// divisions and carry no Noir-level failure semantics; the guarded path even substitutes a
+    /// divisor of `1` on purpose so an inactive branch's hint stays safe.
+    ///
+    /// Restricting it this way loses nothing. Every *user* division is present from `initial_ssa`
+    /// onward, so the early runs see them all; and any that survives to `spill_witness` gets its
+    /// check from `LowerPureGuards`, which runs before anything there can kill it.
+    pub rewrite_dead_divmod: bool,
 }
 
 impl Config {
@@ -53,6 +129,7 @@ impl Config {
         Self {
             witness_shape_frozen: false,
             preserve_all_blocks: false,
+            rewrite_dead_divmod: false,
         }
     }
 
@@ -60,13 +137,17 @@ impl Config {
         Self {
             witness_shape_frozen: true,
             preserve_all_blocks: false,
+            rewrite_dead_divmod: false,
         }
     }
 
+    /// The pre-untaint configuration, used by the phases that still hold purely user-level IR.
+    /// This is the only one that rewrites dead divisions — see [`Config::rewrite_dead_divmod`].
     pub fn preserve_blocks() -> Self {
         Self {
             witness_shape_frozen: false,
             preserve_all_blocks: true,
+            rewrite_dead_divmod: true,
         }
     }
 }
@@ -88,6 +169,15 @@ impl Pass for DCE {
 impl DCE {
     pub fn new(config: Config) -> Self {
         Self { config }
+    }
+
+    /// Whether this run may replace a dead unguarded `Div`/`Mod` with its failure check.
+    fn rewrites_dead_divmod(&self) -> bool {
+        debug_assert!(
+            !(self.config.rewrite_dead_divmod && self.config.witness_shape_frozen),
+            "rewriting dead divisions would add constraints after the witness shape is frozen"
+        );
+        self.config.rewrite_dead_divmod
     }
 
     fn is_initially_live(&self, instruction: &OpCode) -> bool {
@@ -196,6 +286,27 @@ impl DCE {
                 for (i, instruction) in block.get_instructions().enumerate() {
                     if self.is_initially_live(instruction) {
                         worklist.push(WorkItem::LiveInstruction(*function_id, *block_id, i));
+                    }
+
+                    // An unguarded `Div`/`Mod` keeps its operands alive even when its quotient is
+                    // dead, because the sweep replaces such a division with a check *on those
+                    // operands* rather than deleting it. Note this deliberately does not mark the
+                    // division itself live: `live_instructions` staying false for it is precisely
+                    // the signal the sweep uses to know it should rewrite.
+                    //
+                    // Nothing is pessimised for a division that stays: its operands were already
+                    // live. Where the rewrite does fire, an operand the check turns out not to need
+                    // — `lhs`, for everything but signed — is held live one run longer than it has
+                    // to be, because the seeding runs before there is any type information to tell
+                    // the two cases apart. It goes dead again immediately and the *next* DCE run
+                    // drops it, which at the `pre_wti` site is a later pass in the same phase; at
+                    // the `make_struct_access_static` site (the last pass of that phase) it instead
+                    // carries into the next phase's input, where the first DCE reclaims it.
+                    if self.rewrites_dead_divmod()
+                        && let Some((lhs, rhs)) = unguarded_divmod_operands(instruction)
+                    {
+                        worklist.push(WorkItem::LiveValue(*function_id, lhs));
+                        worklist.push(WorkItem::LiveValue(*function_id, rhs));
                     }
                 }
 
@@ -415,6 +526,20 @@ impl DCE {
             }
         }
 
+        // Typed for the whole module whenever this run can rewrite, without first checking whether
+        // there is anything to rewrite: finding out would cost a full instruction walk of its own,
+        // which is the same order as the type analysis it would be guarding.
+        //
+        // Deliberately typed *before* the constant sweep below, and before the sweep proper takes
+        // functions out of the SSA. `Types` walks every instruction in every block, including the
+        // dead ones that are still sitting there waiting to be removed, so it must run while the
+        // module is still whole. Typing after `retain_constants` panics with "Error running opcode
+        // Cast { .. }" the moment a dead instruction's only-use constant has just been pruned out
+        // from under it.
+        let divmod_types: Option<TypeInfo> = self
+            .rewrites_dead_divmod()
+            .then(|| Types::new().run(ssa, cfg));
+
         // Sweep the module-level constant storage: a constant is live iff some live instruction
         // (in any function) references its `ValueId`.
         let all_live: HashSet<ValueId> = live_values
@@ -439,6 +564,29 @@ impl DCE {
 
                 for (i, mut instruction) in instructions.into_iter().enumerate() {
                     if !self.instruction_live(&live_instructions, function_id, block_id, i) {
+                        // A `Div`/`Mod` whose quotient is dead is the one instruction that must not
+                        // vanish. Noir treats a bad division as an execution failure whether or not
+                        // anything reads the quotient, and mavros never sees Noir's SSA-level
+                        // check, so deleting the division here would delete the only thing that
+                        // could ever fail. Replace it with the check alone: the arithmetic still
+                        // goes, which is the whole point of eliminating it.
+                        if let Some(types) = divmod_types.as_ref()
+                            && let Some((lhs, rhs)) = unguarded_divmod_operands(&instruction)
+                        {
+                            let lhs_type = types
+                                .get_function(function_id)
+                                .get_value_type(lhs)
+                                .strip_witness()
+                                .clone();
+                            if divmod_can_fail(&lhs_type) {
+                                let mut emitter = VecEmitter {
+                                    ssa,
+                                    out: &mut new_instructions,
+                                    location: instruction.location().clone(),
+                                };
+                                emit_divmod_is_defined_assert(&mut emitter, lhs, rhs, &lhs_type);
+                            }
+                        }
                         continue;
                     }
 
