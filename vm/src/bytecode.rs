@@ -2008,7 +2008,42 @@ mod def {
 
     #[opcode]
     fn to_bits_le(#[out] res: *mut BoxedValue, #[frame] val: Field, count: u64, vm: &mut VM) {
-        panic!("to_bits_be_lt_8 not implemented");
+        let val = ark_ff::PrimeField::into_bigint(val);
+        let r = BoxedValue::alloc(BoxedLayout::array(count as usize, false), vm);
+        unsafe {
+            for i in 0..count {
+                let bit_idx = i as usize;
+                let limb_idx = bit_idx / 64;
+                let bit_in_limb = bit_idx % 64;
+                let bit = if limb_idx < val.0.len() {
+                    (val.0[limb_idx] >> bit_in_limb) & 1
+                } else {
+                    0
+                };
+                *r.array_idx(bit_idx, 1) = bit;
+            }
+            *res = r;
+        }
+    }
+
+    #[opcode]
+    fn to_bits_be(#[out] res: *mut BoxedValue, #[frame] val: Field, count: u64, vm: &mut VM) {
+        let val = ark_ff::PrimeField::into_bigint(val);
+        let r = BoxedValue::alloc(BoxedLayout::array(count as usize, false), vm);
+        unsafe {
+            for i in 0..count {
+                let bit_idx = i as usize;
+                let limb_idx = bit_idx / 64;
+                let bit_in_limb = bit_idx % 64;
+                let bit = if limb_idx < val.0.len() {
+                    (val.0[limb_idx] >> bit_in_limb) & 1
+                } else {
+                    0
+                };
+                *r.array_idx((count - i - 1) as usize, 1) = bit;
+            }
+            *res = r;
+        }
     }
 
     #[opcode]
