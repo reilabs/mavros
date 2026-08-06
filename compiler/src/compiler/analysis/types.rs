@@ -2,6 +2,8 @@
 //! perform detailed bookkeeping of type information whenever transforming the IR.
 
 use core::panic;
+
+use mavros_artifacts::FieldConfig;
 use tracing::{Level, instrument};
 
 use crate::{
@@ -102,9 +104,14 @@ impl Types {
             .map(|(vid, cv)| (*vid, const_value_type(cv)))
             .collect();
 
+        // The configured field, threaded through calls so that the width of a `Field` can be read
+        // from it rather than a static.
+        let field = ssa.field();
+
         for (function_id, function) in ssa.iter_functions() {
             let cfg = cfg.get_function_cfg(*function_id);
-            let function_info = self.run_function(function, &function_types, &constant_types, cfg);
+            let function_info =
+                self.run_function(function, &function_types, &constant_types, cfg, field);
             type_info.functions.insert(*function_id, function_info);
         }
         type_info
@@ -180,6 +187,7 @@ impl Types {
         function_types: &HashMap<FunctionId, (Vec<Type>, &[Type])>,
         constant_types: &HashMap<ValueId, Type>,
         cfg: &CFG,
+        field: FieldConfig,
     ) -> FunctionTypeInfo {
         let mut function_info = FunctionTypeInfo {
             values: constant_types.clone(),
@@ -193,7 +201,7 @@ impl Types {
             }
 
             for instruction in block.get_instructions() {
-                self.run_opcode(instruction, &mut function_info, function_types)
+                self.run_opcode(instruction, &mut function_info, function_types, field)
                     .unwrap_or_else(|_| panic!("Error running opcode {:?}", instruction));
             }
         }
@@ -206,6 +214,7 @@ impl Types {
         opcode: &OpCode,
         function_info: &mut FunctionTypeInfo,
         function_types: &HashMap<FunctionId, (Vec<Type>, &[Type])>,
+        field: FieldConfig,
     ) -> Result<(), String> {
         match opcode {
             OpCode::Cmp {
@@ -565,7 +574,7 @@ impl Types {
                     .values
                     .get(value)
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
-                let value_bits = value_type.get_bit_size();
+                let value_bits = value_type.get_bit_size(field);
                 if *offset + *width > value_bits {
                     return Err(format!(
                         "BitRange({}, {}) exceeds source width {} for {}",
@@ -741,7 +750,9 @@ impl Types {
                 function_info.values.insert(*result_even, even_type);
                 Ok(())
             }
-            OpCode::Guard { inner, .. } => self.run_opcode(inner, function_info, function_types),
+            OpCode::Guard { inner, .. } => {
+                self.run_opcode(inner, function_info, function_types, field)
+            }
         }
     }
 }

@@ -481,7 +481,7 @@ impl Driver {
         let flow_analysis = FlowAnalysis::run(&r1cs_ssa);
         let type_info = Types::new().run(&r1cs_ssa, &flow_analysis);
 
-        let mut r1cs_gen = R1CGen::new();
+        let mut r1cs_gen = R1CGen::new(r1cs_ssa.field());
         if self.r1cs_profiling {
             r1cs_gen.enable_profile();
         }

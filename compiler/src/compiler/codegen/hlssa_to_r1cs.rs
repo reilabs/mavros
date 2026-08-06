@@ -371,6 +371,10 @@ impl Table {
 
 #[derive(Clone)]
 pub struct R1CGen {
+    /// The field the program operates over. Codegen's arithmetic is still raw `ark_bn254::Fr` (it
+    /// becomes per-field in P4); this is here so that the type-width queries it makes read the
+    /// configured field rather than a static.
+    field: FieldConfig,
     constraints: Vec<R1C>,
     tables: Vec<Table>,
     lookups: Vec<LookupConstraint>,
@@ -795,10 +799,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::mk_array(bit_values)
     }
 
-    fn not(&self, out_type: &Type, _ctx: &mut R1CGen) -> Self {
+    fn not(&self, out_type: &Type, ctx: &mut R1CGen) -> Self {
         let value_const = self.expect_constant();
         let bits = value_const.into_bigint().to_bits_le();
-        let bit_size = out_type.get_bit_size();
+        let bit_size = out_type.get_bit_size(ctx.field());
         let mut negated_bits = Vec::new();
         for i in 0..bit_size {
             let bit = if i < bits.len() { bits[i] } else { false };
@@ -941,8 +945,9 @@ impl symbolic_executor::Value<R1CGen> for Value {
 }
 
 impl R1CGen {
-    pub fn new() -> Self {
+    pub fn new(field: FieldConfig) -> Self {
         Self {
+            field,
             constraints: vec![],
             next_witness: 0,
             tables: vec![],
@@ -953,6 +958,11 @@ impl R1CGen {
             profile_root: "<r1cs>".to_string(),
             profile: None,
         }
+    }
+
+    /// The field the program operates over.
+    pub fn field(&self) -> FieldConfig {
+        self.field
     }
 
     pub fn enable_profile(&mut self) {
@@ -1372,7 +1382,7 @@ impl R1CGen {
 
 #[cfg(test)]
 mod r1cs_profile_tests {
-    use super::{ArrayData, R1CGen, Value, hlssa, symbolic_executor};
+    use super::{ArrayData, FieldConfig, R1CGen, Value, hlssa, symbolic_executor};
     use ark_ff::Field as _;
     use std::{cell::RefCell, rc::Rc};
 
@@ -1403,7 +1413,7 @@ mod r1cs_profile_tests {
 
     #[test]
     fn all_lookup_profiles_match_the_sealed_r1cs_layout() {
-        let mut generator = R1CGen::new();
+        let mut generator = R1CGen::new(FieldConfig::bn254());
         generator.enable_profile();
         generator.profile_root = "main".to_string();
         generator.push_profile_frame("main".to_string());

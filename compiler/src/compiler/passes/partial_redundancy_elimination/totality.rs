@@ -203,7 +203,7 @@ impl<'a> TotalityOracle<'a> {
 
         // `div_s64`/`mod_s64` sign-extend to i64, where MIN / -1 overflows. Only 64-bit operands
         // reach the full i64 range, so narrower signed widths are safe once nonzero.
-        let minus_one_hazard = ty.is_i() && ty.get_bit_size() == 64;
+        let minus_one_hazard = ty.is_i() && ty.get_bit_size(field) == 64;
 
         if let Some(c) = self.cc.const_of(self.fid, divisor) {
             return !constant_is_zero(&c, field) && !(minus_one_hazard && constant_is_all_ones(&c));
@@ -238,7 +238,7 @@ impl<'a> TotalityOracle<'a> {
         let Some(amount) = constant_as_u128(&c) else {
             return false;
         };
-        amount < lhs_ty.get_bit_size() as u128
+        amount < lhs_ty.get_bit_size(self.ssa.field()) as u128
     }
 
     /// The index is a constant strictly below a *static* array length.
