@@ -56,7 +56,7 @@ impl LowerBitRangeOps {
     ) {
         assert!(width > 0, "BitRange width must be at least 1");
         let value_type = context.types().get_value_type(value);
-        let source_bits = value_type.get_bit_size();
+        let source_bits = value_type.get_bit_size(b.field());
         assert!(
             offset + width <= source_bits,
             "BitRange({}, {}) exceeds source width {}",
@@ -107,7 +107,7 @@ impl LowerBitRangeOps {
         width: usize,
     ) {
         let value_type = context.types().get_value_type(value);
-        let source_bits = value_type.get_bit_size();
+        let source_bits = value_type.get_bit_size(b.field());
         let pure_value = b.value_of(value);
         let hint =
             lower_pure_bit_range_value(b, pure_value, &value_type.strip_witness(), offset, width);

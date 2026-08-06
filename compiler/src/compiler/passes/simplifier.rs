@@ -96,6 +96,7 @@ impl Simplifier {
                         &function_types,
                         &constant_types,
                         cfg,
+                        fb.field(),
                     );
                     if !self.run_function(fb, &fti) {
                         break;
@@ -452,7 +453,7 @@ impl Simplifier {
                 offset,
                 width,
             } => {
-                if *offset == 0 && *width == types.get_value_type(*value).get_bit_size() {
+                if *offset == 0 && *width == types.get_value_type(*value).get_bit_size(fb.field()) {
                     return Some(Rewrite::Alias {
                         result: *result,
                         target: *value,
