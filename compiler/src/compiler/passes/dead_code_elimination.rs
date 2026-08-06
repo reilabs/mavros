@@ -46,6 +46,8 @@ pub struct Config {
     /// Remove this option once untaint_control_flow properly handles multiple jumps into merge
     /// blocks.
     pub preserve_all_blocks: bool,
+
+    pub preserve_entry_params: bool,
 }
 
 impl Config {
@@ -53,6 +55,15 @@ impl Config {
         Self {
             witness_shape_frozen: false,
             preserve_all_blocks: false,
+            preserve_entry_params: true,
+        }
+    }
+
+    pub fn r1cs_gen() -> Self {
+        Self {
+            witness_shape_frozen: true,
+            preserve_all_blocks: false,
+            preserve_entry_params: false,
         }
     }
 
@@ -60,6 +71,7 @@ impl Config {
         Self {
             witness_shape_frozen: true,
             preserve_all_blocks: false,
+            preserve_entry_params: true,
         }
     }
 
@@ -67,6 +79,7 @@ impl Config {
         Self {
             witness_shape_frozen: false,
             preserve_all_blocks: true,
+            preserve_entry_params: true,
         }
     }
 }
@@ -181,6 +194,22 @@ impl DCE {
         let mut live_return_slots: HashMap<FunctionId, HashSet<usize>> = HashMap::default();
 
         let mut worklist: Vec<WorkItem> = vec![];
+
+        // The interpreter writes the flattened input blob into the entry frame at fixed offsets. So
+        // the blob must survive DCE. The R1CS-side pipeline opts out via `Config::r1cs_gen`.
+        if self.config.preserve_entry_params {
+            for entry_point in ssa.get_entry_points() {
+                let param_count = ssa
+                    .get_function(*entry_point)
+                    .get_entry()
+                    .get_parameters()
+                    .count();
+                live_entry_params
+                    .entry(*entry_point)
+                    .or_default()
+                    .extend(0..param_count);
+            }
+        }
 
         for function_id in &function_ids {
             let function = ssa.get_function(*function_id);

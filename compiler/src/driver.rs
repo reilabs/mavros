@@ -100,6 +100,7 @@ pub struct Driver {
     abi: Option<noirc_abi::Abi>,
     draw_cfg: bool,
     main_is_unconstrained: bool,
+    main_param_is_public: Vec<bool>,
     /// Requested LogUp bits-of-security (from `--logup-soundness`); sizes the challenge count.
     logup_soundness: u32,
 }
@@ -169,6 +170,7 @@ impl Driver {
             abi: None,
             draw_cfg,
             main_is_unconstrained: false,
+            main_param_is_public: Vec::new(),
             logup_soundness: DEFAULT_LOGUP_SOUNDNESS_BITS,
         }
     }
@@ -236,6 +238,15 @@ impl Driver {
         monomorphizer.process_queue().unwrap();
         let program = monomorphizer.into_program();
 
+        self.main_param_is_public = program
+            .main()
+            .parameters
+            .iter()
+            .map(|(_, _, _, _, visibility)| {
+                matches!(visibility, noirc_frontend::shared::Visibility::Public)
+            })
+            .collect();
+
         self.abi = Some(noirc_driver::gen_abi(
             &context,
             &main,
@@ -267,7 +278,10 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(Defunctionalize::new()),
-                Box::new(PrepareEntryPoint::new(self.main_is_unconstrained)),
+                Box::new(PrepareEntryPoint::new(
+                    self.main_is_unconstrained,
+                    self.main_param_is_public.clone(),
+                )),
                 // Eliminate all tuple types immediately after the entry point is prepared, so every
                 // subsequent pass operates on tuple-free IR.
                 Box::new(ElideTuples::new()),
@@ -508,7 +522,7 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(WitnessWriteToFresh::new()),
-                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
+                Box::new(DCE::new(dead_code_elimination::Config::r1cs_gen())),
                 Box::new(FixDoubleJumps::new()),
             ],
         );
