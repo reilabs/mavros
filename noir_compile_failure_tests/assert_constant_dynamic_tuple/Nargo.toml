@@ -1,0 +1,6 @@
+[package]
+name = "assert_constant_dynamic_tuple"
+type = "bin"
+authors = [""]
+
+[dependencies]

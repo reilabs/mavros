@@ -1,9 +1,11 @@
 //! The driver API for the compilation pipeline.
 
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use ark_ff::AdditiveGroup as _;
@@ -34,6 +36,7 @@ use crate::{
             arg_promotion::ArgPromotion,
             array_boundary_expansion::ArrayBoundaryExpansion,
             array_sroa::ArraySroa,
+            assert_constant::AssertConstantValidation,
             common_subexpression_elimination::CSE,
             dead_code_elimination::{self, DCE},
             deduplicate_phis::DeduplicatePhis,
@@ -63,7 +66,7 @@ use crate::{
             witness_write_to_void::WitnessWriteToVoid,
         },
         ssa::{
-            DefaultSSAAnnotator,
+            DefaultSSAAnnotator, SourceLocation,
             hlssa::{Constant, HLSSA},
         },
         untaint_control_flow::UntaintControlFlow,
@@ -112,6 +115,10 @@ pub enum Error {
     /// field, but multi-challenge LogUp is not yet implemented (see `docs/field-agnosticism.md`,
     /// `L4-logup-challenges`). Rejected rather than silently emitting an under-provisioned circuit.
     LogupSoundnessUnsupported(String),
+    /// One or more Noir `assert_constant` operands are dynamic in a reachable calling context.
+    ///
+    /// Carries every failing assertion so a single compile reports them all.
+    AssertConstantFailed(Vec<SourceLocation>),
 }
 
 impl std::fmt::Display for Error {
@@ -124,6 +131,18 @@ impl std::fmt::Display for Error {
                 write!(f, "program will never execute: {message}")
             }
             Error::LogupSoundnessUnsupported(message) => write!(f, "{message}"),
+            Error::AssertConstantFailed(locations) => {
+                for (i, location) in locations.iter().enumerate() {
+                    if i > 0 {
+                        writeln!(f)?;
+                    }
+                    write!(
+                        f,
+                        "assert_constant failed at {location}: value may depend on witness data"
+                    )?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -374,14 +393,32 @@ impl Driver {
 
         let mut witness_inference = WitnessTaintInference::new();
         witness_inference.run(&mut ssa, &flow_analysis);
+        let witness_inference = Rc::new(witness_inference);
+        let failures = Rc::new(RefCell::new(None));
+        PassManager::new(
+            "assert_constant_validation".to_string(),
+            self.draw_cfg,
+            vec![Box::new(AssertConstantValidation::new(
+                Rc::clone(&witness_inference),
+                Rc::clone(&failures),
+            ))],
+        )
+        .run(&mut ssa);
+        let failures = failures
+            .borrow_mut()
+            .take()
+            .expect("assert_constant validation pass did not record a result");
+        if !failures.is_empty() {
+            return Err(Error::AssertConstantFailed(failures));
+        }
 
         self.write_debug_text(
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),
-            ssa.to_string(&witness_inference),
+            ssa.to_string(witness_inference.as_ref()),
         );
 
         let mut untaint_cf = UntaintControlFlow::new();
-        self.monomorphized_ssa = Some(untaint_cf.run(ssa, &witness_inference));
+        self.monomorphized_ssa = Some(untaint_cf.run(ssa, witness_inference.as_ref()));
 
         self.write_debug_text(
             self.get_debug_output_dir().join("untainted_ssa.txt"),

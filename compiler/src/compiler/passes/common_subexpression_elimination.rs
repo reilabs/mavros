@@ -18,7 +18,7 @@ use crate::{
                 OpCode, Radix,
             },
         },
-        util::ice_non_elided_tuple,
+        util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
     },
 };
 
@@ -656,6 +656,7 @@ impl CSE {
                     | OpCode::DropGlobal { .. }
                     | OpCode::Spread { .. }
                     | OpCode::Unspread { .. } => {}
+                    OpCode::AssertConstant { .. } => ice_unvalidated_assert_constant(),
                     OpCode::Not { result: r, value } => {
                         let value_expr = get_expr(&exprs, &mut interner, value);
                         let result_expr = interner.not(value_expr);

@@ -602,6 +602,7 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
         }
         OpCode::DropGlobal { .. }
         | OpCode::Assert { .. }
+        | OpCode::AssertConstant { .. }
         | OpCode::AssertCmp { .. }
         | OpCode::AssertR1C { .. }
         | OpCode::Rangecheck { .. }
@@ -695,6 +696,7 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         | OpCode::ReadGlobal { .. }
         | OpCode::DropGlobal { .. }
         | OpCode::Assert { .. }
+        | OpCode::AssertConstant { .. }
         | OpCode::AssertCmp { .. }
         | OpCode::AssertR1C { .. }
         | OpCode::Rangecheck { .. }

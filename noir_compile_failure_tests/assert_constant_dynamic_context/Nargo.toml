@@ -1,0 +1,6 @@
+[package]
+name = "assert_constant_dynamic_context"
+type = "bin"
+authors = [""]
+
+[dependencies]

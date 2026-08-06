@@ -1,12 +1,12 @@
 //! Removes guards around side-effect-free operations that are safe to execute unconditionally.
 
-use crate::compiler::util::ice_non_elided_tuple;
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
     ssa::hlssa::{
         BinaryArithOpKind, OpCode, TypeExpr,
         builder::{HLBlockEmitter, HLEmitter},
     },
+    util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
 };
 
 use super::{InstructionLoweringRule, LoweringContext};
@@ -100,6 +100,7 @@ impl LowerSideEffectFreeGuards {
             | OpCode::Lookup { .. }
             | OpCode::DLookup { .. }
             | OpCode::Rangecheck { .. } => false,
+            OpCode::AssertConstant { .. } => ice_unvalidated_assert_constant(),
             OpCode::MkTuple { .. } | OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } => {
                 ice_non_elided_tuple()
             }

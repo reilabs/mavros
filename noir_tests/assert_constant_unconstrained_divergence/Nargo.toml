@@ -1,0 +1,6 @@
+[package]
+name = "assert_constant_unconstrained_divergence"
+type = "bin"
+authors = [""]
+
+[dependencies]

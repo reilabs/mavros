@@ -551,6 +551,12 @@ fn lower_instruction(
                 slice: slices[0],
             });
         }
+        OpCode::AssertConstant { value } => {
+            // A tuple/struct is constant iff each tuple-free component is constant.
+            for value in components(value_map, *value) {
+                out.push(OpCode::AssertConstant { value });
+            }
+        }
         OpCode::Todo {
             payload,
             results,

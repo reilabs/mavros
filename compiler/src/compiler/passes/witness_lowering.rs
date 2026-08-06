@@ -14,7 +14,7 @@ use crate::{
                 builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
             },
         },
-        util::ice_non_elided_tuple,
+        util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
     },
 };
 
@@ -467,6 +467,7 @@ impl WitnessLowering {
                         | OpCode::Unspread { .. } => {
                             emitter.emit(instruction);
                         }
+                        OpCode::AssertConstant { .. } => ice_unvalidated_assert_constant(),
                         OpCode::MkTuple { .. }
                         | OpCode::TupleProj { .. }
                         | OpCode::TupleRefProj { .. } => ice_non_elided_tuple(),
