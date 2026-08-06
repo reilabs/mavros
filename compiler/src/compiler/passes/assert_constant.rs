@@ -2,7 +2,9 @@
 //!
 //! Lowering preserves each assertion as an [`OpCode::AssertConstant`] marker until witness-taint
 //! inference has specialized functions for their concrete calling contexts. An assertion succeeds
-//! exactly when its operand is `Pure` at every level in every specialized context.
+//! exactly when its operand is `Pure` at every level in every specialized context at the point this
+//! pass runs. Optimizations scheduled before validation can therefore affect which operands WTI
+//! classifies as `Pure`.
 //!
 //! WTI intentionally omits unconstrained-only callees. Assertions that exist only in those
 //! functions are therefore outside this validation; successful validation still removes their
@@ -15,7 +17,7 @@ use crate::compiler::{
     pass_manager::{AnalysisStore, Pass},
     ssa::{
         SourceLocation,
-        hlssa::{HLSSA, OpCode},
+        hlssa::{CallTarget, HLSSA, OpCode},
     },
 };
 
@@ -60,6 +62,20 @@ impl Pass for AssertConstantValidation {
                         !matches!(op, OpCode::Guard { .. }),
                         "ICE: Guard reached assert_constant validation before witness taint inference"
                     );
+                    if witness_types.is_some()
+                        && let OpCode::Call {
+                            function: CallTarget::Static(callee),
+                            unconstrained: false,
+                            ..
+                        } = op
+                    {
+                        debug_assert!(
+                            self.witness_inference
+                                .try_get_function_witness_type(*callee)
+                                .is_some(),
+                            "ICE: WTI-covered function {fid:?} has a constrained static call to uncovered function {callee:?}"
+                        );
+                    }
                     let OpCode::AssertConstant { value } = op else {
                         continue;
                     };
@@ -343,5 +359,45 @@ mod tests {
         entry.set_terminator(Terminator::Return(vec![]));
 
         let _ = validate(&mut ssa);
+    }
+
+    #[test]
+    #[should_panic(expected = "has a constrained static call to uncovered function")]
+    fn detects_missing_wti_coverage_for_a_constrained_callee() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        ssa.get_unique_entrypoint_mut()
+            .get_entry_mut()
+            .set_terminator(Terminator::Return(vec![]));
+
+        let flow = FlowAnalysis::run(&ssa);
+        let mut witness_inference = WitnessTaintInference::new();
+        witness_inference.run(&mut ssa, &flow);
+
+        // Simulate a future WTI coverage bug by introducing a constrained callee after inference.
+        let uncovered = ssa.add_function("uncovered".to_string());
+        ssa.get_function_mut(uncovered)
+            .get_entry_mut()
+            .set_terminator(Terminator::Return(vec![]));
+        let main = ssa.get_unique_entrypoint_id();
+        ssa.get_function_mut(main).get_entry_mut().push_instruction(
+            OpCode::Call {
+                results: vec![],
+                function: CallTarget::Static(uncovered),
+                args: vec![],
+                unconstrained: false,
+            }
+            .locate(SourceLocation::test()),
+        );
+
+        let failures = Rc::new(RefCell::new(None));
+        PassManager::new(
+            "assert_constant_validation_test".to_string(),
+            false,
+            vec![Box::new(AssertConstantValidation::new(
+                Rc::new(witness_inference),
+                failures,
+            ))],
+        )
+        .run(&mut ssa);
     }
 }

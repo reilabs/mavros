@@ -1624,10 +1624,10 @@ impl<'a> ExpressionConverter<'a> {
                 None
             }
             "assert_constant" => {
-                let value = self
-                    .convert_expression(&call.arguments[0], b)
-                    .expect("assert_constant argument must produce a value");
-                self.emit_located(b, Some(call.location), |e| e.assert_constant(value));
+                // Unit-valued expressions have no SSA value and are trivially constant.
+                if let Some(value) = self.convert_expression(&call.arguments[0], b) {
+                    self.emit_located(b, Some(call.location), |e| e.assert_constant(value));
+                }
                 None
             }
             "str_as_bytes" => {
