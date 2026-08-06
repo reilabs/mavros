@@ -1,0 +1,6 @@
+[package]
+name = "multi_scalar_mul_unconstrained"
+type = "bin"
+authors = [""]
+
+[dependencies]
