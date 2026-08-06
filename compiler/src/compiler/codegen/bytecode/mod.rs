@@ -1288,18 +1288,13 @@ impl CodeGen {
                     count,
                 } => {
                     let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
-                    match endianness {
-                        Endianness::Big => emitter.push_op(bytecode::OpCode::ToBitsBe {
-                            res,
-                            val: layouter.get_value(*value),
-                            count: *count as u64,
-                        }),
-                        Endianness::Little => emitter.push_op(bytecode::OpCode::ToBitsLe {
-                            res,
-                            val: layouter.get_value(*value),
-                            count: *count as u64,
-                        }),
-                    }
+                    let val = layouter.get_value(*value);
+                    let count = *count as u64;
+                    let op = match endianness {
+                        Endianness::Big => bytecode::OpCode::ToBitsBe { res, val, count },
+                        Endianness::Little => bytecode::OpCode::ToBitsLe { res, val, count },
+                    };
+                    emitter.push_op(op);
                 }
                 hlssa::OpCode::ToRadix {
                     result: r,
