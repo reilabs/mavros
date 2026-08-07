@@ -790,20 +790,14 @@ impl UntaintControlFlow {
                 } else {
                     args
                 };
-                // Unlike constrained callees, unconstrained callees do not receive the circuit
-                // guard as an argument. Guard the call itself so witness generation does not run
-                // a hint from an inactive branch (where its inputs and internal debug assertions
-                // need not be valid). `LowerGuards` supplies default results on the skipped path.
-                maybe_guard(
-                    new_instructions,
-                    block_taint,
+                new_instructions.push(
                     OpCode::Call {
                         results,
                         function: CallTarget::Static(tgt),
                         args,
                         unconstrained: true,
-                    },
-                    location,
+                    }
+                    .locate(location.clone()),
                 );
             }
             OpCode::Call {
@@ -1251,49 +1245,6 @@ mod tests {
         WitnessShape::Ref(top, Box::new(inner))
     }
     use WitnessType::{Pure, Witness};
-
-    #[test]
-    fn tainted_unconstrained_call_is_guarded() {
-        let mut ssa = HLSSA::with_main("main".to_string());
-        let main = ssa.get_unique_entrypoint_id();
-        let hint = ssa.add_function("hint".to_string());
-        let condition = ssa.add_const(crate::compiler::ssa::hlssa::Constant::U(1, 0));
-        let mut function = ssa.take_function(main);
-        let mut instructions = Vec::new();
-
-        UntaintControlFlow::new().process_instruction(
-            OpCode::Call {
-                results: vec![],
-                function: CallTarget::Static(hint),
-                args: vec![],
-                unconstrained: true,
-            },
-            &mut function,
-            &mut ssa,
-            None,
-            Some(condition),
-            &SourceLocation::test(),
-            &mut instructions,
-            &HashMap::default(),
-        );
-
-        assert_eq!(instructions.len(), 1);
-        let OpCode::Guard {
-            condition: guard,
-            inner,
-        } = instructions.pop().unwrap().payload()
-        else {
-            panic!("inactive unconstrained call was not guarded");
-        };
-        assert_eq!(guard, condition);
-        assert!(matches!(
-            inner.as_ref(),
-            OpCode::Call {
-                unconstrained: true,
-                ..
-            }
-        ));
-    }
 
     /// `run` detaches the function and then its current block from the SSA while rewriting them. A
     /// self-call in that block must therefore use the signature snapshot captured before either

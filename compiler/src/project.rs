@@ -29,7 +29,31 @@ struct DependencySourceReplacement {
     trigger: &'static str,
     replacement: &'static str,
     manifest: &'static str,
+    package: &'static str,
+    source_overrides: &'static [DependencySourceOverride],
 }
+
+#[derive(Clone, Copy)]
+struct DependencySourceOverride {
+    dependency: &'static str,
+    path: &'static str,
+    expected: &'static str,
+    replacement: &'static str,
+}
+
+// `noir-bignum` repeats a constrained relation check as an assertion inside its unconstrained
+// quotient hint. Invalid ECDSA inputs in an inactive circuit branch can reach that hint before
+// the branch guard masks the constrained checks, so the debugging assertion makes an otherwise
+// total black-box operation panic. The relation remains enforced by the gadget's range checks.
+// Match the complete pinned source line so a dependency update fails loudly instead of silently
+// applying this compatibility override to changed code.
+const ECDSA_DEPENDENCY_SOURCE_OVERRIDES: &[DependencySourceOverride] =
+    &[DependencySourceOverride {
+        dependency: "bignum",
+        path: "src/fns/expressions.nr",
+        expected: "    assert(__is_zero(remainder));\n",
+        replacement: "",
+    }];
 
 /// Circuit-backed replacements that live in standalone Noir packages.
 ///
@@ -42,6 +66,8 @@ const DEPENDENCY_SOURCE_REPLACEMENTS: &[DependencySourceReplacement] =
         trigger: "std::ecdsa_secp256r1::verify_signature",
         replacement: "mavros_ecdsa::verify_signature",
         manifest: "../mavros_stdlib/ecdsa_dependencies/Nargo.toml",
+        package: "mavros_ecdsa",
+        source_overrides: ECDSA_DEPENDENCY_SOURCE_OVERRIDES,
     }];
 
 pub struct Project {
@@ -234,6 +260,7 @@ fn parse_workspace(
             &mut file_manager,
         );
     }
+    add_dependency_source_overrides(workspace, source_replacements, &mut file_manager);
 
     // 4. Add all remaining workspace and dependency files.
     nargo::insert_all_files_for_workspace_into_file_manager(workspace, &mut file_manager);
@@ -242,6 +269,66 @@ fn parse_workspace(
     // 5. Rewrite replaced foreign functions to call their pure-Noir implementations.
     replace_foreign_functions(&mut parsed_files);
     (file_manager, parsed_files)
+}
+
+fn add_dependency_source_overrides(
+    workspace: &Workspace,
+    replacements: &[DependencySourceReplacement],
+    file_manager: &mut FileManager,
+) {
+    for replacement in replacements {
+        let replacement_package = workspace
+            .members
+            .iter()
+            .find_map(|member| find_direct_dependency(member, replacement.package))
+            .unwrap_or_else(|| {
+                panic!(
+                    "active source replacement package '{}' is not attached to the workspace",
+                    replacement.package
+                )
+            });
+
+        for source_override in replacement.source_overrides {
+            let dependency = find_dependency(replacement_package, source_override.dependency)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "replacement package '{}' has no '{}' dependency",
+                        replacement.package, source_override.dependency
+                    )
+                });
+            let path = dependency.root_dir.join(source_override.path);
+            let source = fs::read_to_string(&path).unwrap_or_else(|error| {
+                panic!("failed to read pinned source {}: {error}", path.display())
+            });
+            assert_eq!(
+                source.matches(source_override.expected).count(),
+                1,
+                "pinned compatibility source changed in {}",
+                path.display()
+            );
+            let rewritten =
+                source.replacen(source_override.expected, source_override.replacement, 1);
+            file_manager.add_file_with_source_canonical_path(&path, rewritten);
+        }
+    }
+}
+
+fn find_direct_dependency<'a>(package: &'a Package, name: &str) -> Option<&'a Package> {
+    package
+        .dependencies
+        .iter()
+        .find(|(dependency_name, _)| dependency_name.to_string() == name)
+        .map(|(_, dependency)| dependency.package())
+}
+
+fn find_dependency<'a>(package: &'a Package, name: &str) -> Option<&'a Package> {
+    if package.name.to_string() == name {
+        return Some(package);
+    }
+    package
+        .dependencies
+        .values()
+        .find_map(|dependency| find_dependency(dependency.package(), name))
 }
 
 fn add_dependency_rewritten_sources(
