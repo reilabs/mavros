@@ -29,8 +29,8 @@ use crate::{
             },
         },
         util::{
-            bit_mask, decode_signed, encode_signed, ice_non_elided_tuple, spread_bits,
-            unspread_bits,
+            bit_mask, decode_signed, encode_signed, ice_non_elided_tuple, sign_extend_bits,
+            spread_bits, unspread_bits,
         },
     },
 };
@@ -648,16 +648,10 @@ impl Value {
             Value::WitnessOf(inner) => {
                 Value::WitnessOf(Box::new(inner.sext_op(from, to, _instrumenter)))
             }
-            Value::U(_, v) => {
-                // Sign-extend: check sign bit at position from-1
-                let sign_bit = if from > 0 { (v >> (from - 1)) & 1 } else { 0 };
-                if sign_bit == 1 {
-                    let mask = ((1u128 << to) - 1) ^ ((1u128 << from) - 1);
-                    Value::U(to, v | mask)
-                } else {
-                    Value::U(to, *v)
-                }
-            }
+            // `U` and `I` both hold raw two's-complement bits, so sign extension is the same
+            // computation on either; only the tag of the result differs.
+            Value::U(_, v) => Value::U(to, sign_extend_bits(*v, from, to)),
+            Value::I(_, v) => Value::I(to, sign_extend_bits(*v, from, to)),
             _ => panic!("Cannot sext {:?}", self),
         }
     }
@@ -862,7 +856,9 @@ impl Value {
                     _ => unreachable!("to_bits of a WitnessOf expected an Array result"),
                 }
             }
-            Value::U(_, v) => {
+            // Decomposition is a property of the bit pattern, so a signed value decomposes
+            // exactly as its unsigned twin does. The bits themselves are always `u1`.
+            Value::U(_, v) | Value::I(_, v) => {
                 let mut r = (0..size)
                     .map(|i| {
                         Value::U(
@@ -1981,8 +1977,13 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
     ) -> Vec<SpecSplitValue> {
         fn unknown_value(ty: &Type) -> Value {
             match &ty.expr {
-                TypeExpr::Field => Value::Unknown(ScalarKind::Field),
-                TypeExpr::U(s) | TypeExpr::I(s) => Value::Unknown(ScalarKind::U(*s)),
+                // Defer to `ScalarKind::from_type` rather than re-deriving the mapping. The
+                // hand-rolled version this replaces sent `I(s)` to `ScalarKind::U(s)`, losing the
+                // sign, which disagreed with every other type-to-unknown map in this file
+                // (`:166`, `:1804`, `:2313`) and with `from_type` itself.
+                TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => {
+                    Value::Unknown(ScalarKind::from_type(ty))
+                }
                 TypeExpr::Array(elem, size) => {
                     Value::array((0..*size).map(|_| unknown_value(elem)).collect())
                 }

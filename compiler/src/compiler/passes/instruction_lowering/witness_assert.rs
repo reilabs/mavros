@@ -45,6 +45,22 @@ impl LowerWitnessAssertOps {
                 self.lower_assert_value(b, context, guard, *value);
                 true
             }
+            // `assert(x == x)` is a tautology for every `x`, under any guard, so it lowers to
+            // nothing at all. Only `Eq` may be dropped this way: `assert(x < x)` on the same value
+            // is the *opposite* — always false — and must keep its rejecting constraint.
+            //
+            // This is not a hypothetical tidy-up. `LowerPureGuards` emits a divide-by-zero check
+            // in front of every `Div`/`Mod`, including the ones whose divisor is a nonzero
+            // constant. For those, SCS folds the failure condition to the interned `u1 0` — the
+            // very value id the check compares against — leaving `AssertCmp(Eq, c, c)`. Lowered as
+            // an ordinary guarded assert that becomes `constrain(cond, 0, 0)`: an R1CS row that
+            // constrains nothing.
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs,
+                rhs,
+            } if lhs == rhs => true,
+
             OpCode::AssertCmp { kind, lhs, rhs } => {
                 let lhs_witness = context.types().get_value_type(*lhs).is_witness_of();
                 let rhs_witness = context.types().get_value_type(*rhs).is_witness_of();

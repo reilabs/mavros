@@ -17,7 +17,7 @@ use crate::compiler::{
     },
 };
 
-use super::{InstructionLoweringRule, LoweringContext};
+use super::{InstructionLoweringRule, LoweringContext, integer_bits_and_signedness};
 
 pub struct LowerWitnessBitwiseOps {}
 
@@ -381,14 +381,6 @@ fn cast_target_for_integer_type(ty: &Type) -> CastTarget {
             CastTarget::I(bits)
         }
         other => panic!("expected integer type, got {:?}", other),
-    }
-}
-
-fn integer_bits_and_signedness(ty: &Type) -> Option<(usize, bool)> {
-    match ty.strip_witness().expr {
-        TypeExpr::U(bits) => Some((bits, false)),
-        TypeExpr::I(bits) => Some((bits, true)),
-        _ => None,
     }
 }
 

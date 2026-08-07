@@ -38,7 +38,8 @@
     "noir_compile_failure_tests/**/*.toml",
     "noir_compile_failure_tests/**/*.yaml",
     "noir_tests/**/*.md",
-    "noir_tests/**/*.toml"
+    "noir_tests/**/*.toml",
+    "tmp/*"
   ],
   "plugins": [
     "https://plugins.dprint.dev/g-plane/pretty_yaml-v0.6.0.wasm",

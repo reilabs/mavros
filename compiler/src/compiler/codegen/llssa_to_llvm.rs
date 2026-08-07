@@ -954,12 +954,19 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                             .build_left_shift(lhs, masked_rhs, name)
                             .unwrap()
                     }
-                    IntArithOp::UShr => {
+                    // `sign_extend` is the only difference between the two right shifts; the
+                    // shift-count masking is identical and for the same reason as `Shl`.
+                    IntArithOp::UShr | IntArithOp::AShr => {
                         let bw = lhs.get_type().get_bit_width();
                         let mask = lhs.get_type().const_int((bw - 1) as u64, false);
                         let masked_rhs = self.builder.build_and(rhs, mask, "shamt").unwrap();
                         self.builder
-                            .build_right_shift(lhs, masked_rhs, false, name)
+                            .build_right_shift(
+                                lhs,
+                                masked_rhs,
+                                matches!(kind, IntArithOp::AShr),
+                                name,
+                            )
                             .unwrap()
                     }
                 };

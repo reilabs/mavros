@@ -28,13 +28,24 @@ release: ## Build Mavros in release mode
 
 # -- Testing --------------------------------------------------------------------------------------
 
+# Where `func-test` writes its report, and how many tests it runs at once. Override both from the
+# command line to compare a working tree against the committed baseline without clobbering it:
+#
+#     make func-test STATUS=/tmp/status-mine.md JOBS=8
+#
+# The test runner defaults `--output` to STATUS.md all on its own and does not validate its
+# arguments, so a mistyped flag silently overwrites the committed report. Going through this
+# variable keeps that a deliberate choice rather than an accident.
+STATUS ?= STATUS.md
+JOBS ?= 4
+
 .PHONY: unit-test
 unit-test: ## Run the unit tests
 	$(SHELL_WRAPPER) cargo test --all-targets --all-features
 
 .PHONY: func-test
-func-test: ## Run the functional test harness
-	$(SHELL_WRAPPER) cargo run --release --bin test-runner -- --output STATUS.md
+func-test: ## Run the functional test harness (override with STATUS=<path> JOBS=<n>)
+	$(SHELL_WRAPPER) cargo run --release --bin test-runner -- --output $(STATUS) --jobs $(JOBS)
 
 .PHONY: determinism-check
 determinism-check: ## Check that compilation output is byte-identical across repeated runs.
