@@ -1,4 +1,5 @@
 // Pure-Noir replacement for the `embedded_curve_add` foreign function.
+// FIELD-ASSUMPTION: L5-embedded-curve
 //
 // The complete Jacobian addition used by the MSM replacement handles distinct
 // points, doubling, inverses, and either input being the point at infinity.

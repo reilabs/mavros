@@ -7,6 +7,12 @@ fn main(
     expected_double_y: pub Field,
     expected_triple_x: pub Field,
     expected_triple_y: pub Field,
+    random_lhs_x: [Field; 4],
+    random_lhs_y: [Field; 4],
+    random_rhs_x: [Field; 4],
+    random_rhs_y: [Field; 4],
+    random_sum_x: pub [Field; 4],
+    random_sum_y: pub [Field; 4],
 ) {
     let point = EmbeddedCurvePoint { x: point_x, y: point_y };
     let infinity = EmbeddedCurvePoint::point_at_infinity();
@@ -33,4 +39,14 @@ fn main(
         false,
     )[0];
     assert(suppressed.is_infinite());
+
+    // These points are deterministic random scalar multiples of the Grumpkin
+    // generator. Their expected sums were computed independently.
+    for i in 0..4 {
+        let lhs = EmbeddedCurvePoint { x: random_lhs_x[i], y: random_lhs_y[i] };
+        let rhs = EmbeddedCurvePoint { x: random_rhs_x[i], y: random_rhs_y[i] };
+        let sum = embedded_curve_add(lhs, rhs);
+        assert_eq(sum.x, random_sum_x[i]);
+        assert_eq(sum.y, random_sum_y[i]);
+    }
 }

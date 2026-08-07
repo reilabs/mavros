@@ -1,4 +1,5 @@
 // Pure-Noir replacement for the `multi_scalar_mul` foreign function.
+// FIELD-ASSUMPTION: L5-embedded-curve
 //
 // The embedded curve for BN254 is Grumpkin, with equation y^2 = x^3 - 17.
 // Scalars are represented by two 128-bit little-endian limbs. The implementation

@@ -419,6 +419,15 @@ _independent_ challenges (not powers `α, α², …`, which are invalid for this
 
 ## Layer 5 — Dependency, Header & Field Selection
 
+### `L5-embedded-curve` — Embedded-Curve Stdlib Replacements (Algorithmic + Hardcoded, P5)
+
+- [ ] `mavros_stdlib/replacements/embedded_curve_add.nr` — delegates to the selected field's
+      `EmbeddedCurvePoint` and shared curve arithmetic; verify that the type and its curve equation
+      follow the configured field.
+- [ ] `mavros_stdlib/replacements/multi_scalar_mul.nr` — explicitly targets Grumpkin: the curve
+      equation uses `-17`, scalar validation uses the Grumpkin scalar modulus, and subgroup
+      validation assumes cofactor 1. These must follow the selected field's embedded curve.
+
 - [ ] **Cargo deps** — root `Cargo.toml:33-34` (`ark-bn254`, `ark-ff` from crates.io; consumed by
       `compiler`, `vm`, `mavros-artifacts`, `wasm-runtime`). Add `crypto-primitives` (git, PR #38)
       in Phase 5, behind the façade impls only.
