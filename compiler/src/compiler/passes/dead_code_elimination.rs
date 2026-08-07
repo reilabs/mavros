@@ -14,9 +14,12 @@ use crate::{
         analysis::{
             flow_analysis::{CFG, FlowAnalysis},
             types::{TypeInfo, Types},
+            value_range_analysis::{ValueRangeAnalysis, ValueRanges},
         },
         pass_manager::{AnalysisId, AnalysisStore, Pass},
-        passes::shared::divmod_guard::{divmod_can_fail, emit_divmod_is_defined_assert},
+        passes::shared::divmod_guard::{
+            divmod_can_fail, divmod_provably_defined, emit_divmod_is_defined_assert,
+        },
         ssa::{
             BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
@@ -180,6 +183,37 @@ impl DCE {
         self.config.rewrite_dead_divmod
     }
 
+    /// Whether a dead unguarded `Div`/`Mod` still has to leave its failure check behind.
+    ///
+    /// `None` means this run does not rewrite at all, so the question does not arise. Otherwise the
+    /// range domain gets to discharge it: a division it proves defined has nothing left to fail, so
+    /// the instruction can simply be deleted — which is the ordinary DCE outcome and the reason the
+    /// mark phase consults this too. Keeping the check would otherwise resurrect the entire chain
+    /// that computes the operands, purely to assert something already known.
+    ///
+    /// The type this asks about is the *stripped* operand type, matching `LowerPureGuards`.
+    fn divmod_check_survives(
+        &self,
+        analyses: Option<&(TypeInfo, ValueRanges)>,
+        function_id: FunctionId,
+        lhs: ValueId,
+        rhs: ValueId,
+    ) -> bool {
+        let Some((types, ranges)) = analyses else {
+            return false;
+        };
+        let lhs_type = types.get_function(function_id).get_value_type(lhs);
+        if !divmod_can_fail(lhs_type) {
+            return false;
+        }
+        let function_ranges = ranges.get_function(function_id);
+        !divmod_provably_defined(
+            &function_ranges.get(lhs),
+            &function_ranges.get(rhs),
+            lhs_type.peel_witness(),
+        )
+    }
+
     fn is_initially_live(&self, instruction: &OpCode) -> bool {
         match instruction {
             OpCode::Call {
@@ -233,6 +267,24 @@ impl DCE {
 
     pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
         let function_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
+
+        // Typed and ranged for the whole module whenever this run can rewrite, without first
+        // checking whether there is anything to rewrite: finding out would cost a full instruction
+        // walk of its own, which is the same order as the analyses it would be guarding.
+        //
+        // Both must be computed *here*, before the mark phase, because the discharge below decides
+        // whether a dead division's operands are seeded live at all — and before anything mutates
+        // the module. `Types` walks every instruction in every block, including the dead ones still
+        // waiting to be removed, so it has to see the module whole: typing after `retain_constants`
+        // panics with "Error running opcode Cast { .. }" the moment a dead instruction's only-use
+        // constant has just been pruned out from under it. Nothing between here and the sweep
+        // touches the SSA, so running them at the top is strictly safer than running them later.
+        let divmod_analyses: Option<(TypeInfo, ValueRanges)> =
+            self.rewrites_dead_divmod().then(|| {
+                let types = Types::new().run(ssa, cfg);
+                let ranges = ValueRangeAnalysis::new().run(ssa, cfg, &types);
+                (types, ranges)
+            });
 
         let mut definitions_by_function: HashMap<FunctionId, HashMap<ValueId, ValueDefinition>> =
             HashMap::default();
@@ -302,8 +354,19 @@ impl DCE {
                     // drops it, which at the `pre_wti` site is a later pass in the same phase; at
                     // the `make_struct_access_static` site (the last pass of that phase) it instead
                     // carries into the next phase's input, where the first DCE reclaims it.
-                    if self.rewrites_dead_divmod()
-                        && let Some((lhs, rhs)) = unguarded_divmod_operands(instruction)
+                    //
+                    // A division the range domain proves defined is exempt: no check will be left
+                    // behind for it, so holding its operands live would keep the chain that
+                    // computes them alive for nothing. This is where most of the saving is — the
+                    // sweep only ever *avoids emitting* a few instructions, while the mark phase
+                    // decides whether an entire dependency chain survives.
+                    if let Some((lhs, rhs)) = unguarded_divmod_operands(instruction)
+                        && self.divmod_check_survives(
+                            divmod_analyses.as_ref(),
+                            *function_id,
+                            lhs,
+                            rhs,
+                        )
                     {
                         worklist.push(WorkItem::LiveValue(*function_id, lhs));
                         worklist.push(WorkItem::LiveValue(*function_id, rhs));
@@ -526,20 +589,6 @@ impl DCE {
             }
         }
 
-        // Typed for the whole module whenever this run can rewrite, without first checking whether
-        // there is anything to rewrite: finding out would cost a full instruction walk of its own,
-        // which is the same order as the type analysis it would be guarding.
-        //
-        // Deliberately typed *before* the constant sweep below, and before the sweep proper takes
-        // functions out of the SSA. `Types` walks every instruction in every block, including the
-        // dead ones that are still sitting there waiting to be removed, so it must run while the
-        // module is still whole. Typing after `retain_constants` panics with "Error running opcode
-        // Cast { .. }" the moment a dead instruction's only-use constant has just been pruned out
-        // from under it.
-        let divmod_types: Option<TypeInfo> = self
-            .rewrites_dead_divmod()
-            .then(|| Types::new().run(ssa, cfg));
-
         // Sweep the module-level constant storage: a constant is live iff some live instruction
         // (in any function) references its `ValueId`.
         let all_live: HashSet<ValueId> = live_values
@@ -570,22 +619,26 @@ impl DCE {
                         // check, so deleting the division here would delete the only thing that
                         // could ever fail. Replace it with the check alone: the arithmetic still
                         // goes, which is the whole point of eliminating it.
-                        if let Some(types) = divmod_types.as_ref()
-                            && let Some((lhs, rhs)) = unguarded_divmod_operands(&instruction)
+                        if let Some((lhs, rhs)) = unguarded_divmod_operands(&instruction)
+                            && self.divmod_check_survives(
+                                divmod_analyses.as_ref(),
+                                function_id,
+                                lhs,
+                                rhs,
+                            )
                         {
+                            let (types, _) = divmod_analyses.as_ref().expect("checked above");
                             let lhs_type = types
                                 .get_function(function_id)
                                 .get_value_type(lhs)
                                 .strip_witness()
                                 .clone();
-                            if divmod_can_fail(&lhs_type) {
-                                let mut emitter = VecEmitter {
-                                    ssa,
-                                    out: &mut new_instructions,
-                                    location: instruction.location().clone(),
-                                };
-                                emit_divmod_is_defined_assert(&mut emitter, lhs, rhs, &lhs_type);
-                            }
+                            let mut emitter = VecEmitter {
+                                ssa,
+                                out: &mut new_instructions,
+                                location: instruction.location().clone(),
+                            };
+                            emit_divmod_is_defined_assert(&mut emitter, lhs, rhs, &lhs_type);
                         }
                         continue;
                     }

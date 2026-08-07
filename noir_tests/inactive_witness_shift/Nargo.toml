@@ -1,0 +1,6 @@
+[package]
+name = "inactive_witness_shift"
+type = "bin"
+authors = [""]
+
+[dependencies]

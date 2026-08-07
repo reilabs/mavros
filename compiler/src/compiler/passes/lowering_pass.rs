@@ -1,12 +1,15 @@
 use crate::compiler::{
     analysis::{
         types::{FunctionTypeInfo, TypeInfo},
-        value_range_analysis::{FunctionValueRanges, IntInterval, ValueRanges},
+        value_range_analysis::{FunctionValueRanges, Interval, ValueRange, ValueRanges, Width},
     },
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::hlssa::{
-        HLSSA, OpCode,
-        builder::{HLBlockEmitter, HLFunctionBuilder, HLSSABuilder},
+    ssa::{
+        ValueId,
+        hlssa::{
+            HLSSA, OpCode,
+            builder::{HLBlockEmitter, HLFunctionBuilder, HLSSABuilder},
+        },
     },
 };
 
@@ -31,13 +34,24 @@ impl<'a> LoweringContext<'a> {
         self.value_ranges
     }
 
-    pub fn range(&self, value: crate::compiler::ssa::ValueId) -> IntInterval {
+    /// The full range record for a value: both readings of its bit pattern.
+    pub fn range(&self, value: ValueId) -> ValueRange {
         self.value_ranges
             .map(|ranges| ranges.get(value))
-            .unwrap_or_else(IntInterval::top)
+            .unwrap_or_else(|| ValueRange::full(Width::NonScalar))
     }
 
-    pub fn try_range(&self, value: crate::compiler::ssa::ValueId) -> Option<&'a IntInterval> {
+    /// The **unsigned** reading: the raw bit pattern as a non-negative integer.
+    pub fn urange(&self, value: ValueId) -> Interval {
+        self.range(value).unsigned().clone()
+    }
+
+    /// The **signed** reading: the mathematical value of a two's-complement integer.
+    pub fn srange(&self, value: ValueId) -> Interval {
+        self.range(value).signed().clone()
+    }
+
+    pub fn try_range(&self, value: ValueId) -> Option<&'a ValueRange> {
         self.value_ranges.and_then(|ranges| ranges.try_get(value))
     }
 }
