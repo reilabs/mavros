@@ -307,6 +307,22 @@ impl UntaintControlFlow {
         let flow_analysis = FlowAnalysis::run(&ssa);
         let type_info = Types::new().run(&ssa, &flow_analysis);
 
+        // Function and block bodies are temporarily detached while this pass rewrites them. Keep
+        // an immutable snapshot of call-boundary types so recursive calls do not depend on whether
+        // their target function or entry block happens to be present in the SSA at that moment.
+        let function_parameter_types: HashMap<FunctionId, Vec<Type>> = ssa
+            .get_function_ids()
+            .map(|id| {
+                let parameters = ssa
+                    .get_function(id)
+                    .get_entry()
+                    .get_parameters()
+                    .map(|(_, typ)| typ.clone())
+                    .collect();
+                (id, parameters)
+            })
+            .collect();
+
         // Step 2: cast insertion + control flow linearization
         let function_ids: Vec<_> = ssa.get_function_ids().collect();
         for function_id in function_ids {
@@ -325,6 +341,7 @@ impl UntaintControlFlow {
                     function_wt,
                     &flow_analysis,
                     func_type_info,
+                    &function_parameter_types,
                 );
                 ssa.put_function(function_id, function);
             }
@@ -342,6 +359,7 @@ impl UntaintControlFlow {
         function_wt: &FunctionWitnessType,
         flow_analysis: &FlowAnalysis,
         type_info: Option<&FunctionTypeInfo>,
+        function_parameter_types: &HashMap<FunctionId, Vec<Type>>,
     ) {
         let cfg = flow_analysis.get_function_cfg(function_id);
 
@@ -383,6 +401,7 @@ impl UntaintControlFlow {
                 &block_param_types,
                 return_types.as_slice(),
                 type_info,
+                function_parameter_types,
             );
         }
     }
@@ -398,6 +417,7 @@ impl UntaintControlFlow {
         block_param_types: &HashMap<BlockId, Vec<Type>>,
         return_types: &[Type],
         type_info: Option<&FunctionTypeInfo>,
+        function_parameter_types: &HashMap<FunctionId, Vec<Type>>,
     ) {
         let mut block = function.take_block(block_id);
         let block_taint = *block_taint_vars.get(&block_id).unwrap();
@@ -420,6 +440,7 @@ impl UntaintControlFlow {
                 block_taint,
                 &location,
                 &mut new_instructions,
+                function_parameter_types,
             );
         }
 
@@ -686,6 +707,7 @@ impl UntaintControlFlow {
         block_taint: Option<ValueId>,
         location: &SourceLocation,
         new_instructions: &mut Vec<LocatedOpCode>,
+        function_parameter_types: &HashMap<FunctionId, Vec<Type>>,
     ) {
         match instruction {
             // -- Constrained Call: push cfg_witness arg --
@@ -702,16 +724,11 @@ impl UntaintControlFlow {
                 // codegen copies raw limbs into a boxed-witness array and AD later interprets
                 // those limbs as pointers.
                 let mut args = if let Some(ti) = type_info {
-                    let expected_types: Vec<_> = ssa
-                        .get_function(tgt)
-                        .get_entry()
-                        .get_parameters()
-                        .take(args.len())
-                        .map(|(_, typ)| typ.clone())
-                        .collect();
-                    assert_eq!(
-                        expected_types.len(),
-                        args.len(),
+                    let expected_types = function_parameter_types
+                        .get(&tgt)
+                        .expect("ICE: constrained call target has no signature snapshot");
+                    assert!(
+                        expected_types.len() >= args.len(),
                         "ICE: constrained call has more arguments than callee parameters"
                     );
 
@@ -751,7 +768,7 @@ impl UntaintControlFlow {
                 args,
                 unconstrained: true,
             } => {
-                if let Some(ti) = type_info {
+                let args = if let Some(ti) = type_info {
                     let mut cast_instrs = Vec::new();
                     let new_args: Vec<_> = {
                         let mut builder =
@@ -769,26 +786,25 @@ impl UntaintControlFlow {
                             .collect()
                     };
                     flush_conversion_instrs_located(new_instructions, block_taint, cast_instrs);
-                    new_instructions.push(
-                        OpCode::Call {
-                            results,
-                            function: CallTarget::Static(tgt),
-                            args: new_args,
-                            unconstrained: true,
-                        }
-                        .locate(location.clone()),
-                    );
+                    new_args
                 } else {
-                    new_instructions.push(
-                        OpCode::Call {
-                            results,
-                            function: CallTarget::Static(tgt),
-                            args,
-                            unconstrained: true,
-                        }
-                        .locate(location.clone()),
-                    );
-                }
+                    args
+                };
+                // Unlike constrained callees, unconstrained callees do not receive the circuit
+                // guard as an argument. Guard the call itself so witness generation does not run
+                // a hint from an inactive branch (where its inputs and internal debug assertions
+                // need not be valid). `LowerGuards` supplies default results on the skipped path.
+                maybe_guard(
+                    new_instructions,
+                    block_taint,
+                    OpCode::Call {
+                        results,
+                        function: CallTarget::Static(tgt),
+                        args,
+                        unconstrained: true,
+                    },
+                    location,
+                );
             }
             OpCode::Call {
                 function: CallTarget::Dynamic(_),
@@ -1223,6 +1239,7 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::ssa::hlssa::builder::HLSSABuilder;
 
     fn scalar(w: WitnessType) -> WitnessShape {
         WitnessShape::Scalar(w)
@@ -1234,6 +1251,96 @@ mod tests {
         WitnessShape::Ref(top, Box::new(inner))
     }
     use WitnessType::{Pure, Witness};
+
+    #[test]
+    fn tainted_unconstrained_call_is_guarded() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let hint = ssa.add_function("hint".to_string());
+        let condition = ssa.add_const(crate::compiler::ssa::hlssa::Constant::U(1, 0));
+        let mut function = ssa.take_function(main);
+        let mut instructions = Vec::new();
+
+        UntaintControlFlow::new().process_instruction(
+            OpCode::Call {
+                results: vec![],
+                function: CallTarget::Static(hint),
+                args: vec![],
+                unconstrained: true,
+            },
+            &mut function,
+            &mut ssa,
+            None,
+            Some(condition),
+            &SourceLocation::test(),
+            &mut instructions,
+            &HashMap::default(),
+        );
+
+        assert_eq!(instructions.len(), 1);
+        let OpCode::Guard {
+            condition: guard,
+            inner,
+        } = instructions.pop().unwrap().payload()
+        else {
+            panic!("inactive unconstrained call was not guarded");
+        };
+        assert_eq!(guard, condition);
+        assert!(matches!(
+            inner.as_ref(),
+            OpCode::Call {
+                unconstrained: true,
+                ..
+            }
+        ));
+    }
+
+    /// `run` detaches the function and then its current block from the SSA while rewriting them. A
+    /// self-call in that block must therefore use the signature snapshot captured before either
+    /// detachment. This exercises the full WTI -> untaint path used by recursive Noir programs.
+    #[test]
+    fn recursive_constrained_call_uses_the_pre_detachment_signature_snapshot() {
+        let mut ssa = HLSSA::with_main("recursive".to_string());
+        let function_id = ssa.get_unique_entrypoint_id();
+        let mut builder = HLSSABuilder::new(&mut ssa);
+        builder.modify_function(function_id, |function| {
+            function.function.add_return_type(Type::field());
+            let entry = function.function.get_entry_id();
+            let mut block = function.test_block(entry);
+            let argument = block.add_parameter(Type::field());
+            let result = block.call(function_id, vec![argument], 1)[0];
+            block.terminate_return(vec![result]);
+        });
+
+        let flow = FlowAnalysis::run(&ssa);
+        let mut witness_inference = WitnessTaintInference::new();
+        witness_inference.run(&mut ssa, &flow);
+        let transformed = UntaintControlFlow::new().run(ssa, &witness_inference);
+
+        let recursive_calls = transformed
+            .get_function_ids()
+            .map(|id| {
+                transformed
+                    .get_function(id)
+                    .get_blocks()
+                    .flat_map(|(_, block)| block.get_instructions())
+                    .filter(|instruction| {
+                        matches!(
+                            *instruction,
+                            OpCode::Call {
+                                function: CallTarget::Static(target),
+                                ..
+                            } if *target == id
+                        )
+                    })
+                    .count()
+            })
+            .sum::<usize>();
+        assert!(
+            recursive_calls > 0,
+            "the fixture must retain a recursive call"
+        );
+    }
 
     /// A fully-witness array (container *and* element witness) materializes faithfully as
     /// `WitnessOf(Array(WitnessOf(Field), N))`: the container wrapper records the witnessed

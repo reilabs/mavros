@@ -36,12 +36,6 @@ pub fn verify_signature(
         0x65, 0x1d, 0x06, 0xb0, 0xcc, 0x53, 0xb0, 0xf6,
         0x3b, 0xce, 0x3c, 0x3e, 0x27, 0xd2, 0x60, 0x4b,
     ]);
-    let point_in_range = (public_key_x < Secp256r1_Fq::modulus())
-        & (public_key_y < Secp256r1_Fq::modulus());
-    let point_on_curve = public_key_y * public_key_y
-        == (public_key_x * public_key_x + curve_a) * public_key_x + curve_b;
-    let point_valid = point_in_range & point_on_curve;
-
     let safe_public_key_x = Secp256r1_Fq::from_be_bytes([
         85, 15, 71, 16, 3, 243, 223, 151,
         195, 223, 80, 106, 199, 151, 246, 114,
@@ -54,6 +48,19 @@ pub fn verify_signature(
         15, 244, 181, 192, 27, 63, 250, 25,
         106, 177, 251, 50, 112, 54, 184, 230,
     ]);
+    // BigNum arithmetic assumes canonical limbs. Check the untrusted coordinates first and use a
+    // known curve point for the curve equation when either coordinate is out of range. The range
+    // bit is retained in `point_valid`, so sanitizing cannot turn an invalid key into a valid one.
+    let point_in_range = (public_key_x < Secp256r1_Fq::modulus())
+        & (public_key_y < Secp256r1_Fq::modulus());
+    let checked_public_key_x =
+        conditional_select(public_key_x, safe_public_key_x, point_in_range);
+    let checked_public_key_y =
+        conditional_select(public_key_y, safe_public_key_y, point_in_range);
+    let point_on_curve = checked_public_key_y * checked_public_key_y
+        == (checked_public_key_x * checked_public_key_x + curve_a) * checked_public_key_x + curve_b;
+    let point_valid = point_in_range & point_on_curve;
+
     let half_order = Secp256r1_Fr::from_be_bytes([
         0x7f, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00,
         0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
