@@ -1,10 +1,7 @@
 //! Lowers canonical `BitRange` operations after the witness integer/bitwise passes have emitted
 //! all bit selections.
 
-use ark_ff::{AdditiveGroup as _, Field as _};
-
 use crate::compiler::{
-    Field,
     analysis::types::FunctionTypeInfo,
     ssa::{
         ValueId,
@@ -59,7 +56,7 @@ impl LowerBitRangeOps {
     ) {
         assert!(width > 0, "BitRange width must be at least 1");
         let value_type = context.types().get_value_type(value);
-        let source_bits = value_type.get_bit_size();
+        let source_bits = value_type.get_bit_size(b.field());
         assert!(
             offset + width <= source_bits,
             "BitRange({}, {}) exceeds source width {}",
@@ -110,7 +107,7 @@ impl LowerBitRangeOps {
         width: usize,
     ) {
         let value_type = context.types().get_value_type(value);
-        let source_bits = value_type.get_bit_size();
+        let source_bits = value_type.get_bit_size(b.field());
         let pure_value = b.value_of(value);
         let hint =
             lower_pure_bit_range_value(b, pure_value, &value_type.strip_witness(), offset, width);
@@ -155,20 +152,20 @@ impl LowerBitRangeOps {
             Some(high)
         };
 
-        let mut reconstructed = low.unwrap_or_else(|| b.field_const(Field::ZERO));
-        let result_shift = b.field_const(two_pow(offset));
+        let mut reconstructed = low.unwrap_or_else(|| b.field_const(b.field().zero()));
+        let result_shift = b.field_const(b.field().two_pow(offset));
         let result_shifted = b.mul(result_field, result_shift);
         reconstructed = b.add(reconstructed, result_shifted);
         if let Some(high) = high {
-            let high_shift = b.field_const(two_pow(offset + width));
+            let high_shift = b.field_const(b.field().two_pow(offset + width));
             let high_shifted = b.mul(high, high_shift);
             reconstructed = b.add(reconstructed, high_shifted);
         }
 
         let value_field = b.cast_to_field(value);
         let diff = b.sub(value_field, reconstructed);
-        let zero = b.field_const(Field::ZERO);
-        let flag = b.field_const(Field::ONE);
+        let zero = b.field_const(b.field().zero());
+        let flag = b.field_const(b.field().one());
         b.constrain(flag, diff, zero);
     }
 
@@ -181,7 +178,7 @@ impl LowerBitRangeOps {
         offset: usize,
         width: usize,
     ) {
-        let flag = b.field_const(Field::ONE);
+        let flag = b.field_const(b.field().one());
         let bytes = decompose_canonical_field_bytes(b, value, flag);
         let selected = lower_field_bit_range_from_bytes(b, &bytes, offset, width, flag);
 
@@ -193,20 +190,28 @@ impl LowerBitRangeOps {
     }
 }
 
-// FIELD-ASSUMPTION: L4-modulus-literal
+// FIELD-ASSUMPTION: L3-felt-limbs
+// The modulus value is now read from the configured field (see below); the residual assumption is
+// structural — that the field fits in 4 limbs / 32 bytes for the canonical byte-decomposition.
 fn decompose_canonical_field_bytes(
     b: &mut HLBlockEmitter<'_>,
     value: ValueId,
     flag: ValueId,
 ) -> Vec<ValueId> {
-    // FIELD-ASSUMPTION: L4-modulus-literal
-    let modulus_hi = b.field_const(Field::from(0x30644e72e131a029b85045b68181585du128));
-    // FIELD-ASSUMPTION: L4-modulus-literal
-    let modulus_lo_m1 = b.field_const(Field::from(0x2833e84879b9709143e1f593f0000000u128));
-    let two_to_8 = b.field_const(Field::from(256u128));
-    let two_to_64 = b.field_const(two_pow(64));
-    let two_to_128 = b.field_const(two_pow(128));
-    let zero = b.field_const(Field::ZERO);
+    // The field modulus, split into its high and low 128-bit halves, drives the canonical
+    // byte-decomposition below. Read from the configured field (not hardcoded), so no concrete
+    // prime is named here; `modulus_lo_m1` is the low half minus one.
+    let modulus_limbs = b.field().modulus_limbs();
+    let modulus_hi_u128 = (u128::from(modulus_limbs[3]) << 64) | u128::from(modulus_limbs[2]);
+    let modulus_lo_u128 = (u128::from(modulus_limbs[1]) << 64) | u128::from(modulus_limbs[0]);
+    // `p` is odd, so subtracting one never borrows out of the lowest limb.
+    let modulus_lo_m1_u128 = modulus_lo_u128 - 1;
+    let modulus_hi = b.field_const(b.field().constant(modulus_hi_u128));
+    let modulus_lo_m1 = b.field_const(b.field().constant(modulus_lo_m1_u128));
+    let two_to_8 = b.field_const(b.field().constant(256u128));
+    let two_to_64 = b.field_const(b.field().two_pow(64));
+    let two_to_128 = b.field_const(b.field().two_pow(128));
+    let zero = b.field_const(b.field().zero());
 
     let pure_value = b.value_of(value);
     let bytes_arr = b.to_radix(pure_value, Radix::Bytes, Endianness::Big, 32);
@@ -247,10 +252,11 @@ fn decompose_canonical_field_bytes(
     let limb3_pure = b.value_of(limbs[3]);
     let limb2_u64 = b.cast_to(CastTarget::U(64), limb2_pure);
     let limb3_u64 = b.cast_to(CastTarget::U(64), limb3_pure);
-    // FIELD-ASSUMPTION: L4-modulus-literal
-    let mod_limb2 = b.u_const(64, 0x2833e84879b97091u64 as u128);
-    // FIELD-ASSUMPTION: L4-modulus-literal
-    let mod_limb3 = b.u_const(64, 0x43e1f593f0000000u64 as u128);
+
+    // The two 64-bit limbs of the low half of `p - 1`, in the same big-endian limb order the byte
+    // decomposition above produces; derived from the configured field rather than written out.
+    let mod_limb2 = b.u_const(64, u128::from((modulus_lo_m1_u128 >> 64) as u64));
+    let mod_limb3 = b.u_const(64, u128::from(modulus_lo_m1_u128 as u64));
     let hi_lt = b.lt(mod_limb2, limb2_u64);
     let hi_eq = b.eq(mod_limb2, limb2_u64);
     let lo_lt = b.lt(mod_limb3, limb3_u64);
@@ -284,7 +290,7 @@ fn lower_field_bit_range_from_bytes(
     let low_end = lower_field_low_bits_from_bytes(b, bytes, offset + width, flag);
     let low_start = lower_field_low_bits_from_bytes(b, bytes, offset, flag);
     let selected_shifted = b.sub(low_end, low_start);
-    let divisor = b.field_const(two_pow(offset));
+    let divisor = b.field_const(b.field().two_pow(offset));
     b.div(selected_shifted, divisor)
 }
 
@@ -294,17 +300,19 @@ fn lower_field_low_bits_from_bytes(
     bits: usize,
     flag: ValueId,
 ) -> ValueId {
-    // FIELD-ASSUMPTION: L3-width254
-    assert!(bits <= 254, "field BitRange exceeds canonical field width");
+    assert!(
+        bits <= b.field().field_bit_size() as usize,
+        "field BitRange exceeds canonical field width"
+    );
     if bits == 0 {
-        return b.field_const(Field::ZERO);
+        return b.field_const(b.field().zero());
     }
 
-    let two_to_8 = b.field_const(Field::from(256u128));
+    let two_to_8 = b.field_const(b.field().constant(256u128));
     let full_bytes = bits / 8;
     let partial_bits = bits % 8;
     let start = 32 - full_bytes - usize::from(partial_bits > 0);
-    let mut value = b.field_const(Field::ZERO);
+    let mut value = b.field_const(b.field().zero());
     for (i, byte) in bytes.iter().enumerate().skip(start) {
         let elem = if i == start && partial_bits > 0 {
             split_partial_field_byte(b, *byte, partial_bits, flag)
@@ -328,7 +336,7 @@ fn split_partial_field_byte(
         "partial byte split must be non-empty"
     );
     let hi_size = 8 - lo_size;
-    let two_to_lo = b.field_const(Field::from(1u128 << lo_size));
+    let two_to_lo = b.field_const(b.field().constant(1u128 << lo_size));
 
     let byte_pure = b.value_of(byte_wit);
     let byte_u8 = b.cast_to(CastTarget::U(8), byte_pure);
@@ -337,14 +345,14 @@ fn split_partial_field_byte(
     let hi_hint = b.cast_to_field(hi_hint_u8);
     let hi_wit = b.write_witness(hi_hint);
 
-    let hi_bound = b.field_const(Field::from((1u128 << hi_size) - 1));
+    let hi_bound = b.field_const(b.field().constant((1u128 << hi_size) - 1));
     let hi_gap = b.sub(hi_bound, hi_wit);
     b.lookup_rngchk_8(hi_gap, flag);
 
     let hi_shifted = b.mul(hi_wit, two_to_lo);
     let lo = b.sub(byte_wit, hi_shifted);
 
-    let lo_bound = b.field_const(Field::from((1u128 << lo_size) - 1));
+    let lo_bound = b.field_const(b.field().constant((1u128 << lo_size) - 1));
     let lo_gap = b.sub(lo_bound, lo);
     b.lookup_rngchk_8(lo_gap, flag);
 
@@ -390,23 +398,25 @@ fn lower_pure_field_bit_range_value(
     let low_end = lower_pure_field_low_bits(b, value, offset + width);
     let low_start = lower_pure_field_low_bits(b, value, offset);
     let selected_shifted = b.sub(low_end, low_start);
-    let divisor = b.field_const(two_pow(offset));
+    let divisor = b.field_const(b.field().two_pow(offset));
     b.div(selected_shifted, divisor)
 }
 
 fn lower_pure_field_low_bits(b: &mut HLBlockEmitter<'_>, value: ValueId, bits: usize) -> ValueId {
-    // FIELD-ASSUMPTION: L3-width254
-    assert!(bits <= 254, "field BitRange exceeds canonical field width");
+    assert!(
+        bits <= b.field().field_bit_size() as usize,
+        "field BitRange exceeds canonical field width"
+    );
     if bits == 0 {
-        return b.field_const(Field::ZERO);
+        return b.field_const(b.field().zero());
     }
 
     let bytes_arr = b.to_radix(value, Radix::Bytes, Endianness::Big, 32);
-    let two_to_8 = b.field_const(Field::from(256u128));
+    let two_to_8 = b.field_const(b.field().constant(256u128));
     let full_bytes = bits / 8;
     let partial_bits = bits % 8;
     let start = 32 - full_bytes - usize::from(partial_bits > 0);
-    let mut result = b.field_const(Field::ZERO);
+    let mut result = b.field_const(b.field().zero());
     for i in start..32 {
         let idx = b.u_const(32, i as u128);
         let byte = b.array_get(bytes_arr, idx);
@@ -431,11 +441,6 @@ fn lower_pure_byte_low_bits(b: &mut HLBlockEmitter<'_>, byte: ValueId, bits: usi
     let high = b.div(byte, divisor);
     let high_shifted = b.mul(high, divisor);
     b.sub(byte, high_shifted)
-}
-
-// FIELD-ASSUMPTION: L4-two-pow
-fn two_pow(exponent: usize) -> Field {
-    Field::from(2).pow([exponent as u64])
 }
 
 fn bit_mask(bits: usize, offset: usize, width: usize) -> u128 {

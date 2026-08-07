@@ -44,6 +44,12 @@ pub fn ice_non_elided_tuple() -> ! {
     panic!("ICE: Tuple encountered after ElideTuples pass")
 }
 
+/// Panic if an `AssertConstant` marker survives its dedicated validation phase.
+#[track_caller]
+pub fn ice_unvalidated_assert_constant() -> ! {
+    panic!("ICE: AssertConstant encountered after assert-constant validation")
+}
+
 pub fn spread_bits(v: u128, bits: usize) -> u128 {
     assert!(
         bits <= 64,
@@ -96,12 +102,16 @@ pub fn spread_u64(v: u32) -> u64 {
 /// Utilities only available in tests.
 #[cfg(test)]
 pub mod test {
-    use crate::compiler::ssa::{ValueId, hlssa::builder::HLEmitter};
+    use mavros_artifacts::FieldConfig;
+
+    use crate::compiler::{
+        Field,
+        ssa::{ValueId, hlssa::builder::HLEmitter},
+    };
 
     /// Convert the provided `n` into a field value.
-    // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
-    pub fn fr(n: u64) -> ark_bn254::Fr {
-        ark_bn254::Fr::from(n)
+    pub fn fr(n: u64) -> Field {
+        FieldConfig::bn254().constant(n)
     }
 
     /// `alloc` of a scalar `Ref<Field>` seeded with an inert default value (0).

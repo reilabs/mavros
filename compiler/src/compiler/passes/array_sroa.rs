@@ -503,8 +503,11 @@ fn debug_assert_dense(
 
 #[cfg(test)]
 mod tests {
+    use mavros_artifacts::FieldConfig;
+
     use super::*;
     use crate::compiler::{
+        Field,
         analysis::types::Types,
         passes::mem2reg::Mem2Reg,
         ssa::hlssa::{
@@ -513,9 +516,8 @@ mod tests {
         },
     };
 
-    // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
-    fn fr(n: u64) -> ark_bn254::Fr {
-        ark_bn254::Fr::from(n)
+    fn fr(n: u64) -> Field {
+        FieldConfig::bn254().constant(n)
     }
 
     /// Pre-#255 `alloc(Field)`: a `Ref<Field>` cell seeded with an inert default field value.

@@ -1,3 +1,5 @@
+use mavros_artifacts::FieldConfig;
+
 use crate::compiler::ssa::{
     ValueId,
     builder::{BlockEmitter, FunctionBuilder, InstrBuilder, SSABuilder},
@@ -19,6 +21,10 @@ pub trait HLEmitter {
     /// Intern a constant value into the SSA's constants side-table, returning the `ValueId` that
     /// names it. Identical `Constant`s collapse to the same `ValueId`.
     fn emit_constant(&mut self, value: Constant) -> ValueId;
+
+    /// The field the program operates over, for minting/inspecting field values
+    /// (e.g. `b.field().two_pow(k)`, `b.field().constant(n)`).
+    fn field(&self) -> FieldConfig;
 
     // -- Arithmetic --
 
@@ -237,10 +243,11 @@ pub trait HLEmitter {
 
     // -- Constants --
 
-    // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
     // FIELD-ASSUMPTION: L2-builder
-    fn field_const(&mut self, value: ark_bn254::Fr) -> ValueId {
-        self.emit_constant(Constant::Field(value))
+    // Accepts anything convertible to a field element (including the raw `ark_bn254::Fr` that the
+    // Noir frontend and some call sites still hold), so migrating the payload type is a no-op here.
+    fn field_const(&mut self, value: impl Into<crate::compiler::Field>) -> ValueId {
+        self.emit_constant(Constant::Field(value.into()))
     }
 
     fn u_const(&mut self, bits: usize, value: u128) -> ValueId {
@@ -467,6 +474,10 @@ pub trait HLEmitter {
         self.emit(OpCode::Assert { value });
     }
 
+    fn assert_constant(&mut self, value: ValueId) {
+        self.emit(OpCode::AssertConstant { value });
+    }
+
     fn assert_cmp(&mut self, kind: CmpKind, lhs: ValueId, rhs: ValueId) {
         self.emit(OpCode::AssertCmp { kind, lhs, rhs });
     }
@@ -655,6 +666,10 @@ impl HLEmitter for HLInstrBuilder<'_> {
     fn emit_constant(&mut self, value: Constant) -> ValueId {
         self.ssa.add_const(value)
     }
+
+    fn field(&self) -> FieldConfig {
+        self.ssa.field()
+    }
 }
 
 impl HLEmitter for HLBlockEmitter<'_> {
@@ -673,13 +688,16 @@ impl HLEmitter for HLBlockEmitter<'_> {
     fn emit_constant(&mut self, value: Constant) -> ValueId {
         self.ssa.add_const(value)
     }
+
+    fn field(&self) -> FieldConfig {
+        self.ssa.field()
+    }
 }
 
 impl HLBlockEmitter<'_> {
     pub(crate) fn default_value(&mut self, typ: &Type) -> ValueId {
         match &typ.expr {
-            // FIELD-ASSUMPTION: L2-builder
-            TypeExpr::Field => self.field_const(ark_bn254::Fr::from(0)),
+            TypeExpr::Field => self.field_const(0u64),
             TypeExpr::U(size) => self.u_const(*size, 0),
             TypeExpr::I(size) => self.i_const(*size, 0),
             TypeExpr::WitnessOf(inner) => {

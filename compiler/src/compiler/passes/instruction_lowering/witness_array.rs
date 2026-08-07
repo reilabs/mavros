@@ -4,10 +4,8 @@
 //! their constraint-level lowering to the later spilling passes.
 
 use crate::compiler::util::ice_non_elided_tuple;
-use ark_ff::Field as _;
 
 use crate::compiler::{
-    Field,
     analysis::types::FunctionTypeInfo,
     ssa::{
         ValueId,
@@ -131,7 +129,7 @@ impl LowerWitnessArrayOps {
             Some(condition) => {
                 b.ensure_field(condition, function_type_info.get_value_type(condition))
             }
-            None => b.field_const(Field::ONE),
+            None => b.field_const(b.field().one()),
         }
     }
 
@@ -158,7 +156,7 @@ impl LowerWitnessArrayOps {
         let base_key = if stride == 1 {
             idx_field
         } else {
-            let stride_const = b.field_const(Field::from(stride as u128));
+            let stride_const = b.field_const(b.field().constant(stride as u128));
             b.mul(idx_field, stride_const)
         };
         self.gen_witness_array_get_from_hint(
@@ -268,7 +266,7 @@ impl LowerWitnessArrayOps {
                 let built_array = b.build_array_loop(*n, inner_target.clone(), |b, i| {
                     let child_hint = b.array_get(hint, i);
                     let i_field = b.cast_to_field(i);
-                    let stride_const = b.field_const(Field::from(inner_leaves));
+                    let stride_const = b.field_const(b.field().constant(inner_leaves));
                     let child_offset = b.mul(i_field, stride_const);
                     let child_base_key = b.add(base_key, child_offset);
                     self.gen_witness_array_get_from_hint(

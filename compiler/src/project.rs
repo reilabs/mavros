@@ -48,6 +48,14 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
         include_str!("../../mavros_stdlib/replacements/blake3.nr"),
     ),
     (
+        "std/mavros/replacements/embedded_curve_add.nr",
+        include_str!("../../mavros_stdlib/replacements/embedded_curve_add.nr"),
+    ),
+    (
+        "std/mavros/replacements/multi_scalar_mul.nr",
+        include_str!("../../mavros_stdlib/replacements/multi_scalar_mul.nr"),
+    ),
+    (
         "std/mavros/replacements/poseidon2_permutation.nr",
         include_str!("../../mavros_stdlib/replacements/poseidon2_permutation.nr"),
     ),
@@ -66,7 +74,13 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
 /// empty body rewritten to call the replacement, so the rest of the frontend treats it as an
 /// ordinary function: type checking, generic instantiation and the constrained/unconstrained
 /// pairing all apply natively, and the mavros pipeline never sees a lowlevel call for it.
-const FOREIGN_REPLACEMENTS: &[&str] = &["blake3", "poseidon2_permutation", "sha256_compression"];
+const FOREIGN_REPLACEMENTS: &[&str] = &[
+    "blake3",
+    "embedded_curve_add",
+    "multi_scalar_mul",
+    "poseidon2_permutation",
+    "sha256_compression",
+];
 
 /// Rewrite all registered `#[foreign]` shims in the parsed files to call their replacements.
 fn replace_foreign_functions(parsed_files: &mut ParsedFiles) {

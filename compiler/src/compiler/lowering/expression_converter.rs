@@ -29,10 +29,15 @@ use crate::{
 
 /// Loop context for break/continue support.
 struct LoopContext {
+    // The block containing the header of the current loop.
     loop_header: BlockId,
+
+    // The block containing the exit of the current loop.
     exit_block: BlockId,
+
     /// Source anchor for desugared instructions emitted on behalf of the loop body.
     body_source_location: SourceLocation,
+
     /// Only for `for` loops — (index_value, bit_size), used by Continue to increment.
     for_loop_index: Option<(ValueId, usize)>,
 }
@@ -633,10 +638,11 @@ impl<'a> ExpressionConverter<'a> {
         let end_raw = self.convert_expression(&for_expr.end_range, b).unwrap();
 
         let index_type = self.type_converter.convert_type(&for_expr.index_type);
+        let field = b.field();
 
         // if range is inclusive, bump by one
         let end = if for_expr.inclusive {
-            let one = b.emit_const(Constant::U(index_type.get_bit_size(), 1));
+            let one = b.emit_const(Constant::U(index_type.get_bit_size(field), 1));
             self.emit_located(b, Some(for_expr.end_range_location), |e| {
                 e.add(end_raw, one)
             })
@@ -670,7 +676,7 @@ impl<'a> ExpressionConverter<'a> {
         let index_bit_size = self
             .type_converter
             .convert_type(&for_expr.index_type)
-            .get_bit_size();
+            .get_bit_size(field);
 
         // Push loop context for break/continue
         self.loop_stack.push(LoopContext {
@@ -927,8 +933,7 @@ impl<'a> ExpressionConverter<'a> {
                             noirc_frontend::shared::Signedness::Unsigned,
                             bit_size,
                         )) => Constant::U(bit_size.bit_size() as usize, 0),
-                        // FIELD-ASSUMPTION: L1-direct-ref (1 sites)
-                        _ => Constant::Field(ark_bn254::Fr::from(0u64)),
+                        _ => Constant::Field(b.field().constant(0u64)),
                     })
                 } else {
                     None
@@ -1088,9 +1093,11 @@ impl<'a> ExpressionConverter<'a> {
 
         let value = self.convert_expression(&cast.lhs, b).unwrap();
 
+        // A Noir `Field` is as wide as the configured field's modulus.
+        let field_bits = b.field().field_bit_size() as usize;
+
         let (src_bits, src_signed) = match cast.lhs.return_type().as_deref() {
-            // FIELD-ASSUMPTION: L3-width254
-            Some(AstType::Field) => (254, false),
+            Some(AstType::Field) => (field_bits, false),
             Some(AstType::Integer(signedness, bit_size)) => (
                 bit_size.bit_size() as usize,
                 *signedness == Signedness::Signed,
@@ -1100,8 +1107,7 @@ impl<'a> ExpressionConverter<'a> {
         };
 
         let (target, target_bits) = match &cast.r#type {
-            // FIELD-ASSUMPTION: L3-width254
-            AstType::Field => (CastTarget::Field, 254),
+            AstType::Field => (CastTarget::Field, field_bits),
             AstType::Integer(signedness, bit_size) => {
                 let bits = bit_size.bit_size() as usize;
                 match signedness {
@@ -1340,8 +1346,9 @@ impl<'a> ExpressionConverter<'a> {
             }
             Literal::Integer(field_element, typ, _location) => match typ {
                 AstType::Field => {
+                    // Boundary: the Noir frontend hands us a raw `ark_bn254::Fr`.
                     let field_val = field_element.into_repr();
-                    Some(Constant::Field(field_val))
+                    Some(Constant::Field(field_val.into()))
                 }
                 AstType::Integer(signedness, bit_size) => {
                     use noirc_frontend::shared::Signedness;
@@ -1614,6 +1621,13 @@ impl<'a> ExpressionConverter<'a> {
             "as_witness" => {
                 // No-op hint, just evaluate the argument and discard
                 self.convert_expression(&call.arguments[0], b);
+                None
+            }
+            "assert_constant" => {
+                // Unit-valued expressions have no SSA value and are trivially constant.
+                if let Some(value) = self.convert_expression(&call.arguments[0], b) {
+                    self.emit_located(b, Some(call.location), |e| e.assert_constant(value));
+                }
                 None
             }
             "str_as_bytes" => {

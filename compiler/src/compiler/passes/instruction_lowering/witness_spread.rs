@@ -3,10 +3,7 @@
 //! The later lookup spilling lowering lowers wide spread lookups into word-sized lookups. This
 //! keeps word splitting in one place without making witness spread/unspread special there.
 
-use ark_ff::Field as _;
-
 use crate::compiler::{
-    Field,
     analysis::types::FunctionTypeInfo,
     ssa::{
         ValueId,
@@ -104,13 +101,13 @@ impl LowerWitnessSpreadOps {
         self.write_unspread_result(b, function_type_info, result_even, even_hint);
 
         let odd_spread = self.write_spread_witness_and_lookup(b, result_odd, bits);
-        let two = b.field_const(Field::from(2));
+        let two = b.field_const(b.field().constant(2));
         let two_odd_spread = b.mul(two, odd_spread);
         let value_field = b.cast_to_field(value);
         let even_spread = b.sub(value_field, two_odd_spread);
 
         let even_field = b.cast_to_field(result_even);
-        let one = b.field_const(Field::ONE);
+        let one = b.field_const(b.field().one());
         b.lookup_spread(bits, even_field, even_spread, one);
     }
 
@@ -141,7 +138,7 @@ impl LowerWitnessSpreadOps {
         let spread_hint = b.spread(value_pure, bits);
         let spread_hint_field = b.cast_to_field(spread_hint);
         let spread_wit = b.write_witness(spread_hint_field);
-        let one = b.field_const(Field::ONE);
+        let one = b.field_const(b.field().one());
         b.lookup_spread(bits, value_field, spread_wit, one);
         spread_wit
     }

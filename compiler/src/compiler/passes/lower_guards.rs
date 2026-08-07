@@ -6,7 +6,6 @@
 //! - Select(cond, l, r) → JmpIf(cond, t_block, f_block) → merge with phi params
 
 use crate::compiler::{
-    Field,
     analysis::types::FunctionTypeInfo,
     ssa::{
         Instruction, ValueId,
@@ -112,7 +111,7 @@ impl LowerGuards {
 
     fn default_value(emitter: &mut HLBlockEmitter<'_>, ty: &Type) -> ValueId {
         match &ty.expr {
-            TypeExpr::Field => emitter.field_const(Field::from(0u64)),
+            TypeExpr::Field => emitter.field_const(emitter.field().constant(0u64)),
             TypeExpr::U(bits) => emitter.u_const(*bits, 0),
             TypeExpr::I(bits) => emitter.i_const(*bits, 0),
             TypeExpr::WitnessOf(inner) => {

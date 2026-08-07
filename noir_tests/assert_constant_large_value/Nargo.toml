@@ -1,0 +1,6 @@
+[package]
+name = "assert_constant_large_value"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -793,8 +793,11 @@ fn apply_call_rewrite(
 
 #[cfg(test)]
 mod tests {
+    use mavros_artifacts::FieldConfig;
+
     use super::*;
     use crate::compiler::{
+        Field,
         analysis::{flow_analysis::FlowAnalysis, types::Types},
         passes::{
             array_sroa::ArraySroa,
@@ -804,9 +807,8 @@ mod tests {
         ssa::hlssa::builder::{HLEmitter, HLSSABuilder},
     };
 
-    // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
-    fn fr(n: u64) -> ark_bn254::Fr {
-        ark_bn254::Fr::from(n)
+    fn fr(n: u64) -> Field {
+        FieldConfig::bn254().constant(n)
     }
 
     /// Build the analyses on the current IR and run only this pass (mirrors the pass-manager).

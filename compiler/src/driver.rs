@@ -1,9 +1,11 @@
 //! The driver API for the compilation pipeline.
 
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use ark_ff::AdditiveGroup as _;
@@ -14,10 +16,11 @@ use noirc_frontend::{
 };
 use tracing::info;
 
+use mavros_artifacts::Field as RawField;
+
 use crate::{
     Project,
     compiler::{
-        Field,
         analysis::{
             flow_analysis::FlowAnalysis, types::Types,
             witness_taint_inference::WitnessTaintInference,
@@ -25,7 +28,7 @@ use crate::{
         codegen::{
             CodeGenOptions,
             bytecode::CodeGen,
-            hlssa_to_r1cs::{R1CGen, R1CS, logup_soundness_report},
+            hlssa_to_r1cs::{R1CGen, R1CS, R1CSProfile, logup_soundness_report},
             llssa_to_llvm::WasmCompileOpts,
         },
         pass_manager::PassManager,
@@ -33,6 +36,7 @@ use crate::{
             arg_promotion::ArgPromotion,
             array_boundary_expansion::ArrayBoundaryExpansion,
             array_sroa::ArraySroa,
+            assert_constant::AssertConstantValidation,
             common_subexpression_elimination::CSE,
             dead_code_elimination::{self, DCE},
             deduplicate_phis::DeduplicatePhis,
@@ -62,7 +66,7 @@ use crate::{
             witness_write_to_void::WitnessWriteToVoid,
         },
         ssa::{
-            DefaultSSAAnnotator,
+            DefaultSSAAnnotator, SourceLocation,
             hlssa::{Constant, HLSSA},
         },
         untaint_control_flow::UntaintControlFlow,
@@ -87,6 +91,8 @@ pub struct Driver {
     monomorphized_ssa: Option<HLSSA>,
     witness_spilled_ssa: Option<HLSSA>,
     r1cs_ssa: Option<HLSSA>,
+    r1cs_profile: Option<R1CSProfile>,
+    r1cs_profiling: bool,
     /// The final multi-entry-point SSA: the witgen program with the AD program merged in as a
     /// second entry point. All executable artifacts (bytecode, LLVM, WASM) are compiled from
     /// this single SSA.
@@ -109,6 +115,10 @@ pub enum Error {
     /// field, but multi-challenge LogUp is not yet implemented (see `docs/field-agnosticism.md`,
     /// `L4-logup-challenges`). Rejected rather than silently emitting an under-provisioned circuit.
     LogupSoundnessUnsupported(String),
+    /// One or more Noir `assert_constant` operands are dynamic in a reachable calling context.
+    ///
+    /// Carries every failing assertion so a single compile reports them all.
+    AssertConstantFailed(Vec<SourceLocation>),
 }
 
 impl std::fmt::Display for Error {
@@ -121,6 +131,18 @@ impl std::fmt::Display for Error {
                 write!(f, "program will never execute: {message}")
             }
             Error::LogupSoundnessUnsupported(message) => write!(f, "{message}"),
+            Error::AssertConstantFailed(locations) => {
+                for (i, location) in locations.iter().enumerate() {
+                    if i > 0 {
+                        writeln!(f)?;
+                    }
+                    write!(
+                        f,
+                        "assert_constant failed at {location}: value may depend on witness data"
+                    )?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -141,6 +163,8 @@ impl Driver {
             monomorphized_ssa: None,
             witness_spilled_ssa: None,
             r1cs_ssa: None,
+            r1cs_profile: None,
+            r1cs_profiling: false,
             program_ssa: None,
             abi: None,
             draw_cfg,
@@ -156,6 +180,10 @@ impl Driver {
         self.logup_soundness = bits;
     }
 
+    pub fn enable_r1cs_profile(&mut self) {
+        self.r1cs_profiling = true;
+    }
+
     pub fn get_debug_output_dir(&self) -> PathBuf {
         self.project.package_root().join("mavros_debug")
     }
@@ -164,6 +192,10 @@ impl Driver {
     /// directory, not the workspace root). `Prover.toml` is read from here.
     pub fn package_root(&self) -> &std::path::Path {
         self.project.package_root()
+    }
+
+    pub fn r1cs_profile(&self) -> Option<&R1CSProfile> {
+        self.r1cs_profile.as_ref()
     }
 
     fn write_debug_text(&self, path: impl AsRef<Path>, contents: impl Into<String>) {
@@ -361,14 +393,32 @@ impl Driver {
 
         let mut witness_inference = WitnessTaintInference::new();
         witness_inference.run(&mut ssa, &flow_analysis);
+        let witness_inference = Rc::new(witness_inference);
+        let failures = Rc::new(RefCell::new(None));
+        PassManager::new(
+            "assert_constant_validation".to_string(),
+            self.draw_cfg,
+            vec![Box::new(AssertConstantValidation::new(
+                Rc::clone(&witness_inference),
+                Rc::clone(&failures),
+            ))],
+        )
+        .run(&mut ssa);
+        let failures = failures
+            .borrow_mut()
+            .take()
+            .expect("assert_constant validation pass did not record a result");
+        if !failures.is_empty() {
+            return Err(Error::AssertConstantFailed(failures));
+        }
 
         self.write_debug_text(
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),
-            ssa.to_string(&witness_inference),
+            ssa.to_string(witness_inference.as_ref()),
         );
 
         let mut untaint_cf = UntaintControlFlow::new();
-        self.monomorphized_ssa = Some(untaint_cf.run(ssa, &witness_inference));
+        self.monomorphized_ssa = Some(untaint_cf.run(ssa, witness_inference.as_ref()));
 
         self.write_debug_text(
             self.get_debug_output_dir().join("untainted_ssa.txt"),
@@ -468,32 +518,41 @@ impl Driver {
         let flow_analysis = FlowAnalysis::run(&r1cs_ssa);
         let type_info = Types::new().run(&r1cs_ssa, &flow_analysis);
 
-        let mut r1cs_gen = R1CGen::new();
+        let mut r1cs_gen = R1CGen::new(r1cs_ssa.field());
+        if self.r1cs_profiling {
+            r1cs_gen.enable_profile();
+        }
         r1cs_gen
             .run(&r1cs_ssa, &type_info)
             .map_err(|e| Error::UnsatisfiableProgram(e.message))?;
         // Captured before `seal` consumes `r1cs_gen`; feeds the LogUp soundness degree D.
         let num_lookups = r1cs_gen.num_lookups();
-        let r1cs = r1cs_gen.seal();
+        // Captured before `r1cs_ssa` is stored away; sizes the LogUp per-challenge soundness.
+        let field = r1cs_ssa.field();
+        let (r1cs, profile) = match r1cs_gen.seal_with_profile() {
+            Ok((r1cs, profile)) => (r1cs, Some(profile)),
+            Err(error) => (error.into_r1cs(), None),
+        };
         let mut num_non_zero_terms = 0;
         for r1c in r1cs.constraints.iter() {
             for (_, coeff) in r1c.a.iter() {
-                if *coeff != Field::ZERO {
+                if *coeff != RawField::ZERO {
                     num_non_zero_terms += 1;
                 }
             }
             for (_, coeff) in r1c.b.iter() {
-                if *coeff != Field::ZERO {
+                if *coeff != RawField::ZERO {
                     num_non_zero_terms += 1;
                 }
             }
             for (_, coeff) in r1c.c.iter() {
-                if *coeff != Field::ZERO {
+                if *coeff != RawField::ZERO {
                     num_non_zero_terms += 1;
                 }
             }
         }
         self.r1cs_ssa = Some(r1cs_ssa);
+        self.r1cs_profile = profile;
         info!(
             message = %"R1CS generated",
             num_constraints = r1cs.constraints.len(),
@@ -512,7 +571,7 @@ impl Driver {
         // always 1 here and the emitted circuit is unchanged.
         if r1cs.witness_layout.challenges_size > 0 {
             let degree = r1cs.witness_layout.multiplicities_size + num_lookups;
-            let report = logup_soundness_report(self.logup_soundness, degree)
+            let report = logup_soundness_report(field, self.logup_soundness, degree)
                 .map_err(Error::LogupSoundnessUnsupported)?;
             info!(
                 message = %"LogUp soundness",
@@ -573,6 +632,35 @@ impl Driver {
 
     pub fn abi(&self) -> &noirc_abi::Abi {
         self.abi.as_ref().unwrap()
+    }
+
+    /// Flattened field count of the entry point's parameters and return value — the size of the
+    /// positional input block that `prepare_entry_point` writes into witness columns
+    /// `1..=count`.
+    ///
+    /// Together with column 0 (the constant one) these are the externally-visible columns a
+    /// compaction of the R1CS must never touch.
+    pub fn entry_point_flattened_io_count(&self) -> usize {
+        let abi = self.abi();
+        let params: usize = abi
+            .parameters
+            .iter()
+            .map(|param| count_abi_type_elements(&param.typ))
+            .sum();
+        let returns = abi
+            .return_type
+            .as_ref()
+            .map_or(0, |ret| count_abi_type_elements(&ret.abi_type));
+        params + returns
+    }
+
+    /// Number of leading R1CS witness columns a compaction must never touch.
+    ///
+    /// It must always include column 0 (the constant one) plus the positional input/return block.
+    /// There should always be at least 1, matching `r1cs_compact::analyze`'s requirement that
+    /// column 0 stays protected.
+    pub fn protected_r1cs_cols(&self) -> usize {
+        1 + self.entry_point_flattened_io_count()
     }
 
     /// Builds the final multi-entry-point SSA.
@@ -796,5 +884,94 @@ fn count_abi_type_elements(typ: &noirc_abi::AbiType) -> usize {
             fields.iter().map(|(_, t)| count_abi_type_elements(t)).sum()
         }
         AbiType::Tuple { fields } => fields.iter().map(count_abi_type_elements).sum(),
+    }
+}
+
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod tests {
+    use noirc_abi::{AbiType, Sign};
+
+    use super::count_abi_type_elements;
+    use crate::compiler::{passes::prepare_entry_point::PrepareEntryPoint, ssa::hlssa::Type};
+
+    /// `entry_point_flattened_io_count` sizes the protected column block from the ABI via
+    /// [`count_abi_type_elements`], while the wrapper's actual pinned witness block is sized from
+    /// the HLSSA signature via [`PrepareEntryPoint::flattened_field_count`]. The two counts must
+    /// agree on corresponding types, or the R1CS compaction analysis would protect the wrong column
+    /// range.
+    #[test]
+    fn abi_and_hlssa_io_flattening_agree() {
+        let cases: Vec<(AbiType, Type)> = vec![
+            (AbiType::Field, Type::field()),
+            (
+                AbiType::Integer {
+                    sign: Sign::Unsigned,
+                    width: 32,
+                },
+                Type::u(32),
+            ),
+            (
+                AbiType::Integer {
+                    sign: Sign::Signed,
+                    width: 64,
+                },
+                Type::i(64),
+            ),
+            (AbiType::Boolean, Type::u(1)),
+            // A Noir `str<12>` lowers to an array of 12 bytes.
+            (AbiType::String { length: 12 }, Type::u(8).array_of(12)),
+            (
+                AbiType::Array {
+                    length: 4,
+                    typ: Box::new(AbiType::Field),
+                },
+                Type::field().array_of(4),
+            ),
+            // Structs lower to tuples.
+            (
+                AbiType::Struct {
+                    path: "Pair".to_string(),
+                    fields: vec![
+                        ("a".to_string(), AbiType::Field),
+                        (
+                            "b".to_string(),
+                            AbiType::Array {
+                                length: 2,
+                                typ: Box::new(AbiType::Boolean),
+                            },
+                        ),
+                    ],
+                },
+                Type::tuple_of(vec![Type::field(), Type::u(1).array_of(2)]),
+            ),
+            // Nesting: array of tuples.
+            (
+                AbiType::Array {
+                    length: 3,
+                    typ: Box::new(AbiType::Tuple {
+                        fields: vec![
+                            AbiType::Field,
+                            AbiType::Integer {
+                                sign: Sign::Unsigned,
+                                width: 8,
+                            },
+                        ],
+                    }),
+                },
+                Type::tuple_of(vec![Type::field(), Type::u(8)]).array_of(3),
+            ),
+            // WitnessOf is transparent on the HLSSA side; the ABI never sees it.
+            (AbiType::Field, Type::witness_of(Type::field())),
+        ];
+        for (abi, hlssa) in &cases {
+            assert_eq!(
+                count_abi_type_elements(abi),
+                PrepareEntryPoint::flattened_field_count(hlssa),
+                "flattening mismatch for ABI type {abi:?} vs HLSSA type {hlssa:?}",
+            );
+        }
     }
 }

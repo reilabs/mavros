@@ -1,5 +1,7 @@
 use std::fmt::{Debug, Display, Formatter};
 
+use mavros_artifacts::FieldConfig;
+
 use crate::compiler::ssa::SSAType;
 
 // FIELD-ASSUMPTION: L6-int-representation
@@ -276,12 +278,14 @@ impl Type {
         }
     }
 
-    pub fn get_bit_size(&self) -> usize {
+    /// The width of a numeric type in bits. A field element is as wide as the configured field's
+    /// modulus, so this needs the program's [`FieldConfig`] (reached from an `SSA` or a builder as
+    /// `ssa.field()` / `b.field()`).
+    pub fn get_bit_size(&self, field: FieldConfig) -> usize {
         match &self.expr {
             TypeExpr::U(size) | TypeExpr::I(size) => *size,
-            // FIELD-ASSUMPTION: L3-width254
-            TypeExpr::Field => 254, // TODO: parametrize
-            TypeExpr::WitnessOf(inner) => inner.get_bit_size(),
+            TypeExpr::Field => field.field_bit_size() as usize,
+            TypeExpr::WitnessOf(inner) => inner.get_bit_size(field),
             _ => panic!("Type is not numeric: {}", self),
         }
     }
@@ -516,6 +520,27 @@ impl SSAType for Type {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- get_bit_size ---
+
+    #[test]
+    fn field_bit_size_comes_from_the_config() {
+        let field = FieldConfig::bn254();
+        assert_eq!(
+            Type::field().get_bit_size(field),
+            field.field_bit_size() as usize
+        );
+        // bn254's modulus is 254 bits wide; pinned because the corpus depends on this width.
+        assert_eq!(Type::field().get_bit_size(field), 254);
+        // A witnessed field is exactly as wide as the field it witnesses.
+        assert_eq!(
+            Type::witness_of(Type::field()).get_bit_size(field),
+            Type::field().get_bit_size(field)
+        );
+        // Integer widths are field-independent.
+        assert_eq!(Type::u(32).get_bit_size(field), 32);
+        assert_eq!(Type::i(64).get_bit_size(field), 64);
+    }
 
     // --- is_subtype_of ---
 

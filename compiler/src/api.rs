@@ -6,11 +6,11 @@ use std::{
 use crate::{
     Project,
     abi_helpers::ordered_params_from_btreemap,
-    compiler::{Field, codegen::hlssa_to_r1cs::R1CS},
+    compiler::codegen::hlssa_to_r1cs::R1CS,
     driver::Driver,
     vm::{bytecode::DebugInfo, interpreter},
 };
-use mavros_artifacts::InputValueOrdered;
+use mavros_artifacts::{Field as RawField, InputValueOrdered};
 use noirc_abi::input_parser::Format;
 
 type Error = Box<dyn std::error::Error>;
@@ -65,6 +65,27 @@ pub fn run_witgen_from_binary(
     )
 }
 
+pub fn run_witgen_profiled_from_binary(
+    binary: &mut [u64],
+    r1cs: &R1CS,
+    params: &[InputValueOrdered],
+    debug_info: Option<DebugInfo>,
+) -> Result<
+    (
+        interpreter::WitgenResult,
+        mavros_artifacts::FlamegraphProfile,
+    ),
+    interpreter::TrapError,
+> {
+    interpreter::run_profiled(
+        binary,
+        r1cs.witness_layout,
+        r1cs.constraints_layout,
+        params,
+        debug_info,
+    )
+}
+
 /// Phase 1: execute the VM and produce the pre-commitment witness. Returns
 /// intermediate state needed by [`run_witgen_phase2`].
 pub fn run_witgen_phase1(
@@ -85,7 +106,7 @@ pub fn run_witgen_phase1(
 /// Phase 2: given real Fiat-Shamir challenges, complete witness generation.
 pub fn run_witgen_phase2(
     phase1: interpreter::Phase1Result,
-    challenges: &[Field],
+    challenges: &[RawField],
     r1cs: &R1CS,
 ) -> interpreter::WitgenResult {
     interpreter::run_phase2(
@@ -115,13 +136,13 @@ pub fn compile_bytecode_artifact(
 pub fn run_ad_from_binary(
     binary: &mut [u64],
     r1cs: &R1CS,
-    coeffs: &[Field],
+    coeffs: &[RawField],
     debug_info: Option<DebugInfo>,
 ) -> Result<
     (
-        Vec<Field>,
-        Vec<Field>,
-        Vec<Field>,
+        Vec<RawField>,
+        Vec<RawField>,
+        Vec<RawField>,
         crate::vm::bytecode::AllocationInstrumenter,
     ),
     interpreter::TrapError,
@@ -135,7 +156,31 @@ pub fn run_ad_from_binary(
     )
 }
 
-pub fn random_ad_coeffs(r1cs: &R1CS) -> Vec<Field> {
+pub fn run_ad_profiled_from_binary(
+    binary: &mut [u64],
+    r1cs: &R1CS,
+    coeffs: &[RawField],
+    debug_info: Option<DebugInfo>,
+) -> Result<
+    (
+        Vec<RawField>,
+        Vec<RawField>,
+        Vec<RawField>,
+        crate::vm::bytecode::AllocationInstrumenter,
+        mavros_artifacts::FlamegraphProfile,
+    ),
+    interpreter::TrapError,
+> {
+    interpreter::run_ad_profiled(
+        binary,
+        coeffs,
+        r1cs.witness_layout,
+        r1cs.constraints_layout,
+        debug_info,
+    )
+}
+
+pub fn random_ad_coeffs(r1cs: &R1CS) -> Vec<RawField> {
     use ark_ff::UniformRand as _;
     let mut rng = rand::thread_rng();
     (0..r1cs.constraints.len())
@@ -153,7 +198,13 @@ pub fn check_witgen(r1cs: &R1CS, res: &interpreter::WitgenResult) -> bool {
     )
 }
 
-pub fn check_ad(r1cs: &R1CS, coeffs: &[Field], a: &[Field], b: &[Field], c: &[Field]) -> bool {
+pub fn check_ad(
+    r1cs: &R1CS,
+    coeffs: &[RawField],
+    a: &[RawField],
+    b: &[RawField],
+    c: &[RawField],
+) -> bool {
     r1cs.check_ad_output(coeffs, a, b, c)
 }
 

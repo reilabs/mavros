@@ -564,6 +564,10 @@ impl FnBuilder<'_> {
             | OpCode::WriteWitness { .. }
             | OpCode::DropGlobal { .. }
             | OpCode::Assert { .. }
+            // Handled rather than ICE-d, unlike the downstream passes: points-to runs inside the
+            // `Types`/`FlowAnalysis` that assert-constant validation itself builds, so it
+            // legitimately observes the marker before validation erases it.
+            | OpCode::AssertConstant { .. }
             | OpCode::AssertCmp { .. }
             | OpCode::AssertR1C { .. }
             | OpCode::Rangecheck { .. }

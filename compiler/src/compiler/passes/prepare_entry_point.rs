@@ -101,8 +101,7 @@ impl PrepareEntryPoint {
             let blob_param = e.add_parameter(Type::blob(Type::field(), total_fields));
 
             // witness[0] must be constant one, emitted by the program.
-            // FIELD-ASSUMPTION: L1-direct-ref (6 sites)
-            let one = e.field_const(ark_bn254::Fr::from(1u64));
+            let one = e.field_const(e.field().constant(1u64));
             e.pinned_write_witness(one);
 
             // Write every input field to the witness in blob order, collecting
@@ -345,7 +344,7 @@ impl PrepareEntryPoint {
         format!("reconstruct_{}", reconstruct_fns.len())
     }
 
-    fn flattened_field_count(typ: &Type) -> usize {
+    pub(crate) fn flattened_field_count(typ: &Type) -> usize {
         match &typ.expr {
             TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => 1,
             TypeExpr::Array(inner, size) => Self::flattened_field_count(inner) * size,
@@ -415,8 +414,8 @@ impl PrepareEntryPoint {
                 let witness = e.write_witness(as_field);
 
                 if *size == 1 {
-                    let zero = e.field_const(ark_bn254::Fr::from(0));
-                    let one = e.field_const(ark_bn254::Fr::from(1));
+                    let zero = e.field_const(e.field().constant(0));
+                    let one = e.field_const(e.field().constant(1));
                     let x_sub_1 = e.sub(witness, one);
                     let x_times_x_sub_1 = e.mul(witness, x_sub_1);
                     e.assert_eq(x_times_x_sub_1, zero);
@@ -531,8 +530,8 @@ impl PrepareEntryPoint {
                 let zero = e.u_const(32, 0);
                 let field_param = e.array_get(input_array, zero);
                 if *size == 1 {
-                    let zero = e.field_const(ark_bn254::Fr::from(0));
-                    let one = e.field_const(ark_bn254::Fr::from(1));
+                    let zero = e.field_const(e.field().constant(0));
+                    let one = e.field_const(e.field().constant(1));
                     let x_sub_1 = e.sub(field_param, one);
                     let x_times_x_sub_1 = e.mul(field_param, x_sub_1);
                     e.assert_eq(x_times_x_sub_1, zero);
@@ -605,7 +604,7 @@ impl PrepareEntryPoint {
     fn emit_default_witness_value(e: &mut HLBlockEmitter<'_>, typ: &Type) -> ValueId {
         match &typ.expr {
             TypeExpr::Field => {
-                let zero = e.field_const(ark_bn254::Fr::from(0));
+                let zero = e.field_const(e.field().constant(0));
                 e.cast_to_witness_of(zero)
             }
             TypeExpr::U(size) => {

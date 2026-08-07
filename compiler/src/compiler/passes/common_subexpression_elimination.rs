@@ -7,6 +7,7 @@
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
+        Field,
         analysis::flow_analysis::{CFG, FlowAnalysis},
         pass_manager::{AnalysisId, AnalysisStore, Pass},
         passes::shared::{availability::can_replace, value_replacements::ValueReplacements},
@@ -17,7 +18,7 @@ use crate::{
                 OpCode, Radix,
             },
         },
-        util::ice_non_elided_tuple,
+        util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
     },
 };
 
@@ -655,6 +656,7 @@ impl CSE {
                     | OpCode::DropGlobal { .. }
                     | OpCode::Spread { .. }
                     | OpCode::Unspread { .. } => {}
+                    OpCode::AssertConstant { .. } => ice_unvalidated_assert_constant(),
                     OpCode::Not { result: r, value } => {
                         let value_expr = get_expr(&exprs, &mut interner, value);
                         let result_expr = interner.not(value_expr);
@@ -693,8 +695,7 @@ enum ExprNode {
     Div { lhs: ExprId, rhs: ExprId },
     Mod { lhs: ExprId, rhs: ExprId },
     Sub { lhs: ExprId, rhs: ExprId },
-    // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
-    FConst(ark_bn254::Fr),
+    FConst(Field),
     UConst { bits: usize, value: u128 },
     IConst { bits: usize, value: u128 },
     Variable(u64),
@@ -751,7 +752,7 @@ impl ExprInterner {
         self.intern(ExprNode::Variable(value_id.0))
     }
 
-    fn fconst(&mut self, value: ark_bn254::Fr) -> ExprId {
+    fn fconst(&mut self, value: Field) -> ExprId {
         self.intern(ExprNode::FConst(value))
     }
 

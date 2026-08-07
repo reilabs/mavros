@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use crate::compiler::{
     analysis::{
@@ -15,23 +15,44 @@ use crate::compiler::{
     util::{spread_bits, unspread_bits},
 };
 use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field, PrimeField};
+use mavros_artifacts::FieldConfig;
 use tracing::{instrument, warn};
 
-pub use mavros_artifacts::{ConstraintsLayout, LC, R1C, R1CS, WitnessLayout};
+pub use mavros_artifacts::{
+    ConstraintsLayout, FlamegraphProfile, FlamegraphStackId, LC, R1C, R1CS, WitnessLayout,
+};
+
+/// Per-function circuit-size profiles produced alongside the R1CS.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct R1CSProfile {
+    pub constraints: FlamegraphProfile,
+    pub witnesses: FlamegraphProfile,
+}
+
+#[derive(Debug)]
+pub struct R1CSProfileDisabled {
+    r1cs: Box<R1CS>,
+}
+
+impl R1CSProfileDisabled {
+    pub fn into_r1cs(self) -> R1CS {
+        *self.r1cs
+    }
+}
+
+impl std::fmt::Display for R1CSProfileDisabled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("R1CS profiling was not enabled")
+    }
+}
+
+impl std::error::Error for R1CSProfileDisabled {}
 
 // FIELD-ASSUMPTION: L1-direct-ref (57 sites)
 // FIELD-ASSUMPTION: L4-two-pow
 fn two_pow(exponent: usize) -> ark_bn254::Fr {
     ark_bn254::Fr::from(2).pow([exponent as u64])
 }
-
-// #[derive(Clone, Debug, Copy, PartialEq, PartialOrd, Eq, Ord)]
-// pub enum WitnessIndex {
-//     PreCommitment(usize),
-//     ChallengePower(usize, usize),
-//     LookupValueInverse(usize),
-//     LookupValueInverseAux(usize),
-// }
 
 #[derive(Clone, Debug)]
 pub struct ArrayData {
@@ -313,18 +334,62 @@ pub enum Table {
     Spread(u8),
 }
 
+impl Table {
+    fn row_count(&self) -> usize {
+        match self {
+            Table::Range(bits) => 1usize << bits,
+            Table::OfElems(elements) => elements.len(),
+            Table::Spread(bits) => 1usize << bits,
+        }
+    }
+
+    fn width(&self) -> usize {
+        match self {
+            Table::Range(_) => 1,
+            Table::OfElems(_) | Table::Spread(_) => 2,
+        }
+    }
+
+    fn profile_size(&self) -> (u64, u64) {
+        let rows = self.row_count() as u64;
+        match self {
+            Table::Range(_) | Table::Spread(_) => (rows + 1, 2 * rows),
+            Table::OfElems(_) => (2 * rows + 1, 3 * rows),
+        }
+    }
+
+    fn profile_name(&self, table_index: usize) -> String {
+        match self {
+            Table::Range(bits) => format!("<range table: {bits} bits>"),
+            Table::OfElems(elements) => {
+                format!("<array table #{table_index}: {} rows>", elements.len())
+            }
+            Table::Spread(bits) => format!("<spread table: {bits} bits>"),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct R1CGen {
+    /// The field the program operates over. Codegen's arithmetic is still raw `ark_bn254::Fr` (it
+    /// becomes per-field in P4); this is here so that the type-width queries it makes read the
+    /// configured field rather than a static.
+    field: FieldConfig,
     constraints: Vec<R1C>,
     tables: Vec<Table>,
     lookups: Vec<LookupConstraint>,
     next_witness: usize,
+    function_names: BTreeMap<FunctionId, String>,
+    call_stack: Vec<String>,
+    call_stack_ids: Vec<(FlamegraphStackId, FlamegraphStackId)>,
+    profile_root: String,
+    profile: Option<R1CSProfile>,
 }
 
 impl symbolic_executor::Context<Value> for R1CGen {
     fn on_call(
         &mut self,
-        _func: FunctionId,
+        func: FunctionId,
         _params: &mut [Value],
         _param_types: &[&Type],
         _result_types: &[Type],
@@ -334,10 +399,22 @@ impl symbolic_executor::Context<Value> for R1CGen {
             !unconstrained,
             "ICE: unconstrained calls should be DCE'd before R1CS gen"
         );
+        if self.profile.is_some() {
+            let name = self
+                .function_names
+                .get(&func)
+                .cloned()
+                .unwrap_or_else(|| format!("fn{}", func.0));
+            self.push_profile_frame(name);
+        }
         None
     }
 
-    fn on_return(&mut self, _returns: &mut [Value], _return_types: &[Type]) {}
+    fn on_return(&mut self, _returns: &mut [Value], _return_types: &[Type]) {
+        if self.profile.is_some() {
+            self.pop_profile_frame();
+        }
+    }
 
     fn on_jmp(&mut self, _target: BlockId, _params: &mut [Value], _param_types: &[&Type]) {}
 
@@ -347,16 +424,12 @@ impl symbolic_executor::Context<Value> for R1CGen {
             .into_iter()
             .map(|e| e.expect_linear_combination())
             .collect();
-        match target {
+        let lookup_size = els.len() as u64;
+        let table_id = match target {
             hlssa::LookupTarget::Rangecheck(i) => {
                 // Find or create the rangecheck table of this size. The lookup-sizing analysis
                 // may select several distinct sizes, so multiple range tables can coexist.
-                let table_id = self.find_or_create_range_table(i as u64);
-                self.lookups.push(LookupConstraint {
-                    table_id,
-                    elements: els,
-                    flag: flag_lc.clone(),
-                });
+                self.find_or_create_range_table(i as u64)
             }
             hlssa::LookupTarget::DynRangecheck(_) => {
                 // `to_radix` lowers its (asserted radix-256) digit checks to static 8-bit
@@ -366,43 +439,36 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 )
             }
             hlssa::LookupTarget::Spread(bits) => {
-                let table_id = {
-                    let existing = self.tables.iter().position(|t| match t {
-                        Table::Spread(n) => *n == bits,
-                        _ => false,
-                    });
-                    if let Some(idx) = existing {
-                        idx
-                    } else {
-                        self.tables.push(Table::Spread(bits));
-                        self.tables.len() - 1
-                    }
-                };
-                self.lookups.push(LookupConstraint {
-                    table_id,
-                    elements: els,
-                    flag: flag_lc,
+                let existing = self.tables.iter().position(|t| match t {
+                    Table::Spread(n) => *n == bits,
+                    _ => false,
                 });
+                if let Some(idx) = existing {
+                    idx
+                } else {
+                    self.add_table(Table::Spread(bits))
+                }
             }
             hlssa::LookupTarget::Array(arr) => {
                 let arr = arr.expect_array();
-                let table_id = if arr.borrow().table_id.is_none() {
+                if arr.borrow().table_id.is_none() {
                     let mut elems = Vec::new();
                     flatten_array_into_table(&arr.borrow(), &mut elems);
-                    self.tables.push(Table::OfElems(elems));
-                    let idx = self.tables.len() - 1;
+                    let idx = self.add_table(Table::OfElems(elems));
                     arr.borrow_mut().table_id = Some(idx);
                     idx
                 } else {
                     arr.borrow().table_id.unwrap()
-                };
-                self.lookups.push(LookupConstraint {
-                    table_id,
-                    elements: els,
-                    flag: flag_lc,
-                });
+                }
             }
-        }
+        };
+        self.record_constraints(lookup_size);
+        self.record_witnesses(lookup_size);
+        self.lookups.push(LookupConstraint {
+            table_id,
+            elements: els,
+            flag: flag_lc,
+        });
     }
 
     fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<Value> {
@@ -690,6 +756,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         let b = b.expect_linear_combination();
         let c = c.expect_linear_combination();
         ctx.constraints.push(R1C { a, b, c });
+        ctx.record_constraints(1);
         Ok(())
     }
 
@@ -732,10 +799,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::mk_array(bit_values)
     }
 
-    fn not(&self, out_type: &Type, _ctx: &mut R1CGen) -> Self {
+    fn not(&self, out_type: &Type, ctx: &mut R1CGen) -> Self {
         let value_const = self.expect_constant();
         let bits = value_const.into_bigint().to_bits_le();
-        let bit_size = out_type.get_bit_size();
+        let bit_size = out_type.get_bit_size(ctx.field());
         let mut negated_bits = Vec::new();
         for i in 0..bit_size {
             let bit = if i < bits.len() { bits[i] } else { false };
@@ -753,7 +820,9 @@ impl symbolic_executor::Value<R1CGen> for Value {
     }
 
     fn of_field(f: crate::compiler::Field, _ctx: &mut R1CGen) -> Self {
-        Value::Const(ark_bn254::Fr::from(f))
+        // Boundary: the middle-end `FieldElement` becomes the raw `ark_bn254::Fr` this R1CS
+        // evaluator computes coefficients in.
+        Value::Const(f.to_ark())
     }
 
     fn of_blob(_elem_type: Type, elements: Vec<Self>, _ctx: &mut R1CGen) -> Self {
@@ -798,11 +867,13 @@ impl symbolic_executor::Value<R1CGen> for Value {
 
     fn write_witness(&self, _tp: Option<&Type>, ctx: &mut R1CGen) -> Self {
         let witness_var = ctx.next_witness();
+        ctx.record_witnesses(1);
         Value::LC(vec![(witness_var, ark_bn254::Fr::ONE)])
     }
 
     fn fresh_witness(_result_type: &Type, ctx: &mut R1CGen) -> Self {
         let witness_var = ctx.next_witness();
+        ctx.record_witnesses(1);
         Value::LC(vec![(witness_var, ark_bn254::Fr::ONE)])
     }
 
@@ -874,13 +945,93 @@ impl symbolic_executor::Value<R1CGen> for Value {
 }
 
 impl R1CGen {
-    pub fn new() -> Self {
+    pub fn new(field: FieldConfig) -> Self {
         Self {
+            field,
             constraints: vec![],
             next_witness: 0,
             tables: vec![],
             lookups: vec![],
+            function_names: BTreeMap::new(),
+            call_stack: Vec::new(),
+            call_stack_ids: Vec::new(),
+            profile_root: "<r1cs>".to_string(),
+            profile: None,
         }
+    }
+
+    /// The field the program operates over.
+    pub fn field(&self) -> FieldConfig {
+        self.field
+    }
+
+    pub fn enable_profile(&mut self) {
+        self.profile = Some(R1CSProfile::default());
+    }
+
+    fn push_profile_frame(&mut self, name: String) {
+        self.call_stack.push(name);
+        let profile = self
+            .profile
+            .as_mut()
+            .expect("profile frames are recorded only when profiling is enabled");
+        let constraint_stack_id = profile
+            .constraints
+            .intern_stack(self.call_stack.iter().cloned())
+            .expect("R1CS profile call stack is non-empty");
+        let witness_stack_id = profile
+            .witnesses
+            .intern_stack(self.call_stack.iter().cloned())
+            .expect("R1CS profile call stack is non-empty");
+        self.call_stack_ids
+            .push((constraint_stack_id, witness_stack_id));
+    }
+
+    fn pop_profile_frame(&mut self) {
+        self.call_stack
+            .pop()
+            .expect("ICE: R1CS profiler call stack underflow");
+        self.call_stack_ids
+            .pop()
+            .expect("ICE: R1CS profiler stack ID underflow");
+    }
+
+    fn record_constraints(&mut self, count: u64) {
+        if let Some(profile) = &mut self.profile {
+            let stack_id = self
+                .call_stack_ids
+                .last()
+                .expect("constraints are recorded inside an R1CS call frame")
+                .0;
+            profile.constraints.record_interned(stack_id, count);
+        }
+    }
+
+    fn record_witnesses(&mut self, count: u64) {
+        if let Some(profile) = &mut self.profile {
+            let stack_id = self
+                .call_stack_ids
+                .last()
+                .expect("witnesses are recorded inside an R1CS call frame")
+                .1;
+            profile.witnesses.record_interned(stack_id, count);
+        }
+    }
+
+    fn add_table(&mut self, table: Table) -> usize {
+        let table_index = self.tables.len();
+        let (constraints, witnesses) = table.profile_size();
+        if let Some(profile) = &mut self.profile {
+            let stack = [
+                self.profile_root.clone(),
+                "<lookup tables>".to_string(),
+                table.profile_name(table_index),
+            ];
+            profile.constraints.record(stack.clone(), constraints);
+            profile.witnesses.record(stack, witnesses);
+        }
+        self.tables.push(table);
+        table_index
     }
 
     /// Return the id of the rangecheck table for `bits`-bit values (i.e. `2^bits` rows), creating
@@ -893,8 +1044,7 @@ impl R1CGen {
         {
             idx
         } else {
-            self.tables.push(Table::Range(bits));
-            self.tables.len() - 1
+            self.add_table(Table::Range(bits))
         }
     }
 
@@ -926,13 +1076,26 @@ impl R1CGen {
     #[instrument(skip_all, name = "R1CGen::run")]
     pub fn run(&mut self, ssa: &HLSSA, type_info: &TypeInfo) -> Result<(), AssertionFailure> {
         let entry_point = ssa.get_unique_entrypoint_id();
+        if self.profile.is_some() {
+            self.function_names = ssa
+                .iter_functions()
+                .map(|(id, function)| (*id, function.get_name().to_string()))
+                .collect();
+            self.profile_root = ssa.get_function(entry_point).get_name().to_string();
+        }
         assert!(
             ssa.get_function(entry_point).get_param_types().len() == 0,
             "Main should not have parameters as WitnessWriteToFresh pass should remove them"
         );
         let main_params = vec![];
         let executor = SymbolicExecutor::new();
-        executor.run(ssa, type_info, entry_point, main_params, self)
+        let result = executor.run(ssa, type_info, entry_point, main_params, self);
+        debug_assert!(
+            self.profile.is_none()
+                || result.is_err()
+                || (self.call_stack.is_empty() && self.call_stack_ids.is_empty())
+        );
+        result
     }
 
     pub fn get_r1cs(self) -> Vec<R1C> {
@@ -957,6 +1120,20 @@ impl R1CGen {
     }
 
     pub fn seal(self) -> R1CS {
+        self.seal_impl().0
+    }
+
+    pub fn seal_with_profile(self) -> Result<(R1CS, R1CSProfile), R1CSProfileDisabled> {
+        let (r1cs, profile) = self.seal_impl();
+        match profile {
+            Some(profile) => Ok((r1cs, profile)),
+            None => Err(R1CSProfileDisabled {
+                r1cs: Box::new(r1cs),
+            }),
+        }
+    }
+
+    fn seal_impl(mut self) -> (R1CS, Option<R1CSProfile>) {
         // Algebraic section
         let mut witness_layout = WitnessLayout {
             algebraic_size: self.next_witness,
@@ -980,50 +1157,35 @@ impl R1CGen {
         }
         let mut table_infos = vec![];
         let mut max_width = 0;
-        for table in self.tables.into_iter() {
-            match table {
-                Table::Range(len) => {
-                    let len = 1 << len;
-                    table_infos.push(TableInfo {
-                        multiplicities_witness_off: witness_layout.multiplicities_size
-                            + witness_layout.algebraic_size,
-                        table,
-                        sum_constraint_idx: 0,
-                    });
-                    max_width = max_width.max(1);
-                    witness_layout.multiplicities_size += len;
-                }
-                Table::OfElems(els) => {
-                    let len = els.len();
-                    table_infos.push(TableInfo {
-                        multiplicities_witness_off: witness_layout.multiplicities_size
-                            + witness_layout.algebraic_size,
-                        table: Table::OfElems(els),
-                        sum_constraint_idx: 0,
-                    });
-                    max_width = max_width.max(2);
-                    witness_layout.multiplicities_size += len;
-                }
-                Table::Spread(bits) => {
-                    let len = 1usize << bits;
-                    table_infos.push(TableInfo {
-                        multiplicities_witness_off: witness_layout.multiplicities_size
-                            + witness_layout.algebraic_size,
-                        table,
-                        sum_constraint_idx: 0,
-                    });
-                    max_width = max_width.max(2); // key + spread_value
-                    witness_layout.multiplicities_size += len;
-                }
-            }
+        for table in self.tables {
+            let len = table.row_count();
+            max_width = max_width.max(table.width());
+            table_infos.push(TableInfo {
+                multiplicities_witness_off: witness_layout.multiplicities_size
+                    + witness_layout.algebraic_size,
+                table,
+                sum_constraint_idx: 0,
+            });
+            witness_layout.multiplicities_size += len;
         }
 
         if table_infos.is_empty() {
-            return R1CS {
+            let r1cs = R1CS {
                 witness_layout,
                 constraints_layout,
                 constraints: result,
             };
+            if let Some(profile) = &self.profile {
+                assert_eq!(
+                    profile.constraints.total_weight(),
+                    r1cs.constraints_layout.size() as u64
+                );
+                assert_eq!(
+                    profile.witnesses.total_weight(),
+                    r1cs.witness_layout.size() as u64
+                );
+            }
+            return (r1cs, self.profile);
         }
 
         // challenges init
@@ -1040,6 +1202,12 @@ impl R1CGen {
         } else {
             usize::MAX // hoping this crashes soon if used
         };
+        if let Some(profile) = &mut self.profile {
+            profile.witnesses.record(
+                [self.profile_root.clone(), "<lookup challenges>".to_string()],
+                witness_layout.challenges_size as u64,
+            );
+        }
 
         // tables contents init
         for table_info in table_infos.iter_mut() {
@@ -1056,7 +1224,7 @@ impl R1CGen {
                             a: vec![(y, ark_bn254::Fr::ONE)],
                             b: vec![
                                 (alpha, ark_bn254::Fr::ONE),
-                                (0, -crate::compiler::Field::from(i as u64)),
+                                (0, -ark_bn254::Fr::from(i as u64)),
                             ],
                             c: vec![(m, ark_bn254::Fr::ONE)],
                         });
@@ -1079,18 +1247,18 @@ impl R1CGen {
                         let y = witness_layout.next_table_data();
                         let m = table_info.multiplicities_witness_off + i;
                         result.push(R1C {
-                            a: vec![(beta, crate::compiler::Field::ONE)],
+                            a: vec![(beta, ark_bn254::Fr::ONE)],
                             b: v.clone(),
-                            c: vec![(x, -crate::compiler::Field::ONE)],
+                            c: vec![(x, -ark_bn254::Fr::ONE)],
                         });
                         result.push(R1C {
                             a: vec![(y, ark_bn254::Fr::ONE)],
                             b: vec![
                                 (alpha, ark_bn254::Fr::ONE),
-                                (0, -crate::compiler::Field::from(i as u64)),
-                                (x, -crate::compiler::Field::ONE),
+                                (0, -ark_bn254::Fr::from(i as u64)),
+                                (x, -ark_bn254::Fr::ONE),
                             ],
-                            c: vec![(m, crate::compiler::Field::ONE)],
+                            c: vec![(m, ark_bn254::Fr::ONE)],
                         });
                         sum_lhs.push((y, ark_bn254::Fr::ONE));
                     }
@@ -1120,10 +1288,10 @@ impl R1CGen {
                             a: vec![(y, ark_bn254::Fr::ONE)],
                             b: vec![
                                 (alpha, ark_bn254::Fr::ONE),
-                                (0, -crate::compiler::Field::from(i as u64)),
-                                (beta, crate::compiler::Field::from(spread_val)),
+                                (0, -ark_bn254::Fr::from(i as u64)),
+                                (beta, ark_bn254::Fr::from(spread_val)),
                             ],
-                            c: vec![(m, crate::compiler::Field::ONE)],
+                            c: vec![(m, ark_bn254::Fr::ONE)],
                         });
                         sum_lhs.push((y, ark_bn254::Fr::ONE));
                     }
@@ -1165,16 +1333,13 @@ impl R1CGen {
                     let y = witness_layout.next_lookups_data();
                     // β * value = -x  (defines x = -β*value)
                     result.push(R1C {
-                        a: vec![(beta, crate::compiler::Field::ONE)],
+                        a: vec![(beta, ark_bn254::Fr::ONE)],
                         b: lookup.elements[1].clone(),
-                        c: vec![(x, -crate::compiler::Field::ONE)],
+                        c: vec![(x, -ark_bn254::Fr::ONE)],
                     });
 
                     // y * (α - x - key) = flag
-                    let mut b = vec![
-                        (alpha, ark_bn254::Fr::ONE),
-                        (x, -crate::compiler::Field::ONE),
-                    ];
+                    let mut b = vec![(alpha, ark_bn254::Fr::ONE), (x, -ark_bn254::Fr::ONE)];
                     for (w, coeff) in lookup.elements[0].iter() {
                         b.push((*w, -*coeff));
                     }
@@ -1196,11 +1361,106 @@ impl R1CGen {
         constraints_layout.lookups_data_size =
             result.len() - constraints_layout.algebraic_size - constraints_layout.tables_data_size;
 
-        R1CS {
+        let r1cs = R1CS {
             witness_layout,
             constraints_layout,
             constraints: result,
+        };
+        if let Some(profile) = &self.profile {
+            assert_eq!(
+                profile.constraints.total_weight(),
+                r1cs.constraints_layout.size() as u64
+            );
+            assert_eq!(
+                profile.witnesses.total_weight(),
+                r1cs.witness_layout.size() as u64
+            );
         }
+        (r1cs, self.profile)
+    }
+}
+
+#[cfg(test)]
+mod r1cs_profile_tests {
+    use super::{ArrayData, FieldConfig, R1CGen, Value, hlssa, symbolic_executor};
+    use ark_ff::Field as _;
+    use std::{cell::RefCell, rc::Rc};
+
+    fn witness(generator: &mut R1CGen) -> Value {
+        let witness = generator.next_witness();
+        generator.record_witnesses(1);
+        Value::LC(vec![(witness, ark_bn254::Fr::ONE)])
+    }
+
+    fn array_table(values: &[u64]) -> Value {
+        Value::Array(Rc::new(RefCell::new(ArrayData {
+            table_id: None,
+            data: values
+                .iter()
+                .map(|value| Value::Const(ark_bn254::Fr::from(*value)))
+                .collect(),
+        })))
+    }
+
+    fn lookup(generator: &mut R1CGen, target: hlssa::LookupTarget<Value>, args: Vec<Value>) {
+        <R1CGen as symbolic_executor::Context<Value>>::lookup(
+            generator,
+            target,
+            args,
+            Value::Const(ark_bn254::Fr::ONE),
+        );
+    }
+
+    #[test]
+    fn all_lookup_profiles_match_the_sealed_r1cs_layout() {
+        let mut generator = R1CGen::new(FieldConfig::bn254());
+        generator.enable_profile();
+        generator.profile_root = "main".to_string();
+        generator.push_profile_frame("main".to_string());
+
+        let range_value = witness(&mut generator);
+        lookup(
+            &mut generator,
+            hlssa::LookupTarget::Rangecheck(2),
+            vec![range_value],
+        );
+
+        let spread_key = witness(&mut generator);
+        let spread_value = witness(&mut generator);
+        lookup(
+            &mut generator,
+            hlssa::LookupTarget::Spread(2),
+            vec![spread_key, spread_value],
+        );
+
+        for values in [[10, 20, 30], [40, 50, 60]] {
+            let table = array_table(&values);
+            let index = witness(&mut generator);
+            let value = witness(&mut generator);
+            lookup(
+                &mut generator,
+                hlssa::LookupTarget::Array(table),
+                vec![index, value],
+            );
+        }
+        generator.pop_profile_frame();
+
+        let (r1cs, profile) = generator.seal_with_profile().unwrap();
+        assert_eq!(
+            profile.constraints.total_weight(),
+            r1cs.constraints_layout.size() as u64
+        );
+        assert_eq!(
+            profile.witnesses.total_weight(),
+            r1cs.witness_layout.size() as u64
+        );
+
+        let constraints = profile.constraints.to_folded();
+        assert!(constraints.contains("main;<lookup tables>;<range table: 2 bits>"));
+        assert!(constraints.contains("main;<lookup tables>;<spread table: 2 bits>"));
+        assert!(constraints.contains("main;<lookup tables>;<array table #2: 3 rows>"));
+        assert!(constraints.contains("main;<lookup tables>;<array table #3: 3 rows>"));
+        assert!(constraints.contains("main 7\n"));
     }
 }
 
@@ -1273,16 +1533,17 @@ fn ceil_log2(n: usize) -> u32 {
 ///
 /// FIELD-ASSUMPTION: L4-logup-challenges
 ///
-/// Reads `MODULUS_BIT_SIZE` of the concrete field to size per-challenge soundness. In P3 this
-/// should read `FieldConfig::field_bit_size()` rather than the bn254 alias.
+/// The bit size comes from the configured field rather than a static constant; what remains
+/// field-dependent is the K-challenge replication this rejects (see `Error::LogupSoundnessUnsupported`).
 pub fn logup_soundness_report(
+    field: FieldConfig,
     requested_bits: u32,
     degree: usize,
 ) -> Result<SoundnessReport, String> {
-    // floor(log2 p): p in [2^(MODULUS_BIT_SIZE-1), 2^MODULUS_BIT_SIZE), so floor(log2 p) =
-    // MODULUS_BIT_SIZE - 1. Using the floor (rather than the bit size) keeps `achieved_bits`
+    // floor(log2 p): p in [2^(field_bit_size-1), 2^field_bit_size), so floor(log2 p) =
+    // field_bit_size - 1. Using the floor (rather than the bit size) keeps `achieved_bits`
     // a lower bound and never over-claims security.
-    let field_bits = <crate::compiler::Field as PrimeField>::MODULUS_BIT_SIZE - 1;
+    let field_bits = field.field_bit_size() - 1;
     compute_logup_soundness(requested_bits, field_bits, degree)
 }
 
@@ -1338,6 +1599,8 @@ fn compute_logup_soundness(
 
 #[cfg(test)]
 mod logup_soundness_tests {
+    use mavros_artifacts::FieldConfig;
+
     use super::{compute_logup_soundness, logup_soundness_report};
 
     #[test]
@@ -1359,8 +1622,8 @@ mod logup_soundness_tests {
 
     #[test]
     fn live_bn254_alias_yields_a_single_challenge_at_the_default() {
-        // The real field alias (bn254) at the 128-bit default must be a genuine no-op.
-        let r = logup_soundness_report(128, 1 << 20).unwrap();
+        // The real configured field (bn254) at the 128-bit default must be a genuine no-op.
+        let r = logup_soundness_report(FieldConfig::bn254(), 128, 1 << 20).unwrap();
         assert_eq!(r.field_bits, 253);
         assert_eq!(r.challenges, 1);
     }

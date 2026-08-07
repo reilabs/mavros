@@ -116,6 +116,12 @@ pub enum OpCode {
     Assert {
         value: ValueId,
     },
+    /// Compile-time assertion that `value` is known in every reachable calling context.
+    ///
+    /// This marker is removed after witness-taint inference and must not reach later passes.
+    AssertConstant {
+        value: ValueId,
+    },
     AssertCmp {
         kind: CmpKind,
         lhs: ValueId,
@@ -327,6 +333,7 @@ impl OpCode {
             | OpCode::Store { .. }
             | OpCode::Load { .. }
             | OpCode::Assert { .. }
+            | OpCode::AssertConstant { .. }
             | OpCode::AssertCmp { .. }
             | OpCode::AssertR1C { .. }
             | OpCode::Call { .. }
@@ -367,14 +374,21 @@ impl OpCode {
         self.scalar_fold().is_some()
     }
 
-    /// `true` if `self` is a fact-establishing assert (`Assert` / `AssertCmp`).
+    /// `true` if `self` must receive the conservative treatment used for assertions.
     ///
     /// The single classifier shared by every consumer that must treat asserts specially: the
     /// conditional analysis records their facts (`click_cooper/conditional.rs` Step 1), and
     /// consumers of its anticipated channel must never rewrite their inputs (Gate 3). A future
     /// establisher opcode must be added here _and_ have its fact recorded in Step 1.
+    ///
+    /// `AssertConstant` does not establish a runtime fact, but is included conservatively so its
+    /// temporary presence does not change ClickCooper's treatment of assert operands. Revisit this
+    /// when the analyses gain explicit support: https://github.com/reilabs/mavros/issues/260.
     pub fn is_assert(&self) -> bool {
-        matches!(self, OpCode::Assert { .. } | OpCode::AssertCmp { .. })
+        matches!(
+            self,
+            OpCode::Assert { .. } | OpCode::AssertConstant { .. } | OpCode::AssertCmp { .. }
+        )
     }
 }
 
@@ -466,6 +480,7 @@ impl Instruction for OpCode {
                 format!("v{}{} = *v{}", result.0, annotate_value(*result), ptr.0)
             }
             OpCode::Assert { value } => format!("assert v{}", value.0),
+            OpCode::AssertConstant { value } => format!("assert_constant v{}", value.0),
             OpCode::AssertCmp { kind, lhs, rhs } => {
                 let op_str = match kind {
                     CmpKind::Lt => "<",
@@ -979,6 +994,7 @@ impl Instruction for OpCode {
                 var: c,
             } => vec![b, c].into_iter(),
             Self::Assert { value: c }
+            | Self::AssertConstant { value: c }
             | Self::Load { result: _, ptr: c }
             | Self::WriteWitness {
                 result: _,
@@ -1150,6 +1166,7 @@ impl Instruction for OpCode {
             | Self::MemOp { .. }
             | Self::Store { .. }
             | Self::Assert { .. }
+            | Self::AssertConstant { .. }
             | Self::AssertCmp { .. }
             | Self::AssertR1C { a: _, b: _, c: _ }
             | Self::Rangecheck { .. } => vec![].into_iter(),
@@ -1206,6 +1223,7 @@ impl Instruction for OpCode {
             | Self::MemOp { .. }
             | Self::Store { .. }
             | Self::Assert { .. }
+            | Self::AssertConstant { .. }
             | Self::AssertCmp { .. }
             | Self::AssertR1C { a: _, b: _, c: _ }
             | Self::Rangecheck { .. } => vec![].into_iter(),
@@ -1306,6 +1324,7 @@ impl Instruction for OpCode {
                 sensitivity: c,
             } => vec![b, c].into_iter(),
             Self::Assert { value: c }
+            | Self::AssertConstant { value: c }
             | Self::Load { result: _, ptr: c }
             | Self::WriteWitness {
                 result: _,
@@ -1529,7 +1548,7 @@ impl Instruction for OpCode {
                 variable: a,
                 sensitivity: b,
             } => vec![a, b].into_iter(),
-            Self::Assert { value: a } => vec![a].into_iter(),
+            Self::Assert { value: a } | Self::AssertConstant { value: a } => vec![a].into_iter(),
             Self::WriteWitness {
                 result: a,
                 value: b,
@@ -1991,9 +2010,8 @@ impl Blob {
 pub enum Constant {
     U(usize, u128),
     I(usize, u128),
-    // FIELD-ASSUMPTION: L1-direct-ref (1 sites)
     // FIELD-ASSUMPTION: L2-ir-const
-    Field(ark_bn254::Fr),
+    Field(crate::compiler::Field),
     FnPtr(FunctionId),
     Blob(Blob),
 }

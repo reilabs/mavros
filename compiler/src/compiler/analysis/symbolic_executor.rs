@@ -17,7 +17,7 @@ use crate::{
                 SequenceTargetType, SliceOpDir, Type, TypeExpr,
             },
         },
-        util::ice_non_elided_tuple,
+        util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
     },
 };
 
@@ -546,6 +546,7 @@ impl SymbolicExecutor {
                         let v = &scope[value];
                         V::assert_bool(v, ctx)?;
                     }
+                    OpCode::AssertConstant { .. } => ice_unvalidated_assert_constant(),
                     OpCode::AssertCmp {
                         kind,
                         lhs: a,

@@ -7,8 +7,9 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use ark_ff::{AdditiveGroup, BigInt, BigInteger, PrimeField};
+use ark_ff::{BigInt, BigInteger};
 use itertools::Itertools;
+use mavros_artifacts::FieldConfig;
 use tracing::{debug, instrument};
 
 use crate::{
@@ -132,11 +133,11 @@ impl Value {
         Value::Array(Rc::new(values))
     }
 
-    fn as_field_const(&self) -> Option<Field> {
+    fn as_field_const(&self, field: FieldConfig) -> Option<Field> {
         match self {
-            Value::U(_, v) | Value::I(_, v) => Some(Field::from(*v)),
+            Value::U(_, v) | Value::I(_, v) => Some(field.constant(*v)),
             Value::Field(f) => Some(*f),
-            Value::WitnessOf(inner) => inner.as_field_const(),
+            Value::WitnessOf(inner) => inner.as_field_const(field),
             _ => None,
         }
     }
@@ -279,8 +280,12 @@ impl Value {
             },
             BinaryArithOpKind::Mul => match (self, b) {
                 (Value::U(s, 0), _) | (_, Value::U(s, 0)) => Value::U(*s, 0),
-                (Value::Field(f), _) if *f == Field::ZERO => Value::Field(Field::ZERO),
-                (_, Value::Field(f)) if *f == Field::ZERO => Value::Field(Field::ZERO),
+                (Value::Field(f), _) if *f == instrumenter.field().zero() => {
+                    Value::Field(instrumenter.field().zero())
+                }
+                (_, Value::Field(f)) if *f == instrumenter.field().zero() => {
+                    Value::Field(instrumenter.field().zero())
+                }
                 (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a.wrapping_mul(*b) & bit_mask(*s)),
                 (Value::I(s, a), Value::I(_, b)) => Value::I(
                     *s,
@@ -327,11 +332,13 @@ impl Value {
                     )
                 }
                 // FIELD-ASSUMPTION: L4-inverse
-                (Value::Field(a), Value::Field(b)) => Value::Field(if *b == Field::ZERO {
-                    Field::ZERO
-                } else {
-                    a / b
-                }),
+                (Value::Field(a), Value::Field(b)) => {
+                    Value::Field(if *b == instrumenter.field().zero() {
+                        instrumenter.field().zero()
+                    } else {
+                        a / b
+                    })
+                }
                 (_, Value::WitnessOf(b)) => Value::WitnessOf(Box::new(
                     self.unwrap_witness()
                         .binary_arith_op(b, binary_arith_op_kind, instrumenter),
@@ -609,12 +616,12 @@ impl Value {
         &self,
         offset: usize,
         width: usize,
-        _instrumenter: &mut dyn OpInstrumenter,
+        instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match self {
             Value::Unknown(kind) => Value::Unknown(*kind),
             Value::WitnessOf(inner) => {
-                Value::WitnessOf(Box::new(inner.bit_range_op(offset, width, _instrumenter)))
+                Value::WitnessOf(Box::new(inner.bit_range_op(offset, width, instrumenter)))
             }
             Value::U(bits, v) => Value::U(*bits, (v >> offset) & bit_mask(width)),
             Value::I(bits, v) => Value::I(*bits, (v >> offset) & bit_mask(width)),
@@ -626,7 +633,9 @@ impl Value {
                     .skip(offset)
                     .take(width)
                     .collect::<Vec<_>>();
-                let r = Field::from_bigint(BigInt::from_bits_le(&bits));
+                let r = instrumenter
+                    .field()
+                    .from_bigint(BigInt::from_bits_le(&bits));
                 Value::Field(r.unwrap())
             }
             _ => panic!("Cannot extract bit range from {:?}", self),
@@ -758,7 +767,7 @@ impl Value {
     fn cast_op(
         &self,
         cast_target: &crate::compiler::ssa::hlssa::CastTarget,
-        _instrumenter: &mut dyn OpInstrumenter,
+        instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match (self, cast_target) {
             (_, CastTarget::WitnessOf) => Value::WitnessOf(Box::new(self.clone())),
@@ -766,7 +775,7 @@ impl Value {
             (Value::Array(values), CastTarget::Map(inner)) => Value::array(
                 values
                     .iter()
-                    .map(|v| v.cast_op(inner, _instrumenter))
+                    .map(|v| v.cast_op(inner, instrumenter))
                     .collect(),
             ),
             (Value::UnknownSlice, CastTarget::Map(_)) => Value::UnknownSlice,
@@ -777,16 +786,18 @@ impl Value {
                 Value::Unknown(*kind)
             }
             (Value::WitnessOf(inner), target) => {
-                Value::WitnessOf(Box::new(inner.cast_op(target, _instrumenter)))
+                Value::WitnessOf(Box::new(inner.cast_op(target, instrumenter)))
             }
             (Value::U(_, v), CastTarget::U(s2)) => Value::U(*s2, *v & bit_mask(*s2)),
             (Value::U(_, v), CastTarget::I(s2)) => Value::I(*s2, *v & bit_mask(*s2)),
             (Value::I(_, v), CastTarget::U(s2)) => Value::U(*s2, *v & bit_mask(*s2)),
             (Value::I(_, v), CastTarget::I(s2)) => Value::I(*s2, *v & bit_mask(*s2)),
-            (Value::U(_, v), CastTarget::Field) => Value::Field(Field::from(*v)),
-            (Value::I(s, v), CastTarget::Field) => {
-                Value::Field(Field::from(Self::to_signed(*v, *s) as u64))
-            }
+            (Value::U(_, v), CastTarget::Field) => Value::Field(instrumenter.field().constant(*v)),
+            (Value::I(s, v), CastTarget::Field) => Value::Field(
+                instrumenter
+                    .field()
+                    .constant(Self::to_signed(*v, *s) as u64),
+            ),
             (Value::Field(f), CastTarget::Field) => Value::Field(*f),
             (Value::Field(f), CastTarget::U(s)) => {
                 let bigint = f.into_bigint();
@@ -813,7 +824,11 @@ impl Value {
         c: &Value,
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Result<(), AssertionFailure> {
-        match (a.as_field_const(), b.as_field_const(), c.as_field_const()) {
+        match (
+            a.as_field_const(instrumenter.field()),
+            b.as_field_const(instrumenter.field()),
+            c.as_field_const(instrumenter.field()),
+        ) {
             (Some(a), Some(b), Some(c)) => {
                 if a * b != c {
                     // A constraint over compile-time constants that does not hold: the program is
@@ -832,9 +847,9 @@ impl Value {
     }
 
     // FIELD-ASSUMPTION: L4-decompose
-    fn to_bits(&self, endianness: &crate::compiler::ssa::hlssa::Endianness, size: usize) -> Value {
+    fn to_bits(&self, endianness: &Endianness, size: usize) -> Value {
         match self {
-            Value::Unknown(kind) => Value::Unknown(*kind),
+            Value::Unknown(_) => Value::array(vec![Value::Unknown(ScalarKind::U(1)); size]),
             Value::WitnessOf(inner) => {
                 let result = inner.to_bits(endianness, size);
                 match result {
@@ -848,12 +863,18 @@ impl Value {
                 }
             }
             Value::U(_, v) => {
-                let mut r = vec![];
-                for i in 0..size {
-                    let bit = (v >> i) & 1;
-                    let bit = Value::U(1, bit);
-                    r.push(bit);
-                }
+                let mut r = (0..size)
+                    .map(|i| {
+                        Value::U(
+                            1,
+                            if i < u128::BITS as usize {
+                                (v >> i) & 1
+                            } else {
+                                0
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 if *endianness == Endianness::Big {
                     r.reverse();
                 }
@@ -861,8 +882,10 @@ impl Value {
             }
             Value::Field(f) => {
                 let bigint = f.into_bigint();
-                let bits = bigint.to_bits_le().into_iter().take(size);
-                let mut bits = bits.map(|b| Value::U(1, b as u128)).collect::<Vec<_>>();
+                let raw_bits = bigint.to_bits_le();
+                let mut bits = (0..size)
+                    .map(|i| Value::U(1, raw_bits.get(i).copied().unwrap_or(false) as u128))
+                    .collect::<Vec<_>>();
                 if *endianness == Endianness::Big {
                     bits.reverse();
                 }
@@ -1469,6 +1492,7 @@ impl FunctionSignature {
 }
 
 trait OpInstrumenter {
+    fn field(&self) -> FieldConfig;
     fn record_constrain(&mut self);
     fn record_high_degree_mul(&mut self);
     /// `unconditional` is true when the lookup's flag is the literal constant `1`; such lookups
@@ -1486,8 +1510,9 @@ trait FunctionInstrumenter {
 /// Raw circuit-cost events for one symbolic execution of a function, exactly as the executor
 /// saw them. Recording only counts what happened; turning the events into constraint and table
 /// costs is interpretation, done on read by the derivation methods below.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct Instrumenter {
+    field: FieldConfig,
     constrains: usize,
     high_degree_muls: usize,
 
@@ -1500,6 +1525,10 @@ struct Instrumenter {
 }
 
 impl OpInstrumenter for Instrumenter {
+    fn field(&self) -> FieldConfig {
+        self.field
+    }
+
     fn record_constrain(&mut self) {
         self.constrains += 1;
     }
@@ -1533,6 +1562,21 @@ impl OpInstrumenter for Instrumenter {
 /// Interpretation of the raw events, mirroring the lookup-spilling expansion that runs before
 /// R1CS generation. Everything here is derived; the struct stores no interpreted state.
 impl Instrumenter {
+    /// A fresh instrumenter for `field`, with every event count zeroed.
+    ///
+    /// Written out rather than derived from `Default`: [`FieldConfig`] has no `Default`, so that a
+    /// carrier cannot acquire a field without being handed one.
+    fn new(field: FieldConfig) -> Instrumenter {
+        Instrumenter {
+            field,
+            constrains: 0,
+            high_degree_muls: 0,
+            rangecheck_lookups: HashMap::default(),
+            spread_lookups: HashMap::default(),
+            array_lookups: 0,
+        }
+    }
+
     fn record_rangecheck_lookup(&mut self, bits: u8, unconditional: bool) {
         assert!(bits >= 1, "rangecheck width must be at least 1 bit");
         *self
@@ -1709,7 +1753,9 @@ impl FunctionInstrumenter for FunctionCost {
     }
 }
 
-pub struct DummyInstrumenter {}
+pub struct DummyInstrumenter {
+    field: FieldConfig,
+}
 
 impl FunctionInstrumenter for DummyInstrumenter {
     fn get_specialized(&mut self) -> &mut dyn OpInstrumenter {
@@ -1728,12 +1774,17 @@ impl FunctionInstrumenter for DummyInstrumenter {
 }
 
 impl OpInstrumenter for DummyInstrumenter {
+    fn field(&self) -> FieldConfig {
+        self.field
+    }
+
     fn record_constrain(&mut self) {}
     fn record_high_degree_mul(&mut self) {}
     fn record_lookup(&mut self, _: &LookupTarget<Value>, _: bool) {}
 }
 
 pub struct CostAnalysis {
+    field: FieldConfig,
     entry_point: Option<FunctionSignature>,
     functions: HashMap<FunctionSignature, FunctionCost>,
     cache: HashMap<FunctionSignature, Vec<ValueSignature>>,
@@ -1854,17 +1905,18 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
     ) {
         // A flag that folds to the constant 1 means the lookup is unconditional, so its spilled bit
         // chunks take the free algebraic form. `as_field_const` treats `U(_,1)`/`Field(1)` alike.
-        let one = Some(Field::from(1u64));
+        let field = self.field;
+        let one = Some(field.constant(1u64));
         let unspecialized_target = target.map(|v| v.unspecialized.clone());
         self.get_unspecialized().record_lookup(
             &unspecialized_target,
-            flag.unspecialized.as_field_const() == one,
+            flag.unspecialized.as_field_const(field) == one,
         );
 
         let specialized_target = target.map(|v| v.specialized.clone());
         self.get_specialized().record_lookup(
             &specialized_target,
-            flag.specialized.as_field_const() == one,
+            flag.specialized.as_field_const(field) == one,
         );
     }
 
@@ -2073,6 +2125,7 @@ impl CostAnalysis {
     }
 
     fn enter_call(&mut self, sig: FunctionSignature) {
+        let field = self.field;
         if !self.stack.is_empty() {
             let (_, cost) = self.stack.last_mut().unwrap();
             cost.record_call(sig.clone());
@@ -2081,12 +2134,13 @@ impl CostAnalysis {
             self.entry_point = Some(sig.clone());
         }
         if self.functions.contains_key(&sig) {
-            self.stack.push((sig, Box::new(DummyInstrumenter {})));
+            self.stack
+                .push((sig, Box::new(DummyInstrumenter { field })));
         } else {
             let instrumenter = FunctionCost {
                 calls: HashMap::default(),
-                raw: Instrumenter::default(),
-                specialized: Instrumenter::default(),
+                raw: Instrumenter::new(field),
+                specialized: Instrumenter::new(field),
             };
             self.stack.push((sig, Box::new(instrumenter)));
         }
@@ -2213,6 +2267,7 @@ impl CostEstimator {
     pub fn run(&self, ssa: &HLSSA, type_info: &TypeInfo) -> CostAnalysis {
         let main_sig = self.make_main_sig(ssa);
         let mut costs = CostAnalysis {
+            field: ssa.field(),
             functions: HashMap::default(),
             stack: vec![],
             entry_point: Some(main_sig.clone()),
@@ -2308,15 +2363,133 @@ impl Analysis for Summary {
 
 #[cfg(test)]
 mod tests {
-    use super::CostEstimator;
+    use super::{CostEstimator, ScalarKind, Value};
     use crate::compiler::{
-        Field,
         analysis::{flow_analysis::FlowAnalysis, types::Types},
+        pass_manager::{AnalysisStore, Pass},
+        passes::instruction_lowering::InstructionLowering,
         ssa::{
             Terminator,
-            hlssa::{Constant, HLSSA, OpCode},
+            hlssa::{Constant, Endianness, HLSSA, OpCode, Radix, Type},
         },
     };
+
+    /// `ToBits` always produces an array, including when the input's concrete value is unknown.
+    /// Keeping that shape is especially important for witnessed unknowns: the witness wrapper
+    /// maps over the result to mark each output bit as witness-derived.
+    #[test]
+    fn witnessed_unknown_to_bits_preserves_array_shape() {
+        let value = Value::WitnessOf(Box::new(Value::Unknown(ScalarKind::Field)));
+
+        let result = value.to_bits(&Endianness::Little, 4);
+
+        let Value::Array(bits) = result else {
+            panic!("ToBits of a witnessed unknown must produce an array");
+        };
+        assert_eq!(bits.len(), 4);
+        assert!(bits.iter().all(|bit| matches!(
+            bit,
+            Value::WitnessOf(inner)
+                if matches!(inner.as_ref(), Value::Unknown(ScalarKind::U(1)))
+        )));
+    }
+
+    #[test]
+    fn integer_to_bits_zero_pads_past_u128() {
+        let Value::Array(bits) = Value::U(8, 5).to_bits(&Endianness::Little, 130) else {
+            panic!("ToBits must produce an array");
+        };
+
+        assert_eq!(bits.len(), 130);
+        assert!(matches!(bits[0], Value::U(1, 1)));
+        assert!(matches!(bits[1], Value::U(1, 0)));
+        assert!(matches!(bits[2], Value::U(1, 1)));
+        assert!(bits[128..].iter().all(|bit| matches!(bit, Value::U(1, 0))));
+    }
+
+    #[test]
+    fn field_to_bits_zero_pads_before_big_endian_output() {
+        let ssa = HLSSA::with_main("main".to_string());
+        let value = Value::Field(ssa.field().constant(5));
+        let Value::Array(bits) = value.to_bits(&Endianness::Big, 260) else {
+            panic!("ToBits must produce an array");
+        };
+
+        assert_eq!(bits.len(), 260);
+        assert!(bits[..257].iter().all(|bit| matches!(bit, Value::U(1, 0))));
+        assert!(matches!(bits[257], Value::U(1, 1)));
+        assert!(matches!(bits[258], Value::U(1, 0)));
+        assert!(matches!(bits[259], Value::U(1, 1)));
+    }
+
+    /// Witness lowering makes the decomposition cost visible as one one-bit rangecheck per bit
+    /// plus one recomposition constraint. `SpecSplitValue::to_bits` must not charge it again.
+    #[test]
+    fn lowered_witness_to_bits_cost_is_explicit() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let value = ssa.fresh_value();
+        let result = ssa.fresh_value();
+        let function = ssa.get_unique_entrypoint_mut();
+        function.add_return_type(Type::witness_of(Type::u(1)).array_of(3));
+        let entry = function.get_entry_mut();
+        entry.push_parameter(value, Type::witness_of(Type::field()));
+        entry.push_test_instruction(OpCode::ToBits {
+            result,
+            value,
+            endianness: Endianness::Little,
+            count: 3,
+        });
+        entry.set_terminator(Terminator::Return(vec![result]));
+
+        InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
+        let flow = FlowAnalysis::run(&ssa);
+        let type_info = Types::new().run(&ssa, &flow);
+        let costs = CostEstimator::new().run(&ssa, &type_info);
+        let function_cost = costs
+            .functions
+            .values()
+            .next()
+            .expect("main must be costed");
+
+        assert_eq!(function_cost.raw.recurring_constraints(), 4);
+        assert_eq!(function_cost.specialized.recurring_constraints(), 4);
+    }
+
+    /// `ToRadix` follows the same accounting path: the pure hint is free, while each lowered
+    /// byte rangecheck and the recomposition constraint are recorded explicitly.
+    #[test]
+    fn lowered_witness_to_radix_cost_is_explicit() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let value = ssa.fresh_value();
+        let result = ssa.fresh_value();
+        let function = ssa.get_unique_entrypoint_mut();
+        function.add_return_type(Type::witness_of(Type::u(8)).array_of(3));
+        let entry = function.get_entry_mut();
+        entry.push_parameter(value, Type::witness_of(Type::field()));
+        entry.push_test_instruction(OpCode::ToRadix {
+            result,
+            value,
+            radix: Radix::Bytes,
+            endianness: Endianness::Little,
+            count: 3,
+        });
+        entry.set_terminator(Terminator::Return(vec![result]));
+
+        InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
+        let flow = FlowAnalysis::run(&ssa);
+        let type_info = Types::new().run(&ssa, &flow);
+        let costs = CostEstimator::new().run(&ssa, &type_info);
+        let function_cost = costs
+            .functions
+            .values()
+            .next()
+            .expect("main must be costed");
+
+        for instrumenter in [&function_cost.raw, &function_cost.specialized] {
+            assert_eq!(instrumenter.constrains, 1);
+            assert_eq!(instrumenter.rangecheck_lookups.get(&(8, true)), Some(&3));
+        }
+    }
 
     /// Run the cost estimator over `ssa` with freshly-computed dependencies, then `summarize` it —
     /// exactly the path `Summary::compute` drives. The estimator absorbs static assertion failures
@@ -2332,9 +2505,9 @@ mod tests {
     /// `main` with a single `Constrain { a, b, c }` over compile-time field constants.
     fn ssa_constraining_constants(a: u64, b: u64, c: u64) -> HLSSA {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let a = ssa.add_const(Constant::Field(Field::from(a)));
-        let b = ssa.add_const(Constant::Field(Field::from(b)));
-        let c = ssa.add_const(Constant::Field(Field::from(c)));
+        let a = ssa.add_const(Constant::Field(ssa.field().constant(a)));
+        let b = ssa.add_const(Constant::Field(ssa.field().constant(b)));
+        let c = ssa.add_const(Constant::Field(ssa.field().constant(c)));
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
         entry.push_test_instruction(OpCode::Constrain { a, b, c });
         entry.set_terminator(Terminator::Return(vec![]));
