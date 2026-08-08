@@ -46,7 +46,7 @@
 //! constraint emission, globals initialization) happen exactly as before. Entry points are
 //! externally invoked by id and are never deleted; they are also never used as a redirect _target_,
 //! because the LLVM/WASM backend gives entry points a distinct calling convention (declared
-//! `fn(VM*)`, with parameters loaded from the public-input region rather than passed as arguments),
+//! `fn()`, with parameters loaded from the VM struct's input region rather than passed as arguments),
 //! so an internal call into an entry would mismatch its signature. Redirect targets are therefore
 //! always non-entry survivors: a group's entry points survive on their own, and a non-entry
 //! duplicate with no non-entry survivor to fold into is kept rather than pointed at an entry.
@@ -170,7 +170,7 @@ impl MergeIdenticalFunctions {
         // Per final group: entry points always survive on their own; every non-entry duplicate
         // redirects to the smallest-id *non-entry* survivor and is deleted. An entry point is never
         // used as a redirect target — the LLVM/WASM backend compiles entries with a distinct
-        // calling convention (declared `fn(VM*)`, parameters loaded from the public-input region
+        // calling convention (declared `fn()`, parameters loaded from the VM struct's input region
         // rather than passed as arguments), so an internal call into one would mismatch its
         // signature. When a group has no non-entry member, or its only non-entry is the survivor,
         // nothing folds there.
@@ -610,7 +610,7 @@ mod tests {
 
         // `f` (non-entry) and `g` (entry) are byte-identical and `main` calls `f`. Folding `f` into
         // the entry `g` would make `g` internally callable, which the LLVM / WASM backend cannot
-        // honor (entries load their params from memory under a `fn(VM*)` signature). So `f` is kept
+        // honor (entries load their params from memory under a `fn()` signature). So `f` is kept
         // — an entry is never a redirect target — and `main` keeps calling `f`.
         assert!(has_function(&ssa, f) && has_function(&ssa, g));
         assert_eq!(call_targets(&ssa, main_id), vec![f]);

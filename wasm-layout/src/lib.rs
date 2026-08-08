@@ -2,9 +2,10 @@
 //!
 //! Two consumers must agree on these byte offsets:
 //!   - the test harness in `src/bin/test_runner.rs` that populates the struct
-//!     in WASM linear memory before invoking `mavros_main`;
-//!   - `src/compiler/codegen/llssa_llvm_codegen.rs`, which emits GEP/load/store ops
-//!     into `vm_ptr` for the generated forward-pass writes and AD helpers.
+//!     (at the address exported as [`VM_GLOBAL_SYMBOL`]) before invoking
+//!     `mavros_main`;
+//!   - `src/compiler/codegen/llssa_to_llvm.rs`, which emits GEP/load/store ops
+//!     into the VM struct for the generated forward-pass writes and AD helpers.
 //!
 //! All offsets are in bytes. wasm32: pointers are 4 bytes, usize/i32 is 4 bytes.
 //!
@@ -115,6 +116,13 @@ pub const AD_CURRENT_CNST_TABLES_OFF_OFFSET: u32 = 28;
 pub const AD_CURRENT_WIT_TABLES_OFF_OFFSET: u32 = 32;
 pub const AD_CURRENT_WIT_MULTIPLICITIES_OFF_OFFSET: u32 = 36;
 pub const AD_VM_STRUCT_SIZE: u32 = 40;
+
+pub const VM_GLOBAL_SYMBOL: &str = "__mavros_vm";
+pub const VM_GLOBAL_SIZE: u32 = if WITGEN_VM_STRUCT_SIZE > AD_VM_STRUCT_SIZE {
+    WITGEN_VM_STRUCT_SIZE
+} else {
+    AD_VM_STRUCT_SIZE
+};
 
 // Static shape checks — if someone renumbers a field, the build breaks here
 // rather than at runtime in WASM.

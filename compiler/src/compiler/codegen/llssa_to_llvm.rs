@@ -35,6 +35,8 @@ use crate::{
     },
 };
 
+use mavros_wasm_layout::{VM_GLOBAL_SIZE, VM_GLOBAL_SYMBOL};
+
 const WASM_STACK_SIZE_BYTES: u32 = 256 * 1024;
 
 /// How to compile a module to WASM.
@@ -108,7 +110,7 @@ pub struct LLVMCodeGen<'ctx> {
     constants: SSAConstantsSnapshot<Constant>,
     block_map: HashMap<BlockId, inkwell::basic_block::BasicBlock<'ctx>>,
     function_map: HashMap<FunctionId, FunctionValue<'ctx>>,
-    vm_ptr: Option<PointerValue<'ctx>>,
+    vm_global: inkwell::values::GlobalValue<'ctx>,
     // Runtime function declarations
     field_mul_fn: Option<FunctionValue<'ctx>>,
     field_add_fn: Option<FunctionValue<'ctx>>,
@@ -169,6 +171,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         );
         let builder = context.create_builder();
 
+        let vm_ty = context.i8_type().array_type(VM_GLOBAL_SIZE);
+        let vm_global = module.add_global(vm_ty, Some(AddressSpace::default()), VM_GLOBAL_SYMBOL);
+        vm_global.set_initializer(&vm_ty.const_zero());
+        vm_global.set_alignment(8);
+
         let mut codegen = Self {
             context,
             module,
@@ -177,7 +184,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             constants: HashMap::default(),
             block_map: HashMap::default(),
             function_map: HashMap::default(),
-            vm_ptr: None,
+            vm_global,
             field_mul_fn: None,
             field_add_fn: None,
             field_sub_fn: None,
@@ -710,17 +717,16 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         entry_points: &[FunctionId],
     ) {
         let entry = function.get_entry();
-        let ptr_type = self.context.ptr_type(AddressSpace::default());
         let entry_index = entry_points.iter().position(|e| *e == fn_id);
 
-        // First parameter is always VM*
-        let mut param_types: Vec<BasicMetadataTypeEnum> = vec![ptr_type.into()];
-
-        if entry_index.is_none() {
-            for (_, tp) in entry.get_parameters().skip(1) {
-                param_types.push(self.convert_type(tp).into());
-            }
-        }
+        let param_types: Vec<BasicMetadataTypeEnum> = if entry_index.is_none() {
+            entry
+                .get_parameters()
+                .map(|(_, tp)| self.convert_type(tp).into())
+                .collect()
+        } else {
+            vec![]
+        };
 
         let return_types: Vec<BasicTypeEnum> = function
             .get_returns()
@@ -786,7 +792,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
         // Map entry block parameters to LLVM function arguments
         self.builder.position_at_end(entry_bb);
-        self.vm_ptr = Some(fn_value.get_nth_param(0).unwrap().into_pointer_value());
 
         let entry = function.get_entry();
         if entry_points.contains(&fn_id) {
@@ -827,18 +832,17 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
     }
 
+    fn vm_ptr_value(&self) -> PointerValue<'ctx> {
+        self.vm_global.as_pointer_value()
+    }
+
     fn load_main_params_from_memory<'a>(
         &mut self,
         parameters: impl Iterator<Item = &'a (ValueId, Type)>,
     ) {
-        let vm_ptr = self
-            .vm_ptr
-            .expect("main parameters are loaded relative to the VM pointer");
+        let vm_ptr = self.vm_ptr_value();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let mut parameters = parameters;
-        if let Some((vm_param, _)) = parameters.next() {
-            self.value_map.insert(*vm_param, vm_ptr.into());
-        }
 
         // Main's only remaining parameter is the input blob, which is bound
         // directly to the host-provided inputs buffer; its elements are loaded
@@ -853,7 +857,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         );
         assert!(
             parameters.next().is_none(),
-            "main must have at most one parameter besides the VM pointer"
+            "main must have at most one parameter (the input blob)"
         );
 
         let vm_type = self
@@ -1438,12 +1442,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 args,
             } => {
                 let callee = self.function_map[func];
-                let vm_ptr = self.vm_ptr.unwrap();
 
-                let mut call_args: Vec<BasicMetadataValueEnum> = vec![vm_ptr.into()];
-                for arg in args {
-                    call_args.push(self.value_map[arg].into());
-                }
+                let call_args: Vec<BasicMetadataValueEnum> =
+                    args.iter().map(|arg| self.value_map[arg].into()).collect();
 
                 let call_result = self
                     .builder
@@ -1476,6 +1477,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let global = self.globals[*global_id];
                 let ptr = global.as_pointer_value();
                 self.value_map.insert(*result, ptr.into());
+            }
+
+            LLOp::VmAddr { result } => {
+                self.value_map.insert(*result, self.vm_ptr_value().into());
             }
 
             _ => panic!("Unsupported LLOp in LLSSA codegen: {:?}", op),
@@ -1601,6 +1606,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 &format!("stack-size={WASM_STACK_SIZE_BYTES}"),
                 "--export=__data_end",
                 "--export=__live_bytes",
+                &format!("--export={VM_GLOBAL_SYMBOL}"),
                 "-o",
             ])
             .arg(path)
