@@ -1196,7 +1196,7 @@ impl<'a> ExpressionConverter<'a> {
             Literal::Str(s) => {
                 // str<N>: array of u8 (UTF-8 bytes)
                 let elem_type = Type::u(8);
-                let elems = s.bytes().map(|byte| Constant::U(8, byte as u128)).collect();
+                let elems = s.iter().map(|byte| Constant::U(8, *byte as u128)).collect();
                 let blob = b.emit_const(Constant::Blob(Blob::new(elem_type.clone(), elems)));
                 let location = self.current_source_location.clone();
                 let arr = self
