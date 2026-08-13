@@ -241,7 +241,7 @@ pub(crate) unconstrained fn batch_invert_slice<let N: u32, let MOD_BITS: u32>(
 ) -> [[u128; N]] {
     // TODO: ugly! Will fail if input slice is empty
     let mut accumulator: [u128; N] = __one::<N>();
-    let mut temporaries: [[u128; N]] = &[];
+    let mut temporaries: [[u128; N]] = [];
     for i in 0..x.len() {
         temporaries = temporaries.push_back(accumulator);
         if (!__is_zero(x[i])) {
