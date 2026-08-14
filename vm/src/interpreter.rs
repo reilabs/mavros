@@ -35,6 +35,12 @@ pub unsafe fn dispatch(pc: *const u64, frame: Frame, vm: &mut VM) {
     }
     let opcode: Handler = unsafe { mem::transmute(*pc) };
     let (next_pc, next_frame) = opcode(pc, frame, vm);
+    // Non-raw handlers cannot return a control-flow result of their own, so operations such as
+    // checked lookup-table writes request a trap through the VM state instead.
+    if vm.trapped {
+        vm.capture_trap(pc, frame);
+        return;
+    }
     unsafe { dispatch(next_pc, next_frame, vm) }
 }
 
@@ -45,6 +51,11 @@ pub unsafe fn dispatch(mut pc: *const u64, mut frame: Frame, vm: &mut VM) {
     while !pc.is_null() {
         let opcode: Handler = unsafe { mem::transmute(*pc) };
         let (next_pc, next_frame) = opcode(pc, frame, vm);
+        // Match the tail-recursive dispatcher above when an opcode requests a trap.
+        if vm.trapped {
+            vm.capture_trap(pc, frame);
+            return;
+        }
         pc = next_pc;
         frame = next_frame;
     }

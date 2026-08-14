@@ -887,6 +887,10 @@ impl VM {
         self.trapped = true;
         self.stack_trace = self.stack_frames_at(pc, frame);
     }
+
+    fn request_trap(&mut self) {
+        self.trapped = true;
+    }
 }
 
 fn program_offset(program_base: *const u64, program_len: usize, pc: *const u64) -> Option<usize> {
@@ -926,19 +930,15 @@ fn unspread_bits(v: u64) -> (u32, u32) {
     (odd, even)
 }
 
-fn checked_lookup_index(key: Field, table_idx: usize, length: usize) -> usize {
+fn checked_lookup_index(key: Field, length: usize) -> Option<usize> {
     let bigint = ark_ff::PrimeField::into_bigint(key);
     let limbs = bigint.as_ref();
-    assert!(
-        limbs[1..].iter().all(|limb| *limb == 0),
-        "lookup key does not fit in an index for table {table_idx} (length {length})"
-    );
-    let index = usize::try_from(limbs[0]).expect("lookup key does not fit in usize");
-    assert!(
-        index < length,
-        "lookup key {index} is out of bounds for table {table_idx} (length {length})"
-    );
-    index
+    if limbs[1..].iter().any(|limb| *limb != 0) {
+        return None;
+    }
+    usize::try_from(limbs[0])
+        .ok()
+        .filter(|index| *index < length)
 }
 
 /// Emit a forward key-value lookup: bump multiplicity and write 2 lookup tape entries.
@@ -965,7 +965,10 @@ unsafe fn forward_kv_lookup_emit(
     unsafe {
         *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
         if flag_u64 != 0 {
-            let key_index = checked_lookup_index(key, table_idx, table_info.length);
+            let Some(key_index) = checked_lookup_index(key, table_info.length) else {
+                vm.request_trap();
+                return;
+            };
             let ptr = table_info.multiplicities_wit.add(key_index);
             *(ptr as *mut u64) += flag_u64;
             *(vm.data.as_forward.lookups_b as *mut u64) = key_index as u64;
@@ -2254,7 +2257,10 @@ mod def {
         let table_info = &vm.tables[table_idx];
         unsafe {
             if flag_u64 != 0 {
-                let val_index = checked_lookup_index(val, table_idx, table_info.length);
+                let Some(val_index) = checked_lookup_index(val, table_info.length) else {
+                    vm.request_trap();
+                    return;
+                };
                 let ptr = table_info.multiplicities_wit.add(val_index);
                 *(ptr as *mut u64) += flag_u64;
                 *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
@@ -2865,13 +2871,17 @@ mod tests {
 
     #[test]
     fn lookup_index_accepts_the_last_table_entry() {
-        assert_eq!(checked_lookup_index(Field::from(3u64), 7, 4), 3);
+        assert_eq!(checked_lookup_index(Field::from(3u64), 4), Some(3));
     }
 
     #[test]
-    #[should_panic(expected = "lookup key 4 is out of bounds for table 7 (length 4)")]
     fn lookup_index_rejects_an_out_of_bounds_key() {
-        let _ = checked_lookup_index(Field::from(4u64), 7, 4);
+        assert_eq!(checked_lookup_index(Field::from(4u64), 4), None);
+    }
+
+    #[test]
+    fn lookup_index_rejects_a_key_that_does_not_fit_usize() {
+        assert_eq!(checked_lookup_index(-Field::from(1u64), 4), None);
     }
 
     fn location(function: &str, line: u64) -> SourceLocation {
