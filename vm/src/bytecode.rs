@@ -1360,6 +1360,30 @@ mod def {
         }
     }
 
+    /// Arithmetic right shift: the lowering for a signed `>>`.
+    ///
+    /// A signed value is held masked to `bits` inside a `u64`, so the sign has to be recovered
+    /// before shifting — sign-extend to `i64`, shift there, then re-mask. That is the same
+    /// preamble `div_s64`/`mod_s64` use.
+    ///
+    /// The shift count is masked to `bits - 1` to match what the LLVM backend does for this op
+    /// (`llssa_to_llvm.rs`, which masks to the LLVM type's `bit_width - 1`), so an over-shift
+    /// cannot make the two backends disagree — and cannot panic on the `i64` shift.
+    #[opcode]
+    fn ashr_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
+        unsafe {
+            let shift = 64 - bits;
+            let signed = ((a << shift) as i64) >> shift;
+            let amount = b & (bits - 1);
+            *res = (signed >> amount) as u64
+                & if bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << bits) - 1
+                };
+        }
+    }
+
     #[opcode]
     fn shl_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
         unsafe { *res = a.wrapping_shl(b.lo as u32) };

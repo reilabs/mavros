@@ -214,7 +214,9 @@ mod conditional;
 mod congruence;
 mod def_order;
 mod exec_view;
-mod lattice;
+// Visible to the rest of the compiler so the specializer's constant folding can delegate to
+// `eval_binary` rather than growing a second, drifting implementation of the same semantics.
+pub(crate) mod lattice;
 mod solver;
 mod stability;
 mod summary;

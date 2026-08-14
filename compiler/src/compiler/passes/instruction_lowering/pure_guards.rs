@@ -33,6 +33,10 @@ use crate::compiler::{
     util::bit_mask,
 };
 
+use crate::compiler::passes::shared::divmod_guard::{
+    divmod_can_fail, emit_divmod_failure_cond, emit_divmod_is_defined_assert,
+};
+
 use super::{InstructionLoweringRule, LoweringContext};
 
 pub struct LowerPureGuards {}
@@ -48,6 +52,44 @@ impl InstructionLoweringRule for LowerPureGuards {
         match instruction {
             OpCode::Guard { condition, inner } => {
                 self.lower_guard(emitter, *condition, inner.as_ref().clone(), type_info)
+            }
+
+            // An unguarded div/mod still has to be checked as `Guard` only covers the ops that sit
+            // under witness-dependent control flow. Witness operands are included: the comparisons
+            // become ordinary constraints, lowered by the later witness passes just like any
+            // other, so one implementation covers both.
+            //
+            // `Field` is in scope for the same reason the integers are, and needs it most, because
+            // there the missing check is a *soundness* hole rather than a wrong answer. `div_field`
+            // answers `0` instead of trapping, and for a witness divisor `lower_field_div`
+            // constrains only `result * rhs == lhs`. At `rhs == lhs == 0` that degenerates to
+            // `q * 0 == 0`, which holds for **every** `q`: witgen fills in `0`, but the quotient is
+            // pinned by nothing, so a verifier would accept a proof carrying any value at all in
+            // that slot. This check closes that, and covers pure operands, which reach no
+            // constraint at all.
+            //
+            // This agrees with Noir, which rejects a zero field divisor in every runtime — the
+            // check is not a strictness increase over it. Noir's ACIR does it structurally rather
+            // than with a separate assert: `div_var` on `NativeField` goes through `inv_var`
+            // (`acir/acir_context/mod.rs:277`), constraining
+            // `predicate * (inv(rhs) * rhs) == predicate` and then forming `lhs * inv(rhs)`. Since
+            // `FieldElement::inverse` yields zero when no inverse exists, `rhs == 0` reduces that
+            // to `0 == predicate` — unsatisfiable under an active predicate whatever `lhs` is.
+            // Brillig and comptime raise "attempt to divide by zero" outright.
+            //
+            // Note that constraining the inverse is *stronger* than mavros's `result * rhs == lhs`,
+            // and gets the nonzero-ness for free. Moving `lower_field_div` onto that encoding would
+            // make this `Field` arm redundant; it is left for separate work because it changes the
+            // witness shape and so moves R1CS layout everywhere.
+            OpCode::BinaryArithOp {
+                kind: kind @ (BinaryArithOpKind::Div | BinaryArithOpKind::Mod),
+                result,
+                lhs,
+                rhs,
+            } if divmod_can_fail(type_info.get_value_type(*lhs)) => {
+                let lhs_type = type_info.get_value_type(*lhs).strip_witness().clone();
+                self.lower_unguarded_divmod(emitter, *kind, *result, *lhs, *rhs, &lhs_type);
+                true
             }
             _ => false,
         }
@@ -562,7 +604,41 @@ impl LowerPureGuards {
         result[0]
     }
 
-    /// Lower `Guard(cond, div/mod(lhs, rhs) -> result)` for division by zero.
+    /// Lower an *unguarded* pure `Div`/`Mod` by asserting it is defined, then performing it
+    /// unchanged.
+    ///
+    /// Without this, an undefined division reaches the backends unchecked and each one disagrees
+    /// about what it means:
+    ///
+    /// - **Zero divisor, integer:** The VM's `div_u64`/`div_u128`/`div_s64` are plain Rust `/`, so
+    ///   witness generation aborts the process with an arithmetic panic instead of reporting a
+    ///   failed execution. LLVM's `udiv`/`sdiv` by zero is undefined behavior outright.
+    /// - **Zero divisor, field:** `div_field` answers `0`, so nothing traps — and at `0 / 0` the
+    ///   `result * rhs == lhs` constraint is satisfied by any quotient, so the value is not pinned
+    ///   at all. The worst of the three: silent, and unsound rather than merely wrong.
+    /// - **`INT_MIN / -1`:** `div_s64` sign-extends to `i64` and wraps on the way back down; LLVM
+    ///   calls signed-division overflow undefined behaviour.
+    ///
+    /// Noir treats all of these as execution failures, so we check in the IR so all backends can
+    /// inherit the same, correct answer.
+    fn lower_unguarded_divmod(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        kind: BinaryArithOpKind,
+        result: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        lhs_type: &Type,
+    ) {
+        emit_divmod_is_defined_assert(emitter, lhs, rhs, lhs_type);
+        emitter.emit(OpCode::BinaryArithOp {
+            kind,
+            result,
+            lhs,
+            rhs,
+        });
+    }
+
     fn lower_divmod_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -573,24 +649,7 @@ impl LowerPureGuards {
         rhs: ValueId,
         lhs_type: &Type,
     ) {
-        let zero_val = match &lhs_type.expr {
-            TypeExpr::U(b) => emitter.u_const(*b, 0),
-            TypeExpr::I(b) => emitter.i_const(*b, 0),
-            TypeExpr::Field => emitter.field_const(emitter.field().constant(0u64)),
-            _ => unreachable!(),
-        };
-        let is_zero = emitter.eq(rhs, zero_val);
-        let failure = match &lhs_type.expr {
-            TypeExpr::I(bits) => {
-                let min_val = emitter.i_const(*bits, 1u128 << (*bits - 1));
-                let minus_one = emitter.i_const(*bits, bit_mask(*bits));
-                let lhs_is_min = emitter.eq(lhs, min_val);
-                let rhs_is_minus_one = emitter.eq(rhs, minus_one);
-                let signed_overflow = emitter.and(lhs_is_min, rhs_is_minus_one);
-                emitter.or(is_zero, signed_overflow)
-            }
-            _ => is_zero,
-        };
+        let failure = emit_divmod_failure_cond(emitter, lhs, rhs, lhs_type);
 
         emitter.build_if_else_into(
             failure,

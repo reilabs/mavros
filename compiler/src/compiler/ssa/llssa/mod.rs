@@ -1097,7 +1097,14 @@ pub enum IntArithOp {
     Or,
     Xor,
     Shl,
+    /// Logical right shift: zero-fill. The lowering for unsigned `>>`.
     UShr,
+    /// Arithmetic right shift: sign-fill. The lowering for signed `>>`.
+    ///
+    /// Only meaningful on a value whose bits are a two's-complement encoding, so it is emitted
+    /// solely for signed HLSSA shifts. The internal bit-manipulation uses of `UShr` elsewhere in
+    /// lowering operate on raw bit patterns and must stay logical.
+    AShr,
 }
 
 impl Display for IntArithOp {
@@ -1115,6 +1122,7 @@ impl Display for IntArithOp {
             IntArithOp::Xor => "xor",
             IntArithOp::Shl => "shl",
             IntArithOp::UShr => "ushr",
+            IntArithOp::AShr => "ashr",
         };
         write!(f, "{}", s)
     }

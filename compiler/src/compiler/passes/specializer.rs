@@ -15,6 +15,7 @@ use crate::{
     compiler::{
         Field,
         analysis::{
+            click_cooper::lattice,
             instrumenter::{FunctionSignature, SpecializationSummary, Summary, ValueSignature},
             symbolic_executor::{self, AssertionFailure, SymbolicExecutor},
             types::TypeInfo,
@@ -24,12 +25,13 @@ use crate::{
             BlockId, FunctionId, SourceLocation, ValueId,
             hlssa::{
                 BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness, HLFunction,
-                HLSSA, LocatedOpCode, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix,
-                RefCountOp, SequenceTargetType, Type, TypeExpr,
+                HLSSA, LocatedOpCode, LookupTarget, MAX_SUPPORTED_SIGNED_BITS,
+                MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, RefCountOp, SequenceTargetType, Type,
+                TypeExpr,
                 builder::{HLEmitter, HLFunctionBuilder},
             },
         },
-        util::{spread_bits, unspread_bits},
+        util::{decode_signed, spread_bits, unspread_bits},
     },
 };
 
@@ -56,6 +58,18 @@ enum ConstVal {
     Array(Vec<ValueId>),
     Blob(Vec<ValueId>),
     BitsOf(Box<ValueId>, usize, Endianness),
+}
+
+/// The width and raw payload of an integer `ConstVal`, whichever way it is tagged.
+///
+/// `U` and `I` both hold raw two's-complement bits, so the tag says nothing the operation does
+/// not already say. Consumers that care about signedness decode with the width themselves; the
+/// rest can treat the two identically. Returns `None` for non-integer constants, which never fold.
+fn int_bits_and_raw(value: Option<&ConstVal>) -> Option<(usize, u128)> {
+    match value? {
+        ConstVal::U(s, v) | ConstVal::I(s, v) => Some((*s, *v)),
+        ConstVal::Field(_) | ConstVal::Array(_) | ConstVal::Blob(_) | ConstVal::BitsOf(..) => None,
+    }
 }
 
 fn const_val_as_field(value: &ConstVal, field: FieldConfig) -> Option<Field> {
@@ -136,54 +150,71 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
     fn ult(&self, b: &Self, ctx: &mut SpecializationState) -> Self {
         let l_const = ctx.const_vals.get(&self.0).cloned();
         let r_const = ctx.const_vals.get(&b.0).cloned();
-        match (l_const, r_const) {
-            (Some(ConstVal::U(_, l_val)), Some(ConstVal::U(_, r_val))) => {
-                let res_u = if l_val < r_val { 1 } else { 0 };
+        match (
+            int_bits_and_raw(l_const.as_ref()),
+            int_bits_and_raw(r_const.as_ref()),
+        ) {
+            // `ult` *is* the unsigned comparison, so the raw bit patterns are compared
+            // directly however the constants happen to be tagged.
+            (Some((_, l_val)), Some((_, r_val))) => {
+                let res_u = (l_val < r_val) as u128;
                 let res = ctx.u_const(1, res_u);
                 ctx.const_vals.insert(res, ConstVal::U(1, res_u));
                 Self(res)
             }
-            (None, _) | (_, None) => {
+            _ => {
                 let res = ctx.cmp(self.0, b.0, CmpKind::Lt);
                 Self(res)
             }
-            _ => todo!(),
         }
     }
 
-    fn slt(&self, b: &Self, _bits: usize, ctx: &mut SpecializationState) -> Self {
+    fn slt(&self, b: &Self, bits: usize, ctx: &mut SpecializationState) -> Self {
         let l_const = ctx.const_vals.get(&self.0).cloned();
         let r_const = ctx.const_vals.get(&b.0).cloned();
-        match (l_const, r_const) {
-            (Some(ConstVal::U(_, l_val)), Some(ConstVal::U(_, r_val))) => {
-                let res_u = if l_val < r_val { 1 } else { 0 };
+        match (
+            int_bits_and_raw(l_const.as_ref()),
+            int_bits_and_raw(r_const.as_ref()),
+        ) {
+            // Decode with `bits` before comparing. This arm previously compared the raw
+            // payloads unsigned, which is the wrong answer for any operand with its sign bit
+            // set — `-1 < 0` would fold to `false`. It was unreachable only because signed
+            // constants carried an `I` tag that fell through to a `todo!()`; once the tags
+            // collapse, an unsigned comparison here would become silently wrong rather than
+            // loudly unimplemented.
+            (Some((_, l_val)), Some((_, r_val)))
+                if (1..=MAX_SUPPORTED_SIGNED_BITS).contains(&bits) =>
+            {
+                let res_u = (decode_signed(bits, l_val) < decode_signed(bits, r_val)) as u128;
                 let res = ctx.u_const(1, res_u);
                 ctx.const_vals.insert(res, ConstVal::U(1, res_u));
                 Self(res)
             }
-            (None, _) | (_, None) => {
+            _ => {
                 let res = ctx.cmp(self.0, b.0, CmpKind::Lt);
                 Self(res)
             }
-            _ => todo!(),
         }
     }
 
     fn eq(&self, b: &Self, ctx: &mut SpecializationState) -> Self {
         let l_const = ctx.const_vals.get(&self.0).cloned();
         let r_const = ctx.const_vals.get(&b.0).cloned();
-        match (l_const, r_const) {
-            (Some(ConstVal::U(_, l_val)), Some(ConstVal::U(_, r_val))) => {
-                let res_u = if l_val == r_val { 1 } else { 0 };
+        match (
+            int_bits_and_raw(l_const.as_ref()),
+            int_bits_and_raw(r_const.as_ref()),
+        ) {
+            // Equality is a property of the bit pattern, so this is tag-independent.
+            (Some((_, l_val)), Some((_, r_val))) => {
+                let res_u = (l_val == r_val) as u128;
                 let res = ctx.u_const(1, res_u);
                 ctx.const_vals.insert(res, ConstVal::U(1, res_u));
                 Self(res)
             }
-            (None, _) | (_, None) => {
+            _ => {
                 let res = ctx.cmp(self.0, b.0, CmpKind::Eq);
                 Self(res)
             }
-            _ => todo!(),
         }
     }
 
@@ -196,6 +227,30 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
     ) -> Self {
         let a_const = ctx.const_vals.get(&self.0).cloned();
         let b_const = ctx.const_vals.get(&b.0).cloned();
+
+        // Signed constant pairs are folded by the shared lattice evaluator rather than by a
+        // second implementation here. It already refuses the cases that must not fold —
+        // overflow, division by zero, `INT_MIN / -1`, out-of-range shift amounts — and it is the
+        // implementation that has tests. When it declines we fall through to the match below,
+        // which emits the operation unfolded: correct, just not constant-folded.
+        //
+        // Before this, every signed pair fell through to a `todo!()`/`panic!()`. That was
+        // survivable only while the `I` tag existed to catch them; when the tags collapse, these
+        // operands land in the `U` arms below, where `Mod` and `Shr` would silently compute the
+        // *unsigned* answer and `Sub` would underflow on the raw payloads.
+        if let (Some(ConstVal::I(s, a_val)), Some(ConstVal::I(_, b_val))) = (&a_const, &b_const)
+            && let Some(Constant::I(res_s, res_v)) = lattice::eval_binary(
+                binary_arith_op_kind,
+                &Constant::I(*s, *a_val),
+                &Constant::I(*s, *b_val),
+                ctx.field(),
+            )
+        {
+            let res = ctx.i_const(res_s, res_v);
+            ctx.const_vals.insert(res, ConstVal::I(res_s, res_v));
+            return Self(res);
+        }
+
         match (binary_arith_op_kind, a_const, b_const) {
             (BinaryArithOpKind::Add, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
                 let res = a_val + b_val;
@@ -257,7 +312,12 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
             (BinaryArithOpKind::Mul, _, _) => Self(ctx.mul(self.0, b.0)),
             (BinaryArithOpKind::Div, _, _) => Self(ctx.div(self.0, b.0)),
 
-            (BinaryArithOpKind::Mod, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
+            // Refuse a zero divisor rather than folding through a raw Rust `%`, which panics.
+            // Declining to fold is free: it leaves the `Mod` in place behind the `LowerPureGuards`
+            // assertion, which rejects the program anyway.
+            (BinaryArithOpKind::Mod, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val)))
+                if b_val != 0 =>
+            {
                 let res = a_val % b_val;
                 let res_v = ctx.u_const(s, res);
                 ctx.const_vals.insert(res_v, ConstVal::U(s, res));
@@ -272,7 +332,9 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                 Self(res_v)
             }
 
-            (BinaryArithOpKind::And, _, None) | (BinaryArithOpKind::And, None, _) => {
+            // Unlike its siblings, `And` had no catch-all, so any constant pair the arm above
+            // did not match reached the `panic!` at the bottom of this match.
+            (BinaryArithOpKind::And, _, _) => {
                 let res = ctx.and(self.0, b.0);
                 Self(res)
             }
@@ -323,24 +385,27 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
             (BinaryArithOpKind::Shr, _, _) => {
                 let res = ctx.shr(self.0, b.0);
                 Self(res)
-            }
-
-            (op, a, b) => panic!("Not yet implemented {:?} {:?}", op, (a, b)),
+            } /* No `_ => panic!("Not yet implemented")` arm: every op kind now ends in a catch-all
+               * that emits the operation unfolded, so exhaustiveness checking proves an
+               * unmodelled constant pair can no longer crash the compiler. Adding a variant to
+               * `BinaryArithOpKind` will now fail to compile here rather than panicking at runtime. */
         }
     }
 
     fn assert_bool(&self, ctx: &mut SpecializationState) -> Result<(), AssertionFailure> {
-        let v_const = ctx.const_vals.get(&self.0);
-        match v_const {
-            Some(ConstVal::U(_, val)) => {
-                if *val == 0 {
+        let v_const = ctx.const_vals.get(&self.0).cloned();
+        // Truthiness is a property of the bit pattern, so this reads either tag. A non-integer
+        // constant emits the assertion rather than panicking — declining to decide is always
+        // safe, and the previous `panic!` made an unmodelled constant a compiler crash.
+        match int_bits_and_raw(v_const.as_ref()) {
+            Some((_, val)) => {
+                if val == 0 {
                     return Err(AssertionFailure::new("assert failed: value is zero"));
                 }
             }
             None => {
                 HLEmitter::assert_bool(ctx, self.0);
             }
-            _ => panic!("Not yet implemented {:?}", v_const),
         }
         Ok(())
     }

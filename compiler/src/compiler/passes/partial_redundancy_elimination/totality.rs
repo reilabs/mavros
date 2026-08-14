@@ -22,13 +22,17 @@
 //!   such predicate and is total.
 //! - **`Div`/`Mod` Trap on a Zero Divisor**: Integer division traps in every engine (raw Rust `/`
 //!   in the VM, `div` instructions in LLVM), while *field* division is total in the VM (`div_field`
-//!   yields 0) but still panics in the R1CS generator's constant evaluation (`inverse().unwrap()` —
-//!   a *compile-time* failure, strictly worse than a reject), so both domains are gated. They are
-//!   speculated only where the divisor is provably nonzero: a nonzero constant, or the analysis's
-//!   disequality channel ([`ClickCooper::known_unequal`] against the interned zero of the divisor's
-//!   type) at the insertion block. Signed division at exactly 64 bits can additionally overflow in
-//!   the VM (`div_s64` computes `i64::MIN / -1`), so it also requires the constant divisor to not
-//!   be `-1`.
+//!   yields 0) but is rejected by the R1CS generator's constant evaluation (an ICE naming the
+//!   broken invariant — a *compile-time* failure, strictly worse than a reject), so both domains
+//!   are gated. This is about the *opcode* since every `Div`/`Mod` also carries a preceding assert
+//!   that the operands are defined, so a bad division fails the program even where the opcode
+//!   itself would not. That assert is a separate instruction this oracle never speculates, which is
+//!   why the gating below is still exactly what keeps a division and its check together. Divisions
+//!   are speculated only where the divisor is provably nonzero: a nonzero constant, or the
+//!   analysis's disequality channel ([`ClickCooper::known_unequal`] against the interned zero of
+//!   the divisor's type) at the insertion block. Signed division at exactly 64 bits can
+//!   additionally overflow in the VM (`div_s64` computes `i64::MIN / -1`), so it also requires the
+//!   constant divisor to not be `-1`.
 //! - **`Shl`/`Shr` Diverge Across Backends:** Once the amount reaches the operand width the
 //!   behaviors differ (the VM's `shl_u64` is an unmasked Rust shift, its `u128` variants wrap,
 //!   R1CGen wraps at 128 bits), so only a constant, in-range amount is speculated.

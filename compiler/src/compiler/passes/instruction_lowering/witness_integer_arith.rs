@@ -8,14 +8,13 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, MAX_SUPPORTED_SIGNED_BITS, OpCode, Type,
-            TypeExpr,
+            BinaryArithOpKind, CastTarget, CmpKind, MAX_SUPPORTED_SIGNED_BITS, OpCode,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
 };
 
-use super::{InstructionLoweringRule, LoweringContext};
+use super::{InstructionLoweringRule, LoweringContext, integer_bits_and_signedness};
 
 pub struct LowerWitnessIntegerArithOps {}
 
@@ -641,14 +640,6 @@ fn guarded_or_zero_field(
         b.select(condition, value, zero)
     } else {
         value
-    }
-}
-
-fn integer_bits_and_signedness(ty: &Type) -> Option<(usize, bool)> {
-    match ty.strip_witness().expr {
-        TypeExpr::U(bits) => Some((bits, false)),
-        TypeExpr::I(bits) => Some((bits, true)),
-        _ => None,
     }
 }
 

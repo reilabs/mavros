@@ -885,7 +885,11 @@ fn lower_instruction(
                         BinaryArithOpKind::Or => IntArithOp::Or,
                         BinaryArithOpKind::Xor => IntArithOp::Xor,
                         BinaryArithOpKind::Shl => IntArithOp::Shl,
-                        BinaryArithOpKind::Shr => IntArithOp::UShr,
+                        // Arithmetic, not logical: Noir specifies sign-fill for a signed `>>`,
+                        // and the cost interpreter (`instrumenter.rs:447`) has always agreed.
+                        // This arm used to emit `UShr`, which made the backends disagree with
+                        // both. `Shl` needs no signed form — it is the same map on bits.
+                        BinaryArithOpKind::Shr => IntArithOp::AShr,
                         BinaryArithOpKind::Div => IntArithOp::SDiv,
                         BinaryArithOpKind::Mod => IntArithOp::SRem,
                     };
