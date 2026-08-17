@@ -43,6 +43,10 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
         include_str!("../../mavros_stdlib/replacements.nr"),
     ),
     (
+        "std/mavros/replacements/blake2s.nr",
+        include_str!("../../mavros_stdlib/replacements/blake2s.nr"),
+    ),
+    (
         "std/mavros/replacements/blake3.nr",
         include_str!("../../mavros_stdlib/replacements/blake3.nr"),
     ),
@@ -74,6 +78,7 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
 /// ordinary function: type checking, generic instantiation and the constrained/unconstrained
 /// pairing all apply natively, and the mavros pipeline never sees a lowlevel call for it.
 const FOREIGN_REPLACEMENTS: &[&str] = &[
+    "blake2s",
     "blake3",
     "embedded_curve_add",
     "multi_scalar_mul",
