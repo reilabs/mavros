@@ -41,7 +41,7 @@ JOBS ?= 4
 
 .PHONY: unit-test
 unit-test: ## Run the unit tests
-	$(SHELL_WRAPPER) cargo test --all-targets --all-features
+	$(SHELL_WRAPPER) env RUST_MIN_STACK=8388608 cargo test --all-targets --all-features
 
 .PHONY: func-test
 func-test: ## Run the functional test harness (override with STATUS=<path> JOBS=<n>)

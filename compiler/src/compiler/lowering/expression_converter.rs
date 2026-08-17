@@ -398,6 +398,8 @@ impl<'a> ExpressionConverter<'a> {
             Definition::LowLevel(name) => {
                 todo!("LowLevel function not yet supported: {}", name)
             }
+            // TODO: When oracle calls are supported, preserve their purity so optimizations such
+            // as CSE and DCE can distinguish pure calls from calls with side effects.
             Definition::Oracle { name, .. } => {
                 todo!("Oracle function not yet supported: {}", name)
             }

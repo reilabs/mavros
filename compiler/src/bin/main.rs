@@ -561,18 +561,6 @@ mod tests {
 
     #[test]
     fn profile_run_writes_all_supported_artifacts() {
-        // Noir's frontend needs more stack than libtest's 2 MiB default when it elaborates the
-        // beta.22 standard library. Match the stack size used by nargo's compiler workers.
-        std::thread::Builder::new()
-            .name("profile-smoke-test".to_string())
-            .stack_size(4 * 1024 * 1024)
-            .spawn(profile_run_writes_all_supported_artifacts_inner)
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    fn profile_run_writes_all_supported_artifacts_inner() {
         let project = tempfile::tempdir().unwrap();
         fs::create_dir(project.path().join("src")).unwrap();
         fs::write(
