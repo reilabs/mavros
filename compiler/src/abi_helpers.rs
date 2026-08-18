@@ -21,12 +21,48 @@ pub fn ordered_params_from_btreemap(
     }
 
     if let Some(return_type) = &abi.return_type {
-        if let Some(return_value) = unordered_params.get(MAIN_RETURN_NAME) {
-            ordered_params.push(ordered_param(&return_type.abi_type, return_value));
+        match unordered_params.get(MAIN_RETURN_NAME) {
+            Some(return_value) => {
+                ordered_params.push(field_param(1));
+                ordered_params.push(ordered_param(&return_type.abi_type, return_value));
+            }
+            None => {
+                ordered_params.push(field_param(0));
+                ordered_params.push(zero_param(&return_type.abi_type));
+            }
         }
     }
 
     ordered_params
+}
+
+fn field_param(value: u64) -> InputValueOrdered {
+    InputValueOrdered::Field(ark_bn254::Fr::from(value)) 
+}
+
+fn zero_param(abi_type: &AbiType) -> InputValueOrdered {
+    match abi_type {
+        AbiType::Array { typ, length } => {
+            InputValueOrdered::Vec((0..*length).map(|_| zero_param(typ)).collect())
+        }
+        AbiType::Struct { fields, .. } => InputValueOrdered::Struct(
+            fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), zero_param(ty)))
+                .collect(),
+        ),
+        AbiType::Tuple { fields } => InputValueOrdered::Struct(
+            fields
+                .iter()
+                .enumerate()
+                .map(|(idx, ty)| (idx.to_string(), zero_param(ty)))
+                .collect(),
+        ),
+        AbiType::String { length } => {
+            InputValueOrdered::Vec((0..*length).map(|_| field_param(0)).collect())
+        }
+        _ => field_param(0),
+    }
 }
 
 fn ordered_param(abi_type: &AbiType, value: &InputValue) -> InputValueOrdered {

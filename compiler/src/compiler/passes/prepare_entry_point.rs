@@ -79,16 +79,22 @@ impl PrepareEntryPoint {
 
         // Reconstruct functions rebuild each typed input value from its
         // flattened field representation, range-checking integers on the way.
+        let has_return = !return_types.is_empty();
+        let guard_type = Type::u(1);
         let mut reconstruct_fns = Vec::new();
         for typ in param_types.iter().chain(return_types.iter()) {
             Self::get_or_create_reconstruct_fn(typ, ssa, &mut reconstruct_fns);
+        }
+        if has_return {
+            Self::get_or_create_reconstruct_fn(&guard_type, ssa, &mut reconstruct_fns);
         }
 
         let total_fields: usize = param_types
             .iter()
             .chain(return_types.iter())
             .map(Self::flattened_field_count)
-            .sum();
+            .sum::<usize>()
+            + usize::from(has_return);
 
         let wrapper_id = ssa.add_function("wrapper_main".to_string());
         let mut sb = HLSSABuilder::new(ssa);
@@ -160,6 +166,8 @@ impl PrepareEntryPoint {
                 arg_values.push(input_value(&mut e, typ));
             }
 
+            let return_guard = has_return.then(|| input_value(&mut e, &guard_type));
+
             let mut return_input_values = Vec::new();
             for typ in &return_types {
                 return_input_values.push(input_value(&mut e, typ));
@@ -177,12 +185,20 @@ impl PrepareEntryPoint {
             e.emit_with_location(
                 SourceLocation::synthetic("public return value check"),
                 |e| {
+                    let Some(guard) = return_guard else { return };
+                    let guard_field = e.cast_to_field(guard);
                     for ((result, public_input), return_type) in results
                         .iter()
                         .zip(return_input_values.iter())
                         .zip(return_types.iter())
                     {
-                        Self::assert_eq_deep(e, *result, *public_input, return_type);
+                        Self::assert_eq_deep_guarded(
+                            e,
+                            guard_field,
+                            *result,
+                            *public_input,
+                            return_type,
+                        );
                     }
                 },
             );
@@ -196,33 +212,36 @@ impl PrepareEntryPoint {
         ssa.set_unique_entrypoint(wrapper_id);
     }
 
-    fn assert_eq_deep(
+    fn assert_eq_deep_guarded(
         b: &mut HLBlockEmitter<'_>,
+        guard_field: ValueId,
         result: ValueId,
         public_input: ValueId,
         typ: &Type,
     ) {
         match &typ.expr {
-            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => {
-                b.assert_eq(result, public_input);
-            }
             TypeExpr::Array(inner, size) => {
                 for i in 0..*size {
                     let index = b.u_const(32, i as u128);
                     let result_elem = b.array_get(result, index);
                     let input_elem = b.array_get(public_input, index);
-                    Self::assert_eq_deep(b, result_elem, input_elem, inner);
+                    Self::assert_eq_deep_guarded(b, guard_field, result_elem, input_elem, inner);
                 }
             }
             TypeExpr::Tuple(element_types) => {
                 for (i, elem_type) in element_types.iter().enumerate() {
                     let result_elem = b.tuple_proj(result, i);
                     let input_elem = b.tuple_proj(public_input, i);
-                    Self::assert_eq_deep(b, result_elem, input_elem, elem_type);
+                    Self::assert_eq_deep_guarded(b, guard_field, result_elem, input_elem, elem_type);
                 }
             }
             _ => {
-                b.assert_eq(result, public_input);
+                let result_field = b.ensure_field(result, typ);
+                let input_field = b.ensure_field(public_input, typ);
+                let diff = b.sub(result_field, input_field);
+                let gated = b.mul(guard_field, diff);
+                let zero = b.field_const(b.field().constant(0u64));
+                b.assert_eq(gated, zero);
             }
         }
     }
