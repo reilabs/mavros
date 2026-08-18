@@ -3,6 +3,7 @@
 //! call into this module (see `FOREIGN_REPLACEMENTS` in the compiler's `project.rs`), so the rest
 //! of the frontend treats them as ordinary functions.
 
+pub mod aes128_encrypt;
 pub mod blake2s;
 pub mod blake3;
 pub mod embedded_curve_add;
