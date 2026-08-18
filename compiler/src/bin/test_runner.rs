@@ -278,7 +278,14 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     let witgen_result = program_artifact.as_ref().and_then(|artifact| {
         emit("START:WITGEN_RUN");
         let r1cs = r1cs.as_ref().unwrap();
-        let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+        let params = match &ordered_params {
+            Ok(params) => params.as_slice(),
+            Err(reason) => {
+                eprintln!("witgen run error: {reason}");
+                emit("END:WITGEN_RUN:fail");
+                return None;
+            }
+        };
         match interpreter::run(
             &artifact.binary,
             r1cs.witness_layout,
@@ -431,7 +438,14 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     let wasm_result = wasm_path.as_ref().and_then(|wasm_path| {
         emit("START:WITGEN_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
-        let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+        let params = match &ordered_params {
+            Ok(params) => params.as_slice(),
+            Err(reason) => {
+                eprintln!("WASM run error: {reason}");
+                emit("END:WITGEN_WASM_RUN:fail");
+                return None;
+            }
+        };
         match run_wasm(wasm_path, r1cs, params) {
             Ok(result) => {
                 emit("END:WITGEN_WASM_RUN:ok");
@@ -516,15 +530,47 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     }
 }
 
-fn load_inputs(file_path: &Path, driver: &Driver) -> Option<Vec<interpreter::InputValueOrdered>> {
-    let ext = file_path.extension().and_then(|e| e.to_str())?;
-    let format = Format::from_ext(ext)?;
-    let contents = fs::read_to_string(file_path).ok()?;
-    let params = format.parse(&contents, driver.abi()).ok()?;
-    Some(abi_helpers::ordered_params_from_btreemap(
-        driver.abi(),
-        &params,
-    ))
+/// Load and order the entry-point inputs, or explain why witgen cannot run.
+fn load_inputs(
+    file_path: &Path,
+    driver: &Driver,
+) -> Result<Vec<interpreter::InputValueOrdered>, String> {
+    let abi = driver.abi();
+
+    if !file_path.exists() {
+        if abi.parameters.is_empty() {
+            return Ok(abi_helpers::ordered_params_from_btreemap(
+                abi,
+                &std::collections::BTreeMap::new(),
+            ));
+        }
+        return Err(format!(
+            "the ABI declares {} parameter(s) but {} does not exist",
+            abi.parameters.len(),
+            file_path.display()
+        ));
+    }
+
+    let format = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(Format::from_ext)
+        .ok_or_else(|| format!("unrecognized input file format: {}", file_path.display()))?;
+    let contents =
+        fs::read_to_string(file_path).map_err(|e| format!("cannot read input file: {e}"))?;
+    let params = format
+        .parse(&contents, abi)
+        .map_err(|e| format!("cannot parse {}: {e}", file_path.display()))?;
+    for param in &abi.parameters {
+        if !params.contains_key(&param.name) {
+            return Err(format!(
+                "{} does not supply parameter `{}`",
+                file_path.display(),
+                param.name
+            ));
+        }
+    }
+    Ok(abi_helpers::ordered_params_from_btreemap(abi, &params))
 }
 
 // ── WASM Runner ──────────────────────────────────────────────────────
