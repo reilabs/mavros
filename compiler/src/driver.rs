@@ -650,7 +650,7 @@ impl Driver {
         let returns = abi
             .return_type
             .as_ref()
-            .map_or(0, |ret| count_abi_type_elements(&ret.abi_type));
+            .map_or(0, |ret| 1 + count_abi_type_elements(&ret.abi_type));
         params + returns
     }
 
