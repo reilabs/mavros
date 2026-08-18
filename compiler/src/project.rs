@@ -232,7 +232,7 @@ fn replace_foreign_function(function: &mut NoirFunction, replaced: &mut HashSet<
 fn parse_workspace(
     workspace: &Workspace,
     source_replacements: &[DependencySourceReplacement],
-) -> (FileManager, ParsedFiles) {
+) -> Result<(FileManager, ParsedFiles), Error> {
     // Build the file manager manually so we can expose the Mavros extensions from the embedded
     // stdlib root without maintaining a copy of upstream's `std/lib.nr`.
     let mut file_manager = FileManager::new(&workspace.root_dir);
@@ -263,7 +263,7 @@ fn parse_workspace(
             &mut file_manager,
         );
     }
-    add_dependency_source_overrides(workspace, source_replacements, &mut file_manager);
+    add_dependency_source_overrides(workspace, source_replacements, &mut file_manager)?;
 
     // 4. Add all remaining workspace and dependency files.
     nargo::insert_all_files_for_workspace_into_file_manager(workspace, &mut file_manager);
@@ -271,49 +271,53 @@ fn parse_workspace(
 
     // 5. Rewrite replaced foreign functions to call their pure-Noir implementations.
     replace_foreign_functions(&mut parsed_files);
-    (file_manager, parsed_files)
+    Ok((file_manager, parsed_files))
 }
 
 fn add_dependency_source_overrides(
     workspace: &Workspace,
     replacements: &[DependencySourceReplacement],
     file_manager: &mut FileManager,
-) {
+) -> Result<(), Error> {
     for replacement in replacements {
         let replacement_package = workspace
             .members
             .iter()
             .find_map(|member| find_direct_dependency(member, replacement.package))
-            .unwrap_or_else(|| {
-                panic!(
+            .ok_or_else(|| {
+                Error::DependencySourceOverride(format!(
                     "active source replacement package '{}' is not attached to the workspace",
                     replacement.package
-                )
-            });
+                ))
+            })?;
 
         for source_override in replacement.source_overrides {
             let dependency = find_dependency(replacement_package, source_override.dependency)
-                .unwrap_or_else(|| {
-                    panic!(
+                .ok_or_else(|| {
+                    Error::DependencySourceOverride(format!(
                         "replacement package '{}' has no '{}' dependency",
                         replacement.package, source_override.dependency
-                    )
-                });
+                    ))
+                })?;
             let path = dependency.root_dir.join(source_override.path);
-            let source = fs::read_to_string(&path).unwrap_or_else(|error| {
-                panic!("failed to read pinned source {}: {error}", path.display())
-            });
-            assert_eq!(
-                source.matches(source_override.expected).count(),
-                1,
-                "pinned compatibility source changed in {}",
-                path.display()
-            );
+            let source = fs::read_to_string(&path).map_err(|error| {
+                Error::DependencySourceOverride(format!(
+                    "failed to read pinned source {}: {error}",
+                    path.display()
+                ))
+            })?;
+            if source.matches(source_override.expected).count() != 1 {
+                return Err(Error::DependencySourceOverride(format!(
+                    "pinned compatibility source changed in {}",
+                    path.display()
+                )));
+            }
             let rewritten =
                 source.replacen(source_override.expected, source_override.replacement, 1);
             file_manager.add_file_with_source_canonical_path(&path, rewritten);
         }
     }
+    Ok(())
 }
 
 fn find_direct_dependency<'a>(package: &'a Package, name: &str) -> Option<&'a Package> {
@@ -416,7 +420,7 @@ impl Project {
         }
 
         let (nargo_file_manager, nargo_parsed_files) =
-            parse_workspace(&nargo_workspace, &source_replacements);
+            parse_workspace(&nargo_workspace, &source_replacements)?;
 
         Ok(Self {
             project_root,

@@ -727,9 +727,10 @@ impl UntaintControlFlow {
                     let expected_types = function_parameter_types
                         .get(&tgt)
                         .expect("ICE: constrained call target has no signature snapshot");
-                    assert!(
-                        expected_types.len() >= args.len(),
-                        "ICE: constrained call has more arguments than callee parameters"
+                    assert_eq!(
+                        expected_types.len(),
+                        args.len(),
+                        "ICE: constrained call arity does not match its callee's parameters"
                     );
 
                     let mut cast_instrs = Vec::new();
