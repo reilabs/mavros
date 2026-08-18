@@ -52,6 +52,7 @@ use crate::{
             normalize_asserts::NormalizeAsserts,
             partial_redundancy_elimination::PRE,
             prepare_entry_point::PrepareEntryPoint,
+            purify_witness_slices::PurifyWitnessSlices,
             rc_insertion::RCInsertion,
             remove_unreachable_blocks::RemoveUnreachableBlocks,
             remove_unreachable_functions::RemoveUnreachableFunctions,
@@ -390,6 +391,12 @@ impl Driver {
                 // value from every predecessor); collapse them before they reach WTI and codegen.
                 Box::new(TrivialPhiElimination::new()),
                 Box::new(RemoveUnreachableFunctions::new()),
+                // Purify witness-length slices into `(physical, log_len, start)` tuples. Reads
+                // the read-only joined WTI approximation (no specialization — context splitting
+                // happens exactly once, below); the elision cleans up the tuples it introduces.
+                Box::new(PurifyWitnessSlices::new()),
+                Box::new(ElideTuples::new()),
+                Box::new(RemoveUnreachableFunctions::new()),
             ],
         )
         .run(&mut ssa);
@@ -450,6 +457,9 @@ impl Driver {
             "witness_spilling".to_string(),
             self.draw_cfg,
             vec![
+                // Lower the remaining (pure-length) slice pops/inserts/removes. The
+                // witness-length ones were already rewritten by `PurifyWitnessSlices`.
+                Box::new(InstructionLowering::slice_ops()),
                 Box::new(InstructionLowering::pure_guards()),
                 Box::new(InstructionLowering::witness_memory_ops()),
                 Box::new(FixDoubleJumps::new()),
@@ -480,6 +490,7 @@ impl Driver {
                 Box::new(SimplifyAsserts::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(InstructionLowering::witness_array_access()),
+                Box::new(InstructionLowering::slice_select()),
                 Box::new(InstructionLowering::witness_integer_ops()),
                 // After the last pre-spilling lowering, run cleanup twice
                 // back-to-back. The first round exposes folds/dedup opportunities

@@ -106,8 +106,9 @@
 //!   as we claim that ZK nested arrays are overwhelmingly loop-indexed (and hence dynamic and
 //!   already collapsed).
 //! - **Slices:** Dynamic-length slices never get per-`Index(k)` cells — every slice value and
-//!   `SlicePush` result collapses to `Elem(AllElems)`. Constant-cell enumeration is ill-defined for
-//!   a runtime-sized container, so this is effectively forced rather than a tunable trade-off.
+//!   every slice-op result (`SlicePush`/`SlicePop`/`SliceInsert`/`SliceRemove`) collapses to
+//!   `Elem(AllElems)`. Constant-cell enumeration is ill-defined for a runtime-sized container, so
+//!   this is effectively forced rather than a tunable trade-off.
 //! - **All-or-Nothing Group Collapse:** A single collapse trigger (one dynamic index, a
 //!   `MkRepeated` of a non-scalar element, a slice op) collapses an array's *entire* flow-group to
 //!   one `AllElems` cell, rather than keeping its constant `Index(k)` cells alongside an `AllElems`

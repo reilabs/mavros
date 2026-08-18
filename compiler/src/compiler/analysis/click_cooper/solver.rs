@@ -17,7 +17,8 @@ use crate::{
             lattice::{
                 Constness, bool_constant, bool_constness, const_bool, const_join, eval_array_get,
                 eval_array_set, eval_binary, eval_bit_range, eval_cast, eval_cmp, eval_mk_repeated,
-                eval_mk_seq, eval_not, eval_sext, eval_slice_len, eval_slice_push,
+                eval_mk_seq, eval_not, eval_sext, eval_slice_insert, eval_slice_len,
+                eval_slice_pop, eval_slice_push, eval_slice_remove,
             },
             summary::{DetSummaries, FnSummary, ReturnJump, SymSummaries, det_return},
         },
@@ -605,6 +606,40 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
             return self.eval_call(bid, function, args, results, *unconstrained);
         }
 
+        // `SlicePop`/`SliceRemove` produces two results, so like `Call` they are
+        // handled before the single-value `eval_aggregate`.
+        if let OpCode::SlicePop {
+            dir,
+            result_slice,
+            result_elem,
+            slice,
+        } = instr
+        {
+            return self.eval_split(bid, &[*slice], (*result_slice, *result_elem), |mut cs| {
+                let slice = cs.pop().expect("SlicePop has a slice operand");
+                eval_slice_pop(*dir, slice)
+            });
+        }
+        if let OpCode::SliceRemove {
+            result_slice,
+            result_elem,
+            slice,
+            index,
+        } = instr
+        {
+            return self.eval_split(
+                bid,
+                &[*slice, *index],
+                (*result_slice, *result_elem),
+                |cs| {
+                    let [slice, index]: [Constant; 2] = cs
+                        .try_into()
+                        .expect("SliceRemove folds exactly two constant operands");
+                    eval_slice_remove(slice, &index)
+                },
+            );
+        }
+
         // The pure, value-semantic sequence ops are not scalar folds but *are* constant-folded over
         // the aggregate (`Blob`) constants kept in the lattice — e.g. indexing a constant lookup
         // table with a constant index yields a scalar constant. Like `Call`, they are handled
@@ -760,6 +795,36 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
             .unwrap_or(Constness::Bottom)
     }
 
+    /// Evaluate a two-result aggregate op `f` over `operands`
+    fn eval_split(
+        &self,
+        bid: BlockId,
+        operands: &[ValueId],
+        results: (ValueId, ValueId),
+        f: impl FnOnce(Vec<Constant>) -> Option<(Constant, Constant)>,
+    ) -> Vec<(ValueId, Constness)> {
+        let both = |c: Constness| vec![(results.0, c.clone()), (results.1, c)];
+        let mut consts = Vec::with_capacity(operands.len());
+        let mut saw_bottom = false;
+        for v in operands {
+            match self.lattice_in_block(bid, *v) {
+                Constness::Top => return both(Constness::Top),
+                Constness::Bottom => saw_bottom = true,
+                Constness::Const(c) => consts.push((*c).clone()),
+            }
+        }
+        if saw_bottom {
+            return both(Constness::Bottom);
+        }
+        match f(consts) {
+            Some((a, b)) => vec![
+                (results.0, Constness::Const(Arc::new(a))),
+                (results.1, Constness::Const(Arc::new(b))),
+            ],
+            None => both(Constness::Bottom),
+        }
+    }
+
     /// The transfer for the pure, value-semantic sequence ops, folded over aggregate (`Blob`)
     /// constants in the lattice, or `None` if `instr` is not one of those ops.
     ///
@@ -812,6 +877,17 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
                     eval_slice_push(*dir, slice, values)
                 })
             }
+            OpCode::SliceInsert {
+                slice,
+                index,
+                value,
+                ..
+            } => self.eval_n(bid, &[*slice, *index, *value], |cs| {
+                let [slice, index, value]: [Constant; 3] = cs
+                    .try_into()
+                    .expect("SliceInsert folds exactly three constant operands");
+                eval_slice_insert(slice, &index, value)
+            }),
             OpCode::SliceLen { slice, .. } => self.eval1(bid, *slice, eval_slice_len),
             _ => return None,
         };

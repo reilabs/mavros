@@ -1,0 +1,6 @@
+[package]
+name = "slice_wl_struct_pop_insert_remove"
+type = "bin"
+authors = [""]
+
+[dependencies]

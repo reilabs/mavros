@@ -25,11 +25,8 @@ impl InstructionLoweringRule for LowerWitnessIntegerArithOps {
         context: &LoweringContext<'_>,
         instruction: &OpCode,
     ) -> bool {
-        if let OpCode::Guard { condition, inner } = instruction {
-            self.process_arith(b, context, Some(*condition), inner.as_ref())
-        } else {
-            self.process_arith(b, context, None, instruction)
-        }
+        let (guard, op) = HLBlockEmitter::unwrap_guard(instruction);
+        self.process_arith(b, context, guard, op)
     }
 }
 
@@ -598,29 +595,13 @@ fn guarded_rangecheck(
     guard: Option<ValueId>,
 ) {
     assert!(bits >= 1, "rangecheck width must be at least 1 bit");
-    let rangecheck = OpCode::Rangecheck {
-        value,
-        max_bits: bits,
-    };
-    if let Some(condition) = guard {
-        b.emit(OpCode::Guard {
-            condition,
-            inner: Box::new(rangecheck),
-        });
-    } else {
-        b.emit(rangecheck);
-    }
-}
-
-fn emit_guarded(b: &mut HLBlockEmitter<'_>, guard: Option<ValueId>, op: OpCode) {
-    if let Some(condition) = guard {
-        b.emit(OpCode::Guard {
-            condition,
-            inner: Box::new(op),
-        });
-    } else {
-        b.emit(op);
-    }
+    b.emit_guarded(
+        guard,
+        OpCode::Rangecheck {
+            value,
+            max_bits: bits,
+        },
+    );
 }
 
 fn guarded_or_zero_field(
@@ -858,8 +839,7 @@ fn lower_unsigned_divmod(
         let r_u128 = b.cast_to(CastTarget::U(128), r_wit);
         let q_u128 = b.cast_to(CastTarget::U(128), q_wit);
         let product = b.fresh_value();
-        emit_guarded(
-            b,
+        b.emit_guarded(
             guard,
             OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Mul,
@@ -869,8 +849,7 @@ fn lower_unsigned_divmod(
             },
         );
         let sum = b.fresh_value();
-        emit_guarded(
-            b,
+        b.emit_guarded(
             guard,
             OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
@@ -879,8 +858,7 @@ fn lower_unsigned_divmod(
                 rhs: r_u128,
             },
         );
-        emit_guarded(
-            b,
+        b.emit_guarded(
             guard,
             OpCode::AssertCmp {
                 kind: CmpKind::Eq,
@@ -888,8 +866,7 @@ fn lower_unsigned_divmod(
                 rhs: dividend,
             },
         );
-        emit_guarded(
-            b,
+        b.emit_guarded(
             guard,
             OpCode::AssertCmp {
                 kind: CmpKind::Lt,

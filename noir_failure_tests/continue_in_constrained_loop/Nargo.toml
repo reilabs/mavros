@@ -1,0 +1,6 @@
+[package]
+name = "continue_in_constrained_loop"
+type = "bin"
+authors = [""]
+
+[dependencies]

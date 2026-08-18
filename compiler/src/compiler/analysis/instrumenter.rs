@@ -562,10 +562,19 @@ impl Value {
             ),
         };
 
+        // An out-of-range constant index is not an ICE here. The IR legitimately contains reads
+        // that can never execute successfully — a `SlicePop` of a statically empty slice lowers
+        // to its (constant-false) bounds assert plus an `ArrayGet` at index 0 — and rejecting
+        // such a program is witgen's job, not the cost estimator's. Answering `Unknown` just
+        // declines to specialize through the read.
+        let at = |i: &u128| match values.get(*i as usize) {
+            Some(value) => value.clone(),
+            None => Value::unknown_from_type(tp),
+        };
         match index {
-            Value::U(_, i) => values[*i as usize].clone(),
+            Value::U(_, i) => at(i),
             Value::WitnessOf(inner) => match inner.as_ref() {
-                Value::U(_, i) => values[*i as usize].clone(),
+                Value::U(_, i) => at(i),
                 _ => Value::unknown_from_type(tp),
             },
             Value::Unknown(_) => Value::unknown_from_type(tp),
@@ -1926,11 +1935,13 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         pushed_values: &[SpecSplitValue],
         dir: SliceOpDir,
     ) -> SpecSplitValue {
-        assert_eq!(dir, SliceOpDir::Back); // TODO
         let new_unspec = match &slice.unspecialized {
             Value::Array(values) => {
-                let mut new_values = values.as_ref().clone();
-                new_values.extend(pushed_values.iter().map(|v| v.unspecialized.clone()));
+                let pushed = pushed_values.iter().map(|v| v.unspecialized.clone());
+                let new_values = match dir {
+                    SliceOpDir::Front => pushed.chain(values.as_ref().iter().cloned()).collect(),
+                    SliceOpDir::Back => values.as_ref().iter().cloned().chain(pushed).collect(),
+                };
                 Value::array(new_values)
             }
             Value::UnknownSlice => Value::UnknownSlice,
@@ -1938,8 +1949,11 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         };
         let new_spec = match &slice.specialized {
             Value::Array(values) => {
-                let mut new_values = values.as_ref().clone();
-                new_values.extend(pushed_values.iter().map(|v| v.specialized.clone()));
+                let pushed = pushed_values.iter().map(|v| v.specialized.clone());
+                let new_values = match dir {
+                    SliceOpDir::Front => pushed.chain(values.as_ref().iter().cloned()).collect(),
+                    SliceOpDir::Back => values.as_ref().iter().cloned().chain(pushed).collect(),
+                };
                 Value::array(new_values)
             }
             Value::UnknownSlice => Value::UnknownSlice,

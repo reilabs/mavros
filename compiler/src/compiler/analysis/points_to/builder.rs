@@ -513,6 +513,52 @@ impl FnBuilder<'_> {
                     self.copy_levels(self.elem_node(*result), NodeKey::value(*value), &elem_ty);
                 }
             }
+            OpCode::SlicePop {
+                result_slice,
+                result_elem,
+                slice,
+                ..
+            } => {
+                let elem_ty = self.array_element(*result_slice);
+                self.copy_levels(
+                    self.elem_node(*result_slice),
+                    self.elem_node(*slice),
+                    &elem_ty,
+                );
+                self.copy_levels(
+                    NodeKey::value(*result_elem),
+                    self.elem_node(*slice),
+                    &elem_ty,
+                );
+            }
+            OpCode::SliceInsert {
+                result,
+                slice,
+                value,
+                ..
+            } => {
+                let elem_ty = self.array_element(*result);
+                self.copy_levels(self.elem_node(*result), self.elem_node(*slice), &elem_ty);
+                self.copy_levels(self.elem_node(*result), NodeKey::value(*value), &elem_ty);
+            }
+            OpCode::SliceRemove {
+                result_slice,
+                result_elem,
+                slice,
+                ..
+            } => {
+                let elem_ty = self.array_element(*result_slice);
+                self.copy_levels(
+                    self.elem_node(*result_slice),
+                    self.elem_node(*slice),
+                    &elem_ty,
+                );
+                self.copy_levels(
+                    NodeKey::value(*result_elem),
+                    self.elem_node(*slice),
+                    &elem_ty,
+                );
+            }
 
             // --- Calls: instantiate the callee summary (replaces blanket escape). ---
             OpCode::Call {

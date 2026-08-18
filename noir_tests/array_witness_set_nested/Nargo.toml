@@ -1,0 +1,6 @@
+[package]
+name = "array_witness_set_nested"
+type = "bin"
+authors = [""]
+
+[dependencies]

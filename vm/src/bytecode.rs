@@ -1,19 +1,16 @@
 #![allow(unused_variables)]
 
-use crate::{
-    ConstraintsLayout, Field, FlamegraphProfile, FlamegraphStackId, TableKind, WitnessLayout,
-};
 use ark_ff::{AdditiveGroup as _, BigInteger as _};
 use mavros_opcode_gen::interpreter;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::array::{BoxedLayout, BoxedValue, StructDescriptor};
-use crate::interpreter::{Frame, Handler};
+use std::{collections::BTreeMap, fmt::Display, ptr};
 
-use crate::array::DataType;
-use std::collections::BTreeMap;
-use std::fmt::Display;
-use std::ptr;
+use crate::{
+    ConstraintsLayout, Field, FlamegraphProfile, FlamegraphStackId, TableKind, WitnessLayout,
+    array::{BoxedLayout, BoxedValue, DataType, StructDescriptor},
+    interpreter::{Frame, Handler},
+};
 
 /// The number of u64 limbs making up a field element.
 // FIELD-ASSUMPTION: L3-felt-limbs
@@ -920,15 +917,46 @@ fn unspread_bits(v: u64) -> (u32, u32) {
     (odd, even)
 }
 
+/// The row `key` addresses in a table of `length` entries, or `None` when it
+/// addresses no row at all.
+///
+/// A lookup argument proves membership by bumping the multiplicity of the row it
+/// landed on, so a key outside `0..length` is not a wider index — it is a
+/// witness that cannot satisfy the lookup, and the caller must trap. Rejecting
+/// on the high limbs matters as much as the bound: the bump is addressed by the
+/// low limb alone, so a key just under the modulus would otherwise truncate to
+/// an arbitrary `u64` and land outside the multiplicities buffer entirely.
+#[inline(always)]
+fn table_row_index(key: Field, length: usize) -> Option<u64> {
+    let limbs = ark_ff::PrimeField::into_bigint(key).0;
+    let (low, high) = limbs.split_first().expect("field bigint has no limbs");
+    (high.iter().all(|limb| *limb == 0) && *low < length as u64).then_some(*low)
+}
+
 /// Emit a forward key-value lookup: bump multiplicity and write 2 lookup tape entries.
+///
+/// Returns `false`, having written nothing, when an active lookup's `key` is not
+/// a row of the table; the caller must trap. An inactive lookup (`flag_u64 == 0`)
+/// bumps no multiplicity and so is always emittable — a guarded-off lookup must
+/// not be able to fail.
+#[must_use]
 unsafe fn forward_kv_lookup_emit(
     table_idx: usize,
     key: Field,
     result: Field,
     flag_u64: u64,
     vm: &mut VM,
-) {
+) -> bool {
     let table_info = &vm.tables[table_idx];
+
+    let key_row = if flag_u64 != 0 {
+        match table_row_index(key, table_info.length) {
+            Some(row) => Some(row),
+            None => return false,
+        }
+    } else {
+        None
+    };
 
     // Entry 1 (x-constraint): table_id, result_value, 0
     unsafe {
@@ -943,8 +971,7 @@ unsafe fn forward_kv_lookup_emit(
     // Entry 2 (y-constraint): table_id, key, flag
     unsafe {
         *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
-        if flag_u64 != 0 {
-            let key_u64 = ark_ff::PrimeField::into_bigint(key).0[0];
+        if let Some(key_u64) = key_row {
             let ptr = table_info.multiplicities_wit.offset(key_u64 as isize);
             *(ptr as *mut u64) += flag_u64;
             *(vm.data.as_forward.lookups_b as *mut u64) = key_u64;
@@ -956,6 +983,8 @@ unsafe fn forward_kv_lookup_emit(
         vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
         vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
     }
+
+    true
 }
 
 /// Emit AD bumps for a key-value lookup (x-constraint + y-constraint + sum).
@@ -2087,14 +2116,16 @@ mod def {
         }
     }
 
-    #[opcode]
+    #[raw_opcode]
     fn spread_lookup_field(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
         #[frame] val: Field,
         #[frame] result: Field,
         #[frame] flag: Field,
         bits: usize,
-        vm: &mut VM,
-    ) {
+    ) -> (*const u64, Frame) {
         // Initialize spread table for this bit-width on first call.
         //
         // Spread tables use the folded single-constraint allocation
@@ -2131,7 +2162,12 @@ mod def {
 
         let table_idx = vm.spread_tables[bits].unwrap();
         let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
-        unsafe { forward_kv_lookup_emit(table_idx, val, result, flag_u64, vm) };
+        // The table's keys are `0..2^bits`, so a wider `val` has nothing to look up.
+        if !unsafe { forward_kv_lookup_emit(table_idx, val, result, flag_u64, vm) } {
+            return trap(pc, frame, vm);
+        }
+
+        (unsafe { pc.offset(5) }, frame)
     }
 
     #[opcode]
@@ -2227,8 +2263,19 @@ mod def {
         unsafe { ad_kv_lookup_emit(table_idx, val, result, flag, vm) };
     }
 
-    #[opcode]
-    fn rngchk_field(#[frame] val: Field, #[frame] flag: Field, bits: usize, vm: &mut VM) {
+    /// The lookup-argument form of [`Self::rangecheck`]: instead of decomposing
+    /// `val` inline, prove `val < 2^bits` by bumping its multiplicity in the
+    /// `bits`-wide rangecheck table. A value with no row in that table fails the
+    /// check, so this traps for exactly the inputs `rangecheck` traps on.
+    #[raw_opcode]
+    fn rngchk_field(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
+        #[frame] val: Field,
+        #[frame] flag: Field,
+        bits: usize,
+    ) -> (*const u64, Frame) {
         if vm.rgchk_tables[bits].is_none() {
             let length = 1usize << bits;
             let table_info = TableInfo {
@@ -2255,9 +2302,20 @@ mod def {
         let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
         let table_idx = vm.rgchk_tables[bits].unwrap();
         let table_info = &vm.tables[table_idx];
+
+        // An inactive check bumps no multiplicity, so it stays emittable whatever
+        // `val` is: a guarded-off rangecheck must not be able to fail.
+        let val_row = if flag_u64 != 0 {
+            match table_row_index(val, table_info.length) {
+                Some(row) => Some(row),
+                None => return trap(pc, frame, vm),
+            }
+        } else {
+            None
+        };
+
         unsafe {
-            if flag_u64 != 0 {
-                let val_u64 = ark_ff::PrimeField::into_bigint(val).0[0];
+            if let Some(val_u64) = val_row {
                 let ptr = table_info.multiplicities_wit.offset(val_u64 as isize);
                 *(ptr as *mut u64) += flag_u64;
                 *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
@@ -2273,18 +2331,22 @@ mod def {
             *(vm.data.as_forward.lookups_c as *mut u64) = flag_u64;
             vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
         }
+
+        (unsafe { pc.offset(4) }, frame)
     }
 
-    #[opcode]
+    #[raw_opcode]
     fn array_lookup_field(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
         #[frame] array: BoxedValue,
         #[frame] index: Field,
         #[frame] result: Field,
         #[frame] flag: Field,
         stride: usize,
         elem_kind: usize,
-        vm: &mut VM,
-    ) {
+    ) -> (*const u64, Frame) {
         let table_id_ptr = array.table_id();
         let table_idx = unsafe { *table_id_ptr };
 
@@ -2335,7 +2397,14 @@ mod def {
         };
 
         let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
-        unsafe { forward_kv_lookup_emit(table_idx, index, result, flag_u64, vm) };
+        // The table's keys are the element indices, so an out-of-bounds `index`
+        // has nothing to look up — the bounds check the compiler emits alongside
+        // this read is what normally rules that out.
+        if !unsafe { forward_kv_lookup_emit(table_idx, index, result, flag_u64, vm) } {
+            return trap(pc, frame, vm);
+        }
+
+        (unsafe { pc.offset(7) }, frame)
     }
 
     #[opcode]
@@ -3058,5 +3127,39 @@ mod tests {
             DebugInfo::default().format_version(),
             DEBUG_INFO_FORMAT_VERSION
         );
+    }
+
+    /// A key names its own row while it is inside the table and no row at all from the end onwards.
+    ///
+    /// The bound is what stops [`table_row_index`]'s callers from bumping a multiplicity outside
+    /// the buffer: every one of them addresses `multiplicities_wit` with the returned row through
+    /// raw pointer arithmetic, which no bounds check stands behind.
+    #[test]
+    fn table_row_index_accepts_only_keys_inside_the_table() {
+        assert_eq!(table_row_index(Field::from(0u64), 8), Some(0));
+        assert_eq!(table_row_index(Field::from(7u64), 8), Some(7));
+        assert_eq!(table_row_index(Field::from(8u64), 8), None);
+        assert_eq!(table_row_index(Field::from(9u64), 8), None);
+        // A degenerate table has no rows to land on, so nothing is a member of it.
+        assert_eq!(table_row_index(Field::from(0u64), 0), None);
+    }
+
+    /// The bound alone is not enough. The row is addressed by the key's *low limb*, so a key whose
+    /// high limbs are set has to be rejected even when that low limb names a valid row — otherwise
+    /// `2^64 + 3` reads as row 3 of an 8-row table, and the lookup it cannot satisfy silently
+    /// succeeds against a row it does not name.
+    #[test]
+    fn table_row_index_rejects_a_key_whose_high_limbs_are_set() {
+        let low_limb_in_range = Field::from((1u128 << 64) + 3);
+        assert_eq!(
+            ark_ff::PrimeField::into_bigint(low_limb_in_range).0[0],
+            3,
+            "the point of this case is that the low limb alone looks like a valid row"
+        );
+        assert_eq!(table_row_index(low_limb_in_range, 8), None);
+
+        // The same shape at the top of the field: `-1` truncates to an arbitrary `u64`, which is
+        // the case that used to land outside the multiplicities buffer entirely.
+        assert_eq!(table_row_index(-Field::from(1u64), 8), None);
     }
 }

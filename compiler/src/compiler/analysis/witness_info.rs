@@ -47,10 +47,29 @@ impl WitnessType {
 
 pub type WitnessInfo = WitnessType;
 
+/// Per-level witness-ness of a value's type.
+///
+/// `Scalar` and `Ref` carry one; `Array` carries none; `Slice` carries one, but for its *length*
+/// rather than its identity. This is necessary because:
+///
+/// - An array's length is static, so a witness "container identity" was never anything its
+///   element taint did not already cover — nothing but the `Cast`-to-`WitnessOf` rule ever wrote
+///   to that slot, and it now seeds the leaves instead (see `build_instr` in [`super::
+///   witness_taint_inference::builder`]).
+/// - A slice's length *is* real state, but `purify_witness_slices` moves it onto the `log_len`
+///   scalar of a `(physical, log_len, start)` tuple before any type is wrapped, so the slice level
+///   must report `Pure` from then on (see [`WitnessShape::toplevel_info`]).
+///
+/// With no container-level wrap, `WitnessOf` can _only ever sit on a leaf_. The witness-indexed
+/// rebuild scans **rely on this**. `instruction_lowering::witness_array::select_leaves`, for
+/// example treats `TypeExpr::WitnessOf(_)` as a scalar and would emit a single `Select` over a
+/// whole array if a `WitnessOf(Array<..>)` could still reach it. Re-introducing a container taint
+/// slot means fixing that consumer in the same change.
 #[derive(PartialEq, Eq, Debug, Clone, Hash)]
 pub enum WitnessShape {
     Scalar(WitnessInfo),
-    Array(WitnessInfo, Box<WitnessShape>),
+    Array(Box<WitnessShape>),
+    Slice(WitnessInfo, Box<WitnessShape>),
     Ref(WitnessInfo, Box<WitnessShape>),
 }
 
@@ -58,8 +77,11 @@ impl Display for WitnessShape {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WitnessShape::Scalar(info) => write!(f, "{info}"),
-            WitnessShape::Array(info, inner) => {
-                write!(f, "[{info} of {inner}]")
+            WitnessShape::Array(inner) => {
+                write!(f, "[{inner}]")
+            }
+            WitnessShape::Slice(len, elem) => {
+                write!(f, "[len:{len} of {elem}]")
             }
             WitnessShape::Ref(info, inner) => {
                 write!(f, "[*{info} of {inner}]")
@@ -75,8 +97,11 @@ impl WitnessShape {
             (WitnessShape::Scalar(t1), WitnessShape::Scalar(t2)) => {
                 WitnessShape::Scalar(t1.join(*t2))
             }
-            (WitnessShape::Array(t1, inner1), WitnessShape::Array(t2, inner2)) => {
-                WitnessShape::Array(t1.join(*t2), Box::new(inner1.join(inner2)))
+            (WitnessShape::Array(inner1), WitnessShape::Array(inner2)) => {
+                WitnessShape::Array(Box::new(inner1.join(inner2)))
+            }
+            (WitnessShape::Slice(l1, e1), WitnessShape::Slice(l2, e2)) => {
+                WitnessShape::Slice(l1.join(*l2), Box::new(e1.join(e2)))
             }
             (WitnessShape::Ref(t1, inner1), WitnessShape::Ref(t2, inner2)) => {
                 WitnessShape::Ref(t1.join(*t2), Box::new(inner1.join(inner2)))
@@ -88,10 +113,17 @@ impl WitnessShape {
         }
     }
 
+    /// The witness-ness of the shape's top level — the level `apply_witness_type` mirrors into
+    /// a `TypeExpr::WitnessOf` wrap.
+    ///
+    /// A slice answers `Pure` even when its length slot is witness: `purify_witness_slices` moves
+    /// that witness-ness onto the `log_len` scalar of a `(physical, log_len, start)` tuple. So the
+    /// slice value itself must never be wrapped. Consumers that need the length slot read the raw
+    /// shape instead.
     pub fn toplevel_info(&self) -> WitnessType {
         match self {
             WitnessShape::Scalar(info) => *info,
-            WitnessShape::Array(info, _) => *info,
+            WitnessShape::Array(_) | WitnessShape::Slice(_, _) => WitnessType::Pure,
             WitnessShape::Ref(info, _) => *info,
         }
     }
@@ -100,15 +132,16 @@ impl WitnessShape {
     pub fn contains_witness(&self) -> bool {
         match self {
             WitnessShape::Scalar(info) => info.is_witness(),
-            WitnessShape::Array(info, inner) | WitnessShape::Ref(info, inner) => {
-                info.is_witness() || inner.contains_witness()
-            }
+            WitnessShape::Array(inner) => inner.contains_witness(),
+            WitnessShape::Ref(info, inner) => info.is_witness() || inner.contains_witness(),
+            WitnessShape::Slice(len, elem) => len.is_witness() || elem.contains_witness(),
         }
     }
 
     pub fn child_witness_type(&self) -> Option<WitnessShape> {
         match self {
-            WitnessShape::Array(_, inner) => Some(*inner.clone()),
+            WitnessShape::Array(inner) => Some(*inner.clone()),
+            WitnessShape::Slice(_, elem) => Some(*elem.clone()),
             WitnessShape::Ref(_, inner) => Some(*inner.clone()),
             WitnessShape::Scalar(_) => None,
         }

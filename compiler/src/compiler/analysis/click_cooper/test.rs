@@ -377,6 +377,119 @@ fn array_ops_are_value_numbered() {
     assert!(!cc.known_equal(fid, s1, s4)); // different elem_type
 }
 
+/// The slice ops are value-numbered: identical ops agree per result position (a pop's rest with
+/// rest, element with element) and never across positions; the push/pop direction and the
+/// index/value operand classes ride in the key or the signature, so differing ops split.
+#[test]
+fn slice_ops_are_value_numbered() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let (s, i, j, x) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let (rb1, eb1, rb2, eb2, rf, ef) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let (p1, p2, p3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let (ins1, ins2, ins3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let (rr1, re1, rr2, re2, rr3, re3) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    let f = ssa.get_unique_entrypoint_mut();
+    f.get_entry_mut()
+        .push_parameter(s, Type::field().slice_of());
+    f.get_entry_mut().push_parameter(i, Type::u(32));
+    f.get_entry_mut().push_parameter(j, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::field());
+    let entry = f.get_entry_mut();
+
+    // Two identical back pops, and a front pop of the same slice.
+    for (rest, elem, dir) in [
+        (rb1, eb1, SliceOpDir::Back),
+        (rb2, eb2, SliceOpDir::Back),
+        (rf, ef, SliceOpDir::Front),
+    ] {
+        entry.push_test_instruction(OpCode::SlicePop {
+            dir,
+            result_slice: rest,
+            result_elem: elem,
+            slice: s,
+        });
+    }
+    // Two identical back pushes and a front push.
+    for (result, dir) in [
+        (p1, SliceOpDir::Back),
+        (p2, SliceOpDir::Back),
+        (p3, SliceOpDir::Front),
+    ] {
+        entry.push_test_instruction(OpCode::SlicePush {
+            dir,
+            result,
+            slice: s,
+            values: vec![x],
+        });
+    }
+    // Two identical inserts and one at a different index.
+    for (result, index) in [(ins1, i), (ins2, i), (ins3, j)] {
+        entry.push_test_instruction(OpCode::SliceInsert {
+            result,
+            slice: s,
+            index,
+            value: x,
+        });
+    }
+    // Two identical removes and one at a different index.
+    for (rest, elem, index) in [(rr1, re1, i), (rr2, re2, i), (rr3, re3, j)] {
+        entry.push_test_instruction(OpCode::SliceRemove {
+            result_slice: rest,
+            result_elem: elem,
+            slice: s,
+            index,
+        });
+    }
+    entry.set_terminator(Terminator::Return(vec![
+        rb1, eb1, rb2, eb2, rf, ef, p1, p2, p3, ins1, ins2, ins3, rr1, re1, rr2, re2, rr3, re3,
+    ]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+
+    // Identical pops agree per position...
+    assert!(cc.known_equal(fid, rb1, rb2));
+    assert!(cc.known_equal(fid, eb1, eb2));
+    // ...but a pop's rest is never its element, and the direction rides in the key.
+    assert!(!cc.known_equal(fid, rb1, eb1));
+    assert!(!cc.known_equal(fid, rb1, rf));
+    assert!(!cc.known_equal(fid, eb1, ef));
+
+    // Pushes: identical merge, direction splits.
+    assert!(cc.known_equal(fid, p1, p2));
+    assert!(!cc.known_equal(fid, p1, p3));
+
+    // Inserts: identical merge, a different index class splits.
+    assert!(cc.known_equal(fid, ins1, ins2));
+    assert!(!cc.known_equal(fid, ins1, ins3));
+
+    // Removes: per-position agreement, never across positions, index splits.
+    assert!(cc.known_equal(fid, rr1, rr2));
+    assert!(cc.known_equal(fid, re1, re2));
+    assert!(!cc.known_equal(fid, rr1, re1));
+    assert!(!cc.known_equal(fid, rr1, rr3));
+}
+
 /// φ-operands come from _executable_ edges only: a parameter whose value differs solely on a
 /// dead in-edge is still congruent to one that agrees on the live edge.
 #[test]
@@ -5726,6 +5839,129 @@ fn const_slice_push_front_and_back() {
     assert_eq!(cc.const_of(fid, tail).as_deref(), Some(&Constant::U(32, 2)));
 }
 
+/// `SlicePop` splits a constant aggregate into two constants: the popped element and the shrunk
+/// slice, whose `SliceLen` folds — the `v.pop_back().len()` chain the pre-WTI SCS/PRE runs need.
+/// A front pop of the shrunk slice keeps folding (pops compose).
+#[test]
+fn const_slice_pop_folds_both_results() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 10));
+    let c1 = ssa.add_const(Constant::U(32, 20));
+    let c2 = ssa.add_const(Constant::U(32, 30));
+    let (seq, rest, last, len) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let (rest2, first) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: seq,
+        elems: vec![c0, c1, c2],
+        seq_type: SequenceTargetType::Slice,
+        elem_type: Type::u(32),
+    });
+    entry.push_test_instruction(OpCode::SlicePop {
+        dir: SliceOpDir::Back,
+        result_slice: rest,
+        result_elem: last,
+        slice: seq,
+    });
+    entry.push_test_instruction(OpCode::SliceLen {
+        result: len,
+        slice: rest,
+    });
+    entry.push_test_instruction(OpCode::SlicePop {
+        dir: SliceOpDir::Front,
+        result_slice: rest2,
+        result_elem: first,
+        slice: rest,
+    });
+    entry.set_terminator(Terminator::Return(vec![last, len, first, rest2]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+
+    assert_eq!(
+        cc.const_of(fid, last).as_deref(),
+        Some(&Constant::U(32, 30))
+    );
+    assert_eq!(cc.const_of(fid, len).as_deref(), Some(&Constant::U(32, 2)));
+    assert_eq!(
+        cc.const_of(fid, first).as_deref(),
+        Some(&Constant::U(32, 10))
+    );
+}
+
+/// `SliceInsert` and `SliceRemove` fold over constant aggregates at a constant index: the
+/// inserted element is visible at its index, the removed element and the shrunk length both fold.
+#[test]
+fn const_slice_insert_and_remove_fold() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 10));
+    let c2 = ssa.add_const(Constant::U(32, 30));
+    let mid = ssa.add_const(Constant::U(32, 20));
+    let idx0 = ssa.add_const(Constant::U(32, 0));
+    let idx1 = ssa.add_const(Constant::U(32, 1));
+    let (seq, grown, at_ins, glen) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let (shrunk, removed, slen) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: seq,
+        elems: vec![c0, c2],
+        seq_type: SequenceTargetType::Slice,
+        elem_type: Type::u(32),
+    });
+    entry.push_test_instruction(OpCode::SliceInsert {
+        result: grown,
+        slice: seq,
+        index: idx1,
+        value: mid,
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: at_ins,
+        array: grown,
+        index: idx1,
+    });
+    entry.push_test_instruction(OpCode::SliceLen {
+        result: glen,
+        slice: grown,
+    });
+    entry.push_test_instruction(OpCode::SliceRemove {
+        result_slice: shrunk,
+        result_elem: removed,
+        slice: grown,
+        index: idx0,
+    });
+    entry.push_test_instruction(OpCode::SliceLen {
+        result: slen,
+        slice: shrunk,
+    });
+    entry.set_terminator(Terminator::Return(vec![at_ins, glen, removed, slen]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+
+    assert_eq!(
+        cc.const_of(fid, at_ins).as_deref(),
+        Some(&Constant::U(32, 20))
+    );
+    assert_eq!(cc.const_of(fid, glen).as_deref(), Some(&Constant::U(32, 3)));
+    assert_eq!(
+        cc.const_of(fid, removed).as_deref(),
+        Some(&Constant::U(32, 10))
+    );
+    assert_eq!(cc.const_of(fid, slen).as_deref(), Some(&Constant::U(32, 2)));
+}
+
 /// `MkSeqOfBlob` re-views a constant blob as a sequence; projecting a constant index folds.
 #[test]
 fn const_mk_seq_of_blob_folds() {
@@ -5908,6 +6144,74 @@ fn aggregate_folding_refuses_oob_set_and_over_cap_constructors() {
     assert_eq!(cc.const_of(fid, at_set_oob), None);
     assert_eq!(cc.const_of(fid, at_pushed), None);
     assert_eq!(cc.const_of(fid, at_big), None);
+}
+
+/// A statically-empty pop and a statically out-of-bounds insert/remove are erroneous programs:
+/// the folds are refused (both results stay `Bottom`) rather than guessed — R1CS generation is
+/// the canonical rejecter.
+#[test]
+fn slice_pop_insert_remove_refuse_oob() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c0 = ssa.add_const(Constant::U(32, 10));
+    let idx_oob = ssa.add_const(Constant::U(32, 5));
+    let (empty, rest, elem) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let (frest, felem) = (ssa.fresh_value(), ssa.fresh_value());
+    let (one, inserted) = (ssa.fresh_value(), ssa.fresh_value());
+    let (rem_rest, rem_elem) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: empty,
+        elems: vec![],
+        seq_type: SequenceTargetType::Slice,
+        elem_type: Type::u(32),
+    });
+    // Both directions: the empty guards are distinct code paths (`pop()?` vs an explicit
+    // `is_empty` check in front of `remove(0)`, which would panic rather than refuse).
+    entry.push_test_instruction(OpCode::SlicePop {
+        dir: SliceOpDir::Back,
+        result_slice: rest,
+        result_elem: elem,
+        slice: empty,
+    });
+    entry.push_test_instruction(OpCode::SlicePop {
+        dir: SliceOpDir::Front,
+        result_slice: frest,
+        result_elem: felem,
+        slice: empty,
+    });
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: one,
+        elems: vec![c0],
+        seq_type: SequenceTargetType::Slice,
+        elem_type: Type::u(32),
+    });
+    entry.push_test_instruction(OpCode::SliceInsert {
+        result: inserted,
+        slice: one,
+        index: idx_oob,
+        value: c0,
+    });
+    entry.push_test_instruction(OpCode::SliceRemove {
+        result_slice: rem_rest,
+        result_elem: rem_elem,
+        slice: one,
+        index: idx_oob,
+    });
+    entry.set_terminator(Terminator::Return(vec![
+        elem, rest, felem, frest, inserted, rem_elem,
+    ]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+
+    assert_eq!(cc.const_of(fid, rest), None);
+    assert_eq!(cc.const_of(fid, elem), None);
+    assert_eq!(cc.const_of(fid, frest), None);
+    assert_eq!(cc.const_of(fid, felem), None);
+    assert_eq!(cc.const_of(fid, inserted), None);
+    assert_eq!(cc.const_of(fid, rem_rest), None);
+    assert_eq!(cc.const_of(fid, rem_elem), None);
 }
 
 // SYMBOLIC INTERPROCEDURAL CONGRUENCE

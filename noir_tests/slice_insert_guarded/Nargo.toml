@@ -1,0 +1,6 @@
+[package]
+name = "slice_insert_guarded"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -420,6 +420,21 @@ impl WitnessLowering {
                                 values: new_values,
                             });
                         }
+                        // `InstructionLowering::slice_ops` (first pass of `witness_spilling`)
+                        // rewrites every pop/insert/remove into asserts plus a rebuild scan, and
+                        // this pass runs on the R1CS SSA long after it — so reaching one here
+                        // means the lowering was skipped. Refuse loudly rather than convert an
+                        // opcode nothing downstream (`rc_insertion`, the symbolic executor)
+                        // accepts either.
+                        OpCode::SlicePop { .. } => {
+                            panic!("ICE: SlicePop must be lowered before witness lowering")
+                        }
+                        OpCode::SliceInsert { .. } => {
+                            panic!("ICE: SliceInsert must be lowered before witness lowering")
+                        }
+                        OpCode::SliceRemove { .. } => {
+                            panic!("ICE: SliceRemove must be lowered before witness lowering")
+                        }
                         OpCode::Select {
                             result: r,
                             cond,

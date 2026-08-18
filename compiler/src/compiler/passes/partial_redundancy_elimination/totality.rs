@@ -247,10 +247,11 @@ impl<'a> TotalityOracle<'a> {
 
     /// The index is a constant strictly below a *static* array length.
     ///
-    /// Slices have no static length and witness-typed accesses lower to constraint-emitting gadgets
-    /// — both refused.
+    /// Slices have no static length and a witness-typed *index* lowers to a constraint-emitting
+    /// gadget — both refused. The array itself is never consulted for witness-ness: container
+    /// tops carry no taint, so it cannot be witness-typed.
     fn const_index_in_bounds(&self, array: ValueId, index: ValueId) -> bool {
-        if self.is_witness(array) || self.is_witness(index) {
+        if self.is_witness(index) {
             return false;
         }
         let arr_ty = self.value_type(array);
