@@ -230,8 +230,13 @@ impl Driver {
         let main = context.get_main_function(context.root_crate_id()).unwrap();
         let debug_type_tracker =
             DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
-        let mut monomorphizer =
-            Monomorphizer::new(&mut context.def_interner, debug_type_tracker, None, false);
+        let mut monomorphizer = Monomorphizer::new(
+            &mut context.def_interner,
+            self.project.file_manager().as_file_map(),
+            debug_type_tracker,
+            None,
+            false,
+        );
         monomorphizer.compile_main(main).unwrap();
         monomorphizer.process_queue().unwrap();
         let program = monomorphizer.into_program();
