@@ -3,6 +3,7 @@
 //! This module converts the monomorphized program directly to mavros SSA format,
 //! bypassing the intermediate Noir SSA representation.
 
+mod derive_pedersen_generators;
 mod expression_converter;
 mod type_converter;
 
@@ -21,6 +22,7 @@ use crate::{
     },
 };
 
+use derive_pedersen_generators::PendingDerivation;
 use expression_converter::ExpressionConverter;
 use fm::FileManager;
 use type_converter::TypeConverter;
@@ -69,6 +71,8 @@ impl SSAConverter {
         file_manager: Option<&FileManager>,
     ) -> (HLSSA, bool) {
         let mut ssa = HLSSA::new();
+        let mut pending_derivations: HashMap<FunctionId, Vec<PendingDerivation>> =
+            HashMap::default();
 
         // Phase 1: Register all functions to handle mutual recursion.
         // For each constrained function, also register an unconstrained variant
@@ -94,7 +98,10 @@ impl SSAConverter {
 
         // Phase 2: Convert globals (must be before function conversion so global_slots are available)
         if !program.globals.is_empty() {
-            self.convert_globals(program, &mut ssa, file_manager);
+            let derivations = self.convert_globals(program, &mut ssa, file_manager);
+            if !derivations.is_empty() {
+                pending_derivations.insert(ssa.get_globals_init_fn().unwrap(), derivations);
+            }
         }
 
         // Phase 3: Convert each function
@@ -102,7 +109,7 @@ impl SSAConverter {
             if ast_func.unconstrained {
                 // Natively unconstrained: convert once with is_unconstrained=true
                 let ssa_func_id = *self.constrained_mapper.get(&ast_func.id).unwrap();
-                let converted = self.convert_function(
+                let (converted, derivations) = self.convert_function(
                     &mut ssa,
                     ast_func,
                     &self.unconstrained_mapper,
@@ -110,10 +117,11 @@ impl SSAConverter {
                     file_manager,
                 );
                 *ssa.get_function_mut(ssa_func_id) = converted;
+                pending_derivations.insert(ssa_func_id, derivations);
             } else {
                 // Constrained version
                 let constrained_id = *self.constrained_mapper.get(&ast_func.id).unwrap();
-                let converted = self.convert_function(
+                let (converted, derivations) = self.convert_function(
                     &mut ssa,
                     ast_func,
                     &self.constrained_mapper,
@@ -121,10 +129,11 @@ impl SSAConverter {
                     file_manager,
                 );
                 *ssa.get_function_mut(constrained_id) = converted;
+                pending_derivations.insert(constrained_id, derivations);
 
                 // Unconstrained variant (for calls from unconstrained context)
                 let unconstrained_id = *self.unconstrained_mapper.get(&ast_func.id).unwrap();
-                let converted = self.convert_function(
+                let (converted, derivations) = self.convert_function(
                     &mut ssa,
                     ast_func,
                     &self.unconstrained_mapper,
@@ -132,8 +141,12 @@ impl SSAConverter {
                     file_manager,
                 );
                 *ssa.get_function_mut(unconstrained_id) = converted;
+                pending_derivations.insert(unconstrained_id, derivations);
             }
         }
+
+        pending_derivations.retain(|_, sites| !sites.is_empty());
+        derive_pedersen_generators::lower(&mut ssa, pending_derivations);
 
         let main_is_unconstrained = program
             .functions
@@ -220,7 +233,7 @@ impl SSAConverter {
         program: &Program,
         ssa: &mut HLSSA,
         file_manager: Option<&FileManager>,
-    ) {
+    ) -> Vec<PendingDerivation> {
         // Assign slot indices
         let mut global_types = Vec::new();
         let mut ordered_ids: Vec<GlobalId> = Vec::new();
@@ -276,6 +289,7 @@ impl SSAConverter {
 
         // Build init function
         let init_fn_id = ssa.add_function("globals_init".to_string());
+        let mut pending_derivations = Vec::new();
         let mut sb = HLSSABuilder::new(ssa);
         sb.modify_function(init_fn_id, |b| {
             let entry = b.function.get_entry_id();
@@ -296,6 +310,7 @@ impl SSAConverter {
                 );
                 let (_name, _typ, init_expr) = &program.globals[gid];
                 let value = expr_converter.convert_expression(init_expr, b).unwrap();
+                pending_derivations.extend(expr_converter.take_pending_derivations());
                 current_block = expr_converter.current_block();
                 let idx = self.global_slots[gid];
                 let location = expr_converter.expression_source_location(init_expr);
@@ -328,6 +343,7 @@ impl SSAConverter {
         ssa.set_global_types(global_types);
         ssa.set_globals_init_fn(init_fn_id);
         ssa.set_globals_deinit_fn(deinit_fn_id);
+        pending_derivations
     }
 
     /// Convert a single function to SSA.
@@ -338,7 +354,7 @@ impl SSAConverter {
         function_mapper: &HashMap<AstFuncId, FunctionId>,
         in_unconstrained: bool,
         file_manager: Option<&FileManager>,
-    ) -> HLFunction {
+    ) -> (HLFunction, Vec<PendingDerivation>) {
         let name = if in_unconstrained && !ast_func.unconstrained {
             format!("{}_unconstrained", ast_func.name)
         } else {
@@ -392,7 +408,8 @@ impl SSAConverter {
         b.block(expr_converter.current_block())
             .terminate_return(return_values);
 
-        function
+        let pending_derivations = expr_converter.take_pending_derivations();
+        (function, pending_derivations)
     }
 }
 

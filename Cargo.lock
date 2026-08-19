@@ -2204,6 +2204,7 @@ dependencies = [
  "ark-ff",
  "bimap",
  "bincode",
+ "bn254_blackbox_solver",
  "cargo_metadata",
  "clap",
  "fixedbitset 0.4.2",

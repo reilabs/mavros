@@ -27,6 +27,8 @@ use crate::{
     },
 };
 
+use super::derive_pedersen_generators::PendingDerivation;
+
 /// Loop context for break/continue support.
 struct LoopContext {
     // The block containing the header of the current loop.
@@ -88,6 +90,10 @@ pub struct ExpressionConverter<'a> {
     /// fallback, but normally gets replaced by the nearest enclosing expression's real source
     /// location while lowering.
     current_source_location: SourceLocation,
+
+    /// Compile-time Pedersen derivations emitted by this function. They are resolved for each
+    /// concrete calling context before the freshly-built SSA leaves the lowering phase.
+    pending_derivations: Vec<PendingDerivation>,
 }
 
 impl<'a> ExpressionConverter<'a> {
@@ -114,6 +120,7 @@ impl<'a> ExpressionConverter<'a> {
             file_manager,
             source_files: RefCell::new(HashMap::default()),
             current_source_location: SourceLocation::synthetic("Noir internal"),
+            pending_derivations: Vec::new(),
         }
     }
 
@@ -243,6 +250,10 @@ impl<'a> ExpressionConverter<'a> {
 
     pub fn current_block(&self) -> BlockId {
         self.current_block
+    }
+
+    pub(super) fn take_pending_derivations(&mut self) -> Vec<PendingDerivation> {
+        std::mem::take(&mut self.pending_derivations)
     }
 
     /// Bind an immutable local variable to a value
@@ -1631,6 +1642,33 @@ impl<'a> ExpressionConverter<'a> {
                     self.emit_located(b, Some(call.location), |e| e.assert_constant(value));
                 }
                 None
+            }
+            "derive_pedersen_generators" => {
+                let domain_separator = self.convert_expression(&call.arguments[0], b).unwrap();
+                let starting_index = self.convert_expression(&call.arguments[1], b).unwrap();
+                let AstType::Array(num_generators, _) = &call.return_type else {
+                    panic!("derive_pedersen_generators must return an array")
+                };
+                let result_type = self.type_converter.convert_type(&call.return_type);
+                let result = b.ssa.fresh_value();
+
+                // This placeholder makes the nascent SSA structurally complete. The lowering
+                // coordinator replaces it with concrete point construction before exposing the
+                // SSA to any analysis or optimization pass.
+                self.emit_located(b, Some(call.location), |e| {
+                    e.todo_op(
+                        "compile-time derive_pedersen_generators".to_string(),
+                        vec![result],
+                        vec![result_type],
+                    )
+                });
+                self.pending_derivations.push(PendingDerivation {
+                    result,
+                    domain_separator,
+                    starting_index,
+                    num_generators: *num_generators,
+                });
+                Some(result)
             }
             "str_as_bytes" => {
                 let string_type = call.arguments[0]
