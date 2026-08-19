@@ -153,7 +153,7 @@ impl LowerWitnessArrayOps {
             idx_field
         } else {
             let stride_const = b.field_const(b.field().constant(stride as u128));
-            b.mul(idx_field, stride_const)
+            b.umul(idx_field, stride_const)
         };
         self.gen_witness_array_get_from_hint(
             b,
@@ -229,7 +229,7 @@ impl LowerWitnessArrayOps {
     ) {
         let elem_type = function_type_info.get_value_type(arr).get_array_element();
         let acc_type = push_witness_of_to_leaves(elem_type.clone());
-        let idx_bits = uint_bits(
+        let idx_bits = int_bits(
             function_type_info.get_value_type(idx),
             "witness slice get index",
         );
@@ -241,17 +241,17 @@ impl LowerWitnessArrayOps {
         b.emit_guarded(
             guard,
             OpCode::AssertCmp {
-                kind: CmpKind::Lt,
+                kind: CmpKind::ULt,
                 lhs: idx_cmp,
                 rhs: len_cmp,
             },
         );
-        let zero = b.u_const(32, 0);
-        let one = b.u_const(32, 1);
+        let zero = b.int_const(32, 0);
+        let one = b.int_const(32, 1);
         let init = b.default_value(&acc_type);
         let results = b.build_loop(
-            vec![(zero, Type::u(32)), (init, acc_type)],
-            |hb, p| hb.lt(p[0], slice_len),
+            vec![(zero, Type::int(32)), (init, acc_type)],
+            |hb, p| hb.ult(p[0], slice_len),
             |bb, p| {
                 let i = p[0];
                 let acc = p[1];
@@ -259,7 +259,7 @@ impl LowerWitnessArrayOps {
                 let hit = bb.eq(idx_cmp, i_cmp);
                 let arr_i = bb.array_get(arr, i);
                 let acc2 = select_leaves(bb, hit, arr_i, acc, &elem_type);
-                let i2 = bb.add(i, one);
+                let i2 = bb.uadd(i, one);
                 vec![i2, acc2]
             },
         );
@@ -295,7 +295,7 @@ impl LowerWitnessArrayOps {
              `select_leaves` cannot reconcile them"
         );
 
-        let idx_bits = uint_bits(function_type_info.get_value_type(idx), "ArraySet index");
+        let idx_bits = int_bits(function_type_info.get_value_type(idx), "ArraySet index");
         let cmp_bits = idx_bits.max(32);
         let idx_cmp = b.widen_u(idx, idx_bits, cmp_bits);
 
@@ -347,7 +347,7 @@ impl LowerWitnessArrayOps {
             b.emit_guarded(
                 guard,
                 OpCode::AssertCmp {
-                    kind: CmpKind::Lt,
+                    kind: CmpKind::ULt,
                     lhs: idx_cmp,
                     rhs: len_cmp,
                 },
@@ -374,7 +374,7 @@ impl LowerWitnessArrayOps {
                 |b, i, acc| {
                     let (elem, hit) = elem_at(b, i);
                     let hit_field = b.cast_to_field(hit);
-                    (elem, b.add(acc, hit_field))
+                    (elem, b.uadd(acc, hit_field))
                 },
             );
             let one = b.field_const(b.field().one());
@@ -422,8 +422,8 @@ impl LowerWitnessArrayOps {
                     let child_hint = b.array_get(hint, i);
                     let i_field = b.cast_to_field(i);
                     let stride_const = b.field_const(b.field().constant(inner_leaves));
-                    let child_offset = b.mul(i_field, stride_const);
-                    let child_base_key = b.add(base_key, child_offset);
+                    let child_offset = b.umul(i_field, stride_const);
+                    let child_base_key = b.uadd(base_key, child_offset);
                     self.gen_witness_array_get_from_hint(
                         b,
                         arr,
@@ -456,7 +456,7 @@ impl LowerWitnessArrayOps {
                     target_type
                 )
             }
-            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => {
+            TypeExpr::Field | TypeExpr::Int(_) => {
                 let leaf_pure = if arr_elem_type.is_witness_of() {
                     b.value_of(hint)
                 } else {
@@ -495,9 +495,7 @@ pub(super) fn select_leaves(
     ty: &Type,
 ) -> ValueId {
     match &ty.expr {
-        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::WitnessOf(_) => {
-            b.select(hit, new_v, acc)
-        }
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::WitnessOf(_) => b.select(hit, new_v, acc),
         TypeExpr::Array(inner, n) => {
             let inner = (**inner).clone();
             b.build_array_loop(*n, push_witness_of_to_leaves(inner.clone()), |b, j| {
@@ -516,7 +514,7 @@ pub(super) fn select_leaves(
 fn leaf_scalar_count(t: &Type) -> usize {
     match &t.expr {
         TypeExpr::Array(inner, n) => n * leaf_scalar_count(inner),
-        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => 1,
+        TypeExpr::Field | TypeExpr::Int(_) => 1,
         TypeExpr::WitnessOf(inner) => leaf_scalar_count(inner),
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
         TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
@@ -527,8 +525,7 @@ fn leaf_scalar_count(t: &Type) -> usize {
 
 fn scalar_cast_target(ty: &Type, context: &str) -> CastTarget {
     match &ty.strip_all_witness().expr {
-        TypeExpr::U(s) => CastTarget::U(*s),
-        TypeExpr::I(s) => CastTarget::I(*s),
+        TypeExpr::Int(s) => CastTarget::Int(*s),
         TypeExpr::Field => CastTarget::Field,
         other => panic!("{context}: unsupported scalar type {:?}", other),
     }
@@ -542,9 +539,9 @@ fn array_len(ty: &Type, context: &str) -> usize {
     }
 }
 
-pub(super) fn uint_bits(ty: &Type, context: &str) -> usize {
+pub(super) fn int_bits(ty: &Type, context: &str) -> usize {
     match ty.strip_witness().expr {
-        TypeExpr::U(n) => n,
-        _ => panic!("{context}: expected unsigned integer type, got {ty}"),
+        TypeExpr::Int(n) => n,
+        _ => panic!("{context}: expected integer type, got {ty}"),
     }
 }

@@ -50,13 +50,40 @@ impl std::fmt::Display for AssertionFailure {
 
 impl std::error::Error for AssertionFailure {}
 
+/// The width a comparison's operands are read at, where they have one.
+///
+/// Which comparison is being made comes from the opcode and never from here. `Eq` and `ULt` compare
+/// raw bit patterns and have no use for a width at all; `SLt` needs one only because two's
+/// complement is meaningless without somewhere to put the sign bit. A non-integer operand has no
+/// such width, so an `SLt` over one is a compiler bug, which we reject here once.
+pub fn cmp_operand_bits(kind: CmpKind, lhs_type: &Type) -> Option<usize> {
+    let bits = match &lhs_type.strip_witness().expr {
+        TypeExpr::Int(bits) => Some(*bits),
+        _ => None,
+    };
+    assert!(
+        bits.is_some() || !matches!(kind, CmpKind::SLt),
+        "ICE: signed comparison of a non-integer: {:?}",
+        lhs_type.expr
+    );
+    bits
+}
+
 pub trait Value<Context>
 where
     Self: Sized + Clone,
 {
-    fn ult(&self, b: &Self, ctx: &mut Context) -> Self;
-    fn slt(&self, b: &Self, bits: usize, ctx: &mut Context) -> Self;
-    fn eq(&self, b: &Self, ctx: &mut Context) -> Self;
+    /// Compare two operands, reading them the way `kind` says to.
+    ///
+    /// One entry point rather than an `ult`/`slt`/`eq` triple, because the split was never about
+    /// three different operations: it was how the executor recovered a signedness the opcode did
+    /// not carry, by picking the method from the operand's type. The opcode carries it now, so
+    /// `kind` is both the choice of comparison and the choice of reading.
+    ///
+    /// `bits` is the width the operands are read at, and is `Some` exactly when they are integers
+    /// — see [`cmp_operand_bits`], which is also where an `SLt` over a non-integer is rejected, so
+    /// an implementation may treat `bits` as guaranteed present on that arm.
+    fn cmp(&self, b: &Self, kind: CmpKind, bits: Option<usize>, ctx: &mut Context) -> Self;
     fn arith(
         &self,
         b: &Self,
@@ -65,11 +92,14 @@ where
         ctx: &mut Context,
     ) -> Self;
     fn assert_bool(&self, ctx: &mut Context) -> Result<(), AssertionFailure>;
+    /// As [`Value::cmp`], but the comparison is an assertion rather than a value.
+    ///
+    /// `bits` comes from the same [`cmp_operand_bits`] and carries the same guarantee.
     fn assert_cmp(
         kind: CmpKind,
         a: &Self,
         b: &Self,
-        lhs_type: &Type,
+        bits: Option<usize>,
         ctx: &mut Context,
     ) -> Result<(), AssertionFailure>;
     fn assert_r1c(a: &Self, b: &Self, c: &Self, ctx: &mut Context) -> Result<(), AssertionFailure>;
@@ -95,8 +125,9 @@ where
         ctx: &mut Context,
     ) -> Self;
     fn not(&self, out_type: &Type, ctx: &mut Context) -> Self;
-    fn of_u(s: usize, v: u128, ctx: &mut Context) -> Self;
-    fn of_i(s: usize, v: u128, ctx: &mut Context) -> Self;
+    /// A constant integer: `s` raw bits, with no reading attached. Every consumer that cares about
+    /// signedness takes it from the operation applied to the value, not from the value.
+    fn of_int(s: usize, v: u128, ctx: &mut Context) -> Self;
     // FIELD-ASSUMPTION: L2-seam
     fn of_field(f: Field, ctx: &mut Context) -> Self;
     fn of_blob(elem_type: Type, elements: Vec<Self>, ctx: &mut Context) -> Self;
@@ -260,25 +291,17 @@ impl SymbolicExecutor {
                 ctx.on_location(location);
                 match instr {
                     OpCode::Cmp {
-                        kind: cmp_kind,
+                        kind,
                         result: r,
                         lhs: a,
                         rhs: b,
                     } => {
-                        let lhs_type = fn_type_info.get_value_type(*a);
+                        // The opcode selects the comparison and the reading. The type is consulted
+                        // only for the width a signed comparison needs to place the sign bit at.
+                        let bits = cmp_operand_bits(*kind, fn_type_info.get_value_type(*a));
                         let a = &scope[a];
                         let b = &scope[b];
-                        let stripped = lhs_type.strip_witness();
-                        scope.insert(
-                            *r,
-                            match cmp_kind {
-                                CmpKind::Eq => a.eq(b, ctx),
-                                CmpKind::Lt => match &stripped.expr {
-                                    TypeExpr::I(bits) => a.slt(b, *bits, ctx),
-                                    _ => a.ult(b, ctx),
-                                },
-                            },
-                        );
+                        scope.insert(*r, a.cmp(b, *kind, bits, ctx));
                     }
                     OpCode::BinaryArithOp {
                         kind: binary_arith_op_kind,
@@ -561,10 +584,10 @@ impl SymbolicExecutor {
                         lhs: a,
                         rhs: b,
                     } => {
-                        let lhs_type = fn_type_info.get_value_type(*a);
+                        let bits = cmp_operand_bits(*kind, fn_type_info.get_value_type(*a));
                         let a = &scope[a];
                         let b = &scope[b];
-                        V::assert_cmp(*kind, a, b, lhs_type, ctx)?;
+                        V::assert_cmp(*kind, a, b, bits, ctx)?;
                     }
                     OpCode::MemOp { kind, value } => {
                         let value = &scope[value];
@@ -793,8 +816,7 @@ where
     V: Value<Ctx>,
 {
     match constant {
-        Constant::U(size, val) => V::of_u(*size, *val, ctx),
-        Constant::I(size, val) => V::of_i(*size, *val, ctx),
+        Constant::Int(size, val) => V::of_int(*size, *val, ctx),
         Constant::Field(val) => V::of_field(*val, ctx),
         Constant::FnPtr(_) => {
             todo!("FnPtrConst in symbolic executor");

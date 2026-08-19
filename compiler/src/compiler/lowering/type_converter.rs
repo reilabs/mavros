@@ -19,14 +19,14 @@ impl TypeConverter {
             NoirType::Field => Type::field(),
             NoirType::Bool => Type::bool(),
             NoirType::Integer(signedness, bit_size) => match signedness {
-                Signedness::Unsigned => Type::u(bit_size.bit_size() as usize),
+                Signedness::Unsigned => Type::int(bit_size.bit_size() as usize),
                 Signedness::Signed => {
                     let bits = bit_size.bit_size() as usize;
                     assert!(
                         bits <= MAX_SUPPORTED_SIGNED_BITS,
                         "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
                     );
-                    Type::i(bits)
+                    Type::int(bits)
                 }
             },
             NoirType::Unit => {
@@ -53,12 +53,12 @@ impl TypeConverter {
             NoirType::Function(_, _, _, _) => Type::function(),
             NoirType::String(len) => {
                 // str<N>: N is UTF-8 byte count, represented as Array(U(8), N)
-                Type::u(8).array_of(*len as usize)
+                Type::int(8).array_of(*len as usize)
             }
             NoirType::FmtString(len, captures_type) => {
                 // fmtstr<N, T>: N is codepoint count, represented as
                 // Tuple(Array(U(32), N), ...T_fields)
-                let codepoints_array = Type::u(32).array_of(*len as usize);
+                let codepoints_array = Type::int(32).array_of(*len as usize);
                 let capture_fields = match captures_type.as_ref() {
                     NoirType::Tuple(fields) => fields
                         .iter()

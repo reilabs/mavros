@@ -49,8 +49,8 @@ impl InstructionLoweringRule for LowerSliceInsert {
             build_insert_bounds_assert(b, *slice, *index, &index_ty);
         b.emit_guarded(guard, assert);
 
-        let zero = b.u_const(32, 0);
-        let one = b.u_const(32, 1);
+        let zero = b.int_const(32, 0);
+        let one = b.int_const(32, 1);
 
         let empty = b.mk_seq(vec![], SequenceTargetType::Slice, sel_elem_ty.clone());
         let value_v = *value;
@@ -60,11 +60,11 @@ impl InstructionLoweringRule for LowerSliceInsert {
         let index_is_witness = index_ty.is_witness_of();
         let rebuilt = b.build_slice_extend_loop(new_len, (empty, acc_slice_ty), move |b, i| {
             // `i - 1` computed as `i - (i > 0)`
-            let i_is_positive = b.lt(zero, i);
-            let dec = b.cast_to(CastTarget::U(32), i_is_positive);
-            let prev = b.sub(i, dec);
+            let i_is_positive = b.ult(zero, i);
+            let dec = b.cast_to(CastTarget::Int(32), i_is_positive);
+            let prev = b.usub(i, dec);
             let i_cmp = b.widen_u(i, 32, cmp_bits);
-            let below = b.lt(i_cmp, idx_cmp);
+            let below = b.ult(i_cmp, idx_cmp);
             let at = b.eq(i_cmp, idx_cmp);
             if index_is_witness {
                 let cur_val = b.array_get(grown, i);
@@ -73,15 +73,15 @@ impl InstructionLoweringRule for LowerSliceInsert {
                 select_leaves(b, below, cur_val, temp, &sel_elem_ty)
             } else {
                 // Multiplexer
-                let below32 = b.cast_to(CastTarget::U(32), below);
-                let at32 = b.cast_to(CastTarget::U(32), at);
-                let tempsum = b.add(below32, at32);
-                let above32 = b.sub(one, tempsum);
-                let t1 = b.mul(below32, i);
-                let t2 = b.mul(at32, len);
-                let t3 = b.mul(above32, prev);
-                let temp = b.add(t1, t2);
-                let src = b.add(temp, t3);
+                let below32 = b.cast_to(CastTarget::Int(32), below);
+                let at32 = b.cast_to(CastTarget::Int(32), at);
+                let tempsum = b.uadd(below32, at32);
+                let above32 = b.usub(one, tempsum);
+                let t1 = b.umul(below32, i);
+                let t2 = b.umul(at32, len);
+                let t3 = b.umul(above32, prev);
+                let temp = b.uadd(t1, t2);
+                let src = b.uadd(temp, t3);
                 b.array_get(grown, src)
             }
         });
@@ -127,11 +127,11 @@ impl InstructionLoweringRule for LowerSliceRemove {
             build_remove_bounds_assert(b, *slice, *index, &index_ty);
         b.emit_guarded(guard, assert);
 
-        let zero = b.u_const(32, 0);
-        let one = b.u_const(32, 1);
-        let nonempty = b.lt(zero, len);
-        let nonempty32 = b.cast_to(CastTarget::U(32), nonempty);
-        let new_len = b.sub(len, nonempty32);
+        let zero = b.int_const(32, 0);
+        let one = b.int_const(32, 1);
+        let nonempty = b.ult(zero, len);
+        let nonempty32 = b.cast_to(CastTarget::Int(32), nonempty);
+        let new_len = b.usub(len, nonempty32);
 
         b.emit_guarded(
             guard,
@@ -148,17 +148,17 @@ impl InstructionLoweringRule for LowerSliceRemove {
         let index_is_witness = index_ty.is_witness_of();
         let rebuilt = b.build_slice_extend_loop(new_len, (empty, acc_slice_ty), move |b, i| {
             let cmp_i = b.widen_u(i, 32, cmp_bits);
-            let below = b.lt(cmp_i, idx_cmp);
+            let below = b.ult(cmp_i, idx_cmp);
             if index_is_witness {
-                let next = b.add(i, one);
+                let next = b.uadd(i, one);
                 let cur_val = b.array_get(slice_v, i);
                 let next_val = b.array_get(slice_v, next);
                 select_leaves(b, below, cur_val, next_val, &sel_elem_ty)
             } else {
                 // Multiplexer
-                let below32 = b.cast_to(CastTarget::U(32), below);
-                let not_below = b.sub(one, below32);
-                let src = b.add(i, not_below);
+                let below32 = b.cast_to(CastTarget::Int(32), below);
+                let not_below = b.usub(one, below32);
+                let src = b.uadd(i, not_below);
                 b.array_get(slice_v, src)
             }
         });

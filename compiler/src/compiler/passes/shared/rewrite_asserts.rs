@@ -3,7 +3,7 @@
 //!
 //! Both passes walk every function and replace each `Assert` over a comparison / `u1`-`And` with a
 //! specialized chain of smaller asserts (`AssertCmp{Eq}`, `AssertCmp{Lt}`, or one assert per `And`
-//! operand). They differ in exactly one place: how an *equality* is emitted. `NormalizeAsserts`
+//! operand). They differ in exactly one place: how an _equality_ is emitted. `NormalizeAsserts`
 //! emits a witness-agnostic `AssertCmp{Eq}` (safe before witness typing); `SimplifyAsserts` may
 //! lower a `Field`-mul equality to the R1CS-native `AssertR1C`. That single difference is injected
 //! as the `emit_eq` closure, so the traversal and the recursive lowering shape live here once.
@@ -25,7 +25,7 @@ use crate::{
 /// Rewrite the asserts of every function in `ssa`.
 ///
 /// Every `Assert{value}` is lowered through [`lower_assert`] (using `emit_eq` for an equality).
-/// When `lower_assert_cmp_eq` is set, an existing `AssertCmp{Eq}` instruction is *also* lowered
+/// When `lower_assert_cmp_eq` is set, an existing `AssertCmp{Eq}` instruction is _also_ lowered
 /// through `emit_eq` — this is what lets `SimplifyAsserts` turn an already-normalized equality into
 /// `AssertR1C`, while `NormalizeAsserts` (which clears the flag) leaves existing `AssertCmp`s
 /// untouched.
@@ -110,13 +110,14 @@ fn lower_assert(
             ..
         }) => emit_eq(*lhs, *rhs, defs, function_type_info),
 
+        // The assertion inherits the comparison's own sign: `assert(a s< b)` must stay signed.
         Some(OpCode::Cmp {
-            kind: CmpKind::Lt,
+            kind: kind @ (CmpKind::ULt | CmpKind::SLt),
             lhs,
             rhs,
             ..
         }) => vec![OpCode::AssertCmp {
-            kind: CmpKind::Lt,
+            kind: *kind,
             lhs: *lhs,
             rhs: *rhs,
         }],
@@ -129,7 +130,7 @@ fn lower_assert(
         }) => {
             let result_type = function_type_info.get_value_type(*result);
             match result_type.strip_witness().expr {
-                TypeExpr::U(1) => {
+                TypeExpr::Int(1) => {
                     let mut out = lower_assert(*lhs, defs, function_type_info, emit_eq);
                     out.extend(lower_assert(*rhs, defs, function_type_info, emit_eq));
                     out

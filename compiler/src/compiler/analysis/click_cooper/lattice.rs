@@ -6,8 +6,8 @@ use mavros_artifacts::FieldConfig;
 
 use crate::compiler::{
     ssa::hlssa::{
-        BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, MAX_SUPPORTED_SIGNED_BITS,
-        SliceOpDir, Type,
+        ArithGroup, BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant,
+        MAX_SUPPORTED_SIGNED_BITS, SliceOpDir, Type,
     },
     util::{bit_mask, decode_signed, encode_signed, fits_signed},
 };
@@ -15,7 +15,7 @@ use crate::compiler::{
 // CONSTNESS
 // ================================================================================================
 
-/// A value's *constness*: where it sits in the constant-propagation lattice.
+/// A value's _constness_: where it sits in the constant-propagation lattice.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Constness {
     /// Not (yet) known to be reachable with any value.
@@ -47,13 +47,9 @@ pub(crate) fn const_join(a: Constness, b: Constness) -> Constness {
 
 pub(crate) fn const_bool(c: &Constant) -> Option<bool> {
     match c {
-        Constant::U(1, 0) => Some(false),
-        Constant::U(1, 1) => Some(true),
-        Constant::U(..)
-        | Constant::I(..)
-        | Constant::Field(_)
-        | Constant::FnPtr(_)
-        | Constant::Blob(_) => None,
+        Constant::Int(1, 0) => Some(false),
+        Constant::Int(1, 1) => Some(true),
+        Constant::Int(..) | Constant::Field(_) | Constant::FnPtr(_) | Constant::Blob(_) => None,
     }
 }
 
@@ -65,7 +61,7 @@ pub(crate) fn bool_constant(value: bool) -> Arc<Constant> {
     static FALSE: OnceLock<Arc<Constant>> = OnceLock::new();
     static TRUE: OnceLock<Arc<Constant>> = OnceLock::new();
     let slot = if value { &TRUE } else { &FALSE };
-    slot.get_or_init(|| Arc::new(Constant::U(1, value as u128)))
+    slot.get_or_init(|| Arc::new(Constant::Int(1, value as u128)))
         .clone()
 }
 
@@ -74,8 +70,8 @@ pub(crate) fn bool_constant(value: bool) -> Arc<Constant> {
 /// Integer results must fit the operand width: an overflowing pure op is an erroneous evaluation
 /// with a backend-specific residue, so an overflowing fold is refused rather than guessed at.
 ///
-/// `Shl` is the exception, because for it overflow is not an error. A left shift *wraps* — Noir
-/// reports a runtime error only when the *amount* reaches the width — so it folds to the truncated
+/// `Shl` is the exception, because for it overflow is not an error. A left shift _wraps_ — Noir
+/// reports a runtime error only when the _amount_ reaches the width — so it folds to the truncated
 /// value rather than declining, agreeing with every backend and with the witness lowering in
 /// `witness_bitwise::wrap_shifted_product`.
 pub(crate) fn eval_binary(
@@ -84,176 +80,193 @@ pub(crate) fn eval_binary(
     b: &Constant,
     field: FieldConfig,
 ) -> Option<Constant> {
-    use BinaryArithOpKind::*;
+    use ArithGroup::*;
+
+    let group = kind.group();
+
     match (a, b) {
-        (Constant::U(s1, x), Constant::U(s2, y)) => {
-            match kind {
-                // Shifts are the only ops with legitimately mixed operand widths (the amount is
-                // typically a narrow integer), but the type analysis types the result as
-                // `U(max(s1, s2))`. A fold to a `U(s1)` constant is therefore only width-preserving
-                // when the amount is no wider than the value; refuse the degenerate wider-amount
-                // case rather than silently changing the result's width.
-                Shl | Shr => {
-                    if s2 > s1 {
-                        return None;
-                    }
-                }
-                Add | Sub | Mul | Div | Mod | And | Or | Xor => {
-                    if s1 != s2 {
-                        return None;
-                    }
-                }
-            }
-
-            let s = *s1;
-            let v = match kind {
-                Add => x.checked_add(*y)?,
-                Sub => x.checked_sub(*y)?,
-                Mul => x.checked_mul(*y)?,
-                Div => {
-                    if *y == 0 {
-                        return None;
-                    }
-                    x / y
-                }
-                Mod => {
-                    if *y == 0 {
-                        return None;
-                    }
-                    x % y
-                }
-                And => x & y,
-                Or => x | y,
-                Xor => x ^ y,
-                Shl | Shr => {
-                    if *y >= s as u128 {
-                        return None;
-                    }
-                    match kind {
-                        // Truncated, not refused: the bits pushed off the top are discarded.
-                        Shl => x.wrapping_shl(*y as u32) & bit_mask(s),
-                        Shr => x >> (*y as u32),
-                        Add | Sub | Mul | Div | Mod | And | Or | Xor => unreachable!(),
-                    }
-                }
-            };
-
-            if v > bit_mask(s) {
-                return None;
-            }
-            Some(Constant::U(s, v))
-        }
-        (Constant::I(s1, x), Constant::I(s2, y)) => {
-            if s1 != s2 {
-                return None;
-            }
-            let s = *s1;
-            if s == 0 || s > MAX_SUPPORTED_SIGNED_BITS {
-                return None;
-            }
-            match kind {
-                And => Some(Constant::I(s, x & y)),
-                Or => Some(Constant::I(s, x | y)),
-                Xor => Some(Constant::I(s, x ^ y)),
-                Add | Sub | Mul | Div | Mod => {
-                    let xa = decode_signed(s, *x);
-                    let ya = decode_signed(s, *y);
-                    let v = match kind {
-                        Add => xa.checked_add(ya)?,
-                        Sub => xa.checked_sub(ya)?,
-                        Mul => xa.checked_mul(ya)?,
-                        // `INT_MIN / -1` overflows: the mathematical quotient is one past the
-                        // top of the type. `INT_MIN % -1` is defined in terms of that same
-                        // quotient, so it is equally undefined even though the remainder it
-                        // would produce (0) is perfectly representable — which is exactly why
-                        // the `fits_signed` check below catches the division but not the
-                        // remainder. Noir rejects both, so neither may fold.
-                        Div | Mod if ya == 0 || (ya == -1 && xa == -(1i128 << (s - 1))) => {
-                            return None;
-                        }
-                        Div => xa.checked_div(ya)?,
-                        Mod => xa.checked_rem(ya)?,
-                        And | Or | Xor | Shl | Shr => unreachable!(),
-                    };
-                    if !fits_signed(s, v) {
-                        return None;
-                    }
-                    Some(Constant::I(s, encode_signed(s, v)))
-                }
-                Shl | Shr => {
-                    let ya = decode_signed(s, *y);
-
-                    // Mirror the unsigned arm: only fold an unambiguously in-range amount.
-                    // Out-of-range shifts are a runtime error in Noir, and the implementations
-                    // that do evaluate them disagree — the backends mask the count to `bits - 1`
-                    // while the cost interpreter saturates to `0`/`-1`. Declining to fold keeps
-                    // this analysis out of that argument entirely. `ya` is decoded, so a shift
-                    // amount whose raw bits set the sign bit reads negative and is refused here
-                    // rather than wrapping into a plausible-looking small shift.
-                    if ya < 0 || ya >= s as i128 {
-                        return None;
-                    }
-
-                    match kind {
-                        // Arithmetic: the decoded value sign-fills as it shifts. It cannot overflow
-                        // as the magnitude only ever shrinks, so it always folds.
-                        Shr => {
-                            let v = decode_signed(s, *x) >> ya;
-                            debug_assert!(fits_signed(s, v));
-                            Some(Constant::I(s, encode_signed(s, v)))
-                        }
-                        // A left shift is the same map on the raw bits whatever the sign, and it
-                        // truncates rather than failing — so this stays on the encoded value and
-                        // masks, exactly as the signed arm of `hlssa_to_r1cs::arith` does. The
-                        // result can change sign (`i8 64 << 1` is `-128`), which is why decoding
-                        // first and asking whether the mathematical product fits would be wrong.
-                        Shl => Some(Constant::I(s, x.wrapping_shl(ya as u32) & bit_mask(s))),
-                        Add | Sub | Mul | Div | Mod | And | Or | Xor => unreachable!(),
-                    }
-                }
+        // A `Constant::Int` is a raw bit pattern and says nothing about how to read itself; the
+        // _operation_ decides, and these two folds are the two readings of the same patterns.
+        (Constant::Int(s1, x), Constant::Int(s2, y)) => {
+            if kind.is_signed() {
+                fold_signed(group, *s1, *x, *s2, *y)
+            } else {
+                fold_unsigned(group, *s1, *x, *s2, *y)
             }
         }
         // FIELD-ASSUMPTION: L4-eval
-        (Constant::Field(x), Constant::Field(y)) => match kind {
-            Add => Some(Constant::Field(*x + *y)),
-            Sub => Some(Constant::Field(*x - *y)),
-            Mul => Some(Constant::Field(*x * *y)),
-            Div => {
-                if *y == field.zero() {
-                    None
-                } else {
-                    // FIELD-ASSUMPTION: L4-inverse
-                    Some(Constant::Field(*x / *y))
+        (Constant::Field(x), Constant::Field(y)) => {
+            match group {
+                Add => Some(Constant::Field(*x + *y)),
+                Sub => Some(Constant::Field(*x - *y)),
+                Mul => Some(Constant::Field(*x * *y)),
+                Div => {
+                    if *y == field.zero() {
+                        None
+                    } else {
+                        // FIELD-ASSUMPTION: L4-inverse
+                        Some(Constant::Field(*x / *y))
+                    }
                 }
+                Rem | And | Or | Xor | Shl | Shr => None,
             }
-            Mod | And | Or | Xor | Shl | Shr => None,
-        },
-
+        }
         // Mixed-kind pairs and non-scalar constants do not fold.
         (
-            Constant::U(..)
-            | Constant::I(..)
-            | Constant::Field(_)
-            | Constant::FnPtr(_)
-            | Constant::Blob(_),
-            Constant::U(..)
-            | Constant::I(..)
-            | Constant::Field(_)
-            | Constant::FnPtr(_)
-            | Constant::Blob(_),
+            Constant::Int(..) | Constant::Field(_) | Constant::FnPtr(_) | Constant::Blob(_),
+            Constant::Int(..) | Constant::Field(_) | Constant::FnPtr(_) | Constant::Blob(_),
         ) => None,
     }
 }
 
+/// The **unsigned** reading of a pair of raw patterns.
+fn fold_unsigned(group: ArithGroup, s1: usize, x: u128, s2: usize, y: u128) -> Option<Constant> {
+    use ArithGroup::*;
+
+    match group {
+        // Shifts are the only ops with legitimately mixed operand widths (the amount is
+        // typically a narrow integer), but the type analysis types the result as
+        // `int{max(s1, s2)}`. A fold to an `s1`-wide constant is therefore only width-preserving
+        // when the amount is no wider than the value; refuse the degenerate wider-amount
+        // case rather than silently changing the result's width.
+        Shl | Shr => {
+            if s2 > s1 {
+                return None;
+            }
+        }
+        Add | Sub | Mul | Div | Rem | And | Or | Xor => {
+            if s1 != s2 {
+                return None;
+            }
+        }
+    }
+
+    let s = s1;
+    let v = match group {
+        Add => x.checked_add(y)?,
+        Sub => x.checked_sub(y)?,
+        Mul => x.checked_mul(y)?,
+        Div => {
+            if y == 0 {
+                return None;
+            }
+            x / y
+        }
+        Rem => {
+            if y == 0 {
+                return None;
+            }
+            x % y
+        }
+        And => x & y,
+        Or => x | y,
+        Xor => x ^ y,
+        Shl | Shr => {
+            if y >= s as u128 {
+                return None;
+            }
+            match group {
+                // Truncated, not refused: the bits pushed off the top are discarded.
+                Shl => x.wrapping_shl(y as u32) & bit_mask(s),
+                Shr => x >> (y as u32),
+                Add | Sub | Mul | Div | Rem | And | Or | Xor => unreachable!(),
+            }
+        }
+    };
+
+    if v > bit_mask(s) {
+        return None;
+    }
+    Some(Constant::Int(s, v))
+}
+
+/// The **signed** reading of a pair of raw patterns.
+fn fold_signed(group: ArithGroup, s1: usize, x: u128, s2: usize, y: u128) -> Option<Constant> {
+    use ArithGroup::*;
+
+    if s1 != s2 {
+        return None;
+    }
+    let s = s1;
+    if s == 0 || s > MAX_SUPPORTED_SIGNED_BITS {
+        return None;
+    }
+    match group {
+        And => Some(Constant::Int(s, x & y)),
+        Or => Some(Constant::Int(s, x | y)),
+        Xor => Some(Constant::Int(s, x ^ y)),
+        Add | Sub | Mul | Div | Rem => {
+            let xa = decode_signed(s, x);
+            let ya = decode_signed(s, y);
+            let v = match group {
+                Add => xa.checked_add(ya)?,
+                Sub => xa.checked_sub(ya)?,
+                Mul => xa.checked_mul(ya)?,
+                // `INT_MIN / -1` overflows: the mathematical quotient is one past the
+                // top of the type. `INT_MIN % -1` is defined in terms of that same
+                // quotient, so it is equally undefined even though the remainder it
+                // would produce (0) is perfectly representable — which is exactly why
+                // the `fits_signed` check below catches the division but not the
+                // remainder. Noir rejects both, so neither may fold.
+                Div | Rem if ya == 0 || (ya == -1 && xa == -(1i128 << (s - 1))) => {
+                    return None;
+                }
+                Div => xa.checked_div(ya)?,
+                Rem => xa.checked_rem(ya)?,
+                And | Or | Xor | Shl | Shr => unreachable!(),
+            };
+            if !fits_signed(s, v) {
+                return None;
+            }
+            Some(Constant::Int(s, encode_signed(s, v)))
+        }
+        Shl | Shr => {
+            let ya = decode_signed(s, y);
+
+            // Mirror the unsigned fold: only fold an unambiguously in-range amount.
+            // Out-of-range shifts are a runtime error in Noir, and the implementations
+            // that do evaluate them disagree — the backends mask the count to `bits - 1`
+            // while the cost interpreter saturates to `0`/`-1`. Declining to fold keeps
+            // this analysis out of that argument entirely. `ya` is decoded, so a shift
+            // amount whose raw bits set the sign bit reads negative and is refused here
+            // rather than wrapping into a plausible-looking small shift.
+            if ya < 0 || ya >= s as i128 {
+                return None;
+            }
+
+            match group {
+                // Arithmetic: the decoded value sign-fills as it shifts. It cannot overflow
+                // as the magnitude only ever shrinks, so it always folds.
+                Shr => {
+                    let v = decode_signed(s, x) >> ya;
+                    debug_assert!(fits_signed(s, v));
+                    Some(Constant::Int(s, encode_signed(s, v)))
+                }
+                // A left shift is the same map on the raw bits whatever the sign, and it
+                // truncates rather than failing — so this stays on the encoded value and
+                // masks, exactly as the signed arm of `hlssa_to_r1cs::arith` does. The
+                // result can change sign (`i8 64 << 1` is `-128`), which is why decoding
+                // first and asking whether the mathematical product fits would be wrong.
+                Shl => Some(Constant::Int(s, x.wrapping_shl(ya as u32) & bit_mask(s))),
+                Add | Sub | Mul | Div | Rem | And | Or | Xor => unreachable!(),
+            }
+        }
+    }
+}
+
 /// Folds a constant comparison operation.
+///
+/// As in [`eval_binary`], the _comparison_ decides how the patterns are read: `ULt` compares them
+/// as magnitudes and `SLt` as two's complement. `Eq` compares the patterns themselves, so it needs
+/// no reading at all — only equal widths.
 pub(crate) fn eval_cmp(kind: CmpKind, a: &Constant, b: &Constant) -> Option<Constant> {
-    let res = |v: bool| Some(Constant::U(1, v as u128));
+    let res = |v: bool| Some(Constant::Int(1, v as u128));
+
     match (kind, a, b) {
-        (CmpKind::Eq, Constant::U(s1, x), Constant::U(s2, y)) if s1 == s2 => res(x == y),
-        (CmpKind::Eq, Constant::I(s1, x), Constant::I(s2, y)) if s1 == s2 => res(x == y),
+        (CmpKind::Eq, Constant::Int(s1, x), Constant::Int(s2, y)) if s1 == s2 => res(x == y),
         (CmpKind::Eq, Constant::Field(x), Constant::Field(y)) => res(x == y),
-        (CmpKind::Lt, Constant::U(s1, x), Constant::U(s2, y)) if s1 == s2 => res(x < y),
-        (CmpKind::Lt, Constant::I(s1, x), Constant::I(s2, y))
+        (CmpKind::ULt, Constant::Int(s1, x), Constant::Int(s2, y)) if s1 == s2 => res(x < y),
+        (CmpKind::SLt, Constant::Int(s1, x), Constant::Int(s2, y))
             if s1 == s2 && *s1 >= 1 && *s1 <= MAX_SUPPORTED_SIGNED_BITS =>
         {
             res(decode_signed(*s1, *x) < decode_signed(*s1, *y))
@@ -261,17 +274,9 @@ pub(crate) fn eval_cmp(kind: CmpKind, a: &Constant, b: &Constant) -> Option<Cons
 
         // Width-mismatched, mixed-kind, and non-scalar comparisons do not fold
         (
-            CmpKind::Eq | CmpKind::Lt,
-            Constant::U(..)
-            | Constant::I(..)
-            | Constant::Field(_)
-            | Constant::FnPtr(_)
-            | Constant::Blob(_),
-            Constant::U(..)
-            | Constant::I(..)
-            | Constant::Field(_)
-            | Constant::FnPtr(_)
-            | Constant::Blob(_),
+            CmpKind::Eq | CmpKind::ULt | CmpKind::SLt,
+            Constant::Int(..) | Constant::Field(_) | Constant::FnPtr(_) | Constant::Blob(_),
+            Constant::Int(..) | Constant::Field(_) | Constant::FnPtr(_) | Constant::Blob(_),
         ) => None,
     }
 }
@@ -290,17 +295,11 @@ pub(crate) fn eval_cast(target: &CastTarget, v: &Constant, field: FieldConfig) -
         | CastTarget::Map(_) => None,
         CastTarget::Field => match v {
             // FIELD-ASSUMPTION: L4-eval
-            Constant::U(_, x) | Constant::I(_, x) => Some(Constant::Field(field.constant(*x))),
+            Constant::Int(_, x) => Some(Constant::Field(field.constant(*x))),
             Constant::Field(_) => Some(v.clone()),
             Constant::FnPtr(_) | Constant::Blob(_) => None,
         },
-        CastTarget::U(n) => int_cast_bits(v, *n).map(|bits| Constant::U(*n, bits)),
-        CastTarget::I(n) => {
-            if *n > MAX_SUPPORTED_SIGNED_BITS {
-                return None;
-            }
-            int_cast_bits(v, *n).map(|bits| Constant::I(*n, bits))
-        }
+        CastTarget::Int(n) => int_cast_bits(v, *n).map(|bits| Constant::Int(*n, bits)),
     }
 }
 
@@ -309,7 +308,7 @@ pub(crate) fn eval_cast(target: &CastTarget, v: &Constant, field: FieldConfig) -
 fn int_cast_bits(v: &Constant, n: usize) -> Option<u128> {
     let mask = bit_mask(n);
     match v {
-        Constant::U(_, x) | Constant::I(_, x) => Some(x & mask),
+        Constant::Int(_, x) => Some(x & mask),
         Constant::Field(f) => {
             let limbs = f.into_bigint().0;
             let low = (limbs[0] as u128) | ((limbs[1] as u128) << 64);
@@ -332,8 +331,7 @@ pub(crate) fn eval_sext(v: &Constant, from_bits: usize, to_bits: usize) -> Optio
         }
     };
     match v {
-        Constant::U(_, x) => Some(Constant::U(to_bits, ext(*x))),
-        Constant::I(_, x) => Some(Constant::I(to_bits, ext(*x))),
+        Constant::Int(_, x) => Some(Constant::Int(to_bits, ext(*x))),
         Constant::Field(_) | Constant::FnPtr(_) | Constant::Blob(_) => None,
     }
 }
@@ -347,8 +345,7 @@ pub(crate) fn eval_bit_range(v: &Constant, offset: usize, width: usize) -> Optio
         return None;
     }
     match v {
-        Constant::U(s, x) => Some(Constant::U(*s, (x >> offset) & bit_mask(width))),
-        Constant::I(s, x) => Some(Constant::I(*s, (x >> offset) & bit_mask(width))),
+        Constant::Int(s, x) => Some(Constant::Int(*s, (x >> offset) & bit_mask(width))),
         Constant::Field(_) | Constant::FnPtr(_) | Constant::Blob(_) => None,
     }
 }
@@ -356,8 +353,7 @@ pub(crate) fn eval_bit_range(v: &Constant, offset: usize, width: usize) -> Optio
 /// Folds a constant binary negation.
 pub(crate) fn eval_not(v: &Constant) -> Option<Constant> {
     match v {
-        Constant::U(s, x) => Some(Constant::U(*s, !x & bit_mask(*s))),
-        Constant::I(s, x) => Some(Constant::I(*s, !x & bit_mask(*s))),
+        Constant::Int(s, x) => Some(Constant::Int(*s, !x & bit_mask(*s))),
         Constant::Field(_) | Constant::FnPtr(_) | Constant::Blob(_) => None,
     }
 }
@@ -376,7 +372,7 @@ const AGGREGATE_FOLD_CAP: usize = 1 << 12;
 /// Reads a constant integer index as a `usize`, or `None` if it is non-integer or too large.
 fn const_index(index: &Constant) -> Option<usize> {
     match index {
-        Constant::U(_, x) | Constant::I(_, x) => usize::try_from(*x).ok(),
+        Constant::Int(_, x) => usize::try_from(*x).ok(),
         Constant::Field(_) | Constant::FnPtr(_) | Constant::Blob(_) => None,
     }
 }
@@ -418,7 +414,7 @@ pub(crate) fn eval_slice_len(slice: &Constant) -> Option<Constant> {
     };
 
     // The result is always a u32 according to the type system.
-    Some(Constant::U(32, blob.len() as u128))
+    Some(Constant::Int(32, blob.len() as u128))
 }
 
 /// Folds a `SlicePush`: a constant aggregate extended by `values` at the front or back.
@@ -523,14 +519,14 @@ mod tests {
 
     /// An `i8` constant, written as the value it denotes rather than its raw bits.
     fn i8c(v: i128) -> Constant {
-        Constant::I(8, encode_signed(8, v))
+        Constant::Int(8, encode_signed(8, v))
     }
 
     /// Fold two `i8` constants, decoding the result back to the value it denotes.
     /// `None` means the fold was refused.
     fn fold(kind: BinaryArithOpKind, a: i128, b: i128) -> Option<i128> {
         match eval_binary(kind, &i8c(a), &i8c(b), FieldConfig::bn254()) {
-            Some(Constant::I(s, raw)) => Some(decode_signed(s, raw)),
+            Some(Constant::Int(s, raw)) => Some(decode_signed(s, raw)),
             Some(other) => panic!("expected a signed constant, got {other:?}"),
             None => None,
         }
@@ -538,91 +534,110 @@ mod tests {
 
     #[test]
     fn signed_shr_sign_fills() {
-        use BinaryArithOpKind::Shr;
-        assert_eq!(fold(Shr, -8, 1), Some(-4));
-        assert_eq!(fold(Shr, -8, 2), Some(-2));
-        assert_eq!(fold(Shr, -8, 3), Some(-1));
+        use BinaryArithOpKind::SShr;
+        assert_eq!(fold(SShr, -8, 1), Some(-4));
+        assert_eq!(fold(SShr, -8, 2), Some(-2));
+        assert_eq!(fold(SShr, -8, 3), Some(-1));
         // Sign-fill saturates at -1 however far it goes, within range.
-        assert_eq!(fold(Shr, -8, 7), Some(-1));
+        assert_eq!(fold(SShr, -8, 7), Some(-1));
         // -1 is all-ones, so it is a fixed point.
-        assert_eq!(fold(Shr, -1, 5), Some(-1));
+        assert_eq!(fold(SShr, -1, 5), Some(-1));
         // Non-negative values behave like a logical shift.
-        assert_eq!(fold(Shr, 8, 1), Some(4));
-        assert_eq!(fold(Shr, 0, 5), Some(0));
+        assert_eq!(fold(SShr, 8, 1), Some(4));
+        assert_eq!(fold(SShr, 0, 5), Some(0));
         // Rounds toward negative infinity, unlike signed division which truncates
         // toward zero: -7 >> 1 is -4 but -7 / 2 is -3.
-        assert_eq!(fold(Shr, -7, 1), Some(-4));
-        assert_eq!(fold(BinaryArithOpKind::Div, -7, 2), Some(-3));
+        assert_eq!(fold(SShr, -7, 1), Some(-4));
+        assert_eq!(fold(BinaryArithOpKind::SDiv, -7, 2), Some(-3));
     }
 
     #[test]
     fn shifts_refuse_out_of_range_amounts() {
-        use BinaryArithOpKind::{Shl, Shr};
+        use BinaryArithOpKind::{SShl, SShr};
         // At or past the width.
-        assert_eq!(fold(Shr, -8, 8), None);
-        assert_eq!(fold(Shl, 1, 8), None);
+        assert_eq!(fold(SShr, -8, 8), None);
+        assert_eq!(fold(SShl, 1, 8), None);
         // A negative amount. This is the case that matters: as raw bits `-1` is
         // 0xFF, which would read as a shift by 255 if it were not decoded, and
         // masking that to the width would produce a plausible-looking shift by 7.
-        assert_eq!(fold(Shr, -8, -1), None);
-        assert_eq!(fold(Shl, 1, -1), None);
+        assert_eq!(fold(SShr, -8, -1), None);
+        assert_eq!(fold(SShl, 1, -1), None);
     }
 
     #[test]
     fn signed_shl_wraps_rather_than_refusing() {
-        use BinaryArithOpKind::Shl;
-        assert_eq!(fold(Shl, -8, 1), Some(-16));
-        assert_eq!(fold(Shl, 1, 6), Some(64));
+        use BinaryArithOpKind::SShl;
+        assert_eq!(fold(SShl, -8, 1), Some(-16));
+        assert_eq!(fold(SShl, 1, 6), Some(64));
         // 1 << 7 is 128, one past `i8::MAX`, so it wraps to `i8::MIN`. Two positive operands
         // producing a negative result is the case a `fits_signed` gate used to refuse.
-        assert_eq!(fold(Shl, 1, 7), Some(-128));
-        assert_eq!(fold(Shl, 2, 6), Some(-128));
+        assert_eq!(fold(SShl, 1, 7), Some(-128));
+        assert_eq!(fold(SShl, 2, 6), Some(-128));
         // Everything shifted out: `-16` is 0xF0, and 0xF0 << 4 keeps nothing.
-        assert_eq!(fold(Shl, -16, 4), Some(0));
-        assert_eq!(fold(Shl, -16, 3), Some(-128));
+        assert_eq!(fold(SShl, -16, 4), Some(0));
+        assert_eq!(fold(SShl, -16, 3), Some(-128));
         // These two are pinned against Noir's own execution by `noir_tests/signed_shift`
         // (`e << 4 == 0` and `e << 3 == -128` for `e: i8 = -16`).
     }
 
     #[test]
     fn unsigned_shl_wraps_rather_than_refusing() {
-        use BinaryArithOpKind::Shl;
+        use BinaryArithOpKind::UShl;
         let fold_u8 = |a: u128, b: u128| {
             eval_binary(
-                Shl,
-                &Constant::U(8, a),
-                &Constant::U(8, b),
+                UShl,
+                &Constant::Int(8, a),
+                &Constant::Int(8, b),
                 FieldConfig::bn254(),
             )
         };
-        assert_eq!(fold_u8(40, 1), Some(Constant::U(8, 80)));
+        assert_eq!(fold_u8(40, 1), Some(Constant::Int(8, 80)));
         // 40 << 3 is 320, which keeps only its low eight bits.
-        assert_eq!(fold_u8(40, 3), Some(Constant::U(8, 64)));
-        assert_eq!(fold_u8(255, 7), Some(Constant::U(8, 128)));
+        assert_eq!(fold_u8(40, 3), Some(Constant::Int(8, 64)));
+        assert_eq!(fold_u8(255, 7), Some(Constant::Int(8, 128)));
         // The amount is still a hard refusal.
         assert_eq!(fold_u8(1, 8), None);
     }
 
     #[test]
     fn int_min_over_minus_one_never_folds() {
-        use BinaryArithOpKind::{Div, Mod};
+        use BinaryArithOpKind::{SDiv, SRem};
         // The quotient overflows, and the remainder is defined in terms of it —
         // so neither may fold, even though the remainder itself would be 0.
-        assert_eq!(fold(Div, -128, -1), None);
-        assert_eq!(fold(Mod, -128, -1), None);
+        assert_eq!(fold(SDiv, -128, -1), None);
+        assert_eq!(fold(SRem, -128, -1), None);
         // The same operands are fine anywhere off that exact pair.
-        assert_eq!(fold(Div, -127, -1), Some(127));
-        assert_eq!(fold(Mod, -127, -1), Some(0));
-        assert_eq!(fold(Div, -128, 1), Some(-128));
-        assert_eq!(fold(Mod, -128, 2), Some(0));
+        assert_eq!(fold(SDiv, -127, -1), Some(127));
+        assert_eq!(fold(SRem, -127, -1), Some(0));
+        assert_eq!(fold(SDiv, -128, 1), Some(-128));
+        assert_eq!(fold(SRem, -128, 2), Some(0));
     }
 
     #[test]
     fn division_by_zero_never_folds() {
-        use BinaryArithOpKind::{Div, Mod};
-        assert_eq!(fold(Div, 5, 0), None);
-        assert_eq!(fold(Mod, 5, 0), None);
-        assert_eq!(fold(Div, -5, 0), None);
-        assert_eq!(fold(Mod, -5, 0), None);
+        use BinaryArithOpKind::{SDiv, SRem};
+        assert_eq!(fold(SDiv, 5, 0), None);
+        assert_eq!(fold(SRem, 5, 0), None);
+        assert_eq!(fold(SDiv, -5, 0), None);
+        assert_eq!(fold(SRem, -5, 0), None);
+    }
+    #[test]
+    fn one_pair_of_patterns_folds_the_way_the_operation_says() {
+        // A `Constant::Int` is a bit pattern with no reading attached, so the _only_ thing that can
+        // say how to fold a pair of them is the opcode. This pins that: identical operands, two
+        // opcodes, two different correct answers. It is also what makes the collapse safe -- while
+        // the tag existed, this pair was "mixed" and did not fold at all, which cost the constant
+        // propagation that collapses whole chains.
+        let f = FieldConfig::bn254();
+        let pair = |kind| eval_binary(kind, &Constant::Int(8, 0xFB), &Constant::Int(8, 0x02), f);
+        // 0xFB is -5 read as two's complement and 251 read as a magnitude.
+        // -5 / 2 == -2 (0xFE); 251 / 2 == 125 (0x7D).
+        assert_eq!(pair(BinaryArithOpKind::SDiv), Some(Constant::Int(8, 0xFE)));
+        assert_eq!(pair(BinaryArithOpKind::UDiv), Some(Constant::Int(8, 0x7D)));
+
+        // The same for a comparison: -5 < 2 but 251 > 2.
+        let cmp = |kind| eval_cmp(kind, &Constant::Int(8, 0xFB), &Constant::Int(8, 0x02));
+        assert_eq!(cmp(CmpKind::SLt), Some(Constant::Int(1, 1)));
+        assert_eq!(cmp(CmpKind::ULt), Some(Constant::Int(1, 0)));
     }
 }

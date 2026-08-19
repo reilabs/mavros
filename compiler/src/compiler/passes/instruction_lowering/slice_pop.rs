@@ -38,11 +38,11 @@ impl InstructionLoweringRule for LowerSlicePop {
         let (assert, len) = build_pop_bounds_assert(b, *slice);
         b.emit_guarded(guard, assert);
 
-        let zero = b.u_const(32, 0);
-        let one = b.u_const(32, 1);
-        let nonempty = b.lt(zero, len);
-        let nonempty32 = b.cast_to(CastTarget::U(32), nonempty);
-        let new_len = b.sub(len, nonempty32);
+        let zero = b.int_const(32, 0);
+        let one = b.int_const(32, 1);
+        let nonempty = b.ult(zero, len);
+        let nonempty32 = b.cast_to(CastTarget::Int(32), nonempty);
+        let new_len = b.usub(len, nonempty32);
         let elem_index = match dir {
             SliceOpDir::Back => new_len,
             SliceOpDir::Front => zero,
@@ -60,7 +60,7 @@ impl InstructionLoweringRule for LowerSlicePop {
         let slice_v = *slice;
         let front = matches!(dir, SliceOpDir::Front);
         let shrunk = b.build_slice_extend_loop(new_len, (empty, slice_ty), move |b, i| {
-            let src_i = if front { b.add(i, one) } else { i };
+            let src_i = if front { b.uadd(i, one) } else { i };
             b.array_get(slice_v, src_i)
         });
         b.emit(OpCode::Cast {

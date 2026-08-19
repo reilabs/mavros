@@ -42,7 +42,7 @@
 //! # Soundness
 //!
 //! Merging never changes behavior: a call to the deleted copy becomes a call to a function with
-//! an identical body, and the *call itself* is preserved, so per-call effects (witness minting,
+//! an identical body, and the _call itself_ is preserved, so per-call effects (witness minting,
 //! constraint emission, globals initialization) happen exactly as before. Entry points are
 //! externally invoked by id and are never deleted; they are also never used as a redirect _target_,
 //! because the LLVM/WASM backend gives entry points a distinct calling convention (declared
@@ -100,7 +100,7 @@ impl MergeIdenticalFunctions {
                 match c {
                     Constant::FnPtr(_) => true,
                     Constant::Blob(blob) => blob.elements.iter().any(contains_fn_ptr),
-                    Constant::U(..) | Constant::I(..) | Constant::Field(_) => false,
+                    Constant::Int(..) | Constant::Field(_) => false,
                 }
             }
             let mut has_fn_ptr = false;
@@ -168,7 +168,7 @@ impl MergeIdenticalFunctions {
         }
 
         // Per final group: entry points always survive on their own; every non-entry duplicate
-        // redirects to the smallest-id *non-entry* survivor and is deleted. An entry point is never
+        // redirects to the smallest-id _non-entry_ survivor and is deleted. An entry point is never
         // used as a redirect target — the LLVM/WASM backend compiles entries with a distinct
         // calling convention (declared `fn(VM*)`, parameters loaded from the public-input region
         // rather than passed as arguments), so an internal call into one would mismatch its
@@ -304,7 +304,7 @@ impl Canonicalizer<'_> {
 /// partition instead of comparing raw.
 ///
 /// Identity is decided by exact string equality of this serialization, which relies on `Debug` being
-/// injective over every opcode / type / source-location value that can appear: two *distinct* values
+/// injective over every opcode / type / source-location value that can appear: two _distinct_ values
 /// must never format to the same string, or two different functions would be merged (unsound). This
 /// holds today because value-carrying immediates (constants) appear here only as their raw const
 /// `ValueId`s, never as formatted values. A future opcode field or `Type` with a lossy `Debug` would
@@ -537,12 +537,12 @@ mod tests {
         let mut leaf_with_const = |name: &str, value: u128| {
             let fid = sb.ssa().add_function(name.to_string());
             sb.modify_function(fid, |fb| {
-                fb.function.add_return_type(Type::u(32));
+                fb.function.add_return_type(Type::int(32));
                 let entry = fb.function.get_entry_id();
                 let result = fb.fresh_value();
-                let c = fb.emit_const(Constant::U(32, value));
+                let c = fb.emit_const(Constant::Int(32, value));
                 let mut block = fb.test_block(entry);
-                let _x = block.add_parameter(Type::u(32));
+                let _x = block.add_parameter(Type::int(32));
                 block.emit_instruction(OpCode::Not { result, value: c });
                 block.terminate_return(vec![result]);
             });
@@ -811,7 +811,7 @@ mod tests {
                 fb.function.add_return_type(Type::field());
                 let entry = fb.function.get_entry_id();
                 let result = fb.fresh_value();
-                let condition = fb.emit_const(Constant::U(1, 1));
+                let condition = fb.emit_const(Constant::Int(1, 1));
                 let mut block = fb.test_block(entry);
                 let x = block.add_parameter(Type::field());
                 block.emit_instruction(OpCode::Guard {
@@ -863,7 +863,7 @@ mod tests {
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let result = fb.fresh_value();
-            let condition = fb.emit_const(Constant::U(1, 1));
+            let condition = fb.emit_const(Constant::Int(1, 1));
             let arg = fb.emit_const(Constant::Field(fb.field().constant(7u64)));
             let mut block = fb.test_block(entry);
             block.emit_instruction(OpCode::Guard {

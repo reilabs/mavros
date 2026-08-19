@@ -131,7 +131,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
     fnptr_entries.sort_by_key(|(vid, _)| vid.0);
     let mut fnptr_remap = ValueReplacements::new();
     for (fnptr_vid, fn_id) in &fnptr_entries {
-        let canon = ssa.add_const(Constant::U(32, fn_id.0 as u128));
+        let canon = ssa.add_const(Constant::Int(32, fn_id.0 as u128));
         fnptr_remap.insert(*fnptr_vid, canon);
     }
 
@@ -212,7 +212,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         }
     }
 
-    // 3c. Replace TypeExpr::Function → TypeExpr::U(32) everywhere
+    // 3c. Replace TypeExpr::Function → TypeExpr::Int(32) everywhere
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
     for fid in func_ids {
         let func = ssa.get_function_mut(fid);
@@ -263,11 +263,9 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                 contains_function(inner)
             }
             TypeExpr::Tuple(elems) => elems.iter().any(contains_function),
-            TypeExpr::Field
-            | TypeExpr::U(_)
-            | TypeExpr::I(_)
-            | TypeExpr::WitnessOf(_)
-            | TypeExpr::Blob(..) => false,
+            TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::WitnessOf(_) | TypeExpr::Blob(..) => {
+                false
+            }
         }
     }
 
@@ -576,7 +574,7 @@ fn build_dispatch_function(
         let mut forwarded_params: Vec<ValueId> = Vec::new();
         {
             let mut entry = b.block(entry_block);
-            fn_id_param = entry.add_parameter(Type::u32());
+            fn_id_param = entry.add_parameter(Type::int32());
             for param_type in param_types {
                 forwarded_params.push(entry.add_parameter(param_type.clone()));
             }
@@ -597,7 +595,7 @@ fn build_dispatch_function(
             let mut cb = b
                 .block(current_block)
                 .with_source_location(location.clone());
-            let const_val = cb.u_const(32, variant_id.0 as u128);
+            let const_val = cb.int_const(32, variant_id.0 as u128);
             cb.assert_eq(fn_id_param, const_val);
             let call_results = cb.call(variant_id, forwarded_params.clone(), return_types.len());
             cb.terminate_jmp(merge_block, call_results);
@@ -609,7 +607,7 @@ fn build_dispatch_function(
                     let mut cb = b
                         .block(current_block)
                         .with_source_location(location.clone());
-                    let const_val = cb.u_const(32, variant_id.0 as u128);
+                    let const_val = cb.int_const(32, variant_id.0 as u128);
                     cb.assert_eq(fn_id_param, const_val);
                     let call_results =
                         cb.call(variant_id, forwarded_params.clone(), return_types.len());
@@ -622,7 +620,7 @@ fn build_dispatch_function(
                         let mut cb = b
                             .block(current_block)
                             .with_source_location(location.clone());
-                        let const_val = cb.u_const(32, variant_id.0 as u128);
+                        let const_val = cb.int_const(32, variant_id.0 as u128);
                         let eq_result = cb.eq(fn_id_param, const_val);
                         cb.terminate_jmp_if(eq_result, call_block, next_check_block);
                     }
@@ -643,11 +641,11 @@ fn build_dispatch_function(
     dispatch_fn_id
 }
 
-/// Recursively replace `TypeExpr::Function` with `TypeExpr::U(32)` in a type.
+/// Recursively replace `TypeExpr::Function` with `TypeExpr::Int(32)` in a type.
 fn replace_function_type(typ: &mut Type) {
     match &mut typ.expr {
         TypeExpr::Function => {
-            typ.expr = TypeExpr::U(32);
+            typ.expr = TypeExpr::Int(32);
         }
         TypeExpr::Array(inner, _) => replace_function_type(inner),
         TypeExpr::Slice(inner) => replace_function_type(inner),
@@ -657,11 +655,7 @@ fn replace_function_type(typ: &mut Type) {
                 replace_function_type(elem);
             }
         }
-        TypeExpr::Field
-        | TypeExpr::U(_)
-        | TypeExpr::I(_)
-        | TypeExpr::WitnessOf(_)
-        | TypeExpr::Blob(..) => {}
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::WitnessOf(_) | TypeExpr::Blob(..) => {}
     }
 }
 

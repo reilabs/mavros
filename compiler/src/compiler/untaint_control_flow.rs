@@ -350,7 +350,7 @@ impl UntaintControlFlow {
             let id = ssa.fresh_value();
             function
                 .get_block_mut(entry_id)
-                .push_parameter(id, Type::witness_of(Type::u(1)));
+                .push_parameter(id, Type::witness_of(Type::int(1)));
             Some(id)
         } else {
             None
@@ -1050,7 +1050,7 @@ fn emit_merge_select(
             };
             let mut elems = Vec::with_capacity(*size);
             for i in 0..*size {
-                let idx = builder.u_const(32, i as u128);
+                let idx = builder.int_const(32, i as u128);
                 let lhs_elem = builder.array_get(lhs, idx);
                 let rhs_elem = builder.array_get(rhs, idx);
                 let selected = emit_merge_select(
@@ -1096,7 +1096,7 @@ fn emit_merge_select(
             });
             result
         }
-        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => {
+        TypeExpr::Field | TypeExpr::Int(_) => {
             let result = result.unwrap_or_else(|| builder.fresh_value());
             builder.push(OpCode::Select {
                 result,
@@ -1138,16 +1138,8 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
                 base
             }
         }
-        (TypeExpr::U(size), WitnessShape::Scalar(info)) => {
-            let base = Type::u(size);
-            if info.is_witness() {
-                Type::witness_of(base)
-            } else {
-                base
-            }
-        }
-        (TypeExpr::I(size), WitnessShape::Scalar(info)) => {
-            let base = Type::i(size);
+        (TypeExpr::Int(size), WitnessShape::Scalar(info)) => {
+            let base = Type::int(size);
             if info.is_witness() {
                 Type::witness_of(base)
             } else {

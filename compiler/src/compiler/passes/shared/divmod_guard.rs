@@ -3,20 +3,24 @@
 //!
 //! Three consumers, which must not drift:
 //!
-//! - `LowerPureGuards::lower_divmod_guard` — a *guarded* division turns the condition into "this
+//! - `LowerPureGuards::lower_divmod_guard` — a _guarded_ division turns the condition into "this
 //!   branch must be inactive", so an inactive bad division is not an error.
 //! - `LowerPureGuards::lower_unguarded_divmod` — an unguarded division whose quotient is used
 //!   asserts the condition is false, then performs the division unchanged.
-//! - `DCE` — an unguarded division whose quotient is *not* used is replaced by the assertion
+//! - `DCE` — an unguarded division whose quotient is _not_ used is replaced by the assertion
 //!   alone. Mavros builds HLSSA straight from Noir's monomorphized AST and never runs Noir's SSA
 //!   pipeline, so nothing upstream has already attached a failure to the division; if the division
 //!   is simply deleted, the failure Noir promises disappears with it.
 //!
 //! [`divmod_provably_defined`] is the fourth member of that set and must not drift either: it is
-//! the *discharge* of the same condition, so a consumer that can prove it need emit nothing at all.
+//! the _discharge_ of the same condition, so a consumer that can prove it need emit nothing at all.
 //! Both `LowerPureGuards` (at each of its two sites) and `DCE` consult it — the latter in its mark
 //! phase as well as its sweep, since a check it will not emit must not hold the operand chain that
 //! feeds it live either.
+//!
+//! None of them reads the operand's signedness off the type — a type has none to read. Every
+//! entry point here takes a `signed` flag its caller took from the `Div`/`Mod` opcode, so that the
+//! check and the division it accompanies are decided by one source.
 
 use num_bigint::BigInt;
 use num_traits::{One, Zero};
@@ -36,10 +40,7 @@ use crate::compiler::{
 /// `INT_MIN / -1`), and `Field` by a zero divisor, which has no multiplicative inverse. Anything
 /// else is not a division operand type at all.
 pub fn divmod_can_fail(ty: &Type) -> bool {
-    matches!(
-        ty.strip_witness().expr,
-        TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Field
-    )
+    matches!(ty.strip_witness().expr, TypeExpr::Int(_) | TypeExpr::Field)
 }
 
 /// Whether the range domain **proves** this division is defined, so the check
@@ -53,36 +54,61 @@ pub fn divmod_can_fail(ty: &Type) -> bool {
 ///   the top of the type. Either half is enough to rule that out: a divisor that is never `−1`, or
 ///   a dividend that is never `INT_MIN`.
 ///
-/// The queries are over *bit patterns*, not mathematical values, which is what lets one predicate
+/// The queries are over _bit patterns_, not mathematical values, which is what lets one predicate
 /// serve `U`, `I` and `Field` alike — and it is the reason the domain carries both readings, since
 /// `−1` is the pattern `2^bits − 1` read one way and `−1` read the other.
 ///
 /// `lhs_type` must already be stripped of any `WitnessOf` wrapper and satisfy [`divmod_can_fail`];
 /// anything else answers `false`, since a check that is not understood must not be dropped.
 ///
+/// `signed` comes from the caller's opcode, **not** from `lhs_type` — which no longer carries a
+/// sign to read. It has to: [`emit_divmod_failure_cond`] builds the disjunction from the same flag,
+/// and the division the caller re-plants alongside it takes its lowering from the same operation.
+/// If this predicate answered differently from that lowering, a check could be discharged here that
+/// the lowering still needs — so the three are given one source, and the opcode is it. The width
+/// still comes from the type, which is not in question.
+///
 /// Note that ⊥ answers `false` throughout, by [`ValueRange::proves_excludes_pattern`]. That matters
 /// here more than anywhere: a `Div` whose operand range is ⊥ is exactly the division the check is
 /// there to reject.
 ///
-/// This is the domain's first *constraint-eliding* consumer, so it also inherits the one soundness
+/// This is the domain's first _constraint-eliding_ consumer, so it also inherits the one soundness
 /// assumption the domain cannot discharge itself: `WriteWitness` gives a minted witness the range
 /// of its **hint**, which binds the prover only through whatever constraints accompany it. A
 /// divisor that is a hint written without them would be proved nonzero on the honest execution
 /// alone. Every hint in the tree today is pinned; see the `WriteWitness` transfer in
 /// `value_range_analysis`.
-pub fn divmod_provably_defined(lhs: &ValueRange, rhs: &ValueRange, lhs_type: &Type) -> bool {
+pub fn divmod_provably_defined(
+    lhs: &ValueRange,
+    rhs: &ValueRange,
+    lhs_type: &Type,
+    signed: bool,
+) -> bool {
     let zero = BigInt::zero();
-    match &lhs_type.expr {
-        TypeExpr::U(_) | TypeExpr::Field => rhs.proves_excludes_pattern(&zero),
-        TypeExpr::I(bits) if *bits > 0 => {
-            if !rhs.proves_excludes_pattern(&zero) {
-                return false;
-            }
+    let bits = match &lhs_type.expr {
+        TypeExpr::Int(bits) => Some(*bits),
+        TypeExpr::Field => None,
+        // A check that is not understood must not be dropped.
+        _ => return false,
+    };
+
+    if !rhs.proves_excludes_pattern(&zero) {
+        return false;
+    }
+    if !signed {
+        return true;
+    }
+    match bits {
+        // A field has no `INT_MIN`, so a nonzero divisor is the whole condition however the
+        // operation reads its operands.
+        None => true,
+        Some(bits) if bits > 0 => {
             let minus_one = (BigInt::one() << bits) - BigInt::one();
             let int_min = BigInt::one() << (bits - 1);
             rhs.proves_excludes_pattern(&minus_one) || lhs.proves_excludes_pattern(&int_min)
         }
-        _ => false,
+        // A zero-width signed integer has no sign bit to reason about; refuse rather than guess.
+        Some(_) => false,
     }
 }
 
@@ -91,23 +117,28 @@ pub fn divmod_provably_defined(lhs: &ValueRange, rhs: &ValueRange, lhs_type: &Ty
 /// type.
 ///
 /// `lhs_type` must already be stripped of any `WitnessOf` wrapper and satisfy [`divmod_can_fail`].
+///
+/// `signed` decides whether the overflow disjunct is emitted, and comes from the opcode via the
+/// caller, for the reason spelled out on [`divmod_provably_defined`]. The type supplies only the
+/// width; it has no sign left to supply.
 pub fn emit_divmod_failure_cond(
     emitter: &mut impl HLEmitter,
     lhs: ValueId,
     rhs: ValueId,
     lhs_type: &Type,
+    signed: bool,
 ) -> ValueId {
     let zero_val = match &lhs_type.expr {
-        TypeExpr::U(b) => emitter.u_const(*b, 0),
-        TypeExpr::I(b) => emitter.i_const(*b, 0),
+        TypeExpr::Int(b) => emitter.int_const(*b, 0),
         TypeExpr::Field => emitter.field_const(emitter.field().constant(0u64)),
         other => unreachable!("divmod failure condition on a non-numeric operand type: {other:?}"),
     };
     let is_zero = emitter.eq(rhs, zero_val);
     match &lhs_type.expr {
-        TypeExpr::I(bits) => {
-            let min_val = emitter.i_const(*bits, 1u128 << (*bits - 1));
-            let minus_one = emitter.i_const(*bits, bit_mask(*bits));
+        TypeExpr::Int(bits) if signed => {
+            let bits = *bits;
+            let min_val = emitter.int_const(bits, 1u128 << (bits - 1));
+            let minus_one = emitter.int_const(bits, bit_mask(bits));
             let lhs_is_min = emitter.eq(lhs, min_val);
             let rhs_is_minus_one = emitter.eq(rhs, minus_one);
             let signed_overflow = emitter.and(lhs_is_min, rhs_is_minus_one);
@@ -119,15 +150,17 @@ pub fn emit_divmod_failure_cond(
 
 /// Emit `assert(!undefined(lhs, rhs))` — the unguarded form of the check.
 ///
-/// The caller decides whether the division itself follows.
+/// The caller decides whether the division itself follows, and supplies `signed` as for
+/// [`emit_divmod_failure_cond`].
 pub fn emit_divmod_is_defined_assert(
     emitter: &mut impl HLEmitter,
     lhs: ValueId,
     rhs: ValueId,
     lhs_type: &Type,
+    signed: bool,
 ) {
-    let failure = emit_divmod_failure_cond(emitter, lhs, rhs, lhs_type);
-    let zero_u1 = emitter.u_const(1, 0);
+    let failure = emit_divmod_failure_cond(emitter, lhs, rhs, lhs_type, signed);
+    let zero_u1 = emitter.int_const(1, 0);
     emitter.emit(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: failure,
@@ -160,12 +193,14 @@ mod tests {
         assert!(divmod_provably_defined(
             &anything,
             &u8_range(1, 255),
-            &Type::u(8)
+            &Type::int(8),
+            false
         ));
         assert!(!divmod_provably_defined(
             &anything,
             &u8_range(0, 1),
-            &Type::u(8)
+            &Type::int(8),
+            false
         ));
     }
 
@@ -175,12 +210,14 @@ mod tests {
         assert!(divmod_provably_defined(
             &anything,
             &field_range(1, 9),
-            &Type::field()
+            &Type::field(),
+            false
         ));
         assert!(!divmod_provably_defined(
             &anything,
             &field_range(0, 9),
-            &Type::field()
+            &Type::field(),
+            false
         ));
     }
 
@@ -191,25 +228,29 @@ mod tests {
         assert!(!divmod_provably_defined(
             &anything,
             &i8_range(-128, -1),
-            &Type::i(8)
+            &Type::int(8),
+            true
         ));
         // Either half of the overflow case is enough on its own: a divisor that is never `-1`...
         assert!(divmod_provably_defined(
             &anything,
             &i8_range(-128, -2),
-            &Type::i(8)
+            &Type::int(8),
+            true
         ));
         // ...or a dividend that is never `INT_MIN`.
         assert!(divmod_provably_defined(
             &i8_range(-127, 127),
             &i8_range(-128, -1),
-            &Type::i(8)
+            &Type::int(8),
+            true
         ));
         // A zero divisor still sinks it, whatever the dividend.
         assert!(!divmod_provably_defined(
             &i8_range(0, 0),
             &i8_range(0, 5),
-            &Type::i(8)
+            &Type::int(8),
+            true
         ));
     }
 
@@ -219,12 +260,23 @@ mod tests {
         // to reject, so ⊥ must not be read as "cannot fail". See the `proves_*` predicates.
         let bottom = ValueRange::empty(Width::Bits(8));
         let anything = ValueRange::full(Width::Bits(8));
-        assert!(!divmod_provably_defined(&anything, &bottom, &Type::u(8)));
-        assert!(!divmod_provably_defined(&bottom, &bottom, &Type::i(8)));
+        assert!(!divmod_provably_defined(
+            &anything,
+            &bottom,
+            &Type::int(8),
+            false
+        ));
+        assert!(!divmod_provably_defined(
+            &bottom,
+            &bottom,
+            &Type::int(8),
+            true
+        ));
         assert!(!divmod_provably_defined(
             &bottom,
             &u8_range(1, 255),
-            &Type::i(8)
+            &Type::int(8),
+            true
         ));
     }
 
@@ -232,13 +284,39 @@ mod tests {
     fn a_type_that_cannot_divide_is_never_discharged() {
         // `divmod_can_fail` refuses these, so the question should not arise -- but answering
         // "provably defined" for an operand type this does not understand would silently delete a
-        // check if the two ever drifted apart. Note the divisor range here is one that *would*
+        // check if the two ever drifted apart. Note the divisor range here is one that _would_
         // discharge a `U`/`Field` division, so it is the type arm alone that refuses.
         assert!(!divmod_provably_defined(
             &ValueRange::full(Width::NonScalar),
             &u8_range(1, 255),
-            &Type::function()
+            &Type::function(),
+            false
         ));
         assert!(!divmod_can_fail(&Type::function()));
+    }
+
+    #[test]
+    fn the_sign_parameter_decides_the_overflow_half_not_the_type() {
+        // The whole point of taking `signed` rather than reading it off `lhs_type`: the type has no
+        // sign in it any more, so flipping the flag against a fixed type must flip the answer. If
+        // it did not, this predicate would be answering from something other than the opcode the
+        // caller is about to emit.
+        let anything = ValueRange::full(Width::Bits(8));
+        let nonzero_but_reaches_minus_one = i8_range(-128, -1);
+
+        // Read as signed, `INT_MIN / -1` is still in reach, so a nonzero divisor is not enough...
+        assert!(!divmod_provably_defined(
+            &anything,
+            &nonzero_but_reaches_minus_one,
+            &Type::int(8),
+            true
+        ));
+        // ...and read as unsigned, there is no such case and the same operands discharge.
+        assert!(divmod_provably_defined(
+            &anything,
+            &nonzero_but_reaches_minus_one,
+            &Type::int(8),
+            false
+        ));
     }
 }

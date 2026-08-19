@@ -16,7 +16,8 @@ use crate::{
         ssa::{
             FunctionId, Located, ValueId,
             hlssa::{
-                BinaryArithOpKind, CastTarget, CmpKind, Constant, HLSSA, OpCode, Type, TypeExpr,
+                ArithGroup, BinaryArithOpKind, CastTarget, CmpKind, Constant, HLSSA, OpCode, Type,
+                TypeExpr,
                 builder::{HLFunctionBuilder, HLSSABuilder},
             },
         },
@@ -174,8 +175,11 @@ impl Simplifier {
                 lhs,
                 rhs,
             } => {
-                match kind {
-                    BinaryArithOpKind::Add => {
+                // These are algebraic identities on the value, and each holds in both readings —
+                // `x + 0 = x` whatever the sign — so the rules are keyed on the sign-erased group.
+                // The one place the sign genuinely matters is the `Shr` rewrite below.
+                match kind.group() {
+                    ArithGroup::Add => {
                         if is_zero(fb.ssa, *lhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
@@ -189,7 +193,7 @@ impl Simplifier {
                             });
                         }
                     }
-                    BinaryArithOpKind::Sub => {
+                    ArithGroup::Sub => {
                         if is_zero(fb.ssa, *rhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
@@ -200,7 +204,7 @@ impl Simplifier {
                             return materialize_zero(types, *result, fb);
                         }
                     }
-                    BinaryArithOpKind::Mul => {
+                    ArithGroup::Mul => {
                         if is_zero(fb.ssa, *lhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
@@ -226,7 +230,7 @@ impl Simplifier {
                             });
                         }
                     }
-                    BinaryArithOpKind::Div => {
+                    ArithGroup::Div => {
                         if is_one(fb.ssa, *rhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
@@ -242,14 +246,21 @@ impl Simplifier {
                                 .ssa
                                 .add_const(Constant::Field((*denom).inverse().unwrap())); // FIELD-ASSUMPTION: L4-inverse
                             return Some(Rewrite::Replace(vec![OpCode::BinaryArithOp {
-                                kind: BinaryArithOpKind::Mul,
+                                // Carry the division's own sign onto the multiplication rather
+                                // than defaulting: a field divide is unsigned, but if this one
+                                // says otherwise that is a disagreement to keep visible, not to
+                                // launder away here.
+                                kind: BinaryArithOpKind::with_sign(
+                                    ArithGroup::Mul,
+                                    kind.is_signed(),
+                                ),
                                 result: *result,
                                 lhs: *lhs,
                                 rhs: inv,
                             }]));
                         }
                     }
-                    BinaryArithOpKind::And => {
+                    ArithGroup::And => {
                         if is_zero(fb.ssa, *lhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
@@ -281,7 +292,7 @@ impl Simplifier {
                             });
                         }
                     }
-                    BinaryArithOpKind::Or => {
+                    ArithGroup::Or => {
                         if is_zero(fb.ssa, *lhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
@@ -301,7 +312,7 @@ impl Simplifier {
                             });
                         }
                     }
-                    BinaryArithOpKind::Xor => {
+                    ArithGroup::Xor => {
                         if is_zero(fb.ssa, *lhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
@@ -318,31 +329,36 @@ impl Simplifier {
                             return materialize_zero(types, *result, fb);
                         }
                     }
-                    BinaryArithOpKind::Shl | BinaryArithOpKind::Shr => {
+                    ArithGroup::Shl | ArithGroup::Shr => {
                         if is_zero(fb.ssa, *rhs) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *lhs,
                             });
                         }
-                        if matches!(kind, BinaryArithOpKind::Shr) {
-                            if let Some(offset) = const_as_usize(fb.ssa, *rhs) {
-                                let lhs_type = types.get_value_type(*lhs);
-                                let lhs_inner = lhs_type.strip_witness();
-                                if let TypeExpr::U(bits) = lhs_inner.expr {
-                                    if offset < bits {
-                                        return Some(Rewrite::Replace(vec![OpCode::BitRange {
-                                            result: *result,
-                                            value: *lhs,
-                                            offset,
-                                            width: bits - offset,
-                                        }]));
-                                    }
-                                }
+                        if kind.group() == ArithGroup::Shr
+                            && let Some(offset) = const_as_usize(fb.ssa, *rhs)
+                        {
+                            let lhs_type = types.get_value_type(*lhs);
+                            // Only a _logical_ right shift is a bit-range extract: an arithmetic
+                            // one fills the vacated top bits with the sign, not with zeros. The
+                            // opcode is what says which this is.
+                            let signed = kind.is_signed();
+                            let lhs_inner = lhs_type.strip_witness();
+                            if !signed
+                                && let TypeExpr::Int(bits) = lhs_inner.expr
+                                && offset < bits
+                            {
+                                return Some(Rewrite::Replace(vec![OpCode::BitRange {
+                                    result: *result,
+                                    value: *lhs,
+                                    offset,
+                                    width: bits - offset,
+                                }]));
                             }
                         }
                     }
-                    BinaryArithOpKind::Mod => {}
+                    ArithGroup::Rem => {}
                 }
                 None
             }
@@ -529,8 +545,7 @@ fn materialize_zero(
 ) -> Option<Rewrite> {
     let field = fb.field();
     materialize_const(types, result, fb, move |t| match t {
-        TypeExpr::U(s) => Some(Constant::U(*s, 0)),
-        TypeExpr::I(s) => Some(Constant::I(*s, 0)),
+        TypeExpr::Int(s) => Some(Constant::Int(*s, 0)),
         TypeExpr::Field => Some(Constant::Field(field.zero())),
         _ => None,
     })
@@ -543,8 +558,7 @@ fn materialize_one(
 ) -> Option<Rewrite> {
     let field = fb.field();
     materialize_const(types, result, fb, move |t| match t {
-        TypeExpr::U(s) => Some(Constant::U(*s, 1)),
-        TypeExpr::I(s) => Some(Constant::I(*s, 1)),
+        TypeExpr::Int(s) => Some(Constant::Int(*s, 1)),
         TypeExpr::Field => Some(Constant::Field(field.one())),
         _ => None,
     })
@@ -552,7 +566,7 @@ fn materialize_one(
 
 fn is_zero(ssa: &HLSSA, v: ValueId) -> bool {
     match ssa.get_const(v).as_deref() {
-        Some(Constant::U(_, 0) | Constant::I(_, 0)) => true,
+        Some(Constant::Int(_, 0)) => true,
         Some(Constant::Field(f)) => f.is_zero(),
         _ => false,
     }
@@ -560,7 +574,7 @@ fn is_zero(ssa: &HLSSA, v: ValueId) -> bool {
 
 fn is_one(ssa: &HLSSA, v: ValueId) -> bool {
     match ssa.get_const(v).as_deref() {
-        Some(Constant::U(_, 1) | Constant::I(_, 1)) => true,
+        Some(Constant::Int(_, 1)) => true,
         Some(Constant::Field(f)) => f.is_one(),
         _ => false,
     }
@@ -568,14 +582,14 @@ fn is_one(ssa: &HLSSA, v: ValueId) -> bool {
 
 fn is_all_ones(ssa: &HLSSA, v: ValueId) -> bool {
     match ssa.get_const(v).as_deref() {
-        Some(Constant::U(bits, value) | Constant::I(bits, value)) => *value == bit_mask(*bits),
+        Some(Constant::Int(bits, value)) => *value == bit_mask(*bits),
         _ => false,
     }
 }
 
 fn const_as_usize(ssa: &HLSSA, v: ValueId) -> Option<usize> {
     match ssa.get_const(v).as_deref() {
-        Some(Constant::U(_, value) | Constant::I(_, value)) => (*value).try_into().ok(),
+        Some(Constant::Int(_, value)) => (*value).try_into().ok(),
         _ => None,
     }
 }

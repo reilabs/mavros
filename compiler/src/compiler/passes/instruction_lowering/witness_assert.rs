@@ -47,7 +47,7 @@ impl LowerWitnessAssertOps {
             }
             // `assert(x == x)` is a tautology for every `x`, under any guard, so it lowers to
             // nothing at all. Only `Eq` may be dropped this way: `assert(x < x)` on the same value
-            // is the *opposite* — always false — and must keep its rejecting constraint.
+            // is the _opposite_ — always false — and must keep its rejecting constraint.
             //
             // This is not a hypothetical tidy-up. `LowerPureGuards` emits a divide-by-zero check
             // in front of every `Div`/`Mod`, including the ones whose divisor is a nonzero
@@ -69,10 +69,11 @@ impl LowerWitnessAssertOps {
                 }
                 match kind {
                     CmpKind::Eq => self.lower_assert_eq(b, context, guard, *lhs, *rhs),
-                    CmpKind::Lt => self.lower_assert_lt(
+                    CmpKind::ULt | CmpKind::SLt => self.lower_assert_lt(
                         b,
                         context,
                         guard,
+                        *kind,
                         *lhs,
                         *rhs,
                         lhs_witness,
@@ -134,7 +135,7 @@ impl LowerWitnessAssertOps {
         let rhs_field = b.ensure_field(rhs, &rhs_type.strip_witness());
         if let Some(condition) = guard {
             let cond_field = b.ensure_field(condition, context.types().get_value_type(condition));
-            let diff = b.sub(lhs_field, rhs_field);
+            let diff = b.usub(lhs_field, rhs_field);
             let zero = b.field_const(b.field().zero());
             b.constrain(cond_field, diff, zero);
         } else {
@@ -143,35 +144,63 @@ impl LowerWitnessAssertOps {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lower_assert_lt(
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         guard: Option<ValueId>,
+        kind: CmpKind,
         lhs: ValueId,
         rhs: ValueId,
         lhs_witness: bool,
         rhs_witness: bool,
     ) {
-        match context.types().get_value_type(rhs).strip_witness().expr {
-            TypeExpr::U(_) if guard.is_some() && !lhs_witness && !rhs_witness => {
-                self.lower_assert_lt_via_cmp(b, context, guard, lhs, rhs);
-            }
-            TypeExpr::U(bits) => self.lower_unsigned_assert_lt(b, context, guard, lhs, rhs, bits),
-            TypeExpr::I(_) => self.lower_assert_lt_via_cmp(b, context, guard, lhs, rhs),
-            _ => panic!("ICE: AssertCmp Lt rhs is not an integer type"),
+        // The width is read from `rhs`, as it always has been here, while every other consumer
+        // reads `lhs` (`symbolic_executor::cmp_operand_bits`, `hlssa_to_llssa`). Nothing enforces
+        // that the two agree: `Types` looks at both operands of a comparison only to decide whether
+        // the `bool` result is witnessed, and never compares their widths. So the agreement is a
+        // property of what the frontend emits (Noir unifies the operands of a comparison) rather
+        // than a checked invariant, so we check it in debug builds.
+        let lhs_type = context.types().get_value_type(lhs);
+        let rhs_type = context.types().get_value_type(rhs);
+        let signed = kind.is_signed();
+
+        let TypeExpr::Int(bits) = rhs_type.strip_witness().expr else {
+            panic!("ICE: AssertCmp Lt rhs is not an integer type");
+        };
+        debug_assert!(
+            matches!(lhs_type.strip_witness().expr, TypeExpr::Int(lhs_bits) if lhs_bits == bits),
+            "ICE: AssertCmp Lt operands disagree on width: {lhs_type} vs {rhs_type}"
+        );
+
+        // A signed assertion always goes via the comparison, which is the only lowering that reads
+        // the operands as two's complement. An unsigned one prefers the direct form, except behind
+        // a guard on two pure operands, where the comparison is cheaper.
+        if signed || (guard.is_some() && !lhs_witness && !rhs_witness) {
+            self.lower_assert_lt_via_cmp(b, context, guard, kind, lhs, rhs);
+        } else {
+            self.lower_unsigned_assert_lt(b, context, guard, lhs, rhs, bits);
         }
     }
 
+    /// Re-express `assert(lhs < rhs)` as `assert(lhs < rhs == true)`, leaving the comparison for
+    /// `LowerWitnessCompareOps` to lower.
+    ///
+    /// The comparison it emits carries the assertion's own sign, as resolved by the caller. It
+    /// reaches here on the signed operands themselves — not on a raw-bit stand-in the way
+    /// `lower_unsigned_assert_lt` does — so emitting an unsigned comparison would be a genuinely
+    /// different test.
     fn lower_assert_lt_via_cmp(
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         guard: Option<ValueId>,
+        kind: CmpKind,
         lhs: ValueId,
         rhs: ValueId,
     ) {
-        let cmp = b.lt(lhs, rhs);
+        let cmp = b.cmp(lhs, rhs, kind);
         let cmp_field = b.cast_to_field(cmp);
         self.lower_assert_field(b, context, guard, cmp_field);
     }
@@ -190,9 +219,9 @@ impl LowerWitnessAssertOps {
         let rhs_type = context.types().get_value_type(rhs);
         let lhs_field = b.ensure_field(lhs, &lhs_type.strip_witness());
         let rhs_field = b.ensure_field(rhs, &rhs_type.strip_witness());
-        let diff = b.sub(rhs_field, lhs_field);
+        let diff = b.usub(rhs_field, lhs_field);
         let one = b.field_const(b.field().one());
-        let diff_minus_one = b.sub(diff, one);
+        let diff_minus_one = b.usub(diff, one);
         self.emit_rangecheck(b, guard, diff_minus_one, bits);
     }
 
@@ -234,8 +263,8 @@ impl LowerWitnessAssertOps {
         let c_field = b.ensure_field(c, &c_type.strip_witness());
 
         if let Some(condition) = guard {
-            let product = b.mul(a_field, b_field);
-            let diff = b.sub(product, c_field);
+            let product = b.umul(a_field, b_field);
+            let diff = b.usub(product, c_field);
             let cond_field = b.ensure_field(condition, context.types().get_value_type(condition));
             let zero = b.field_const(b.field().zero());
             b.constrain(cond_field, diff, zero);
