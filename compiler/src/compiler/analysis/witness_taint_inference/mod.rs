@@ -199,6 +199,9 @@ use crate::{
     },
 };
 
+// PUBLIC TYPES
+// ================================================================================================
+
 /// The `≥` constraint graph over taint [`Position`]s — built per function by [`builder`] and
 /// solved by both phases.
 type WitnessTaint = graph::TaintGraph<Position>;
@@ -512,9 +515,9 @@ mod tests {
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let w = e.write_witness(x);
-            let a = e.add(w, x); // witness ∨ pure = witness
+            let a = e.uadd(w, x); // witness ∨ pure = witness
             let c = e.field_const(fr(2));
-            let d = e.add(c, x); // pure ∨ pure = pure
+            let d = e.uadd(c, x); // pure ∨ pure = pure
             e.terminate_return(vec![d, a]);
         });
         let fwt = run(&mut ssa);
@@ -544,7 +547,7 @@ mod tests {
             e.emit(OpCode::Guard {
                 condition: cond,
                 inner: Box::new(OpCode::BinaryArithOp {
-                    kind: BinaryArithOpKind::Add,
+                    kind: BinaryArithOpKind::UAdd,
                     result: r,
                     lhs: c1,
                     rhs: c2,
@@ -894,7 +897,7 @@ mod tests {
                 |e| {
                     let c1 = e.field_const(fr(1));
                     let c2 = e.field_const(fr(2));
-                    let a = e.add(c1, c2); // pure arithmetic under a witness branch
+                    let a = e.uadd(c1, c2); // pure arithmetic under a witness branch
                     let c7 = e.field_const(fr(7));
                     e.store(p, c7); // conditional store → the slot becomes Witness
                     vec![a]
@@ -1196,7 +1199,7 @@ mod tests {
             let w = e.write_witness(x);
             let r1 = e.call(helper_id, vec![c], 1)[0];
             let r2 = e.call(helper_id, vec![w], 1)[0];
-            let s = e.add(r1, r2);
+            let s = e.uadd(r1, r2);
             e.terminate_return(vec![s]);
             (x, c, w)
         });
@@ -1320,7 +1323,7 @@ mod tests {
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field().slice_of());
-            b.function.add_return_type(Type::u(32));
+            b.function.add_return_type(Type::int(32));
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
@@ -1400,7 +1403,7 @@ mod tests {
         sb.modify_function(main_id, |b| {
             b.function.add_return_type(Type::field().slice_of());
             b.function.add_return_type(Type::field());
-            b.function.add_return_type(Type::u(32));
+            b.function.add_return_type(Type::int(32));
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());

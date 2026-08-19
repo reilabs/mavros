@@ -1015,8 +1015,9 @@ fn derive_promotions(
                     lhs,
                     rhs,
                 }) if facts.congruence.known_equal(lhs, rhs) => true,
+                // `x < x` is false in either reading, so this needs no sign.
                 Some(ScalarFold::Cmp {
-                    kind: CmpKind::Lt,
+                    kind: CmpKind::ULt | CmpKind::SLt,
                     lhs,
                     rhs,
                 }) if facts.congruence.known_equal(lhs, rhs) => false,

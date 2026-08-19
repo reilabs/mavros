@@ -102,12 +102,11 @@ impl<'a> LoweringContext<'a> {
 /// The bit width and signedness of an integer type, ignoring any `WitnessOf` wrapper, or `None`
 /// if the type is not an integer.
 ///
-/// Signedness lives in the type today, so every lowering rule that needs it has to recover it
-/// here. Once it moves onto the opcodes this reduces to a width lookup and the `bool` goes away.
-pub(super) fn integer_bits_and_signedness(ty: &Type) -> Option<(usize, bool)> {
+/// Signedness is not among the answers: it belongs to the operation, and a rule that needs it
+/// takes it from its opcode.
+pub(super) fn integer_bits(ty: &Type) -> Option<usize> {
     match ty.strip_witness().expr {
-        TypeExpr::U(bits) => Some((bits, false)),
-        TypeExpr::I(bits) => Some((bits, true)),
+        TypeExpr::Int(bits) => Some(bits),
         _ => None,
     }
 }

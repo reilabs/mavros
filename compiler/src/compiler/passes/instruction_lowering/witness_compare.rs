@@ -1,12 +1,13 @@
-use crate::compiler::ssa::{
-    ValueId,
-    hlssa::{
-        CastTarget, CmpKind, OpCode, TypeExpr,
-        builder::{HLBlockEmitter, HLEmitter},
+use crate::compiler::{
+    passes::instruction_lowering::{InstructionLoweringRule, LoweringContext},
+    ssa::{
+        ValueId,
+        hlssa::{
+            CastTarget, CmpKind, OpCode, TypeExpr,
+            builder::{HLBlockEmitter, HLEmitter},
+        },
     },
 };
-
-use super::{InstructionLoweringRule, LoweringContext};
 
 pub struct LowerWitnessCompareOps {}
 
@@ -50,7 +51,16 @@ impl LowerWitnessCompareOps {
 
         match kind {
             CmpKind::Eq => self.lower_eq(b, context, *result, *lhs, *rhs, lhs_witness, rhs_witness),
-            CmpKind::Lt => self.lower_lt(b, context, *result, *lhs, *rhs, lhs_witness, rhs_witness),
+            CmpKind::ULt | CmpKind::SLt => self.lower_lt(
+                b,
+                context,
+                *kind,
+                *result,
+                *lhs,
+                *rhs,
+                lhs_witness,
+                rhs_witness,
+            ),
         }
         true
     }
@@ -70,7 +80,7 @@ impl LowerWitnessCompareOps {
         let rhs_type = context.types().get_value_type(rhs);
         let lhs_field = b.ensure_field(lhs, &lhs_type.strip_witness());
         let rhs_field = b.ensure_field(rhs, &rhs_type.strip_witness());
-        let diff = b.sub(lhs_field, rhs_field);
+        let diff = b.usub(lhs_field, rhs_field);
 
         let lhs_pure = if lhs_witness { b.value_of(lhs) } else { lhs };
         let rhs_pure = if rhs_witness { b.value_of(rhs) } else { rhs };
@@ -80,14 +90,14 @@ impl LowerWitnessCompareOps {
         b.emit(OpCode::Cast {
             result,
             value: result_witness,
-            target: CastTarget::U(1),
+            target: CastTarget::Int(1),
         });
 
         let result_field = b.cast_to_field(result);
         let one = b.field_const(b.field().one());
-        let not_result = b.sub(one, result_field);
-        let quotient = b.div(not_result, diff);
-        let quotient_plus_result = b.add(quotient, result_field);
+        let not_result = b.usub(one, result_field);
+        let quotient = b.udiv(not_result, diff);
+        let quotient_plus_result = b.uadd(quotient, result_field);
         b.constrain(diff, quotient_plus_result, not_result);
     }
 
@@ -96,20 +106,22 @@ impl LowerWitnessCompareOps {
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
+        kind: CmpKind,
         result: ValueId,
         lhs: ValueId,
         rhs: ValueId,
         lhs_witness: bool,
         rhs_witness: bool,
     ) {
-        match context.types().get_value_type(rhs).strip_witness().expr {
-            TypeExpr::U(bits) => {
-                self.lower_unsigned_lt(b, context, result, lhs, rhs, bits, lhs_witness, rhs_witness)
-            }
-            TypeExpr::I(bits) => {
-                self.lower_signed_lt(b, context, result, lhs, rhs, bits, lhs_witness, rhs_witness)
-            }
-            _ => panic!("ICE: Cmp Lt rhs is not an integer type"),
+        let rhs_type = context.types().get_value_type(rhs);
+        let TypeExpr::Int(bits) = rhs_type.strip_witness().expr else {
+            panic!("ICE: Cmp Lt rhs is not an integer type");
+        };
+
+        if kind.is_signed() {
+            self.lower_signed_lt(b, context, result, lhs, rhs, bits, lhs_witness, rhs_witness)
+        } else {
+            self.lower_unsigned_lt(b, context, result, lhs, rhs, bits, lhs_witness, rhs_witness)
         }
     }
 
@@ -145,7 +157,7 @@ impl LowerWitnessCompareOps {
         b.emit(OpCode::Cast {
             result,
             value: signed_result,
-            target: CastTarget::U(1),
+            target: CastTarget::Int(1),
         });
     }
 
@@ -165,15 +177,15 @@ impl LowerWitnessCompareOps {
 
         let lhs_pure = if lhs_witness { b.value_of(lhs) } else { lhs };
         let rhs_pure = if rhs_witness { b.value_of(rhs) } else { rhs };
-        let lhs_hint = b.cast_to(CastTarget::U(bits), lhs_pure);
-        let rhs_hint = b.cast_to(CastTarget::U(bits), rhs_pure);
-        let result_hint = b.lt(lhs_hint, rhs_hint);
+        let lhs_hint = b.cast_to(CastTarget::Int(bits), lhs_pure);
+        let rhs_hint = b.cast_to(CastTarget::Int(bits), rhs_pure);
+        let result_hint = b.ult(lhs_hint, rhs_hint);
         let result_hint_field = b.cast_to_field(result_hint);
         let result_witness = b.write_witness(result_hint_field);
         b.emit(OpCode::Cast {
             result,
             value: result_witness,
-            target: CastTarget::U(1),
+            target: CastTarget::Int(1),
         });
 
         let result_field = b.cast_to_field(result);
@@ -184,18 +196,18 @@ impl LowerWitnessCompareOps {
         let lhs_field = b.ensure_field(lhs, &lhs_type.strip_witness());
         let rhs_field = b.ensure_field(rhs, &rhs_type.strip_witness());
         let one = b.field_const(b.field().one());
-        let true_delta = b.sub(rhs_field, lhs_field);
-        let true_delta = b.sub(true_delta, one);
-        let false_delta = b.sub(lhs_field, rhs_field);
-        let delta_diff = b.sub(true_delta, false_delta);
-        let selected_adjustment = b.mul(result_field, delta_diff);
-        let selected_delta = b.add(false_delta, selected_adjustment);
+        let true_delta = b.usub(rhs_field, lhs_field);
+        let true_delta = b.usub(true_delta, one);
+        let false_delta = b.usub(lhs_field, rhs_field);
+        let delta_diff = b.usub(true_delta, false_delta);
+        let selected_adjustment = b.umul(result_field, delta_diff);
+        let selected_delta = b.uadd(false_delta, selected_adjustment);
         self.emit_rangecheck(b, selected_delta, bits);
     }
 
     fn sign_bit(&self, b: &mut HLBlockEmitter<'_>, value: ValueId, bits: usize) -> ValueId {
         let sign = b.bit_range(value, bits - 1, 1);
-        b.cast_to(CastTarget::U(1), sign)
+        b.cast_to(CastTarget::Int(1), sign)
     }
 
     fn emit_rangecheck(&self, b: &mut HLBlockEmitter<'_>, value: ValueId, bits: usize) {

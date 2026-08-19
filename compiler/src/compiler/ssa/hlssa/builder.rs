@@ -28,10 +28,14 @@ pub trait HLEmitter {
 
     // -- Arithmetic --
 
-    fn add(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+    /// Emit any binary arithmetic operation.
+    ///
+    /// The named helpers below are thin wrappers on this; use it directly when the operation is
+    /// itself a variable, e.g. when a pass is rebuilding an instruction it matched on.
+    fn bin(&mut self, kind: BinaryArithOpKind, lhs: ValueId, rhs: ValueId) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind,
             result: r,
             lhs,
             rhs,
@@ -39,103 +43,72 @@ pub trait HLEmitter {
         r
     }
 
-    fn sub(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Sub,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+    fn uadd(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::UAdd, lhs, rhs)
     }
 
-    fn mul(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Mul,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+    fn sadd(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::SAdd, lhs, rhs)
     }
 
-    fn div(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Div,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+    fn usub(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::USub, lhs, rhs)
     }
 
-    fn modulo(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Mod,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+    fn ssub(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::SSub, lhs, rhs)
+    }
+
+    fn umul(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::UMul, lhs, rhs)
+    }
+
+    fn smul(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::SMul, lhs, rhs)
+    }
+
+    fn udiv(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::UDiv, lhs, rhs)
+    }
+
+    fn sdiv(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::SDiv, lhs, rhs)
+    }
+
+    fn urem(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::URem, lhs, rhs)
+    }
+
+    fn srem(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::SRem, lhs, rhs)
     }
 
     fn and(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::And,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+        self.bin(BinaryArithOpKind::And, lhs, rhs)
     }
 
     fn or(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Or,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+        self.bin(BinaryArithOpKind::Or, lhs, rhs)
     }
 
     fn xor(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Xor,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+        self.bin(BinaryArithOpKind::Xor, lhs, rhs)
     }
 
-    fn shl(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Shl,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+    fn ushl(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::UShl, lhs, rhs)
     }
 
-    fn shr(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Shr,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+    fn sshl(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::SShl, lhs, rhs)
+    }
+
+    fn ushr(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::UShr, lhs, rhs)
+    }
+
+    fn sshr(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::SShr, lhs, rhs)
     }
 
     fn not(&mut self, value: ValueId) -> ValueId {
@@ -158,25 +131,15 @@ pub trait HLEmitter {
     }
 
     fn eq(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Cmp {
-            kind: CmpKind::Eq,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+        self.cmp(lhs, rhs, CmpKind::Eq)
     }
 
-    fn lt(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+    fn ult(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.cmp(lhs, rhs, CmpKind::ULt)
+    }
+
+    fn slt(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.cmp(lhs, rhs, CmpKind::SLt)
     }
 
     // -- Casts --
@@ -217,7 +180,7 @@ pub trait HLEmitter {
         if from_bits == to_bits {
             value
         } else {
-            self.cast_to(CastTarget::U(to_bits), value)
+            self.cast_to(CastTarget::Int(to_bits), value)
         }
     }
 
@@ -262,12 +225,12 @@ pub trait HLEmitter {
         self.emit_constant(Constant::Field(value.into()))
     }
 
-    fn u_const(&mut self, bits: usize, value: u128) -> ValueId {
-        self.emit_constant(Constant::U(bits, value))
-    }
-
-    fn i_const(&mut self, bits: usize, value: u128) -> ValueId {
-        self.emit_constant(Constant::I(bits, value))
+    /// A constant integer of `bits` raw two's-complement bits.
+    ///
+    /// There is no signed/unsigned pair here because there is no sign to record: what the bits mean
+    /// is decided by the opcode that consumes them.
+    fn int_const(&mut self, bits: usize, value: u128) -> ValueId {
+        self.emit_constant(Constant::Int(bits, value))
     }
 
     // -- Witness --
@@ -762,8 +725,7 @@ impl HLBlockEmitter<'_> {
     pub(crate) fn default_value(&mut self, typ: &Type) -> ValueId {
         match &typ.expr {
             TypeExpr::Field => self.field_const(0u64),
-            TypeExpr::U(size) => self.u_const(*size, 0),
-            TypeExpr::I(size) => self.i_const(*size, 0),
+            TypeExpr::Int(size) => self.int_const(*size, 0),
             TypeExpr::WitnessOf(inner) => {
                 let inner_default = self.default_value(inner);
                 self.cast_to_witness_of(inner_default)
@@ -859,22 +821,22 @@ impl HLBlockEmitter<'_> {
         body: impl FnOnce(&mut Self, ValueId, &[ValueId]) -> Vec<ValueId>,
     ) -> Vec<ValueId> {
         // Emit constants into current block (before the loop)
-        let const_0 = self.u_const(32, 0);
-        let const_1 = self.u_const(32, 1);
-        let const_len = self.u_const(32, len as u128);
+        let const_0 = self.int_const(32, 0);
+        let const_1 = self.int_const(32, 1);
+        let const_len = self.int_const(32, len as u128);
 
         // Loop params: [index, ...accumulators]
-        let mut params = vec![(const_0, Type::u(32))];
+        let mut params = vec![(const_0, Type::int(32))];
         params.extend(accumulators);
 
         let results = self.build_loop(
             params,
-            |b, loop_params| b.lt(loop_params[0], const_len),
+            |b, loop_params| b.ult(loop_params[0], const_len),
             |emitter, loop_params| {
                 let i_val = loop_params[0];
                 let acc_params = &loop_params[1..];
                 let updated_accs = body(emitter, i_val, acc_params);
-                let next_i = emitter.add(i_val, const_1);
+                let next_i = emitter.uadd(i_val, const_1);
                 let mut result = vec![next_i];
                 result.extend(updated_accs);
                 result
@@ -895,15 +857,15 @@ impl HLBlockEmitter<'_> {
     ) -> ValueId {
         let (acc_init, acc_type) = acc;
         let start = self.slice_len(acc_init);
-        let const_1 = self.u_const(32, 1);
+        let const_1 = self.int_const(32, 1);
         let results = self.build_loop(
-            vec![(start, Type::u(32)), (acc_init, acc_type)],
-            |b, params| b.lt(params[0], end),
+            vec![(start, Type::int(32)), (acc_init, acc_type)],
+            |b, params| b.ult(params[0], end),
             |b, params| {
                 let (i, acc) = (params[0], params[1]);
                 let elem = body(b, i);
                 let pushed = b.slice_push(acc, vec![elem], SliceOpDir::Back);
-                let next_i = b.add(i, const_1);
+                let next_i = b.uadd(i, const_1);
                 vec![next_i, pushed]
             },
         );
@@ -952,7 +914,7 @@ mod tests {
             OpCode::Cast {
                 result,
                 value,
-                target: CastTarget::U(32),
+                target: CastTarget::Int(32),
             } => {
                 assert_eq!(value, v);
                 assert_eq!(result, w);
@@ -984,13 +946,13 @@ mod tests {
         let mut builder = HLFunctionBuilder::new(&mut function, &mut ssa);
         let mut b = builder.test_block(entry);
 
-        let zero = b.u_const(32, 0);
+        let zero = b.int_const(32, 0);
         let mut seen = Vec::new();
         let (array, acc) =
-            b.build_array_loop_with_acc(len, Type::u(32), (zero, Type::u(32)), |b, i, acc| {
+            b.build_array_loop_with_acc(len, Type::int(32), (zero, Type::int(32)), |b, i, acc| {
                 seen.push(i);
-                let one = b.u_const(32, 1);
-                (i, b.add(acc, one))
+                let one = b.int_const(32, 1);
+                (i, b.uadd(acc, one))
             });
         (array, acc, seen)
     }
@@ -1016,10 +978,10 @@ mod tests {
         let mut builder = HLFunctionBuilder::new(&mut function, &mut ssa);
         let mut b = builder.test_block(entry);
 
-        let init = b.u_const(32, 7);
+        let init = b.int_const(32, 7);
         let mut ran = false;
         let (_, acc) =
-            b.build_array_loop_with_acc(0, Type::u(32), (init, Type::u(32)), |_, i, acc| {
+            b.build_array_loop_with_acc(0, Type::int(32), (init, Type::int(32)), |_, i, acc| {
                 ran = true;
                 (i, acc)
             });

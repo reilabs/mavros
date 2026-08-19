@@ -22,7 +22,7 @@
 //!
 //! # Width::Field
 //!
-//! A field element's canonical integer *is* its value; there is no second reading. So
+//! A field element's canonical integer _is_ its value; there is no second reading. So
 //! [`Width::Field`] keeps `signed == unsigned`, both ⊆ `[0, p−1]`. Keeping the struct total this
 //! way avoids an `Option<Interval>` that every call site would have to unwrap.
 
@@ -43,7 +43,8 @@ use crate::{
         ssa::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
             hlssa::{
-                BinaryArithOpKind, CastTarget, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr,
+                ArithGroup, BinaryArithOpKind, CastTarget, Constant, HLFunction, HLSSA, OpCode,
+                Type, TypeExpr,
             },
         },
     },
@@ -124,7 +125,7 @@ impl ValueRangeAnalysis {
                     // Only `Jmp` carries block arguments, so a `JmpIf` predecessor contributes
                     // nothing — which is right precisely because a block it can reach has no
                     // parameters to contribute to. Were that invariant ever broken, the join below
-                    // would run over a strict subset of the predecessors and *narrow* rather than
+                    // would run over a strict subset of the predecessors and _narrow_ rather than
                     // give up, so we assert for safety.
                     debug_assert!(
                         block.get_parameters().next().is_none()
@@ -200,7 +201,7 @@ impl ValueRangeAnalysis {
         field: FieldConfig,
     ) {
         // Both readings of an operand's bit pattern. Every rule below picks its reading from the
-        // *operation*, not from the operand's declared signedness — that is the point of the pair.
+        // _operation_, not from the operand's declared signedness — that is the point of the pair.
         let range = |bounds: &HashMap<ValueId, ValueRange>, v: ValueId| -> ValueRange {
             match bounds.get(&v) {
                 Some(r) => r.clone(),
@@ -222,7 +223,7 @@ impl ValueRangeAnalysis {
                     // them sign-extends — `SExt` is the opcode that does that — so a negative `i8`
                     // casts to `Field` as 255 rather than `p − 1`.
                     CastTarget::Field => in_r.reinterpret_to(Width::Field(field)),
-                    CastTarget::U(n) | CastTarget::I(n) => in_r.reinterpret_to(Width::Bits(*n)),
+                    CastTarget::Int(n) => in_r.reinterpret_to(Width::Bits(*n)),
                     // ValueOf strips the WitnessOf wrapper: payload unchanged.
                     CastTarget::Nop | CastTarget::WitnessOf | CastTarget::ValueOf => in_r,
                     // Sequence-level casts carry no scalar range.
@@ -264,7 +265,7 @@ impl ValueRangeAnalysis {
                 width,
             } => {
                 let in_r = range(bounds, *value);
-                // `(v >> offset) & mask(width)`, with the result keeping the *source's* type. The
+                // `(v >> offset) & mask(width)`, with the result keeping the _source's_ type. The
                 // mask is exact whenever the shifted value already fits, which subsumes the
                 // identity case a signed source used to need a rule of its own for.
                 let shifted = in_r.unsigned().div_const_pos(&(BigInt::one() << *offset));
@@ -284,7 +285,7 @@ impl ValueRangeAnalysis {
                 );
             }
 
-            // The witness takes the range of its *hint*, which is a claim about witness generation
+            // The witness takes the range of its _hint_, which is a claim about witness generation
             // rather than about the circuit: `WriteWitness` mints an unconstrained R1CS variable,
             // and only the constraints emitted around it pin the value a prover may choose. So this
             // transfer is sound exactly under the standing invariant that **every hint is pinned by
@@ -352,18 +353,15 @@ impl ValueRangeAnalysis {
             } => {
                 let result_ty = types.get_value_type(*result);
                 let width = Width::of_type(result_ty, field);
-                let signed = type_is_signed(result_ty);
                 let l = range(bounds, *lhs);
                 let r_in = range(bounds, *rhs);
                 let r = Self::binary_arith(
                     *kind,
                     width,
-                    signed,
                     &l,
                     &r_in,
                     width_of(*lhs) == width,
                     width_of(*rhs) == width,
-                    types.get_value_type(*rhs),
                 );
                 Self::set(bounds, *result, types, field, r, changed);
             }
@@ -377,16 +375,17 @@ impl ValueRangeAnalysis {
                 let width = Width::of_type(result_ty, field);
                 let c = range(bounds, *const_val);
                 let v = range(bounds, *var);
-                // The result takes the *variable's* type, and the constant is a plain multiplier
-                // rather than a bit pattern, so it is read at its own declared signedness and then
-                // scales both of the variable's readings.
-                let factor = c.by_type(types.get_value_type(*const_val));
+
+                // `MulConst` is a _field_ multiply of raw patterns, so the multiplier is read as
+                // the pattern it is. There is no opcode here to carry a sign and nothing to read
+                // one from.
+                let factor = c.unsigned();
                 let r = if c.is_empty() || v.is_empty() || width_of(*var) != width {
                     Self::unknown_or_empty(width, c.is_empty() || v.is_empty())
                 } else {
                     Self::wrap_or_trap(
                         width,
-                        type_is_signed(result_ty),
+                        false,
                         factor.mul(v.unsigned()),
                         factor.mul(v.signed()),
                     )
@@ -405,11 +404,11 @@ impl ValueRangeAnalysis {
 
             OpCode::Guard { inner, .. } => {
                 self.transfer(inner, types, bounds, changed, field);
-                // A guarded *failable* operation is not simply its inner operation. `LowerPureGuards`
-                // branches on the failure condition: the failing side asserts the guard's condition
-                // is false and yields the result type's zero, so an inactive guard around an
-                // operation that would have overflowed, divided by zero or shifted out of range
-                // produces `0` — a value the computed range can easily exclude.
+                // A guarded _failable_ operation is not simply its inner operation.
+                // `LowerPureGuards` branches on the failure condition: the failing side asserts the
+                // guard's condition is false and yields the result type's zero, so an inactive
+                // guard around an operation that would have overflowed, divided by zero or shifted
+                // out of range produces `0` — a value the computed range can easily exclude.
                 if guard_may_produce_zero(inner, types) {
                     for vid in inner.get_results() {
                         let width = Width::of_type(types.get_value_type(*vid), field);
@@ -443,34 +442,40 @@ impl ValueRangeAnalysis {
     /// the two, and a shift amount is typically a narrow integer — and a shift reads its amount as
     /// a count rather than as a bit pattern, so it needs no width agreement. Every other rule here
     /// reasons about the result's bit pattern and gives up if an operand is not a reading of it.
+    ///
+    /// `kind` carries the sign as well as the operation, and both are read off it. It used to
+    /// arrive alongside a separate `signed` flag, which meant a caller could spell an `SDiv` with
+    /// `signed: false` — an operation the pipeline cannot produce — and have it silently mean
+    /// something.
     #[allow(clippy::too_many_arguments)]
     fn binary_arith(
         kind: BinaryArithOpKind,
         width: Width,
-        signed: bool,
         l: &ValueRange,
         r: &ValueRange,
         lhs_matches: bool,
         rhs_matches: bool,
-        rhs_type: &Type,
     ) -> ValueRange {
-        use BinaryArithOpKind::*;
+        use ArithGroup::*;
+        let group = kind.group();
+        let signed = kind.is_signed();
 
-        // An unreachable operand makes the result unreachable. Propagating it matters: the bitwise
-        // rules below read `hi` directly, and ⊥ spells `[1, 0]`, whose `hi` is a perfectly
+        // An unreachable operand makes the result unreachable. Propagating it matters because the
+        // bitwise rules below read `hi` directly, and ⊥ spells `[1, 0]`, whose `hi` is a perfectly
         // plausible-looking zero.
         if l.is_empty() || r.is_empty() {
             return ValueRange::empty(width);
         }
 
-        match kind {
+        match group {
             Add | Sub | Mul => {
                 if !(lhs_matches && rhs_matches) {
                     return ValueRange::full(width);
                 }
+
                 // The same formula in both readings, because the operation is a ring homomorphism
                 // modulo the width: `dec` commutes with `+`, `−` and `×`.
-                let (raw_u, raw_s) = match kind {
+                let (raw_u, raw_s) = match group {
                     Add => (l.unsigned().add(r.unsigned()), l.signed().add(r.signed())),
                     Sub => (l.unsigned().sub(r.unsigned()), l.signed().sub(r.signed())),
                     _ => (l.unsigned().mul(r.unsigned()), l.signed().mul(r.signed())),
@@ -478,7 +483,7 @@ impl ValueRangeAnalysis {
                 Self::wrap_or_trap(width, signed, raw_u, raw_s)
             }
 
-            Div | Mod => {
+            Div | Rem => {
                 let Width::Bits(_) = width else {
                     // A field `Div` is multiplication by a modular inverse, which no interval
                     // bounds at all, and a field `Mod` does not exist.
@@ -487,6 +492,7 @@ impl ValueRangeAnalysis {
                 if !(lhs_matches && rhs_matches) {
                     return ValueRange::full(width);
                 }
+
                 // The reading the instruction is performed in. Unsigned division is performed on
                 // the raw pattern; signed division on its two's-complement value.
                 let (dividend, divisor) = if signed {
@@ -494,18 +500,20 @@ impl ValueRangeAnalysis {
                 } else {
                     (l.unsigned(), r.unsigned())
                 };
+
                 // Signed division truncates toward zero while `div_const_pos` floors, and the two
                 // agree only for a non-negative dividend. An unsigned reading satisfies that by
                 // construction, so this gate is now vacuous on the unsigned side.
                 if !dividend.is_non_negative() {
                     return ValueRange::full(width);
                 }
-                let math = match (kind, divisor.lo(), divisor.hi()) {
+
+                let math = match (group, divisor.lo(), divisor.hi()) {
                     (Div, Some(lo), Some(hi)) if lo == hi && lo.is_positive() => {
                         dividend.div_const_pos(lo)
                     }
                     // `x % d < d`, and a non-negative `x % d` is also no larger than `x` itself.
-                    (Mod, Some(lo), Some(hi)) if lo.is_positive() => {
+                    (Rem, Some(lo), Some(hi)) if lo.is_positive() => {
                         let mut cap = hi - BigInt::one();
                         if let Some(d) = dividend.hi()
                             && d < &cap
@@ -523,13 +531,14 @@ impl ValueRangeAnalysis {
                 if !matches!(width, Width::Bits(_)) || !(lhs_matches && rhs_matches) {
                     return ValueRange::full(width);
                 }
+
                 // Bitwise operations act on the raw pattern, so the unsigned readings bound them
                 // unconditionally. The old rule needed both operands to be non-negative because it
                 // had only the mathematical reading to work with; here the gate is vacuous.
                 let (Some(lh), Some(rh)) = (l.unsigned().hi(), r.unsigned().hi()) else {
                     return ValueRange::full(width);
                 };
-                let cap = match kind {
+                let cap = match group {
                     // `x & y <= min(x, y)`.
                     And => lh.min(rh).clone(),
                     // `x | y` and `x ^ y` fit in as many bits as the wider operand needs.
@@ -545,17 +554,28 @@ impl ValueRangeAnalysis {
                 if !lhs_matches {
                     return ValueRange::full(width);
                 }
-                // The amount is a count, read at its own declared signedness, exactly as the
-                // constant folder decodes it.
-                let amount = r.by_type(rhs_type);
+
+                // The amount is read as a magnitude, which makes the arms below sound regardless of
+                // the originally-declared sign of the operand.
+                //
+                // This is not because a shift amount cannot be negative — it can. Noir types it as
+                // the shifted value's own type (`bind_type_variables_for_infix` unifies both
+                // operands of every infix operator, shifts included), so `i32 s<< i32` is
+                // well-typed and `noir_tests/signed_shift` contains one. But a negative amount is a
+                // program failure, rejected by `pure_guards::emit_invalid_shift_cond`, and reading
+                // it here as the large magnitude its raw bits spell is exactly what keeps it out of
+                // the constant arm: `2^n - 1` never satisfies `k < n`, so it falls to the
+                // conservative unknown-amount arms below rather than folding to a plausible small
+                // shift.
+                let amount = r.unsigned();
                 let constant = match (amount.lo(), amount.hi()) {
                     (Some(a), Some(b)) if a == b && !a.is_negative() => {
                         a.to_usize().filter(|k| *k < n)
                     }
                     _ => None,
                 };
-                match (kind, constant) {
-                    // A left shift is a multiply by `2^k`, modelled as *wrapping* rather than
+                match (group, constant) {
+                    // A left shift is a multiply by `2^k`, modelled as _wrapping_ rather than
                     // trapping: the backends mask an out-of-range shift while the constant folder
                     // refuses one, and the wrapping reading is sound under either reading of an
                     // overflowing shift.
@@ -567,6 +587,7 @@ impl ValueRangeAnalysis {
                             l.signed().mul(&factor).wrap_to_signed_bits(n),
                         )
                     }
+
                     // A right shift is a floored divide in whichever reading it is performed:
                     // logical on an unsigned type, arithmetic on a signed one. Both floor, which
                     // is what `div_const_pos` does.
@@ -582,6 +603,7 @@ impl ValueRangeAnalysis {
                             },
                         )
                     }
+
                     // An unknown amount is still known to be a non-negative count, and a right
                     // shift is monotone in it: it can only move a value toward zero, or toward −1
                     // if the shift is arithmetic and the value is negative.
@@ -619,7 +641,7 @@ impl ValueRangeAnalysis {
 
     /// Combine the two readings of an `Add`, `Sub` or `Mul` result.
     ///
-    /// Both were computed by the same formula, but only one of them is *exact*: the declared type
+    /// Both were computed by the same formula, but only one of them is _exact_: the declared type
     /// traps on overflow in its own reading, so an out-of-range result there is a program failure
     /// and may be intersected away. The other reading is merely congruent modulo the width, and is
     /// wrapped into its window instead.
@@ -981,7 +1003,7 @@ impl Interval {
     }
 }
 
-/// Modular reduction into a fixed window — the *wrapping* half of a change of representation.
+/// Modular reduction into a fixed window — the _wrapping_ half of a change of representation.
 ///
 /// A run of consecutive integers stays consecutive under reduction, so the reduction is exact
 /// unless the run is wider than the window or straddles its far edge; in those cases it saturates
@@ -1059,7 +1081,7 @@ impl Width {
     /// The width implied by a declared SSA type, looking through `WitnessOf`.
     pub fn of_type(ty: &Type, field: FieldConfig) -> Self {
         match &ty.strip_witness().expr {
-            TypeExpr::U(n) | TypeExpr::I(n) => Width::Bits(*n),
+            TypeExpr::Int(n) => Width::Bits(*n),
             TypeExpr::Field => Width::Field(field),
             _ => Width::NonScalar,
         }
@@ -1171,7 +1193,7 @@ impl ValueRange {
             // other would let `opt_mul`'s `∞·0 = 0` mint a second spelling of "no information".
             Width::NonScalar => Self::full(Width::NonScalar),
 
-            // A field element's canonical integer *is* its value, so the two readings are one
+            // A field element's canonical integer _is_ its value, so the two readings are one
             // reading and the reduction is a plain intersection.
             Width::Field(f) => {
                 let both = self
@@ -1230,7 +1252,7 @@ impl ValueRange {
     /// This is what `Cast` does at runtime — the LLSSA lowering emits a `zext` or a `truncate` for
     /// every integer target, and builds the low limbs directly for a field one. It never turns a
     /// reachable value into an unreachable one. Either direction discards the old signed reading
-    /// (every arm rebuilds from the unsigned one) since it was the sign at the *old* width and says
+    /// (every arm rebuilds from the unsigned one) since it was the sign at the _old_ width and says
     /// nothing at the new one; nothing is lost by that, because a reduced range has already folded
     /// it into the unsigned reading.
     pub fn reinterpret_to(&self, width: Width) -> Self {
@@ -1252,7 +1274,7 @@ impl ValueRange {
     /// set ones.
     ///
     /// Only the **unsigned** reading crosses the width boundary. It is the raw integer, so it means
-    /// the same thing at any width; the signed reading is two's complement at the *old* width and
+    /// the same thing at any width; the signed reading is two's complement at the _old_ width and
     /// is a statement about a sign bit that has moved, so it is dropped and recovered by the
     /// reduction rather than carried over. Carrying it is how a widening used to manufacture ⊥: a
     /// `Bits(8)` `[200, 255]` has the signed reading `[−56, −1]`, and re-reading that at `Bits(16)`
@@ -1278,7 +1300,7 @@ impl ValueRange {
         &self.unsigned
     }
 
-    /// The two's-complement signed reading — the *mathematical* value of a signed integer.
+    /// The two's-complement signed reading — the _mathematical_ value of a signed integer.
     pub fn signed(&self) -> &Interval {
         &self.signed
     }
@@ -1309,8 +1331,8 @@ impl ValueRange {
     ///
     /// Only the **unsigned** reading answers this, because it is the one that means the same thing
     /// at every width: capped below `2^(bits−1)`, bit `bits − 1` of the pattern is clear whatever
-    /// width the pattern is held at. The signed reading is the two's-complement value at *this
-    /// range's own* width and says nothing about a narrower one — a `U(32)` pinned to `200` has a
+    /// width the pattern is held at. The signed reading is the two's-complement value at _this
+    /// range's own_ width and says nothing about a narrower one — a `U(32)` pinned to `200` has a
     /// non-negative signed reading and a set bit 7, so consulting it here would report the pattern
     /// `0xC8` as sign-bit-clear and let a caller hardcode the wrong sign.
     ///
@@ -1327,14 +1349,14 @@ impl ValueRange {
     /// True when the value provably is **not** the bit pattern `raw`, named by its unsigned (raw)
     /// reading.
     ///
-    /// γ admits a pattern only when *both* readings admit it, so excluding it from either one is
+    /// γ admits a pattern only when _both_ readings admit it, so excluding it from either one is
     /// enough. Both are consulted rather than just the unsigned reading because the reduction
-    /// leaves each component a *hull*, and γ may have a hole in the middle of that hull: at `n = 8`
+    /// leaves each component a _hull_, and γ may have a hole in the middle of that hull: at `n = 8`
     /// with `u = [0, 255]` and `s = [−1, 1]`, γ is `{255, 0, 1}`, and it is the signed reading that
     /// rules out the pattern `5`.
     ///
     /// ⊥ answers `false`, like every other `proves_*` query. An unreachable value cannot be `raw`,
-    /// but the analysis derives ⊥ *from* the constraints the caller is about to drop, so answering
+    /// but the analysis derives ⊥ _from_ the constraints the caller is about to drop, so answering
     /// `true` would be circular. See the proof-strength predicates on [`Interval`].
     pub fn proves_excludes_pattern(&self, raw: &BigInt) -> bool {
         if self.is_empty() {
@@ -1343,7 +1365,7 @@ impl ValueRange {
         match self.width {
             // No bit pattern to speak of, and both readings are top by invariant.
             Width::NonScalar => false,
-            // One reading, and the pattern *is* the canonical integer.
+            // One reading, and the pattern _is_ the canonical integer.
             Width::Field(_) => !self.unsigned.contains(raw),
             Width::Bits(n) => {
                 !self.unsigned.contains(raw) || !self.signed.contains(&decode_signed(n, raw))
@@ -1376,17 +1398,6 @@ impl ValueRange {
             self.signed.intersect(&other.signed),
         )
     }
-
-    /// The interval the *declared type* says is this value's mathematical reading: the signed one
-    /// for a signed integer type, the unsigned one otherwise.
-    ///
-    /// FIXME: This exists only while signedness still lives in the type.
-    pub fn by_type(&self, ty: &Type) -> &Interval {
-        match &ty.strip_witness().expr {
-            TypeExpr::I(_) => &self.signed,
-            _ => &self.unsigned,
-        }
-    }
 }
 
 /// `dec_n` from the module doc: the two's-complement reading of the `bits`-wide pattern `raw`.
@@ -1405,18 +1416,6 @@ fn decode_signed(bits: usize, raw: &BigInt) -> BigInt {
     }
 }
 
-/// Whether a declared type reads its bit pattern as two's-complement signed.
-///
-/// The domain itself is sign-agnostic; this is consulted only where the *operation* is not —
-/// which reading an arithmetic opcode traps on, and whether `Div`, `Mod` and `Shr` are the signed
-/// or the unsigned instruction.
-///
-/// FIXME: This exists only while signedness still lives in the type. From Stage 2 the opcode
-/// carries it and this query disappears.
-fn type_is_signed(ty: &Type) -> bool {
-    matches!(&ty.strip_witness().expr, TypeExpr::I(_))
-}
-
 /// Whether a guarded operation can yield a zero it would not have computed.
 ///
 /// This is the complement, restricted to scalars, of what
@@ -1429,24 +1428,20 @@ fn type_is_signed(ty: &Type) -> bool {
 ///
 /// Integer `Add`/`Sub`/`Mul` are in the set and their field counterparts are not, because field
 /// arithmetic cannot fail. `ArrayGet` and `ArraySet` also have failure branches, and their results
-/// *can* be scalars — they are left out because the transfer does not model them either way: they
+/// _can_ be scalars — they are left out because the transfer does not model them either way: they
 /// fall to the `_` arm, which answers with the full range of the declared type, and that already
 /// contains the zero the failure branch would produce.
 fn guard_may_produce_zero(inner: &OpCode, types: &FunctionTypeInfo) -> bool {
-    use BinaryArithOpKind::*;
+    use ArithGroup::*;
     match inner {
-        OpCode::BinaryArithOp {
-            kind: Add | Sub | Mul,
-            lhs,
-            ..
-        } => !matches!(
-            types.get_value_type(*lhs).strip_witness().expr,
-            TypeExpr::Field
-        ),
-        OpCode::BinaryArithOp {
-            kind: Div | Mod | Shl | Shr,
-            ..
-        } => true,
+        OpCode::BinaryArithOp { kind, lhs, .. } => match kind.group() {
+            Add | Sub | Mul => !matches!(
+                types.get_value_type(*lhs).strip_witness().expr,
+                TypeExpr::Field
+            ),
+            Div | Rem | Shl | Shr => true,
+            And | Or | Xor => false,
+        },
         _ => false,
     }
 }
@@ -1560,9 +1555,16 @@ fn opt_mul(a: Option<&BigInt>, b: Option<&BigInt>) -> Option<BigInt> {
     }
 }
 
-/// Convert a `Constant::I(bits, encoded)` u128 bit pattern back to a signed `BigInt`.
+/// Convert a `Constant::Int(bits, encoded)` u128 bit pattern back to a signed `BigInt`.
 ///
 /// Two's-complement decode for any `bits ∈ [1, 128]`.
+///
+/// Test-only. `compute_constant_bounds` used to call this on the signed half of the constant tag;
+/// with one `Constant::Int` it names a constant by its raw pattern instead and lets the domain's
+/// reduction recover the signed reading. What survives here is the _statement_ of that equivalence
+/// — `the_two_routes_to_one_pattern_agree` is what stops the reduction quietly drifting from the
+/// decode it is supposed to reproduce.
+#[cfg(test)]
 fn signed_const_to_bigint(bits: usize, encoded: u128) -> BigInt {
     if bits == 0 {
         return BigInt::zero();
@@ -1608,13 +1610,13 @@ fn compute_constant_bounds(ssa: &HLSSA) -> HashMap<ValueId, ValueRange> {
         .iter()
         .map(|(vid, cv)| {
             let r = match cv.as_ref() {
-                Constant::U(bits, v) => {
+                // One known bit pattern. Which reading it is _given_ through does not matter: the
+                // domain carries both, and the reduction is canonical, so naming the pattern as an
+                // unsigned singleton recovers exactly the signed reading `from_signed` would have
+                // been handed. `the_two_routes_to_one_pattern_agree` pins that.
+                Constant::Int(bits, v) => {
                     ValueRange::from_unsigned(Width::Bits(*bits), Interval::singleton(*v))
                 }
-                Constant::I(bits, encoded) => ValueRange::from_signed(
-                    Width::Bits(*bits),
-                    Interval::singleton(signed_const_to_bigint(*bits, *encoded)),
-                ),
                 Constant::Field(f) => ValueRange::from_unsigned(
                     Width::Field(field),
                     Interval::singleton(field_to_bigint(f)),
@@ -1658,7 +1660,7 @@ mod tests {
         Interval::closed(a, b)
     }
 
-    /// The concrete set a `Bits(n)` range denotes: every bit pattern admitted by *both* readings.
+    /// The concrete set a `Bits(n)` range denotes: every bit pattern admitted by _both_ readings.
     /// This is γ, written out directly, and it is what the invariant tests compare against.
     fn gamma(r: &ValueRange, n: usize) -> Vec<i64> {
         gamma_of(n, r.unsigned(), r.signed())
@@ -1682,7 +1684,7 @@ mod tests {
 
     #[test]
     fn excluding_a_pattern_is_exactly_non_membership_of_gamma() {
-        // `proves_excludes_pattern` is not an approximation: γ admits a pattern iff *both* readings
+        // `proves_excludes_pattern` is not an approximation: γ admits a pattern iff _both_ readings
         // do, so testing both is precisely the membership test. Brute-forced over every pattern at
         // `n = 8`, against γ computed independently.
         //
@@ -1726,7 +1728,7 @@ mod tests {
 
     #[test]
     fn excluding_a_pattern_reads_a_field_as_its_canonical_integer() {
-        // One reading, and no sign bit: the pattern *is* the value, so `p − 1` is `p − 1` and not
+        // One reading, and no sign bit: the pattern _is_ the value, so `p − 1` is `p − 1` and not
         // `−1`. The divmod discharge only ever asks a field range about zero, which is what the
         // first two assertions pin.
         let nonzero = ValueRange::from_unsigned(Width::Field(f()), iv(1, 9));
@@ -1747,13 +1749,13 @@ mod tests {
         let minus_one = BigInt::from(255);
         let int_min = BigInt::from(128);
 
-        // A tight *signed* reading rules out `−1` while the unsigned hull still contains `255`.
+        // A tight _signed_ reading rules out `−1` while the unsigned hull still contains `255`.
         let non_negative = ValueRange::from_signed(Width::Bits(8), iv(0, 127));
         assert!(non_negative.proves_excludes_pattern(&minus_one));
         assert!(non_negative.proves_excludes_pattern(&int_min));
         assert!(!non_negative.proves_excludes_pattern(&BigInt::zero()));
 
-        // A tight *unsigned* reading rules out `INT_MIN` the other way round.
+        // A tight _unsigned_ reading rules out `INT_MIN` the other way round.
         let small = ValueRange::from_unsigned(Width::Bits(8), iv(1, 100));
         assert!(small.proves_excludes_pattern(&BigInt::zero()));
         assert!(small.proves_excludes_pattern(&int_min));
@@ -1768,7 +1770,7 @@ mod tests {
 
     #[test]
     fn a_field_width_keeps_its_two_readings_equal() {
-        // A field element's canonical integer *is* its value; there is no second reading, so the
+        // A field element's canonical integer _is_ its value; there is no second reading, so the
         // struct must not be able to represent one. `opt_mul`'s `inf * 0 = 0` rule and the
         // equality-driven `overwrite` together mean a second representation of the same value
         // would make the fixpoint oscillate.
@@ -1824,16 +1826,17 @@ mod tests {
     }
 
     #[test]
-    fn by_type_selects_the_declared_reading() {
-        // The one place the domain still consults type-level signedness: an instruction reading its
-        // operand as a mathematical count rather than as a bit pattern.
+    fn both_readings_of_one_pattern_stay_available() {
+        // The domain keeps both readings of every value and never picks between them by looking at
+        // a type -- there is no longer a type-level sign to look at. Consumers that need one ask
+        // for it by name, and which name they ask for follows their opcode.
         let r = ValueRange::from_unsigned(Width::Bits(8), iv(200, 200));
-        assert_eq!(r.by_type(&Type::u(8)), &iv(200, 200));
-        assert_eq!(r.by_type(&Type::i(8)), &iv(-56, -56));
-        assert_eq!(r.by_type(&Type::witness_of(Type::i(8))), &iv(-56, -56));
+        assert_eq!(r.unsigned(), &iv(200, 200));
+        assert_eq!(r.signed(), &iv(-56, -56));
 
+        // A field element has one reading, so the two agree.
         let r = ValueRange::from_unsigned(Width::Field(f()), iv(0, 7));
-        assert_eq!(r.by_type(&Type::field()), &iv(0, 7));
+        assert_eq!(r.unsigned(), &iv(0, 7));
     }
 
     #[test]
@@ -1891,7 +1894,7 @@ mod tests {
 
     #[test]
     fn a_boolean_has_a_signed_reading_of_minus_one() {
-        // In one-bit two's complement the pattern `1` *is* `-1`. No consumer reads the signed
+        // In one-bit two's complement the pattern `1` _is_ `-1`. No consumer reads the signed
         // component of a boolean, and this pins what it would see if one started to.
         let r = ValueRange::full(Width::Bits(1));
         assert_eq!(r.unsigned(), &iv(0, 1));
@@ -1915,7 +1918,7 @@ mod tests {
     #[test]
     fn reinterpret_is_a_raw_bit_operation_and_never_empties() {
         // What `Cast` does at runtime: zero-extend or truncate the pattern. Widening a negative
-        // signed value is *not* sign extension — `i8 -1` is 255 at any wider width.
+        // signed value is _not_ sign extension — `i8 -1` is 255 at any wider width.
         let minus_one = ValueRange::from_signed(Width::Bits(8), iv(-1, -1));
         assert_eq!(
             minus_one.reinterpret_to(Width::Bits(16)).unsigned(),
@@ -1949,7 +1952,7 @@ mod tests {
     fn constraining_down_keeps_the_patterns_that_still_fit() {
         // The narrowing half of `constraining_to_a_wider_width_does_not_manufacture_bottom`, and
         // the same mistake: `[128, 255]` is representable at `Bits(8)` -- every one of those
-        // patterns is a `u8` -- but read as two's complement *there* it is negative, so carrying
+        // patterns is a `u8` -- but read as two's complement _there_ it is negative, so carrying
         // the old width's signed reading across and intersecting it with `signed_full(8)` used to
         // discard the whole top half of the range. The assertion `constrain_to` models is about
         // representability, which only the unsigned reading decides.
@@ -2019,7 +2022,7 @@ mod tests {
 
     #[test]
     fn the_sign_bit_test_declines_at_a_width_narrower_than_the_range() {
-        // The signed reading is two's complement at the range's *own* width, so it says nothing
+        // The signed reading is two's complement at the range's _own_ width, so it says nothing
         // about a narrower one. `200` held in a `U(32)` reads as a non-negative `200` there while
         // bit 7 of the pattern `0xC8` is set, so a predicate that consulted it would license
         // `lower_integer_sext` to hardcode `sign = 0` and sign-extend `200` to `200` instead of
@@ -2042,9 +2045,41 @@ mod tests {
     }
 
     #[test]
+    fn the_two_routes_to_one_pattern_agree() {
+        // What lets `compute_constant_bounds` name a constant by its raw pattern alone. A
+        // `Constant::Int` says nothing about how to read itself, so the range built from it is the
+        // unsigned singleton -- and that has to be _the same domain element_ the signed route
+        // would have produced, or collapsing the two constant tags would have quietly widened or
+        // narrowed every signed constant's range.
+        //
+        // It holds because the domain carries both readings and its reduction is canonical: each
+        // route pins one reading and lets the reduction recover the other, and both denote the
+        // same single bit pattern. Checked at the boundaries, where the two readings differ most.
+        for (bits, raw) in [
+            (8usize, 0xFFu128),
+            (8, 0x80),
+            (8, 0x7F),
+            (8, 0),
+            (1, 1),
+            (32, 0xDEAD),
+        ] {
+            let from_pattern =
+                ValueRange::from_unsigned(Width::Bits(bits), Interval::singleton(raw));
+            let from_signed_reading = ValueRange::from_signed(
+                Width::Bits(bits),
+                Interval::singleton(signed_const_to_bigint(bits, raw)),
+            );
+            assert_eq!(
+                from_pattern, from_signed_reading,
+                "int{bits} pattern {raw:#x} disagrees between the two routes"
+            );
+        }
+    }
+
+    #[test]
     fn signed_constants_decode_to_their_mathematical_value() {
-        // Guards `compute_constant_bounds`: `Constant::I` stores the raw two's-complement bits, so
-        // the signed reading has to decode them rather than take them at face value.
+        // The decode `the_two_routes_to_one_pattern_agree` is stated against: raw two's-complement
+        // bits have to be decoded rather than taken at face value.
         assert_eq!(signed_const_to_bigint(8, 0xFF), BigInt::from(-1));
         assert_eq!(signed_const_to_bigint(8, 0x80), BigInt::from(-128));
         assert_eq!(signed_const_to_bigint(8, 0x7F), BigInt::from(127));
@@ -2066,13 +2101,13 @@ mod tests {
         // The whole point of the rewrite: `u32` and `i32` are the same bit pattern, so they must
         // produce the same width. When `TypeExpr::U` disappears this becomes the only rule left.
         assert_eq!(
-            Width::of_type(&Type::u(32), f()),
-            Width::of_type(&Type::i(32), f())
+            Width::of_type(&Type::int(32), f()),
+            Width::of_type(&Type::int(32), f())
         );
-        assert_eq!(Width::of_type(&Type::u(32), f()), Width::Bits(32));
+        assert_eq!(Width::of_type(&Type::int(32), f()), Width::Bits(32));
         assert_eq!(Width::of_type(&Type::field(), f()), Width::Field(f()));
         assert_eq!(
-            Width::of_type(&Type::u(8).array_of(3), f()),
+            Width::of_type(&Type::int(8).array_of(3), f()),
             Width::NonScalar
         );
     }
@@ -2124,7 +2159,7 @@ mod tests {
         assert!(!bottom.is_non_negative_at_width(8));
         assert!(!bottom.is_non_negative_as_signed());
 
-        // A ⊥ *field* element likewise proves nothing, even though every reachable field element
+        // A ⊥ _field_ element likewise proves nothing, even though every reachable field element
         // is non-negative.
         let bottom_field = ValueRange::from_unsigned(Width::Field(f()), Interval::empty());
         assert!(!bottom_field.is_non_negative_as_signed());
@@ -2132,15 +2167,8 @@ mod tests {
 
     /// `binary_arith` with both operands the result's width, which is every case that occurs
     /// outside a shift by a narrower amount.
-    fn arith(
-        kind: BinaryArithOpKind,
-        width: Width,
-        signed: bool,
-        l: &ValueRange,
-        r: &ValueRange,
-        rhs_type: &Type,
-    ) -> ValueRange {
-        ValueRangeAnalysis::binary_arith(kind, width, signed, l, r, true, true, rhs_type)
+    fn arith(kind: BinaryArithOpKind, width: Width, l: &ValueRange, r: &ValueRange) -> ValueRange {
+        ValueRangeAnalysis::binary_arith(kind, width, l, r, true, true)
     }
 
     fn u8r(lo: i64, hi: i64) -> ValueRange {
@@ -2158,33 +2186,33 @@ mod tests {
 
         // Unsigned: the trap prunes the overflowing tail of the sum, and the signed reading
         // follows from what is left.
-        let sum = arith(Add, w, false, &u8r(200, 255), &u8r(1, 1), &Type::u(8));
+        let sum = arith(UAdd, w, &u8r(200, 255), &u8r(1, 1));
         assert_eq!(sum.unsigned(), &iv(201, 255));
         assert_eq!(sum.signed(), &iv(-55, -1));
 
         // Signed: the trap is on the signed reading instead, and the unsigned one wraps.
-        let sum = arith(Add, w, true, &i8r(-2, -1), &i8r(1, 1), &Type::i(8));
+        let sum = arith(SAdd, w, &i8r(-2, -1), &i8r(1, 1));
         assert_eq!(sum.signed(), &iv(-1, 0));
         assert_eq!(sum.unsigned(), &iv(0, 255));
 
-        // The legal `u8` add whose *signed* reading leaves the type. Capping both readings here —
+        // The legal `u8` add whose _signed_ reading leaves the type. Capping both readings here —
         // rather than only the one the type traps on — would report it unreachable.
-        let sum = arith(Add, w, false, &u8r(127, 127), &u8r(1, 1), &Type::u(8));
+        let sum = arith(UAdd, w, &u8r(127, 127), &u8r(1, 1));
         assert!(!sum.is_empty());
         assert_eq!(sum.unsigned(), &iv(128, 128));
         assert_eq!(sum.signed(), &iv(-128, -128));
 
         // Underflow of an unsigned subtraction is the ⊥ the proof predicates exist for.
-        let diff = arith(Sub, w, false, &u8r(0, 0), &u8r(1, 1), &Type::u(8));
+        let diff = arith(USub, w, &u8r(0, 0), &u8r(1, 1));
         assert!(diff.is_empty());
 
-        let product = arith(Mul, w, false, &u8r(2, 3), &u8r(4, 5), &Type::u(8));
+        let product = arith(UMul, w, &u8r(2, 3), &u8r(4, 5));
         assert_eq!(product.unsigned(), &iv(8, 15));
 
         // An unreachable operand makes the result unreachable rather than a plausible zero.
         let bottom = ValueRange::empty(w);
-        assert!(arith(Add, w, false, &bottom, &u8r(1, 1), &Type::u(8)).is_empty());
-        assert!(arith(And, w, false, &bottom, &u8r(1, 1), &Type::u(8)).is_empty());
+        assert!(arith(UAdd, w, &bottom, &u8r(1, 1)).is_empty());
+        assert!(arith(And, w, &bottom, &u8r(1, 1)).is_empty());
     }
 
     #[test]
@@ -2194,15 +2222,15 @@ mod tests {
 
         // Both operands negative as signed, which the old rule refused to bound at all. The raw
         // patterns are 200..=255 and 254..=255, so the AND is capped by the smaller.
-        let and = arith(And, w, true, &i8r(-56, -1), &i8r(-2, -1), &Type::i(8));
+        let and = arith(And, w, &i8r(-56, -1), &i8r(-2, -1));
         assert_eq!(and.unsigned(), &iv(0, 255));
 
-        let and = arith(And, w, true, &i8r(-1, -1), &i8r(0, 3), &Type::i(8));
+        let and = arith(And, w, &i8r(-1, -1), &i8r(0, 3));
         assert_eq!(and.unsigned(), &iv(0, 3));
 
-        let or = arith(Or, w, false, &u8r(0, 5), &u8r(0, 9), &Type::u(8));
+        let or = arith(Or, w, &u8r(0, 5), &u8r(0, 9));
         assert_eq!(or.unsigned(), &iv(0, 15));
-        let xor = arith(Xor, w, false, &u8r(0, 5), &u8r(0, 9), &Type::u(8));
+        let xor = arith(Xor, w, &u8r(0, 5), &u8r(0, 9));
         assert_eq!(xor.unsigned(), &iv(0, 15));
     }
 
@@ -2211,30 +2239,28 @@ mod tests {
         use BinaryArithOpKind::*;
         let w = Width::Bits(8);
 
-        let quot = arith(Div, w, false, &u8r(200, 255), &u8r(4, 4), &Type::u(8));
+        let quot = arith(UDiv, w, &u8r(200, 255), &u8r(4, 4));
         assert_eq!(quot.unsigned(), &iv(50, 63));
 
         // A negative signed dividend still gives up: signed division truncates toward zero while
         // interval division floors, and the two only agree above zero.
-        let quot = arith(Div, w, true, &i8r(-8, -1), &i8r(2, 2), &Type::i(8));
+        let quot = arith(SDiv, w, &i8r(-8, -1), &i8r(2, 2));
         assert_eq!(quot.signed(), &Interval::signed_full(8));
 
         // `x % d < d`, and `x % d <= x`: the second term is what the old rule was missing.
-        let rem = arith(Mod, w, false, &u8r(0, 3), &u8r(10, 10), &Type::u(8));
+        let rem = arith(URem, w, &u8r(0, 3), &u8r(10, 10));
         assert_eq!(rem.unsigned(), &iv(0, 3));
-        let rem = arith(Mod, w, false, &u8r(0, 200), &u8r(10, 10), &Type::u(8));
+        let rem = arith(URem, w, &u8r(0, 200), &u8r(10, 10));
         assert_eq!(rem.unsigned(), &iv(0, 9));
 
         // Field division is multiplication by a modular inverse, which no interval bounds. The old
         // rule reached for `div_const_pos` here and got an answer that is simply wrong.
         let fw = Width::Field(f());
         let quot = arith(
-            Div,
+            UDiv,
             fw,
-            false,
             &ValueRange::from_unsigned(fw, iv(0, 100)),
             &ValueRange::from_unsigned(fw, iv(2, 2)),
-            &Type::field(),
         );
         assert_eq!(quot, ValueRange::full(fw));
     }
@@ -2244,22 +2270,22 @@ mod tests {
         use BinaryArithOpKind::*;
         let w = Width::Bits(8);
 
-        let shl = arith(Shl, w, false, &u8r(1, 3), &u8r(2, 2), &Type::u(8));
+        let shl = arith(UShl, w, &u8r(1, 3), &u8r(2, 2));
         assert_eq!(shl.unsigned(), &iv(4, 12));
         // An overflowing left shift is modelled as wrapping, which is sound whichever way the
         // backends and the constant folder settle their disagreement about it.
-        let shl = arith(Shl, w, false, &u8r(200, 200), &u8r(1, 1), &Type::u(8));
+        let shl = arith(UShl, w, &u8r(200, 200), &u8r(1, 1));
         assert!(!shl.is_empty());
 
         // Logical on an unsigned type, arithmetic on a signed one — both floor.
-        let shr = arith(Shr, w, false, &u8r(200, 255), &u8r(1, 1), &Type::u(8));
+        let shr = arith(UShr, w, &u8r(200, 255), &u8r(1, 1));
         assert_eq!(shr.unsigned(), &iv(100, 127));
-        let shr = arith(Shr, w, true, &i8r(-8, -5), &i8r(1, 1), &Type::i(8));
+        let shr = arith(SShr, w, &i8r(-8, -5), &i8r(1, 1));
         assert_eq!(shr.signed(), &iv(-4, -3));
 
         // An out-of-range amount is a runtime error the backends disagree about, so it is not
         // modelled at all.
-        let shr = arith(Shr, w, false, &u8r(200, 255), &u8r(9, 9), &Type::u(8));
+        let shr = arith(UShr, w, &u8r(200, 255), &u8r(9, 9));
         assert_eq!(shr, ValueRange::full(w));
     }
 
@@ -2269,17 +2295,17 @@ mod tests {
         let w = Width::Bits(8);
 
         // Shifting right can only move a value toward zero...
-        let shr = arith(Shr, w, false, &u8r(0, 60), &u8r(0, 7), &Type::u(8));
+        let shr = arith(UShr, w, &u8r(0, 60), &u8r(0, 7));
         assert_eq!(shr.unsigned(), &iv(0, 60));
 
         // ...or toward -1, when the shift is arithmetic and the value is negative.
-        let shr = arith(Shr, w, true, &i8r(-40, -10), &i8r(0, 7), &Type::i(8));
+        let shr = arith(SShr, w, &i8r(-40, -10), &i8r(0, 7));
         assert_eq!(shr.signed(), &iv(-40, -1));
-        let shr = arith(Shr, w, true, &i8r(-40, 10), &i8r(0, 7), &Type::i(8));
+        let shr = arith(SShr, w, &i8r(-40, 10), &i8r(0, 7));
         assert_eq!(shr.signed(), &iv(-40, 10));
 
         // A left shift by an unknown amount has no bound at all.
-        let shl = arith(Shl, w, false, &u8r(0, 1), &u8r(0, 7), &Type::u(8));
+        let shl = arith(UShl, w, &u8r(0, 1), &u8r(0, 7));
         assert_eq!(shl, ValueRange::full(w));
     }
 
@@ -2290,30 +2316,12 @@ mod tests {
         let narrow = ValueRange::from_unsigned(Width::Bits(4), iv(1, 1));
 
         assert_eq!(
-            ValueRangeAnalysis::binary_arith(
-                Add,
-                w,
-                false,
-                &u8r(1, 1),
-                &narrow,
-                true,
-                false,
-                &Type::u(4)
-            ),
+            ValueRangeAnalysis::binary_arith(UAdd, w, &u8r(1, 1), &narrow, true, false),
             ValueRange::full(w)
         );
         // A shift is the exception: its amount is a count, not a reading of the result, so a
         // narrower one is fine.
-        let shl = ValueRangeAnalysis::binary_arith(
-            Shl,
-            w,
-            false,
-            &u8r(1, 3),
-            &narrow,
-            true,
-            false,
-            &Type::u(4),
-        );
+        let shl = ValueRangeAnalysis::binary_arith(UShl, w, &u8r(1, 3), &narrow, true, false);
         assert_eq!(shl.unsigned(), &iv(2, 6));
     }
 
@@ -2332,7 +2340,7 @@ mod tests {
     fn a_select_across_widths_keeps_the_narrow_branchs_values() {
         // `Types` unifies a `Select`'s alternatives with `get_arithmetic_result_type`, so a `u8`
         // and a `u16` branch give a `u16` result and the `u8` operand's range has to be re-read at
-        // the wider width. Carrying its *signed* reading across is what made that go wrong: `200`
+        // the wider width. Carrying its _signed_ reading across is what made that go wrong: `200`
         // at `u8` reads as `-56`, which at `u16` describes a pattern above `2^15`, so
         // `constrain_to` reduced the whole branch to ⊥ — and `join` treats ⊥ as the identity, so
         // the merged range silently became the other branch's alone. That is an unsound narrowing,
@@ -2343,16 +2351,16 @@ mod tests {
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
             selected = sb.modify_function(main_id, |b| {
-                b.function.add_return_type(Type::u(16));
+                b.function.add_return_type(Type::int(16));
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                // Opaque rather than `u_const(1, 1)`: the `Select` transfer ignores its condition
+                // Opaque rather than `int_const(1, 1)`: the `Select` transfer ignores its condition
                 // today, so a constant would still join both branches -- but it would stop doing
                 // so the moment anyone teaches it to fold a known condition, and the test would
                 // keep passing while testing nothing.
-                let cond = e.add_parameter(Type::u(1));
-                let narrow = e.u_const(8, 200);
-                let wide = e.u_const(16, 1000);
+                let cond = e.add_parameter(Type::int(1));
+                let narrow = e.int_const(8, 200);
+                let wide = e.int_const(16, 1000);
                 let r = e.select(cond, narrow, wide);
                 e.terminate_return(vec![r]);
                 r
@@ -2369,7 +2377,7 @@ mod tests {
     fn a_block_parameter_joins_both_readings_across_its_predecessors() {
         // The block-param join and the `overwrite`/`ITER_LIMIT` sweep are the parts of the solver
         // that canonicity protects, and nothing else here reaches them. Merging 3 with 200 leaves
-        // information in *both* readings — neither interval alone denotes `{3, 200}` — which is the
+        // information in _both_ readings — neither interval alone denotes `{3, 200}` — which is the
         // reduced product doing the only thing a single interval could not.
         let mut ssa = HLSSA::with_main("main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
@@ -2377,7 +2385,7 @@ mod tests {
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
             merged = sb.modify_function(main_id, |b| {
-                b.function.add_return_type(Type::u(8));
+                b.function.add_return_type(Type::int(8));
 
                 let merge = b.add_block(|_| {});
                 let then_block = b.add_block(|_| {});
@@ -2385,7 +2393,7 @@ mod tests {
 
                 let param = {
                     let mut e = b.test_block(merge);
-                    let p = e.add_parameter(Type::u(8));
+                    let p = e.add_parameter(Type::int(8));
                     e.terminate_return(vec![p]);
                     p
                 };
@@ -2393,17 +2401,17 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 {
                     let mut e = b.test_block(entry);
-                    let cond = e.u_const(1, 1);
+                    let cond = e.int_const(1, 1);
                     e.terminate_jmp_if(cond, then_block, else_block);
                 }
                 {
                     let mut e = b.test_block(then_block);
-                    let small = e.u_const(8, 3);
+                    let small = e.int_const(8, 3);
                     e.terminate_jmp(merge, vec![small]);
                 }
                 {
                     let mut e = b.test_block(else_block);
-                    let large = e.u_const(8, 200);
+                    let large = e.int_const(8, 200);
                     e.terminate_jmp(merge, vec![large]);
                 }
                 param
@@ -2429,15 +2437,15 @@ mod tests {
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
             guarded = sb.modify_function(main_id, |b| {
-                b.function.add_return_type(Type::u(8));
+                b.function.add_return_type(Type::int(8));
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let x = e.add_parameter(Type::field());
                 // A witness condition, which is what leaves a `Guard` standing.
                 let w = e.write_witness(x);
                 let cond = e.eq(w, x);
-                let a = e.u_const(8, lhs);
-                let b_ = e.u_const(8, rhs);
+                let a = e.int_const(8, lhs);
+                let b_ = e.int_const(8, rhs);
                 let result = e.fresh_value();
                 e.emit(OpCode::Guard {
                     condition: cond,
@@ -2459,24 +2467,24 @@ mod tests {
     fn a_guarded_failable_operation_can_still_produce_zero() {
         use BinaryArithOpKind::*;
 
-        // `0 - 1` on a `u8` underflows, so the range of the operation *itself* is ⊥. An inactive
+        // `0 - 1` on a `u8` underflows, so the range of the operation _itself_ is ⊥. An inactive
         // guard around it does not underflow — it produces zero — and a transfer that recursed
         // into the inner operation alone would report the whole thing unreachable.
-        let r = guarded_u8_op(Sub, 0, 1);
+        let r = guarded_u8_op(USub, 0, 1);
         assert!(!r.is_empty());
         assert_eq!(r.unsigned(), &iv(0, 0));
 
         // Division by zero and an out-of-range shift also produce zero when inactive, but the
         // transfer has no bound on either operation to begin with, so the join is invisible.
-        assert_eq!(guarded_u8_op(Div, 7, 0).unsigned(), &iv(0, 255));
-        assert_eq!(guarded_u8_op(Shl, 3, 9).unsigned(), &iv(0, 255));
+        assert_eq!(guarded_u8_op(UDiv, 7, 0).unsigned(), &iv(0, 255));
+        assert_eq!(guarded_u8_op(UShl, 3, 9).unsigned(), &iv(0, 255));
 
         // An operation that does not fail keeps its own value, joined with the zero the failure
         // branch would have produced.
-        assert_eq!(guarded_u8_op(Add, 3, 4).unsigned(), &iv(0, 7));
+        assert_eq!(guarded_u8_op(UAdd, 3, 4).unsigned(), &iv(0, 7));
 
         // Without the fix, `known_sign` could read a range that excludes zero and hardcode a sign
         // bit the inactive branch contradicts.
-        assert!(!guarded_u8_op(Sub, 3, 4).unsigned().is_empty());
+        assert!(!guarded_u8_op(USub, 3, 4).unsigned().is_empty());
     }
 }

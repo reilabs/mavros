@@ -3,13 +3,13 @@
 //!
 //! Where array SROA peels a fixed-size array into one value per cell, it only does this for arrays
 //! that never cross a function boundary: a parameter, a `Call` arg/result, or a `Return` is a
-//! *collapse trigger*, so an array passed into a helper or returned from one is never
+//! _collapse trigger_, so an array passed into a helper or returned from one is never
 //! scalar-replaced even when both sides only ever constant-index it. This pass severs those call
 //! boundaries so the existing intra-function passes can finish the job.
 //!
 //! ## Why this is a Separate Pass
 //!
-//! This is deliberately a *separate* pass rather than an extension of `array_sroa`, for the same
+//! This is deliberately a _separate_ pass rather than an extension of `array_sroa`, for the same
 //! reason `arg_promotion` is separate from `mem2reg`.
 //!
 //! `array_sroa`'s correctness rests on a **boundary guarantee**: a `Split` value never appears at a
@@ -19,18 +19,18 @@
 //!
 //! Teaching `array_sroa` to rewrite signatures, call sites and returns directly would dismantle
 //! that invariant and reinvent the caller/callee coordination this pass performs. Instead, this
-//! pass *only severs boundaries* — emitting local `MkSeq`/`ArrayGet` so the array still exists
+//! pass _only severs boundaries_ — emitting local `MkSeq`/`ArrayGet` so the array still exists
 //! locally but no longer crosses the boundary — and leaves the actual peeling to a downstream
 //! `ArraySroa`, with `dce` reclaiming any cells that turn out unused. Each pass stays simple and
 //! composable.
 //!
 //! ## Reuse, not Re-Threading
 //!
-//! Like `arg_promotion`, this pass rewrites only the *boundary* of procedures; it reconstructs the
+//! Like `arg_promotion`, this pass rewrites only the _boundary_ of procedures; it reconstructs the
 //! original array value locally so the bodies in the middle are untouched and still typecheck.
 //!
 //! - **Callee (Parameter):** The `Array<T, N>` formal `i` of `g` becomes `N` by-value `T` formals;
-//!   a `MkSeq` of those `N` cells, *reusing the original parameter id as its result*, is prepended
+//!   a `MkSeq` of those `N` cells, _reusing the original parameter id as its result_, is prepended
 //!   at entry. The reconstructed array is now purely local and constant-indexed, so the follow-up
 //!   `ArraySroa` reclassifies it `Split` and peels it.
 //! - **Callee (Return):** Before each `Return`, the `N` cells of the returned array are `ArrayGet`d
@@ -50,18 +50,18 @@
 //! the following conditions.
 //!
 //! - **Owned & Enumerable:** `g` is type-analyzable, not an entry point, not the globals init or
-//!   deinit function, not address-taken, and has at least one static call site — so *every* call
+//!   deinit function, not address-taken, and has at least one static call site — so _every_ call
 //!   site is a `Call{Static(g)}` this pass rewrites.
-//! - **Shape:** A *bare* (non-witnessed) fixed-size `Array<T, N>` of bare *scalar* cells
+//! - **Shape:** A _bare_ (non-witnessed) fixed-size `Array<T, N>` of bare _scalar_ cells
 //!   (`Field`/`u*`/`i*`), with `MIN_CELLS <= N <= SIZE_CAP`.
 //! - **Callee-Side Splittability:** The parameter (respectively, every `Return`'s value at that
-//!   position) would be `Split` were it not for crossing *this* boundary — i.e. it hits no *hard*
-//!   collapse trigger and no *other* boundary.
+//!   position) would be `Split` were it not for crossing _this_ boundary — i.e. it hits no _hard_
+//!   collapse trigger and no _other_ boundary.
 //! - **Caller-Side Profitability:** At every site the array would itself be `Split` once the call
 //!   boundary is severed — for a parameter, the argument array
 //!   ([`PointsTo::boundary_splittable_arg`]) so the inserted per-cell `ArrayGet`s peel; for a
 //!   return, the result array ([`PointsTo::boundary_splittable_result`]) so the reconstructing
-//!   `MkSeq` peels. Without this an expansion would *widen* the boundary (extra `ArrayGet`s / a
+//!   `MkSeq` peels. Without this an expansion would _widen_ the boundary (extra `ArrayGet`s / a
 //!   surviving `MkSeq`) for no net peel.
 //!
 //! Because array values are value-semantic, there is no caller co-argument aliasing hazard (the one
@@ -77,7 +77,7 @@
 //! - **Witnessed / Nested / Ref-Cell Arrays:** Blocked by the shape condition.
 //! - **Globals:** Array-typed globals are a separate module-level effort; they remain hard collapse
 //!   triggers here.
-//! - **Multi-Consumer Args:** an argument array also passed to a *non-expanded* call survives as a
+//! - **Multi-Consumer Args:** an argument array also passed to a _non-expanded_ call survives as a
 //!   second consumer, so its caller `MkSeq` does not fully peel and bytecode can still grow
 //!   slightly. The caller-side guards bound this to a latent size risk, never an unsoundness;
 //!   tightening to "every consumer is expanded" is a follow-up.
@@ -180,7 +180,7 @@ fn expandable_array(ty: &Type) -> Option<(Type, usize)> {
         return None;
     }
     let elem = ty.get_array_element();
-    if matches!(elem.expr, TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_)) {
+    if matches!(elem.expr, TypeExpr::Field | TypeExpr::Int(_)) {
         Some((elem, n))
     } else {
         None
@@ -292,7 +292,7 @@ fn select(ssa: &HLSSA, types: &TypeInfo, points_to: &PointsTo) -> Selection {
     // Call-site agreement: every static call site is scanned. A parameter is dropped if any site's
     // argument would not itself peel (or its caller is un-analyzable); a callee with no static call
     // site is dropped entirely. Return expansion is structurally sound regardless of the caller,
-    // but each site still gets a caller-side *profitability* check (`boundary_splittable_result`,
+    // but each site still gets a caller-side _profitability_ check (`boundary_splittable_result`,
     // so the reconstructing `MkSeq` peels rather than widening the boundary) plus a defensive arity
     // check.
     let mut param_drop: HashSet<(FunctionId, usize)> = HashSet::default();
@@ -432,7 +432,7 @@ fn build_plan(ssa: &HLSSA, sel: &Selection) -> Plan {
         .max()
         .unwrap_or(0);
     plan.index_consts = (0..max_n)
-        .map(|k| ssa.add_const(Constant::U(32, k as u128)))
+        .map(|k| ssa.add_const(Constant::Int(32, k as u128)))
         .collect();
 
     // Callee plans (sorted callees; within each, params then return cells).
@@ -697,7 +697,7 @@ fn rewrite_caller_block(
         {
             // The recorded rewrites cover exactly the expanded-callee calls, in this order. Order
             // matching is sound because the callee-rewrite phase (run before any caller rewrite in
-            // `apply`) only ever *inserts* `MkSeq`/`ArrayGet`, never a `Call`, so the `Call`
+            // `apply`) only ever _inserts_ `MkSeq`/`ArrayGet`, never a `Call`, so the `Call`
             // subsequence of every block is identical to the one `build_plan` recorded against.
             if next < rewrites.len() && rewrites[next].callee == *g {
                 let (instr, location) = instr.take();
@@ -873,7 +873,7 @@ mod tests {
         None
     }
 
-    /// A scalar array *parameter* that is only constant-indexed in the callee is expanded into
+    /// A scalar array _parameter_ that is only constant-indexed in the callee is expanded into
     /// per-cell formals, and the follow-up ArraySroa peels the reconstruction on both sides.
     #[test]
     fn param_array_expands_and_peels() {
@@ -889,11 +889,11 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = e.add_parameter(Type::field().array_of(2));
-                let i0 = e.u_const(32, 0);
-                let i1 = e.u_const(32, 1);
+                let i0 = e.int_const(32, 0);
+                let i1 = e.int_const(32, 1);
                 let x = e.array_get(a, i0);
                 let y = e.array_get(a, i1);
-                let s = e.add(x, y);
+                let s = e.uadd(x, y);
                 e.terminate_return(vec![s]);
             });
             // main(): arr = [3, 4]; return sink(arr)
@@ -933,7 +933,7 @@ mod tests {
         );
     }
 
-    /// A scalar array *return* that is built from constants in the callee is expanded into per-cell
+    /// A scalar array _return_ that is built from constants in the callee is expanded into per-cell
     /// returns, and ArraySroa peels both sides.
     #[test]
     fn return_array_expands_and_peels() {
@@ -959,11 +959,11 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = e.call(make, vec![], 1)[0];
-                let i0 = e.u_const(32, 0);
-                let i1 = e.u_const(32, 1);
+                let i0 = e.int_const(32, 0);
+                let i1 = e.int_const(32, 1);
                 let x = e.array_get(a, i0);
                 let y = e.array_get(a, i1);
-                let s = e.add(x, y);
+                let s = e.uadd(x, y);
                 e.terminate_return(vec![s]);
             });
         }
@@ -986,7 +986,7 @@ mod tests {
     }
 
     /// A cell the callee never reads becomes a dead formal after the peel; the follow-up DCE drops
-    /// it interprocedurally (the formal *and* the matching argument at the call site). The used
+    /// it interprocedurally (the formal _and_ the matching argument at the call site). The used
     /// cell is anchored by a global store so DCE keeps it (this toy's only other consumer, the
     /// entry-point return, is itself pruned at this stage).
     #[test]
@@ -1004,7 +1004,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = e.add_parameter(Type::field().array_of(2));
-                let i0 = e.u_const(32, 0);
+                let i0 = e.int_const(32, 0);
                 let x = e.array_get(a, i0);
                 e.terminate_return(vec![x]);
             });
@@ -1053,7 +1053,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = e.add_parameter(Type::field().array_of(2));
-                let i = e.add_parameter(Type::u(32));
+                let i = e.add_parameter(Type::int(32));
                 let x = e.array_get(a, i);
                 e.terminate_return(vec![x]);
             });
@@ -1065,7 +1065,7 @@ mod tests {
                 let c3 = e.field_const(fr(3));
                 let c4 = e.field_const(fr(4));
                 let arr = e.mk_seq(vec![c3, c4], SequenceTargetType::Array(2), Type::field());
-                let i0 = e.u_const(32, 0);
+                let i0 = e.int_const(32, 0);
                 let r = e.call(sink, vec![arr, i0], 1)[0];
                 e.terminate_return(vec![r]);
             });
@@ -1127,7 +1127,7 @@ mod tests {
     #[test]
     fn expandable_array_shape_gate() {
         assert!(expandable_array(&Type::field().array_of(2)).is_some());
-        assert!(expandable_array(&Type::u(32).array_of(4)).is_some());
+        assert!(expandable_array(&Type::int(32).array_of(4)).is_some());
         assert!(
             expandable_array(&Type::field().array_of(1)).is_none(),
             "below MIN_CELLS"

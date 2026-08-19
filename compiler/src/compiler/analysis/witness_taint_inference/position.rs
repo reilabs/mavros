@@ -1,6 +1,6 @@
 //! Taint positions, used as the nodes of the `≥` graph.
 //!
-//! Witness-ness is tracked per *level* of a type. A [`Position`] names one such level as
+//! Witness-ness is tracked per _level_ of a type. A [`Position`] names one such level as
 //! `(owner, path)`, where `path` descends through `Deref` (a `Ref` pointee) and `Elem` (an
 //! `Array`/`Slice` element).
 //!
@@ -108,7 +108,7 @@ pub enum Owner {
     /// witness-ness is decided once, program-wide, rather than threaded through call summaries).
     ///
     /// Globals are init-time constants in this IR today, so `compute_witness_globals` finds none to
-    /// be Witness. The position model covers cross-function global *reads*; see the module docs for
+    /// be Witness. The position model covers cross-function global _reads_; see the module docs for
     /// the extensions mutable globals would require.
     Global(usize),
 
@@ -135,11 +135,7 @@ fn collect_paths(ty: &Type, prefix: &mut Vec<Descent>, out: &mut Vec<Vec<Descent
     let ty = ty.peel_witness();
     out.push(prefix.clone());
     match &ty.expr {
-        TypeExpr::Field
-        | TypeExpr::U(_)
-        | TypeExpr::I(_)
-        | TypeExpr::Function
-        | TypeExpr::Blob(..) => {}
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => {}
         TypeExpr::Slice(inner) => {
             prefix.push(Descent::Len);
             out.push(prefix.clone());

@@ -164,7 +164,7 @@ struct BoundaryLifts {
 
 /// The `(physical, log_len, start)` window over a physical slice type.
 fn window_type(physical: Type) -> Type {
-    Type::tuple_of(vec![physical, Type::u(32), Type::u(32)])
+    Type::tuple_of(vec![physical, Type::int(32), Type::int(32)])
 }
 
 fn purify_type(ty: &Type, shape: &WitnessShape) -> Type {
@@ -593,7 +593,7 @@ fn is_slice_tuple(ty: &Type) -> bool {
     matches!(
         elems.as_slice(),
         [physical, log_len, start]
-            if physical.is_slice() && *log_len == Type::u(32) && *start == Type::u(32)
+            if physical.is_slice() && *log_len == Type::int(32) && *start == Type::int(32)
     )
 }
 
@@ -636,7 +636,7 @@ fn is_window_op(
 fn debug_assert_u32_index(index: ValueId, type_info: &FunctionTypeInfo) {
     let ty = type_info.get_value_type(index);
     debug_assert!(
-        matches!(ty.strip_witness().expr, TypeExpr::U(32)),
+        matches!(ty.strip_witness().expr, TypeExpr::Int(32)),
         "purify_witness_slices: slice index must be u32, got {ty}"
     );
 }
@@ -681,7 +681,7 @@ fn mk_slice_tuple(
     let mut b = HLInstrBuilder::new(function, ssa, new_instrs, loc);
     b.mk_tuple(
         vec![physical, log_len, start],
-        vec![phys_ty, Type::u(32), Type::u(32)],
+        vec![phys_ty, Type::int(32), Type::int(32)],
     )
 }
 
@@ -696,7 +696,7 @@ fn materialize_pure_slice_tuple(
     let loc = SourceLocation::synthetic("purify_witness_slices");
     let (ll, start) = {
         let mut b = HLInstrBuilder::new(function, ssa, new_instrs, loc.clone());
-        (b.slice_len(slice), b.u_const(32, 0))
+        (b.slice_len(slice), b.int_const(32, 0))
     };
     mk_slice_tuple(slice, ll, start, phys_ty, function, ssa, new_instrs, loc)
 }
@@ -904,21 +904,21 @@ fn rewrite_instruction(
             let phys_ty = physical_type(result, affected, type_info);
             let (physical, log_len, start) = {
                 let mut b = HLInstrBuilder::new(function, ssa, new_instrs, loc.clone());
-                let bump = b.u_const(32, values.len() as u128);
+                let bump = b.int_const(32, values.len() as u128);
                 match (replacement_tuple_map.get(&slice).copied(), dir) {
                     (Some(t), SliceOpDir::Back) => {
                         let p = b.tuple_proj(t, 0);
                         let ll = b.tuple_proj(t, 1);
                         let st = b.tuple_proj(t, 2);
-                        let one = b.u_const(32, 1);
+                        let one = b.int_const(32, 1);
                         let mut physical = p;
-                        let mut cursor = b.add(st, ll);
+                        let mut cursor = b.uadd(st, ll);
                         for value in &values {
                             let grown = b.slice_push(physical, vec![*value], SliceOpDir::Back);
                             physical = b.array_set(grown, cursor, *value);
-                            cursor = b.add(cursor, one);
+                            cursor = b.uadd(cursor, one);
                         }
-                        (physical, b.add(ll, bump), st)
+                        (physical, b.uadd(ll, bump), st)
                     }
                     (Some(t), SliceOpDir::Front) => {
                         let p = b.tuple_proj(t, 0);
@@ -926,11 +926,11 @@ fn rewrite_instruction(
                         let st = b.tuple_proj(t, 2);
                         let mut physical = b.slice_push(p, values.clone(), SliceOpDir::Front);
                         for (k, value) in values.iter().enumerate() {
-                            let k_const = b.u_const(32, k as u128);
-                            let idx = b.add(st, k_const);
+                            let k_const = b.int_const(32, k as u128);
+                            let idx = b.uadd(st, k_const);
                             physical = b.array_set(physical, idx, *value);
                         }
-                        (physical, b.add(ll, bump), st)
+                        (physical, b.uadd(ll, bump), st)
                     }
                     (None, SliceOpDir::Back) => {
                         let base_len = b.slice_len(slice);
@@ -938,14 +938,14 @@ fn rewrite_instruction(
                         for value in &values {
                             physical = b.slice_push(physical, vec![*value], SliceOpDir::Back);
                         }
-                        let zero = b.u_const(32, 0);
-                        (physical, b.add(base_len, bump), zero)
+                        let zero = b.int_const(32, 0);
+                        (physical, b.uadd(base_len, bump), zero)
                     }
                     (None, SliceOpDir::Front) => {
                         let base_len = b.slice_len(slice);
                         let physical = b.slice_push(slice, values.clone(), SliceOpDir::Front);
-                        let zero = b.u_const(32, 0);
-                        (physical, b.add(base_len, bump), zero)
+                        let zero = b.int_const(32, 0);
+                        (physical, b.uadd(base_len, bump), zero)
                     }
                 }
             };
@@ -967,16 +967,16 @@ fn rewrite_instruction(
                 (b.tuple_proj(t, 0), b.tuple_proj(t, 1), b.tuple_proj(t, 2))
             } else {
                 let ll = b.slice_len(slice);
-                let st = b.u_const(32, 0);
+                let st = b.int_const(32, 0);
                 (slice, ll, st)
             };
-            let zero = b.u_const(32, 0);
-            b.assert_cmp(CmpKind::Lt, zero, ll);
-            let one = b.u_const(32, 1);
-            let new_ll = b.sub(ll, one);
+            let zero = b.int_const(32, 0);
+            b.assert_cmp(CmpKind::ULt, zero, ll);
+            let one = b.int_const(32, 1);
+            let new_ll = b.usub(ll, one);
             let (elem_index, new_st) = match dir {
-                SliceOpDir::Back => (b.add(st, new_ll), st),
-                SliceOpDir::Front => (st, b.add(st, one)),
+                SliceOpDir::Back => (b.uadd(st, new_ll), st),
+                SliceOpDir::Front => (st, b.uadd(st, one)),
             };
             new_instrs.push(
                 OpCode::ArrayGet {
@@ -1003,13 +1003,13 @@ fn rewrite_instruction(
                 (b.tuple_proj(t, 0), b.tuple_proj(t, 1), b.tuple_proj(t, 2))
             } else {
                 let ll = b.slice_len(slice);
-                let st = b.u_const(32, 0);
+                let st = b.int_const(32, 0);
                 (slice, ll, st)
             };
-            let one = b.u_const(32, 1);
-            let new_ll = b.add(ll, one);
-            b.assert_cmp(CmpKind::Lt, index, new_ll);
-            let phys_idx = b.add(st, index);
+            let one = b.int_const(32, 1);
+            let new_ll = b.uadd(ll, one);
+            b.assert_cmp(CmpKind::ULt, index, new_ll);
+            let phys_idx = b.uadd(st, index);
             let physical = b.slice_insert(p, phys_idx, value);
             let t = mk_slice_tuple(
                 physical, new_ll, st, phys_ty, function, ssa, new_instrs, loc,
@@ -1030,13 +1030,13 @@ fn rewrite_instruction(
                 (b.tuple_proj(t, 0), b.tuple_proj(t, 1), b.tuple_proj(t, 2))
             } else {
                 let ll = b.slice_len(slice);
-                let st = b.u_const(32, 0);
+                let st = b.int_const(32, 0);
                 (slice, ll, st)
             };
-            b.assert_cmp(CmpKind::Lt, index, ll);
-            let one = b.u_const(32, 1);
-            let new_ll = b.sub(ll, one);
-            let phys_idx = b.add(st, index);
+            b.assert_cmp(CmpKind::ULt, index, ll);
+            let one = b.int_const(32, 1);
+            let new_ll = b.usub(ll, one);
+            let phys_idx = b.uadd(st, index);
             let physical = b.fresh_value();
             new_instrs.push(
                 OpCode::SliceRemove {
@@ -1065,8 +1065,8 @@ fn rewrite_instruction(
                 let p = b.tuple_proj(t, 0);
                 let ll = b.tuple_proj(t, 1);
                 let st = b.tuple_proj(t, 2);
-                b.assert_cmp(CmpKind::Lt, index, ll);
-                (p, b.add(st, index))
+                b.assert_cmp(CmpKind::ULt, index, ll);
+                (p, b.uadd(st, index))
             };
             new_instrs.push(
                 OpCode::ArrayGet {
@@ -1092,8 +1092,8 @@ fn rewrite_instruction(
                 let p = b.tuple_proj(t, 0);
                 let ll = b.tuple_proj(t, 1);
                 let st = b.tuple_proj(t, 2);
-                b.assert_cmp(CmpKind::Lt, index, ll);
-                let phys_index = b.add(st, index);
+                b.assert_cmp(CmpKind::ULt, index, ll);
+                let phys_index = b.uadd(st, index);
                 (b.array_set(p, phys_index, value), ll, st)
             };
             let t2 = mk_slice_tuple(
@@ -1380,7 +1380,7 @@ mod tests {
     }
 
     fn wl_tuple_type() -> Type {
-        Type::tuple_of(vec![Type::field().slice_of(), Type::u(32), Type::u(32)])
+        Type::tuple_of(vec![Type::field().slice_of(), Type::int(32), Type::int(32)])
     }
 
     /// Ops of the (possibly cloned) entry function, in block order.
@@ -1438,7 +1438,7 @@ mod tests {
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(ssa);
         sb.modify_function(main_id, |b| {
-            b.function.add_return_type(Type::u(32));
+            b.function.add_return_type(Type::int(32));
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
@@ -1493,7 +1493,7 @@ mod tests {
         });
 
         sb.modify_function(main_id, |b| {
-            b.function.add_return_type(Type::u(32));
+            b.function.add_return_type(Type::int(32));
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
@@ -1566,7 +1566,7 @@ mod tests {
         });
 
         sb.modify_function(main_id, |b| {
-            b.function.add_return_type(Type::u(32));
+            b.function.add_return_type(Type::int(32));
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
@@ -1597,7 +1597,7 @@ mod tests {
 
             let pure_len = e.slice_len(pure_result);
             let wl_len = e.slice_len(again);
-            let total = e.add(pure_len, wl_len);
+            let total = e.uadd(pure_len, wl_len);
             e.terminate_return(vec![total]);
         });
     }
@@ -1797,7 +1797,7 @@ mod tests {
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
-            b.function.add_return_type(Type::u(32));
+            b.function.add_return_type(Type::int(32));
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
@@ -1898,7 +1898,7 @@ mod tests {
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
-            b.function.add_return_type(Type::u(32));
+            b.function.add_return_type(Type::int(32));
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());

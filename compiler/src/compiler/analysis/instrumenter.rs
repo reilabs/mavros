@@ -20,12 +20,13 @@ use crate::{
             symbolic_executor::{self, AssertionFailure, SymbolicExecutor},
             types::TypeInfo,
         },
+        pass_manager::{Analysis, AnalysisId, AnalysisStore},
         ssa::{
             FunctionId,
             hlssa::{
-                BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLSSA, LookupTarget,
-                MAX_SUPPORTED_UNSIGNED_BITS, Radix, RefCountOp, SequenceTargetType, SliceOpDir,
-                Type, TypeExpr,
+                ArithGroup, BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLSSA,
+                LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, Radix, RefCountOp, SequenceTargetType,
+                SliceOpDir, Type, TypeExpr,
             },
         },
         util::{
@@ -38,16 +39,15 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScalarKind {
     Field,
-    U(usize),
-    I(usize),
+    /// An `n`-bit integer, with no reading attached — as `TypeExpr::Int`, which it is built from.
+    Int(usize),
 }
 
 impl ScalarKind {
     pub fn from_type(tp: &Type) -> Self {
         match &tp.strip_witness().expr {
             TypeExpr::Field => ScalarKind::Field,
-            TypeExpr::U(s) => ScalarKind::U(*s),
-            TypeExpr::I(s) => ScalarKind::I(*s),
+            TypeExpr::Int(s) => ScalarKind::Int(*s),
             TypeExpr::WitnessOf(_) => panic!("WitnessOf is not a scalar type: {:?}", tp),
             _ => panic!("Not a scalar type: {:?}", tp),
         }
@@ -56,8 +56,7 @@ impl ScalarKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ValueSignature {
-    U { bits_size: usize, value: u128 },
-    I { bits_size: usize, value: u128 },
+    Int { bits_size: usize, value: u128 },
     Field(Field),
     Array(Vec<ValueSignature>),
     Blob(Vec<ValueSignature>),
@@ -70,8 +69,7 @@ pub enum ValueSignature {
 impl ValueSignature {
     pub fn to_value(&self) -> Value {
         match self {
-            ValueSignature::U { bits_size, value } => Value::U(*bits_size, *value),
-            ValueSignature::I { bits_size, value } => Value::I(*bits_size, *value),
+            ValueSignature::Int { bits_size, value } => Value::Int(*bits_size, *value),
             ValueSignature::Field(field) => Value::Field(*field),
             ValueSignature::Array(vals) => {
                 Value::array(vals.iter().map(|v| v.to_value()).collect())
@@ -86,9 +84,7 @@ impl ValueSignature {
 
     pub fn pretty_print(&self, full: bool) -> String {
         match self {
-            ValueSignature::U { value, .. } | ValueSignature::I { value, .. } => {
-                format!("{value}")
-            }
+            ValueSignature::Int { value, .. } => format!("{value}"),
             ValueSignature::Field(f) => format!("{}", f),
             ValueSignature::Array(items) => {
                 if full {
@@ -117,8 +113,9 @@ impl ValueSignature {
 #[derive(Debug, Clone)]
 // FIELD-ASSUMPTION: L4-eval
 pub enum Value {
-    U(usize, u128),
-    I(usize, u128),
+    /// `bits` raw two's-complement bits. Which reading applies is decided by the opcode the
+    /// interpreter is executing, never by the value — see [`Value::binary_arith_op`].
+    Int(usize, u128),
     Field(Field),
     Array(Rc<Vec<Value>>),
     Blob(Vec<Value>),
@@ -135,7 +132,7 @@ impl Value {
 
     fn as_field_const(&self, field: FieldConfig) -> Option<Field> {
         match self {
-            Value::U(_, v) | Value::I(_, v) => Some(field.constant(*v)),
+            Value::Int(_, v) => Some(field.constant(*v)),
             Value::Field(f) => Some(*f),
             Value::WitnessOf(inner) => inner.as_field_const(field),
             _ => None,
@@ -162,8 +159,7 @@ impl Value {
     fn unknown_from_type(tp: &Type) -> Value {
         match &tp.expr {
             TypeExpr::Field => Value::Unknown(ScalarKind::Field),
-            TypeExpr::U(s) => Value::Unknown(ScalarKind::U(*s)),
-            TypeExpr::I(s) => Value::Unknown(ScalarKind::I(*s)),
+            TypeExpr::Int(s) => Value::Unknown(ScalarKind::Int(*s)),
             TypeExpr::WitnessOf(inner) => {
                 Value::WitnessOf(Box::new(Value::unknown_from_type(inner)))
             }
@@ -184,67 +180,67 @@ impl Value {
         }
     }
 
-    fn ult_op(&self, b: &Value) -> Value {
+    /// Interpret one comparison.
+    ///
+    /// A `Value::Int` is a raw bit pattern with no reading attached, so the arms below take their
+    /// reading from the _opcode_, exactly as [`Value::binary_arith_op`] does. `SLt` decodes both
+    /// operands as two's complement at the caller's `bits` while `ULt` compares the patterns as
+    /// magnitudes and `Eq` needs no reading at all.
+    fn cmp_op(&self, b: &Value, kind: CmpKind, bits: Option<usize>) -> Value {
         match (self, b) {
-            (Value::U(_, a), Value::U(_, b)) => Value::U(1, if a < b { 1 } else { 0 }),
-            (Value::I(_, a), Value::I(_, b)) => Value::U(1, if a < b { 1 } else { 0 }),
-            (Value::Field(a), Value::Field(b)) => Value::U(1, if a < b { 1 } else { 0 }),
-            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                Value::WitnessOf(Box::new(self.unwrap_witness().ult_op(b.unwrap_witness())))
+            (Value::Int(_, a), Value::Int(_, b)) => {
+                let result = match kind {
+                    CmpKind::Eq => a == b,
+                    CmpKind::ULt => a < b,
+                    CmpKind::SLt => {
+                        let bits = bits.expect("ICE: signed comparison without an operand width");
+                        Self::to_signed(*a, bits) < Self::to_signed(*b, bits)
+                    }
+                };
+                Value::Int(1, result as u128)
             }
-            (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
-            _ => panic!("Cannot compare {:?} and {:?}", self, b),
-        }
-    }
-
-    fn slt_op(&self, b: &Value, bits: usize) -> Value {
-        match (self, b) {
-            (Value::U(_, a), Value::U(_, b)) => {
-                let (sa, sb) = (Self::to_signed(*a, bits), Self::to_signed(*b, bits));
-                Value::U(1, if sa < sb { 1 } else { 0 })
+            // A field element has no two's complement reading, so an `SLt` over one never reaches
+            // here as the executor rejects it before the call. `ULt` and `Eq` compare the elements
+            // themselves.
+            (Value::Field(a), Value::Field(b)) => {
+                let result = match kind {
+                    CmpKind::Eq => a == b,
+                    CmpKind::ULt | CmpKind::SLt => a < b,
+                };
+                Value::Int(1, result as u128)
             }
-            (Value::I(s, a), Value::I(_, b)) => {
-                let (sa, sb) = (Self::to_signed(*a, *s), Self::to_signed(*b, *s));
-                Value::U(1, if sa < sb { 1 } else { 0 })
-            }
-            (Value::Field(a), Value::Field(b)) => Value::U(1, if a < b { 1 } else { 0 }),
             (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => Value::WitnessOf(Box::new(
-                self.unwrap_witness().slt_op(b.unwrap_witness(), bits),
+                self.unwrap_witness().cmp_op(b.unwrap_witness(), kind, bits),
             )),
-            (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
+            (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::Int(1)),
             _ => panic!("Cannot compare {:?} and {:?}", self, b),
         }
     }
 
-    fn eq_op(&self, b: &Value) -> Value {
-        match (self, b) {
-            (Value::U(_, a), Value::U(_, b)) | (Value::I(_, a), Value::I(_, b)) => {
-                Value::U(1, if a == b { 1 } else { 0 })
-            }
-            (Value::Field(a), Value::Field(b)) => Value::U(1, if a == b { 1 } else { 0 }),
-            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                Value::WitnessOf(Box::new(self.unwrap_witness().eq_op(b.unwrap_witness())))
-            }
-            (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::U(1)),
-            _ => panic!("Cannot compare {:?} and {:?}", self, b),
-        }
-    }
-
+    /// Interpret one binary arithmetic operation.
+    ///
+    /// A `Value::Int` is a raw bit pattern with no reading attached, so every arm below takes its
+    /// reading from the _opcode_: `signed` is what decides between two's complement and magnitude,
+    /// not anything carried by the operands.
     fn binary_arith_op(
         &self,
         b: &Value,
         binary_arith_op_kind: &crate::compiler::ssa::hlssa::BinaryArithOpKind,
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
-        match binary_arith_op_kind {
-            BinaryArithOpKind::Add => match (self, b) {
-                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a.wrapping_add(*b) & bit_mask(*s)),
-                (Value::I(s, a), Value::I(_, b)) => Value::I(
+        let signed = binary_arith_op_kind.is_signed();
+        match binary_arith_op_kind.group() {
+            ArithGroup::Add => match (self, b) {
+                (Value::Int(s, a), Value::Int(_, b)) => Value::Int(
                     *s,
-                    Self::from_signed(
-                        Self::to_signed(*a, *s).wrapping_add(Self::to_signed(*b, *s)),
-                        *s,
-                    ),
+                    if signed {
+                        Self::from_signed(
+                            Self::to_signed(*a, *s).wrapping_add(Self::to_signed(*b, *s)),
+                            *s,
+                        )
+                    } else {
+                        a.wrapping_add(*b) & bit_mask(*s)
+                    },
                 ),
                 // FIELD-ASSUMPTION: L4-eval
                 (Value::Field(a), Value::Field(b)) => Value::Field(a + b),
@@ -258,14 +254,17 @@ impl Value {
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
-            BinaryArithOpKind::Sub => match (self, b) {
-                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a.wrapping_sub(*b) & bit_mask(*s)),
-                (Value::I(s, a), Value::I(_, b)) => Value::I(
+            ArithGroup::Sub => match (self, b) {
+                (Value::Int(s, a), Value::Int(_, b)) => Value::Int(
                     *s,
-                    Self::from_signed(
-                        Self::to_signed(*a, *s).wrapping_sub(Self::to_signed(*b, *s)),
-                        *s,
-                    ),
+                    if signed {
+                        Self::from_signed(
+                            Self::to_signed(*a, *s).wrapping_sub(Self::to_signed(*b, *s)),
+                            *s,
+                        )
+                    } else {
+                        a.wrapping_sub(*b) & bit_mask(*s)
+                    },
                 ),
                 (Value::Field(a), Value::Field(b)) => Value::Field(a - b),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
@@ -278,21 +277,24 @@ impl Value {
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
-            BinaryArithOpKind::Mul => match (self, b) {
-                (Value::U(s, 0), _) | (_, Value::U(s, 0)) => Value::U(*s, 0),
+            ArithGroup::Mul => match (self, b) {
+                (Value::Int(s, 0), _) | (_, Value::Int(s, 0)) => Value::Int(*s, 0),
                 (Value::Field(f), _) if *f == instrumenter.field().zero() => {
                     Value::Field(instrumenter.field().zero())
                 }
                 (_, Value::Field(f)) if *f == instrumenter.field().zero() => {
                     Value::Field(instrumenter.field().zero())
                 }
-                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a.wrapping_mul(*b) & bit_mask(*s)),
-                (Value::I(s, a), Value::I(_, b)) => Value::I(
+                (Value::Int(s, a), Value::Int(_, b)) => Value::Int(
                     *s,
-                    Self::from_signed(
-                        Self::to_signed(*a, *s).wrapping_mul(Self::to_signed(*b, *s)),
-                        *s,
-                    ),
+                    if signed {
+                        Self::from_signed(
+                            Self::to_signed(*a, *s).wrapping_mul(Self::to_signed(*b, *s)),
+                            *s,
+                        )
+                    } else {
+                        a.wrapping_mul(*b) & bit_mask(*s)
+                    },
                 ),
                 (Value::Field(a), Value::Field(b)) => Value::Field(a * b),
                 (Value::WitnessOf(a), Value::WitnessOf(b)) => {
@@ -318,19 +320,22 @@ impl Value {
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
-            BinaryArithOpKind::Div => match (self, b) {
+            ArithGroup::Div => match (self, b) {
                 // Division by zero yields 0 here (as in the signed arm below): this executor also
                 // runs for cost estimation over dummy signature values, where a zero denominator
                 // is routine — a gadget's real divisor is constrained nonzero on honest runs, but
                 // the estimate must not panic on it.
-                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, if *b == 0 { 0 } else { a / b }),
-                (Value::I(s, a), Value::I(_, b)) => {
-                    let (sa, sb) = (Self::to_signed(*a, *s), Self::to_signed(*b, *s));
-                    Value::I(
-                        *s,
-                        Self::from_signed(if sb == 0 { 0 } else { sa.wrapping_div(sb) }, *s),
-                    )
-                }
+                (Value::Int(s, a), Value::Int(_, b)) => Value::Int(
+                    *s,
+                    if signed {
+                        let (sa, sb) = (Self::to_signed(*a, *s), Self::to_signed(*b, *s));
+                        Self::from_signed(if sb == 0 { 0 } else { sa.wrapping_div(sb) }, *s)
+                    } else if *b == 0 {
+                        0
+                    } else {
+                        a / b
+                    },
+                ),
                 // FIELD-ASSUMPTION: L4-inverse
                 (Value::Field(a), Value::Field(b)) => {
                     Value::Field(if *b == instrumenter.field().zero() {
@@ -351,16 +356,19 @@ impl Value {
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
-            BinaryArithOpKind::Mod => match (self, b) {
+            ArithGroup::Rem => match (self, b) {
                 // Zero modulus yields 0, as in the signed arm below and the `Div` arms above.
-                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, if *b == 0 { 0 } else { a % b }),
-                (Value::I(s, a), Value::I(_, b)) => {
-                    let (sa, sb) = (Self::to_signed(*a, *s), Self::to_signed(*b, *s));
-                    Value::I(
-                        *s,
-                        Self::from_signed(if sb == 0 { 0 } else { sa.wrapping_rem(sb) }, *s),
-                    )
-                }
+                (Value::Int(s, a), Value::Int(_, b)) => Value::Int(
+                    *s,
+                    if signed {
+                        let (sa, sb) = (Self::to_signed(*a, *s), Self::to_signed(*b, *s));
+                        Self::from_signed(if sb == 0 { 0 } else { sa.wrapping_rem(sb) }, *s)
+                    } else if *b == 0 {
+                        0
+                    } else {
+                        a % b
+                    },
+                ),
                 (_, Value::WitnessOf(b)) => Value::WitnessOf(Box::new(
                     self.unwrap_witness()
                         .binary_arith_op(b, binary_arith_op_kind, instrumenter),
@@ -373,9 +381,8 @@ impl Value {
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
-            BinaryArithOpKind::And => match (self, b) {
-                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a & b),
-                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a & b) & bit_mask(*s)),
+            ArithGroup::And => match (self, b) {
+                (Value::Int(s, a), Value::Int(_, b)) => Value::Int(*s, (a & b) & bit_mask(*s)),
                 (Value::Field(_), Value::Field(_)) => todo!(),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
@@ -387,9 +394,8 @@ impl Value {
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
-            BinaryArithOpKind::Or => match (self, b) {
-                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a | b),
-                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a | b) & bit_mask(*s)),
+            ArithGroup::Or => match (self, b) {
+                (Value::Int(s, a), Value::Int(_, b)) => Value::Int(*s, (a | b) & bit_mask(*s)),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
                         b.unwrap_witness(),
@@ -400,9 +406,8 @@ impl Value {
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
-            BinaryArithOpKind::Xor => match (self, b) {
-                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a ^ b),
-                (Value::I(s, a), Value::I(_, b)) => Value::I(*s, (a ^ b) & bit_mask(*s)),
+            ArithGroup::Xor => match (self, b) {
+                (Value::Int(s, a), Value::Int(_, b)) => Value::Int(*s, (a ^ b) & bit_mask(*s)),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
                         b.unwrap_witness(),
@@ -413,23 +418,29 @@ impl Value {
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
-            BinaryArithOpKind::Shl => match (self, b) {
-                (Value::U(s, a), Value::U(_, b)) => Value::U(
-                    *s,
-                    if *b as usize >= *s {
-                        0
+            ArithGroup::Shl => match (self, b) {
+                (Value::Int(s, a), Value::Int(_, b)) => {
+                    // The over-shift test is made at the amount's own width and only then narrowed.
+                    // Narrowing first would let an amount whose low bits happen to fall below `s`
+                    // — `1 << 32` on a `u128` shift, say — read as a small in-range shift and
+                    // return the value unchanged where it must return `0`.
+                    //
+                    // A signed amount is decoded, so a negative one is negative here rather than a
+                    // large magnitude; either way it misses `0..s` and lands in the over-shift
+                    // branch.
+                    let in_range = if signed {
+                        (0..*s as i128).contains(&Self::to_signed(*b, *s))
                     } else {
-                        (a << b) & bit_mask(*s)
-                    },
-                ),
-                (Value::I(s, a), Value::I(_, b)) => {
-                    let shift = Self::to_signed(*b, *s) as u32;
-                    Value::I(
+                        *b < *s as u128
+                    };
+                    Value::Int(
                         *s,
-                        if shift as usize >= *s {
-                            0
+                        if in_range {
+                            // In range, so the amount is below `s` and non-negative under either
+                            // reading — which makes its raw pattern the count itself.
+                            (a << (*b as u32)) & bit_mask(*s)
                         } else {
-                            (a << shift) & bit_mask(*s)
+                            0
                         },
                     )
                 }
@@ -443,20 +454,37 @@ impl Value {
                 (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
-            BinaryArithOpKind::Shr => match (self, b) {
-                (Value::U(s, a), Value::U(_, b)) => Value::U(*s, a >> b),
-                (Value::I(s, a), Value::I(_, b)) => {
-                    let sa = Self::to_signed(*a, *s);
-                    let shift = Self::to_signed(*b, *s);
-                    Value::I(
-                        *s,
-                        if shift < 0 || shift as usize >= *s {
-                            // Over-shift: result is 0 or -1 depending on sign
-                            Self::from_signed(if sa < 0 { -1 } else { 0 }, *s)
-                        } else {
-                            Self::from_signed(sa >> (shift as u32), *s)
-                        },
-                    )
+            ArithGroup::Shr => match (self, b) {
+                (Value::Int(s, a), Value::Int(_, b)) => {
+                    // The amount is tested at its own width before being narrowed, as in `Shl`.
+                    // The unsigned arm used to shift by the raw `u128` directly, which is a
+                    // debug-build panic for any amount at or above 128 and, in release, a shift by
+                    // a count Rust had silently masked to `b & 127`.
+                    //
+                    // An out-of-range amount **saturates** here — to `0` when zero-filling, to
+                    // `0`/`-1` by sign when sign-filling — rather than masking the count to
+                    // `bits - 1` the way the VM's `ushr_u64`/`ashr_u64` and LLVM's shifts do. That
+                    // disagreement is deliberate and predates the sign refactor: it is exactly why
+                    // `lattice::eval_binary` refuses to fold an out-of-range shift at all, so no
+                    // constant the backends would read differently is ever manufactured from it.
+                    // Nothing inherits this answer but the cost estimate, for a program Noir
+                    // rejects at runtime anyway.
+                    if signed {
+                        let sa = Self::to_signed(*a, *s);
+                        let amount = Self::to_signed(*b, *s);
+                        Value::Int(
+                            *s,
+                            if (0..*s as i128).contains(&amount) {
+                                Self::from_signed(sa >> (amount as u32), *s)
+                            } else {
+                                // Sign-fill.
+                                Self::from_signed(if sa < 0 { -1 } else { 0 }, *s)
+                            },
+                        )
+                    } else {
+                        // Zero-fill.
+                        Value::Int(*s, if *b < *s as u128 { a >> (*b as u32) } else { 0 })
+                    }
                 }
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
@@ -477,7 +505,7 @@ impl Value {
                 inner.forget_concrete();
             }
             Value::Unknown(_) | Value::UnknownSlice => {}
-            Value::U(_, _) | Value::I(_, _) | Value::Field(_) => {}
+            Value::Int(_, _) | Value::Field(_) => {}
             Value::Array(vals) => {
                 for val in Rc::make_mut(vals).iter_mut() {
                     val.blind();
@@ -496,8 +524,7 @@ impl Value {
 
     fn forget_concrete(&mut self) {
         match self {
-            Value::U(s, _) => *self = Value::Unknown(ScalarKind::U(*s)),
-            Value::I(s, _) => *self = Value::Unknown(ScalarKind::I(*s)),
+            Value::Int(s, _) => *self = Value::Unknown(ScalarKind::Int(*s)),
             Value::Field(_) => *self = Value::Unknown(ScalarKind::Field),
             Value::Unknown(_) | Value::UnknownSlice => {}
             Value::WitnessOf(inner) => {
@@ -526,11 +553,7 @@ impl Value {
             Value::WitnessOf(inner) => {
                 ValueSignature::WitnessOf(Box::new(inner.make_unspecialized_sig()))
             }
-            Value::U(s, v) => ValueSignature::U {
-                bits_size: *s,
-                value: *v,
-            },
-            Value::I(s, v) => ValueSignature::I {
+            Value::Int(s, v) => ValueSignature::Int {
                 bits_size: *s,
                 value: *v,
             },
@@ -572,9 +595,9 @@ impl Value {
             None => Value::unknown_from_type(tp),
         };
         match index {
-            Value::U(_, i) => at(i),
+            Value::Int(_, i) => at(i),
             Value::WitnessOf(inner) => match inner.as_ref() {
-                Value::U(_, i) => at(i),
+                Value::Int(_, i) => at(i),
                 _ => Value::unknown_from_type(tp),
             },
             Value::Unknown(_) => Value::unknown_from_type(tp),
@@ -592,13 +615,13 @@ impl Value {
         _instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match (self, index, value) {
-            (Value::Array(vals), Value::U(_, index), value) => {
+            (Value::Array(vals), Value::Int(_, index), value) => {
                 let mut new_vals = vals.as_ref().clone();
                 new_vals[*index as usize] = value.clone();
                 Value::array(new_vals)
             }
             (Value::Array(vals), Value::WitnessOf(inner), value) => match inner.as_ref() {
-                Value::U(_, index) => {
+                Value::Int(_, index) => {
                     let mut new_vals = vals.as_ref().clone();
                     new_vals[*index as usize] = value.clone();
                     Value::array(new_vals)
@@ -632,8 +655,7 @@ impl Value {
             Value::WitnessOf(inner) => {
                 Value::WitnessOf(Box::new(inner.bit_range_op(offset, width, instrumenter)))
             }
-            Value::U(bits, v) => Value::U(*bits, (v >> offset) & bit_mask(width)),
-            Value::I(bits, v) => Value::I(*bits, (v >> offset) & bit_mask(width)),
+            Value::Int(bits, v) => Value::Int(*bits, (v >> offset) & bit_mask(width)),
             Value::Field(f) => {
                 let bits = f
                     .into_bigint()
@@ -657,49 +679,30 @@ impl Value {
             Value::WitnessOf(inner) => {
                 Value::WitnessOf(Box::new(inner.sext_op(from, to, _instrumenter)))
             }
-            // `U` and `I` both hold raw two's-complement bits, so sign extension is the same
-            // computation on either; only the tag of the result differs.
-            Value::U(_, v) => Value::U(to, sign_extend_bits(*v, from, to)),
-            Value::I(_, v) => Value::I(to, sign_extend_bits(*v, from, to)),
+            Value::Int(_, v) => Value::Int(to, sign_extend_bits(*v, from, to)),
             _ => panic!("Cannot sext {:?}", self),
         }
     }
 
     fn spread_op(&self) -> Value {
         match self {
-            Value::U(bits, v) => {
+            Value::Int(bits, v) => {
                 assert!(
                     *bits <= 64,
-                    "Spread only supports integer widths up to 64 bits, got u{}",
+                    "Spread only supports integer widths up to 64 bits, got int{}",
                     bits
                 );
-                Value::U(bits * 2, spread_bits(*v, *bits))
-            }
-            Value::I(bits, v) => {
-                assert!(
-                    *bits <= 64,
-                    "Spread only supports integer widths up to 64 bits, got i{}",
-                    bits
-                );
-                Value::I(bits * 2, spread_bits(*v, *bits))
+                Value::Int(bits * 2, spread_bits(*v, *bits))
             }
             Value::Field(_) => panic!("Spread of field values is unsupported"),
             Value::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.spread_op())),
-            Value::Unknown(ScalarKind::U(bits)) => {
+            Value::Unknown(ScalarKind::Int(bits)) => {
                 assert!(
                     *bits <= 64,
-                    "Spread only supports integer widths up to 64 bits, got u{}",
+                    "Spread only supports integer widths up to 64 bits, got int{}",
                     bits
                 );
-                Value::Unknown(ScalarKind::U(bits * 2))
-            }
-            Value::Unknown(ScalarKind::I(bits)) => {
-                assert!(
-                    *bits <= 64,
-                    "Spread only supports integer widths up to 64 bits, got i{}",
-                    bits
-                );
-                Value::Unknown(ScalarKind::I(bits * 2))
+                Value::Unknown(ScalarKind::Int(bits * 2))
             }
             Value::Unknown(ScalarKind::Field) => panic!("Spread of field values is unsupported"),
             _ => panic!("Cannot spread {:?}", self),
@@ -708,25 +711,18 @@ impl Value {
 
     fn unspread_op(&self) -> (Value, Value) {
         match self {
-            Value::U(bits, v) => {
+            Value::Int(bits, v) => {
                 assert!(
                     *bits <= MAX_SUPPORTED_UNSIGNED_BITS && bits % 2 == 0,
-                    "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got u{}",
+                    "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got int{}",
                     bits
                 );
                 let (odd_val, even_val) = unspread_bits(*v, *bits);
                 let half_bits = bits / 2;
-                (Value::U(half_bits, odd_val), Value::U(half_bits, even_val))
-            }
-            Value::I(bits, v) => {
-                assert!(
-                    *bits <= MAX_SUPPORTED_UNSIGNED_BITS && bits % 2 == 0,
-                    "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got i{}",
-                    bits
-                );
-                let (odd_val, even_val) = unspread_bits(*v, *bits);
-                let half_bits = bits / 2;
-                (Value::I(half_bits, odd_val), Value::I(half_bits, even_val))
+                (
+                    Value::Int(half_bits, odd_val),
+                    Value::Int(half_bits, even_val),
+                )
             }
             Value::Field(_) => panic!("Unspread of field values is unsupported"),
             Value::WitnessOf(inner) => {
@@ -736,28 +732,16 @@ impl Value {
                     Value::WitnessOf(Box::new(even)),
                 )
             }
-            Value::Unknown(ScalarKind::U(bits)) => {
+            Value::Unknown(ScalarKind::Int(bits)) => {
                 assert!(
                     *bits <= MAX_SUPPORTED_UNSIGNED_BITS && bits % 2 == 0,
-                    "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got u{}",
+                    "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got int{}",
                     bits
                 );
                 let half_bits = bits / 2;
                 (
-                    Value::Unknown(ScalarKind::U(half_bits)),
-                    Value::Unknown(ScalarKind::U(half_bits)),
-                )
-            }
-            Value::Unknown(ScalarKind::I(bits)) => {
-                assert!(
-                    *bits <= MAX_SUPPORTED_UNSIGNED_BITS && bits % 2 == 0,
-                    "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got i{}",
-                    bits
-                );
-                let half_bits = bits / 2;
-                (
-                    Value::Unknown(ScalarKind::I(half_bits)),
-                    Value::Unknown(ScalarKind::I(half_bits)),
+                    Value::Unknown(ScalarKind::Int(half_bits)),
+                    Value::Unknown(ScalarKind::Int(half_bits)),
                 )
             }
             Value::Unknown(ScalarKind::Field) => {
@@ -782,8 +766,7 @@ impl Value {
                     .collect(),
             ),
             (Value::UnknownSlice, CastTarget::Map(_)) => Value::UnknownSlice,
-            (Value::Unknown(_), CastTarget::U(s)) => Value::Unknown(ScalarKind::U(*s)),
-            (Value::Unknown(_), CastTarget::I(s)) => Value::Unknown(ScalarKind::I(*s)),
+            (Value::Unknown(_), CastTarget::Int(s)) => Value::Unknown(ScalarKind::Int(*s)),
             (Value::Unknown(_), CastTarget::Field) => Value::Unknown(ScalarKind::Field),
             (Value::Unknown(kind), CastTarget::Nop | CastTarget::ArrayToSlice) => {
                 Value::Unknown(*kind)
@@ -791,27 +774,22 @@ impl Value {
             (Value::WitnessOf(inner), target) => {
                 Value::WitnessOf(Box::new(inner.cast_op(target, instrumenter)))
             }
-            (Value::U(_, v), CastTarget::U(s2)) => Value::U(*s2, *v & bit_mask(*s2)),
-            (Value::U(_, v), CastTarget::I(s2)) => Value::I(*s2, *v & bit_mask(*s2)),
-            (Value::I(_, v), CastTarget::U(s2)) => Value::U(*s2, *v & bit_mask(*s2)),
-            (Value::I(_, v), CastTarget::I(s2)) => Value::I(*s2, *v & bit_mask(*s2)),
-            (Value::U(_, v), CastTarget::Field) => Value::Field(instrumenter.field().constant(*v)),
-            (Value::I(s, v), CastTarget::Field) => Value::Field(
-                instrumenter
-                    .field()
-                    .constant(Self::to_signed(*v, *s) as u64),
-            ),
-            (Value::Field(f), CastTarget::Field) => Value::Field(*f),
-            (Value::Field(f), CastTarget::U(s)) => {
-                let bigint = f.into_bigint();
-                Value::U(
-                    *s,
-                    (bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)) & bit_mask(*s),
-                )
+            (Value::Int(_, v), CastTarget::Int(s2)) => Value::Int(*s2, *v & bit_mask(*s2)),
+            // Raw bits, and _only_ raw bits. There used to be a second arm here, reached whenever
+            // the operand happened to be tagged `I`, that decoded to two's complement and then
+            // `as u64` — which disagreed with every other implementation of this cast
+            // (`lattice::eval_cast` takes the raw payload, `hlssa_to_r1cs::of_int` builds
+            // `Fr::from(raw)`, and the LLVM path zero-extends) and mangled the value on top of it,
+            // since `as u64` on a negative `i128` is not a field element's worth of anything. The
+            // cost interpreter has to agree with the circuit it is estimating, so the surviving
+            // arm is the one the backends implement.
+            (Value::Int(_, v), CastTarget::Field) => {
+                Value::Field(instrumenter.field().constant(*v))
             }
-            (Value::Field(f), CastTarget::I(s)) => {
+            (Value::Field(f), CastTarget::Field) => Value::Field(*f),
+            (Value::Field(f), CastTarget::Int(s)) => {
                 let bigint = f.into_bigint();
-                Value::I(
+                Value::Int(
                     *s,
                     (bigint.0[0] as u128 | ((bigint.0[1] as u128) << 64)) & bit_mask(*s),
                 )
@@ -852,7 +830,7 @@ impl Value {
     // FIELD-ASSUMPTION: L4-decompose
     fn to_bits(&self, endianness: &Endianness, size: usize) -> Value {
         match self {
-            Value::Unknown(_) => Value::array(vec![Value::Unknown(ScalarKind::U(1)); size]),
+            Value::Unknown(_) => Value::array(vec![Value::Unknown(ScalarKind::Int(1)); size]),
             Value::WitnessOf(inner) => {
                 let result = inner.to_bits(endianness, size);
                 match result {
@@ -867,10 +845,10 @@ impl Value {
             }
             // Decomposition is a property of the bit pattern, so a signed value decomposes
             // exactly as its unsigned twin does. The bits themselves are always `u1`.
-            Value::U(_, v) | Value::I(_, v) => {
+            Value::Int(_, v) => {
                 let mut r = (0..size)
                     .map(|i| {
-                        Value::U(
+                        Value::Int(
                             1,
                             if i < u128::BITS as usize {
                                 (v >> i) & 1
@@ -889,7 +867,7 @@ impl Value {
                 let bigint = f.into_bigint();
                 let raw_bits = bigint.to_bits_le();
                 let mut bits = (0..size)
-                    .map(|i| Value::U(1, raw_bits.get(i).copied().unwrap_or(false) as u128))
+                    .map(|i| Value::Int(1, raw_bits.get(i).copied().unwrap_or(false) as u128))
                     .collect::<Vec<_>>();
                 if *endianness == Endianness::Big {
                     bits.reverse();
@@ -920,10 +898,10 @@ impl Value {
                     _ => unreachable!("to_radix of a WitnessOf expected an Array result"),
                 }
             }
-            Value::Unknown(_) => Value::array(vec![Value::Unknown(ScalarKind::U(8)); size]),
+            Value::Unknown(_) => Value::array(vec![Value::Unknown(ScalarKind::Int(8)); size]),
             Value::Field(f) => {
                 let radix_val = match radix {
-                    Radix::Dyn(Value::U(_, r)) => *r,
+                    Radix::Dyn(Value::Int(_, r)) => *r,
                     Radix::Bytes => 256,
                     _ => panic!("Cannot convert {:?} to radix {:?}", self, radix),
                 };
@@ -934,7 +912,7 @@ impl Value {
                         let limb = val.0[0] as u128;
                         limb % radix_val
                     };
-                    digits.push(Value::U(8, digit));
+                    digits.push(Value::Int(8, digit));
                     // Divide val by radix_val
                     let mut carry: u128 = 0;
                     for i in (0..val.0.len()).rev() {
@@ -953,7 +931,7 @@ impl Value {
         match self {
             Value::Unknown(kind) => Value::Unknown(*kind),
             Value::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.not_op(_instrumenter))),
-            Value::U(s, v) => Value::U(*s, !v & bit_mask(*s)),
+            Value::Int(s, v) => Value::Int(*s, !v & bit_mask(*s)),
             _ => panic!("Cannot perform not operation on {:?}", self),
         }
     }
@@ -984,11 +962,11 @@ impl Value {
         _instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
         match self {
-            Value::U(_, 0) => if_false.clone(),
-            Value::U(_, _) => if_true.clone(),
+            Value::Int(_, 0) => if_false.clone(),
+            Value::Int(_, _) => if_true.clone(),
             Value::WitnessOf(inner) => match inner.as_ref() {
-                Value::U(_, 0) => if_false.clone(),
-                Value::U(_, _) => if_true.clone(),
+                Value::Int(_, 0) => if_false.clone(),
+                Value::Int(_, _) => if_true.clone(),
                 _ => {
                     let mut result = if_true.clone();
                     result.forget_concrete();
@@ -1023,29 +1001,16 @@ impl SpecSplitValue {
 }
 
 impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
-    fn ult(&self, b: &SpecSplitValue, _instrumenter: &mut CostAnalysis) -> SpecSplitValue {
-        SpecSplitValue {
-            unspecialized: self.unspecialized.ult_op(&b.unspecialized),
-            specialized: self.specialized.ult_op(&b.specialized),
-        }
-    }
-
-    fn slt(
+    fn cmp(
         &self,
         b: &SpecSplitValue,
-        bits: usize,
+        kind: CmpKind,
+        bits: Option<usize>,
         _instrumenter: &mut CostAnalysis,
     ) -> SpecSplitValue {
         SpecSplitValue {
-            unspecialized: self.unspecialized.slt_op(&b.unspecialized, bits),
-            specialized: self.specialized.slt_op(&b.specialized, bits),
-        }
-    }
-
-    fn eq(&self, b: &SpecSplitValue, _instrumenter: &mut CostAnalysis) -> SpecSplitValue {
-        SpecSplitValue {
-            unspecialized: self.unspecialized.eq_op(&b.unspecialized),
-            specialized: self.specialized.eq_op(&b.specialized),
+            unspecialized: self.unspecialized.cmp_op(&b.unspecialized, kind, bits),
+            specialized: self.specialized.cmp_op(&b.specialized, kind, bits),
         }
     }
 
@@ -1283,7 +1248,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         _kind: CmpKind,
         _a: &Self,
         _b: &Self,
-        _lhs_type: &Type,
+        _bits: Option<usize>,
         _instrumenter: &mut CostAnalysis,
     ) -> Result<(), AssertionFailure> {
         Ok(())
@@ -1336,14 +1301,14 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
 
     fn expect_constant_bool(&self, _ctx: &mut CostAnalysis) -> bool {
         let specialized = match &self.specialized {
-            Value::U(1, v) => *v != 0,
+            Value::Int(1, v) => *v != 0,
             _ => panic!(
                 "Expected constant bool, got specialized={:?}",
                 self.specialized
             ),
         };
         let unspecialized = match &self.unspecialized {
-            Value::U(1, v) => *v != 0,
+            Value::Int(1, v) => *v != 0,
             _ => panic!(
                 "Expected constant bool, got unspecialized={:?}",
                 self.unspecialized
@@ -1351,7 +1316,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         };
         // The unspecialized world is a blinding-refinement of the specialized one: both are seeded
         // identically and every value op is symmetric, with the only asymmetry being
-        // `blind_unspecialized`, which coarsens a concrete leaf to `Unknown` — never to a *different*
+        // `blind_unspecialized`, which coarsens a concrete leaf to `Unknown` — never to a _different_
         // concrete. So a branch condition that is a concrete bool in both worlds must agree; a
         // divergence here is a specializer/writeback miscompilation, not a benign dead path.
         assert_eq!(
@@ -1361,17 +1326,10 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         specialized
     }
 
-    fn of_u(s: usize, v: u128, _ctx: &mut CostAnalysis) -> Self {
+    fn of_int(s: usize, v: u128, _ctx: &mut CostAnalysis) -> Self {
         Self {
-            unspecialized: Value::U(s, v),
-            specialized: Value::U(s, v),
-        }
-    }
-
-    fn of_i(s: usize, v: u128, _ctx: &mut CostAnalysis) -> Self {
-        Self {
-            unspecialized: Value::I(s, v),
-            specialized: Value::I(s, v),
+            unspecialized: Value::Int(s, v),
+            specialized: Value::Int(s, v),
         }
     }
 
@@ -1661,7 +1619,7 @@ impl Instrumenter {
         self.rangecheck_lookups.keys().any(|(bits, _)| *bits >= 2)
     }
 
-    // Array table *allocation* is deliberately not costed anywhere below: tables are
+    // Array table _allocation_ is deliberately not costed anywhere below: tables are
     // circuit-global (allocated once per distinct array, whichever function touches it first),
     // so a per-function instrumenter has no sound way to attribute that cost. Only the
     // recurring per-lookup cost is counted.
@@ -1809,8 +1767,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
             fn unknown_value(ty: &Type) -> Value {
                 match &ty.expr {
                     TypeExpr::Field => Value::Unknown(ScalarKind::Field),
-                    TypeExpr::U(s) => Value::Unknown(ScalarKind::U(*s)),
-                    TypeExpr::I(s) => Value::Unknown(ScalarKind::I(*s)),
+                    TypeExpr::Int(s) => Value::Unknown(ScalarKind::Int(*s)),
                     TypeExpr::Array(elem, size) => {
                         Value::array((0..*size).map(|_| unknown_value(elem)).collect())
                     }
@@ -1967,13 +1924,13 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
 
     fn slice_len(&mut self, slice: &SpecSplitValue) -> SpecSplitValue {
         let unspec = match &slice.unspecialized {
-            Value::Array(values) => Value::U(32, values.len() as u128),
-            Value::UnknownSlice => Value::Unknown(ScalarKind::U(32)),
+            Value::Array(values) => Value::Int(32, values.len() as u128),
+            Value::UnknownSlice => Value::Unknown(ScalarKind::Int(32)),
             _ => panic!("Cannot get length of {:?}", slice.unspecialized),
         };
         let spec = match &slice.specialized {
-            Value::Array(values) => Value::U(32, values.len() as u128),
-            Value::UnknownSlice => Value::Unknown(ScalarKind::U(32)),
+            Value::Array(values) => Value::Int(32, values.len() as u128),
+            Value::UnknownSlice => Value::Unknown(ScalarKind::Int(32)),
             _ => panic!("Cannot get length of {:?}", slice.specialized),
         };
         SpecSplitValue {
@@ -1991,13 +1948,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
     ) -> Vec<SpecSplitValue> {
         fn unknown_value(ty: &Type) -> Value {
             match &ty.expr {
-                // Defer to `ScalarKind::from_type` rather than re-deriving the mapping. The
-                // hand-rolled version this replaces sent `I(s)` to `ScalarKind::U(s)`, losing the
-                // sign, which disagreed with every other type-to-unknown map in this file
-                // (`:166`, `:1804`, `:2313`) and with `from_type` itself.
-                TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => {
-                    Value::Unknown(ScalarKind::from_type(ty))
-                }
+                TypeExpr::Field | TypeExpr::Int(_) => Value::Unknown(ScalarKind::from_type(ty)),
                 TypeExpr::Array(elem, size) => {
                     Value::array((0..*size).map(|_| unknown_value(elem)).collect())
                 }
@@ -2247,7 +2198,7 @@ impl CostAnalysis {
             r.total_savings_to_make += summary.specialization_total_savings;
             let raw = &self.functions[sig].raw;
             aggregate.add(raw, summary.calls);
-            // Aggregate the *raw* (un-spilled) lookup widths for the table-size optimizer.
+            // Aggregate the _raw_ (un-spilled) lookup widths for the table-size optimizer.
             // Note `AggregatedConstraintCost` pre-splits spreads into bytes via
             // `final_spread_lookups()`; the optimizer needs the original widths instead.
             for (&key, &count) in raw.rangecheck_lookups.iter() {
@@ -2328,8 +2279,7 @@ impl CostEstimator {
     fn type_to_unknown_sig(&self, tp: &Type) -> ValueSignature {
         match &tp.expr {
             TypeExpr::Field => ValueSignature::Unknown(ScalarKind::Field),
-            TypeExpr::U(s) => ValueSignature::Unknown(ScalarKind::U(*s)),
-            TypeExpr::I(s) => ValueSignature::Unknown(ScalarKind::I(*s)),
+            TypeExpr::Int(s) => ValueSignature::Unknown(ScalarKind::Int(*s)),
             TypeExpr::WitnessOf(inner) => {
                 ValueSignature::WitnessOf(Box::new(self.type_to_unknown_sig(inner)))
             }
@@ -2361,8 +2311,6 @@ impl CostEstimator {
     }
 }
 
-use crate::compiler::pass_manager::{Analysis, AnalysisId, AnalysisStore};
-
 impl Analysis for Summary {
     fn dependencies() -> Vec<AnalysisId> {
         vec![TypeInfo::id()]
@@ -2378,7 +2326,7 @@ impl Analysis for Summary {
 
 #[cfg(test)]
 mod tests {
-    use super::{CostEstimator, ScalarKind, Value};
+    use super::{CmpKind, CostEstimator, ScalarKind, Value};
     use crate::compiler::{
         analysis::{flow_analysis::FlowAnalysis, types::Types},
         pass_manager::{AnalysisStore, Pass},
@@ -2388,6 +2336,31 @@ mod tests {
             hlssa::{Constant, Endianness, HLSSA, OpCode, Radix, Type},
         },
     };
+
+    /// The comparison's reading comes from the opcode, so one pair of operands must compare two
+    /// different ways under the two orderings.
+    ///
+    /// The cost model estimates a circuit it does not build, and it is only useful while it agrees
+    /// with the one that _is_ built. There is nothing about a `Value::Int` that can tell these two
+    /// answers apart — the payload is the same eight bits either way — so if the reading ever comes
+    /// from anywhere but `kind` again, this is the pair that catches it.
+    #[test]
+    fn a_comparison_reads_its_operands_the_way_the_opcode_says() {
+        // 0xFB in eight bits is 251 read as a magnitude and -5 read as two's complement, so the
+        // two readings disagree about every comparison of it against a small positive.
+        let a = Value::Int(8, 0xFB);
+        let b = Value::Int(8, 2);
+
+        let is = |v: Value, expected: u128| matches!(v, Value::Int(1, got) if got == expected);
+
+        assert!(
+            is(a.cmp_op(&b, CmpKind::ULt, Some(8)), 0),
+            "251 < 2 is false"
+        );
+        assert!(is(a.cmp_op(&b, CmpKind::SLt, Some(8)), 1), "-5 < 2 is true");
+        assert!(is(a.cmp_op(&b, CmpKind::Eq, Some(8)), 0));
+        assert!(is(a.cmp_op(&a, CmpKind::Eq, Some(8)), 1));
+    }
 
     /// `ToBits` always produces an array, including when the input's concrete value is unknown.
     /// Keeping that shape is especially important for witnessed unknowns: the witness wrapper
@@ -2405,21 +2378,25 @@ mod tests {
         assert!(bits.iter().all(|bit| matches!(
             bit,
             Value::WitnessOf(inner)
-                if matches!(inner.as_ref(), Value::Unknown(ScalarKind::U(1)))
+                if matches!(inner.as_ref(), Value::Unknown(ScalarKind::Int(1)))
         )));
     }
 
     #[test]
     fn integer_to_bits_zero_pads_past_u128() {
-        let Value::Array(bits) = Value::U(8, 5).to_bits(&Endianness::Little, 130) else {
+        let Value::Array(bits) = Value::Int(8, 5).to_bits(&Endianness::Little, 130) else {
             panic!("ToBits must produce an array");
         };
 
         assert_eq!(bits.len(), 130);
-        assert!(matches!(bits[0], Value::U(1, 1)));
-        assert!(matches!(bits[1], Value::U(1, 0)));
-        assert!(matches!(bits[2], Value::U(1, 1)));
-        assert!(bits[128..].iter().all(|bit| matches!(bit, Value::U(1, 0))));
+        assert!(matches!(bits[0], Value::Int(1, 1)));
+        assert!(matches!(bits[1], Value::Int(1, 0)));
+        assert!(matches!(bits[2], Value::Int(1, 1)));
+        assert!(
+            bits[128..]
+                .iter()
+                .all(|bit| matches!(bit, Value::Int(1, 0)))
+        );
     }
 
     #[test]
@@ -2431,10 +2408,14 @@ mod tests {
         };
 
         assert_eq!(bits.len(), 260);
-        assert!(bits[..257].iter().all(|bit| matches!(bit, Value::U(1, 0))));
-        assert!(matches!(bits[257], Value::U(1, 1)));
-        assert!(matches!(bits[258], Value::U(1, 0)));
-        assert!(matches!(bits[259], Value::U(1, 1)));
+        assert!(
+            bits[..257]
+                .iter()
+                .all(|bit| matches!(bit, Value::Int(1, 0)))
+        );
+        assert!(matches!(bits[257], Value::Int(1, 1)));
+        assert!(matches!(bits[258], Value::Int(1, 0)));
+        assert!(matches!(bits[259], Value::Int(1, 1)));
     }
 
     /// Witness lowering makes the decomposition cost visible as one one-bit rangecheck per bit
@@ -2445,7 +2426,7 @@ mod tests {
         let value = ssa.fresh_value();
         let result = ssa.fresh_value();
         let function = ssa.get_unique_entrypoint_mut();
-        function.add_return_type(Type::witness_of(Type::u(1)).array_of(3));
+        function.add_return_type(Type::witness_of(Type::int(1)).array_of(3));
         let entry = function.get_entry_mut();
         entry.push_parameter(value, Type::witness_of(Type::field()));
         entry.push_test_instruction(OpCode::ToBits {
@@ -2478,7 +2459,7 @@ mod tests {
         let value = ssa.fresh_value();
         let result = ssa.fresh_value();
         let function = ssa.get_unique_entrypoint_mut();
-        function.add_return_type(Type::witness_of(Type::u(8)).array_of(3));
+        function.add_return_type(Type::witness_of(Type::int(8)).array_of(3));
         let entry = function.get_entry_mut();
         entry.push_parameter(value, Type::witness_of(Type::field()));
         entry.push_test_instruction(OpCode::ToRadix {

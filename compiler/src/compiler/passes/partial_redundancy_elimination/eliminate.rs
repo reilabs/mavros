@@ -9,7 +9,7 @@
 //!   graft) numbering, const-seeded classes — none of which expression hashing can see. Call
 //!   results are excluded as redirect _sources_ but remain valid redirect _targets_: a local
 //!   expression congruent to a dominating call result is redirected straight to it.
-//! - **Canonical-Key Dedup:** A CSE-style interner keyed over *congruence classes* rather than raw
+//! - **Canonical-Key Dedup:** A CSE-style interner keyed over _congruence classes_ rather than raw
 //!   values: commutative `Add`/`Mul`/`And`/`Or`/`Xor` chains are flattened and sorted (`And`/`Or`
 //!   deduped, `MulConst` unified with `Mul`), and every terminal operand resolves to its class
 //!   representative ([`ClickCooper::class_key`]). This reproduces the CSE interner's equivalences
@@ -32,8 +32,8 @@ use crate::{
         ssa::{
             FunctionId, ProgramPoint, ValueId,
             hlssa::{
-                BinaryArithOpKind, CastTarget, Endianness, HLFunction, LookupTarget, OpCode, Radix,
-                Type,
+                ArithGroup, CastTarget, CmpKind, Endianness, HLFunction, LookupTarget, OpCode,
+                Radix, Type,
             },
         },
         util::ice_non_elided_tuple,
@@ -95,7 +95,7 @@ struct Eliminator<'a> {
     /// chase entries recorded earlier in the walk, composing nested dedups within one run.
     replacements: ValueReplacements,
 
-    /// Group leaders per canonical key: the occurrences no earlier *same-typed* occurrence covers.
+    /// Group leaders per canonical key: the occurrences no earlier _same-typed_ occurrence covers.
     ///
     /// A group may hold dominance-comparable leaders of different types (the witness-wrapper
     /// asymmetry); the scan in [`Self::record_value`] is type-guarded, so each type's leaders are
@@ -165,7 +165,14 @@ impl Eliminator<'_> {
 
     /// Key one instruction and record it into the value or assertion channel.
     fn visit(&mut self, point: ProgramPoint, instruction: &OpCode) {
-        use BinaryArithOpKind::*;
+        // The sign participates in every key, and the opcode is the authority on it. `UDiv(x, y)`
+        // and `SDiv(x, y)` are two different computations over the same operands; `UAdd(x, y)` and
+        // `SAdd(x, y)` agree on every bit but owe different rejections, and the merge would pick
+        // one of them to emit. Both are WRONG ANSWERS. See `BinaryArithOpKind::signedness`.
+        //
+        // The commutative chains carry it as part of `ChainKind`, which also keeps `extend_chain`
+        // from flattening a signed operand into an unsigned chain.
+        use ArithGroup::*;
         match instruction {
             OpCode::BinaryArithOp {
                 kind,
@@ -173,27 +180,31 @@ impl Eliminator<'_> {
                 lhs,
                 rhs,
             } => {
-                let node = match kind {
-                    Add => self.chain(ChainKind::Add, *result, &[*lhs, *rhs]),
-                    Mul => self.chain(ChainKind::Mul, *result, &[*lhs, *rhs]),
+                let sign = kind.signedness();
+                let signed = kind.is_signed();
+                let node = match kind.group() {
+                    Add => self.chain(ChainKind::Add(signed), *result, &[*lhs, *rhs]),
+                    Mul => self.chain(ChainKind::Mul(signed), *result, &[*lhs, *rhs]),
                     And => self.chain(ChainKind::And, *result, &[*lhs, *rhs]),
                     Or => self.chain(ChainKind::Or, *result, &[*lhs, *rhs]),
                     Xor => self.chain(ChainKind::Xor, *result, &[*lhs, *rhs]),
-                    Sub => self.binary(*lhs, *rhs, |lhs, rhs| CanonNode::Sub { lhs, rhs }),
-                    Div => self.binary(*lhs, *rhs, |lhs, rhs| CanonNode::Div { lhs, rhs }),
-                    Mod => self.binary(*lhs, *rhs, |lhs, rhs| CanonNode::Mod { lhs, rhs }),
-                    Shl => self.binary(*lhs, *rhs, |lhs, rhs| CanonNode::Shl { lhs, rhs }),
-                    Shr => self.binary(*lhs, *rhs, |lhs, rhs| CanonNode::Shr { lhs, rhs }),
+                    Sub => self.binary(*lhs, *rhs, |lhs, rhs| CanonNode::Sub { lhs, rhs, sign }),
+                    Div => self.binary(*lhs, *rhs, |lhs, rhs| CanonNode::Div { lhs, rhs, sign }),
+                    Rem => self.binary(*lhs, *rhs, |lhs, rhs| CanonNode::Mod { lhs, rhs, sign }),
+                    Shl => self.binary(*lhs, *rhs, |lhs, rhs| CanonNode::Shl { lhs, rhs, sign }),
+                    Shr => self.binary(*lhs, *rhs, |lhs, rhs| CanonNode::Shr { lhs, rhs, sign }),
                 };
                 self.record_value(point, *result, node);
             }
-            // Unified with `Mul` chains so `MulConst` dedups against `BinaryArithOp::Mul`.
+            // Unified with unsigned `Mul` chains so `MulConst` dedups against `UMul`. Unsigned is
+            // not a default here: `MulConst` is `const_val(field) * var`, a field multiply, and
+            // `witness_lowering` only ever builds one from a `UMul` or from field arithmetic.
             OpCode::MulConst {
                 result,
                 const_val,
                 var,
             } => {
-                let node = self.chain(ChainKind::Mul, *result, &[*const_val, *var]);
+                let node = self.chain(ChainKind::Mul(false), *result, &[*const_val, *var]);
                 self.record_value(point, *result, node);
             }
             OpCode::Cmp {
@@ -203,11 +214,15 @@ impl Eliminator<'_> {
                 rhs,
             } => {
                 let node = match kind {
-                    crate::compiler::ssa::hlssa::CmpKind::Eq => {
-                        self.binary(*lhs, *rhs, |lhs, rhs| CanonNode::Eq { lhs, rhs })
-                    }
-                    crate::compiler::ssa::hlssa::CmpKind::Lt => {
-                        self.binary(*lhs, *rhs, |lhs, rhs| CanonNode::Lt { lhs, rhs })
+                    CmpKind::Eq => self.binary(*lhs, *rhs, |lhs, rhs| CanonNode::Eq { lhs, rhs }),
+
+                    // `CmpKind::is_ordering` is the comparison counterpart of the predicate above.
+                    CmpKind::ULt | CmpKind::SLt => {
+                        self.binary(*lhs, *rhs, |lhs, rhs| CanonNode::Lt {
+                            lhs,
+                            rhs,
+                            signed: kind.is_signed(),
+                        })
                     }
                 };
                 self.record_value(point, *result, node);
@@ -439,7 +454,7 @@ impl Eliminator<'_> {
         id
     }
 
-    /// Join `value` to an existing dominating *same-typed* group of `node` (recording the redirect)
+    /// Join `value` to an existing dominating _same-typed_ group of `node` (recording the redirect)
     /// or start a new group with it.
     ///
     /// Occurrences arrive in domination preorder, so an earlier group leader can never be dominated
@@ -491,10 +506,14 @@ impl Eliminator<'_> {
 pub(crate) struct NodeId(u32);
 
 /// The flattenable (associative and commutative) chain operators.
+///
+/// `Add` and `Mul` carry the sign of the operation that built them. It is part of the key, so a
+/// signed chain and an unsigned one never merge, and it is also what stops `extend_chain` splicing
+/// the parts of one into the other — a chain is only associative within a single reading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ChainKind {
-    Add,
-    Mul,
+    Add(bool),
+    Mul(bool),
     And,
     Or,
     Xor,
@@ -505,6 +524,11 @@ enum ChainKind {
 /// Terminal operands are congruence-class representatives ([`CanonNode::Class`]) wherever the
 /// analysis numbered the value, so two keys are equal only when the computations produce equal
 /// values in every run.
+///
+/// The `sign` field the non-commutative arithmetic nodes carry is the reading the operation applies
+/// to its operands, so a signed and an unsigned form can never share a node. It is `None` only for
+/// operations that have no signed form at all. The commutative chains carry the same discriminator
+/// inside [`ChainKind`]. See [`Eliminator::visit`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum CanonNode {
     /// A value known to the congruence partition, named by its class key (minimum member id).
@@ -518,25 +542,31 @@ enum CanonNode {
     /// The result type rides in the key so chains of different widths never merge, and flattening
     /// never crosses a width change (wrapping arithmetic is associative only within one modulus).
     Chain(ChainKind, Vec<NodeId>, Type),
+
     Sub {
         lhs: NodeId,
         rhs: NodeId,
+        sign: Option<bool>,
     },
     Div {
         lhs: NodeId,
         rhs: NodeId,
+        sign: Option<bool>,
     },
     Mod {
         lhs: NodeId,
         rhs: NodeId,
+        sign: Option<bool>,
     },
     Shl {
         lhs: NodeId,
         rhs: NodeId,
+        sign: Option<bool>,
     },
     Shr {
         lhs: NodeId,
         rhs: NodeId,
+        sign: Option<bool>,
     },
     Eq {
         lhs: NodeId,
@@ -545,6 +575,7 @@ enum CanonNode {
     Lt {
         lhs: NodeId,
         rhs: NodeId,
+        signed: bool,
     },
     Not(NodeId),
     Select {
