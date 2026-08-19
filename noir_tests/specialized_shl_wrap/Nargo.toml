@@ -1,0 +1,6 @@
+[package]
+name = "specialized_shl_wrap"
+type = "bin"
+authors = [""]
+
+[dependencies]
