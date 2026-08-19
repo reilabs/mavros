@@ -31,9 +31,7 @@ pub struct Project {
 }
 
 /// Mavros stdlib extensions that get injected into the `std/` namespace.
-/// These must be added before the embedded stdlib so our modified `std/lib.nr` takes precedence.
 const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
-    ("std/lib.nr", include_str!("../../mavros_stdlib/lib.nr")),
     (
         "std/mavros.nr",
         include_str!("../../mavros_stdlib/mavros.nr"),
@@ -185,20 +183,25 @@ fn replace_foreign_function(function: &mut NoirFunction, replaced: &mut HashSet<
 }
 
 fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
-    // Build file manager manually so we can inject mavros stdlib extensions
-    // before the embedded stdlib. Since `add_file_with_source_canonical_path`
-    // is a no-op for paths that already exist, our `std/lib.nr` (which adds
-    // `pub mod mavros;`) takes precedence over the embedded one.
+    // Build the file manager manually so we can expose the Mavros extensions from the embedded
+    // stdlib root without maintaining a copy of upstream's `std/lib.nr`.
     let mut file_manager = FileManager::new(&workspace.root_dir);
 
-    // 1. Add mavros stdlib extensions first
+    // 1. Add the embedded stdlib, extending its root with the Mavros module declaration.
+    let stdlib_root = Path::new("std/lib.nr");
+    let mut extended_stdlib_root = false;
+    for (path, mut source) in stdlib_paths_with_source() {
+        if Path::new(&path) == stdlib_root {
+            source.push_str("\npub mod mavros;\n");
+            extended_stdlib_root = true;
+        }
+        file_manager.add_file_with_source_canonical_path(Path::new(&path), source);
+    }
+    assert!(extended_stdlib_root, "embedded stdlib root was not found");
+
+    // 2. Add the Mavros stdlib extensions.
     for (path, source) in MAVROS_STDLIB_FILES {
         file_manager.add_file_with_source_canonical_path(Path::new(path), source.to_string());
-    }
-
-    // 2. Add the rest of the embedded stdlib (std/lib.nr will be skipped)
-    for (path, source) in stdlib_paths_with_source() {
-        file_manager.add_file_with_source_canonical_path(Path::new(&path), source);
     }
 
     // 3. Add workspace files

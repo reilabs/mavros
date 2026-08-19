@@ -398,7 +398,9 @@ impl<'a> ExpressionConverter<'a> {
             Definition::LowLevel(name) => {
                 todo!("LowLevel function not yet supported: {}", name)
             }
-            Definition::Oracle(name) => {
+            // TODO: When oracle calls are supported, preserve their purity so optimizations such
+            // as CSE and DCE can distinguish pure calls from calls with side effects.
+            Definition::Oracle { name, .. } => {
                 todo!("Oracle function not yet supported: {}", name)
             }
             Definition::Global(global_id) => {
@@ -1448,7 +1450,7 @@ impl<'a> ExpressionConverter<'a> {
                     // since some arguments (e.g. string messages) must be skipped
                     Definition::Builtin(name) => self.convert_builtin_call(name, call, b),
                     Definition::LowLevel(name) => self.convert_lowlevel_call(name, call, b),
-                    Definition::Oracle(name) if name == "print" => None,
+                    Definition::Oracle { name, .. } if name == "print" => None,
                     _ => todo!("Call to {:?} not yet supported", ident.definition),
                 }
             }
