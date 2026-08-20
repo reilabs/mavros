@@ -37,7 +37,7 @@ pub fn ordered_params_from_btreemap(
 }
 
 fn field_param(value: u64) -> InputValueOrdered {
-    InputValueOrdered::Field(ark_bn254::Fr::from(value)) 
+    InputValueOrdered::Field(ark_bn254::Fr::from(value)) // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
 }
 
 fn zero_param(abi_type: &AbiType) -> InputValueOrdered {
@@ -93,7 +93,7 @@ fn ordered_param(abi_type: &AbiType, value: &InputValue) -> InputValueOrdered {
             InputValueOrdered::Vec(
                 bytes
                     .iter()
-                    .map(|byte| InputValueOrdered::Field(ark_bn254::Fr::from(*byte as u64))) // FIELD-ASSUMPTION: L1-direct-ref (1 sites)
+                    .map(|byte| InputValueOrdered::Field(ark_bn254::Fr::from(*byte as u64)))
                     .collect(),
             )
         }
