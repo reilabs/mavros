@@ -6,8 +6,8 @@ use noirc_errors::Location as NoirLocation;
 use noirc_frontend::{
     ast::BinaryOpKind,
     monomorphization::ast::{
-        Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, GlobalId, Ident, If,
-        Index, LValue, Let, LocalId, Type as AstType, While,
+        Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, Function as AstFunction,
+        GlobalId, Ident, If, Index, LValue, Let, LocalId, Type as AstType, While,
     },
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -26,8 +26,6 @@ use crate::{
         },
     },
 };
-
-use super::derive_pedersen_generators::PendingDerivation;
 
 /// Loop context for break/continue support.
 struct LoopContext {
@@ -57,6 +55,15 @@ pub struct ExpressionConverter<'a> {
 
     /// Maps AST FuncId to SSA FunctionId
     function_mapper: &'a HashMap<AstFuncId, FunctionId>,
+
+    /// Monomorphized functions used by targeted constant-builtin inlining.
+    functions: &'a [AstFunction],
+
+    /// Functions on a call path to a constant-only builtin.
+    constant_builtin_inline_functions: &'a HashSet<AstFuncId>,
+
+    /// Active targeted-inlining call path, used to reject recursion before lowering diverges.
+    inline_call_stack: Vec<AstFuncId>,
 
     /// Set of AST function IDs that are natively unconstrained
     natively_unconstrained: &'a HashSet<AstFuncId>,
@@ -90,15 +97,13 @@ pub struct ExpressionConverter<'a> {
     /// fallback, but normally gets replaced by the nearest enclosing expression's real source
     /// location while lowering.
     current_source_location: SourceLocation,
-
-    /// Compile-time Pedersen derivations emitted by this function. They are resolved for each
-    /// concrete calling context before the freshly-built SSA leaves the lowering phase.
-    pending_derivations: Vec<PendingDerivation>,
 }
 
 impl<'a> ExpressionConverter<'a> {
     pub fn new_with_globals(
         function_mapper: &'a HashMap<AstFuncId, FunctionId>,
+        functions: &'a [AstFunction],
+        constant_builtin_inline_functions: &'a HashSet<AstFuncId>,
         natively_unconstrained: &'a HashSet<AstFuncId>,
         in_unconstrained: bool,
         global_slots: &'a HashMap<GlobalId, usize>,
@@ -110,6 +115,9 @@ impl<'a> ExpressionConverter<'a> {
             bindings: HashMap::default(),
             mutable_locals: HashSet::default(),
             function_mapper,
+            functions,
+            constant_builtin_inline_functions,
+            inline_call_stack: Vec::new(),
             natively_unconstrained,
             type_converter: TypeConverter::new(),
             loop_stack: Vec::new(),
@@ -120,7 +128,6 @@ impl<'a> ExpressionConverter<'a> {
             file_manager,
             source_files: RefCell::new(HashMap::default()),
             current_source_location: SourceLocation::synthetic("Noir internal"),
-            pending_derivations: Vec::new(),
         }
     }
 
@@ -250,10 +257,6 @@ impl<'a> ExpressionConverter<'a> {
 
     pub fn current_block(&self) -> BlockId {
         self.current_block
-    }
-
-    pub(super) fn take_pending_derivations(&mut self) -> Vec<PendingDerivation> {
-        std::mem::take(&mut self.pending_derivations)
     }
 
     /// Bind an immutable local variable to a value
@@ -1503,6 +1506,62 @@ impl<'a> ExpressionConverter<'a> {
             .map(|arg| self.convert_expression(arg, b).unwrap())
             .collect();
 
+        let must_inline = self.constant_builtin_inline_functions.contains(func_id);
+        if must_inline {
+            let callee = self
+                .functions
+                .iter()
+                .find(|function| function.id == *func_id)
+                .unwrap_or_else(|| panic!("Undefined function: {:?}", func_id));
+            if callee.unconstrained {
+                return self.emit_static_call(func_id, call, args, b);
+            }
+            // Clone before recursively lowering the body so `self` is no longer borrowed through
+            // `functions`.
+            let callee = callee.clone();
+            assert!(
+                !self.inline_call_stack.contains(func_id),
+                "recursive call path reaches derive_pedersen_generators"
+            );
+            assert_eq!(
+                callee.parameters.len(),
+                args.len(),
+                "inlined call argument count does not match callee parameters"
+            );
+
+            // LocalIds are scoped to a monomorphized function. Snapshot the whole environment so
+            // parameters and locals from the inlined body cannot overwrite caller bindings.
+            let saved_bindings = self.bindings.clone();
+            let saved_mutable_locals = self.mutable_locals.clone();
+            for ((local_id, mutable, _, _, _), argument) in
+                callee.parameters.iter().zip(args.iter().copied())
+            {
+                if *mutable {
+                    let location = self.expression_source_location(&callee.body);
+                    self.bind_local_mut(*local_id, argument, b, location);
+                } else {
+                    self.bind_local(*local_id, argument);
+                }
+            }
+
+            self.inline_call_stack.push(*func_id);
+            let result = self.convert_expression(&callee.body, b);
+            self.inline_call_stack.pop();
+            self.bindings = saved_bindings;
+            self.mutable_locals = saved_mutable_locals;
+            return result;
+        }
+
+        self.emit_static_call(func_id, call, args, b)
+    }
+
+    fn emit_static_call(
+        &mut self,
+        func_id: &AstFuncId,
+        call: &noirc_frontend::monomorphization::ast::Call,
+        args: Vec<ValueId>,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
         let ssa_func_id = self
             .function_mapper
             .get(func_id)
@@ -1649,26 +1708,33 @@ impl<'a> ExpressionConverter<'a> {
                 let AstType::Array(num_generators, _) = &call.return_type else {
                     panic!("derive_pedersen_generators must return an array")
                 };
-                let result_type = self.type_converter.convert_type(&call.return_type);
-                let result = b.ssa.fresh_value();
-
-                // This placeholder makes the nascent SSA structurally complete. The lowering
-                // coordinator replaces it with concrete point construction before exposing the
-                // SSA to any analysis or optimization pass.
-                self.emit_located(b, Some(call.location), |e| {
-                    e.todo_op(
-                        "compile-time derive_pedersen_generators".to_string(),
-                        vec![result],
-                        vec![result_type],
-                    )
-                });
-                self.pending_derivations.push(PendingDerivation {
-                    result,
+                let generators = super::derive_pedersen_generators::derive(
+                    b.ssa,
+                    b.function,
                     domain_separator,
                     starting_index,
-                    num_generators: *num_generators,
-                });
-                Some(result)
+                    *num_generators,
+                );
+                let generator_constants: Vec<_> = generators
+                    .into_iter()
+                    .map(|(x, y)| {
+                        (
+                            b.ssa.add_const(Constant::Field(x)),
+                            b.ssa.add_const(Constant::Field(y)),
+                        )
+                    })
+                    .collect();
+                Some(self.emit_located(b, Some(call.location), |e| {
+                    let points = generator_constants
+                        .into_iter()
+                        .map(|(x, y)| e.mk_tuple(vec![x, y], vec![Type::field(), Type::field()]))
+                        .collect();
+                    e.mk_seq(
+                        points,
+                        SequenceTargetType::Array(*num_generators as usize),
+                        Type::tuple_of(vec![Type::field(), Type::field()]),
+                    )
+                }))
             }
             "str_as_bytes" => {
                 let string_type = call.arguments[0]
