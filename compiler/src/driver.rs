@@ -654,17 +654,7 @@ impl Driver {
     /// Together with column 0 (the constant one) these are the externally-visible columns a
     /// compaction of the R1CS must never touch.
     pub fn entry_point_flattened_io_count(&self) -> usize {
-        let abi = self.abi();
-        let params: usize = abi
-            .parameters
-            .iter()
-            .map(|param| count_abi_type_elements(&param.typ))
-            .sum();
-        let returns = abi
-            .return_type
-            .as_ref()
-            .map_or(0, |ret| count_abi_type_elements(&ret.abi_type));
-        params + returns
+        crate::abi_helpers::flattened_io_count(self.abi())
     }
 
     /// Number of leading R1CS witness columns a compaction must never touch.
@@ -849,7 +839,7 @@ impl Driver {
         // Build parameter info
         let mut parameters = Vec::new();
         for param in &abi.parameters {
-            let element_count = count_abi_type_elements(&param.typ);
+            let element_count = crate::abi_helpers::count_abi_type_elements(&param.typ);
             parameters.push(serde_json::json!({
                 "name": param.name,
                 "elementCount": element_count
@@ -884,30 +874,14 @@ fn const_contains_fn_ptr(constant: &Constant) -> bool {
     }
 }
 
-/// Count the number of field elements in an ABI type
-fn count_abi_type_elements(typ: &noirc_abi::AbiType) -> usize {
-    use noirc_abi::AbiType;
-    match typ {
-        AbiType::Field => 1,
-        AbiType::Integer { .. } => 1,
-        AbiType::Boolean => 1,
-        AbiType::String { length } => *length as usize,
-        AbiType::Array { length, typ } => (*length as usize) * count_abi_type_elements(typ),
-        AbiType::Struct { fields, .. } => {
-            fields.iter().map(|(_, t)| count_abi_type_elements(t)).sum()
-        }
-        AbiType::Tuple { fields } => fields.iter().map(count_abi_type_elements).sum(),
-    }
-}
-
 // TESTS
 // ================================================================================================
 
 #[cfg(test)]
 mod tests {
-    use noirc_abi::{AbiType, Sign};
+    use noirc_abi::{Abi, AbiParameter, AbiReturnType, AbiType, AbiVisibility, Sign};
 
-    use super::count_abi_type_elements;
+    use crate::abi_helpers::{count_abi_type_elements, flattened_io_count};
     use crate::compiler::{passes::prepare_entry_point::PrepareEntryPoint, ssa::hlssa::Type};
 
     /// `entry_point_flattened_io_count` sizes the protected column block from the ABI via
@@ -984,6 +958,69 @@ mod tests {
                 count_abi_type_elements(abi),
                 PrepareEntryPoint::flattened_field_count(hlssa),
                 "flattening mismatch for ABI type {abi:?} vs HLSSA type {hlssa:?}",
+            );
+        }
+    }
+
+    fn abi_of(params: Vec<AbiType>, return_type: Option<AbiType>) -> Abi {
+        Abi {
+            parameters: params
+                .into_iter()
+                .enumerate()
+                .map(|(i, typ)| AbiParameter {
+                    name: format!("p{i}"),
+                    typ,
+                    visibility: AbiVisibility::Private,
+                })
+                .collect(),
+            return_type: return_type.map(|abi_type| AbiReturnType {
+                abi_type,
+                visibility: AbiVisibility::Public,
+            }),
+            error_types: Default::default(),
+        }
+    }
+
+    /// The ABI side counts the guard slot iff `abi.return_type.is_some()`
+    /// ([`flattened_io_count`]) while the wrapper emits it iff `main` has HLSSA return values
+    /// ([`PrepareEntryPoint::entry_blob_field_count`]). The frontend makes these conditions
+    /// coincide — a unit-returning `main` gets `return_type: None` *and* no HLSSA return values —
+    /// and this test pins the resulting blob sizes to each other for both shapes.
+    #[test]
+    fn abi_and_hlssa_blob_sizing_agree() {
+        let cases: Vec<(Vec<AbiType>, Option<AbiType>, Vec<Type>, Vec<Type>)> = vec![
+            // `fn main(x: Field) -> pub ()` — unit return: no guard slot on either side.
+            (vec![AbiType::Field], None, vec![Type::field()], vec![]),
+            // No parameters, no return.
+            (vec![], None, vec![], vec![]),
+            // `fn main(x: Field) -> pub Field` — guard slot on both sides.
+            (
+                vec![AbiType::Field],
+                Some(AbiType::Field),
+                vec![Type::field()],
+                vec![Type::field()],
+            ),
+            // Compound return: one guard slot regardless of leaf count.
+            (
+                vec![AbiType::Boolean],
+                Some(AbiType::Array {
+                    length: 3,
+                    typ: Box::new(AbiType::Integer {
+                        sign: Sign::Unsigned,
+                        width: 8,
+                    }),
+                }),
+                vec![Type::u(1)],
+                vec![Type::u(8).array_of(3)],
+            ),
+        ];
+        for (abi_params, abi_return, hlssa_params, hlssa_returns) in cases {
+            let abi = abi_of(abi_params, abi_return);
+            assert_eq!(
+                flattened_io_count(&abi),
+                PrepareEntryPoint::entry_blob_field_count(&hlssa_params, &hlssa_returns),
+                "blob size mismatch for ABI {:?} vs HLSSA ({hlssa_params:?}, {hlssa_returns:?})",
+                (&abi.parameters, &abi.return_type),
             );
         }
     }
