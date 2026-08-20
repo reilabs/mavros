@@ -230,8 +230,13 @@ impl Driver {
         let main = context.get_main_function(context.root_crate_id()).unwrap();
         let debug_type_tracker =
             DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
-        let mut monomorphizer =
-            Monomorphizer::new(&mut context.def_interner, debug_type_tracker, None, false);
+        let mut monomorphizer = Monomorphizer::new(
+            &mut context.def_interner,
+            self.project.file_manager().as_file_map(),
+            debug_type_tracker,
+            None,
+            false,
+        );
         monomorphizer.compile_main(main).unwrap();
         monomorphizer.process_queue().unwrap();
         let program = monomorphizer.into_program();
@@ -276,6 +281,14 @@ impl Driver {
                 // asserted-constant facts. Run pre-WTI: operands are still scalar, so asserted
                 // constants fold away here and never become witnesses/constraints downstream.
                 Box::new(NormalizeAsserts::new()),
+                // Algebraic identities before the fold, because some of them *produce* the
+                // constants the fold then propagates — `x - x -> 0` above all. This is the only
+                // pre-untaint Simplifier run, and it has to be here rather than later: the DCE
+                // below is the first that rewrites a dead `Div`/`Mod` into its check, and once a
+                // division has become a bare assert the operand chain is pinned live for good.
+                // Nothing in this pass touches the CFG (it rewrites instructions and aliases
+                // results), so it is safe on the pre-untaint IR the phase still holds.
+                Box::new(Simplifier::new()),
                 // Fold constants and prune statically-decided branches (e.g. monomorphized
                 // generic dispatch) BEFORE pruning functions: calls in never-taken branches must
                 // not keep their callees alive into witness type inference and untaint CF, which

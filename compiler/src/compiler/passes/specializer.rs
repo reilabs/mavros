@@ -251,6 +251,38 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
             return Self(res);
         }
 
+        // `Shl` is the one *unsigned* fold whose answer is not simply the Rust operator applied to
+        // the raw payloads, and it gets the same treatment as the signed pairs above for the same
+        // reason: the contract is subtle, it is settled in `lattice::eval_binary`, and that is
+        // where the tests are.
+        //
+        // Two halves, and the arm this replaces had neither. The value **wraps** — bits pushed off
+        // the top are discarded — so `u32 1 << 32` must not become `Constant::U(32, 4294967296)`,
+        // a constant a whole bit wider than the type it claims. Nothing downstream agrees about
+        // such a value: `hlssa_to_r1cs` wraps it on the way in and reads `0`, while the VM's
+        // `mov_const` carries the full payload. And an *amount* at or above the width is a runtime
+        // error in Noir rather than any value at all, so it must not fold — folding it would
+        // manufacture a constant for a program that is required to fail.
+        //
+        // `eval_binary` also declines a shift whose amount is *wider* than the value, which this
+        // arm used to fold to the value's width; the type analysis types that result as
+        // `U(max(s1, s2))`, so refusing is the correct reading and the operation is simply left
+        // unfolded.
+        if binary_arith_op_kind == BinaryArithOpKind::Shl
+            && let (Some(ConstVal::U(s, a_val)), Some(ConstVal::U(amount_s, b_val))) =
+                (&a_const, &b_const)
+            && let Some(Constant::U(res_s, res_v)) = lattice::eval_binary(
+                BinaryArithOpKind::Shl,
+                &Constant::U(*s, *a_val),
+                &Constant::U(*amount_s, *b_val),
+                ctx.field(),
+            )
+        {
+            let res = ctx.u_const(res_s, res_v);
+            ctx.const_vals.insert(res, ConstVal::U(res_s, res_v));
+            return Self(res);
+        }
+
         match (binary_arith_op_kind, a_const, b_const) {
             (BinaryArithOpKind::Add, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
                 let res = a_val + b_val;
@@ -363,13 +395,8 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                 Self(res)
             }
 
-            (BinaryArithOpKind::Shl, Some(ConstVal::U(s, a_val)), Some(ConstVal::U(_, b_val))) => {
-                let res = a_val << b_val;
-                let res_v = ctx.u_const(s, res);
-                ctx.const_vals.insert(res_v, ConstVal::U(s, res));
-                Self(res_v)
-            }
-
+            // No constant-pair arm: every unsigned `Shl` the lattice will fold has already been
+            // handled above, and one it declines must reach this catch-all unfolded.
             (BinaryArithOpKind::Shl, _, _) => {
                 let res = ctx.shl(self.0, b.0);
                 Self(res)
@@ -1340,5 +1367,78 @@ impl Specializer {
         );
 
         dispatcher
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::{analysis::symbolic_executor::Value as _, located::SourceLocation};
+
+    /// Fold `a << b` exactly as the specializer does, returning the constant it produced or `None`
+    /// when it declined and left the shift in the residual program.
+    ///
+    /// This arm is **not reachable on the corpus** — probed across nine shift- and
+    /// specialization-heavy tests, none of which reaches it — so a unit test is the only thing
+    /// that can hold it to the contract.
+    fn specializer_shl(a: (usize, u128), b: (usize, u128)) -> Option<(usize, u128)> {
+        let mut ssa = HLSSA::new();
+        let fid = ssa
+            .get_function_ids()
+            .next()
+            .expect("HLSSA::new makes a main");
+        let body = ssa.take_function(fid);
+
+        let lhs = ssa.add_const(Constant::U(a.0, a.1));
+        let rhs = ssa.add_const(Constant::U(b.0, b.1));
+        let mut ctx = SpecializationState {
+            ssa: &ssa,
+            body,
+            const_vals: HashMap::default(),
+            current_location: SourceLocation::synthetic("specializer_test"),
+        };
+        ctx.const_vals.insert(lhs, ConstVal::U(a.0, a.1));
+        ctx.const_vals.insert(rhs, ConstVal::U(b.0, b.1));
+
+        let out = Val(lhs).arith(&Val(rhs), BinaryArithOpKind::Shl, &Type::u(a.0), &mut ctx);
+        match ctx.const_vals.get(&out.0) {
+            Some(ConstVal::U(s, v)) => Some((*s, *v)),
+            // Declined: `arith` emitted the shift instead, and its result has no constant.
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn unsigned_shl_folds_to_a_constant_inside_its_own_width() {
+        // The bug this pins: `1 << 32` at `u32` used to fold to `Constant::U(32, 4294967296)`, a
+        // value one bit wider than the type it is tagged with. `hlssa_to_r1cs` wraps such a
+        // constant on the way in and reads `0` while the VM's `mov_const` carries the whole
+        // payload, so the two backends disagree about the program.
+        //
+        // The amount is what fails, not the value, so `1 << 32` at `u32` does not fold at all.
+        assert_eq!(specializer_shl((32, 1), (32, 32)), None);
+        assert_eq!(specializer_shl((8, 1), (8, 8)), None);
+
+        // A shift that stays inside the width is unaffected.
+        assert_eq!(specializer_shl((32, 1), (32, 31)), Some((32, 1 << 31)));
+        assert_eq!(specializer_shl((64, 1), (64, 32)), Some((64, 1 << 32)));
+        assert_eq!(specializer_shl((8, 1), (8, 0)), Some((8, 1)));
+
+        // And one that leaves it **wraps** rather than being refused or widened -- `200 << 1` is
+        // `400`, which keeps only its low eight bits. Every value here is the one
+        // `noir_tests/pure_guarded_shift` checks against Noir's own execution.
+        assert_eq!(specializer_shl((8, 200), (8, 1)), Some((8, 144)));
+        assert_eq!(specializer_shl((8, 200), (8, 7)), Some((8, 0)));
+        assert_eq!(specializer_shl((8, 255), (8, 7)), Some((8, 128)));
+    }
+
+    #[test]
+    fn unsigned_shl_declines_an_amount_wider_than_the_value() {
+        // The type analysis types this result as `U(max(s1, s2))`, so folding it to the value's
+        // width would silently narrow it. Declining leaves the shift in place, which is correct
+        // whatever the widths.
+        assert_eq!(specializer_shl((8, 1), (32, 1)), None);
+        // The mirror case is fine: a narrower amount says nothing about the result width.
+        assert_eq!(specializer_shl((32, 1), (8, 1)), Some((32, 2)));
     }
 }

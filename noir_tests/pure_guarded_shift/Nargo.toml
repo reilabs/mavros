@@ -1,0 +1,6 @@
+[package]
+name = "pure_guarded_shift"
+type = "bin"
+authors = [""]
+
+[dependencies]

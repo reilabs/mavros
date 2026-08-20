@@ -12,10 +12,13 @@
 //!   !cond and pass through array; else array_set.
 //! - **Lower with overflow check** (pure inputs only, can fail): Integer Add/Sub/Mul — compute,
 //!   check overflow with native-width predicates, if overflow assert !cond and produce 0.
-//! - **Lower with shift check** (pure inputs only, can fail): Integer Shl/Shr — validate shift
-//!   amount before shifting; Shl also checks overflow so we fail there too.
+//! - **Lower with shift check** (pure inputs only, can fail): Integer Shl/Shr — validate the shift
+//!   *amount* before shifting. The value is not checked: a shift that pushes bits off the top
+//!   wraps, it does not fail.
 //! - **Lower with div-zero check** (pure inputs only, can fail): Div/Mod — if divisor==0 assert
-//!   !cond and produce 0; else compute.
+//!   !cond and produce 0; else compute. A division the range domain proves defined skips this
+//!   entirely: guarded, the guard is dropped and the bare operation emitted; unguarded, the
+//!   instruction is left alone with no assertion attached.
 //! - **Leave untouched here** (side-effectful, constraint-generating, or handled by witness rules):
 //!   Store, Call, Assert, AssertCmp, AssertR1C, Constrain, witness Rangecheck, and failable ops with
 //!   witness inputs.
@@ -34,7 +37,8 @@ use crate::compiler::{
 };
 
 use crate::compiler::passes::shared::divmod_guard::{
-    divmod_can_fail, emit_divmod_failure_cond, emit_divmod_is_defined_assert,
+    divmod_can_fail, divmod_provably_defined, emit_divmod_failure_cond,
+    emit_divmod_is_defined_assert,
 };
 
 use super::{InstructionLoweringRule, LoweringContext};
@@ -51,7 +55,7 @@ impl InstructionLoweringRule for LowerPureGuards {
         let type_info = context.types();
         match instruction {
             OpCode::Guard { condition, inner } => {
-                self.lower_guard(emitter, *condition, inner.as_ref().clone(), type_info)
+                self.lower_guard(emitter, context, *condition, inner.as_ref().clone())
             }
 
             // An unguarded div/mod still has to be checked as `Guard` only covers the ops that sit
@@ -86,7 +90,9 @@ impl InstructionLoweringRule for LowerPureGuards {
                 result,
                 lhs,
                 rhs,
-            } if divmod_can_fail(type_info.get_value_type(*lhs)) => {
+            } if divmod_can_fail(type_info.get_value_type(*lhs))
+                && !self.divmod_discharged(context, *lhs, *rhs) =>
+            {
                 let lhs_type = type_info.get_value_type(*lhs).strip_witness().clone();
                 self.lower_unguarded_divmod(emitter, *kind, *result, *lhs, *rhs, &lhs_type);
                 true
@@ -109,14 +115,25 @@ impl LowerPureGuards {
         })
     }
 
+    /// Whether the range domain discharges this division's failure check, making both the check and
+    /// — under a guard — the branch built around it dead.
+    ///
+    /// The single query behind both divmod sites in this rule — the guarded one and the unguarded
+    /// one — so the two cannot drift apart.
+    fn divmod_discharged(&self, context: &LoweringContext<'_>, lhs: ValueId, rhs: ValueId) -> bool {
+        let lhs_type = context.types().get_value_type(lhs).peel_witness();
+        divmod_provably_defined(&context.range(lhs), &context.range(rhs), lhs_type)
+    }
+
     /// Lower a single Guard instruction.
     fn lower_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
+        context: &LoweringContext<'_>,
         condition: ValueId,
         inner: OpCode,
-        type_info: &FunctionTypeInfo,
     ) -> bool {
+        let type_info = context.types();
         match inner {
             // -- Side-effectful / constraint-generating: always keep as Guard --
             OpCode::Store { .. }
@@ -197,6 +214,24 @@ impl LowerPureGuards {
                 lhs,
                 rhs,
             } => {
+                // Provably defined: the operation is total, so its guard carries no information
+                // about it and can simply be dropped -- the same rewrite `LowerSideEffectFreeGuards`
+                // applies to every op it accepts, and the reason it refuses `Div`/`Mod` outright is
+                // exactly the failure this discharges.
+                //
+                // Purity is beside the point here. It is required below because that path *builds*
+                // a branch out of the operands and needs them evaluable outside the witness; this
+                // path builds nothing, so a witness-operand division is dropped on the same terms.
+                if self.divmod_discharged(context, lhs, rhs) {
+                    emitter.emit(OpCode::BinaryArithOp {
+                        kind,
+                        result,
+                        lhs,
+                        rhs,
+                    });
+                    return true;
+                }
+
                 let lhs_type = type_info.get_value_type(lhs);
                 match &lhs_type.strip_witness().expr {
                     TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Field
@@ -480,9 +515,14 @@ impl LowerPureGuards {
 
     /// Lower `Guard(cond, shift(lhs, rhs) -> result)`.
     ///
-    /// Shifts are only valid for amounts in `[0, bits)`.  The range check must
-    /// dominate the shift itself; otherwise LLVM can treat an out-of-range shift
-    /// in an inactive guarded branch as poison.
+    /// Shifts are only valid for amounts in `[0, bits)`. The range check must dominate the shift
+    /// itself; otherwise LLVM can treat an out-of-range shift in an inactive guarded branch as
+    /// poison.
+    ///
+    /// The *amount* is the only failure mode. A `<<` whose result leaves the width wraps, with Noir
+    /// reporting an error only for the amount, so the valid path is the bare operation for both
+    /// kinds, and the backends all truncate it to `bits` (`shl_u64` masks, LLVM's `shl` is already
+    /// at the operand width, and `hlssa_to_r1cs`'s constant fold wraps).
     fn lower_shift_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -494,6 +534,11 @@ impl LowerPureGuards {
         bits: usize,
         signed: bool,
     ) {
+        debug_assert!(
+            matches!(kind, BinaryArithOpKind::Shl | BinaryArithOpKind::Shr),
+            "ICE: lower_shift_guard called for non-shift op"
+        );
+
         let result_type = if signed {
             Type {
                 expr: TypeExpr::I(bits),
@@ -509,21 +554,15 @@ impl LowerPureGuards {
             invalid_shift,
             vec![(original_result, result_type.clone())],
             |e| vec![self.emit_guard_failure_default(e, condition, signed, bits)],
-            |e| match kind {
-                BinaryArithOpKind::Shr => {
-                    let result = e.fresh_value();
-                    e.emit(OpCode::BinaryArithOp {
-                        kind,
-                        result,
-                        lhs,
-                        rhs,
-                    });
-                    vec![result]
-                }
-                BinaryArithOpKind::Shl => {
-                    vec![self.emit_checked_shl_ok_path(e, condition, lhs, rhs, bits, signed)]
-                }
-                _ => unreachable!("lower_shift_guard called for non-shift op"),
+            |e| {
+                let result = e.fresh_value();
+                e.emit(OpCode::BinaryArithOp {
+                    kind,
+                    result,
+                    lhs,
+                    rhs,
+                });
+                vec![result]
             },
         );
     }
@@ -557,51 +596,6 @@ impl LowerPureGuards {
         } else {
             rhs_too_large
         }
-    }
-
-    fn emit_checked_shl_ok_path(
-        &self,
-        emitter: &mut HLBlockEmitter<'_>,
-        condition: ValueId,
-        lhs: ValueId,
-        rhs: ValueId,
-        bits: usize,
-        signed: bool,
-    ) -> ValueId {
-        let result_type = if signed {
-            Type {
-                expr: TypeExpr::I(bits),
-            }
-        } else {
-            Type {
-                expr: TypeExpr::U(bits),
-            }
-        };
-
-        let shifted = emitter.fresh_value();
-        emitter.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Shl,
-            result: shifted,
-            lhs,
-            rhs,
-        });
-        let back = emitter.fresh_value();
-        emitter.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Shr,
-            result: back,
-            lhs: shifted,
-            rhs,
-        });
-        let identity_eq = emitter.eq(back, lhs);
-        let overflow = emitter.not(identity_eq);
-
-        let result = emitter.build_if_else(
-            overflow,
-            vec![result_type],
-            |e| vec![self.emit_guard_failure_default(e, condition, signed, bits)],
-            |_| vec![shifted],
-        );
-        result[0]
     }
 
     /// Lower an *unguarded* pure `Div`/`Mod` by asserting it is defined, then performing it
