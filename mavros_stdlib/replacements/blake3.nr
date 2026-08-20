@@ -38,7 +38,7 @@ fn rotr7(x: u32) -> u32 {
     (x % 128) * 33554432 + (x / 128)
 }
 
-fn g(a: u32, b: u32, c: u32, d: u32, mx: u32, my: u32) -> (u32, u32, u32, u32) {
+pub(crate) fn g(a: u32, b: u32, c: u32, d: u32, mx: u32, my: u32) -> (u32, u32, u32, u32) {
     let a = a.wrapping_add(b).wrapping_add(mx);
     let d = rotr16(d ^ a);
     let c = c.wrapping_add(d);
