@@ -33,7 +33,53 @@ pub fn ordered_params_from_btreemap(
         }
     }
 
+    let flattened: usize = ordered_params.iter().map(flattened_value_count).sum();
+    assert_eq!(
+        flattened,
+        flattened_io_count(abi),
+        "ordered params do not flatten to the ABI's io count"
+    );
+
     ordered_params
+}
+
+pub fn flattened_io_count(abi: &noirc_abi::Abi) -> usize {
+    let params: usize = abi
+        .parameters
+        .iter()
+        .map(|param| count_abi_type_elements(&param.typ))
+        .sum();
+    let returns = abi
+        .return_type
+        .as_ref()
+        .map_or(0, |ret| 1 + count_abi_type_elements(&ret.abi_type));
+    params + returns
+}
+
+/// Count the number of field elements in an ABI type.
+pub fn count_abi_type_elements(typ: &AbiType) -> usize {
+    match typ {
+        AbiType::Field => 1,
+        AbiType::Integer { .. } => 1,
+        AbiType::Boolean => 1,
+        AbiType::String { length } => *length as usize,
+        AbiType::Array { length, typ } => (*length as usize) * count_abi_type_elements(typ),
+        AbiType::Struct { fields, .. } => {
+            fields.iter().map(|(_, t)| count_abi_type_elements(t)).sum()
+        }
+        AbiType::Tuple { fields } => fields.iter().map(count_abi_type_elements).sum(),
+    }
+}
+
+fn flattened_value_count(value: &InputValueOrdered) -> usize {
+    match value {
+        InputValueOrdered::Field(_) => 1,
+        InputValueOrdered::Vec(elements) => elements.iter().map(flattened_value_count).sum(),
+        InputValueOrdered::Struct(fields) => {
+            fields.iter().map(|(_, v)| flattened_value_count(v)).sum()
+        }
+        InputValueOrdered::String(_) => unreachable!("ordered params encode strings as Vec"),
+    }
 }
 
 fn field_param(value: u64) -> InputValueOrdered {
@@ -68,12 +114,19 @@ fn zero_param(abi_type: &AbiType) -> InputValueOrdered {
 fn ordered_param(abi_type: &AbiType, value: &InputValue) -> InputValueOrdered {
     match (value, abi_type) {
         (InputValue::Field(elem), _) => InputValueOrdered::Field(elem.into_repr()),
-        (InputValue::Vec(vec_elements), AbiType::Array { typ, .. }) => InputValueOrdered::Vec(
-            vec_elements
-                .iter()
-                .map(|elem| ordered_param(typ, elem))
-                .collect(),
-        ),
+        (InputValue::Vec(vec_elements), AbiType::Array { typ, length }) => {
+            assert_eq!(
+                vec_elements.len(),
+                *length as usize,
+                "Array value length does not match ABI array length"
+            );
+            InputValueOrdered::Vec(
+                vec_elements
+                    .iter()
+                    .map(|elem| ordered_param(typ, elem))
+                    .collect(),
+            )
+        }
         (InputValue::Struct(object), AbiType::Struct { fields, .. }) => InputValueOrdered::Struct(
             fields
                 .iter()

@@ -106,12 +106,7 @@ impl PrepareEntryPoint {
             Self::get_or_create_reconstruct_fn(&guard_type, ssa, &mut reconstruct_fns);
         }
 
-        let total_fields: usize = param_types
-            .iter()
-            .chain(return_types.iter())
-            .map(Self::flattened_field_count)
-            .sum::<usize>()
-            + usize::from(has_return);
+        let total_fields = Self::entry_blob_field_count(&param_types, &return_types);
 
         let wrapper_id = ssa.add_function("wrapper_main".to_string());
         let mut sb = HLSSABuilder::new(ssa);
@@ -249,7 +244,13 @@ impl PrepareEntryPoint {
                 for (i, elem_type) in element_types.iter().enumerate() {
                     let result_elem = b.tuple_proj(result, i);
                     let input_elem = b.tuple_proj(public_input, i);
-                    Self::assert_eq_deep_guarded(b, guard_field, result_elem, input_elem, elem_type);
+                    Self::assert_eq_deep_guarded(
+                        b,
+                        guard_field,
+                        result_elem,
+                        input_elem,
+                        elem_type,
+                    );
                 }
             }
             _ => {
@@ -378,6 +379,15 @@ impl PrepareEntryPoint {
 
     fn unique_reconstruct_fn_name(reconstruct_fns: &[ReconstructFnEntry]) -> String {
         format!("reconstruct_{}", reconstruct_fns.len())
+    }
+
+    pub(crate) fn entry_blob_field_count(param_types: &[Type], return_types: &[Type]) -> usize {
+        param_types
+            .iter()
+            .chain(return_types.iter())
+            .map(Self::flattened_field_count)
+            .sum::<usize>()
+            + usize::from(!return_types.is_empty())
     }
 
     pub(crate) fn flattened_field_count(typ: &Type) -> usize {
