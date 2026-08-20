@@ -539,10 +539,10 @@ fn load_inputs(
 
     if !file_path.exists() {
         if abi.parameters.is_empty() {
-            return Ok(abi_helpers::ordered_params_from_btreemap(
+            return abi_helpers::ordered_params_from_btreemap(
                 abi,
                 &std::collections::BTreeMap::new(),
-            ));
+            );
         }
         return Err(format!(
             "the ABI declares {} parameter(s) but {} does not exist",
@@ -561,16 +561,7 @@ fn load_inputs(
     let params = format
         .parse(&contents, abi)
         .map_err(|e| format!("cannot parse {}: {e}", file_path.display()))?;
-    for param in &abi.parameters {
-        if !params.contains_key(&param.name) {
-            return Err(format!(
-                "{} does not supply parameter `{}`",
-                file_path.display(),
-                param.name
-            ));
-        }
-    }
-    Ok(abi_helpers::ordered_params_from_btreemap(abi, &params))
+    abi_helpers::ordered_params_from_btreemap(abi, &params)
 }
 
 // ── WASM Runner ──────────────────────────────────────────────────────

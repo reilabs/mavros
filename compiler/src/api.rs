@@ -45,7 +45,7 @@ pub fn read_prover_inputs(
     let inputs = format
         .parse(&inputs_src, abi)
         .map_err(|e| format!("failed to parse inputs: {e}"))?;
-    let ordered_params = ordered_params_from_btreemap(abi, &inputs);
+    let ordered_params = ordered_params_from_btreemap(abi, &inputs)?;
 
     Ok(ordered_params)
 }

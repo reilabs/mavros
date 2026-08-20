@@ -695,7 +695,7 @@ impl R1CS {
 // InputValueOrdered – ABI-ordered input representation
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputValueOrdered {
     Field(Field),
     String(String),
