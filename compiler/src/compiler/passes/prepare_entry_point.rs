@@ -4,11 +4,13 @@
 //! It does the following four things:
 //!
 //! 1. **Synthesises a Wrapper for `main`:** The wrapper takes a single `Blob<Field; N>` parameter
-//!    holding every flattened input field (the original main's arguments followed by its declared
-//!    return values), performs global initialization, invokes the original `main` and then uses a
-//!    deep assert to constrain the return value against the declared counterpart in the witness.
-//!    It then deinitializes the globals. The blob keeps the entry point's parameter list (and the
-//!    resulting locals pressure in the generated code) constant regardless of input size.
+//!    holding every flattened input field (the original main's arguments, then — when `main`
+//!    declares a return — a one-field *return guard* followed by the declared return values),
+//!    performs global initialization, invokes the original `main` and then uses a deep assert to
+//!    constrain the return value against the declared counterpart in the witness (see **Return
+//!    Guard** below). It then deinitializes the globals. The blob keeps the entry point's
+//!    parameter list (and the resulting locals pressure in the generated code) constant
+//!    regardless of input size.
 //! 2. **Pinned Witness Writes:** A single counted loop writes every blob element to the witness,
 //!    pinned so that DCE cannot remove the writes downstream, while accumulating the witness
 //!    values into an array.
@@ -18,6 +20,21 @@
 //!    the unconstrained result to the witness. It also handles range-checking of integers, and
 //!    recurses into arrays and tuples. This ensures that we bind the untrusted/unconstrained
 //!    results into the constraint system.
+//!
+//! # Return Guard
+//!
+//! The declared return in the blob is optional: a `u1` guard slot between the flattened
+//! parameters and returns gates the check. Each leaf asserts `guard * (result - declared) == 0`,
+//! so `guard = 0` (missing `return` input, columns zero-filled) disables the check entirely.
+//!
+//! Enforcing the declared return is a verifier obligation: pinning only the parameter and return
+//! columns accepts any return value (the prover picks `guard = 0`), so a verifier must require
+//! `guard == 1` as a public input. Relying on the column being boolean is not sound either: the
+//! booleanity constraint lives in the guard's reconstruct function and survives only as long as
+//! the guarded asserts consuming it do.
+//!
+//! Cost: one witness column, one blob slot, and one booleanity row per program; each leaf check
+//! stays a single R1C (see `assert_eq_deep_guarded`).
 
 use crate::{
     collections::HashMap,
