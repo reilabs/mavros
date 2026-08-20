@@ -1,0 +1,6 @@
+[package]
+name = "array_witness_set_oob_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -1,0 +1,6 @@
+[package]
+name = "slice_wl_lifted_return_chain"
+type = "bin"
+authors = [""]
+
+[dependencies]

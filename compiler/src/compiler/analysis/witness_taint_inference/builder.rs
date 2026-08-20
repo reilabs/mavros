@@ -12,22 +12,26 @@
 //! taint (which slot was written is witness-dependent under a witness-selected pointer), and a
 //! load reads them.
 
-use crate::collections::HashMap;
-use crate::compiler::{
-    analysis::{
-        flow_analysis::CFG,
-        types::FunctionTypeInfo,
-        witness_taint_inference::{
-            FunctionSummary, WitnessTaint,
-            position::{Descent, Owner, Position, paths_of_type},
+use crate::{
+    collections::HashMap,
+    compiler::{
+        analysis::{
+            flow_analysis::CFG,
+            types::FunctionTypeInfo,
+            witness_taint_inference::{
+                FunctionSummary, WitnessTaint,
+                position::{Descent, Owner, Position, paths_of_type},
+            },
         },
+        ssa::{
+            BlockId, FunctionId, Terminator, ValueId,
+            hlssa::{
+                CallTarget, CastTarget, HLFunction, OpCode, Radix, SliceOpDir, Type, TypeExpr,
+            },
+            traits::Instruction,
+        },
+        util::ice_non_elided_tuple,
     },
-    ssa::{
-        BlockId, FunctionId, Terminator, ValueId,
-        hlssa::{CallTarget, CastTarget, HLFunction, OpCode, Radix, Type, TypeExpr},
-        traits::Instruction,
-    },
-    util::ice_non_elided_tuple,
 };
 
 // GRAPH BUILDER
@@ -114,6 +118,14 @@ impl<'a> GraphBuilder<'a> {
             Owner::Value(_) => {
                 panic!("ICE: summary referenced a non-formal position {formal:?}")
             }
+        }
+    }
+
+    /// Add `base·leaf ≥ source` for every taintable position of `ty` ([`leaf_paths`]: scalar
+    /// leaves, ref roots, and slice `Len`s).
+    fn add_taint_to_leaves(&mut self, base: Position, source: Position, ty: &Type) {
+        for path in leaf_paths(ty) {
+            self.graph.add_ge(base.extend(&path), source.clone());
         }
     }
 
@@ -208,16 +220,16 @@ pub fn build_graph(
                 }
             }
             Some(Terminator::JmpIf(cond, _, _)) => {
-                // Push the condition into the leaves of the merge-point phi parameters.
+                // Push the condition into the leaves of the merge-point phi
+                // parameters
                 let merge = cfg.get_merge_point(*bid);
-                let cond = *cond;
+                let cond_pos = builder.value_position(*cond);
                 for (merge_param, merge_type) in func.get_block(merge).get_parameters() {
-                    for path in leaf_paths(merge_type) {
-                        builder.graph.add_ge(
-                            builder.value_position(*merge_param).extend(&path),
-                            builder.value_position(cond),
-                        );
-                    }
+                    builder.add_taint_to_leaves(
+                        builder.value_position(*merge_param),
+                        cond_pos.clone(),
+                        merge_type,
+                    );
                 }
             }
             Some(Terminator::Return(values)) => {
@@ -266,12 +278,10 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
         } => {
             // A WitnessOf cast is a witness *source* (emitted before inference, e.g. the default
             // element for an array that will hold witness values): its result is unconditionally
-            // Witness at the top level, like WriteWitness.
+            // Witness — at its leaf positions, since container roots carry no taint.
             let ty = builder.value_type(*result);
             builder.copy_taint(*result, *value, ty);
-            builder
-                .graph
-                .add_ge(builder.value_position(*result), Position::top());
+            builder.add_taint_to_leaves(builder.value_position(*result), Position::top(), ty);
         }
         OpCode::Not { result, value }
         | OpCode::Cast { result, value, .. }
@@ -301,10 +311,9 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             let ty = builder.value_type(*result);
             builder.copy_taint(*result, *if_t, ty);
             builder.copy_taint(*result, *if_f, ty);
-            builder.graph.add_ge(
-                builder.value_position(*result),
-                builder.value_position(*cond),
-            );
+            // The condition chooses the result's identity — the choice lands on every leaf.
+            let cond_pos = builder.value_position(*cond);
+            builder.add_taint_to_leaves(builder.value_position(*result), cond_pos, ty);
         }
         OpCode::MkSeq { result, elems, .. } => {
             let element_type = builder
@@ -343,17 +352,9 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
                 builder.value_position(*array).child(Descent::Elem),
                 result_type,
             );
-            // a dynamic (or witness) index / array handle taints the read value's leaves
-            for path in leaf_paths(result_type) {
-                builder.graph.add_ge(
-                    builder.value_position(*result).extend(&path),
-                    builder.value_position(*index),
-                );
-                builder.graph.add_ge(
-                    builder.value_position(*result).extend(&path),
-                    builder.value_position(*array),
-                );
-            }
+            // A dynamic (or witness) index taints the read value's leaves.
+            let index_pos = builder.value_position(*index);
+            builder.add_taint_to_leaves(builder.value_position(*result), index_pos, result_type);
         }
         OpCode::ArraySet {
             result,
@@ -365,33 +366,15 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
                 .value_type(*result)
                 .peel_witness()
                 .get_array_element();
-            builder.copy_levels(
-                builder.value_position(*result).child(Descent::Elem),
-                builder.value_position(*array).child(Descent::Elem),
-                &element_type,
-            );
+            builder.copy_taint(*result, *array, builder.value_type(*result));
             builder.copy_levels(
                 builder.value_position(*result).child(Descent::Elem),
                 builder.value_position(*value),
                 &element_type,
             );
-            // result array handle ≥ source array handle
-            builder.graph.add_ge(
-                builder.value_position(*result),
-                builder.value_position(*array),
-            );
-            // The written element leaves pick up the index taint and, under witness control flow,
-            // the cfg flag — a conditional set leaves the element witness-dependent.
-            for path in leaf_paths(&element_type) {
-                let written = builder
-                    .value_position(*result)
-                    .child(Descent::Elem)
-                    .extend(&path);
-                builder
-                    .graph
-                    .add_ge(written.clone(), builder.value_position(*index));
-                builder.add_cf_taint_to(&written, branch_conditions);
-            }
+            let elem_base = builder.value_position(*result).child(Descent::Elem);
+            let index_pos = builder.value_position(*index);
+            builder.add_taint_to_leaves(elem_base, index_pos, &element_type);
         }
         OpCode::SlicePush {
             result,
@@ -403,11 +386,7 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
                 .value_type(*result)
                 .peel_witness()
                 .get_array_element();
-            builder.copy_levels(
-                builder.value_position(*result).child(Descent::Elem),
-                builder.value_position(*slice).child(Descent::Elem),
-                &element_type,
-            );
+            builder.copy_taint(*result, *slice, builder.value_type(*result));
             for value in values {
                 builder.copy_levels(
                     builder.value_position(*result).child(Descent::Elem),
@@ -415,31 +394,83 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
                     &element_type,
                 );
             }
-            builder.graph.add_ge(
-                builder.value_position(*result),
-                builder.value_position(*slice),
+        }
+        OpCode::SlicePop {
+            dir,
+            result_slice,
+            result_elem,
+            slice,
+        } => {
+            let ty = builder.value_type(*result_slice);
+            let element_type = ty.peel_witness().get_array_element();
+            builder.copy_taint(*result_slice, *slice, ty);
+            builder.copy_levels(
+                builder.value_position(*result_elem),
+                builder.value_position(*slice).child(Descent::Elem),
+                &element_type,
             );
-
-            // Under witness control flow a conditional push leaves the appended elements
-            // witness-dependent.
-            for path in leaf_paths(&element_type) {
-                let written = builder
-                    .value_position(*result)
-                    .child(Descent::Elem)
-                    .extend(&path);
-                builder.add_cf_taint_to(&written, branch_conditions);
+            // A back pop's result depends on the slice's witness length. `types.rs`'s `SlicePop`
+            // deliberately keeps the plain element type and relies on this rule for the
+            // witness-ness — keep the two in sync.
+            if matches!(dir, SliceOpDir::Back) {
+                let len_pos = builder.value_position(*slice).child(Descent::Len);
+                builder.add_taint_to_leaves(
+                    builder.value_position(*result_elem),
+                    len_pos,
+                    &element_type,
+                );
             }
         }
-        OpCode::SliceLen { .. } => {
-            // No edges: the length is structural metadata, Pure for every slice this analysis
-            // can express. KNOWN LIMITATION (inherited from the previous pass): a slice whose
-            // *length* is witness-dependent has no representation — `leaf_paths` deliberately
-            // excludes container-top levels, so nothing ever taints a slice's top and there is
-            // no source for SliceLen to read. The phi-merge route (a slice merged at a witness
-            // JmpIf) is rejected loudly downstream (`UntaintControlFlow` panics on witness merge
-            // selects over slices); the ref route (a witness-conditional store of a slice
-            // through a ref) would need WitnessOf-slice support throughout untaint/lowering
-            // before this rule can be tightened.
+        OpCode::SliceInsert {
+            result,
+            slice,
+            index,
+            value,
+        } => {
+            let ty = builder.value_type(*result);
+            let element_type = ty.peel_witness().get_array_element();
+            builder.copy_taint(*result, *slice, ty);
+            builder.copy_levels(
+                builder.value_position(*result).child(Descent::Elem),
+                builder.value_position(*value),
+                &element_type,
+            );
+            // Shifted content depends on the index (length does not).
+            let elem_base = builder.value_position(*result).child(Descent::Elem);
+            builder.add_taint_to_leaves(elem_base, builder.value_position(*index), &element_type);
+        }
+        OpCode::SliceRemove {
+            result_slice,
+            result_elem,
+            slice,
+            index,
+        } => {
+            let ty = builder.value_type(*result_slice);
+            let element_type = ty.peel_witness().get_array_element();
+            builder.copy_taint(*result_slice, *slice, ty);
+            builder.copy_levels(
+                builder.value_position(*result_elem),
+                builder.value_position(*slice).child(Descent::Elem),
+                &element_type,
+            );
+            // Both the removed element and the shifted survivors depend on the index.
+            let index_pos = builder.value_position(*index);
+            builder.add_taint_to_leaves(
+                builder.value_position(*result_elem),
+                index_pos.clone(),
+                &element_type,
+            );
+            builder.add_taint_to_leaves(
+                builder.value_position(*result_slice).child(Descent::Elem),
+                index_pos,
+                &element_type,
+            );
+        }
+        OpCode::SliceLen { result, slice } => {
+            builder.graph.add_ge(
+                builder.value_position(*result),
+                builder.value_position(*slice).child(Descent::Len),
+            );
         }
         OpCode::MkSeqOfBlob { .. } => {
             // the blob is compile-time constant data: the result starts Pure. (no edges)
@@ -490,11 +521,11 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             builder.copy_levels(slot.clone(), builder.value_position(*value), pointee);
 
             // A conditional store leaves shared memory witness-dependent. As everywhere, the
-            // taintable leaves include a nested ref's *handle* level: which ref a slot holds after
+            // taintable positions include a nested ref's *handle* level: which ref a slot holds after
             // a conditional ref store is itself witness-dependent (the unification of the
             // candidates' pointees does not capture that).
             //
-            // A store through a witness-selected pointer likewise leaves the written leaves
+            // A store through a witness-selected pointer likewise leaves the written positions
             // witness-dependent — *which* slot received the value depends on the witness — so the
             // pointer's own handle taint flows into them: the dual of Load's `result ≥ ptr`.
             // (Unification spreads this over every alias of the candidate slots, the usual
@@ -519,11 +550,10 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
                 builder.value_position(*ptr).child(Descent::Deref),
                 pointee,
             );
-            // a witness-selected pointer taints the read value's top
-            builder.graph.add_ge(
-                builder.value_position(*result),
-                builder.value_position(*ptr),
-            );
+            // A witness-selected pointer chooses the read value's identity — same treatment as
+            // `Select`'s condition — the choice lands on every leaf.
+            let ptr_pos = builder.value_position(*ptr);
+            builder.add_taint_to_leaves(builder.value_position(*result), ptr_pos, pointee);
         }
         OpCode::WriteWitness { result, .. } => {
             if let Some(r) = result {
@@ -662,17 +692,36 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
 // ================================================================================================
 
 /// Whether executing `op` under witness control flow must taint what it writes — the
-/// `add_cf_taint_to` rule for ops whose effect outlives the instruction (functional array/slice
-/// updates, stores through refs, global inits).
+/// `add_cf_taint_to` rule for ops whose effect outlives the instruction (stores through refs,
+/// global inits).
+///
+/// Value-producing array/slice updates (`ArraySet`, the slice ops) deliberately take no cf taint:
+/// their two-world reconciliation happens at the merge phi, whose parameters take the branch
+/// condition edge. Sound only if a witness arm always reconverges at [`CFG::get_merge_point`], and
+/// it does. There are exactly two ways an arm could leave without reconverging, and neither is
+/// reachable:
+///
+/// - **Early `return`.** Rejected by the Noir frontend outright ("Early 'return' is unsupported"),
+///   in constrained and unconstrained functions alike. Pinned by
+///   `noir_failure_tests/early_return_field`.
+/// - **`break`/`continue`.** Rejected by the frontend in *constrained* functions ("break is only
+///   allowed in unconstrained functions"), pinned by `noir_failure_tests/{break,continue}_in_
+///   constrained_loop`. Where they *are* legal — unconstrained functions — they do not escape the
+///   rule either: both jump to a block still inside the enclosing loop's region (the latch for
+///   `continue`, the loop exit for `break`), so the arms still reconverge and that join is exactly
+///   what `get_merge_point`'s reverse-CFG immediate dominator returns.
+///
+/// Should the first ever change, the backstop is a panic rather than a silent miscompile: this
+/// analysis reaches every witness `JmpIf` through [`CFG::get_merge_point`], which unwraps
+/// `node_to_block` for the reverse-CFG immediate dominator. An arm that returns directly makes that
+/// the synthetic `return_node`, which is never registered in `node_to_block`, so the unwrap fails
+/// before any unmerged path can be built.
 ///
 /// Deliberately exhaustive: adding an opcode forces an explicit decision here, and `build_graph`
 /// debug-asserts after every instruction that this list agrees with what `build_instr` applied.
 fn writes_under_witness_cf(op: &OpCode) -> bool {
     match op {
-        OpCode::ArraySet { .. }
-        | OpCode::SlicePush { .. }
-        | OpCode::Store { .. }
-        | OpCode::InitGlobal { .. } => true,
+        OpCode::Store { .. } | OpCode::InitGlobal { .. } => true,
         OpCode::Guard { inner, .. } => writes_under_witness_cf(inner),
         OpCode::Cmp { .. }
         | OpCode::BinaryArithOp { .. }
@@ -686,7 +735,12 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         | OpCode::MkSeq { .. }
         | OpCode::MkRepeated { .. }
         | OpCode::ArrayGet { .. }
+        | OpCode::ArraySet { .. }
         | OpCode::SliceLen { .. }
+        | OpCode::SlicePush { .. }
+        | OpCode::SlicePop { .. }
+        | OpCode::SliceInsert { .. }
+        | OpCode::SliceRemove { .. }
         | OpCode::MkSeqOfBlob { .. }
         | OpCode::ToBits { .. }
         | OpCode::ToRadix { .. }
@@ -716,13 +770,17 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
     }
 }
 
-/// Paths to the witness "leaves" of `ty` for the purpose of pushing in a scalar taint: scalar
-/// leaves (descending arrays/slices), and the *root* of any `Ref` (a ref is opaque to leaf-pushing)
-/// — the positions a control-flow taint lands on.
+/// Paths to the witness positions of `ty` — everywhere a conditional-write,
+/// witness-merge, or witness-indexed-read taint must land: scalar leaves (descending
+/// arrays/slices), the *root* of any `Ref` (which ref is held is state; the ref is otherwise
+/// opaque to leaf-pushing), and the `Len` level of every slice (its *length* is state — a
+/// witness merge of different-length arms or a conditional store of a different-length slice
+/// leaves "how many elements" witness-dependent even when every element is pure;
+/// `purify_witness_slices` reads that taint to split such slices into `(physical, log_len, start)`
+/// tuples).
 ///
-/// Container-top levels (array/slice roots) are deliberately not leaves: an array's identity is
-/// fully covered by its element taint, and a witness-dependent slice *length* is not expressible
-/// in the current shape model (see the `SliceLen` rule in [`build_instr`]).
+/// Arrays have no analogous level: their length is static, so their identity is fully covered by
+/// their element taint.
 fn leaf_paths(ty: &Type) -> Vec<Vec<Descent>> {
     let mut out = Vec::new();
     fn go(ty: &Type, prefix: &mut Vec<Descent>, out: &mut Vec<Vec<Descent>>) {
@@ -733,7 +791,15 @@ fn leaf_paths(ty: &Type) -> Vec<Vec<Descent>> {
             | TypeExpr::Function
             | TypeExpr::Blob(..) => out.push(prefix.clone()),
             TypeExpr::Ref(_) => out.push(prefix.clone()),
-            TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
+            TypeExpr::Slice(inner) => {
+                prefix.push(Descent::Len);
+                out.push(prefix.clone());
+                prefix.pop();
+                prefix.push(Descent::Elem);
+                go(inner, prefix, out);
+                prefix.pop();
+            }
+            TypeExpr::Array(inner, _) => {
                 prefix.push(Descent::Elem);
                 go(inner, prefix, out);
                 prefix.pop();

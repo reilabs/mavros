@@ -351,8 +351,7 @@ impl LowerWitnessBitwiseOps {
                 });
             }
             BinaryArithOpKind::Shr => {
-                emit_guarded(
-                    b,
+                b.emit_guarded(
                     guard,
                     OpCode::BinaryArithOp {
                         kind: BinaryArithOpKind::Div,
@@ -476,8 +475,7 @@ impl LowerWitnessBitwiseOps {
         bits: usize,
     ) {
         let factor_u = b.cast_to(CastTarget::U(bits), factor);
-        emit_guarded(
-            b,
+        b.emit_guarded(
             guard,
             OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Div,
@@ -512,8 +510,7 @@ impl LowerWitnessBitwiseOps {
         let raw = b.cast_to(CastTarget::U(bits), lhs);
         let factor_u = b.cast_to(CastTarget::U(bits), factor);
         let quotient = b.fresh_value();
-        emit_guarded(
-            b,
+        b.emit_guarded(
             guard,
             OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Div,
@@ -591,8 +588,7 @@ fn emit_shift_amount_check(
     let high_field = b.cast_to_field(high);
     let zero = b.field_const(b.field().zero());
 
-    emit_guarded(
-        b,
+    b.emit_guarded(
         guard,
         OpCode::AssertCmp {
             kind: CmpKind::Eq,
@@ -860,25 +856,13 @@ fn guarded_rangecheck(
     guard: Option<ValueId>,
 ) {
     assert!(bits >= 1, "rangecheck width must be at least 1 bit");
-    emit_guarded(
-        b,
+    b.emit_guarded(
         guard,
         OpCode::Rangecheck {
             value,
             max_bits: bits,
         },
     );
-}
-
-fn emit_guarded(b: &mut HLBlockEmitter<'_>, guard: Option<ValueId>, op: OpCode) {
-    if let Some(condition) = guard {
-        b.emit(OpCode::Guard {
-            condition,
-            inner: Box::new(op),
-        });
-    } else {
-        b.emit(op);
-    }
 }
 
 fn cast_target_for_integer_type(ty: &Type) -> CastTarget {

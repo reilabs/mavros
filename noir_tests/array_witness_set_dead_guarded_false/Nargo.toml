@@ -1,0 +1,6 @@
+[package]
+name = "array_witness_set_dead_guarded_false"
+type = "bin"
+authors = [""]
+
+[dependencies]

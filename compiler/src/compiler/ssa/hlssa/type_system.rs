@@ -480,6 +480,31 @@ impl Type {
         }
     }
 
+    /// The unified type of a `Select`'s two alternatives.
+    ///
+    /// Numeric alternatives unify by the arithmetic rule. The two container kinds `Select` also
+    /// ranges over — but on which no arithmetic is defined — unify elementwise via
+    /// [`Self::join`] instead:
+    ///
+    /// - **Slices:** `untaint_control_flow`'s `emit_merge_select` merges witness-length physical
+    ///   slices with a `Select`.
+    /// - **Tuples:** `purify_witness_slices`'s `Select` arm rewrites both alternatives of a
+    ///   witness-length slice select into `(physical, log_len, start)` tuples. That form is
+    ///   transient — `ElideTuples` runs next and splits the select per component — but `TypeInfo`
+    ///   is recomputed in between (the pass preserves no analyses, and `ElideTuples` needs types),
+    ///   so it must type.
+    ///
+    /// `join` still asserts on arity/shape mismatch, and everything else is still refused, so this
+    /// stays a real check rather than a widened [`Self::get_arithmetic_result_type`].
+    pub fn get_select_result_type(&self, other: &Self) -> Self {
+        match (&self.expr, &other.expr) {
+            (TypeExpr::Slice(_), TypeExpr::Slice(_)) | (TypeExpr::Tuple(_), TypeExpr::Tuple(_)) => {
+                Type::join(self, other)
+            }
+            _ => self.get_arithmetic_result_type(other),
+        }
+    }
+
     // --- Misc ---
 
     pub fn contains_ptrs(&self) -> bool {

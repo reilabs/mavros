@@ -1,0 +1,6 @@
+[package]
+name = "slice_pop_front_pure"
+type = "bin"
+authors = [""]
+
+[dependencies]

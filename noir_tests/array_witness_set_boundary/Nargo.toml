@@ -1,0 +1,6 @@
+[package]
+name = "array_witness_set_boundary"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -643,6 +643,9 @@ impl CSE {
                     | OpCode::MkRepeated { .. }
                     | OpCode::ArraySet { .. }
                     | OpCode::SlicePush { .. }
+                    | OpCode::SlicePop { .. }
+                    | OpCode::SliceInsert { .. }
+                    | OpCode::SliceRemove { .. }
                     | OpCode::SliceLen { .. }
                     | OpCode::MemOp { kind: _, value: _ }
                     | OpCode::Lookup { .. }

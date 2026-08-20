@@ -25,6 +25,16 @@
 
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
+    passes::{
+        instruction_lowering::{InstructionLoweringRule, LoweringContext},
+        shared::{
+            divmod_guard::{
+                divmod_can_fail, divmod_provably_defined, emit_divmod_failure_cond,
+                emit_divmod_is_defined_assert,
+            },
+            seq_bounds::seq_bounds_operands,
+        },
+    },
     ssa::{
         Instruction, ValueId,
         hlssa::{
@@ -35,13 +45,6 @@ use crate::compiler::{
     },
     util::bit_mask,
 };
-
-use crate::compiler::passes::shared::divmod_guard::{
-    divmod_can_fail, divmod_provably_defined, emit_divmod_failure_cond,
-    emit_divmod_is_defined_assert,
-};
-
-use super::{InstructionLoweringRule, LoweringContext};
 
 pub struct LowerPureGuards {}
 
@@ -778,11 +781,7 @@ impl LowerPureGuards {
                      {max_bits} needs wider-than-u128 comparison; not yet supported"
                 );
                 let cmp_bits = val_bits.max(max_bits + 1);
-                let v_cmp = if val_bits == cmp_bits {
-                    value
-                } else {
-                    emitter.cast_to(CastTarget::U(cmp_bits), value)
-                };
+                let v_cmp = emitter.widen_u(value, val_bits, cmp_bits);
                 let bound = emitter.u_const(cmp_bits, 1u128 << max_bits);
                 let in_range = emitter.lt(v_cmp, bound);
                 let oob = emitter.not(in_range);
@@ -834,8 +833,13 @@ impl LowerPureGuards {
         }
     }
 
-    /// Compute the OOB condition: idx >= len(seq). Returns a bool ValueId.
-    /// Works for both arrays (static length) and slices (runtime SliceLen).
+    /// Compute the OOB condition `idx >= len(seq)`, returning a bool ValueId, for both arrays and
+    /// slices.
+    ///
+    /// The length lookup and the widening rule come from [`seq_bounds_operands`], which is also
+    /// what DCE's dead-access rewrite builds its `AssertCmp` from. This rule needs the condition as
+    /// a *value* to branch on rather than as an assert, but the comparison itself must be the same
+    /// one or the two disagree about what "out of bounds" means.
     fn emit_oob_cond(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -843,25 +847,17 @@ impl LowerPureGuards {
         index: ValueId,
         type_info: &FunctionTypeInfo,
     ) -> ValueId {
-        let seq_type = type_info.get_value_type(seq);
-        let len_val = match &seq_type.strip_witness().expr {
-            TypeExpr::Array(_, len) => emitter.u_const(32, *len as u128),
-            TypeExpr::Slice(_) => emitter.slice_len(seq),
-            other => panic!("LowerPureGuards: seq op on non-seq type: {:?}", other),
-        };
-
-        let idx_type = type_info.get_value_type(index);
-        let idx_as_u32 = if matches!(idx_type.strip_witness().expr, TypeExpr::U(32)) {
-            index
-        } else {
-            emitter.cast_to(CastTarget::U(32), index)
-        };
-        let in_bounds = emitter.lt(idx_as_u32, len_val);
+        let seq_type = type_info.get_value_type(seq).clone();
+        let idx_type = type_info.get_value_type(index).clone();
+        let (_, len_cmp, idx_cmp, _) =
+            seq_bounds_operands(emitter, seq, index, &seq_type, &idx_type);
+        let in_bounds = emitter.lt(idx_cmp, len_cmp);
         emitter.not(in_bounds)
     }
 
-    /// Common pattern: branch on a failure condition. In the fail branch,
-    /// assert condition==false and produce a default value. In the ok branch,
+    /// Common pattern: branch on a failure condition.
+    ///
+    /// In the fail branch, assert condition==false and produce a default value. In the ok branch,
     /// execute the actual computation.
     fn emit_guarded_branch(
         &self,

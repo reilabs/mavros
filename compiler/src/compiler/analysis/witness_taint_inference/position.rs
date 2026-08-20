@@ -77,6 +77,9 @@ pub enum Descent {
 
     /// Through an `Array<T>`/`Slice<T>` to its element `T`.
     Elem,
+
+    /// To a `Slice<T>`'s *length*
+    Len,
 }
 
 /// What a [`Position`] belongs to.
@@ -117,7 +120,7 @@ pub enum Owner {
 // ================================================================================================
 
 /// Enumerate, in pre-order, the path to every level of `ty` (the empty path for the top level, then
-/// each `Deref`/`Elem` descent).
+/// each `Deref`/`Elem`/`Len` descent).
 ///
 /// Two values of the same type share this path set, so copying taint from value `a` to value `b` is
 /// just "for every path `p`, add `b·p ≥ a·p`".
@@ -137,7 +140,15 @@ fn collect_paths(ty: &Type, prefix: &mut Vec<Descent>, out: &mut Vec<Vec<Descent
         | TypeExpr::I(_)
         | TypeExpr::Function
         | TypeExpr::Blob(..) => {}
-        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
+        TypeExpr::Slice(inner) => {
+            prefix.push(Descent::Len);
+            out.push(prefix.clone());
+            prefix.pop();
+            prefix.push(Descent::Elem);
+            collect_paths(inner, prefix, out);
+            prefix.pop();
+        }
+        TypeExpr::Array(inner, _) => {
             prefix.push(Descent::Elem);
             collect_paths(inner, prefix, out);
             prefix.pop();

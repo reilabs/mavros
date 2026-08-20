@@ -1,0 +1,6 @@
+[package]
+name = "slice_witness_pop_front"
+type = "bin"
+authors = [""]
+
+[dependencies]

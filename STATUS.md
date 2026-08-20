@@ -94,8 +94,8 @@
 | noir_tests/unconstrained_cross_block | ✅ | ✅ | 1 | 3 | 3032 | 3232 | 26717 | 191053 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/unconstrained_sqrt | ✅ | ✅ | 1 | 3 | 2848 | 2855 | 30202 | 194688 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/witness_array_select | ✅ | ✅ | 6 | 9 | 5664 | 4150 | 39670 | 203914 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir_compile_failure_tests/assert_constant_dynamic_context | ✅ | N/A | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
-| noir_compile_failure_tests/assert_constant_dynamic_tuple | ✅ | N/A | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| noir_failure_tests/assert_constant_dynamic_context | ✅ | N/A | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| noir_failure_tests/assert_constant_dynamic_tuple | ✅ | N/A | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
 | noir/test_programs/execution_success/a_1327_concrete_in_generic | ✅ | ✅ | 2 | 4 | 4960 | 5465 | 27687 | 193462 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/a_1_mul | ✅ | ✅ | 78 | 146 | 9136 | 2968 | 42224 | 207672 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/a_2_div | ✅ | ✅ | 89 | 162 | 10840 | 4293 | 47352 | 212875 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |

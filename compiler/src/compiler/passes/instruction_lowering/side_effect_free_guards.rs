@@ -88,6 +88,11 @@ impl LowerSideEffectFreeGuards {
             | OpCode::Todo { .. } => true,
             OpCode::ToBits { value, .. } => !type_info.get_value_type(*value).is_witness_of(),
             OpCode::ToRadix { value, .. } => !type_info.get_value_type(*value).is_witness_of(),
+            // Guard-elision judgment, not liveness. A pop from empty or an OOB insert/remove fails,
+            // so running one unconditionally would fail a world whose guard is off.
+            OpCode::SlicePop { .. } | OpCode::SliceInsert { .. } | OpCode::SliceRemove { .. } => {
+                false
+            }
             OpCode::Store { .. }
             | OpCode::Assert { .. }
             | OpCode::AssertCmp { .. }

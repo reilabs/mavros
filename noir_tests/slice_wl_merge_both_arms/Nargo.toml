@@ -1,0 +1,6 @@
+[package]
+name = "slice_wl_merge_both_arms"
+type = "bin"
+authors = [""]
+
+[dependencies]

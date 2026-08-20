@@ -443,6 +443,57 @@ pub(crate) fn eval_slice_push(
     Some(Constant::Blob(Blob::new(blob.elem_type, elements)))
 }
 
+/// Folds a `SlicePop`: a non-empty constant aggregate split into the shrunk slice and the popped
+/// element. A statically empty aggregate is an erroneous program.
+pub(crate) fn eval_slice_pop(dir: SliceOpDir, slice: Constant) -> Option<(Constant, Constant)> {
+    let Constant::Blob(mut blob) = slice else {
+        return None;
+    };
+    let elem = match dir {
+        SliceOpDir::Back => blob.elements.pop()?,
+        SliceOpDir::Front => {
+            if blob.is_empty() {
+                return None;
+            }
+            blob.elements.remove(0)
+        }
+    };
+    Some((Constant::Blob(blob), elem))
+}
+
+/// Folds a `SliceInsert`: a constant aggregate with `value` inserted at a constant `index`.
+/// An index larger than `len` is erroneous and refuses the fold.
+pub(crate) fn eval_slice_insert(
+    slice: Constant,
+    index: &Constant,
+    value: Constant,
+) -> Option<Constant> {
+    let Constant::Blob(mut blob) = slice else {
+        return None;
+    };
+    let idx = const_index(index)?;
+    if idx > blob.len() || blob.len() + 1 > AGGREGATE_FOLD_CAP {
+        return None;
+    }
+    blob.elements.insert(idx, value);
+    Some(Constant::Blob(blob))
+}
+
+/// Folds a `SliceRemove`: a constant aggregate split into the slice without element `index` and
+/// the removed element.
+pub(crate) fn eval_slice_remove(slice: Constant, index: &Constant) -> Option<(Constant, Constant)> {
+    let Constant::Blob(mut blob) = slice else {
+        return None;
+    };
+    let idx = const_index(index)?;
+    // Also covers the empty aggregate: every index is out of bounds when `len` is 0.
+    if idx >= blob.len() {
+        return None;
+    }
+    let elem = blob.elements.remove(idx);
+    Some((Constant::Blob(blob), elem))
+}
+
 /// Folds a `MkSeq`: an aggregate constant from constant elements.
 pub(crate) fn eval_mk_seq(elem_type: &Type, elems: Vec<Constant>) -> Option<Constant> {
     if elems.len() > AGGREGATE_FOLD_CAP {

@@ -1703,6 +1703,52 @@ impl<'a> ExpressionConverter<'a> {
                     e.slice_push(slice, vec![elem], SliceOpDir::Back)
                 }))
             }
+            "vector_push_front" => {
+                let slice = self.convert_expression(&call.arguments[0], b).unwrap();
+                let elem = self.convert_expression(&call.arguments[1], b).unwrap();
+                Some(self.emit_located(b, Some(call.location), |e| {
+                    e.slice_push(slice, vec![elem], SliceOpDir::Front)
+                }))
+            }
+            "vector_pop_back" | "vector_pop_front" => {
+                let front = name == "vector_pop_front";
+                let slice = self.convert_expression(&call.arguments[0], b).unwrap();
+                let tuple_ty = self.type_converter.convert_type(&call.return_type);
+                let TypeExpr::Tuple(parts) = &tuple_ty.expr else {
+                    panic!("vector pop builtin must return a tuple, got {tuple_ty}")
+                };
+                let parts = parts.clone();
+                Some(self.emit_located(b, Some(call.location), |e| {
+                    if front {
+                        let (shrunk, elem) = e.slice_pop(slice, SliceOpDir::Front);
+                        e.mk_tuple(vec![elem, shrunk], parts)
+                    } else {
+                        let (shrunk, elem) = e.slice_pop(slice, SliceOpDir::Back);
+                        e.mk_tuple(vec![shrunk, elem], parts)
+                    }
+                }))
+            }
+            "vector_insert" => {
+                let slice = self.convert_expression(&call.arguments[0], b).unwrap();
+                let index = self.convert_expression(&call.arguments[1], b).unwrap();
+                let elem = self.convert_expression(&call.arguments[2], b).unwrap();
+                Some(self.emit_located(b, Some(call.location), |e| {
+                    e.slice_insert(slice, index, elem)
+                }))
+            }
+            "vector_remove" => {
+                let slice = self.convert_expression(&call.arguments[0], b).unwrap();
+                let index = self.convert_expression(&call.arguments[1], b).unwrap();
+                let tuple_ty = self.type_converter.convert_type(&call.return_type);
+                let TypeExpr::Tuple(parts) = &tuple_ty.expr else {
+                    panic!("vector remove builtin must return a tuple, got {tuple_ty}")
+                };
+                let parts = parts.clone();
+                Some(self.emit_located(b, Some(call.location), |e| {
+                    let (shrunk, elem) = e.slice_remove(slice, index);
+                    e.mk_tuple(vec![shrunk, elem], parts)
+                }))
+            }
             _ => todo!("Builtin function '{}' not yet supported", name),
         }
     }

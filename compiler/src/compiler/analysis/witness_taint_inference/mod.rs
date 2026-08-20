@@ -22,12 +22,13 @@
 //!
 //! #### Positions, Not Values
 //!
-//! Witness-ness is attributed per 'level' of a type, **not** per value: a `Ref<Array<Field>>`, for
-//! example, has independent taint at the ref level, the array level, and the field level (mirroring
-//! `WitnessShape::{Scalar, Array, Ref}`). A position is `(owner, path)` where the path descends
-//! through `Deref`/`Elem`, and owner is a parameter slot, a return slot, an SSA value, the
-//! function's cfg flag, a global, or the synthetic always-Witness source Top. Edges then connect
-//! positions level-for-level.
+//! Witness-ness is attributed per 'level' of a type, **not** per value: a `Ref<Slice<Field>>`,
+//! for example, has independent taint at the ref level, the slice's length, and the field level
+//! (mirroring `WitnessShape::{Scalar, Array, Slice, Ref}`). Containers themselves carry no taint
+//! slot. A position is `(owner, path)` where
+//! the path descends through `Deref`/`Elem` — plus a terminal `Len` level for each slice — and
+//! owner is a parameter slot, a return slot, an SSA value, the function's cfg flag, a global, or
+//! the synthetic always-Witness source Top. Edges then connect positions level-for-level.
 //!
 //! #### Two Phases and the Safety of Summaries
 //!
@@ -117,10 +118,12 @@
 //!
 //! - phi/merge parameters at the join of a witness `JmpIf` take an edge from the *branch condition
 //!   itself* (the merge value differs by which witness-chosen arm ran),
-//! - writes performed under witness control flow (`Store`/`ArraySet`/`SlicePush`/`InitGlobal` join
-//!   cfg(block)—the function's cfg-flag position `Cfg` plus every dominating witness branch
+//! - writes to shared mutable state performed under witness control flow (`Store`/`InitGlobal`
+//!   join cfg(block)—the function's cfg-flag position `Cfg` plus every dominating witness branch
 //!   condition—into the written leaf, because the write must be predicated and its post-state is
-//!   witness-dependent).
+//!   witness-dependent). The value-producing updates (`ArraySet`, the slice ops) deliberately do
+//!   *not* join cfg taint: they mint a new SSA value, and the two-world reconciliation happens at
+//!   the merge phi via the first rule (see `writes_under_witness_cf` in [`builder`]).
 //!
 //! `Cfg` feeds only (b): a merge under a pure local condition stays pure even when the function
 //! as a whole is called under witness control flow, since either the whole call runs or none of it
@@ -183,15 +186,17 @@ mod position;
 
 use std::collections::BTreeSet;
 
-use crate::collections::HashMap;
-use crate::compiler::{
-    analysis::{
-        flow_analysis::FlowAnalysis,
-        types::TypeInfo,
-        witness_info::{FunctionWitnessType, WitnessShape, WitnessType},
-        witness_taint_inference::position::Position,
+use crate::{
+    collections::HashMap,
+    compiler::{
+        analysis::{
+            flow_analysis::FlowAnalysis,
+            types::TypeInfo,
+            witness_info::{FunctionWitnessType, WitnessShape, WitnessType},
+            witness_taint_inference::position::Position,
+        },
+        ssa::{BlockId, FunctionId, SSAAnotator, ValueId, hlssa::HLSSA},
     },
-    ssa::{BlockId, FunctionId, SSAAnotator, ValueId, hlssa::HLSSA},
 };
 
 /// The `≥` constraint graph over taint [`Position`]s — built per function by [`builder`] and
@@ -293,7 +298,13 @@ struct FunctionSummary {
 /// makes it a sound witness-ness source for pre-untaint consumers (PRE's `TotalityOracle`) that
 /// must refuse to speculate ops whose witness lowering emits rejecting constraints.
 pub struct ApproximateWitnessTaint {
-    functions: HashMap<FunctionId, HashMap<ValueId, WitnessShape>>,
+    functions: HashMap<FunctionId, FunctionApproxShapes>,
+}
+
+/// The shape of every SSA value plus the positional return shapes
+pub struct FunctionApproxShapes {
+    pub value_shapes: HashMap<ValueId, WitnessShape>,
+    pub return_shapes: Vec<WitnessShape>,
 }
 
 impl ApproximateWitnessTaint {
@@ -312,7 +323,10 @@ impl ApproximateWitnessTaint {
     ///
     /// This is the faithful mirror of the top-level `TypeExpr::WitnessOf` wrap `UntaintControlFlow`
     /// applies (`apply_witness_type` wraps a level iff that shape level is witness), which is what
-    /// post-untaint `Type::is_witness_of` checks read.
+    /// post-untaint `Type::is_witness_of` checks read. For witness-*length* slices the mirror
+    /// holds only because both sides deliberately report the slice level `Pure` — purification
+    /// moves the length's witness-ness onto a tuple scalar before untaint ever wraps types (see
+    /// `WitnessShape::toplevel_info`); use [`Self::shape_of`] when the length slot matters.
     ///
     /// A value absent from a known function is a constant — always `Pure`. An unknown _function_
     /// answers `true` (conservative refuse). Only functions unreachable via constrained static
@@ -321,11 +335,24 @@ impl ApproximateWitnessTaint {
     /// speculation opportunity is worth relying on that fact.
     pub fn value_is_witness(&self, fid: FunctionId, vid: ValueId) -> bool {
         match self.functions.get(&fid) {
-            Some(values) => values
+            Some(shapes) => shapes
+                .value_shapes
                 .get(&vid)
                 .is_some_and(|shape| shape.toplevel_info() == WitnessType::Witness),
             None => true,
         }
+    }
+
+    pub fn shape_of(&self, fid: FunctionId, vid: ValueId) -> Option<&WitnessShape> {
+        self.functions.get(&fid)?.value_shapes.get(&vid)
+    }
+
+    pub fn value_shapes(&self, fid: FunctionId) -> Option<&HashMap<ValueId, WitnessShape>> {
+        self.functions.get(&fid).map(|s| &s.value_shapes)
+    }
+
+    pub fn return_shapes(&self, fid: FunctionId) -> Option<&[WitnessShape]> {
+        self.functions.get(&fid).map(|s| s.return_shapes.as_slice())
     }
 }
 
@@ -1278,5 +1305,196 @@ mod tests {
         let taint = run_approx(&ssa);
 
         assert!(taint.value_is_witness(rec_id, rec_param));
+    }
+
+    /// A witness-condition merge of two pure slices taints the merged slice's `Len` level (and
+    /// its element leaves): "how many elements" becomes witness-dependent even though no slice
+    /// op ever runs. This is the signal `purify_witness_slices` reads for differing-length
+    /// merges without pushes; `SliceLen` of the merged slice reads that `Len` taint.
+    #[test]
+    fn witness_merge_of_slices_taints_len_and_leaves() {
+        use crate::compiler::ssa::hlssa::SequenceTargetType;
+
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |b| {
+            b.function.add_return_type(Type::field().slice_of());
+            b.function.add_return_type(Type::u(32));
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let x = e.add_parameter(Type::field());
+            let w = e.write_witness(x);
+            let zero = e.field_const(fr(0));
+            let cond = e.eq(w, zero);
+            let merge = e.build_if_else(
+                cond,
+                vec![Type::field().slice_of()],
+                |e| {
+                    let c = e.field_const(fr(7));
+                    vec![e.mk_seq(vec![c], SequenceTargetType::Slice, Type::field())]
+                },
+                |e| {
+                    let c1 = e.field_const(fr(1));
+                    let c2 = e.field_const(fr(2));
+                    vec![e.mk_seq(vec![c1, c2], SequenceTargetType::Slice, Type::field())]
+                },
+            );
+            let len = e.slice_len(merge[0]);
+            e.terminate_return(vec![merge[0], len]);
+        });
+        let fwt = run(&mut ssa);
+        assert_eq!(
+            fwt.returns_witness,
+            vec![
+                WitnessShape::Slice(WitnessType::Witness, Box::new(witness())),
+                witness(),
+            ]
+        );
+    }
+
+    /// The single-instruction form of the previous test: a `Select` between two slices on a
+    /// witness condition taints `Len` and the element leaves the same way a cfg merge does.
+    #[test]
+    fn select_between_slices_taints_len_and_leaves() {
+        use crate::compiler::ssa::hlssa::SequenceTargetType;
+
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |b| {
+            b.function.add_return_type(Type::field().slice_of());
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let x = e.add_parameter(Type::field());
+            let w = e.write_witness(x);
+            let zero = e.field_const(fr(0));
+            let cond = e.eq(w, zero);
+            let c1 = e.field_const(fr(1));
+            let c2 = e.field_const(fr(2));
+            let s1 = e.mk_seq(vec![c1], SequenceTargetType::Slice, Type::field());
+            let s2 = e.mk_seq(vec![c1, c2], SequenceTargetType::Slice, Type::field());
+            let m = e.select(cond, s1, s2);
+            e.terminate_return(vec![m]);
+        });
+        let fwt = run(&mut ssa);
+        assert_eq!(
+            fwt.returns_witness,
+            vec![WitnessShape::Slice(
+                WitnessType::Witness,
+                Box::new(witness())
+            )]
+        );
+    }
+
+    /// Controls for the two tests above: a merge on a *pure* condition and an unconditional
+    /// push/pop chain leave every slice level Pure — no spurious `Len` taint, so
+    /// `purify_witness_slices` has nothing to rewrite.
+    #[test]
+    fn pure_merge_and_unconditional_slice_ops_stay_pure() {
+        use crate::compiler::ssa::hlssa::{SequenceTargetType, SliceOpDir};
+
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |b| {
+            b.function.add_return_type(Type::field().slice_of());
+            b.function.add_return_type(Type::field());
+            b.function.add_return_type(Type::u(32));
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let x = e.add_parameter(Type::field());
+            let zero = e.field_const(fr(0));
+            let cond = e.eq(x, zero); // pure condition
+            let merge = e.build_if_else(
+                cond,
+                vec![Type::field().slice_of()],
+                |e| {
+                    let c = e.field_const(fr(7));
+                    vec![e.mk_seq(vec![c], SequenceTargetType::Slice, Type::field())]
+                },
+                |e| {
+                    let c1 = e.field_const(fr(1));
+                    let c2 = e.field_const(fr(2));
+                    vec![e.mk_seq(vec![c1, c2], SequenceTargetType::Slice, Type::field())]
+                },
+            );
+            let c3 = e.field_const(fr(3));
+            let pushed = e.slice_push(merge[0], vec![c3], SliceOpDir::Back);
+            let (popped, elem) = e.slice_pop(pushed, SliceOpDir::Back);
+            let len = e.slice_len(popped);
+            e.terminate_return(vec![popped, elem, len]);
+        });
+        let fwt = run(&mut ssa);
+        assert_eq!(
+            fwt.returns_witness,
+            vec![
+                WitnessShape::Slice(WitnessType::Pure, Box::new(pure())),
+                pure(),
+                pure(),
+            ]
+        );
+    }
+
+    /// A push under a witness branch is Pure at the push itself; the taint lands on the merge
+    /// phi. This is the contract `purify_witness_slices` relies on: it rewrites the wl merge
+    /// parameter and materializes `(physical, log_len, start)` tuples for the pure jump
+    /// arguments, not the in-branch push.
+    #[test]
+    fn guarded_push_is_pure_until_the_merge() {
+        use crate::compiler::ssa::hlssa::{OpCode, SequenceTargetType, SliceOpDir};
+
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |b| {
+            b.function.add_return_type(Type::field().slice_of());
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let x = e.add_parameter(Type::field());
+            let w = e.write_witness(x);
+            let zero = e.field_const(fr(0));
+            let cond = e.eq(w, zero);
+            let c1 = e.field_const(fr(1));
+            let s = e.mk_seq(vec![c1], SequenceTargetType::Slice, Type::field());
+            let merge = e.build_if_else(
+                cond,
+                vec![Type::field().slice_of()],
+                |e| {
+                    let c2 = e.field_const(fr(2));
+                    vec![e.slice_push(s, vec![c2], SliceOpDir::Back)]
+                },
+                |_e| vec![s],
+            );
+            e.terminate_return(vec![merge[0]]);
+        });
+        let fwt = run(&mut ssa);
+        assert_eq!(
+            fwt.returns_witness,
+            vec![WitnessShape::Slice(
+                WitnessType::Witness,
+                Box::new(witness())
+            )]
+        );
+
+        // The push result inside the branch stays fully Pure (phase 2 remaps ids, so read it
+        // off the clone).
+        let clone_id = ssa.get_unique_entrypoint_id();
+        let push_result = ssa
+            .get_function(clone_id)
+            .get_blocks()
+            .flat_map(|(_, block)| block.get_instructions())
+            .find_map(|instr| {
+                if let OpCode::SlicePush { result, .. } = instr {
+                    Some(*result)
+                } else {
+                    None
+                }
+            })
+            .expect("clone should contain the push");
+        assert_eq!(
+            fwt.value_witness_types.get(&push_result),
+            Some(&WitnessShape::Slice(WitnessType::Pure, Box::new(pure())))
+        );
     }
 }
