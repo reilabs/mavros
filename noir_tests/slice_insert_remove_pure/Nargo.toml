@@ -1,0 +1,6 @@
+[package]
+name = "slice_insert_remove_pure"
+type = "bin"
+authors = [""]
+
+[dependencies]

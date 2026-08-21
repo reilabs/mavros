@@ -18,6 +18,7 @@ pub mod merge_identical_functions;
 pub mod normalize_asserts;
 pub mod partial_redundancy_elimination;
 pub mod prepare_entry_point;
+pub mod purify_witness_slices;
 pub mod rc_insertion;
 pub mod remove_unreachable_blocks;
 pub mod remove_unreachable_functions;

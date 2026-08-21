@@ -1,0 +1,6 @@
+[package]
+name = "rangecheck_lookup_oob_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]

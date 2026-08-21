@@ -5,23 +5,23 @@
 //! It also handles cases where values die along edges instead of within a block to actually perform
 //! the necessary decrements.
 
-use crate::{
-    collections::HashMap,
-    compiler::util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
-};
 use itertools::Itertools;
 use tracing::{Level, debug, instrument, trace};
 
-use crate::compiler::{
-    analysis::{
-        flow_analysis::{CFG, FlowAnalysis},
-        liveness::{FunctionLiveness, LivenessAnalysis},
-        types::{FunctionTypeInfo, TypeInfo},
-    },
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{
-        Instruction, Located, SourceLocation, Terminator, ValueId,
-        hlssa::{CastTarget, HLFunction, HLSSA, OpCode, RefCountOp, Type, TypeExpr},
+use crate::{
+    collections::HashMap,
+    compiler::{
+        analysis::{
+            flow_analysis::{CFG, FlowAnalysis},
+            liveness::{FunctionLiveness, LivenessAnalysis},
+            types::{FunctionTypeInfo, TypeInfo},
+        },
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        ssa::{
+            Instruction, Located, SourceLocation, Terminator, ValueId,
+            hlssa::{CastTarget, HLFunction, HLSSA, OpCode, RefCountOp, Type, TypeExpr},
+        },
+        util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
     },
 };
 
@@ -733,6 +733,15 @@ impl RCInsertion {
                         let mut live_vals = vec![*slice];
                         live_vals.extend(values.iter().copied());
                         currently_live.extend(live_vals);
+                    }
+                    OpCode::SlicePop { .. } => {
+                        panic!("ICE: SlicePop must be lowered before rc insertion")
+                    }
+                    OpCode::SliceInsert { .. } => {
+                        panic!("ICE: SliceInsert must be lowered before rc insertion")
+                    }
+                    OpCode::SliceRemove { .. } => {
+                        panic!("ICE: SliceRemove must be lowered before rc insertion")
                     }
                     OpCode::InitGlobal {
                         global: _,

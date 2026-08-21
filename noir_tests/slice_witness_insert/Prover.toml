@@ -1,0 +1,5 @@
+w = "1"
+expected0 = "10"
+expected1 = "99"
+expected2 = "20"
+expected_len = "3"

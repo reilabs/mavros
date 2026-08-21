@@ -52,6 +52,7 @@ use crate::{
             normalize_asserts::NormalizeAsserts,
             partial_redundancy_elimination::PRE,
             prepare_entry_point::PrepareEntryPoint,
+            purify_witness_slices::PurifyWitnessSlices,
             rc_insertion::RCInsertion,
             remove_unreachable_blocks::RemoveUnreachableBlocks,
             remove_unreachable_functions::RemoveUnreachableFunctions,
@@ -281,6 +282,14 @@ impl Driver {
                 // asserted-constant facts. Run pre-WTI: operands are still scalar, so asserted
                 // constants fold away here and never become witnesses/constraints downstream.
                 Box::new(NormalizeAsserts::new()),
+                // Algebraic identities before the fold, because some of them *produce* the
+                // constants the fold then propagates — `x - x -> 0` above all. This is the only
+                // pre-untaint Simplifier run, and it has to be here rather than later: the DCE
+                // below is the first that rewrites a dead `Div`/`Mod` into its check, and once a
+                // division has become a bare assert the operand chain is pinned live for good.
+                // Nothing in this pass touches the CFG (it rewrites instructions and aliases
+                // results), so it is safe on the pre-untaint IR the phase still holds.
+                Box::new(Simplifier::new()),
                 // Fold constants and prune statically-decided branches (e.g. monomorphized
                 // generic dispatch) BEFORE pruning functions: calls in never-taken branches must
                 // not keep their callees alive into witness type inference and untaint CF, which
@@ -382,6 +391,12 @@ impl Driver {
                 // value from every predecessor); collapse them before they reach WTI and codegen.
                 Box::new(TrivialPhiElimination::new()),
                 Box::new(RemoveUnreachableFunctions::new()),
+                // Purify witness-length slices into `(physical, log_len, start)` tuples. Reads
+                // the read-only joined WTI approximation (no specialization — context splitting
+                // happens exactly once, below); the elision cleans up the tuples it introduces.
+                Box::new(PurifyWitnessSlices::new()),
+                Box::new(ElideTuples::new()),
+                Box::new(RemoveUnreachableFunctions::new()),
             ],
         )
         .run(&mut ssa);
@@ -442,6 +457,9 @@ impl Driver {
             "witness_spilling".to_string(),
             self.draw_cfg,
             vec![
+                // Lower the remaining (pure-length) slice pops/inserts/removes. The
+                // witness-length ones were already rewritten by `PurifyWitnessSlices`.
+                Box::new(InstructionLowering::slice_ops()),
                 Box::new(InstructionLowering::pure_guards()),
                 Box::new(InstructionLowering::witness_memory_ops()),
                 Box::new(FixDoubleJumps::new()),
@@ -472,6 +490,7 @@ impl Driver {
                 Box::new(SimplifyAsserts::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(InstructionLowering::witness_array_access()),
+                Box::new(InstructionLowering::slice_select()),
                 Box::new(InstructionLowering::witness_integer_ops()),
                 // After the last pre-spilling lowering, run cleanup twice
                 // back-to-back. The first round exposes folds/dedup opportunities

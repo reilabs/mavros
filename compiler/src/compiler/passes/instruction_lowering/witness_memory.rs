@@ -36,6 +36,16 @@ impl InstructionLoweringRule for LowerWitnessMemoryOps {
     }
 }
 
+/// Slice selects must be emitted *bare*.
+///
+/// This pass is the second producer of witness `Select`s on slices (`untaint_control_flow`'s
+/// `emit_merge_select` also), and unlike that it runs *after* `InstructionLowering::pure_guards`.
+/// This means that `LowerSideEffectFreeGuards`, which is what normally strips a `Select`'s guard,
+/// will never see what this emits. `LowerSliceSelect` asserts its input is unguarded, so a guarded
+/// slice select emitted from here would trip that assert.
+///
+/// The `Slice` arm below is therefore deliberately a plain `b.select(..)`: the guarded store's
+/// condition is already folded in as the select's `cond`, and nothing here re-wraps it.
 fn emit_select(
     b: &mut HLBlockEmitter<'_>,
     cond: ValueId,
@@ -57,7 +67,7 @@ fn emit_select(
             b.select(cond, lhs, rhs)
         }
         TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
-        TypeExpr::Slice(_) => panic!("Witness select on Slice type not supported"),
+        TypeExpr::Slice(_) => b.select(cond, lhs, rhs),
         TypeExpr::Function => panic!("Witness select on Function type not supported"),
         TypeExpr::Blob(..) => panic!("Witness select on Blob type not supported"),
     }

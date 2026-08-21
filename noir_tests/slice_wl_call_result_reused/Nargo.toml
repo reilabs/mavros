@@ -1,0 +1,6 @@
+[package]
+name = "slice_wl_call_result_reused"
+type = "bin"
+authors = [""]
+
+[dependencies]

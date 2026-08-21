@@ -2,6 +2,9 @@ mod bit_range;
 mod degree_spilling;
 mod pure_guards;
 mod side_effect_free_guards;
+mod slice_insert_remove;
+mod slice_pop;
+mod slice_select;
 mod witness_array;
 mod witness_assert;
 mod witness_bitwise;
@@ -15,25 +18,42 @@ use crate::compiler::{
     analysis::{
         flow_analysis::FlowAnalysis,
         types::{FunctionTypeInfo, Types},
-        value_range_analysis::{FunctionValueRanges, IntInterval, ValueRangeAnalysis},
+        value_range_analysis::{
+            FunctionValueRanges, Interval, ValueRange, ValueRangeAnalysis, Width,
+        },
     },
     pass_manager::{AnalysisId, AnalysisStore, Pass},
-    ssa::hlssa::{
-        HLSSA, OpCode, Type, TypeExpr,
-        builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder, HLSSABuilder},
+    ssa::{
+        ValueId,
+        hlssa::{
+            HLSSA, OpCode, Type, TypeExpr,
+            builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder, HLSSABuilder},
+        },
     },
 };
 
 use self::{
-    bit_range::LowerBitRangeOps, degree_spilling::LowerDegreeSpillingOps,
-    pure_guards::LowerPureGuards, side_effect_free_guards::LowerSideEffectFreeGuards,
-    witness_array::LowerWitnessArrayOps, witness_assert::LowerWitnessAssertOps,
-    witness_bitwise::LowerWitnessBitwiseOps, witness_compare::LowerWitnessCompareOps,
-    witness_field::LowerWitnessFieldOps, witness_integer_arith::LowerWitnessIntegerArithOps,
-    witness_memory::LowerWitnessMemoryOps, witness_spread::LowerWitnessSpreadOps,
+    bit_range::LowerBitRangeOps,
+    degree_spilling::LowerDegreeSpillingOps,
+    pure_guards::LowerPureGuards,
+    side_effect_free_guards::LowerSideEffectFreeGuards,
+    slice_insert_remove::{LowerSliceInsert, LowerSliceRemove},
+    slice_pop::LowerSlicePop,
+    slice_select::LowerSliceSelect,
+    witness_array::LowerWitnessArrayOps,
+    witness_assert::LowerWitnessAssertOps,
+    witness_bitwise::LowerWitnessBitwiseOps,
+    witness_compare::LowerWitnessCompareOps,
+    witness_field::LowerWitnessFieldOps,
+    witness_integer_arith::LowerWitnessIntegerArithOps,
+    witness_memory::LowerWitnessMemoryOps,
+    witness_spread::LowerWitnessSpreadOps,
 };
 
 const ITERATION_LIMIT: usize = 32;
+
+// INSTRUCTION LOWERING
+// ================================================================================================
 
 pub struct InstructionLowering {
     name: &'static str,
@@ -58,10 +78,24 @@ impl<'a> LoweringContext<'a> {
         self.types
     }
 
-    pub fn range(&self, value: crate::compiler::ssa::ValueId) -> IntInterval {
+    /// The full range record for a value, with both readings of its bit pattern.
+    pub fn range(&self, value: ValueId) -> ValueRange {
         self.value_ranges
             .map(|ranges| ranges.get(value))
-            .unwrap_or_else(IntInterval::top)
+            .unwrap_or_else(|| ValueRange::full(Width::NonScalar))
+    }
+
+    /// The **unsigned** reading: the raw bit pattern as a non-negative integer.
+    ///
+    /// This is what a rule wants whenever it is about to `cast_to_field` the value and do field
+    /// arithmetic.
+    pub fn urange(&self, value: ValueId) -> Interval {
+        self.range(value).unsigned().clone()
+    }
+
+    /// The **signed** reading: the mathematical value of a two's-complement integer.
+    pub fn srange(&self, value: ValueId) -> Interval {
+        self.range(value).signed().clone()
     }
 }
 
@@ -102,6 +136,26 @@ impl InstructionLowering {
                 Box::new(LowerWitnessFieldOps::new()),
             ],
             true,
+        )
+    }
+
+    pub fn slice_select() -> Self {
+        Self::with_lowerers(
+            "instruction_lowering_slice_select",
+            vec![Box::new(LowerSliceSelect::default())],
+            false,
+        )
+    }
+
+    pub fn slice_ops() -> Self {
+        Self::with_lowerers(
+            "instruction_lowering_slice_ops",
+            vec![
+                Box::new(LowerSlicePop::default()),
+                Box::new(LowerSliceInsert::default()),
+                Box::new(LowerSliceRemove::default()),
+            ],
+            false,
         )
     }
 

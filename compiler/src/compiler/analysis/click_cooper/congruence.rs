@@ -242,6 +242,38 @@ impl Congruence {
                     continue;
                 }
 
+                // The two-result slice ops are numbered per result position over the same
+                // operands.
+                if let OpCode::SlicePop {
+                    dir,
+                    result_slice,
+                    result_elem,
+                    slice,
+                } = instr
+                {
+                    for (j, r) in [result_slice, result_elem].into_iter().enumerate() {
+                        universe.insert(*r);
+                        nodes.insert(*r, Node::op(OpKey::SlicePop(*dir, j), vec![*slice], false));
+                    }
+                    continue;
+                }
+                if let OpCode::SliceRemove {
+                    result_slice,
+                    result_elem,
+                    slice,
+                    index,
+                } = instr
+                {
+                    for (j, r) in [result_slice, result_elem].into_iter().enumerate() {
+                        universe.insert(*r);
+                        nodes.insert(
+                            *r,
+                            Node::op(OpKey::SliceRemove(j), vec![*slice, *index], false),
+                        );
+                    }
+                    continue;
+                }
+
                 match op_signature(instr) {
                     Some((key, operands, commutative)) => {
                         let mut results = instr.get_results();
@@ -527,6 +559,9 @@ pub(crate) enum OpKey {
     MkRepeated(SequenceTargetType, usize, Type),
     MkSeqOfBlob(Type),
     SlicePush(SliceOpDir),
+    SliceInsert,
+    SlicePop(SliceOpDir, usize),
+    SliceRemove(usize),
 
     /// Return position `usize` of a constrained static call to `FunctionId` whose result is a
     /// deterministic function of the call's arguments (its operands). Two such calls to the same
@@ -631,6 +666,14 @@ pub(crate) fn op_signature(instr: &OpCode) -> Option<(OpKey, Vec<ValueId>, bool)
             operands.push(*slice);
             operands.extend(values.iter().copied());
             return Some((OpKey::SlicePush(*dir), operands, false));
+        }
+        OpCode::SliceInsert {
+            slice,
+            index,
+            value,
+            ..
+        } => {
+            return Some((OpKey::SliceInsert, vec![*slice, *index, *value], false));
         }
         _ => {}
     }

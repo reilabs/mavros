@@ -6,25 +6,27 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::collections::{HashMap, HashSet};
-use crate::compiler::{
-    analysis::{
-        flow_analysis::FlowAnalysis,
-        shared::fixpoint::call_graph_fixpoint,
-        types::{FunctionTypeInfo, TypeInfo, Types},
-        witness_info::{FunctionWitnessType, WitnessShape, WitnessType},
-        witness_taint_inference::{
-            FunctionSummary, WitnessTaint,
-            builder::{build_graph, compute_block_conditions},
-            position::{Descent, Owner, Position, paths_of_type},
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        analysis::{
+            flow_analysis::FlowAnalysis,
+            shared::fixpoint::call_graph_fixpoint,
+            types::{FunctionTypeInfo, TypeInfo, Types},
+            witness_info::{FunctionWitnessType, WitnessShape, WitnessType},
+            witness_taint_inference::{
+                FunctionApproxShapes, FunctionSummary, WitnessTaint,
+                builder::{build_graph, compute_block_conditions},
+                position::{Descent, Owner, Position, paths_of_type},
+            },
         },
+        ssa::{
+            BlockId, FunctionId, ProgramPoint, ValueId,
+            hlssa::{CallTarget, HLFunction, HLSSA, OpCode, Type, TypeExpr},
+            traits::Instruction,
+        },
+        util::ice_non_elided_tuple,
     },
-    ssa::{
-        BlockId, FunctionId, ProgramPoint, ValueId,
-        hlssa::{CallTarget, HLFunction, HLSSA, OpCode, Type, TypeExpr},
-        traits::Instruction,
-    },
-    util::ice_non_elided_tuple,
 };
 
 // PHASE 1: POLYMORPHIC SUMMARIES
@@ -405,7 +407,7 @@ pub(super) fn joined_value_shapes(
     ssa: &HLSSA,
     flow: &FlowAnalysis,
     types: &TypeInfo,
-) -> HashMap<FunctionId, HashMap<ValueId, WitnessShape>> {
+) -> HashMap<FunctionId, FunctionApproxShapes> {
     // Mirrors `run`'s setup, minus the `Types` recompute and minus phase-2 mutation.
     let fids: Vec<FunctionId> = ssa
         .get_function_ids()
@@ -430,7 +432,7 @@ pub(super) fn joined_value_shapes(
     // its joined context strictly grows.
     let main_id = ssa.get_unique_entrypoint_id();
     let mut joined: HashMap<FunctionId, Ctx> = HashMap::default();
-    let mut shapes: HashMap<FunctionId, HashMap<ValueId, WitnessShape>> = HashMap::default();
+    let mut shapes: HashMap<FunctionId, FunctionApproxShapes> = HashMap::default();
     let mut worklist: VecDeque<FunctionId> = VecDeque::new();
 
     // Queue membership, so re-enqueue checks are O(1) instead of scanning the deque.
@@ -469,7 +471,13 @@ pub(super) fn joined_value_shapes(
             }
         }
         // A re-solve at a grown context replaces the stale (smaller) solution.
-        shapes.insert(f, result.value_shapes);
+        shapes.insert(
+            f,
+            FunctionApproxShapes {
+                value_shapes: result.value_shapes,
+                return_shapes: result.return_shapes,
+            },
+        );
     }
     shapes
 }
@@ -912,11 +920,28 @@ fn go_shape_from(
         | TypeExpr::I(_)
         | TypeExpr::Function
         | TypeExpr::Blob(..) => WitnessShape::Scalar(info),
-        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
+        TypeExpr::Slice(inner) => {
+            path.push(Descent::Len);
+            let len = if read
+                && witness.contains(&Position {
+                    owner: owner.clone(),
+                    path: path.clone(),
+                }) {
+                WitnessType::Witness
+            } else {
+                WitnessType::Pure
+            };
+            path.pop();
             path.push(Descent::Elem);
             let c = go_shape_from(owner, path, inner, witness, read);
             path.pop();
-            WitnessShape::Array(info, Box::new(c))
+            WitnessShape::Slice(len, Box::new(c))
+        }
+        TypeExpr::Array(inner, _) => {
+            path.push(Descent::Elem);
+            let c = go_shape_from(owner, path, inner, witness, read);
+            path.pop();
+            WitnessShape::Array(Box::new(c))
         }
         TypeExpr::Ref(inner) => {
             path.push(Descent::Deref);
@@ -944,9 +969,22 @@ fn seed_shape(
     }
     match shape {
         WitnessShape::Scalar(_) => {}
-        WitnessShape::Array(_, inner) => {
+        WitnessShape::Array(inner) => {
             path.push(Descent::Elem);
             seed_shape(owner, inner, path, seeds);
+            path.pop();
+        }
+        WitnessShape::Slice(len, elem) => {
+            if len.is_witness() {
+                path.push(Descent::Len);
+                seeds.push(Position {
+                    owner: owner.clone(),
+                    path: path.clone(),
+                });
+                path.pop();
+            }
+            path.push(Descent::Elem);
+            seed_shape(owner, elem, path, seeds);
             path.pop();
         }
         WitnessShape::Ref(_, inner) => {

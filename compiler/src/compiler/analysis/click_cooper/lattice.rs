@@ -73,6 +73,11 @@ pub(crate) fn bool_constant(value: bool) -> Arc<Constant> {
 ///
 /// Integer results must fit the operand width: an overflowing pure op is an erroneous evaluation
 /// with a backend-specific residue, so an overflowing fold is refused rather than guessed at.
+///
+/// `Shl` is the exception, because for it overflow is not an error. A left shift *wraps* — Noir
+/// reports a runtime error only when the *amount* reaches the width — so it folds to the truncated
+/// value rather than declining, agreeing with every backend and with the witness lowering in
+/// `witness_bitwise::wrap_shifted_product`.
 pub(crate) fn eval_binary(
     kind: BinaryArithOpKind,
     a: &Constant,
@@ -125,7 +130,8 @@ pub(crate) fn eval_binary(
                         return None;
                     }
                     match kind {
-                        Shl => x.checked_shl(*y as u32)?,
+                        // Truncated, not refused: the bits pushed off the top are discarded.
+                        Shl => x.wrapping_shl(*y as u32) & bit_mask(s),
                         Shr => x >> (*y as u32),
                         Add | Sub | Mul | Div | Mod | And | Or | Xor => unreachable!(),
                     }
@@ -175,7 +181,6 @@ pub(crate) fn eval_binary(
                     Some(Constant::I(s, encode_signed(s, v)))
                 }
                 Shl | Shr => {
-                    let xa = decode_signed(s, *x);
                     let ya = decode_signed(s, *y);
 
                     // Mirror the unsigned arm: only fold an unambiguously in-range amount.
@@ -189,21 +194,22 @@ pub(crate) fn eval_binary(
                         return None;
                     }
 
-                    let v = match kind {
-                        // Arithmetic: `xa` is the decoded value, so this sign-fills. It cannot
-                        // overflow — the magnitude only ever shrinks — so it always folds.
-                        Shr => xa >> ya,
-                        // Also mirroring the unsigned arm, which refuses an `Shl` whose result
-                        // leaves the width. Where this does fold it agrees with the wrapping
-                        // fold in `hlssa_to_r1cs`, since they overlap only on the cases that do
-                        // not overflow.
-                        Shl => xa.checked_shl(ya as u32)?,
+                    match kind {
+                        // Arithmetic: the decoded value sign-fills as it shifts. It cannot overflow
+                        // as the magnitude only ever shrinks, so it always folds.
+                        Shr => {
+                            let v = decode_signed(s, *x) >> ya;
+                            debug_assert!(fits_signed(s, v));
+                            Some(Constant::I(s, encode_signed(s, v)))
+                        }
+                        // A left shift is the same map on the raw bits whatever the sign, and it
+                        // truncates rather than failing — so this stays on the encoded value and
+                        // masks, exactly as the signed arm of `hlssa_to_r1cs::arith` does. The
+                        // result can change sign (`i8 64 << 1` is `-128`), which is why decoding
+                        // first and asking whether the mathematical product fits would be wrong.
+                        Shl => Some(Constant::I(s, x.wrapping_shl(ya as u32) & bit_mask(s))),
                         Add | Sub | Mul | Div | Mod | And | Or | Xor => unreachable!(),
-                    };
-                    if !fits_signed(s, v) {
-                        return None;
                     }
-                    Some(Constant::I(s, encode_signed(s, v)))
                 }
             }
         }
@@ -437,6 +443,57 @@ pub(crate) fn eval_slice_push(
     Some(Constant::Blob(Blob::new(blob.elem_type, elements)))
 }
 
+/// Folds a `SlicePop`: a non-empty constant aggregate split into the shrunk slice and the popped
+/// element. A statically empty aggregate is an erroneous program.
+pub(crate) fn eval_slice_pop(dir: SliceOpDir, slice: Constant) -> Option<(Constant, Constant)> {
+    let Constant::Blob(mut blob) = slice else {
+        return None;
+    };
+    let elem = match dir {
+        SliceOpDir::Back => blob.elements.pop()?,
+        SliceOpDir::Front => {
+            if blob.is_empty() {
+                return None;
+            }
+            blob.elements.remove(0)
+        }
+    };
+    Some((Constant::Blob(blob), elem))
+}
+
+/// Folds a `SliceInsert`: a constant aggregate with `value` inserted at a constant `index`.
+/// An index larger than `len` is erroneous and refuses the fold.
+pub(crate) fn eval_slice_insert(
+    slice: Constant,
+    index: &Constant,
+    value: Constant,
+) -> Option<Constant> {
+    let Constant::Blob(mut blob) = slice else {
+        return None;
+    };
+    let idx = const_index(index)?;
+    if idx > blob.len() || blob.len() + 1 > AGGREGATE_FOLD_CAP {
+        return None;
+    }
+    blob.elements.insert(idx, value);
+    Some(Constant::Blob(blob))
+}
+
+/// Folds a `SliceRemove`: a constant aggregate split into the slice without element `index` and
+/// the removed element.
+pub(crate) fn eval_slice_remove(slice: Constant, index: &Constant) -> Option<(Constant, Constant)> {
+    let Constant::Blob(mut blob) = slice else {
+        return None;
+    };
+    let idx = const_index(index)?;
+    // Also covers the empty aggregate: every index is out of bounds when `len` is 0.
+    if idx >= blob.len() {
+        return None;
+    }
+    let elem = blob.elements.remove(idx);
+    Some((Constant::Blob(blob), elem))
+}
+
 /// Folds a `MkSeq`: an aggregate constant from constant elements.
 pub(crate) fn eval_mk_seq(elem_type: &Type, elems: Vec<Constant>) -> Option<Constant> {
     if elems.len() > AGGREGATE_FOLD_CAP {
@@ -512,13 +569,38 @@ mod tests {
     }
 
     #[test]
-    fn signed_shl_refuses_to_leave_the_width() {
+    fn signed_shl_wraps_rather_than_refusing() {
         use BinaryArithOpKind::Shl;
         assert_eq!(fold(Shl, -8, 1), Some(-16));
         assert_eq!(fold(Shl, 1, 6), Some(64));
-        // 1 << 7 is 128, one past i8::MAX.
-        assert_eq!(fold(Shl, 1, 7), None);
-        assert_eq!(fold(Shl, 2, 6), None);
+        // 1 << 7 is 128, one past `i8::MAX`, so it wraps to `i8::MIN`. Two positive operands
+        // producing a negative result is the case a `fits_signed` gate used to refuse.
+        assert_eq!(fold(Shl, 1, 7), Some(-128));
+        assert_eq!(fold(Shl, 2, 6), Some(-128));
+        // Everything shifted out: `-16` is 0xF0, and 0xF0 << 4 keeps nothing.
+        assert_eq!(fold(Shl, -16, 4), Some(0));
+        assert_eq!(fold(Shl, -16, 3), Some(-128));
+        // These two are pinned against Noir's own execution by `noir_tests/signed_shift`
+        // (`e << 4 == 0` and `e << 3 == -128` for `e: i8 = -16`).
+    }
+
+    #[test]
+    fn unsigned_shl_wraps_rather_than_refusing() {
+        use BinaryArithOpKind::Shl;
+        let fold_u8 = |a: u128, b: u128| {
+            eval_binary(
+                Shl,
+                &Constant::U(8, a),
+                &Constant::U(8, b),
+                FieldConfig::bn254(),
+            )
+        };
+        assert_eq!(fold_u8(40, 1), Some(Constant::U(8, 80)));
+        // 40 << 3 is 320, which keeps only its low eight bits.
+        assert_eq!(fold_u8(40, 3), Some(Constant::U(8, 64)));
+        assert_eq!(fold_u8(255, 7), Some(Constant::U(8, 128)));
+        // The amount is still a hard refusal.
+        assert_eq!(fold_u8(1, 8), None);
     }
 
     #[test]

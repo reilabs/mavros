@@ -4,7 +4,7 @@ use num_traits::{One, Signed, Zero};
 use mavros_artifacts::FieldConfig;
 
 use crate::compiler::{
-    analysis::value_range_analysis::{IntInterval, field_modulus},
+    analysis::value_range_analysis::{Interval, field_modulus},
     ssa::{
         ValueId,
         hlssa::{
@@ -25,11 +25,8 @@ impl InstructionLoweringRule for LowerWitnessIntegerArithOps {
         context: &LoweringContext<'_>,
         instruction: &OpCode,
     ) -> bool {
-        if let OpCode::Guard { condition, inner } = instruction {
-            self.process_arith(b, context, Some(*condition), inner.as_ref())
-        } else {
-            self.process_arith(b, context, None, instruction)
-        }
+        let (guard, op) = HLBlockEmitter::unwrap_guard(instruction);
+        self.process_arith(b, context, guard, op)
     }
 }
 
@@ -131,11 +128,11 @@ impl LowerWitnessIntegerArithOps {
             _ => unreachable!(),
         };
         let range = match kind {
-            BinaryArithOpKind::Add => context.range(lhs).add(&context.range(rhs)),
-            BinaryArithOpKind::Sub => context.range(lhs).sub(&context.range(rhs)),
+            BinaryArithOpKind::Add => context.urange(lhs).add(&context.urange(rhs)),
+            BinaryArithOpKind::Sub => context.urange(lhs).sub(&context.urange(rhs)),
             _ => unreachable!(),
         };
-        if !range.fits_in_unsigned_bits(bits) {
+        if !range.proves_fits_in_unsigned_bits(bits) {
             let rc_bits = narrow_rangecheck_width(&range, bits);
             guarded_rangecheck(b, value, rc_bits, guard);
         }
@@ -163,7 +160,7 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
-        let product_range = context.range(lhs).mul(&context.range(rhs));
+        let product_range = context.urange(lhs).mul(&context.urange(rhs));
         if bits == 128 && !range_fits_field_injectively(&product_range, b.field()) {
             let lhs_limbs = split_u128_value(b, lhs);
             let rhs_limbs = split_u128_value(b, rhs);
@@ -204,7 +201,7 @@ impl LowerWitnessIntegerArithOps {
         let lhs_field = b.cast_to_field(lhs);
         let rhs_field = b.cast_to_field(rhs);
         let value = b.mul(lhs_field, rhs_field);
-        if !product_range.fits_in_unsigned_bits(bits) {
+        if !product_range.proves_fits_in_unsigned_bits(bits) {
             let rc_bits = narrow_rangecheck_width(&product_range, bits);
             guarded_rangecheck(b, value, rc_bits, guard);
         }
@@ -236,8 +233,8 @@ impl LowerWitnessIntegerArithOps {
             bits <= MAX_SUPPORTED_SIGNED_BITS,
             "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
         );
-        let lhs_range = context.range(lhs);
-        let rhs_range = context.range(rhs);
+        let lhs_range = context.srange(lhs);
+        let rhs_range = context.srange(rhs);
         let sign_l = match known_sign(&lhs_range, bits) {
             Some(false) => b.field_const(b.field().zero()),
             Some(true) => b.field_const(b.field().one()),
@@ -318,8 +315,8 @@ impl LowerWitnessIntegerArithOps {
             bits <= MAX_SUPPORTED_SIGNED_BITS,
             "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
         );
-        let lhs_range = context.range(lhs);
-        let rhs_range = context.range(rhs);
+        let lhs_range = context.srange(lhs);
+        let rhs_range = context.srange(rhs);
         let product_range = lhs_range.mul(&rhs_range);
         assert!(
             range_fits_field_injectively(&product_range, b.field()),
@@ -392,8 +389,8 @@ impl LowerWitnessIntegerArithOps {
             bits,
             context.types().get_value_type(lhs).is_witness_of(),
             context.types().get_value_type(rhs).is_witness_of(),
-            &context.range(lhs),
-            &context.range(rhs),
+            &context.urange(lhs),
+            &context.urange(rhs),
             guard,
             guard_is_witness,
         );
@@ -427,8 +424,8 @@ impl LowerWitnessIntegerArithOps {
         );
         let lhs_witness = context.types().get_value_type(lhs).is_witness_of();
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
-        let lhs_range = context.range(lhs);
-        let rhs_range = context.range(rhs);
+        let lhs_range = context.srange(lhs);
+        let rhs_range = context.srange(rhs);
 
         let lhs_known_sign = known_sign(&lhs_range, bits);
         let sign_l_is_witness = lhs_witness && lhs_known_sign.is_none();
@@ -587,14 +584,7 @@ impl LowerWitnessIntegerArithOps {
 
         let encoded_hint = b.select(magnitude_is_zero, zero, encoded_if_nonzero);
         let encoded_hint = b.cast_to(CastTarget::U(bits), encoded_hint);
-        encode_signed_value(
-            b,
-            signed_value,
-            encoded_hint,
-            &IntInterval::top(),
-            bits,
-            guard,
-        )
+        encode_signed_value(b, signed_value, encoded_hint, &Interval::top(), bits, guard)
     }
 }
 
@@ -605,29 +595,13 @@ fn guarded_rangecheck(
     guard: Option<ValueId>,
 ) {
     assert!(bits >= 1, "rangecheck width must be at least 1 bit");
-    let rangecheck = OpCode::Rangecheck {
-        value,
-        max_bits: bits,
-    };
-    if let Some(condition) = guard {
-        b.emit(OpCode::Guard {
-            condition,
-            inner: Box::new(rangecheck),
-        });
-    } else {
-        b.emit(rangecheck);
-    }
-}
-
-fn emit_guarded(b: &mut HLBlockEmitter<'_>, guard: Option<ValueId>, op: OpCode) {
-    if let Some(condition) = guard {
-        b.emit(OpCode::Guard {
-            condition,
-            inner: Box::new(op),
-        });
-    } else {
-        b.emit(op);
-    }
+    b.emit_guarded(
+        guard,
+        OpCode::Rangecheck {
+            value,
+            max_bits: bits,
+        },
+    );
 }
 
 fn guarded_or_zero_field(
@@ -643,7 +617,12 @@ fn guarded_or_zero_field(
     }
 }
 
-fn narrow_rangecheck_width(range: &IntInterval, default_bits: usize) -> usize {
+fn narrow_rangecheck_width(range: &Interval, default_bits: usize) -> usize {
+    // ⊥ is `[1, 0]`, which would otherwise measure as a *one-bit* check on a value the analysis
+    // only believes unreachable because of this very check. Fall back to the declared width.
+    if range.is_empty() {
+        return default_bits;
+    }
     let (Some(lo), Some(hi)) = (range.lo(), range.hi()) else {
         return default_bits;
     };
@@ -659,7 +638,12 @@ fn narrow_rangecheck_width(range: &IntInterval, default_bits: usize) -> usize {
 // false for u64xu64, and even for the fragile u32xu32 edge). The debt is not the predicate —
 // it is the missing FALSE-case codegen (only unsigned u128 mul has a fallback). See Layer 6
 // (`L6-int-op-strategy`) in docs/field-agnosticism.md.
-fn range_fits_field_injectively(range: &IntInterval, field: FieldConfig) -> bool {
+fn range_fits_field_injectively(range: &Interval, field: FieldConfig) -> bool {
+    // ⊥ would report `hi - lo = -1 < p` and so license the single-field product path on no evidence
+    // at all.
+    if range.is_empty() {
+        return false;
+    }
     let Some(lo) = range.lo() else {
         return false;
     };
@@ -687,8 +671,10 @@ fn signed_value_from_encoded(
     b.sub(encoded_field, sign_shifted)
 }
 
-fn known_sign(range: &IntInterval, bits: usize) -> Option<bool> {
-    if range.is_non_negative_in_signed(bits) {
+/// The provable sign of a value, or `None` when it is not known. Callers hardcode a constant sign
+/// bit on the strength of this, so ⊥ must answer `None` rather than the vacuous `Some(false)`.
+fn known_sign(range: &Interval, bits: usize) -> Option<bool> {
+    if range.proves_non_negative_in_signed(bits) {
         Some(false)
     } else if is_strictly_negative(range) {
         Some(true)
@@ -701,11 +687,11 @@ fn encode_signed_value(
     b: &mut HLBlockEmitter<'_>,
     signed_value: ValueId,
     encoded_hint: ValueId,
-    signed_range: &IntInterval,
+    signed_range: &Interval,
     bits: usize,
     guard: Option<ValueId>,
 ) -> ValueId {
-    let sign = if signed_range.is_non_negative_in_signed(bits) {
+    let sign = if signed_range.proves_non_negative_in_signed(bits) {
         b.field_const(b.field().zero())
     } else if is_strictly_negative(signed_range) {
         b.field_const(b.field().one())
@@ -720,7 +706,7 @@ fn encode_signed_value(
     let sign_shift = b.field_const(b.field().two_pow(bits));
     let sign_shifted = b.mul(sign, sign_shift);
     let encoded = b.add(signed_value, sign_shifted);
-    if !signed_range.fits_in_signed_bits(bits) || known_sign(signed_range, bits).is_none() {
+    if !signed_range.proves_fits_in_signed_bits(bits) || known_sign(signed_range, bits).is_none() {
         if bits == 1 {
             let diff = b.sub(encoded, sign);
             guarded_rangecheck(b, diff, 1, guard);
@@ -736,7 +722,7 @@ fn encode_signed_value(
     guarded_or_zero_field(b, encoded, guard)
 }
 
-fn is_strictly_negative(range: &IntInterval) -> bool {
+fn is_strictly_negative(range: &Interval) -> bool {
     range.hi().is_some_and(|hi| hi.is_negative())
 }
 
@@ -781,8 +767,8 @@ fn lower_unsigned_divmod(
     bits: usize,
     dividend_is_witness: bool,
     divisor_is_witness: bool,
-    dividend_range: &IntInterval,
-    divisor_range: &IntInterval,
+    dividend_range: &Interval,
+    divisor_range: &Interval,
     guard: Option<ValueId>,
     guard_is_witness: bool,
 ) -> DivModResult {
@@ -853,8 +839,7 @@ fn lower_unsigned_divmod(
         let r_u128 = b.cast_to(CastTarget::U(128), r_wit);
         let q_u128 = b.cast_to(CastTarget::U(128), q_wit);
         let product = b.fresh_value();
-        emit_guarded(
-            b,
+        b.emit_guarded(
             guard,
             OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Mul,
@@ -864,8 +849,7 @@ fn lower_unsigned_divmod(
             },
         );
         let sum = b.fresh_value();
-        emit_guarded(
-            b,
+        b.emit_guarded(
             guard,
             OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::Add,
@@ -874,8 +858,7 @@ fn lower_unsigned_divmod(
                 rhs: r_u128,
             },
         );
-        emit_guarded(
-            b,
+        b.emit_guarded(
             guard,
             OpCode::AssertCmp {
                 kind: CmpKind::Eq,
@@ -883,8 +866,7 @@ fn lower_unsigned_divmod(
                 rhs: dividend,
             },
         );
-        emit_guarded(
-            b,
+        b.emit_guarded(
             guard,
             OpCode::AssertCmp {
                 kind: CmpKind::Lt,
@@ -974,32 +956,32 @@ fn lower_unsigned_divmod(
     }
 }
 
-fn quotient_bound(a_range: &IntInterval, b_range: &IntInterval) -> IntInterval {
+fn quotient_bound(a_range: &Interval, b_range: &Interval) -> Interval {
     let (Some(a_hi), Some(b_lo)) = (a_range.hi(), b_range.lo()) else {
-        return IntInterval::top();
+        return Interval::top();
     };
     if !a_range.is_non_negative() || !b_lo.is_positive() {
-        return IntInterval::top();
+        return Interval::top();
     }
-    IntInterval::closed(BigInt::zero(), a_hi / b_lo)
+    Interval::closed(BigInt::zero(), a_hi / b_lo)
 }
 
-fn remainder_bound(b_range: &IntInterval) -> IntInterval {
+fn remainder_bound(b_range: &Interval) -> Interval {
     let Some(b_hi) = b_range.hi() else {
-        return IntInterval::top();
+        return Interval::top();
     };
     if !b_hi.is_positive() {
-        return IntInterval::top();
+        return Interval::top();
     }
-    IntInterval::closed(BigInt::zero(), b_hi - BigInt::one())
+    Interval::closed(BigInt::zero(), b_hi - BigInt::one())
 }
 
-fn abs_bound(range: &IntInterval) -> IntInterval {
+fn abs_bound(range: &Interval) -> Interval {
     let Some(lo) = range.lo() else {
-        return IntInterval::top();
+        return Interval::top();
     };
     let Some(hi) = range.hi() else {
-        return IntInterval::top();
+        return Interval::top();
     };
     let lo_abs = lo.abs();
     let hi_abs = hi.abs();
@@ -1009,9 +991,54 @@ fn abs_bound(range: &IntInterval) -> IntInterval {
         hi_abs.clone()
     };
     if lo <= &BigInt::zero() && hi >= &BigInt::zero() {
-        IntInterval::closed(BigInt::zero(), max)
+        Interval::closed(BigInt::zero(), max)
     } else {
         let min = if lo_abs <= hi_abs { lo_abs } else { hi_abs };
-        IntInterval::closed(min, max)
+        Interval::closed(min, max)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ⊥ means "the range analysis believes this value cannot occur" — but the belief rests on the
+    // constraints this module is about to emit, so none of these helpers may treat it as evidence.
+    // Left unguarded, `narrow_rangecheck_width` measures `[1, 0]` as a *one-bit* check.
+
+    #[test]
+    fn bottom_does_not_narrow_a_rangecheck() {
+        assert_eq!(narrow_rangecheck_width(&Interval::empty(), 32), 32);
+        // The surrounding behavior is unchanged: a genuine bound still narrows, and an unbounded
+        // or possibly-negative one still falls back.
+        assert_eq!(narrow_rangecheck_width(&Interval::closed(0, 100), 32), 7);
+        assert_eq!(narrow_rangecheck_width(&Interval::closed(-1, 100), 32), 32);
+        assert_eq!(narrow_rangecheck_width(&Interval::top(), 32), 32);
+    }
+
+    #[test]
+    fn bottom_has_no_known_sign() {
+        // Without the guard this is `Some(false)`, which hardcodes `sign = 0` into the encoding.
+        assert_eq!(known_sign(&Interval::empty(), 8), None);
+        assert_eq!(known_sign(&Interval::closed(0, 4), 8), Some(false));
+        assert_eq!(known_sign(&Interval::closed(-4, -1), 8), Some(true));
+        assert_eq!(known_sign(&Interval::closed(-4, 4), 8), None);
+    }
+
+    #[test]
+    fn bottom_is_not_field_injective() {
+        // `hi - lo` is `-1` for ⊥, which is trivially below any modulus.
+        assert!(!range_fits_field_injectively(
+            &Interval::empty(),
+            FieldConfig::bn254()
+        ));
+        assert!(range_fits_field_injectively(
+            &Interval::closed(0, 1000),
+            FieldConfig::bn254()
+        ));
+        assert!(!range_fits_field_injectively(
+            &Interval::top(),
+            FieldConfig::bn254()
+        ));
     }
 }
