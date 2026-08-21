@@ -1,0 +1,6 @@
+[package]
+name = "ecdsa_secp256r1_invalid"
+type = "bin"
+authors = [""]
+
+[dependencies]

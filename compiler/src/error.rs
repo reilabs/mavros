@@ -17,4 +17,6 @@ pub enum Error {
         dependency_name: String,
         err: String,
     },
+    #[error("dependency source override failed: {0}")]
+    DependencySourceOverride(String),
 }
