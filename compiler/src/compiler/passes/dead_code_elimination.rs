@@ -24,8 +24,8 @@ use crate::{
         ssa::{
             BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
-                BinaryArithOpKind, CallTarget, Constant, HLFunction, HLSSA, LocatedOpCode, OpCode,
-                builder::HLEmitter,
+                ArithGroup, BinaryArithOpKind, CallTarget, Constant, HLFunction, HLSSA,
+                LocatedOpCode, OpCode, builder::HLEmitter,
             },
         },
         util::ice_non_elided_tuple,
@@ -71,16 +71,17 @@ impl HLEmitter for VecEmitter<'_, '_> {
 /// instructions DCE may not simply delete when their results go dead.
 ///
 /// Deliberately matches only at the top level: a `Guard`-wrapped division must keep today's
-/// behavior, because inside an inactive branch it is required *not* to fail and
+/// behavior, because inside an inactive branch it is required _not_ to fail and
 /// `lower_divmod_guard` already encodes that.
-fn unguarded_divmod_operands(instruction: &OpCode) -> Option<(ValueId, ValueId)> {
+fn unguarded_divmod_operands(
+    instruction: &OpCode,
+) -> Option<(BinaryArithOpKind, ValueId, ValueId)> {
     match instruction {
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Div | BinaryArithOpKind::Mod,
-            lhs,
-            rhs,
-            ..
-        } => Some((*lhs, *rhs)),
+        OpCode::BinaryArithOp { kind, lhs, rhs, .. }
+            if matches!(kind.group(), ArithGroup::Div | ArithGroup::Rem) =>
+        {
+            Some((*kind, *lhs, *rhs))
+        }
         _ => None,
     }
 }
@@ -244,7 +245,7 @@ impl DCE {
     /// mark phase consults this too. Keeping the check would otherwise resurrect the entire chain
     /// that computes the operands, purely to assert something already known.
     ///
-    /// The type this asks about is the *stripped* operand type, matching `LowerPureGuards`.
+    /// The type this asks about is the _stripped_ operand type, matching `LowerPureGuards`.
     ///
     /// `None` means [`Config::rewrite_dead_partial_ops`] is off: the ranges are only calculated
     /// when the flag is set. This avoids being able to turn it back on by accident.
@@ -252,6 +253,7 @@ impl DCE {
         &self,
         analyses: Option<(&TypeInfo, &ValueRanges)>,
         function_id: FunctionId,
+        kind: BinaryArithOpKind,
         lhs: ValueId,
         rhs: ValueId,
     ) -> bool {
@@ -264,12 +266,17 @@ impl DCE {
             return false;
         }
 
+        // The division's own signedness. `divmod_guard` takes the resulting flag rather than the
+        // type so that this discharge, the check it elides, and the one the sweep emits below are
+        // all decided by one source.
+        let signed = kind.is_signed();
         let function_ranges = ranges.get_function(function_id);
 
         !divmod_provably_defined(
             &function_ranges.get(lhs),
             &function_ranges.get(rhs),
             lhs_type.peel_witness(),
+            signed,
         )
     }
 
@@ -364,7 +371,7 @@ impl DCE {
         // checking whether there is anything to rewrite: finding out would cost a full instruction
         // walk of its own, which is the same order as the analyses it would be guarding.
         //
-        // Both must be computed *here*, before the mark phase, because the discharge below decides
+        // Both must be computed _here_, before the mark phase, because the discharge below decides
         // whether a dead division's operands are seeded live at all — and before anything mutates
         // the module. `Types` walks every instruction in every block, including the dead ones still
         // waiting to be removed, so it has to see the module whole: typing after `retain_constants`
@@ -467,8 +474,8 @@ impl DCE {
                     // decides whether an entire dependency chain survives. There is no matching
                     // exemption for the sequence bounds below: nothing here can prove such a check
                     // away, so their operands are always seeded.
-                    if let Some((lhs, rhs)) = unguarded_divmod_operands(instruction)
-                        && self.divmod_check_survives(divmod_analyses, *function_id, lhs, rhs)
+                    if let Some((kind, lhs, rhs)) = unguarded_divmod_operands(instruction)
+                        && self.divmod_check_survives(divmod_analyses, *function_id, kind, lhs, rhs)
                     {
                         worklist.push(WorkItem::LiveValue(*function_id, lhs));
                         worklist.push(WorkItem::LiveValue(*function_id, rhs));
@@ -783,16 +790,22 @@ impl DCE {
                         // ever fail. Replace it with the check alone: the arithmetic still goes,
                         // which is the whole point of eliminating it.
                         if let Some(types) = rewrite_types.as_ref() {
-                            if let Some((lhs, rhs)) = unguarded_divmod_operands(&instruction) {
+                            if let Some((kind, lhs, rhs)) = unguarded_divmod_operands(&instruction)
+                            {
                                 // `divmod_check_survives` subsumes the `divmod_can_fail` type gate
                                 // and additionally lets the range domain discharge the check, in
                                 // which case the division just goes.
                                 if self.divmod_check_survives(
                                     divmod_analyses,
                                     function_id,
+                                    kind,
                                     lhs,
                                     rhs,
                                 ) {
+                                    // The same resolution the mark phase made for this
+                                    // instruction, so the check that survives there is the check
+                                    // emitted here.
+                                    let signed = kind.is_signed();
                                     let lhs_type = types
                                         .get_function(function_id)
                                         .get_value_type(lhs)
@@ -808,6 +821,7 @@ impl DCE {
                                         lhs,
                                         rhs,
                                         &lhs_type,
+                                        signed,
                                     );
                                 }
                             } else if let Some(check) = failable_bounds(&instruction)

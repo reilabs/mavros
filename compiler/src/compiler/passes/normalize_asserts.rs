@@ -121,7 +121,7 @@ mod tests {
         // A `Field` multiply feeding the equality: `SimplifyAsserts` would turn this into `AssertR1C`,
         // but `NormalizeAsserts` must not.
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Mul,
+            kind: BinaryArithOpKind::UMul,
             result: mul,
             lhs: a,
             rhs: b,
@@ -152,7 +152,7 @@ mod tests {
         f.get_entry_mut().push_parameter(b, Type::field());
         let entry = f.get_entry_mut();
         entry.push_test_instruction(OpCode::Cmp {
-            kind: CmpKind::Lt,
+            kind: CmpKind::ULt,
             result: lt,
             lhs: a,
             rhs: b,
@@ -172,8 +172,8 @@ mod tests {
         let (l, r, and) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
         let f = ssa.get_unique_entrypoint_mut();
-        f.get_entry_mut().push_parameter(l, Type::u(1));
-        f.get_entry_mut().push_parameter(r, Type::u(1));
+        f.get_entry_mut().push_parameter(l, Type::int(1));
+        f.get_entry_mut().push_parameter(r, Type::int(1));
         let entry = f.get_entry_mut();
         entry.push_test_instruction(OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::And,
@@ -205,7 +205,7 @@ mod tests {
         let w = ssa.fresh_value();
 
         let f = ssa.get_unique_entrypoint_mut();
-        f.get_entry_mut().push_parameter(w, Type::u(1));
+        f.get_entry_mut().push_parameter(w, Type::int(1));
         let entry = f.get_entry_mut();
         entry.push_test_instruction(OpCode::Assert { value: w });
         entry.set_terminator(Terminator::Return(vec![]));

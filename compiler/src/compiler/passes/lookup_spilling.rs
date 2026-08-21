@@ -1,20 +1,21 @@
-use crate::collections::{HashMap, HashSet};
-
 use mavros_artifacts::FieldConfig;
 
-use crate::compiler::{
-    analysis::{
-        flow_analysis::FlowAnalysis,
-        lookup_sizing::{Chunk, LookupSizing, TableKind},
-        types::{FunctionTypeInfo, Types},
-    },
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    ssa::{
-        FunctionId, SourceLocation, ValueId,
-        hlssa::{
-            CastTarget, Constant, HLSSA, HLSSAConstantsSnapshot, LookupTarget,
-            MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type,
-            builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        analysis::{
+            flow_analysis::FlowAnalysis,
+            lookup_sizing::{Chunk, LookupSizing, TableKind},
+            types::{FunctionTypeInfo, Types},
+        },
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        ssa::{
+            FunctionId, SourceLocation, ValueId,
+            hlssa::{
+                CastTarget, Constant, HLSSA, HLSSAConstantsSnapshot, LookupTarget,
+                MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type,
+                builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
+            },
         },
     },
 };
@@ -48,7 +49,7 @@ struct HelperKey {
 fn flag_is_const_one(consts: &HLSSAConstantsSnapshot, flag: ValueId, field: FieldConfig) -> bool {
     match consts.get(&flag).map(|c| &**c) {
         Some(Constant::Field(f)) => *f == field.one(),
-        Some(Constant::U(_, v)) => *v == 1,
+        Some(Constant::Int(_, v)) => *v == 1,
         _ => false,
     }
 }
@@ -383,7 +384,7 @@ impl LookupSpilling {
         } else {
             MAX_SUPPORTED_UNSIGNED_BITS
         };
-        let pure_u = b.cast_to(CastTarget::U(extract_bits), pure);
+        let pure_u = b.cast_to(CastTarget::Int(extract_bits), pure);
 
         let offsets = cumulative_offsets(&plan);
 
@@ -404,12 +405,12 @@ impl LookupSpilling {
             self.emit_rangecheck_chunk(b, chunk, key, flag, is_witness);
 
             let shift = b.field_const(b.field().two_pow(offsets[i]));
-            let shifted = b.mul(key, shift);
-            rest = b.add(rest, shifted);
+            let shifted = b.umul(key, shift);
+            rest = b.uadd(rest, shifted);
         }
 
         let low_chunk = plan[0];
-        let low = b.sub(value, rest);
+        let low = b.usub(value, rest);
         self.emit_rangecheck_chunk(b, low_chunk, low, flag, is_witness);
     }
 
@@ -421,10 +422,10 @@ impl LookupSpilling {
             return;
         }
         let value_plain = b.value_of(value);
-        let square_hint = b.mul(value_plain, value_plain);
+        let square_hint = b.umul(value_plain, value_plain);
         let square = b.write_witness(square_hint);
         b.constrain(value, value, square);
-        let diff = b.sub(square, value);
+        let diff = b.usub(square, value);
         let zero = b.field_const(b.field().zero());
         b.constrain(flag, diff, zero);
     }
@@ -504,7 +505,7 @@ impl LookupSpilling {
             if chunk.width == 1 {
                 // A 1-bit spread is the identity: bound the bit and pin `expected_spread == key`.
                 self.spill_one_bit_rangecheck(b, key_field, flag_field);
-                let diff = b.sub(expected_spread, key_field);
+                let diff = b.usub(expected_spread, key_field);
                 b.constrain(flag_field, diff, zero);
                 return;
             }
@@ -524,7 +525,7 @@ impl LookupSpilling {
             MAX_SUPPORTED_UNSIGNED_BITS
         };
         let pure = if key_is_witness { b.value_of(key) } else { key };
-        let pure_u = b.cast_to(CastTarget::U(extract_bits), pure);
+        let pure_u = b.cast_to(CastTarget::Int(extract_bits), pure);
         let key_field = if key_inner_is_field {
             key
         } else {
@@ -532,7 +533,7 @@ impl LookupSpilling {
         };
 
         // Rotate a lookup-backed chunk (width >= 2 — a full table chunk or a partial) to the front
-        // so it becomes the derived chunk 0: its own `lookup_spread` then closes *both* the key and
+        // so it becomes the derived chunk 0: its own `lookup_spread` then closes _both_ the key and
         // spread reconstructions, with no extra constraint. Only an all-bit plan has no such chunk;
         // its front bit's spread sum is closed by the one unavoidable explicit equality below.
         let closing = plan.iter().position(|c| c.width >= 2).unwrap_or(0);
@@ -569,22 +570,22 @@ impl LookupSpilling {
                 spread
             };
             let key_shift = b.field_const(b.field().two_pow(offset));
-            let shifted_key = b.mul(chunk_key, key_shift);
-            rec_key = b.add(rec_key, shifted_key);
+            let shifted_key = b.umul(chunk_key, key_shift);
+            rec_key = b.uadd(rec_key, shifted_key);
             let spread_shift = b.field_const(b.field().two_pow(offset * 2));
-            let shifted_spread = b.mul(chunk_spread, spread_shift);
-            rec_spread = b.add(rec_spread, shifted_spread);
+            let shifted_spread = b.umul(chunk_spread, spread_shift);
+            rec_spread = b.uadd(rec_spread, shifted_spread);
         }
 
         // Derive chunk 0 from what's left and pin it. Its `lookup_spread` closes the spread sum, so
         // no extra constraint — unless it's a bit (an all-bit plan), where there is no lookup to
         // close the sum and we tie it with the one unavoidable equality.
         let chunk0 = plan[0];
-        let chunk0_key = b.sub(key_field, rec_key);
-        let chunk0_spread = b.sub(expected_spread, rec_spread);
+        let chunk0_key = b.usub(key_field, rec_key);
+        let chunk0_spread = b.usub(expected_spread, rec_spread);
         if chunk0.width == 1 {
             self.spill_one_bit_rangecheck(b, chunk0_key, flag_field);
-            let diff = b.sub(chunk0_key, chunk0_spread);
+            let diff = b.usub(chunk0_key, chunk0_spread);
             b.constrain(flag_field, diff, zero);
         } else {
             b.lookup_spread(chunk0.table_size, chunk0_key, chunk0_spread, flag_field);
@@ -599,10 +600,10 @@ impl LookupSpilling {
     /// exactly `width` bits.
     fn partial_gap(&self, b: &mut HLBlockEmitter<'_>, chunk: Chunk, key: ValueId) -> ValueId {
         let bound = b.field_const(b.field().constant((1u128 << chunk.width) - 1));
-        b.sub(bound, key)
+        b.usub(bound, key)
     }
 
-    /// Emit the "2-larger" complement lookup for a *partial spread* chunk. The complement only needs
+    /// Emit the "2-larger" complement lookup for a _partial spread_ chunk. The complement only needs
     /// to be range-bounded (to rule out field wraparound), not spread, so when a rangecheck table of
     /// size `>= chunk.width` exists it is a single 1-witness rangecheck. Otherwise it falls back to
     /// a spread lookup in the chunk's own table. This mirrors the cost model in `lookup_sizing`
@@ -639,7 +640,7 @@ impl LookupSpilling {
         is_witness: bool,
     ) -> ValueId {
         let pure = if is_witness { b.value_of(key) } else { key };
-        let key_u = b.cast_to(CastTarget::U(table_size as usize), pure);
+        let key_u = b.cast_to(CastTarget::Int(table_size as usize), pure);
         let spread = b.spread(key_u, table_size);
         let spread_field = b.cast_to_field(spread);
         if is_witness {
@@ -681,12 +682,12 @@ fn extract_low_chunk(
     let shifted = if offset == 0 {
         value
     } else {
-        let divisor = b.u_const(value_bits, two_pow_u128(offset));
-        b.div(value, divisor)
+        let divisor = b.int_const(value_bits, two_pow_u128(offset));
+        b.udiv(value, divisor)
     };
-    let modulus = b.u_const(value_bits, two_pow_u128(chunk_bits));
-    let chunk = b.modulo(shifted, modulus);
-    b.cast_to(CastTarget::U(chunk_bits), chunk)
+    let modulus = b.int_const(value_bits, two_pow_u128(chunk_bits));
+    let chunk = b.urem(shifted, modulus);
+    b.cast_to(CastTarget::Int(chunk_bits), chunk)
 }
 
 // FIELD-ASSUMPTION: L4-two-pow

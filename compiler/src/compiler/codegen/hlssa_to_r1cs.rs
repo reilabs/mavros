@@ -8,8 +8,8 @@ use crate::compiler::{
     ssa::{
         BlockId, FunctionId,
         hlssa::{
-            self, BinaryArithOpKind, CmpKind, HLSSA, MAX_SUPPORTED_SIGNED_BITS,
-            MAX_SUPPORTED_UNSIGNED_BITS, Radix, RefCountOp, SliceOpDir, Type, TypeExpr,
+            self, ArithGroup, BinaryArithOpKind, CmpKind, HLSSA, MAX_SUPPORTED_UNSIGNED_BITS,
+            Radix, RefCountOp, SliceOpDir, Type, TypeExpr, assert_signed_op_width,
         },
     },
     util::{spread_bits, unspread_bits},
@@ -89,10 +89,8 @@ impl Value {
     }
 
     fn decode_signed(v: u128, bits: usize) -> i128 {
-        assert!(
-            bits > 0 && bits <= MAX_SUPPORTED_SIGNED_BITS,
-            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-        );
+        assert!(bits > 0, "cannot decode a zero-width integer");
+        assert_signed_op_width(bits, "two's complement decoding");
         let masked = Self::wrap_unsigned(v, bits);
         let sign_bit = 1u128 << (bits - 1);
         if masked & sign_bit == 0 {
@@ -103,10 +101,7 @@ impl Value {
     }
 
     fn encode_signed(v: i128, bits: usize) -> u128 {
-        assert!(
-            bits <= MAX_SUPPORTED_SIGNED_BITS,
-            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-        );
+        assert_signed_op_width(bits, "two's complement encoding");
         Self::wrap_unsigned(v as u128, bits)
     }
 
@@ -551,22 +546,22 @@ impl symbolic_executor::Context<Value> for R1CGen {
 
 // FIELD-ASSUMPTION: L4-eval
 impl symbolic_executor::Value<R1CGen> for Value {
-    fn ult(&self, b: &Self, _ctx: &mut R1CGen) -> Self {
-        self.lt(b)
-    }
-
-    fn slt(&self, b: &Self, bits: usize, _ctx: &mut R1CGen) -> Self {
-        let a = Self::decode_signed(self.expect_u128(), bits);
-        let b_val = Self::decode_signed(b.expect_u128(), bits);
-        if a < b_val {
-            Value::Const(ark_bn254::Fr::ONE)
-        } else {
-            Value::Const(ark_bn254::Fr::ZERO)
+    fn cmp(&self, b: &Self, kind: CmpKind, bits: Option<usize>, _ctx: &mut R1CGen) -> Self {
+        match kind {
+            CmpKind::Eq => self.eq(b),
+            // `ULt` compares the field encodings, which is the magnitude for an unsigned integer.
+            CmpKind::ULt => self.lt(b),
+            CmpKind::SLt => {
+                let bits = bits.expect("ICE: signed comparison without an operand width");
+                let a = Self::decode_signed(self.expect_u128(), bits);
+                let b_val = Self::decode_signed(b.expect_u128(), bits);
+                if a < b_val {
+                    Value::Const(ark_bn254::Fr::ONE)
+                } else {
+                    Value::Const(ark_bn254::Fr::ZERO)
+                }
+            }
         }
-    }
-
-    fn eq(&self, b: &Self, _ctx: &mut R1CGen) -> Self {
-        self.eq(b)
     }
 
     fn arith(
@@ -576,11 +571,13 @@ impl symbolic_executor::Value<R1CGen> for Value {
         out_type: &Type,
         _ctx: &mut R1CGen,
     ) -> Self {
+        let signed = binary_arith_op_kind.is_signed();
+
         match &out_type.strip_witness().expr {
-            TypeExpr::U(bits) => {
+            TypeExpr::Int(bits) if !signed => {
                 assert!(
                     *bits > 0 && *bits <= MAX_SUPPORTED_UNSIGNED_BITS,
-                    "Unsupported unsigned integer size in R1CS arith: u{bits}"
+                    "Unsupported integer size in R1CS arith: int{bits}"
                 );
                 assert!(
                     matches!((self, b), (Value::Const(_), Value::Const(_))),
@@ -590,28 +587,29 @@ impl symbolic_executor::Value<R1CGen> for Value {
                 let a = Self::wrap_unsigned(self.expect_u128(), *bits);
                 let b = Self::wrap_unsigned(b.expect_u128(), *bits);
                 let shift = b as u32;
-                let result = match binary_arith_op_kind {
-                    BinaryArithOpKind::Add => a.wrapping_add(b),
-                    BinaryArithOpKind::Sub => a.wrapping_sub(b),
-                    BinaryArithOpKind::Mul => a.wrapping_mul(b),
-                    BinaryArithOpKind::Div => a.checked_div(b).unwrap_or_else(|| {
+                let result = match binary_arith_op_kind.group() {
+                    ArithGroup::Add => a.wrapping_add(b),
+                    ArithGroup::Sub => a.wrapping_sub(b),
+                    ArithGroup::Mul => a.wrapping_mul(b),
+                    ArithGroup::Div => a.checked_div(b).unwrap_or_else(|| {
                         Self::ice_undefined_divmod(binary_arith_op_kind, *bits, false)
                     }),
-                    BinaryArithOpKind::Mod => a.checked_rem(b).unwrap_or_else(|| {
+                    ArithGroup::Rem => a.checked_rem(b).unwrap_or_else(|| {
                         Self::ice_undefined_divmod(binary_arith_op_kind, *bits, false)
                     }),
-                    BinaryArithOpKind::And => a & b,
-                    BinaryArithOpKind::Or => a | b,
-                    BinaryArithOpKind::Xor => a ^ b,
-                    BinaryArithOpKind::Shl => a.wrapping_shl(shift),
-                    BinaryArithOpKind::Shr => a.wrapping_shr(shift),
+                    ArithGroup::And => a & b,
+                    ArithGroup::Or => a | b,
+                    ArithGroup::Xor => a ^ b,
+                    ArithGroup::Shl => a.wrapping_shl(shift),
+                    ArithGroup::Shr => a.wrapping_shr(shift),
                 };
                 Value::Const(ark_bn254::Fr::from(Self::wrap_unsigned(result, *bits)))
             }
-            TypeExpr::I(bits) => {
+            TypeExpr::Int(bits) => {
+                assert_signed_op_width(*bits, "R1CS constant arithmetic");
                 assert!(
-                    *bits > 0 && *bits <= MAX_SUPPORTED_SIGNED_BITS,
-                    "Unsupported signed integer size in R1CS arith: i{bits}"
+                    *bits > 0,
+                    "Unsupported integer size in R1CS arith: int{bits}"
                 );
                 assert!(
                     matches!((self, b), (Value::Const(_), Value::Const(_))),
@@ -621,47 +619,50 @@ impl symbolic_executor::Value<R1CGen> for Value {
                 let a = Self::decode_signed(self.expect_u128(), *bits);
                 let b = Self::decode_signed(b.expect_u128(), *bits);
                 let b_bits = Self::wrap_unsigned(b as u128, *bits) as u32;
-                let result = match binary_arith_op_kind {
-                    BinaryArithOpKind::Add => Self::encode_signed(a.wrapping_add(b), *bits),
-                    BinaryArithOpKind::Sub => Self::encode_signed(a.wrapping_sub(b), *bits),
-                    BinaryArithOpKind::Mul => Self::encode_signed(a.wrapping_mul(b), *bits),
-                    BinaryArithOpKind::And => {
+                let result = match binary_arith_op_kind.group() {
+                    ArithGroup::Add => Self::encode_signed(a.wrapping_add(b), *bits),
+                    ArithGroup::Sub => Self::encode_signed(a.wrapping_sub(b), *bits),
+                    ArithGroup::Mul => Self::encode_signed(a.wrapping_mul(b), *bits),
+                    ArithGroup::And => {
                         Self::wrap_unsigned(a as u128, *bits)
                             & Self::wrap_unsigned(b as u128, *bits)
                     }
-                    BinaryArithOpKind::Or => {
+                    ArithGroup::Or => {
                         Self::wrap_unsigned(a as u128, *bits)
                             | Self::wrap_unsigned(b as u128, *bits)
                     }
-                    BinaryArithOpKind::Xor => {
+                    ArithGroup::Xor => {
                         Self::wrap_unsigned(a as u128, *bits)
                             ^ Self::wrap_unsigned(b as u128, *bits)
                     }
+
                     // Left shift is the same map on bits whatever the sign, so this stays on the
-                    // raw encoding. Note it does *not* mask the shift count the way `Shr` below
+                    // raw encoding. Note it does _not_ mask the shift count the way `Shr` below
                     // does: `wrapping_shl` on a `u128` masks to 127, not to `bits - 1`. Left for
-                    // now as backends do not agree on behavior here.
-                    BinaryArithOpKind::Shl => {
+                    // now as the backends do not agree on behavior here.
+                    ArithGroup::Shl => {
                         let raw = Self::wrap_unsigned(a as u128, *bits).wrapping_shl(b_bits);
                         Self::wrap_unsigned(raw, *bits)
                     }
-                    // Arithmetic, not logical. `a` is already the decoded signed value, so
-                    // shifting it directly sign-fills; the previous `wrap_unsigned(..)` re-encoded
-                    // to raw bits first and so zero-filled. The shift count is masked to
-                    // `bits - 1` to match the VM's `ashr_u64` and LLVM's `AShr` — the right-shift
-                    // trio does agree, unlike `Shl` above.
-                    BinaryArithOpKind::Shr => {
+
+                    // Arithmetic, not logical. `a` is already the decoded signed value, so shifting
+                    // it directly sign-fills; the previous `wrap_unsigned(..)` re-encoded to raw
+                    // bits first and so zero-filled. The shift count is masked to `bits - 1` to
+                    // match the VM's `ashr_u64` and LLVM's `AShr` — the right-shift trio does
+                    // agree, unlike `Shl` above.
+                    ArithGroup::Shr => {
                         Self::encode_signed(a >> (b_bits & (*bits as u32 - 1)), *bits)
                     }
+
                     // `INT_MIN / -1` is undefined for the same reason a zero divisor is, and is
                     // guarded identically by `LowerPureGuards`, so it ICEs identically here.
-                    BinaryArithOpKind::Div => {
+                    ArithGroup::Div => {
                         if Self::signed_divmod_undefined(a, b, *bits) {
                             Self::ice_undefined_divmod(binary_arith_op_kind, *bits, true);
                         }
                         Self::encode_signed(a / b, *bits)
                     }
-                    BinaryArithOpKind::Mod => {
+                    ArithGroup::Rem => {
                         if Self::signed_divmod_undefined(a, b, *bits) {
                             Self::ice_undefined_divmod(binary_arith_op_kind, *bits, true);
                         }
@@ -670,19 +671,19 @@ impl symbolic_executor::Value<R1CGen> for Value {
                 };
                 Value::Const(ark_bn254::Fr::from(result))
             }
-            TypeExpr::Field | TypeExpr::WitnessOf(_) => match binary_arith_op_kind {
-                BinaryArithOpKind::Add => self.add(b),
-                BinaryArithOpKind::Sub => self.sub(b),
-                BinaryArithOpKind::Mul => self.mul(b),
-                BinaryArithOpKind::Div => self.div(b),
-                BinaryArithOpKind::Mod => {
+            TypeExpr::Field | TypeExpr::WitnessOf(_) => match binary_arith_op_kind.group() {
+                ArithGroup::Add => self.add(b),
+                ArithGroup::Sub => self.sub(b),
+                ArithGroup::Mul => self.mul(b),
+                ArithGroup::Div => self.div(b),
+                ArithGroup::Rem => {
                     panic!("Modulo is not defined on field elements")
                 }
-                BinaryArithOpKind::And
-                | BinaryArithOpKind::Or
-                | BinaryArithOpKind::Xor
-                | BinaryArithOpKind::Shl
-                | BinaryArithOpKind::Shr => {
+                ArithGroup::And
+                | ArithGroup::Or
+                | ArithGroup::Xor
+                | ArithGroup::Shl
+                | ArithGroup::Shr => {
                     panic!("Bitwise operations are not supported on field elements")
                 }
             },
@@ -702,7 +703,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         kind: CmpKind,
         a: &Self,
         b: &Self,
-        lhs_type: &Type,
+        bits: Option<usize>,
         _ctx: &mut R1CGen,
     ) -> Result<(), AssertionFailure> {
         match kind {
@@ -716,35 +717,26 @@ impl symbolic_executor::Value<R1CGen> for Value {
                 }
             }
             // FIELD-ASSUMPTION: L4-sign
-            CmpKind::Lt => {
+            CmpKind::ULt => {
                 let a_val = a.expect_constant();
                 let b_val = b.expect_constant();
-                match &lhs_type.strip_witness().expr {
-                    TypeExpr::I(bits) => {
-                        // Signed comparison: interpret as two's complement
-                        let a_int = a_val.into_bigint();
-                        let b_int = b_val.into_bigint();
-                        let half = ark_bn254::Fr::from(1u64 << (bits - 1)).into_bigint();
-                        let a_neg = a_int >= half;
-                        let b_neg = b_int >= half;
-                        let result = match (a_neg, b_neg) {
-                            (true, false) => true,  // negative < positive
-                            (false, true) => false, // positive >= negative
-                            _ => a_int < b_int,     // same sign: compare directly
-                        };
-                        if !result {
-                            return Err(AssertionFailure::new(format!(
-                                "assert_cmp lt (signed) failed: {a_val:?} >= {b_val:?}"
-                            )));
-                        }
-                    }
-                    _ => {
-                        if a_val >= b_val {
-                            return Err(AssertionFailure::new(format!(
-                                "assert_cmp lt failed: {a_val:?} >= {b_val:?}"
-                            )));
-                        }
-                    }
+                if a_val >= b_val {
+                    return Err(AssertionFailure::new(format!(
+                        "assert_cmp lt failed: {a_val:?} >= {b_val:?}"
+                    )));
+                }
+            }
+            CmpKind::SLt => {
+                let bits = bits.expect("ICE: signed comparison without an operand width");
+                let a_val = a.expect_constant();
+                let b_val = b.expect_constant();
+                // Interpret both as two's complement, by the same decoding `cmp` uses.
+                if Self::decode_signed(a.expect_u128(), bits)
+                    >= Self::decode_signed(b.expect_u128(), bits)
+                {
+                    return Err(AssertionFailure::new(format!(
+                        "assert_cmp lt (signed) failed: {a_val:?} >= {b_val:?}"
+                    )));
                 }
             }
         }
@@ -879,11 +871,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::Const(ark_bn254::Fr::from_bigint(BigInt::from_bits_le(&negated_bits)).unwrap())
     }
 
-    fn of_u(_s: usize, v: u128, _ctx: &mut R1CGen) -> Self {
-        Value::Const(ark_bn254::Fr::from(v))
-    }
-
-    fn of_i(_s: usize, v: u128, _ctx: &mut R1CGen) -> Self {
+    fn of_int(_s: usize, v: u128, _ctx: &mut R1CGen) -> Self {
         Value::Const(ark_bn254::Fr::from(v))
     }
 
@@ -1620,7 +1608,7 @@ pub fn logup_soundness_report(
 /// LogUp proves a log-derivative rational identity at a random challenge; clearing denominators
 /// yields a nonzero polynomial of total degree `<= D = table_entries + num_lookups`, so one
 /// challenge fails with probability `<= D/|F|` (Schwartz-Zippel). K independent challenges give
-/// `(D/|F|)^K`, i.e. `K * (log2|F| - log2 D)` bits. All rounding is toward *under*-estimating
+/// `(D/|F|)^K`, i.e. `K * (log2|F| - log2 D)` bits. All rounding is toward _under_-estimating
 /// security (floor `log2 p`, ceil `log2 D`), so we never report more bits than are actually
 /// delivered.
 fn compute_logup_soundness(
@@ -1762,5 +1750,74 @@ mod logup_soundness_tests {
         // Boundary: field_bits == d_bits is still an error (per-challenge would be 0 bits).
         assert!(compute_logup_soundness(128, 22, 1 << 22).is_err());
         assert!(compute_logup_soundness(128, 23, 1 << 22).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod comparison_tests {
+    use super::{CmpKind, FieldConfig, R1CGen, Value, symbolic_executor};
+
+    fn constant(v: u64) -> Value {
+        Value::Const(ark_bn254::Fr::from(v))
+    }
+
+    fn cmp(a: &Value, b: &Value, kind: CmpKind, bits: Option<usize>) -> bool {
+        let mut generator = R1CGen::new(FieldConfig::bn254());
+        <Value as symbolic_executor::Value<R1CGen>>::cmp(a, b, kind, bits, &mut generator)
+            .expect_u1()
+    }
+
+    fn assert_cmp_holds(a: &Value, b: &Value, kind: CmpKind, bits: Option<usize>) -> bool {
+        let mut generator = R1CGen::new(FieldConfig::bn254());
+        <Value as symbolic_executor::Value<R1CGen>>::assert_cmp(kind, a, b, bits, &mut generator)
+            .is_ok()
+    }
+
+    /// Both comparison paths read their operands the way the opcode says, not the way the operand
+    /// type says.
+    ///
+    /// `assert_cmp` is the half that was wrong. It used to pick two's complement by asking whether
+    /// the operand was an integer, which was a working proxy for "signed" only while an unsigned
+    /// integer wore a different type tag. Once `TypeExpr::U` and `TypeExpr::I` collapsed into one
+    /// `Int`, that question started answering "yes" for every integer, and a `ULt` over a byte with
+    /// its high bit set read it as negative — passing an assertion that should have failed, which
+    /// is the direction that matters: the program is accepted, not rejected.
+    #[test]
+    fn a_comparison_reads_its_operands_the_way_the_opcode_says() {
+        // 0xFB in eight bits is 251 read as a magnitude and -5 read as two's complement, so the
+        // two readings disagree about every comparison of it against a small positive.
+        let a = constant(0xFB);
+        let b = constant(2);
+
+        assert!(!cmp(&a, &b, CmpKind::ULt, Some(8)), "251 < 2 is false");
+        assert!(cmp(&a, &b, CmpKind::SLt, Some(8)), "-5 < 2 is true");
+        assert!(!cmp(&a, &b, CmpKind::Eq, Some(8)));
+        assert!(cmp(&a, &a, CmpKind::Eq, Some(8)));
+
+        assert!(
+            !assert_cmp_holds(&a, &b, CmpKind::ULt, Some(8)),
+            "an unsigned assertion that 251 < 2 must fail"
+        );
+        assert!(
+            assert_cmp_holds(&a, &b, CmpKind::SLt, Some(8)),
+            "a signed assertion that -5 < 2 must hold"
+        );
+        assert!(!assert_cmp_holds(&a, &b, CmpKind::Eq, Some(8)));
+        assert!(assert_cmp_holds(&a, &a, CmpKind::Eq, Some(8)));
+    }
+
+    /// A field element has no width and no sign, and its comparisons say so.
+    ///
+    /// This is the case that used to reach `assert_cmp`'s non-integer arm, and it must keep
+    /// reaching the same answers now that the arm is selected by the opcode instead.
+    #[test]
+    fn a_field_comparison_needs_no_width() {
+        let a = constant(2);
+        let b = constant(0xFB);
+
+        assert!(cmp(&a, &b, CmpKind::ULt, None));
+        assert!(assert_cmp_holds(&a, &b, CmpKind::ULt, None));
+        assert!(!assert_cmp_holds(&b, &a, CmpKind::ULt, None));
+        assert!(assert_cmp_holds(&a, &a, CmpKind::Eq, None));
     }
 }

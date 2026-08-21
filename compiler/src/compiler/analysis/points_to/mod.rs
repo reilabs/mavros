@@ -79,7 +79,7 @@
 //! - **Opaque Source Precision:** Unconstrained call results stay `External` as their input
 //!   dependence re-enters structurally as `WriteWitness` rather than splittable heap refs. `Global`
 //!   objects carry per-slot identity (so a global read does not alias everything) but not per-slot
-//!   *contents*. A future whole-program global-constants pre-pass (`InitGlobal` → `Global` cells
+//!   _contents_. A future whole-program global-constants pre-pass (`InitGlobal` → `Global` cells
 //!   seeded into every `ReadGlobal`) would tighten loads through global-derived refs. As Globals
 //!   are init-time constants and program-wide escaped this rarely unblocks a split.
 //! - **Unconstrained-Boundary Refs:** Noir guarantees an unconstrained call cannot return a
@@ -110,12 +110,12 @@
 //!   `Elem(AllElems)`. Constant-cell enumeration is ill-defined for a runtime-sized container, so
 //!   this is effectively forced rather than a tunable trade-off.
 //! - **All-or-Nothing Group Collapse:** A single collapse trigger (one dynamic index, a
-//!   `MkRepeated` of a non-scalar element, a slice op) collapses an array's *entire* flow-group to
+//!   `MkRepeated` of a non-scalar element, a slice op) collapses an array's _entire_ flow-group to
 //!   one `AllElems` cell, rather than keeping its constant `Index(k)` cells alongside an `AllElems`
 //!   overflow (the textbook field-sensitive model: a dynamic write weak-updates `AllElems`; a
 //!   constant read sees `Index(k) ∪ AllElems`). The hybrid would only sharpen `may_alias` on groups
 //!   mixing constant and dynamic accesses, and such a group is never `splittable_cells` (splitting
-//!   needs *every* access constant), so the planned SROA/mem2reg clients gain nothing — hence the
+//!   needs _every_ access constant), so the planned SROA/mem2reg clients gain nothing — hence the
 //!   simpler disjoint-roles invariant (`Split` xor `Collapsed`).
 
 mod array_cells;
@@ -162,16 +162,16 @@ use solver::PointsToSolution;
 /// [`PointsTo::classify_pointer_uses`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerUse {
-    /// A `Load`/`Store` *pointer* operand whose points-to set is ambiguous (more than one possible
+    /// A `Load`/`Store` _pointer_ operand whose points-to set is ambiguous (more than one possible
     /// object): no object it may touch can be strongly updated or promoted.
     Deref,
 
-    /// A `Store` *pointer* operand (reported regardless of ambiguity): every object it may touch is
+    /// A `Store` _pointer_ operand (reported regardless of ambiguity): every object it may touch is
     /// written through — the out-direction an in/out parameter must replay.
     Write,
 
     /// A non-pointer use — a stored value, a non-`Load`/`Store` instruction input, or a terminator
-    /// operand — so any object the value may point to is consumed *as a value* and its allocation
+    /// operand — so any object the value may point to is consumed _as a value_ and its allocation
     /// cannot be removed.
     Consume,
 }
@@ -325,8 +325,8 @@ impl PointsTo {
     ///
     /// No escape check is needed: a `Split` group is, by construction, never observed as an
     /// aggregate outside its constant-index accesses — every way an array escapes (a `Call`
-    /// arg/result, a `Return`, a `Ref<Array>` store/load) is a *collapse trigger*, so it cannot be
-    /// `Split`. The cell *contents* escaping (a peeled ref later returned) does not block peeling
+    /// arg/result, a `Return`, a `Ref<Array>` store/load) is a _collapse trigger_, so it cannot be
+    /// `Split`. The cell _contents_ escaping (a peeled ref later returned) does not block peeling
     /// as the peeled slot just holds that ref. Works uniformly for scalar and ref arrays.
     pub fn splittable_cells(&self, f: FunctionId, v: ValueId) -> Option<HashSet<usize>> {
         self.array_cells.get(&f)?.split_indices(v).cloned()
@@ -343,7 +343,7 @@ impl PointsTo {
 
     /// Whether the array parameter `v` of `f` would be `Split` were it not an entry formal.
     ///
-    /// The callee-side precondition for whole-program *array boundary expansion* to peel it (see
+    /// The callee-side precondition for whole-program _array boundary expansion_ to peel it (see
     /// [`ArrayCells::boundary_splittable_param`]). The caller confirms `v` is a fixed-size array.
     pub fn boundary_splittable_param(&self, f: FunctionId, v: ValueId) -> bool {
         self.array_cells
@@ -382,7 +382,7 @@ impl PointsTo {
     /// Walk function `f`'s body and report every pointer use, paired with the points-to set at that
     /// site (see [`PointerUse`]).
     ///
-    /// This is the shared core of the "is this object used *only* as an unambiguous `Load`/`Store`
+    /// This is the shared core of the "is this object used _only_ as an unambiguous `Load`/`Store`
     /// pointer?" predicate that both `mem2reg` (which local allocations are promotable) and
     /// `arg_promotion` (which ref parameters are clean, and whether they are written) build on.
     /// Each caller maps the reported set onto its own candidate representation — `mem2reg` keys
@@ -398,7 +398,7 @@ impl PointsTo {
         for (_, block) in func.get_blocks() {
             for instr in block.get_instructions() {
                 match instr {
-                    // A Load's pointer is a legitimate use; only an *ambiguous* deref disqualifies.
+                    // A Load's pointer is a legitimate use; only an _ambiguous_ deref disqualifies.
                     OpCode::Load { ptr, .. } => {
                         let pts = self.points_to(f, *ptr);
                         if pts.len() != 1 {
@@ -411,11 +411,11 @@ impl PointsTo {
                             visit(PointerUse::Deref, pts);
                         }
                         visit(PointerUse::Write, pts);
-                        // The stored *value* is a non-pointer use.
+                        // The stored _value_ is a non-pointer use.
                         visit(PointerUse::Consume, self.points_to(f, *value));
                     }
                     // An Alloc defines a ref and consumes its initial value into the new cell —
-                    // exactly like a Store's stored value. Without this, a ref handle used *only*
+                    // exactly like a Store's stored value. Without this, a ref handle used _only_
                     // as an alloc's init value (e.g. `let p = &mut inner;` lowering to
                     // `p = alloc(inner_ref)`) would look unused and be wrongly promoted, leaving a
                     // dangling reference.
@@ -523,7 +523,7 @@ pub(super) fn compute_escaped(
         }
     }
 
-    // Anything stored *through* an opaque object (`External`/`Global`) is published to unknown
+    // Anything stored _through_ an opaque object (`External`/`Global`) is published to unknown
     // memory, so opaque objects are escape roots: their cell contents escape. Their own
     // escaped-ness is `is_inherently_escaped`; this closes the store-through-opaque hole.
     for o in contents.keys() {
@@ -985,8 +985,8 @@ mod tests {
                     SequenceTargetType::Array(2),
                     Type::field().ref_of(),
                 );
-                let i0 = e.u_const(32, 0);
-                let i1 = e.u_const(32, 1);
+                let i0 = e.int_const(32, 0);
+                let i1 = e.int_const(32, 1);
                 let r0 = e.array_get(arr, i0);
                 let r1 = e.array_get(arr, i1);
                 let v = e.load(r0);
@@ -1030,7 +1030,7 @@ mod tests {
                 let c0 = e.field_const(fr(7));
                 let c1 = e.field_const(fr(9));
                 let arr = e.mk_seq(vec![c0, c1], SequenceTargetType::Array(2), Type::field());
-                let i1 = e.u_const(32, 1);
+                let i1 = e.int_const(32, 1);
                 let got = e.array_get(arr, i1);
                 e.terminate_return(vec![got]);
                 captured = Some(arr);
@@ -1058,7 +1058,7 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let n = e.add_parameter(Type::u(32)); // dynamic index
+                let n = e.add_parameter(Type::int(32)); // dynamic index
                 let ra = falloc(&mut e);
                 let rb = falloc(&mut e);
                 let arr = e.mk_seq(
@@ -1084,7 +1084,7 @@ mod tests {
         assert!(pt.may_alias(main_id, r, rb));
     }
 
-    /// A phi-merged array stays cell-aligned: cell 0 of the merge sees cell 0 of *both*
+    /// A phi-merged array stays cell-aligned: cell 0 of the merge sees cell 0 of _both_
     /// predecessors (the wholesale-copy soundness obligation) and never cell 1.
     #[test]
     fn phi_merged_array_is_cell_aligned() {
@@ -1118,7 +1118,7 @@ mod tests {
                     |_| vec![arr_t],
                     |_| vec![arr_f],
                 )[0];
-                let i0 = e.u_const(32, 0);
+                let i0 = e.int_const(32, 0);
                 let r0 = e.array_get(merged, i0);
                 let v = e.load(r0);
                 e.terminate_return(vec![v]);
@@ -1174,7 +1174,7 @@ mod tests {
         );
     }
 
-    /// A constant-count repeat of a *scalar* element is cell-splittable over `0..count` (the cells
+    /// A constant-count repeat of a _scalar_ element is cell-splittable over `0..count` (the cells
     /// all alias the one source value until an `ArraySet` diverges them — the O1 refinement).
     #[test]
     fn mk_repeated_scalar_is_splittable() {
@@ -1189,7 +1189,7 @@ mod tests {
                 let mut e = b.test_block(entry);
                 let c = e.field_const(fr(3));
                 let arr = e.mk_repeated(c, SequenceTargetType::Array(4), 4, Type::field());
-                let i0 = e.u_const(32, 0);
+                let i0 = e.int_const(32, 0);
                 let got = e.array_get(arr, i0);
                 e.terminate_return(vec![got]);
                 captured = Some(arr);
@@ -1203,7 +1203,7 @@ mod tests {
         );
     }
 
-    /// A repeat of a *ref* element stays collapsed: every cell aliases the one object, so peeling is
+    /// A repeat of a _ref_ element stays collapsed: every cell aliases the one object, so peeling is
     /// pointless and the analysis reports it un-splittable.
     #[test]
     fn mk_repeated_ref_is_not_splittable() {
@@ -1220,7 +1220,7 @@ mod tests {
                 let c = e.field_const(fr(3));
                 e.store(r, c);
                 let arr = e.mk_repeated(r, SequenceTargetType::Array(4), 4, Type::field().ref_of());
-                let i0 = e.u_const(32, 0);
+                let i0 = e.int_const(32, 0);
                 let got = e.array_get(arr, i0);
                 let v = e.load(got);
                 e.terminate_return(vec![v]);
@@ -1254,7 +1254,7 @@ mod tests {
                     ],
                 }));
                 let arr = e.mk_seq_of_blob(Type::field(), blob);
-                let i1 = e.u_const(32, 1);
+                let i1 = e.int_const(32, 1);
                 let got = e.array_get(arr, i1);
                 e.terminate_return(vec![got]);
                 captured = Some(arr);
@@ -1331,7 +1331,7 @@ mod tests {
         );
     }
 
-    /// Opacity soundness (load side): loading *through* a ref read from a global yields `External`
+    /// Opacity soundness (load side): loading _through_ a ref read from a global yields `External`
     /// (unknown memory), so the loaded value may-aliases anything — not the unsound empty set.
     #[test]
     fn load_through_global_yields_external() {
@@ -1393,13 +1393,13 @@ mod tests {
     // PRECISE ARG-OUT
     // --------------------------------------------------------------------------------------------
 
-    /// A callee that allocates and writes a ref *through* a ref parameter: the caller's load of
+    /// A callee that allocates and writes a ref _through_ a ref parameter: the caller's load of
     /// that param's pointee resolves to the callee's actual allocation — not `External`. The
     /// headline precise-arg-out win over the old `External`-pollution model.
     ///
     /// `pp`'s cell carries two objects: the alloc's init seed and the object the callee writes
     /// through `*pp` (the analysis is weak-update, so the seed is not killed). The win is that
-    /// *both* are concrete, non-escaping allocations — the callee's write never decays to the
+    /// _both_ are concrete, non-escaping allocations — the callee's write never decays to the
     /// opaque `External`.
     #[test]
     fn callee_write_through_param_resolves_precisely() {

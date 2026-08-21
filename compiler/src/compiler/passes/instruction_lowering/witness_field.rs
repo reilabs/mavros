@@ -1,13 +1,14 @@
-use crate::compiler::ssa::{
-    ValueId,
-    hlssa::{
-        BinaryArithOpKind, CastTarget, Endianness, LookupTarget, OpCode, Radix, SequenceTargetType,
-        Type, TypeExpr,
-        builder::{HLBlockEmitter, HLEmitter},
+use crate::compiler::{
+    passes::instruction_lowering::{InstructionLoweringRule, LoweringContext},
+    ssa::{
+        ValueId,
+        hlssa::{
+            ArithGroup, BinaryArithOpKind, CastTarget, Endianness, LookupTarget, OpCode, Radix,
+            SequenceTargetType, Type, TypeExpr,
+            builder::{HLBlockEmitter, HLEmitter},
+        },
     },
 };
-
-use super::{InstructionLoweringRule, LoweringContext};
 
 pub struct LowerWitnessFieldOps {}
 
@@ -40,11 +41,13 @@ impl LowerWitnessFieldOps {
     ) -> bool {
         match op {
             OpCode::BinaryArithOp {
-                kind: kind @ (BinaryArithOpKind::Div | BinaryArithOpKind::Mod),
+                kind,
                 result,
                 lhs,
                 rhs,
-            } => self.lower_divmod(b, context, guard, *kind, *result, *lhs, *rhs),
+            } if matches!(kind.group(), ArithGroup::Div | ArithGroup::Rem) => {
+                self.lower_divmod(b, context, guard, *kind, *result, *lhs, *rhs)
+            }
             OpCode::Select {
                 result,
                 cond,
@@ -108,7 +111,7 @@ impl LowerWitnessFieldOps {
         }
 
         assert!(
-            kind == BinaryArithOpKind::Div,
+            kind.group() == ArithGroup::Div,
             "Modulo is not defined on field elements"
         );
 
@@ -144,7 +147,7 @@ impl LowerWitnessFieldOps {
 
         let lhs_pure = if lhs_witness { b.value_of(lhs) } else { lhs };
         let rhs_pure = if rhs_witness { b.value_of(rhs) } else { rhs };
-        let quotient_hint = b.div(lhs_pure, rhs_pure);
+        let quotient_hint = b.udiv(lhs_pure, rhs_pure);
         let quotient_hint_field = b.cast_to_field(quotient_hint);
         b.emit(OpCode::WriteWitness {
             result: Some(result),
@@ -169,7 +172,7 @@ impl LowerWitnessFieldOps {
     ) {
         if lhs_witness && !rhs_witness {
             b.emit(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Div,
+                kind: BinaryArithOpKind::UDiv,
                 result,
                 lhs,
                 rhs,
@@ -187,12 +190,12 @@ impl LowerWitnessFieldOps {
         let lhs_pure = if lhs_witness { b.value_of(lhs) } else { lhs };
         let rhs_pure = if rhs_witness { b.value_of(rhs) } else { rhs };
 
-        let lhs_gated_hint = b.mul(lhs_pure, condition_pure);
+        let lhs_gated_hint = b.umul(lhs_pure, condition_pure);
         let one = b.field_const(b.field().one());
-        let one_minus_condition = b.sub(one, condition_pure);
-        let rhs_when_active = b.mul(rhs_pure, condition_pure);
-        let safe_rhs_hint = b.add(rhs_when_active, one_minus_condition);
-        let quotient_hint = b.div(lhs_gated_hint, safe_rhs_hint);
+        let one_minus_condition = b.usub(one, condition_pure);
+        let rhs_when_active = b.umul(rhs_pure, condition_pure);
+        let safe_rhs_hint = b.uadd(rhs_when_active, one_minus_condition);
+        let quotient_hint = b.udiv(lhs_gated_hint, safe_rhs_hint);
         let quotient_hint_field = b.cast_to_field(quotient_hint);
         b.emit(OpCode::WriteWitness {
             result: Some(result),
@@ -205,7 +208,7 @@ impl LowerWitnessFieldOps {
             b.constrain(lhs, condition_field, lhs_gated_witness);
             lhs_gated_witness
         } else {
-            b.mul(lhs, condition_field)
+            b.umul(lhs, condition_field)
         };
         b.constrain(result, rhs, lhs_gated);
     }
@@ -232,19 +235,19 @@ impl LowerWitnessFieldOps {
             b.cast_to_field(if_f)
         };
 
-        let l_sub_r = b.sub(l_field, r_field);
+        let l_sub_r = b.usub(l_field, r_field);
         let cond_field = b.ensure_field(cond, context.types().get_value_type(cond));
-        let cond_times_diff = b.mul(l_sub_r, cond_field);
+        let cond_times_diff = b.umul(l_sub_r, cond_field);
         let result_type = context.types().get_value_type(result);
         if result_type.strip_witness().is_field() {
             b.emit(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result,
                 lhs: cond_times_diff,
                 rhs: r_field,
             });
         } else {
-            let selected = b.add(cond_times_diff, r_field);
+            let selected = b.uadd(cond_times_diff, r_field);
             b.emit(OpCode::Cast {
                 result,
                 value: selected,
@@ -298,20 +301,20 @@ impl LowerWitnessFieldOps {
             Endianness::Big => Box::new(0..count),
         };
         for i in visit_order {
-            let idx = b.u_const(32, i as u128);
+            let idx = b.int_const(32, i as u128);
             let bit = b.array_get(hint, idx);
             let bit_field = b.cast_to_field(bit);
             let bit_witness = b.write_witness(bit_field);
             b.lookup_rngchk(rangecheck_type, bit_witness, flag);
-            let shifted = b.mul(recomposed, two);
-            recomposed = b.add(shifted, bit_witness);
+            let shifted = b.umul(recomposed, two);
+            recomposed = b.uadd(shifted, bit_witness);
             witnesses[i] = bit_witness;
         }
 
         // Bind the decomposition to the input. Under a guard, the equality and one-bit lookups
         // are active only when the guarded operation executes.
         if let Some(flag) = guard_field {
-            let diff = b.sub(recomposed, value);
+            let diff = b.usub(recomposed, value);
             let zero = b.field_const(b.field().zero());
             b.constrain(diff, flag, zero);
         } else {
@@ -321,13 +324,13 @@ impl LowerWitnessFieldOps {
 
         let bit_elems = witnesses
             .into_iter()
-            .map(|bit| b.cast_to(CastTarget::U(1), bit))
+            .map(|bit| b.cast_to(CastTarget::Int(1), bit))
             .collect();
         b.emit(OpCode::MkSeq {
             result,
             elems: bit_elems,
             seq_type: SequenceTargetType::Array(count),
-            elem_type: Type::witness_of(Type::u(1)),
+            elem_type: Type::witness_of(Type::int(1)),
         });
         true
     }
@@ -349,7 +352,7 @@ impl LowerWitnessFieldOps {
     ) -> bool {
         let radix = match radix {
             Radix::Dyn(rv) => {
-                let const_256 = b.u_const(32, 256);
+                let const_256 = b.int_const(32, 256);
                 if let Some(condition) = guard {
                     b.emit(OpCode::Guard {
                         condition,
@@ -405,17 +408,17 @@ impl LowerWitnessFieldOps {
             Endianness::Big => Box::new(0..count),
         };
         for i in visit_order {
-            let idx = b.u_const(32, i as u128);
+            let idx = b.int_const(32, i as u128);
             let byte = b.array_get(hint, idx);
             let byte_field = b.cast_to_field(byte);
             let byte_wit = b.write_witness(byte_field);
             b.lookup_rngchk(rangecheck_type, byte_wit, flag);
-            let shift_prev_res = b.mul(current_sum, radix_val);
-            current_sum = b.add(shift_prev_res, byte_wit);
+            let shift_prev_res = b.umul(current_sum, radix_val);
+            current_sum = b.uadd(shift_prev_res, byte_wit);
             witnesses[i] = byte_wit;
         }
         if let Some(flag) = guard_field {
-            let diff = b.sub(current_sum, value);
+            let diff = b.usub(current_sum, value);
             let zero = b.field_const(b.field().zero());
             b.constrain(diff, flag, zero);
         } else {
@@ -424,13 +427,13 @@ impl LowerWitnessFieldOps {
         }
         let byte_elems: Vec<ValueId> = witnesses
             .iter()
-            .map(|&w| b.cast_to(CastTarget::U(8), w))
+            .map(|&w| b.cast_to(CastTarget::Int(8), w))
             .collect();
         b.emit(OpCode::MkSeq {
             result,
             elems: byte_elems,
             seq_type: SequenceTargetType::Array(count),
-            elem_type: Type::witness_of(Type::u(8)),
+            elem_type: Type::witness_of(Type::int(8)),
         });
         true
     }
@@ -463,8 +466,10 @@ impl LowerWitnessFieldOps {
 
 fn cast_target_for_integer_type(ty: &Type) -> CastTarget {
     match ty.strip_witness().expr {
-        TypeExpr::U(bits) => CastTarget::U(bits),
-        TypeExpr::I(bits) => CastTarget::I(bits),
+        // A `CastTarget` is a raw-bits conversion, so there is one target per width and no sign to
+        // choose: `TypeExpr::Int(n)` says only "an n-bit integer", and `CastTarget::Int(n)` says
+        // only "reinterpret at n bits". Sign extension is the separate `SExt` opcode.
+        TypeExpr::Int(bits) => CastTarget::Int(bits),
         other => panic!("expected integer type, got {:?}", other),
     }
 }
@@ -484,11 +489,11 @@ mod tests {
         let condition = guarded.then(|| ssa.fresh_value());
         let result = ssa.fresh_value();
         let function = ssa.get_unique_entrypoint_mut();
-        function.add_return_type(Type::witness_of(Type::u(1)).array_of(3));
+        function.add_return_type(Type::witness_of(Type::int(1)).array_of(3));
         let entry = function.get_entry_mut();
         entry.push_parameter(value, Type::witness_of(Type::field()));
         if let Some(condition) = condition {
-            entry.push_parameter(condition, Type::witness_of(Type::u(1)));
+            entry.push_parameter(condition, Type::witness_of(Type::int(1)));
         }
         let to_bits = OpCode::ToBits {
             result,
@@ -558,7 +563,7 @@ mod tests {
                 elems,
                 seq_type: SequenceTargetType::Array(3),
                 elem_type,
-            } if *r == result && elems.len() == 3 && *elem_type == Type::witness_of(Type::u(1))
+            } if *r == result && elems.len() == 3 && *elem_type == Type::witness_of(Type::int(1))
         )));
     }
 

@@ -1,13 +1,13 @@
 //! The per-opcode constraint walker for the points-to analysis.
 //!
 //! For each function it emits the inclusion constraints of every opcode into a [`ConstraintSet`],
-//! plus the value nodes whose points-to set *escapes* to a true program sink (a global, or — for
+//! plus the value nodes whose points-to set _escapes_ to a true program sink (a global, or — for
 //! `main` — a return). Calls are no longer modeled by blanket escape: a `Call` **instantiates the
 //! callee's [`PointsToSummary`]** (see [`super::summary`]), so a ref passed to a callee that does
 //! not leak it stays local, and a ref returned from a callee resolves to the callee's actual object
 //! rather than `External`.
 //!
-//! Pointer structure is handled by emitting one constraint per *ref-bearing level* of a type (see
+//! Pointer structure is handled by emitting one constraint per _ref-bearing level_ of a type (see
 //! [`ref_levels`]): the points-to set lives at each level whose type is a `Ref`, reached by
 //! descending only through array elements. Object cells (a `Ref`'s pointee, an array element) are
 //! shared through object identity in the solver, never copied — that is the inclusion refinement of
@@ -17,7 +17,7 @@
 //! classifies each array flow-group as `Split` (purely local, only ever constant-indexed) or
 //! `Collapsed`. For a `Split` group the builder emits one `Obj(_, Elem(Index(k)))` node per live
 //! constant index, so distinct constant cells carry distinct points-to sets and `may_alias` is
-//! answered *per cell*. A `Collapsed` group (any dynamic index, `MkRepeated`, slice, through-`Ref`,
+//! answered _per cell_. A `Collapsed` group (any dynamic index, `MkRepeated`, slice, through-`Ref`,
 //! or boundary crossing) and every array level below the value's top level collapse to the single
 //! [`Cell::AllElems`](super::object::Cell) node. The
 //! [`PointsTo::splittable_cells`](super::PointsTo::splittable_cells) query reads the same
@@ -25,7 +25,7 @@
 //!
 //! ## Contexts
 //!
-//! [`build_function`] takes a creation [`Context`] for *this* function's local allocations and a
+//! [`build_function`] takes a creation [`Context`] for _this_ function's local allocations and a
 //! depth `k`. Phase 1 (summary computation) passes `ctx = empty`, `k = 0`, so every object is
 //! polymorphic; Phase 2 passes a per-call-site context and `k ≥ 1`, qualifying local allocations
 //! and pushing each call site (`object::Context::push`) so two call sites of one helper get
@@ -110,7 +110,7 @@ pub fn build_function(
     // Phase 1 the placeholder is the symbolic input the summary is parametric over.
     for (i, (value, ty)) in func.get_entry().get_parameters().enumerate() {
         // The entry function has no caller, so its parameters cannot be ref-typed: a `Placeholder`
-        // for a `main` parameter would stand for caller memory that does not exist and is *not*
+        // for a `main` parameter would stand for caller memory that does not exist and is _not_
         // `is_inherently_escaped`, so a local stored through it would be judged non-escaping —
         // unsound. ZK `main` signatures are value-typed, so this never fires; the assert pins the
         // invariant against a future change that would silently under-approximate escape.
@@ -240,12 +240,12 @@ impl FnBuilder<'_> {
     /// The constant value of `index`, if any.
     fn const_index(&self, index: ValueId) -> Option<usize> {
         match &*self.ssa.get_const(index)? {
-            Constant::U(_, v) => Some(*v as usize),
+            Constant::Int(_, v) => Some(*v as usize),
             _ => None,
         }
     }
 
-    /// Ref-bearing paths of a *value* of type `ty`, with the value's own top array level expanded
+    /// Ref-bearing paths of a _value_ of type `ty`, with the value's own top array level expanded
     /// into its flow-group cells (deeper array levels collapse to `AllElems` — single-level arrays
     /// are the case that matters; nested arrays stay sound).
     ///
@@ -280,11 +280,7 @@ impl FnBuilder<'_> {
                     prefix.pop();
                 }
             }
-            TypeExpr::Field
-            | TypeExpr::U(_)
-            | TypeExpr::I(_)
-            | TypeExpr::Function
-            | TypeExpr::Blob(..) => {}
+            TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => {}
             TypeExpr::WitnessOf(_) => unreachable!("peeled above"),
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
         }
@@ -582,7 +578,7 @@ impl FnBuilder<'_> {
             } => {
                 // Each global slot+level is a distinct (escaped, opaque) `Global` object: two reads
                 // of one slot alias, but a read does not alias unrelated locals — avoiding the
-                // `External` virality that would block a coexisting local's split. Loads *through*
+                // `External` virality that would block a coexisting local's split. Loads _through_
                 // the read ref still yield `External` (Global is opaque), so the deref stays sound.
                 let off = *offset as usize;
                 for path in ref_levels(result_type) {
@@ -814,10 +810,10 @@ impl FnBuilder<'_> {
 /// Every path to a `Ref`-typed level of `ty`, descending only through array/slice elements (which
 /// collapse to [`Cell::AllElems`]).
 ///
-/// These are the levels at which a *value* of type `ty` directly holds a pointer; a `Ref`'s own
+/// These are the levels at which a _value_ of type `ty` directly holds a pointer; a `Ref`'s own
 /// pointee is object-land, not a value level, so descent stops at the first `Ref`.
 ///
-/// This is deliberately *not* `witness_taint_inference`'s `paths_of_type`/`leaf_paths`: the former
+/// This is deliberately _not_ `witness_taint_inference`'s `paths_of_type`/`leaf_paths`: the former
 /// descends through `Deref` into pointees (which points-to must not do — a pointee is reached
 /// through the object graph, never a value's own path), and the latter also emits scalar leaves and
 /// lacks the [`Cell`] payload. Deriving ref-only paths from either is more code than this focused
@@ -838,11 +834,7 @@ fn collect_ref_levels(ty: &Type, prefix: &mut Path, out: &mut Vec<Path>) {
             collect_ref_levels(inner, prefix, out);
             prefix.pop();
         }
-        TypeExpr::Field
-        | TypeExpr::U(_)
-        | TypeExpr::I(_)
-        | TypeExpr::Function
-        | TypeExpr::Blob(..) => {}
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => {}
         TypeExpr::WitnessOf(_) => unreachable!("peeled above"),
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
     }

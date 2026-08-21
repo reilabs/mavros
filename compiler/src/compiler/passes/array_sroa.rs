@@ -10,14 +10,14 @@
 //! plain scalars (which `WitnessTaintInference` can then classify `Pure`); cells of ref arrays
 //! become individual refs that the follow-up [`super::mem2reg`] promotes. It is the array analog of
 //! tuple elision (which explodes tuples the same way), but driven by the analysis rather than by
-//! syntax — so it fires only where aliasing is *proven* separable, never speculatively.
+//! syntax — so it fires only where aliasing is _proven_ separable, never speculatively.
 //!
 //! ## One-Level Value Rewriting
 //!
 //! Three facts from the analysis ensure that it can be a simple, one-level value-rewriting pass.
 //!
 //! - **`Split` never crosses a boundary.** Every parameter, `Call` arg/result, `Return`,
-//!   `InitGlobal`, `ReadGlobal`, and `Ref<Array>` store/load is a *collapse trigger*, so a `Split`
+//!   `InitGlobal`, `ReadGlobal`, and `Ref<Array>` store/load is a _collapse trigger_, so a `Split`
 //!   array value appears _only_ in `MkSeq`/`MkSeqOfBlob`/`MkRepeated` (def), `ArrayGet`/`ArraySet`
 //!   (constant access), the union-copy ops (`ArraySet`-result, `Select`, `Cast`), and
 //!   block-param/`Jmp` phis.
@@ -40,7 +40,7 @@
 //!
 //! 1. **Plan:** Create a `value_map: ValueId -> Vec<ValueId>` for the peeled values only. A `Split`
 //!    array maps to its `N` per-cell component values (index `k` at position `k` — the cell set is
-//!    dense `0..N`). `MkSeq`/`MkSeqOfBlob`/`MkRepeated`/`ArrayGet`/`ArraySet` results *alias*
+//!    dense `0..N`). `MkSeq`/`MkSeqOfBlob`/`MkRepeated`/`ArrayGet`/`ArraySet` results _alias_
 //!    slices of their operands' components (no fresh ids, no emitted op); `Select`/`Cast` results
 //!    and split params get fresh per-cell ids. Everything else is absent from the map and is its
 //!    own single component.
@@ -323,7 +323,7 @@ struct Plan {
     /// their own single component.
     value_map: HashMap<ValueId, Vec<ValueId>>,
 
-    /// The subset of `value_map` keys that are *peeled `Split` arrays* (as opposed to single-value
+    /// The subset of `value_map` keys that are _peeled `Split` arrays_ (as opposed to single-value
     /// `ArrayGet` cell aliases). Drives the rewrite decision (drop / emit-per-cell / keep).
     split: HashSet<ValueId>,
 }
@@ -461,10 +461,10 @@ fn array_size(ty: &Type) -> usize {
     }
 }
 
-/// The constant value of an index, if it resolves to a `Constant::U`.
+/// The constant value of an index, if it resolves to an integer constant.
 fn const_index(ssa: &HLSSA, index: ValueId) -> Option<usize> {
     match &*ssa.get_const(index)? {
-        Constant::U(_, v) => Some(*v as usize),
+        Constant::Int(_, v) => Some(*v as usize),
         _ => None,
     }
 }
@@ -608,11 +608,11 @@ mod tests {
                 let x = e.field_const(fr(7));
                 let y = e.field_const(fr(9));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
-                let i0 = e.u_const(32, 0);
-                let i1 = e.u_const(32, 1);
+                let i0 = e.int_const(32, 0);
+                let i1 = e.int_const(32, 1);
                 let a = e.array_get(arr, i0);
                 let bb = e.array_get(arr, i1);
-                let s = e.add(a, bb);
+                let s = e.uadd(a, bb);
                 e.terminate_return(vec![s]);
             });
         }
@@ -637,12 +637,12 @@ mod tests {
                 let y = e.field_const(fr(2));
                 let z = e.field_const(fr(3));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
-                let i0 = e.u_const(32, 0);
-                let i1 = e.u_const(32, 1);
+                let i0 = e.int_const(32, 0);
+                let i1 = e.int_const(32, 1);
                 let arr2 = e.array_set(arr, i0, z); // [z, y]
                 let a = e.array_get(arr2, i0); // z
                 let bb = e.array_get(arr2, i1); // y
-                let s = e.add(a, bb);
+                let s = e.uadd(a, bb);
                 e.terminate_return(vec![s]);
             });
         }
@@ -678,11 +678,11 @@ mod tests {
                     |_| vec![arr_t],
                     |_| vec![arr_f],
                 )[0];
-                let i0 = e.u_const(32, 0);
-                let i1 = e.u_const(32, 1);
+                let i0 = e.int_const(32, 0);
+                let i1 = e.int_const(32, 1);
                 let r0 = e.array_get(merged, i0);
                 let r1 = e.array_get(merged, i1);
-                let s = e.add(r0, r1);
+                let s = e.uadd(r0, r1);
                 e.terminate_return(vec![s]);
             });
         }
@@ -707,7 +707,7 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let n = e.add_parameter(Type::u(32)); // dynamic index
+                let n = e.add_parameter(Type::int(32)); // dynamic index
                 let x = e.field_const(fr(7));
                 let y = e.field_const(fr(9));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
@@ -721,7 +721,7 @@ mod tests {
         assert_eq!(c.arrayget, 1, "dynamic ArrayGet retained");
     }
 
-    /// Negative — an out-of-bounds *constant* index (a legal program whose bounds failure is
+    /// Negative — an out-of-bounds _constant_ index (a legal program whose bounds failure is
     /// deferred to runtime) collapses the group, so the array is retained rather than peeled (which
     /// would index a nonexistent cell and crash the compiler).
     #[test]
@@ -737,7 +737,7 @@ mod tests {
                 let y = e.field_const(fr(2));
                 let z = e.field_const(fr(3));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
-                let oob = e.u_const(32, 5); // index 5 into a length-2 array
+                let oob = e.int_const(32, 5); // index 5 into a length-2 array
                 let _ = e.array_set(arr, oob, z);
                 e.terminate_return(vec![]);
             });
@@ -762,7 +762,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = e.add_parameter(arr2(Type::field()));
-                let i0 = e.u_const(32, 0);
+                let i0 = e.int_const(32, 0);
                 let got = e.array_get(a, i0);
                 e.terminate_return(vec![got]);
             });
@@ -806,7 +806,7 @@ mod tests {
                     ],
                 }));
                 let arr = e.mk_seq_of_blob(Type::field(), blob);
-                let i1 = e.u_const(32, 1);
+                let i1 = e.int_const(32, 1);
                 let got = e.array_get(arr, i1);
                 e.terminate_return(vec![got]);
             });
@@ -840,13 +840,13 @@ mod tests {
                     SequenceTargetType::Array(2),
                     Type::field().ref_of(),
                 );
-                let i0 = e.u_const(32, 0);
-                let i1 = e.u_const(32, 1);
+                let i0 = e.int_const(32, 0);
+                let i1 = e.int_const(32, 1);
                 let r0 = e.array_get(arr, i0); // ra
                 let r1 = e.array_get(arr, i1); // rb
                 let v0 = e.load(r0);
                 let v1 = e.load(r1);
-                let s = e.add(v0, v1);
+                let s = e.uadd(v0, v1);
                 e.terminate_return(vec![s]);
             });
         }
@@ -879,7 +879,7 @@ mod tests {
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
                 let p = e.alloc(arr); // Ref<Array<Field,2>>, seeded with arr (store folded into the alloc)
                 let loaded = e.load(p); // Array<Field,2>
-                let i0 = e.u_const(32, 0);
+                let i0 = e.int_const(32, 0);
                 let got = e.array_get(loaded, i0);
                 e.terminate_return(vec![got]);
             });
@@ -895,7 +895,7 @@ mod tests {
         assert_eq!(c.arrayget, 0);
     }
 
-    /// O1: a constant-count repeat of a *scalar* (`[0; 4]`), functionally updated at one cell and
+    /// O1: a constant-count repeat of a _scalar_ (`[0; 4]`), functionally updated at one cell and
     /// read at constant indices, peels fully — no `MkRepeated`/`ArraySet`/`ArrayGet` remains.
     #[test]
     fn repeated_scalar_array_peels() {
@@ -910,12 +910,12 @@ mod tests {
                 let zero = e.field_const(fr(0));
                 let arr = e.mk_repeated(zero, SequenceTargetType::Array(4), 4, Type::field()); // [0;4]
                 let x = e.field_const(fr(7));
-                let i1 = e.u_const(32, 1);
+                let i1 = e.int_const(32, 1);
                 let updated = e.array_set(arr, i1, x); // [0, 7, 0, 0]
-                let i0 = e.u_const(32, 0);
+                let i0 = e.int_const(32, 0);
                 let a = e.array_get(updated, i0); // 0
                 let bb = e.array_get(updated, i1); // 7
-                let s = e.add(a, bb);
+                let s = e.uadd(a, bb);
                 e.terminate_return(vec![s]);
             });
         }
@@ -926,7 +926,7 @@ mod tests {
         assert_eq!(c.arrayget, 0, "ArrayGets peeled away");
     }
 
-    /// O1 negative: a repeat of a *ref* element stays collapsed (all cells alias one object, so
+    /// O1 negative: a repeat of a _ref_ element stays collapsed (all cells alias one object, so
     /// peeling is pointless) — the `MkRepeated` and its `ArrayGet` are retained.
     #[test]
     fn repeated_ref_array_is_not_peeled() {
@@ -942,7 +942,7 @@ mod tests {
                 let c = e.field_const(fr(5));
                 e.store(r, c);
                 let arr = e.mk_repeated(r, SequenceTargetType::Array(3), 3, Type::field().ref_of()); // [r;3]
-                let i0 = e.u_const(32, 0);
+                let i0 = e.int_const(32, 0);
                 let got = e.array_get(arr, i0); // r
                 let v = e.load(got);
                 e.terminate_return(vec![v]);
@@ -957,7 +957,7 @@ mod tests {
         assert_eq!(c.arrayget, 1, "ref repeat's ArrayGet retained");
     }
 
-    /// C1: a locally-built *slice* threaded through an if/else phi is never `Split` (a slice can't be
+    /// C1: a locally-built _slice_ threaded through an if/else phi is never `Split` (a slice can't be
     /// peeled — `array_size` would panic on it), so both slice constructors are retained and the
     /// pass does not crash.
     #[test]
@@ -1008,7 +1008,7 @@ mod tests {
                 let y = e.field_const(fr(9));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
                 let _slice = e.cast_to(CastTarget::ArrayToSlice, arr); // unioned into arr's group
-                let i0 = e.u_const(32, 0);
+                let i0 = e.int_const(32, 0);
                 let got = e.array_get(arr, i0);
                 e.terminate_return(vec![got]);
             });

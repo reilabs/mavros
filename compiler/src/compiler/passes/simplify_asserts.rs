@@ -69,8 +69,9 @@ fn emit_assert_eq(
     defs: &HashMap<ValueId, OpCode>,
     function_type_info: &FunctionTypeInfo,
 ) -> Vec<OpCode> {
+    // Gated on a `Field` result below, where the sign says nothing, so it accepts either form.
     if let Some(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Mul,
+        kind: BinaryArithOpKind::UMul | BinaryArithOpKind::SMul,
         result,
         lhs: a,
         rhs: b,
@@ -87,7 +88,7 @@ fn emit_assert_eq(
     }
 
     if let Some(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Mul,
+        kind: BinaryArithOpKind::UMul | BinaryArithOpKind::SMul,
         result,
         lhs: a,
         rhs: b,

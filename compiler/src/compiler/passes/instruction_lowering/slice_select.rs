@@ -32,9 +32,7 @@ fn emit_elem_select(
     typ: &Type,
 ) -> ValueId {
     match &typ.expr {
-        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::WitnessOf(_) => {
-            b.select(cond, lhs, rhs)
-        }
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::WitnessOf(_) => b.select(cond, lhs, rhs),
         TypeExpr::Array(elem_type, size) => {
             let elem_type = (**elem_type).clone();
             b.build_array_loop(*size, elem_type.clone(), |b, idx| {
@@ -98,16 +96,16 @@ impl InstructionLoweringRule for LowerSliceSelect {
 
         let len_a = b.slice_len(a);
         let len_c = b.slice_len(c);
-        let zero = b.u_const(32, 0);
-        let one = b.u_const(32, 1);
+        let zero = b.int_const(32, 0);
+        let one = b.int_const(32, 1);
         let acc = b.mk_seq(vec![], SequenceTargetType::Slice, elem_ty.clone());
 
         // Prefix `0 .. min(len_a, len_c)`
         let acc = b.build_loop(
-            vec![(zero, Type::u(32)), (acc, result_ty.clone())],
+            vec![(zero, Type::int(32)), (acc, result_ty.clone())],
             |hb, p| {
-                let in_a = hb.lt(p[0], len_a);
-                let in_c = hb.lt(p[0], len_c);
+                let in_a = hb.ult(p[0], len_a);
+                let in_c = hb.ult(p[0], len_c);
                 hb.and(in_a, in_c)
             },
             |bb, p| {
@@ -116,7 +114,7 @@ impl InstructionLoweringRule for LowerSliceSelect {
                 let c_i = bb.array_get(c, i);
                 let sel = emit_elem_select(bb, cond, a_i, c_i, &elem_ty);
                 let acc = bb.slice_push(p[1], vec![sel], SliceOpDir::Back);
-                vec![bb.add(i, one), acc]
+                vec![bb.uadd(i, one), acc]
             },
         )[1];
 

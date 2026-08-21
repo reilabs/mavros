@@ -3,7 +3,7 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, OpCode, TypeExpr,
+            ArithGroup, OpCode, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -21,12 +21,15 @@ impl InstructionLoweringRule for LowerDegreeSpillingOps {
         instruction: &OpCode,
     ) -> bool {
         match instruction {
+            // Degree spilling is about the _shape_ of the product, not how its operands read.
             OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Mul,
+                kind,
                 result,
                 lhs,
                 rhs,
-            } => self.lower_mul(b, context.types(), *result, *lhs, *rhs),
+            } if kind.group() == ArithGroup::Mul => {
+                self.lower_mul(b, context.types(), *result, *lhs, *rhs)
+            }
             _ => false,
         }
     }
@@ -54,7 +57,7 @@ impl LowerDegreeSpillingOps {
         }
 
         match lhs_type.strip_witness().expr {
-            TypeExpr::U(_) | TypeExpr::I(_) => {
+            TypeExpr::Int(_) => {
                 panic!(
                     "witness integer multiplication should have been lowered by instruction_lowering"
                 )
@@ -62,7 +65,7 @@ impl LowerDegreeSpillingOps {
             _ if lhs_witness && rhs_witness => {
                 let lhs_plain = b.value_of(lhs);
                 let rhs_plain = b.value_of(rhs);
-                let mul_hint = b.mul(lhs_plain, rhs_plain);
+                let mul_hint = b.umul(lhs_plain, rhs_plain);
                 b.emit(OpCode::WriteWitness {
                     result: Some(result),
                     value: mul_hint,

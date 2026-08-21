@@ -276,7 +276,7 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             value,
             target: CastTarget::WitnessOf,
         } => {
-            // A WitnessOf cast is a witness *source* (emitted before inference, e.g. the default
+            // A WitnessOf cast is a witness _source_ (emitted before inference, e.g. the default
             // element for an array that will hold witness values): its result is unconditionally
             // Witness — at its leaf positions, since container roots carry no taint.
             let ty = builder.value_type(*result);
@@ -785,11 +785,9 @@ fn leaf_paths(ty: &Type) -> Vec<Vec<Descent>> {
     let mut out = Vec::new();
     fn go(ty: &Type, prefix: &mut Vec<Descent>, out: &mut Vec<Vec<Descent>>) {
         match &ty.peel_witness().expr {
-            TypeExpr::Field
-            | TypeExpr::U(_)
-            | TypeExpr::I(_)
-            | TypeExpr::Function
-            | TypeExpr::Blob(..) => out.push(prefix.clone()),
+            TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
+                out.push(prefix.clone())
+            }
             TypeExpr::Ref(_) => out.push(prefix.clone()),
             TypeExpr::Slice(inner) => {
                 prefix.push(Descent::Len);

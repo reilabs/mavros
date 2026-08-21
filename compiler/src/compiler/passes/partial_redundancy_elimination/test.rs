@@ -36,7 +36,7 @@ fn diamond_arms() -> (
     let t = f.add_block();
     let e = f.add_block();
     let entry = f.get_entry_mut();
-    entry.push_parameter(cond, Type::u(1));
+    entry.push_parameter(cond, Type::int(1));
     entry.set_terminator(Terminator::JmpIf(cond, t, e));
     f.get_block_mut(t)
         .set_terminator(Terminator::Return(vec![]));
@@ -91,7 +91,7 @@ fn split_both_arms_of_shared_target() {
     let f = ssa.get_unique_entrypoint_mut();
     let t = f.add_block();
     let entry = f.get_entry_mut();
-    entry.push_parameter(cond, Type::u(1));
+    entry.push_parameter(cond, Type::int(1));
     entry.set_terminator(Terminator::JmpIf(cond, t, t));
     f.get_block_mut(t)
         .set_terminator(Terminator::Return(vec![]));
@@ -135,7 +135,7 @@ fn split_panics_on_parameterized_target() {
     let f = ssa.get_unique_entrypoint_mut();
     let t = f.add_block();
     let entry = f.get_entry_mut();
-    entry.push_parameter(cond, Type::u(1));
+    entry.push_parameter(cond, Type::int(1));
     // Malformed on purpose: a `JmpIf` edge cannot bind `t`'s parameter.
     entry.set_terminator(Terminator::JmpIf(cond, t, t));
     let tb = f.get_block_mut(t);
@@ -203,7 +203,7 @@ fn field_arithmetic_is_total() {
     let entry = ssa.get_unique_entrypoint().get_entry_id();
 
     use BinaryArithOpKind::*;
-    for kind in [Add, Sub, Mul] {
+    for kind in [UAdd, USub, UMul] {
         assert!(oracle.is_total_at(&bin(kind, r, a, b), entry));
         // Witness-ness does not matter for field arithmetic: the gadgets are functional.
         assert!(oracle.is_total_at(&bin(kind, r, wa, wa), entry));
@@ -220,9 +220,13 @@ fn field_arithmetic_is_total() {
 
 #[test]
 fn integer_wrap_arithmetic_is_not_total() {
-    let (ssa, vals) = main_with_params(&[Type::u(32), Type::u(32), Type::witness_of(Type::u(32))]);
+    let (ssa, vals) = main_with_params(&[
+        Type::int(32),
+        Type::int(32),
+        Type::witness_of(Type::int(32)),
+    ]);
     let (a, b, wa) = (vals[0], vals[1], vals[2]);
-    let c2 = ssa.add_const(Constant::U(32, 2));
+    let c2 = ssa.add_const(Constant::Int(32, 2));
     let r = ssa.fresh_value();
 
     let (fid, cc, types) = oracle_env(&ssa);
@@ -230,7 +234,7 @@ fn integer_wrap_arithmetic_is_not_total() {
     let entry = ssa.get_unique_entrypoint().get_entry_id();
 
     use BinaryArithOpKind::*;
-    for kind in [Add, Sub, Mul] {
+    for kind in [UAdd, USub, UMul] {
         assert!(!oracle.is_total_at(&bin(kind, r, a, b), entry));
         assert!(!oracle.is_total_at(&bin(kind, r, wa, wa), entry));
     }
@@ -250,7 +254,7 @@ fn integer_wrap_arithmetic_is_not_total() {
 
 #[test]
 fn comparisons_selects_and_bit_ops_are_total() {
-    let (ssa, vals) = main_with_params(&[Type::u(32), Type::u(32), Type::u(1)]);
+    let (ssa, vals) = main_with_params(&[Type::int(32), Type::int(32), Type::int(1)]);
     let (a, b, cond) = (vals[0], vals[1], vals[2]);
     let r = ssa.fresh_value();
 
@@ -258,7 +262,7 @@ fn comparisons_selects_and_bit_ops_are_total() {
     let oracle = TotalityOracle::new(&cc, &ssa, fid, types.get_function(fid));
     let entry = ssa.get_unique_entrypoint().get_entry_id();
 
-    for kind in [CmpKind::Eq, CmpKind::Lt] {
+    for kind in [CmpKind::Eq, CmpKind::ULt] {
         assert!(oracle.is_total_at(
             &OpCode::Cmp {
                 kind,
@@ -307,7 +311,7 @@ fn comparisons_selects_and_bit_ops_are_total() {
 
 #[test]
 fn representation_casts_are_total_map_is_not() {
-    let (ssa, vals) = main_with_params(&[Type::field(), Type::witness_of(Type::u(32))]);
+    let (ssa, vals) = main_with_params(&[Type::field(), Type::witness_of(Type::int(32))]);
     let (a, wa) = (vals[0], vals[1]);
     let r = ssa.fresh_value();
 
@@ -320,8 +324,8 @@ fn representation_casts_are_total_map_is_not() {
         value,
         target,
     };
-    assert!(oracle.is_total_at(&cast(CastTarget::U(8), a), entry));
-    assert!(oracle.is_total_at(&cast(CastTarget::I(16), a), entry));
+    assert!(oracle.is_total_at(&cast(CastTarget::Int(8), a), entry));
+    assert!(oracle.is_total_at(&cast(CastTarget::Int(16), a), entry));
     assert!(oracle.is_total_at(&cast(CastTarget::Field, a), entry));
     assert!(oracle.is_total_at(&cast(CastTarget::Nop, a), entry));
     assert!(oracle.is_total_at(&cast(CastTarget::WitnessOf, a), entry));
@@ -334,10 +338,10 @@ fn representation_casts_are_total_map_is_not() {
 
 #[test]
 fn division_requires_a_provably_nonzero_divisor() {
-    let (ssa, vals) = main_with_params(&[Type::u(32), Type::u(32)]);
+    let (ssa, vals) = main_with_params(&[Type::int(32), Type::int(32)]);
     let (x, d) = (vals[0], vals[1]);
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c2 = ssa.add_const(Constant::U(32, 2));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c2 = ssa.add_const(Constant::Int(32, 2));
     let r = ssa.fresh_value();
 
     let (fid, cc, types) = oracle_env(&ssa);
@@ -345,7 +349,7 @@ fn division_requires_a_provably_nonzero_divisor() {
     let entry = ssa.get_unique_entrypoint().get_entry_id();
 
     use BinaryArithOpKind::*;
-    for kind in [Div, Mod] {
+    for kind in [UDiv, URem] {
         assert!(oracle.is_total_at(&bin(kind, r, x, c2), entry));
         assert!(!oracle.is_total_at(&bin(kind, r, x, c0), entry));
         // No fact about a plain parameter divisor.
@@ -359,15 +363,15 @@ fn division_requires_a_provably_nonzero_divisor() {
 fn division_discharged_by_disequality_branch() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (x, d, eq) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
     let r = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
     let t = f.add_block();
     let e = f.add_block();
     let entry = f.get_entry_mut();
-    entry.push_parameter(x, Type::u(32));
-    entry.push_parameter(d, Type::u(32));
+    entry.push_parameter(x, Type::int(32));
+    entry.push_parameter(d, Type::int(32));
     entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: eq,
@@ -384,30 +388,32 @@ fn division_discharged_by_disequality_branch() {
     let (fid, cc, types) = oracle_env(&ssa);
     let oracle = TotalityOracle::new(&cc, &ssa, fid, types.get_function(fid));
 
-    let div = bin(BinaryArithOpKind::Div, r, x, d);
+    let div = bin(BinaryArithOpKind::UDiv, r, x, d);
     assert!(oracle.is_total_at(&div, e));
     assert!(!oracle.is_total_at(&div, entry_id));
     assert!(!oracle.is_total_at(&div, t));
 }
 
-/// Signed 64-bit division alone can overflow (`i64::MIN / -1` in the VM's `div_s64`): a constant
-/// `-1` divisor is refused, a disequality-only fact is insufficient, and other widths/signs are
-/// unaffected.
+/// A signed division owes an `INT_MIN / -1` rejection: a constant `-1` divisor is refused, a
+/// disequality-only fact is insufficient, and the unsigned forms are unaffected.
+///
+/// See [`narrow_signed_division_has_the_minus_one_hazard_too`] for why this is not a 64-bit-only
+/// concern, which is what it was originally written as.
 #[test]
 fn signed_64_bit_division_minus_one_hazard() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (x, d, eq) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::I(64, 0));
-    let c2 = ssa.add_const(Constant::I(64, 2));
-    let cm1 = ssa.add_const(Constant::I(64, u64::MAX as u128));
+    let c0 = ssa.add_const(Constant::Int(64, 0));
+    let c2 = ssa.add_const(Constant::Int(64, 2));
+    let cm1 = ssa.add_const(Constant::Int(64, u64::MAX as u128));
     let r = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
     let t = f.add_block();
     let e = f.add_block();
     let entry = f.get_entry_mut();
-    entry.push_parameter(x, Type::i(64));
-    entry.push_parameter(d, Type::i(64));
+    entry.push_parameter(x, Type::int(64));
+    entry.push_parameter(d, Type::int(64));
     entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: eq,
@@ -423,8 +429,12 @@ fn signed_64_bit_division_minus_one_hazard() {
     let (fid, cc, types) = oracle_env(&ssa);
     let oracle = TotalityOracle::new(&cc, &ssa, fid, types.get_function(fid));
 
+    // Signed _opcodes_, not merely signed operand types: `minus_one_hazard` reads the sign off the
+    // operation now, so spelling these `UDiv`/`URem` over `i64` operands would be asking about an
+    // unsigned division that happens to have mis-typed operands -- which has no `-1` hazard, and
+    // which the sign-check reports as the contradiction it is.
     use BinaryArithOpKind::*;
-    for kind in [Div, Mod] {
+    for kind in [SDiv, SRem] {
         assert!(oracle.is_total_at(&bin(kind, r, x, c2), e));
         assert!(!oracle.is_total_at(&bin(kind, r, x, cm1), e));
         // `d != 0` alone leaves `-1` possible at 64 signed bits.
@@ -432,28 +442,19 @@ fn signed_64_bit_division_minus_one_hazard() {
     }
 }
 
-/// The all-ones bit pattern is only hazardous as a *signed* 64-bit divisor; as an unsigned
-/// divisor it is just a large nonzero constant.
+/// The `-1` hazard is not about the width, and gating it on 64 bits was wrong.
+///
+/// The reasoning that produced that gate was about the VM: `div_s64` sign-extends to `i64`, where
+/// only a 64-bit `MIN / -1` actually overflows. But the rejection a speculation has to respect is
+/// the one mavros emits, and `divmod_guard::emit_divmod_failure_cond` builds the overflow disjunct
+/// from `1 << (bits - 1)` at every width -- so an `i8` division by `-1` can fail too, and hoisting
+/// it moves that failure onto a path that did not have it.
 #[test]
-fn unsigned_64_bit_all_ones_divisor_is_fine() {
-    let (ssa, vals) = main_with_params(&[Type::u(64)]);
+fn narrow_signed_division_has_the_minus_one_hazard_too() {
+    let (ssa, vals) = main_with_params(&[Type::int(8)]);
     let x = vals[0];
-    let ones = ssa.add_const(Constant::U(64, u64::MAX as u128));
-    let r = ssa.fresh_value();
-
-    let (fid, cc, types) = oracle_env(&ssa);
-    let oracle = TotalityOracle::new(&cc, &ssa, fid, types.get_function(fid));
-    let entry = ssa.get_unique_entrypoint().get_entry_id();
-
-    assert!(oracle.is_total_at(&bin(BinaryArithOpKind::Div, r, x, ones), entry));
-}
-
-#[test]
-fn shifts_require_a_constant_in_range_amount() {
-    let (ssa, vals) = main_with_params(&[Type::u(32), Type::u(8)]);
-    let (a, dyn_amount) = (vals[0], vals[1]);
-    let c5 = ssa.add_const(Constant::U(8, 5));
-    let c40 = ssa.add_const(Constant::U(8, 40));
+    let minus_one = ssa.add_const(Constant::Int(8, 0xFF));
+    let two = ssa.add_const(Constant::Int(8, 2));
     let r = ssa.fresh_value();
 
     let (fid, cc, types) = oracle_env(&ssa);
@@ -461,7 +462,50 @@ fn shifts_require_a_constant_in_range_amount() {
     let entry = ssa.get_unique_entrypoint().get_entry_id();
 
     use BinaryArithOpKind::*;
-    for kind in [Shl, Shr] {
+    for kind in [SDiv, SRem] {
+        assert!(
+            oracle.is_total_at(&bin(kind, r, x, two), entry),
+            "{kind:?} by an ordinary nonzero constant is still speculable"
+        );
+        assert!(
+            !oracle.is_total_at(&bin(kind, r, x, minus_one), entry),
+            "{kind:?} by -1 can hit INT_MIN / -1 at eight bits as much as at sixty-four"
+        );
+    }
+    // The same pattern read unsigned is 255, an ordinary large divisor with no hazard at all.
+    assert!(oracle.is_total_at(&bin(UDiv, r, x, minus_one), entry));
+}
+
+/// The all-ones bit pattern is only hazardous as a _signed_ divisor; as an unsigned
+/// divisor it is just a large nonzero constant.
+#[test]
+fn unsigned_64_bit_all_ones_divisor_is_fine() {
+    let (ssa, vals) = main_with_params(&[Type::int(64)]);
+    let x = vals[0];
+    let ones = ssa.add_const(Constant::Int(64, u64::MAX as u128));
+    let r = ssa.fresh_value();
+
+    let (fid, cc, types) = oracle_env(&ssa);
+    let oracle = TotalityOracle::new(&cc, &ssa, fid, types.get_function(fid));
+    let entry = ssa.get_unique_entrypoint().get_entry_id();
+
+    assert!(oracle.is_total_at(&bin(BinaryArithOpKind::UDiv, r, x, ones), entry));
+}
+
+#[test]
+fn shifts_require_a_constant_in_range_amount() {
+    let (ssa, vals) = main_with_params(&[Type::int(32), Type::int(8)]);
+    let (a, dyn_amount) = (vals[0], vals[1]);
+    let c5 = ssa.add_const(Constant::Int(8, 5));
+    let c40 = ssa.add_const(Constant::Int(8, 40));
+    let r = ssa.fresh_value();
+
+    let (fid, cc, types) = oracle_env(&ssa);
+    let oracle = TotalityOracle::new(&cc, &ssa, fid, types.get_function(fid));
+    let entry = ssa.get_unique_entrypoint().get_entry_id();
+
+    use BinaryArithOpKind::*;
+    for kind in [UShl, UShr] {
         assert!(oracle.is_total_at(&bin(kind, r, a, c5), entry));
         assert!(!oracle.is_total_at(&bin(kind, r, a, c40), entry));
         assert!(!oracle.is_total_at(&bin(kind, r, a, dyn_amount), entry));
@@ -473,12 +517,12 @@ fn array_access_requires_a_constant_in_bounds_index() {
     let (ssa, vals) = main_with_params(&[
         Type::field().array_of(3),
         Type::field().slice_of(),
-        Type::u(32),
+        Type::int(32),
         Type::field(),
     ]);
     let (arr, slice, dyn_idx, elem) = (vals[0], vals[1], vals[2], vals[3]);
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
     let r = ssa.fresh_value();
 
     let (fid, cc, types) = oracle_env(&ssa);
@@ -522,7 +566,7 @@ fn witness_typed_division_is_never_total() {
     let (ssa, vals) = main_with_params(&[
         Type::witness_of(Type::field()),
         Type::field(),
-        Type::witness_of(Type::u(32)),
+        Type::witness_of(Type::int(32)),
     ]);
     let (wx, y, wd) = (vals[0], vals[1], vals[2]);
     let c2f = ssa.add_const(Constant::Field(ssa.field().constant(2u64)));
@@ -534,9 +578,9 @@ fn witness_typed_division_is_never_total() {
 
     use BinaryArithOpKind::*;
     // Witness dividend, constant divisor.
-    assert!(!oracle.is_total_at(&bin(Div, r, wx, c2f), entry));
+    assert!(!oracle.is_total_at(&bin(UDiv, r, wx, c2f), entry));
     // Pure dividend, witness divisor.
-    assert!(!oracle.is_total_at(&bin(Div, r, y, wd), entry));
+    assert!(!oracle.is_total_at(&bin(UDiv, r, y, wd), entry));
 }
 
 /// A pure `Field` division still needs the divisor gate: the witgen VM defines `x / 0 = 0`, but
@@ -553,14 +597,14 @@ fn field_division_uses_the_same_divisor_gate() {
     let oracle = TotalityOracle::new(&cc, &ssa, fid, types.get_function(fid));
     let entry = ssa.get_unique_entrypoint().get_entry_id();
 
-    assert!(oracle.is_total_at(&bin(BinaryArithOpKind::Div, r, x, c2), entry));
-    assert!(!oracle.is_total_at(&bin(BinaryArithOpKind::Div, r, x, c0), entry));
-    assert!(!oracle.is_total_at(&bin(BinaryArithOpKind::Div, r, x, d), entry));
+    assert!(oracle.is_total_at(&bin(BinaryArithOpKind::UDiv, r, x, c2), entry));
+    assert!(!oracle.is_total_at(&bin(BinaryArithOpKind::UDiv, r, x, c0), entry));
+    assert!(!oracle.is_total_at(&bin(BinaryArithOpKind::UDiv, r, x, d), entry));
 }
 
 #[test]
 fn effectful_and_witness_machinery_ops_are_never_total() {
-    let (ssa, vals) = main_with_params(&[Type::u(1), Type::field()]);
+    let (ssa, vals) = main_with_params(&[Type::int(1), Type::field()]);
     let (cond, a) = (vals[0], vals[1]);
     let r = ssa.fresh_value();
 
@@ -598,15 +642,15 @@ fn effectful_and_witness_machinery_ops_are_never_total() {
 
 /// The pre-untaint witness gate: no `WitnessOf` types exist yet, so under the `Taint` source the
 /// oracle must read witness-ness from the joined WTI approximation instead. A division whose
-/// dividend is a *written witness* (its type is still a plain `U(32)`) is refused where the types
+/// dividend is a _written witness_ (its type is still a plain `U(32)`) is refused where the types
 /// alone would silently license it; the all-pure twin stays licensed, and a const-index array
 /// access is licensed too (constants are absent from the taint map ⇒ Pure).
 #[test]
 fn taint_source_gates_witness_ness_pre_untaint() {
-    let (mut ssa, vals) = main_with_params(&[Type::u(32), Type::field().array_of(3)]);
+    let (mut ssa, vals) = main_with_params(&[Type::int(32), Type::field().array_of(3)]);
     let (x, arr) = (vals[0], vals[1]);
-    let c2 = ssa.add_const(Constant::U(32, 2));
-    let idx = ssa.add_const(Constant::U(32, 1));
+    let c2 = ssa.add_const(Constant::Int(32, 2));
+    let idx = ssa.add_const(Constant::Int(32, 1));
     let (w, r) = (ssa.fresh_value(), ssa.fresh_value());
     ssa.get_unique_entrypoint_mut()
         .get_entry_mut()
@@ -629,7 +673,7 @@ fn taint_source_gates_witness_ness_pre_untaint() {
     let entry = ssa.get_unique_entrypoint().get_entry_id();
 
     use BinaryArithOpKind::*;
-    for kind in [Div, Mod] {
+    for kind in [UDiv, URem] {
         // The tainted dividend is refused — its plain pre-untaint type answers "pure".
         assert!(!oracle.is_total_at(&bin(kind, r, w, c2), entry));
         // The all-pure twin over the parameter stays licensed.
@@ -746,7 +790,7 @@ fn add(
     lhs: crate::compiler::ssa::ValueId,
     rhs: crate::compiler::ssa::ValueId,
 ) -> OpCode {
-    bin(BinaryArithOpKind::Add, result, lhs, rhs)
+    bin(BinaryArithOpKind::UAdd, result, lhs, rhs)
 }
 
 /// The return values of `main`'s single returning block.
@@ -815,7 +859,7 @@ fn dominated_block_reuses_dominating_definition() {
 /// elimination sweep never moves code (the insertion stages own that).
 #[test]
 fn sibling_arms_are_not_deduplicated() {
-    let (mut ssa, vals) = main_with_params(&[Type::u(1), Type::field(), Type::field()]);
+    let (mut ssa, vals) = main_with_params(&[Type::int(1), Type::field(), Type::field()]);
     let (cond, a, b) = (vals[0], vals[1], vals[2]);
     let (r1, r2, p) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
@@ -881,7 +925,7 @@ fn mul_const_unifies_with_mul() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Mul,
+        kind: BinaryArithOpKind::UMul,
         result: m1,
         lhs: a,
         rhs: c2,
@@ -903,9 +947,9 @@ fn mul_const_unifies_with_mul() {
 #[test]
 fn loop_carried_congruent_increments_redirect() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (i, j, cond, i2, j2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -920,10 +964,10 @@ fn loop_carried_congruent_increments_redirect() {
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(header, vec![c0, c0]));
     let hb = f.get_block_mut(header);
-    hb.push_parameter(i, Type::u(32));
-    hb.push_parameter(j, Type::u(32));
+    hb.push_parameter(i, Type::int(32));
+    hb.push_parameter(j, Type::int(32));
     hb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: cond,
         lhs: i,
         rhs: c10,
@@ -972,7 +1016,7 @@ fn rangecheck_duplicates_are_dropped() {
     assert_eq!(f.get_entry().get_instructions().count(), 2);
 }
 
-/// Rangechecks over *congruent* (not merely identical) values share a key — stronger than the
+/// Rangechecks over _congruent_ (not merely identical) values share a key — stronger than the
 /// expression-keyed CSE this sweep replaces.
 #[test]
 fn rangecheck_over_congruent_values_deduplicates() {
@@ -1006,7 +1050,7 @@ fn lookup_dedup_respects_config() {
     let build = || {
         let (mut ssa, vals) = main_with_params(&[Type::field()]);
         let v = vals[0];
-        let flag = ssa.add_const(Constant::U(1, 1));
+        let flag = ssa.add_const(Constant::Int(1, 1));
         let f = ssa.get_unique_entrypoint_mut();
         let entry = f.get_entry_mut();
         for _ in 0..2 {
@@ -1096,7 +1140,7 @@ fn to_bits_deduplicates() {
 /// bound and is never keyed.
 #[test]
 fn to_radix_bytes_deduplicates_dyn_does_not() {
-    let (mut ssa, vals) = main_with_params(&[Type::field(), Type::u(32)]);
+    let (mut ssa, vals) = main_with_params(&[Type::field(), Type::int(32)]);
     let (v, d) = (vals[0], vals[1]);
     let (r1, r2, d1, d2) = (
         ssa.fresh_value(),
@@ -1192,7 +1236,7 @@ fn aggregate_constructors_are_untouched() {
 fn array_get_deduplicates() {
     let (mut ssa, vals) = main_with_params(&[Type::field().array_of(3)]);
     let arr = vals[0];
-    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
     let (g1, g2) = (ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
@@ -1231,7 +1275,7 @@ fn read_global_deduplicates() {
     assert_eq!(return_values(&ssa), vec![r1, r1]);
 }
 
-/// The dedup groups are type-scoped: a dominating same-key occurrence of a *different* type neither
+/// The dedup groups are type-scoped: a dominating same-key occurrence of a _different_ type neither
 /// absorbs a later occurrence nor blocks it from leading its own type's group.
 ///
 /// The shape is synthetic — `ReadGlobal` is keyed by offset alone, the one canonical key that
@@ -1245,7 +1289,7 @@ fn mismatched_type_leader_does_not_block_same_typed_dedup() {
     let (m, r1, r2) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
-    for (result, result_type) in [(m, Type::u(32)), (r1, Type::field()), (r2, Type::field())] {
+    for (result, result_type) in [(m, Type::int(32)), (r1, Type::field()), (r2, Type::field())] {
         entry.push_test_instruction(OpCode::ReadGlobal {
             result,
             offset: 0,
@@ -1309,9 +1353,9 @@ fn invariant_loop(
 ) {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (i, cond, inv, i2, inv2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -1332,9 +1376,9 @@ fn invariant_loop(
     entry.set_terminator(Terminator::Jmp(header, vec![c0]));
 
     let hb = f.get_block_mut(header);
-    hb.push_parameter(i, Type::u(32));
+    hb.push_parameter(i, Type::int(32));
     hb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: cond,
         lhs: i,
         rhs: c10,
@@ -1343,7 +1387,7 @@ fn invariant_loop(
 
     let bb = f.get_block_mut(body);
     bb.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Mul,
+        kind: BinaryArithOpKind::UMul,
         result: inv,
         lhs: a,
         rhs: b,
@@ -1364,7 +1408,7 @@ fn invariant_loop(
     let eb = f.get_block_mut(exit);
     if with_exit_occurrence {
         eb.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Mul,
+            kind: BinaryArithOpKind::UMul,
             result: inv2,
             lhs: a,
             rhs: b,
@@ -1399,7 +1443,7 @@ fn anticipated_invariant_is_hoisted_to_entry_edge() {
     assert!(matches!(
         f.get_block(entry).get_instructions().next().unwrap(),
         OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Mul,
+            kind: BinaryArithOpKind::UMul,
             ..
         }
     ));
@@ -1482,7 +1526,7 @@ fn hoisting_requires_the_loop_hoist_level() {
 /// relies on exactly this geometry (a single jump into the merge from each branch side).
 #[test]
 fn pre_untaint_config_dedups_without_structural_change() {
-    let (mut ssa, vals) = main_with_params(&[Type::u(1), Type::field(), Type::field()]);
+    let (mut ssa, vals) = main_with_params(&[Type::int(1), Type::field(), Type::field()]);
     let (cond, a, b) = (vals[0], vals[1], vals[2]);
     let (r1, r2) = (ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
@@ -1551,7 +1595,7 @@ fn pre_untaint_config_hoists_without_structural_change() {
     assert!(matches!(
         f.get_block(entry).get_instructions().next().unwrap(),
         OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Mul,
+            kind: BinaryArithOpKind::UMul,
             ..
         }
     ));
@@ -1596,9 +1640,9 @@ fn tainted_invariant_loop(
 ) {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let c2f = ssa.add_const(Constant::Field(ssa.field().constant(2u64)));
     let (w, i, cond, inv, i2) = (
         ssa.fresh_value(),
@@ -1625,9 +1669,9 @@ fn tainted_invariant_loop(
     entry.set_terminator(Terminator::Jmp(header, vec![c0]));
 
     let hb = f.get_block_mut(header);
-    hb.push_parameter(i, Type::u(32));
+    hb.push_parameter(i, Type::int(32));
     hb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: cond,
         lhs: i,
         rhs: c10,
@@ -1635,8 +1679,8 @@ fn tainted_invariant_loop(
     hb.set_terminator(Terminator::JmpIf(cond, body, exit));
 
     let rhs = match kind {
-        BinaryArithOpKind::Mul => b,
-        BinaryArithOpKind::Div => c2f,
+        BinaryArithOpKind::UMul => b,
+        BinaryArithOpKind::UDiv => c2f,
         other => panic!("unsupported tainted-invariant kind {other:?}"),
     };
     let bb = f.get_block_mut(body);
@@ -1667,12 +1711,12 @@ fn run_pre_untaint_config(ssa: &mut HLSSA) {
 }
 
 /// Stage 2's payoff shape: through `Config::pre_untaint()` a body-only loop-invariant field `Mul`
-/// over a *written witness* is speculated onto the `Jmp`-terminated entry edge — the taint-fed
+/// over a _written witness_ is speculated onto the `Jmp`-terminated entry edge — the taint-fed
 /// oracle licenses it (field arithmetic is total regardless of taint) — and the block/parameter
 /// geometry survives untouched.
 #[test]
 fn pre_untaint_config_speculates_tainted_total_op() {
-    let (mut ssa, entry, header, body, _exit) = tainted_invariant_loop(BinaryArithOpKind::Mul);
+    let (mut ssa, entry, header, body, _exit) = tainted_invariant_loop(BinaryArithOpKind::UMul);
 
     run_pre_untaint_config(&mut ssa);
 
@@ -1685,7 +1729,7 @@ fn pre_untaint_config_speculates_tainted_total_op() {
     );
     let hoisted = match entry_ops[1] {
         OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Mul,
+            kind: BinaryArithOpKind::UMul,
             result,
             ..
         } => *result,
@@ -1712,7 +1756,7 @@ fn pre_untaint_config_speculates_tainted_total_op() {
 /// (and the plain pre-untaint types alone would have licensed it).
 #[test]
 fn pre_untaint_config_does_not_speculate_tainted_div() {
-    let (mut ssa, entry, _header, body, _exit) = tainted_invariant_loop(BinaryArithOpKind::Div);
+    let (mut ssa, entry, _header, body, _exit) = tainted_invariant_loop(BinaryArithOpKind::UDiv);
 
     run_pre_untaint_config(&mut ssa);
 
@@ -1723,7 +1767,7 @@ fn pre_untaint_config_does_not_speculate_tainted_div() {
     assert_eq!(f.get_block(body).get_instructions().count(), 3);
 }
 
-/// A counted loop whose only `a * b` evaluation sits *after* it: anticipated at the header (the
+/// A counted loop whose only `a * b` evaluation sits _after_ it: anticipated at the header (the
 /// exit path is bound to compute it), but eliminating nothing per-iteration.
 ///
 /// Returns `(ssa, entry, exit, post)`.
@@ -1735,9 +1779,9 @@ fn post_loop_only_shape() -> (
 ) {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (i, cond, i2, post) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -1757,9 +1801,9 @@ fn post_loop_only_shape() -> (
     entry.set_terminator(Terminator::Jmp(header, vec![c0]));
 
     let hb = f.get_block_mut(header);
-    hb.push_parameter(i, Type::u(32));
+    hb.push_parameter(i, Type::int(32));
     hb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: cond,
         lhs: i,
         rhs: c10,
@@ -1772,7 +1816,7 @@ fn post_loop_only_shape() -> (
 
     let eb = f.get_block_mut(exit);
     eb.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Mul,
+        kind: BinaryArithOpKind::UMul,
         result: post,
         lhs: a,
         rhs: b,
@@ -1806,9 +1850,9 @@ fn post_loop_only_occurrence_is_not_hoisted() {
 #[test]
 fn loop_carried_operand_blocks_hoist() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let c1f = ssa.add_const(Constant::Field(ssa.field().constant(1u64)));
     let c2f = ssa.add_const(Constant::Field(ssa.field().constant(2u64)));
     let (j, acc, jc, x, k, kc, m1, k2, m2, j2) = (
@@ -1836,10 +1880,10 @@ fn loop_carried_operand_blocks_hoist() {
         .set_terminator(Terminator::Jmp(oh, vec![c0, c1f]));
 
     let ohb = f.get_block_mut(oh);
-    ohb.push_parameter(j, Type::u(32));
+    ohb.push_parameter(j, Type::int(32));
     ohb.push_parameter(acc, Type::field());
     ohb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: jc,
         lhs: j,
         rhs: c10,
@@ -1852,9 +1896,9 @@ fn loop_carried_operand_blocks_hoist() {
     obb.set_terminator(Terminator::Jmp(ih, vec![c0]));
 
     let ihb = f.get_block_mut(ih);
-    ihb.push_parameter(k, Type::u(32));
+    ihb.push_parameter(k, Type::int(32));
     ihb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: kc,
         lhs: k,
         rhs: c10,
@@ -1863,7 +1907,7 @@ fn loop_carried_operand_blocks_hoist() {
 
     let ibb = f.get_block_mut(ibody);
     ibb.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Mul,
+        kind: BinaryArithOpKind::UMul,
         result: m1,
         lhs: x,
         rhs: c2f,
@@ -1877,7 +1921,7 @@ fn loop_carried_operand_blocks_hoist() {
 
     let iab = f.get_block_mut(iafter);
     iab.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Mul,
+        kind: BinaryArithOpKind::UMul,
         result: m2,
         lhs: x,
         rhs: c2f,
@@ -1918,11 +1962,11 @@ fn outer_body_operand_shape(
 ) {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let c2 = if wrapping {
-        ssa.add_const(Constant::U(32, 2))
+        ssa.add_const(Constant::Int(32, 2))
     } else {
         ssa.add_const(Constant::Field(ssa.field().constant(2u64)))
     };
@@ -1937,7 +1981,11 @@ fn outer_body_operand_shape(
         ssa.fresh_value(),
         ssa.fresh_value(),
     );
-    let operand_type = if wrapping { Type::u(32) } else { Type::field() };
+    let operand_type = if wrapping {
+        Type::int(32)
+    } else {
+        Type::field()
+    };
 
     let f = ssa.get_unique_entrypoint_mut();
     let oh = f.add_block();
@@ -1953,9 +2001,9 @@ fn outer_body_operand_shape(
     entry.set_terminator(Terminator::Jmp(oh, vec![c0]));
 
     let ohb = f.get_block_mut(oh);
-    ohb.push_parameter(j, Type::u(32));
+    ohb.push_parameter(j, Type::int(32));
     ohb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: jc,
         lhs: j,
         rhs: c10,
@@ -1968,9 +2016,9 @@ fn outer_body_operand_shape(
     obb.set_terminator(Terminator::Jmp(ih, vec![c0]));
 
     let ihb = f.get_block_mut(ih);
-    ihb.push_parameter(k, Type::u(32));
+    ihb.push_parameter(k, Type::int(32));
     ihb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: kc,
         lhs: k,
         rhs: c10,
@@ -2021,7 +2069,7 @@ fn outer_body_pure_operand_hoists_from_inner_loop() {
     assert!(matches!(
         instrs[1],
         OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Mul,
+            kind: BinaryArithOpKind::UMul,
             ..
         }
     ));
@@ -2098,9 +2146,9 @@ fn call_result_operand_shape(
     let g = ssa.add_function("g".to_string());
     let (p, r) = (ssa.fresh_value(), ssa.fresh_value());
     let (a, x) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let c2f = ssa.add_const(Constant::Field(ssa.field().constant(2u64)));
     let (j, jc, k, kc, m1, k2, m2, j2) = (
         ssa.fresh_value(),
@@ -2135,9 +2183,9 @@ fn call_result_operand_shape(
     entry.set_terminator(Terminator::Jmp(oh, vec![c0]));
 
     let ohb = f.get_block_mut(oh);
-    ohb.push_parameter(j, Type::u(32));
+    ohb.push_parameter(j, Type::int(32));
     ohb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: jc,
         lhs: j,
         rhs: c10,
@@ -2154,9 +2202,9 @@ fn call_result_operand_shape(
     obb.set_terminator(Terminator::Jmp(ih, vec![c0]));
 
     let ihb = f.get_block_mut(ih);
-    ihb.push_parameter(k, Type::u(32));
+    ihb.push_parameter(k, Type::int(32));
     ihb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: kc,
         lhs: k,
         rhs: c10,
@@ -2211,7 +2259,7 @@ fn det_call_result_operand_hoists_from_inner_loop() {
 }
 
 /// The negative twin: an `unconstrained` call is nondeterministic advice — its results are pinned
-/// to no function of their arguments, and rule 3's det-call form requires a *constrained* static
+/// to no function of their arguments, and rule 3's det-call form requires a _constrained_ static
 /// call — so `x` stays unstable and the inner-loop `x * 2` must stay put. If the gate's determinism
 /// read regressed to blessing every call, this hoist would fire.
 #[test]
@@ -2242,9 +2290,9 @@ fn nondet_call_result_operand_blocks_hoist() {
 fn aggregate_const_phi_operand_hoists_via_congruence_tier() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let idx = ssa.fresh_value();
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let ce1 = ssa.add_const(Constant::Field(ssa.field().constant(7u64)));
     let ce2 = ssa.add_const(Constant::Field(ssa.field().constant(9u64)));
     let (arr0, j, arr, jc, k, kc, x1, k2, x2, j2) = (
@@ -2269,7 +2317,7 @@ fn aggregate_const_phi_operand_hoists_via_congruence_tier() {
     let oexit = f.add_block();
 
     let entry = f.get_entry_mut();
-    entry.push_parameter(idx, Type::u(32));
+    entry.push_parameter(idx, Type::int(32));
     entry.push_test_instruction(OpCode::MkSeq {
         result: arr0,
         elems: vec![ce1, ce2],
@@ -2279,10 +2327,10 @@ fn aggregate_const_phi_operand_hoists_via_congruence_tier() {
     entry.set_terminator(Terminator::Jmp(oh, vec![c0, arr0]));
 
     let ohb = f.get_block_mut(oh);
-    ohb.push_parameter(j, Type::u(32));
+    ohb.push_parameter(j, Type::int(32));
     ohb.push_parameter(arr, Type::field().array_of(2));
     ohb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: jc,
         lhs: j,
         rhs: c10,
@@ -2293,9 +2341,9 @@ fn aggregate_const_phi_operand_hoists_via_congruence_tier() {
         .set_terminator(Terminator::Jmp(ih, vec![c0]));
 
     let ihb = f.get_block_mut(ih);
-    ihb.push_parameter(k, Type::u(32));
+    ihb.push_parameter(k, Type::int(32));
     ihb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: kc,
         lhs: k,
         rhs: c10,
@@ -2363,7 +2411,7 @@ fn jmp_if_entry_edge_is_split_for_the_hoist() {
     let entry_id = f.get_entry_id();
 
     let entry = f.get_entry_mut();
-    entry.push_parameter(c, Type::u(1));
+    entry.push_parameter(c, Type::int(1));
     entry.push_parameter(a, Type::field());
     entry.push_parameter(b, Type::field());
     entry.set_terminator(Terminator::JmpIf(c, h, skip));
@@ -2372,7 +2420,7 @@ fn jmp_if_entry_edge_is_split_for_the_hoist() {
     // anticipated there regardless of the exit path.
     let hb = f.get_block_mut(h);
     hb.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Mul,
+        kind: BinaryArithOpKind::UMul,
         result: inv,
         lhs: a,
         rhs: b,
@@ -2422,14 +2470,14 @@ fn jmp_if_entry_edge_hoist_is_refused_when_preserving_structure() {
     let entry_id = f.get_entry_id();
 
     let entry = f.get_entry_mut();
-    entry.push_parameter(c, Type::u(1));
+    entry.push_parameter(c, Type::int(1));
     entry.push_parameter(a, Type::field());
     entry.push_parameter(b, Type::field());
     entry.set_terminator(Terminator::JmpIf(c, h, skip));
 
     let hb = f.get_block_mut(h);
     hb.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Mul,
+        kind: BinaryArithOpKind::UMul,
         result: inv,
         lhs: a,
         rhs: b,
@@ -2456,7 +2504,7 @@ fn jmp_if_entry_edge_hoist_is_refused_when_preserving_structure() {
         h_ops[..],
         [
             OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Mul,
+                kind: BinaryArithOpKind::UMul,
                 ..
             },
             OpCode::Rangecheck { value, .. }
@@ -2470,9 +2518,9 @@ fn jmp_if_entry_edge_hoist_is_refused_when_preserving_structure() {
 fn multi_entry_header_is_skipped() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (c, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (i, cond, inv, i2, inv2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -2489,7 +2537,7 @@ fn multi_entry_header_is_skipped() {
     let exit = f.add_block();
 
     let entry = f.get_entry_mut();
-    entry.push_parameter(c, Type::u(1));
+    entry.push_parameter(c, Type::int(1));
     entry.push_parameter(a, Type::field());
     entry.push_parameter(b, Type::field());
     entry.set_terminator(Terminator::JmpIf(c, p1, p2));
@@ -2499,9 +2547,9 @@ fn multi_entry_header_is_skipped() {
         .set_terminator(Terminator::Jmp(header, vec![c1]));
 
     let hb = f.get_block_mut(header);
-    hb.push_parameter(i, Type::u(32));
+    hb.push_parameter(i, Type::int(32));
     hb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: cond,
         lhs: i,
         rhs: c10,
@@ -2510,7 +2558,7 @@ fn multi_entry_header_is_skipped() {
 
     let bb = f.get_block_mut(body);
     bb.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Mul,
+        kind: BinaryArithOpKind::UMul,
         result: inv,
         lhs: a,
         rhs: b,
@@ -2524,7 +2572,7 @@ fn multi_entry_header_is_skipped() {
 
     let eb = f.get_block_mut(exit);
     eb.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Mul,
+        kind: BinaryArithOpKind::UMul,
         result: inv2,
         lhs: a,
         rhs: b,
@@ -2559,7 +2607,7 @@ fn value_available_before_the_loop_is_not_rehoisted() {
             0,
             crate::compiler::ssa::Located::new(
                 OpCode::BinaryArithOp {
-                    kind: BinaryArithOpKind::Mul,
+                    kind: BinaryArithOpKind::UMul,
                     result: pre,
                     lhs: a,
                     rhs: b,
@@ -2605,7 +2653,7 @@ fn diamond() -> (
     let entry = f.get_entry_mut();
     entry.push_parameter(a, Type::field());
     entry.push_parameter(b, Type::field());
-    entry.push_parameter(c, Type::u(1));
+    entry.push_parameter(c, Type::int(1));
     entry.set_terminator(Terminator::JmpIf(c, left, right));
     f.get_block_mut(left)
         .set_terminator(Terminator::Jmp(merge, vec![]));
@@ -2818,7 +2866,7 @@ fn merge_without_dominated_occurrence_is_refused() {
     let entry = f.get_entry_mut();
     entry.push_parameter(a, Type::field());
     entry.push_parameter(b, Type::field());
-    entry.push_parameter(c, Type::u(1));
+    entry.push_parameter(c, Type::int(1));
     entry.set_terminator(Terminator::JmpIf(c, pre, w));
     f.get_block_mut(pre)
         .set_terminator(Terminator::JmpIf(c, left, right));
@@ -2864,7 +2912,7 @@ fn branching_predecessor_edge_is_split_to_carry_the_argument() {
     let entry = f.get_entry_mut();
     entry.push_parameter(a, Type::field());
     entry.push_parameter(b, Type::field());
-    entry.push_parameter(c, Type::u(1));
+    entry.push_parameter(c, Type::int(1));
     entry.set_terminator(Terminator::JmpIf(c, p1, p2));
     let p1b = f.get_block_mut(p1);
     p1b.push_test_instruction(add(t1, a, b));
@@ -2901,7 +2949,7 @@ fn branching_predecessor_edge_is_split_to_carry_the_argument() {
     }
 }
 
-/// One predecessor enters the merge through *both* arms of its `JmpIf`: the wiring splits both
+/// One predecessor enters the merge through _both_ arms of its `JmpIf`: the wiring splits both
 /// arms, the single materialized copy lands at that predecessor's own end (its exit is the edge,
 /// dominating both splits), and both split jumps carry the copy as their argument.
 #[test]
@@ -2917,7 +2965,7 @@ fn both_arms_predecessor_hosts_one_copy_and_two_arguments() {
     let entry = f.get_entry_mut();
     entry.push_parameter(a, Type::field());
     entry.push_parameter(b, Type::field());
-    entry.push_parameter(c, Type::u(1));
+    entry.push_parameter(c, Type::int(1));
     entry.set_terminator(Terminator::JmpIf(c, left, bi));
     let lb = f.get_block_mut(left);
     lb.push_test_instruction(add(t1, a, b));
@@ -3023,7 +3071,7 @@ fn existing_parameters_and_arguments_stay_aligned() {
     let entry = f.get_entry_mut();
     entry.push_parameter(a, Type::field());
     entry.push_parameter(b, Type::field());
-    entry.push_parameter(c, Type::u(1));
+    entry.push_parameter(c, Type::int(1));
     entry.set_terminator(Terminator::JmpIf(c, left, right));
     let lb = f.get_block_mut(left);
     lb.push_test_instruction(add(t1, a, b));
@@ -3077,7 +3125,7 @@ fn multi_entry_loop_header_joins_with_self_carrying_back_edge() {
     let entry = f.get_entry_mut();
     entry.push_parameter(a, Type::field());
     entry.push_parameter(b, Type::field());
-    entry.push_parameter(c, Type::u(1));
+    entry.push_parameter(c, Type::int(1));
     entry.set_terminator(Terminator::JmpIf(c, e1, e2));
     let e1b = f.get_block_mut(e1);
     e1b.push_test_instruction(add(t1, a, b));
@@ -3172,7 +3220,7 @@ fn body_only_invariant_is_speculated_to_entry_edge() {
     assert!(matches!(
         f.get_block(entry).get_instructions().next().unwrap(),
         OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Mul,
+            kind: BinaryArithOpKind::UMul,
             ..
         }
     ));
@@ -3204,9 +3252,9 @@ fn speculation_requires_the_speculate_level() {
 fn wrapping_integer_invariant_is_not_speculated() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (i, s, cond, u, i2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3222,15 +3270,15 @@ fn wrapping_integer_invariant_is_not_speculated() {
     let entry_id = f.get_entry_id();
 
     let entry = f.get_entry_mut();
-    entry.push_parameter(a, Type::u(32));
-    entry.push_parameter(b, Type::u(32));
+    entry.push_parameter(a, Type::int(32));
+    entry.push_parameter(b, Type::int(32));
     entry.set_terminator(Terminator::Jmp(header, vec![c0, c0]));
 
     let hb = f.get_block_mut(header);
-    hb.push_parameter(i, Type::u(32));
-    hb.push_parameter(s, Type::u(32));
+    hb.push_parameter(i, Type::int(32));
+    hb.push_parameter(s, Type::int(32));
     hb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: cond,
         lhs: i,
         rhs: c10,
@@ -3260,9 +3308,9 @@ fn wrapping_integer_invariant_is_not_speculated() {
 fn guarded_division_is_speculated_where_the_fact_holds() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (x, d) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (eq, i, acc, cond, q, i2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3280,8 +3328,8 @@ fn guarded_division_is_speculated_where_the_fact_holds() {
     let exit = f.add_block();
 
     let entry = f.get_entry_mut();
-    entry.push_parameter(x, Type::u(32));
-    entry.push_parameter(d, Type::u(32));
+    entry.push_parameter(x, Type::int(32));
+    entry.push_parameter(d, Type::int(32));
     entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: eq,
@@ -3296,10 +3344,10 @@ fn guarded_division_is_speculated_where_the_fact_holds() {
         .set_terminator(Terminator::Jmp(header, vec![c0, c0]));
 
     let hb = f.get_block_mut(header);
-    hb.push_parameter(i, Type::u(32));
-    hb.push_parameter(acc, Type::u(32));
+    hb.push_parameter(i, Type::int(32));
+    hb.push_parameter(acc, Type::int(32));
     hb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: cond,
         lhs: i,
         rhs: c10,
@@ -3308,7 +3356,7 @@ fn guarded_division_is_speculated_where_the_fact_holds() {
 
     let bb = f.get_block_mut(body);
     bb.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Div,
+        kind: BinaryArithOpKind::UDiv,
         result: q,
         lhs: x,
         rhs: d,
@@ -3327,7 +3375,7 @@ fn guarded_division_is_speculated_where_the_fact_holds() {
     assert!(matches!(
         pre_instrs[0],
         OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Div,
+            kind: BinaryArithOpKind::UDiv,
             ..
         }
     ));
@@ -3345,9 +3393,9 @@ fn guarded_division_is_speculated_where_the_fact_holds() {
 fn unguarded_division_is_not_speculated() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (x, d) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (i, acc, cond, q, i2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3363,15 +3411,15 @@ fn unguarded_division_is_not_speculated() {
     let entry_id = f.get_entry_id();
 
     let entry = f.get_entry_mut();
-    entry.push_parameter(x, Type::u(32));
-    entry.push_parameter(d, Type::u(32));
+    entry.push_parameter(x, Type::int(32));
+    entry.push_parameter(d, Type::int(32));
     entry.set_terminator(Terminator::Jmp(header, vec![c0, c0]));
 
     let hb = f.get_block_mut(header);
-    hb.push_parameter(i, Type::u(32));
-    hb.push_parameter(acc, Type::u(32));
+    hb.push_parameter(i, Type::int(32));
+    hb.push_parameter(acc, Type::int(32));
     hb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: cond,
         lhs: i,
         rhs: c10,
@@ -3380,7 +3428,7 @@ fn unguarded_division_is_not_speculated() {
 
     let bb = f.get_block_mut(body);
     bb.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Div,
+        kind: BinaryArithOpKind::UDiv,
         result: q,
         lhs: x,
         rhs: d,
@@ -3432,7 +3480,7 @@ fn mul(
     lhs: crate::compiler::ssa::ValueId,
     rhs: crate::compiler::ssa::ValueId,
 ) -> OpCode {
-    bin(BinaryArithOpKind::Mul, result, lhs, rhs)
+    bin(BinaryArithOpKind::UMul, result, lhs, rhs)
 }
 
 /// A hoisted copy carries its template's source location, so a moved evaluation still attributes
@@ -3441,9 +3489,9 @@ fn mul(
 fn hoisted_copy_carries_the_template_source_location() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (i, cond, inv, i2, inv2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3464,9 +3512,9 @@ fn hoisted_copy_carries_the_template_source_location() {
     entry.set_terminator(Terminator::Jmp(header, vec![c0]));
 
     let hb = f.get_block_mut(header);
-    hb.push_parameter(i, Type::u(32));
+    hb.push_parameter(i, Type::int(32));
     hb.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: cond,
         lhs: i,
         rhs: c10,
@@ -3530,4 +3578,148 @@ fn join_copy_carries_the_template_source_location() {
         .collect();
     assert_eq!(copies.len(), 1);
     assert_eq!(copies[0].1, &test_location());
+}
+
+// SIGN-AWARE VALUE NUMBERING
+// ================================================================================================
+
+/// `main(x, y) { a = x op1 y; b = x op2 y; return (a, b) }` through the elimination sweep.
+///
+/// Returns the two values the terminator carries afterwards; if the sweep merged the second
+/// expression into the first they are equal, because the redirect rewrites the `Return`.
+///
+/// This shape only became expressible once an integer type stopped carrying a sign: while it did,
+/// `UDiv` and `SDiv` could not share operands, because the operands had one type and so one of the
+/// two opcodes contradicted it.
+fn pre_two_ops(
+    op1: BinaryArithOpKind,
+    op2: BinaryArithOpKind,
+) -> (crate::compiler::ssa::ValueId, crate::compiler::ssa::ValueId) {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
+    let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry = f.get_entry_mut();
+    entry.push_parameter(x, Type::int(64));
+    entry.push_parameter(y, Type::int(64));
+    for (kind, result) in [(op1, a), (op2, b)] {
+        entry.push_test_instruction(bin(kind, result, x, y));
+    }
+    entry.set_terminator(Terminator::Return(vec![a, b]));
+
+    eliminate(&mut ssa);
+
+    let f = ssa.get_unique_entrypoint();
+    match f.get_entry().get_terminator() {
+        Some(Terminator::Return(values)) => (values[0], values[1]),
+        other => panic!("expected the entry block to still return two values, got {other:?}"),
+    }
+}
+
+#[test]
+fn two_occurrences_of_one_expression_are_deduplicated() {
+    // The positive control: without it every assertion below would pass on a sweep that had
+    // stopped merging anything at all.
+    let (a, b) = pre_two_ops(BinaryArithOpKind::UDiv, BinaryArithOpKind::UDiv);
+    assert_eq!(a, b, "two identical divisions should share one value");
+}
+
+#[test]
+fn no_operation_merges_with_its_opposite_sign() {
+    // Every group with two forms. `UAdd`/`SAdd` and friends used to merge here on the grounds that
+    // their results agree bit for bit; what that misses is that the survivor's opcode is what
+    // `LowerWitnessIntegerArithOps` reads to pick the overflow check, so the merge deletes one of
+    // the two checks. `noir_failure_tests/signed_unsigned_vn_merge` is the program it broke.
+    use BinaryArithOpKind::*;
+    for (unsigned, signed) in [
+        (UAdd, SAdd),
+        (USub, SSub),
+        (UMul, SMul),
+        (UDiv, SDiv),
+        (URem, SRem),
+        (UShl, SShl),
+        (UShr, SShr),
+    ] {
+        let (a, b) = pre_two_ops(unsigned, signed);
+        assert_ne!(a, b, "{unsigned:?} and {signed:?} must not merge");
+    }
+}
+
+#[test]
+fn a_signed_chain_does_not_absorb_an_unsigned_one() {
+    // `Add` and `Mul` are flattened chains, so the sign has to live on the chain rather than on
+    // the instruction: `(x + y) s+ z` must not splice the unsigned pair into a signed chain and
+    // come out as `(x s+ y) s+ z`. Both are built here and must stay distinct computations.
+    use BinaryArithOpKind::*;
+    let build = |inner: BinaryArithOpKind| {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let (x, y, z) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        let (inner_r, outer_r, other_r) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+        let f = ssa.get_unique_entrypoint_mut();
+        let entry = f.get_entry_mut();
+        for v in [x, y, z] {
+            entry.push_parameter(v, Type::int(64));
+        }
+        entry.push_test_instruction(bin(inner, inner_r, x, y));
+        entry.push_test_instruction(bin(SAdd, outer_r, inner_r, z));
+        // A second, wholly signed chain over the same leaves. It may merge with `outer_r` only
+        // when `inner` was itself signed.
+        let signed_inner = ssa.fresh_value();
+        let f = ssa.get_unique_entrypoint_mut();
+        let entry = f.get_entry_mut();
+        entry.push_test_instruction(bin(SAdd, signed_inner, x, y));
+        entry.push_test_instruction(bin(SAdd, other_r, signed_inner, z));
+        entry.set_terminator(Terminator::Return(vec![outer_r, other_r]));
+
+        eliminate(&mut ssa);
+
+        let f = ssa.get_unique_entrypoint();
+        match f.get_entry().get_terminator() {
+            Some(Terminator::Return(values)) => (values[0], values[1]),
+            other => panic!("expected the entry block to still return two values, got {other:?}"),
+        }
+    };
+
+    let (a, b) = build(SAdd);
+    assert_eq!(a, b, "two identical signed chains should share one value");
+
+    let (a, b) = build(UAdd);
+    assert_ne!(
+        a, b,
+        "an unsigned sub-chain must stay a leaf inside a signed chain"
+    );
+}
+
+#[test]
+fn the_two_signed_forms_of_a_comparison_are_not_one_expression() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
+    let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    let entry = f.get_entry_mut();
+    entry.push_parameter(x, Type::int(64));
+    entry.push_parameter(y, Type::int(64));
+    for (kind, result) in [(CmpKind::ULt, a), (CmpKind::SLt, b)] {
+        entry.push_test_instruction(OpCode::Cmp {
+            kind,
+            result,
+            lhs: x,
+            rhs: y,
+        });
+    }
+    entry.set_terminator(Terminator::Return(vec![a, b]));
+
+    eliminate(&mut ssa);
+
+    let f = ssa.get_unique_entrypoint();
+    let Some(Terminator::Return(values)) = f.get_entry().get_terminator() else {
+        panic!("expected the entry block to still return two values");
+    };
+    assert_ne!(
+        values[0], values[1],
+        "`<` and `s<` are different comparisons of the same operands"
+    );
 }
