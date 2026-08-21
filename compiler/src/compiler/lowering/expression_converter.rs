@@ -19,7 +19,7 @@ use crate::{
         ssa::{
             BlockId, FunctionId, SourceLocation, ValueId,
             hlssa::{
-                Blob, CastTarget, Constant, Endianness, MAX_SUPPORTED_SIGNED_BITS, Radix,
+                Blob, CastTarget, Constant, Endianness, MAX_SUPPORTED_SIGNED_BITS, OpCode, Radix,
                 SequenceTargetType, SliceOpDir, Type, TypeExpr,
                 builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder},
             },
@@ -1477,6 +1477,9 @@ impl<'a> ExpressionConverter<'a> {
                     .collect();
 
                 let fn_ptr = self.convert_expression(&call.func, b).unwrap();
+                if let Some(func_id) = self.targeted_function_pointer(fn_ptr, b) {
+                    return self.convert_static_call_with_args(&func_id, call, args, b);
+                }
                 let return_type = &call.return_type;
                 let return_size = self.return_size(return_type);
 
@@ -1506,7 +1509,25 @@ impl<'a> ExpressionConverter<'a> {
             .map(|arg| self.convert_expression(arg, b).unwrap())
             .collect();
 
-        let must_inline = self.constant_builtin_inline_functions.contains(func_id);
+        self.convert_static_call_with_args(func_id, call, args, b)
+    }
+
+    fn convert_static_call_with_args(
+        &mut self,
+        func_id: &AstFuncId,
+        call: &noirc_frontend::monomorphization::ast::Call,
+        args: Vec<ValueId>,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
+        // A higher-order helper receiving one of the targeted functions must itself be expanded
+        // at this call site. Its indirect call can then recover the concrete function pointer and
+        // continue the same targeted inlining path.
+        let receives_targeted_function = args
+            .iter()
+            .any(|argument| self.targeted_function_pointer(*argument, b).is_some());
+
+        let must_inline =
+            self.constant_builtin_inline_functions.contains(func_id) || receives_targeted_function;
         if must_inline {
             let callee = self
                 .functions
@@ -1553,6 +1574,52 @@ impl<'a> ExpressionConverter<'a> {
         }
 
         self.emit_static_call(func_id, call, args, b)
+    }
+
+    fn targeted_function_pointer(
+        &self,
+        value: ValueId,
+        b: &HLFunctionBuilder<'_>,
+    ) -> Option<AstFuncId> {
+        if let Some(constant) = b.ssa.get_const(value)
+            && let Constant::FnPtr(function_id) = constant.as_ref()
+        {
+            return self.function_mapper.iter().find_map(|(ast_id, ssa_id)| {
+                (*ssa_id == *function_id && self.constant_builtin_inline_functions.contains(ast_id))
+                    .then_some(*ast_id)
+            });
+        }
+
+        for (_, block) in b.function.get_blocks() {
+            for instruction in block.get_instructions() {
+                match instruction {
+                    OpCode::MkTuple { result, elems, .. } if *result == value => {
+                        return elems
+                            .iter()
+                            .find_map(|element| self.targeted_function_pointer(*element, b));
+                    }
+                    OpCode::TupleProj { result, tuple, idx } if *result == value => {
+                        for (_, tuple_block) in b.function.get_blocks() {
+                            for tuple_instruction in tuple_block.get_instructions() {
+                                if let OpCode::MkTuple {
+                                    result: tuple_result,
+                                    elems,
+                                    ..
+                                } = tuple_instruction
+                                    && tuple_result == tuple
+                                {
+                                    return elems.get(*idx).and_then(|element| {
+                                        self.targeted_function_pointer(*element, b)
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
     }
 
     fn emit_static_call(
@@ -1715,15 +1782,23 @@ impl<'a> ExpressionConverter<'a> {
                     starting_index,
                     *num_generators,
                 );
-                let generator_constants: Vec<_> = generators
-                    .into_iter()
-                    .map(|(x, y)| {
-                        (
-                            b.ssa.add_const(Constant::Field(x)),
-                            b.ssa.add_const(Constant::Field(y)),
-                        )
-                    })
-                    .collect();
+                let generator_constants: Vec<_> = if let Some(generators) = generators {
+                    generators
+                        .into_iter()
+                        .map(|(x, y)| {
+                            (
+                                b.ssa.add_const(Constant::Field(x)),
+                                b.ssa.add_const(Constant::Field(y)),
+                            )
+                        })
+                        .collect()
+                } else {
+                    // The stdlib emits `assert_constant` for both inputs immediately before this
+                    // builtin. Keep lowering type-correct and let that existing validation report
+                    // any reachable non-constant call.
+                    let zero = b.ssa.add_const(Constant::Field(b.ssa.field().zero()));
+                    vec![(zero, zero); *num_generators as usize]
+                };
                 Some(self.emit_located(b, Some(call.location), |e| {
                     let points = generator_constants
                         .into_iter()

@@ -9,6 +9,7 @@ mod type_converter;
 
 use noirc_frontend::monomorphization::ast::{
     Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, Program,
+    Type as AstType,
 };
 use noirc_frontend::monomorphization::visitor::visit_expr;
 
@@ -83,12 +84,6 @@ impl SSAConverter {
         // For each constrained function, also register an unconstrained variant
         // so that calls from unconstrained context propagate is_unconstrained=true.
         for func in &program.functions {
-            // Every static call to these functions is expanded by ExpressionConverter. Avoid
-            // creating a dead standalone copy whose constant-only builtin would necessarily see
-            // abstract parameters instead of the concrete call-site values.
-            if self.is_targeted_inline_function(func) {
-                continue;
-            }
             let ssa_id = if func.id == Program::main_id() {
                 ssa.get_unique_entrypoint_id()
             } else {
@@ -114,6 +109,9 @@ impl SSAConverter {
 
         // Phase 3: Convert each function
         for ast_func in &program.functions {
+            // Static and resolved higher-order calls to these functions are expanded by
+            // ExpressionConverter. Their abstract standalone copies cannot resolve the
+            // constant-only builtin and are intentionally left empty for reachability pruning.
             if self.is_targeted_inline_function(ast_func) {
                 continue;
             }
@@ -156,6 +154,16 @@ impl SSAConverter {
             }
         }
 
+        // These IDs were needed while lowering function values, but every supported call to them
+        // has now been expanded. Remove their intentionally body-less registrations before the
+        // ordinary SSA pipeline inspects function bodies.
+        for ast_func in &program.functions {
+            if self.is_targeted_inline_function(ast_func) {
+                ssa.delete_function(self.constrained_mapper[&ast_func.id]);
+                ssa.delete_function(self.unconstrained_mapper[&ast_func.id]);
+            }
+        }
+
         let main_is_unconstrained = program
             .functions
             .iter()
@@ -177,7 +185,16 @@ impl SSAConverter {
     /// Find the transitive callers of a builtin in the monomorphized call graph.
     fn functions_reaching_builtin(program: &Program, builtin: &str) -> HashSet<AstFuncId> {
         let mut callees = HashMap::<AstFuncId, HashSet<AstFuncId>>::default();
+        let mut higher_order_calls = Vec::<(AstFuncId, HashSet<AstFuncId>)>::new();
         let mut reaching = HashSet::default();
+
+        fn contains_function(typ: &AstType) -> bool {
+            match typ {
+                AstType::Function(..) => true,
+                AstType::Tuple(elements) => elements.iter().any(contains_function),
+                _ => false,
+            }
+        }
 
         for function in &program.functions {
             let function_callees = callees.entry(function.id).or_default();
@@ -188,6 +205,26 @@ impl SSAConverter {
                     match &ident.definition {
                         Definition::Function(callee) => {
                             function_callees.insert(*callee);
+                            let mut function_arguments = HashSet::default();
+                            for argument in &call.arguments {
+                                if argument
+                                    .return_type()
+                                    .is_some_and(|typ| contains_function(typ.as_ref()))
+                                {
+                                    visit_expr(argument, &mut |argument_expression| {
+                                        if let Expression::Ident(ident) = argument_expression
+                                            && let Definition::Function(function) =
+                                                &ident.definition
+                                        {
+                                            function_arguments.insert(*function);
+                                        }
+                                        true
+                                    });
+                                }
+                            }
+                            if !function_arguments.is_empty() {
+                                higher_order_calls.push((*callee, function_arguments));
+                            }
                         }
                         Definition::Builtin(name) if name == builtin => {
                             reaching.insert(function.id);
@@ -197,6 +234,16 @@ impl SSAConverter {
                 }
                 true
             });
+        }
+
+        // Treat a higher-order helper as calling the function values passed to it. This reuses
+        // the same transitive closure below and ensures helpers specialized at their call sites do
+        // not leave abstract function-pointer bodies for defunctionalization.
+        for (callee, function_arguments) in higher_order_calls {
+            callees
+                .entry(callee)
+                .or_default()
+                .extend(function_arguments);
         }
 
         loop {

@@ -22,23 +22,18 @@ pub(super) fn derive(
     domain_separator: ValueId,
     starting_index: ValueId,
     num_generators: u32,
-) -> Vec<(Field, Field)> {
+) -> Option<Vec<(Field, Field)>> {
     let constants = known_constants(ssa, function);
-    let domain = constant_for(ssa, &constants, domain_separator)
-        .and_then(domain_separator_bytes)
-        .unwrap_or_else(|| {
-            panic!("derive_pedersen_generators domain separator must be a constant [u8]")
-        });
-    let starting_index = constant_for(ssa, &constants, starting_index)
-        .and_then(constant_u32)
-        .unwrap_or_else(|| {
-            panic!("derive_pedersen_generators starting index must be a constant u32")
-        });
+    let domain =
+        constant_for(ssa, &constants, domain_separator).and_then(domain_separator_bytes)?;
+    let starting_index = constant_for(ssa, &constants, starting_index).and_then(constant_u32)?;
 
-    bn254_blackbox_solver::derive_generators(&domain, num_generators, starting_index)
-        .into_iter()
-        .map(|generator| (Field::from(generator.x), Field::from(generator.y)))
-        .collect()
+    Some(
+        bn254_blackbox_solver::derive_generators(&domain, num_generators, starting_index)
+            .into_iter()
+            .map(|generator| (Field::from(generator.x), Field::from(generator.y)))
+            .collect(),
+    )
 }
 
 fn known_constants(ssa: &HLSSA, function: &HLFunction) -> HashMap<ValueId, Constant> {
