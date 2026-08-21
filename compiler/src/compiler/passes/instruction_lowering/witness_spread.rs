@@ -5,6 +5,7 @@
 
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
+    passes::instruction_lowering::{InstructionLoweringRule, LoweringContext},
     ssa::{
         ValueId,
         hlssa::{
@@ -13,8 +14,6 @@ use crate::compiler::{
         },
     },
 };
-
-use super::{InstructionLoweringRule, LoweringContext};
 
 pub struct LowerWitnessSpreadOps {}
 
@@ -102,9 +101,9 @@ impl LowerWitnessSpreadOps {
 
         let odd_spread = self.write_spread_witness_and_lookup(b, result_odd, bits);
         let two = b.field_const(b.field().constant(2));
-        let two_odd_spread = b.mul(two, odd_spread);
+        let two_odd_spread = b.umul(two, odd_spread);
         let value_field = b.cast_to_field(value);
-        let even_spread = b.sub(value_field, two_odd_spread);
+        let even_spread = b.usub(value_field, two_odd_spread);
 
         let even_field = b.cast_to_field(result_even);
         let one = b.field_const(b.field().one());
@@ -146,8 +145,10 @@ impl LowerWitnessSpreadOps {
 
 fn cast_target_for_type(ty: &Type) -> CastTarget {
     match ty.strip_all_witness().expr {
-        TypeExpr::U(bits) => CastTarget::U(bits),
-        TypeExpr::I(bits) => CastTarget::I(bits),
+        // A `CastTarget` is a raw-bits conversion, so there is one target per width and no sign to
+        // choose: `TypeExpr::Int(n)` says only "an n-bit integer", and `CastTarget::Int(n)` says
+        // only "reinterpret at n bits". Sign extension is the separate `SExt` opcode.
+        TypeExpr::Int(bits) => CastTarget::Int(bits),
         other => panic!(
             "Expected integer type for witness spread result, got {:?}",
             other

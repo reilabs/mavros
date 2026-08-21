@@ -154,8 +154,7 @@ impl CSE {
         let mut exprs: HashMap<ValueId, ExprId> = HashMap::default();
         for (vid, cv) in constants {
             let id = match cv.as_ref() {
-                Constant::U(bits, value) => interner.uconst(*bits, *value),
-                Constant::I(bits, value) => interner.iconst(*bits, *value),
+                Constant::Int(bits, value) => interner.int_const(*bits, *value),
                 Constant::Field(value) => interner.fconst(*value),
                 Constant::FnPtr(_) | Constant::Blob(_) => continue,
             };
@@ -200,20 +199,30 @@ impl CSE {
                 .push(ProgramPoint::new(block_id, instruction_idx));
         }
 
+        // The sign participates in every key below. `UDiv(x, y)` and `SDiv(x, y)` are two different
+        // computations over the same operands; `UAdd(x, y)` and `SAdd(x, y)` agree on every bit but
+        // owe different rejections, and a merge picks one of them to emit. Both are wrong answers,
+        // so no arm is exempt.
+        //
+        // Each arm still matches an operation's two forms together and then carries the sign into
+        // the interner node. The commutative pair take it as part of the flattened chain, which is
+        // also what stops `extend_adds`/`extend_muls` splicing a signed chain into an unsigned one.
+        // Only the genuinely sign-free operations pass nothing: `And`/`Or`/`Xor` have one form, and
+        // `Eq` compares patterns under either reading.
         for block_id in cfg.get_domination_pre_order() {
             let block = ssa.get_block(block_id);
 
             for (instruction_idx, instruction) in block.get_instructions().enumerate() {
                 match instruction {
                     OpCode::BinaryArithOp {
-                        kind: BinaryArithOpKind::Add,
+                        kind: kind @ (BinaryArithOpKind::UAdd | BinaryArithOpKind::SAdd),
                         result: r,
                         lhs,
                         rhs,
                     } => {
                         let lhs_expr = get_expr(&exprs, &mut interner, lhs);
                         let rhs_expr = get_expr(&exprs, &mut interner, rhs);
-                        let result_expr = interner.add(lhs_expr, rhs_expr);
+                        let result_expr = interner.add(lhs_expr, rhs_expr, kind.is_signed());
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -224,14 +233,14 @@ impl CSE {
                         );
                     }
                     OpCode::BinaryArithOp {
-                        kind: BinaryArithOpKind::Mul,
+                        kind: kind @ (BinaryArithOpKind::UMul | BinaryArithOpKind::SMul),
                         result: r,
                         lhs,
                         rhs,
                     } => {
                         let lhs_expr = get_expr(&exprs, &mut interner, lhs);
                         let rhs_expr = get_expr(&exprs, &mut interner, rhs);
-                        let result_expr = interner.mul(lhs_expr, rhs_expr);
+                        let result_expr = interner.mul(lhs_expr, rhs_expr, kind.is_signed());
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -242,14 +251,15 @@ impl CSE {
                         );
                     }
                     OpCode::BinaryArithOp {
-                        kind: BinaryArithOpKind::Div,
+                        kind: kind @ (BinaryArithOpKind::UDiv | BinaryArithOpKind::SDiv),
                         result: r,
                         lhs,
                         rhs,
                     } => {
                         let lhs_expr = get_expr(&exprs, &mut interner, lhs);
                         let rhs_expr = get_expr(&exprs, &mut interner, rhs);
-                        let result_expr = interner.div(lhs_expr, rhs_expr);
+                        let sign = kind.signedness();
+                        let result_expr = interner.div(lhs_expr, rhs_expr, sign);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -260,14 +270,15 @@ impl CSE {
                         );
                     }
                     OpCode::BinaryArithOp {
-                        kind: BinaryArithOpKind::Sub,
+                        kind: kind @ (BinaryArithOpKind::USub | BinaryArithOpKind::SSub),
                         result: r,
                         lhs,
                         rhs,
                     } => {
                         let lhs_expr = get_expr(&exprs, &mut interner, lhs);
                         let rhs_expr = get_expr(&exprs, &mut interner, rhs);
-                        let result_expr = interner.sub(lhs_expr, rhs_expr);
+                        let sign = kind.signedness();
+                        let result_expr = interner.sub(lhs_expr, rhs_expr, sign);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -296,14 +307,14 @@ impl CSE {
                         );
                     }
                     OpCode::Cmp {
-                        kind: CmpKind::Lt,
+                        kind: kind @ (CmpKind::ULt | CmpKind::SLt),
                         result: r,
                         lhs,
                         rhs,
                     } => {
                         let lhs_expr = get_expr(&exprs, &mut interner, lhs);
                         let rhs_expr = get_expr(&exprs, &mut interner, rhs);
-                        let result_expr = interner.lt(lhs_expr, rhs_expr);
+                        let result_expr = interner.lt(lhs_expr, rhs_expr, kind.is_signed());
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -314,14 +325,15 @@ impl CSE {
                         );
                     }
                     OpCode::BinaryArithOp {
-                        kind: BinaryArithOpKind::Mod,
+                        kind: kind @ (BinaryArithOpKind::URem | BinaryArithOpKind::SRem),
                         result: r,
                         lhs,
                         rhs,
                     } => {
                         let lhs_expr = get_expr(&exprs, &mut interner, lhs);
                         let rhs_expr = get_expr(&exprs, &mut interner, rhs);
-                        let result_expr = interner.modulo(lhs_expr, rhs_expr);
+                        let sign = kind.signedness();
+                        let result_expr = interner.modulo(lhs_expr, rhs_expr, sign);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -386,14 +398,15 @@ impl CSE {
                         );
                     }
                     OpCode::BinaryArithOp {
-                        kind: BinaryArithOpKind::Shl,
+                        kind: kind @ (BinaryArithOpKind::UShl | BinaryArithOpKind::SShl),
                         result: r,
                         lhs,
                         rhs,
                     } => {
                         let lhs_expr = get_expr(&exprs, &mut interner, lhs);
                         let rhs_expr = get_expr(&exprs, &mut interner, rhs);
-                        let result_expr = interner.shl(lhs_expr, rhs_expr);
+                        let sign = kind.signedness();
+                        let result_expr = interner.shl(lhs_expr, rhs_expr, sign);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -404,14 +417,15 @@ impl CSE {
                         );
                     }
                     OpCode::BinaryArithOp {
-                        kind: BinaryArithOpKind::Shr,
+                        kind: kind @ (BinaryArithOpKind::UShr | BinaryArithOpKind::SShr),
                         result: r,
                         lhs,
                         rhs,
                     } => {
                         let lhs_expr = get_expr(&exprs, &mut interner, lhs);
                         let rhs_expr = get_expr(&exprs, &mut interner, rhs);
-                        let result_expr = interner.shr(lhs_expr, rhs_expr);
+                        let sign = kind.signedness();
+                        let result_expr = interner.shr(lhs_expr, rhs_expr, sign);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -527,10 +541,12 @@ impl CSE {
                         const_val,
                         var,
                     } => {
-                        // Fold into Expr::Mul so MulConst dedups with BinaryArithOp::Mul.
+                        // Fold into an unsigned Expr::Mul so MulConst dedups with `UMul`.
+                        // Unsigned is not a default: `MulConst` is a field multiply, which
+                        // `witness_lowering` only ever builds from `UMul` or field arithmetic.
                         let lhs_expr = get_expr(&exprs, &mut interner, const_val);
                         let rhs_expr = get_expr(&exprs, &mut interner, var);
-                        let result_expr = interner.mul(lhs_expr, rhs_expr);
+                        let result_expr = interner.mul(lhs_expr, rhs_expr, false);
                         record_expr(
                             &mut exprs,
                             &mut result,
@@ -693,31 +709,97 @@ struct ExprId(u32);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum ExprNode {
-    Add(Vec<ExprId>),
-    Mul(Vec<ExprId>),
-    Div { lhs: ExprId, rhs: ExprId },
-    Mod { lhs: ExprId, rhs: ExprId },
-    Sub { lhs: ExprId, rhs: ExprId },
+    /// The flattened commutative chains, carrying the sign of the operation that built them.
+    ///
+    /// The sign is part of the key, so a signed chain never merges with an unsigned one, and
+    /// `extend_adds`/`extend_muls` will not splice the parts of one into the other.
+    Add(Vec<ExprId>, bool),
+    Mul(Vec<ExprId>, bool),
+
+    /// The non-commutative binary operations.
+    ///
+    /// `sign` is the reading the operation applies to its operands, taken from
+    /// `BinaryArithOpKind::signedness`, so a signed and an unsigned form never share a node. It is
+    /// `None` only for operations that have no signed form at all — none of which appear here,
+    /// since the bitwise trio are chains.
+    Div {
+        lhs: ExprId,
+        rhs: ExprId,
+        sign: Option<bool>,
+    },
+    Mod {
+        lhs: ExprId,
+        rhs: ExprId,
+        sign: Option<bool>,
+    },
+    Sub {
+        lhs: ExprId,
+        rhs: ExprId,
+        sign: Option<bool>,
+    },
     FConst(Field),
-    UConst { bits: usize, value: u128 },
-    IConst { bits: usize, value: u128 },
+    IntConst {
+        bits: usize,
+        value: u128,
+    },
     Variable(u64),
-    Eq { lhs: ExprId, rhs: ExprId },
-    Lt { lhs: ExprId, rhs: ExprId },
+    Eq {
+        lhs: ExprId,
+        rhs: ExprId,
+    },
+    Lt {
+        lhs: ExprId,
+        rhs: ExprId,
+        signed: bool,
+    },
     And(Vec<ExprId>),
     Or(Vec<ExprId>),
     Xor(Vec<ExprId>),
-    Shl { lhs: ExprId, rhs: ExprId },
-    Shr { lhs: ExprId, rhs: ExprId },
-    BitRange { value: ExprId, offset: usize, width: usize },
-    Select { condition: ExprId, then: ExprId, otherwise: ExprId },
-    ArrayGet { array: ExprId, index: ExprId },
+    Shl {
+        lhs: ExprId,
+        rhs: ExprId,
+        sign: Option<bool>,
+    },
+    Shr {
+        lhs: ExprId,
+        rhs: ExprId,
+        sign: Option<bool>,
+    },
+    BitRange {
+        value: ExprId,
+        offset: usize,
+        width: usize,
+    },
+    Select {
+        condition: ExprId,
+        then: ExprId,
+        otherwise: ExprId,
+    },
+    ArrayGet {
+        array: ExprId,
+        index: ExprId,
+    },
     Not(ExprId),
     ReadGlobal(u64),
-    Cast { value: ExprId, target: CastTarget },
-    SExt { value: ExprId, from_bits: usize, to_bits: usize },
-    BytesOf { value: ExprId, endianness: Endianness, count: usize },
-    BitsOf { value: ExprId, endianness: Endianness, count: usize },
+    Cast {
+        value: ExprId,
+        target: CastTarget,
+    },
+    SExt {
+        value: ExprId,
+        from_bits: usize,
+        to_bits: usize,
+    },
+    BytesOf {
+        value: ExprId,
+        endianness: Endianness,
+        count: usize,
+    },
+    BitsOf {
+        value: ExprId,
+        endianness: Endianness,
+        count: usize,
+    },
     Witness(ExprId),
 }
 
@@ -759,24 +841,20 @@ impl ExprInterner {
         self.intern(ExprNode::FConst(value))
     }
 
-    fn uconst(&mut self, bits: usize, value: u128) -> ExprId {
-        self.intern(ExprNode::UConst { bits, value })
+    fn int_const(&mut self, bits: usize, value: u128) -> ExprId {
+        self.intern(ExprNode::IntConst { bits, value })
     }
 
-    fn iconst(&mut self, bits: usize, value: u128) -> ExprId {
-        self.intern(ExprNode::IConst { bits, value })
-    }
-
-    fn extend_adds(&self, expr: ExprId, out: &mut Vec<ExprId>) {
+    fn extend_adds(&self, expr: ExprId, signed: bool, out: &mut Vec<ExprId>) {
         match self.node(expr) {
-            ExprNode::Add(exprs) => out.extend(exprs.iter().copied()),
+            ExprNode::Add(exprs, s) if *s == signed => out.extend(exprs.iter().copied()),
             _ => out.push(expr),
         }
     }
 
-    fn extend_muls(&self, expr: ExprId, out: &mut Vec<ExprId>) {
+    fn extend_muls(&self, expr: ExprId, signed: bool, out: &mut Vec<ExprId>) {
         match self.node(expr) {
-            ExprNode::Mul(exprs) => out.extend(exprs.iter().copied()),
+            ExprNode::Mul(exprs, s) if *s == signed => out.extend(exprs.iter().copied()),
             _ => out.push(expr),
         }
     }
@@ -802,32 +880,32 @@ impl ExprInterner {
         }
     }
 
-    fn add(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+    fn add(&mut self, lhs: ExprId, rhs: ExprId, signed: bool) -> ExprId {
         let mut adds = Vec::new();
-        self.extend_adds(lhs, &mut adds);
-        self.extend_adds(rhs, &mut adds);
+        self.extend_adds(lhs, signed, &mut adds);
+        self.extend_adds(rhs, signed, &mut adds);
         adds.sort();
-        self.intern(ExprNode::Add(adds))
+        self.intern(ExprNode::Add(adds, signed))
     }
 
-    fn mul(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
+    fn mul(&mut self, lhs: ExprId, rhs: ExprId, signed: bool) -> ExprId {
         let mut muls = Vec::new();
-        self.extend_muls(lhs, &mut muls);
-        self.extend_muls(rhs, &mut muls);
+        self.extend_muls(lhs, signed, &mut muls);
+        self.extend_muls(rhs, signed, &mut muls);
         muls.sort();
-        self.intern(ExprNode::Mul(muls))
+        self.intern(ExprNode::Mul(muls, signed))
     }
 
-    fn div(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        self.intern(ExprNode::Div { lhs, rhs })
+    fn div(&mut self, lhs: ExprId, rhs: ExprId, sign: Option<bool>) -> ExprId {
+        self.intern(ExprNode::Div { lhs, rhs, sign })
     }
 
-    fn modulo(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        self.intern(ExprNode::Mod { lhs, rhs })
+    fn modulo(&mut self, lhs: ExprId, rhs: ExprId, sign: Option<bool>) -> ExprId {
+        self.intern(ExprNode::Mod { lhs, rhs, sign })
     }
 
-    fn sub(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        self.intern(ExprNode::Sub { lhs, rhs })
+    fn sub(&mut self, lhs: ExprId, rhs: ExprId, sign: Option<bool>) -> ExprId {
+        self.intern(ExprNode::Sub { lhs, rhs, sign })
     }
 
     fn and(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
@@ -856,12 +934,12 @@ impl ExprInterner {
         self.intern(ExprNode::Xor(xors))
     }
 
-    fn shl(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        self.intern(ExprNode::Shl { lhs, rhs })
+    fn shl(&mut self, lhs: ExprId, rhs: ExprId, sign: Option<bool>) -> ExprId {
+        self.intern(ExprNode::Shl { lhs, rhs, sign })
     }
 
-    fn shr(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        self.intern(ExprNode::Shr { lhs, rhs })
+    fn shr(&mut self, lhs: ExprId, rhs: ExprId, sign: Option<bool>) -> ExprId {
+        self.intern(ExprNode::Shr { lhs, rhs, sign })
     }
 
     fn bit_range(&mut self, value: ExprId, offset: usize, width: usize) -> ExprId {
@@ -876,8 +954,8 @@ impl ExprInterner {
         self.intern(ExprNode::Eq { lhs, rhs })
     }
 
-    fn lt(&mut self, lhs: ExprId, rhs: ExprId) -> ExprId {
-        self.intern(ExprNode::Lt { lhs, rhs })
+    fn lt(&mut self, lhs: ExprId, rhs: ExprId, signed: bool) -> ExprId {
+        self.intern(ExprNode::Lt { lhs, rhs, signed })
     }
 
     fn array_get(&mut self, array: ExprId, index: ExprId) -> ExprId {
@@ -930,5 +1008,176 @@ impl ExprInterner {
 
     fn witness(&mut self, value: ExprId) -> ExprId {
         self.intern(ExprNode::Witness(value))
+    }
+}
+
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::ssa::{Terminator, hlssa::Type};
+
+    /// `main(x, y) { a = x op1 y; b = x op2 y; return (a, b) }`, run through CSE.
+    ///
+    /// Returns the two values the terminator carries afterwards. If the pass merged the second
+    /// expression into the first they are equal, because the redirect rewrites the `Return`.
+    fn cse_two_ops(op1: BinaryArithOpKind, op2: BinaryArithOpKind) -> (ValueId, ValueId) {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
+        let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
+
+        let f = ssa.get_unique_entrypoint_mut();
+        let entry = f.get_entry_mut();
+        entry.push_parameter(x, Type::int(64));
+        entry.push_parameter(y, Type::int(64));
+        for (kind, result) in [(op1, a), (op2, b)] {
+            entry.push_test_instruction(OpCode::BinaryArithOp {
+                kind,
+                result,
+                lhs: x,
+                rhs: y,
+            });
+        }
+        entry.set_terminator(Terminator::Return(vec![a, b]));
+
+        let cfg = FlowAnalysis::run(&ssa);
+        CSE::post_r1c().do_run(&mut ssa, &cfg);
+
+        let f = ssa.get_unique_entrypoint();
+        match f.get_entry().get_terminator() {
+            Some(Terminator::Return(values)) => (values[0], values[1]),
+            other => panic!("expected the entry block to still return two values, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_occurrences_of_one_expression_are_deduplicated() {
+        // The positive control. Without it, every assertion below would pass just as well on a pass
+        // that had stopped merging anything at all.
+        let (a, b) = cse_two_ops(BinaryArithOpKind::UDiv, BinaryArithOpKind::UDiv);
+        assert_eq!(a, b, "two identical divisions should share one value");
+    }
+
+    #[test]
+    fn the_two_signed_forms_of_a_division_are_not_one_expression() {
+        // The split. `UDiv` and `SDiv` compute different values from the same operands, so merging
+        // them is a wrong answer -- whichever survives is lowered for the sign it carries, and the
+        // other operation silently becomes it.
+        let (a, b) = cse_two_ops(BinaryArithOpKind::UDiv, BinaryArithOpKind::SDiv);
+        assert_ne!(
+            a, b,
+            "an unsigned and a signed division are different expressions"
+        );
+    }
+
+    #[test]
+    fn no_operation_merges_with_its_opposite_sign() {
+        // Every group with two forms, not just the ones whose forms compute different values.
+        // `UAdd`/`SAdd` agree on every bit and used to merge here on that basis; what that misses
+        // is that the survivor's opcode is what picks the overflow check emitted downstream.
+        use BinaryArithOpKind::*;
+        for (unsigned, signed) in [
+            (UAdd, SAdd),
+            (USub, SSub),
+            (UMul, SMul),
+            (UDiv, SDiv),
+            (URem, SRem),
+            (UShl, SShl),
+            (UShr, SShr),
+        ] {
+            let (a, b) = cse_two_ops(unsigned, signed);
+            assert_ne!(a, b, "{unsigned:?} and {signed:?} must not merge");
+        }
+    }
+
+    #[test]
+    fn a_signed_chain_does_not_absorb_an_unsigned_one() {
+        // `Add` and `Mul` are flattened chains, so the sign has to live on the chain rather than on
+        // the instruction: `(x + y) s+ z` must not splice the unsigned pair into a signed chain and
+        // come out as the same expression as `(x s+ y) s+ z`.
+        use BinaryArithOpKind::*;
+        let build = |inner: BinaryArithOpKind| {
+            let mut ssa = HLSSA::with_main("main".to_string());
+            let (x, y, z) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+            let (inner_r, outer_r) = (ssa.fresh_value(), ssa.fresh_value());
+            let (signed_inner, other_r) = (ssa.fresh_value(), ssa.fresh_value());
+
+            let f = ssa.get_unique_entrypoint_mut();
+            let entry = f.get_entry_mut();
+            for v in [x, y, z] {
+                entry.push_parameter(v, Type::int(64));
+            }
+            for (kind, result, lhs, rhs) in [
+                (inner, inner_r, x, y),
+                (SAdd, outer_r, inner_r, z),
+                // A wholly signed chain over the same leaves. It may merge with `outer_r` only
+                // when `inner` was itself signed.
+                (SAdd, signed_inner, x, y),
+                (SAdd, other_r, signed_inner, z),
+            ] {
+                entry.push_test_instruction(OpCode::BinaryArithOp {
+                    kind,
+                    result,
+                    lhs,
+                    rhs,
+                });
+            }
+            entry.set_terminator(Terminator::Return(vec![outer_r, other_r]));
+
+            let cfg = FlowAnalysis::run(&ssa);
+            CSE::post_r1c().do_run(&mut ssa, &cfg);
+
+            let f = ssa.get_unique_entrypoint();
+            match f.get_entry().get_terminator() {
+                Some(Terminator::Return(values)) => (values[0], values[1]),
+                other => {
+                    panic!("expected the entry block to still return two values, got {other:?}")
+                }
+            }
+        };
+
+        let (a, b) = build(SAdd);
+        assert_eq!(a, b, "two identical signed chains should share one value");
+
+        let (a, b) = build(UAdd);
+        assert_ne!(
+            a, b,
+            "an unsigned sub-chain must stay a leaf inside a signed chain"
+        );
+    }
+
+    #[test]
+    fn the_two_signed_forms_of_a_comparison_are_not_one_expression() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
+        let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
+
+        let f = ssa.get_unique_entrypoint_mut();
+        let entry = f.get_entry_mut();
+        entry.push_parameter(x, Type::int(64));
+        entry.push_parameter(y, Type::int(64));
+        for (kind, result) in [(CmpKind::ULt, a), (CmpKind::SLt, b)] {
+            entry.push_test_instruction(OpCode::Cmp {
+                kind,
+                result,
+                lhs: x,
+                rhs: y,
+            });
+        }
+        entry.set_terminator(Terminator::Return(vec![a, b]));
+
+        let cfg = FlowAnalysis::run(&ssa);
+        CSE::post_r1c().do_run(&mut ssa, &cfg);
+
+        let f = ssa.get_unique_entrypoint();
+        let Some(Terminator::Return(values)) = f.get_entry().get_terminator() else {
+            panic!("expected the entry block to still return two values");
+        };
+        assert_ne!(
+            values[0], values[1],
+            "`<` and `s<` are different comparisons of the same operands"
+        );
     }
 }

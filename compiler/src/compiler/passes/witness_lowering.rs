@@ -10,7 +10,7 @@ use crate::{
         ssa::{
             BlockId, Terminator, ValueId,
             hlssa::{
-                BinaryArithOpKind, CastTarget, DMatrix, HLSSA, OpCode, Type, TypeExpr,
+                ArithGroup, BinaryArithOpKind, CastTarget, DMatrix, HLSSA, OpCode, Type, TypeExpr,
                 builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
             },
         },
@@ -39,12 +39,7 @@ impl WitnessLowering {
         Self {}
     }
 
-    pub fn do_run(
-        &self,
-        ssa: &mut HLSSA,
-        type_info: &crate::compiler::analysis::types::TypeInfo,
-        flow_analysis: &FlowAnalysis,
-    ) {
+    pub fn do_run(&self, ssa: &mut HLSSA, type_info: &TypeInfo, flow_analysis: &FlowAnalysis) {
         let fids: Vec<_> = ssa.get_function_ids().collect();
         let mut sb = HLSSABuilder::new(ssa);
         for function_id in fids {
@@ -252,9 +247,26 @@ impl WitnessLowering {
                         } => {
                             let a_type = type_info.get_value_type(a);
                             let b_type = type_info.get_value_type(b);
+
+                            // The dispatch is on the sign-erased group, and the operation's own
+                            // sign is cross-checked against the operand type rather than consulted.
+                            //
+                            // Which sign the _emitted_ operations carry follows one rule: an arm
+                            // that re-emits the operation it matched preserves its sign (the `Add`
+                            // arm below, and the two `emitter.emit(instruction)` arms), while an
+                            // arm that _synthesises_ a new operation spells the sign out. The only
+                            // synthesised arithmetic here is the `a + (-b)` that replaces a
+                            // subtraction, and it is field addition, so it is `UAdd`.
+                            //
+                            // Sign never actually arises on the arms that rewrite: this pass runs
+                            // in `ad_lowering`, long after `spill_witness` has put every integer
+                            // witness operation through `LowerWitnessIntegerArithOps`, so an
+                            // operand that is still `WitnessOf` here wraps a `Field`. The pure/pure
+                            // arm can see integers, and passes them through untouched.
+
                             match (a, a_type.is_witness_of(), b, b_type.is_witness_of()) {
-                                (_, true, _, true) => match kind {
-                                    BinaryArithOpKind::Sub => {
+                                (_, true, _, true) => match kind.group() {
+                                    ArithGroup::Sub => {
                                         let neg_one =
                                             emitter.field_const(emitter.field().constant(-1i64));
                                         let neg_b = emitter.fresh_value();
@@ -264,7 +276,7 @@ impl WitnessLowering {
                                             var: b,
                                         });
                                         emitter.emit(OpCode::BinaryArithOp {
-                                            kind: BinaryArithOpKind::Add,
+                                            kind: BinaryArithOpKind::UAdd,
                                             result: r,
                                             lhs: a,
                                             rhs: neg_b,
@@ -277,8 +289,10 @@ impl WitnessLowering {
                                 (_, false, _, false) => {
                                     emitter.emit(instruction);
                                 }
-                                (wit, true, pure, false) | (pure, false, wit, true) => match kind {
-                                    BinaryArithOpKind::Add => {
+                                (wit, true, pure, false) | (pure, false, wit, true) => match kind
+                                    .group()
+                                {
+                                    ArithGroup::Add => {
                                         let pure_refed = emitter.cast_to_witness_of(pure);
                                         emitter.emit(OpCode::BinaryArithOp {
                                             kind,
@@ -287,19 +301,19 @@ impl WitnessLowering {
                                             rhs: wit,
                                         });
                                     }
-                                    BinaryArithOpKind::Mul => {
+                                    ArithGroup::Mul => {
                                         emitter.emit(OpCode::MulConst {
                                             result: r,
                                             const_val: pure,
                                             var: wit,
                                         });
                                     }
-                                    BinaryArithOpKind::Div if a == wit => {
+                                    ArithGroup::Div if a == wit => {
                                         // wit / pure → MulConst(wit, 1/pure)
                                         let one = emitter.field_const(emitter.field().constant(1u64));
                                         let inv_pure = emitter.fresh_value();
                                         emitter.emit(OpCode::BinaryArithOp {
-                                            kind: BinaryArithOpKind::Div,
+                                            kind: BinaryArithOpKind::UDiv,
                                             result: inv_pure,
                                             lhs: one,
                                             rhs: pure,
@@ -310,12 +324,12 @@ impl WitnessLowering {
                                             var: wit,
                                         });
                                     }
-                                    BinaryArithOpKind::Div | BinaryArithOpKind::Mod => {
+                                    ArithGroup::Div | ArithGroup::Rem => {
                                         panic!(
                                             "Div/Mod is not supported for witness-pure arithmetic"
                                         )
                                     }
-                                    BinaryArithOpKind::Sub => {
+                                    ArithGroup::Sub => {
                                         let pure_refed = emitter.cast_to_witness_of(pure);
                                         let lhs_ref = if a == wit { wit } else { pure_refed };
                                         let rhs_ref = if b == wit { wit } else { pure_refed };
@@ -328,17 +342,17 @@ impl WitnessLowering {
                                             var: rhs_ref,
                                         });
                                         emitter.emit(OpCode::BinaryArithOp {
-                                            kind: BinaryArithOpKind::Add,
+                                            kind: BinaryArithOpKind::UAdd,
                                             result: r,
                                             lhs: lhs_ref,
                                             rhs: neg_rhs,
                                         });
                                     }
-                                    BinaryArithOpKind::And
-                                    | BinaryArithOpKind::Or
-                                    | BinaryArithOpKind::Xor
-                                    | BinaryArithOpKind::Shl
-                                    | BinaryArithOpKind::Shr => {
+                                    ArithGroup::And
+                                    | ArithGroup::Or
+                                    | ArithGroup::Xor
+                                    | ArithGroup::Shl
+                                    | ArithGroup::Shr => {
                                         panic!(
                                             "{:?} is not supported for witness-pure arithmetic",
                                             kind
@@ -570,7 +584,7 @@ impl WitnessLowering {
 
     fn witness_lowering_in_type(&self, tp: &Type) -> Type {
         match &tp.expr {
-            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => {
+            TypeExpr::Field | TypeExpr::Int(_) => {
                 if tp.is_witness_of() {
                     Type::witness_of(tp.clone())
                 } else {

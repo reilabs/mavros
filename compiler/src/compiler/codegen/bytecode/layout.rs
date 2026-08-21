@@ -6,10 +6,7 @@ use crate::{
         codegen::constants,
         ssa::{
             ValueId,
-            hlssa::{
-                Constant, HLSSA, MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type,
-                TypeExpr,
-            },
+            hlssa::{Constant, HLSSA, MAX_SUPPORTED_UNSIGNED_BITS, Type, TypeExpr},
         },
         util::ice_non_elided_tuple,
     },
@@ -86,16 +83,12 @@ impl FrameLayouter {
         match tp.expr {
             // FIELD-ASSUMPTION: L3-felt-limbs
             TypeExpr::Field => bytecode::FELT_LIMBS,
-            TypeExpr::U(bits) => {
+            // Width-driven, and it must stay that way: `alloc_int` advances the frame by
+            // `int_cell_count`, so a second formula here would silently disagree with it for any
+            // width needing more than one cell.
+            TypeExpr::Int(bits) => {
                 assert!(bits <= MAX_SUPPORTED_UNSIGNED_BITS);
                 int_cell_count(bits)
-            }
-            TypeExpr::I(bits) => {
-                assert!(
-                    bits <= MAX_SUPPORTED_SIGNED_BITS,
-                    "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-                );
-                1
             }
             TypeExpr::Array(_, _) => constants::POINTER_SIZE_CELLS,
             TypeExpr::Slice(_) => constants::POINTER_SIZE_CELLS,
@@ -212,21 +205,15 @@ impl ConstantPoolInterner {
 /// of sync. Adding a new [`Constant`] variant only requires updating this function.
 pub fn for_each_constant_word(constant: &Constant, visit: &mut impl FnMut(u64)) {
     match constant {
-        Constant::U(size, val) => match size {
+        // The word count is a question about the width alone.
+        Constant::Int(size, val) => match size {
             bits if *bits <= 64 => visit(*val as u64),
             128 => {
                 visit(*val as u64);
                 visit((*val >> 64) as u64);
             }
-            bits => panic!("unsupported unsigned integer width: {bits}"),
+            bits => panic!("unsupported integer width: {bits}"),
         },
-        Constant::I(size, val) => {
-            assert!(
-                *size <= MAX_SUPPORTED_SIGNED_BITS,
-                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-            );
-            visit(*val as u64);
-        }
         Constant::Field(val) => {
             // FIELD-ASSUMPTION: L3-felt-limbs
             // FIELD-ASSUMPTION: L3-frame
@@ -276,16 +263,10 @@ impl GlobalFrameLayouter {
         match &typ.expr {
             // FIELD-ASSUMPTION: L3-felt-limbs
             TypeExpr::Field => bytecode::FELT_LIMBS,
-            TypeExpr::U(bits) => {
+            // Width-driven; see `FrameLayouter::type_size`.
+            TypeExpr::Int(bits) => {
                 assert!(*bits <= MAX_SUPPORTED_UNSIGNED_BITS);
                 int_cell_count(*bits)
-            }
-            TypeExpr::I(bits) => {
-                assert!(
-                    *bits <= MAX_SUPPORTED_SIGNED_BITS,
-                    "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-                );
-                1
             }
             // Heap-allocated types are pointers (1 word)
             _ => 1,
@@ -304,4 +285,65 @@ impl GlobalFrameLayouter {
 pub fn int_cell_count(bits: usize) -> usize {
     assert!(bits > 0 && bits <= MAX_SUPPORTED_UNSIGNED_BITS);
     bits.div_ceil(64)
+}
+
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_two_frame_size_formulas_agree_at_every_width() {
+        // `alloc_value` goes through `type_size` while `alloc_int` goes through `int_cell_count`,
+        // and the same value can be allocated by either. They used to disagree for anything
+        // needing more than one cell -- `type_size` hardcoded `1` for a signed integer, which was
+        // invisible only because a signed type could not be wider than 64 bits. Nothing bounds the
+        // width by sign any more, so the two must agree by construction.
+        let layouter = FrameLayouter::new();
+        for bits in [1usize, 8, 32, 63, 64, 65, 127, 128] {
+            assert_eq!(
+                layouter.type_size(&Type::int(bits)),
+                int_cell_count(bits),
+                "type_size and alloc_int disagree at {bits} bits"
+            );
+            assert_eq!(
+                GlobalFrameLayouter::type_frame_size(&Type::int(bits)),
+                int_cell_count(bits),
+                "type_frame_size and alloc_int disagree at {bits} bits"
+            );
+        }
+    }
+
+    #[test]
+    fn a_constant_occupies_as_many_words_as_its_width_needs() {
+        // The word count follows the width, and `alloc_int` must agree with it -- the two used to
+        // disagree, and a wide constant lost its upper word.
+        let count = |c: &Constant| {
+            let mut n = 0;
+            for_each_constant_word(c, &mut |_| n += 1);
+            n
+        };
+        for bits in [1usize, 8, 32, 63, 64] {
+            assert_eq!(count(&Constant::Int(bits, 1)), 1, "at {bits} bits");
+        }
+        assert_eq!(count(&Constant::Int(128, 1)), 2);
+
+        // The upper word is emitted, not dropped: a payload living entirely above bit 64 must
+        // still produce two words, the low one zero.
+        let mut words = Vec::new();
+        for_each_constant_word(&Constant::Int(128, 1u128 << 100), &mut |w| words.push(w));
+        assert_eq!(words, vec![0u64, 1u64 << 36]);
+
+        // And the count agrees with what the frame reserves for the same width, which is the
+        // pairing that actually has to hold.
+        for bits in [1usize, 8, 32, 63, 64, 128] {
+            assert_eq!(
+                count(&Constant::Int(bits, 1)),
+                int_cell_count(bits),
+                "constant words and frame cells disagree at {bits} bits"
+            );
+        }
+    }
 }

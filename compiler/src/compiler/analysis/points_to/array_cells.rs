@@ -1,15 +1,15 @@
 //! The array flow-group pre-pass that provides per-`Index(k)` cell precision.
 //!
 //! Arrays are value-semantic in HLSSA, so `ArraySet`, block-parameter phis, `Select`, and casts are
-//! *wholesale copies* of an array value: the result inherits all of the source's element cells. For
+//! _wholesale copies_ of an array value: the result inherits all of the source's element cells. For
 //! per-constant-index cell precision in the (type-oblivious) solver, a wholesale copy must
-//! reproduce every `Index(j)` cell — an enumeration set that is a *global* property of the array's
+//! reproduce every `Index(j)` cell — an enumeration set that is a _global_ property of the array's
 //! flow-group, not knowable at one instruction. This module computes that set.
 //!
 //! It partitions a function's array/slice `ValueId`s into flow-groups (a union-find over wholesale-
 //! copy edges) and classifies each group:
 //!
-//! - **`Split`** — the group is *purely local*, *only ever constant-indexed*, a *fixed-size array*
+//! - **`Split`** — the group is _purely local_, _only ever constant-indexed_, a _fixed-size array_
 //!   (never a slice), and never hits a collapse trigger. Its live constant indices are tracked as
 //!   distinct `Index(k)` cells. A constant-count `MkRepeated` of a scalar element is `Split` too (its
 //!   cells all alias the one source value until an `ArraySet` diverges them).
@@ -23,14 +23,14 @@
 //! paths (parameter seeding, summary instantiation, `Store`/`Load`) never touch a `Split` group, so
 //! there is no seeding/reading mismatch — see [`super::builder`].
 //!
-//! A `Collapsed` group is further classified by *why* it collapsed (a `Collapse`): a *severable call
-//! boundary* (a `BoundaryKind`) versus a *hard* obstacle. Whole-program array boundary expansion (the
+//! A `Collapsed` group is further classified by _why_ it collapsed (a `Collapse`): a _severable call
+//! boundary_ (a `BoundaryKind`) versus a _hard_ obstacle. Whole-program array boundary expansion (the
 //! `passes::array_boundary_expansion` pass) consumes the boundary case — via
 //! [`ArrayCells::boundary_splittable_param`] and its siblings — to decide which call boundaries it can
 //! sever, after which a re-run can `Split` the now-local array.
 //!
 //! Construction is **two-pass**. Pass 1 records every union edge and every observation
-//! `(value, Index(k) | Collapse)` while pass 2 folds each observation onto its value's *final*
+//! `(value, Index(k) | Collapse)` while pass 2 folds each observation onto its value's _final_
 //! union-find representative. Folding after all unions avoids the observe-before-union hazard (a
 //! value can change representative as later unions accrue).
 
@@ -72,14 +72,14 @@ impl ArrayCells {
     }
 
     /// Whether `v`'s flow-group would be `Split` were its only obstacle the `allowed` call
-    /// boundary — i.e. no *hard* trigger fired and every boundary crossing on the group is
+    /// boundary — i.e. no _hard_ trigger fired and every boundary crossing on the group is
     /// `allowed`.
     ///
     /// This is the "splittable modulo a single severable boundary" predicate that whole-program
     /// array boundary expansion gates on; the caller still confirms `v` is a fixed-size array (so
     /// the post-expansion reconstruction is dense `0..N`). Returns `false` for an untracked value.
     ///
-    /// Sound by construction: a missed *hard* reason can only ever promote a group to
+    /// Sound by construction: a missed _hard_ reason can only ever promote a group to
     /// `Collapse::Hard` (blocking expansion), never enable a bad one.
     ///
     /// A group with no boundary crossing satisfies the relaxability check vacuously, so this is
@@ -127,7 +127,7 @@ impl ArrayCells {
 
         // The static element count of a fixed-size array value, or `None` for slices / non-arrays.
         //
-        // Used to collapse a group accessed at an out-of-bounds *constant* index (a legal program
+        // Used to collapse a group accessed at an out-of-bounds _constant_ index (a legal program
         // whose bounds failure is deferred to witgen/runtime) so the splitter never peels it.
         let arr_size = |v: ValueId| -> Option<usize> {
             match &types.get_value_type(v).peel_witness().expr {
@@ -141,7 +141,7 @@ impl ArrayCells {
         let is_scalar = |v: ValueId| -> bool {
             matches!(
                 types.get_value_type(v).peel_witness().expr,
-                TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_)
+                TypeExpr::Field | TypeExpr::Int(_)
             )
         };
 
@@ -220,16 +220,16 @@ enum Collapse {
 
     /// Irreparably collapsed — never relaxable by severing a single boundary.
     ///
-    /// Either a *hard* trigger fired (a dynamic/out-of-bounds index, a slice, a `Ref<Array>`
+    /// Either a _hard_ trigger fired (a dynamic/out-of-bounds index, a slice, a `Ref<Array>`
     /// store/load, a deeper array level, a global, or any opaque consumer), or the group crosses
-    /// ≥2 *distinct* boundary kinds (which no single severance could relax — equivalent to a hard
+    /// ≥2 _distinct_ boundary kinds (which no single severance could relax — equivalent to a hard
     /// collapse for every query).
     Hard,
 }
 
 impl Collapse {
     /// Fold one observed collapse in (a semilattice join; `Hard` is top, `None` is identity). Two
-    /// *distinct* boundary kinds join to `Hard`, since no single severance can relax both.
+    /// _distinct_ boundary kinds join to `Hard`, since no single severance can relax both.
     fn observe(&mut self, other: Collapse) {
         *self = match (*self, other) {
             (Collapse::Hard, _) | (_, Collapse::Hard) => Collapse::Hard,
@@ -249,7 +249,7 @@ impl Collapse {
         !matches!(self, Collapse::None)
     }
 
-    /// Whether the group's *only* obstacle to `Split` is the single `allowed` boundary kind — no
+    /// Whether the group's _only_ obstacle to `Split` is the single `allowed` boundary kind — no
     /// hard trigger fired and the one boundary crossing on the group is `allowed`.
     ///
     /// `None` satisfies this vacuously (no obstacle at all), so it is meaningful only when the
@@ -266,7 +266,7 @@ impl Collapse {
 
 /// The kind of call-boundary crossing that collapsed an array flow-group.
 ///
-/// These are the collapse triggers that whole-program array boundary expansion can *sever* (by
+/// These are the collapse triggers that whole-program array boundary expansion can _sever_ (by
 /// passing/returning the array as its cells), as opposed to the [`Collapse::Hard`] triggers
 /// that always block splitting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -297,7 +297,7 @@ enum Obs {
     Collapse(Collapse),
 }
 
-/// Record `v` as *hard*-collapsed, entering it into the union-find first. Idempotent in `v`
+/// Record `v` as _hard_-collapsed, entering it into the union-find first. Idempotent in `v`
 /// (`UnionFind::add` is a no-op when present, and a duplicate observation folds harmlessly), so it
 /// is safe even where `v` was already added or unioned.
 fn collapse_hard(uf: &mut UnionFind<ValueId>, obs: &mut Vec<(ValueId, Obs)>, v: ValueId) {
@@ -338,7 +338,7 @@ fn process_instr(
         // Array construction.
         OpCode::MkSeq { result, elems, .. } => {
             uf.add(*result);
-            // Only a *fixed-size array* is peelable. A `MkSeq` building a slice
+            // Only a _fixed-size array_ is peelable. A `MkSeq` building a slice
             // (`SequenceTargetType::Slice`) must collapse: the SROA client's `array_size` panics on
             // a slice type, so a slice must never be classified `Split`.
             if arr_size(*result).is_some() {
@@ -350,7 +350,7 @@ fn process_instr(
             }
 
             // An array-typed element flows into a cell of `result` (array-of-arrays): it is a
-            // *deeper* array level, which never gets per-cell precision.
+            // _deeper_ array level, which never gets per-cell precision.
             //
             // Track it separately and collapse it, mirroring the `ArraySet` stored-inner-array
             // handling below. This keeps the disjoint-roles invariant honest for `MkSeq` too:
@@ -368,7 +368,7 @@ fn process_instr(
         } => {
             uf.add(*result);
 
-            // A constant-count repeat of a *scalar* element into a fixed-size array is peelable: the
+            // A constant-count repeat of a _scalar_ element into a fixed-size array is peelable: the
             // N cells all alias the one source value (zero duplication in SSA — they share its
             // ValueId) and diverge only when a later `ArraySet` overlays one. Record `0..n` so the
             // group can be `Split`. Collapse otherwise:
@@ -448,7 +448,7 @@ fn process_instr(
         OpCode::Cast { result, value, .. } if is_arr(*result) => {
             uf.union(*result, *value);
             // An Array→Slice (or the unlikely Slice→Array) cast pulls a non-peelable member into the
-            // group; collapse the *whole* unioned group. Collapsing only the slice side would leave
+            // group; collapse the _whole_ unioned group. Collapsing only the slice side would leave
             // the array peelable while the `Cast` consuming it is kept, tripping `single()` in the
             // client's fallback arm.
             if arr_size(*result).is_none() || arr_size(*value).is_none() {
@@ -543,7 +543,7 @@ struct GroupFacts {
 
 /// Record a constant in-bounds index as an `Index(k)` observation, else collapse the group.
 ///
-/// Collapse triggers: a dynamic index, an unresolvable array size, or an out-of-bounds *constant*
+/// Collapse triggers: a dynamic index, an unresolvable array size, or an out-of-bounds _constant_
 /// index. The last is a legal program (e.g. `let a = [1,2,3]; a[10] = x;`) whose bounds failure is
 /// deferred to witgen/runtime — the splitter must not peel it (cell `k` does not exist), so the
 /// whole group collapses and the access is left for normal handling.
@@ -562,7 +562,7 @@ fn record_index(
 
 fn const_index(ssa: &HLSSA, index: ValueId) -> Option<usize> {
     match &*ssa.get_const(index)? {
-        Constant::U(_, v) => Some(*v as usize),
+        Constant::Int(_, v) => Some(*v as usize),
         _ => None,
     }
 }

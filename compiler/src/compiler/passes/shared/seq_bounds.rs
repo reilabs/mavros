@@ -78,7 +78,7 @@ impl SeqBoundsCheck {
 ///
 /// Compare at the wider of the two widths. Narrowing the index to u32 instead would alias an
 /// out-of-range wide index onto its low limb — `1 << 32` would read as in-bounds — so the narrow
-/// operand is always the one brought up. A non-`U` index (a `Field` subscript) has no width to
+/// operand is always the one brought up. A non-integer index (a `Field` subscript) has no width to
 /// widen to; it keeps the historical narrowing cast rather than change behaviour for a case none of
 /// the consumers model.
 pub fn seq_bounds_operands(
@@ -89,19 +89,19 @@ pub fn seq_bounds_operands(
     index_ty: &Type,
 ) -> (ValueId, ValueId, ValueId, usize) {
     let len = match &seq_ty.strip_witness().expr {
-        TypeExpr::Array(_, n) => emitter.u_const(32, *n as u128),
+        TypeExpr::Array(_, n) => emitter.int_const(32, *n as u128),
         TypeExpr::Slice(_) => emitter.slice_len(seq),
         other => panic!("seq bounds check on non-sequence type: {other:?}"),
     };
     match index_ty.strip_witness().expr {
-        TypeExpr::U(idx_bits) => {
+        TypeExpr::Int(idx_bits) => {
             let cmp_bits = idx_bits.max(32);
             let idx_cmp = emitter.widen_u(index, idx_bits, cmp_bits);
             let len_cmp = emitter.widen_u(len, 32, cmp_bits);
             (len, len_cmp, idx_cmp, cmp_bits)
         }
         _ => {
-            let idx_cmp = emitter.cast_to(CastTarget::U(32), index);
+            let idx_cmp = emitter.cast_to(CastTarget::Int(32), index);
             (len, len, idx_cmp, 32)
         }
     }
@@ -110,9 +110,9 @@ pub fn seq_bounds_operands(
 /// Returns `(assert, len)`; the caller emits the assert — bare, or under the op's guard.
 pub fn build_pop_bounds_assert(emitter: &mut impl HLEmitter, slice: ValueId) -> (OpCode, ValueId) {
     let len = emitter.slice_len(slice);
-    let zero = emitter.u_const(32, 0);
+    let zero = emitter.int_const(32, 0);
     let assert = OpCode::AssertCmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         lhs: zero,
         rhs: len,
     };
@@ -129,13 +129,13 @@ pub fn build_insert_bounds_assert(
 ) -> (OpCode, ValueId, ValueId, ValueId, usize) {
     let idx_bits = index_bits(index_ty, "slice insert");
     let len = emitter.slice_len(slice);
-    let one = emitter.u_const(32, 1);
-    let new_len = emitter.add(len, one);
+    let one = emitter.int_const(32, 1);
+    let new_len = emitter.uadd(len, one);
     let cmp_bits = idx_bits.max(32);
     let idx_cmp = emitter.widen_u(index, idx_bits, cmp_bits);
     let new_len_cmp = emitter.widen_u(new_len, 32, cmp_bits);
     let assert = OpCode::AssertCmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         lhs: idx_cmp,
         rhs: new_len_cmp,
     };
@@ -155,7 +155,7 @@ pub fn build_remove_bounds_assert(
     let idx_cmp = emitter.widen_u(index, idx_bits, cmp_bits);
     let len_cmp = emitter.widen_u(len, 32, cmp_bits);
     let assert = OpCode::AssertCmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         lhs: idx_cmp,
         rhs: len_cmp,
     };
@@ -176,7 +176,7 @@ pub fn build_seq_access_bounds_assert(
     }
     let (_, len_cmp, idx_cmp, _) = seq_bounds_operands(emitter, seq, index, seq_ty, index_ty);
     Some(OpCode::AssertCmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         lhs: idx_cmp,
         rhs: len_cmp,
     })
@@ -212,7 +212,7 @@ pub fn emit_bounds_assert(
 
 fn index_bits(ty: &Type, context: &str) -> usize {
     match ty.strip_witness().expr {
-        TypeExpr::U(n) => n,
-        _ => panic!("{context}: index must be an unsigned integer, got {ty}"),
+        TypeExpr::Int(n) => n,
+        _ => panic!("{context}: index must be an integer, got {ty}"),
     }
 }
