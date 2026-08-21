@@ -1,0 +1,6 @@
+[package]
+name = "derive_pedersen_generators"
+type = "bin"
+authors = [""]
+
+[dependencies]

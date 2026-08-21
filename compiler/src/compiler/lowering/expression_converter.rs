@@ -6,8 +6,8 @@ use noirc_errors::Location as NoirLocation;
 use noirc_frontend::{
     ast::BinaryOpKind,
     monomorphization::ast::{
-        Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, GlobalId, Ident, If,
-        Index, LValue, Let, LocalId, Type as AstType, While,
+        Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, Function as AstFunction,
+        GlobalId, Ident, If, Index, LValue, Let, LocalId, Type as AstType, While,
     },
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -19,7 +19,7 @@ use crate::{
         ssa::{
             BlockId, FunctionId, SourceLocation, ValueId,
             hlssa::{
-                Blob, CastTarget, Constant, Endianness, MAX_SUPPORTED_SIGNED_BITS, Radix,
+                Blob, CastTarget, Constant, Endianness, MAX_SUPPORTED_SIGNED_BITS, OpCode, Radix,
                 SequenceTargetType, SliceOpDir, Type, TypeExpr,
                 builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder},
             },
@@ -55,6 +55,15 @@ pub struct ExpressionConverter<'a> {
 
     /// Maps AST FuncId to SSA FunctionId
     function_mapper: &'a HashMap<AstFuncId, FunctionId>,
+
+    /// Monomorphized functions used by targeted constant-builtin inlining.
+    functions: &'a [AstFunction],
+
+    /// Functions on a call path to a constant-only builtin.
+    constant_builtin_inline_functions: &'a HashSet<AstFuncId>,
+
+    /// Active targeted-inlining call path, used to reject recursion before lowering diverges.
+    inline_call_stack: Vec<AstFuncId>,
 
     /// Set of AST function IDs that are natively unconstrained
     natively_unconstrained: &'a HashSet<AstFuncId>,
@@ -93,6 +102,8 @@ pub struct ExpressionConverter<'a> {
 impl<'a> ExpressionConverter<'a> {
     pub fn new_with_globals(
         function_mapper: &'a HashMap<AstFuncId, FunctionId>,
+        functions: &'a [AstFunction],
+        constant_builtin_inline_functions: &'a HashSet<AstFuncId>,
         natively_unconstrained: &'a HashSet<AstFuncId>,
         in_unconstrained: bool,
         global_slots: &'a HashMap<GlobalId, usize>,
@@ -104,6 +115,9 @@ impl<'a> ExpressionConverter<'a> {
             bindings: HashMap::default(),
             mutable_locals: HashSet::default(),
             function_mapper,
+            functions,
+            constant_builtin_inline_functions,
+            inline_call_stack: Vec::new(),
             natively_unconstrained,
             type_converter: TypeConverter::new(),
             loop_stack: Vec::new(),
@@ -1463,6 +1477,9 @@ impl<'a> ExpressionConverter<'a> {
                     .collect();
 
                 let fn_ptr = self.convert_expression(&call.func, b).unwrap();
+                if let Some(func_id) = self.targeted_function_pointer(fn_ptr, b) {
+                    return self.convert_static_call_with_args(&func_id, call, args, b);
+                }
                 let return_type = &call.return_type;
                 let return_size = self.return_size(return_type);
 
@@ -1492,6 +1509,126 @@ impl<'a> ExpressionConverter<'a> {
             .map(|arg| self.convert_expression(arg, b).unwrap())
             .collect();
 
+        self.convert_static_call_with_args(func_id, call, args, b)
+    }
+
+    fn convert_static_call_with_args(
+        &mut self,
+        func_id: &AstFuncId,
+        call: &noirc_frontend::monomorphization::ast::Call,
+        args: Vec<ValueId>,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
+        // A higher-order helper receiving one of the targeted functions must itself be expanded
+        // at this call site. Its indirect call can then recover the concrete function pointer and
+        // continue the same targeted inlining path.
+        let receives_targeted_function = args
+            .iter()
+            .any(|argument| self.targeted_function_pointer(*argument, b).is_some());
+
+        let must_inline =
+            self.constant_builtin_inline_functions.contains(func_id) || receives_targeted_function;
+        if must_inline {
+            let callee = self
+                .functions
+                .iter()
+                .find(|function| function.id == *func_id)
+                .unwrap_or_else(|| panic!("Undefined function: {:?}", func_id));
+            if callee.unconstrained {
+                return self.emit_static_call(func_id, call, args, b);
+            }
+            // Clone before recursively lowering the body so `self` is no longer borrowed through
+            // `functions`.
+            let callee = callee.clone();
+            assert!(
+                !self.inline_call_stack.contains(func_id),
+                "recursive call path reaches derive_pedersen_generators"
+            );
+            assert_eq!(
+                callee.parameters.len(),
+                args.len(),
+                "inlined call argument count does not match callee parameters"
+            );
+
+            // LocalIds are scoped to a monomorphized function. Snapshot the whole environment so
+            // parameters and locals from the inlined body cannot overwrite caller bindings.
+            let saved_bindings = self.bindings.clone();
+            let saved_mutable_locals = self.mutable_locals.clone();
+            for ((local_id, mutable, _, _, _), argument) in
+                callee.parameters.iter().zip(args.iter().copied())
+            {
+                if *mutable {
+                    let location = self.expression_source_location(&callee.body);
+                    self.bind_local_mut(*local_id, argument, b, location);
+                } else {
+                    self.bind_local(*local_id, argument);
+                }
+            }
+
+            self.inline_call_stack.push(*func_id);
+            let result = self.convert_expression(&callee.body, b);
+            self.inline_call_stack.pop();
+            self.bindings = saved_bindings;
+            self.mutable_locals = saved_mutable_locals;
+            return result;
+        }
+
+        self.emit_static_call(func_id, call, args, b)
+    }
+
+    fn targeted_function_pointer(
+        &self,
+        value: ValueId,
+        b: &HLFunctionBuilder<'_>,
+    ) -> Option<AstFuncId> {
+        if let Some(constant) = b.ssa.get_const(value)
+            && let Constant::FnPtr(function_id) = constant.as_ref()
+        {
+            return self.function_mapper.iter().find_map(|(ast_id, ssa_id)| {
+                (*ssa_id == *function_id && self.constant_builtin_inline_functions.contains(ast_id))
+                    .then_some(*ast_id)
+            });
+        }
+
+        for (_, block) in b.function.get_blocks() {
+            for instruction in block.get_instructions() {
+                match instruction {
+                    OpCode::MkTuple { result, elems, .. } if *result == value => {
+                        return elems
+                            .iter()
+                            .find_map(|element| self.targeted_function_pointer(*element, b));
+                    }
+                    OpCode::TupleProj { result, tuple, idx } if *result == value => {
+                        for (_, tuple_block) in b.function.get_blocks() {
+                            for tuple_instruction in tuple_block.get_instructions() {
+                                if let OpCode::MkTuple {
+                                    result: tuple_result,
+                                    elems,
+                                    ..
+                                } = tuple_instruction
+                                    && tuple_result == tuple
+                                {
+                                    return elems.get(*idx).and_then(|element| {
+                                        self.targeted_function_pointer(*element, b)
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    fn emit_static_call(
+        &mut self,
+        func_id: &AstFuncId,
+        call: &noirc_frontend::monomorphization::ast::Call,
+        args: Vec<ValueId>,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
         let ssa_func_id = self
             .function_mapper
             .get(func_id)
@@ -1631,6 +1768,48 @@ impl<'a> ExpressionConverter<'a> {
                     self.emit_located(b, Some(call.location), |e| e.assert_constant(value));
                 }
                 None
+            }
+            "derive_pedersen_generators" => {
+                let domain_separator = self.convert_expression(&call.arguments[0], b).unwrap();
+                let starting_index = self.convert_expression(&call.arguments[1], b).unwrap();
+                let AstType::Array(num_generators, _) = &call.return_type else {
+                    panic!("derive_pedersen_generators must return an array")
+                };
+                let generators = super::derive_pedersen_generators::derive(
+                    b.ssa,
+                    b.function,
+                    domain_separator,
+                    starting_index,
+                    *num_generators,
+                );
+                let generator_constants: Vec<_> = if let Some(generators) = generators {
+                    generators
+                        .into_iter()
+                        .map(|(x, y)| {
+                            (
+                                b.ssa.add_const(Constant::Field(x)),
+                                b.ssa.add_const(Constant::Field(y)),
+                            )
+                        })
+                        .collect()
+                } else {
+                    // The stdlib emits `assert_constant` for both inputs immediately before this
+                    // builtin. Keep lowering type-correct and let that existing validation report
+                    // any reachable non-constant call.
+                    let zero = b.ssa.add_const(Constant::Field(b.ssa.field().zero()));
+                    vec![(zero, zero); *num_generators as usize]
+                };
+                Some(self.emit_located(b, Some(call.location), |e| {
+                    let points = generator_constants
+                        .into_iter()
+                        .map(|(x, y)| e.mk_tuple(vec![x, y], vec![Type::field(), Type::field()]))
+                        .collect();
+                    e.mk_seq(
+                        points,
+                        SequenceTargetType::Array(*num_generators as usize),
+                        Type::tuple_of(vec![Type::field(), Type::field()]),
+                    )
+                }))
             }
             "str_as_bytes" => {
                 let string_type = call.arguments[0]
