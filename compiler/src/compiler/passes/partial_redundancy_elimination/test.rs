@@ -444,7 +444,7 @@ fn signed_64_bit_division_minus_one_hazard() {
 
 /// The `-1` hazard is not about the width, and gating it on 64 bits was wrong.
 ///
-/// The reasoning that produced that gate was about the VM: `div_s64` sign-extends to `i64`, where
+/// The reasoning that produced that gate was about the VM: `sdiv_int` sign-extends to `i64`, where
 /// only a 64-bit `MIN / -1` actually overflows. But the rejection a speculation has to respect is
 /// the one mavros emits, and `divmod_guard::emit_divmod_failure_cond` builds the overflow disjunct
 /// from `1 << (bits - 1)` at every width -- so an `i8` division by `-1` can fail too, and hoisting

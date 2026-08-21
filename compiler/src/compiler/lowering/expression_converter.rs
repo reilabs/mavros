@@ -1922,13 +1922,7 @@ fn checked_int_cast_target(
     }
 }
 
-/// The constant `1` a `for` loop steps its index by.
-///
-/// `1` is the same pattern under either reading, and the `Add` that consumes it carries the index's
-/// signedness on the opcode — so this needs only the width. It used to need the index's sign too,
-/// because the constant tags were what several consumers dispatched on and a mismatched pair made
-/// `instrumenter::binary_arith_op` panic rather than merely decline; with one `Constant::Int` there
-/// is no pair to mismatch.
+/// The constant `1` a `for` loop steps by, at the index's width.
 fn index_step_one(bit_size: usize) -> Constant {
     Constant::Int(bit_size, 1)
 }
