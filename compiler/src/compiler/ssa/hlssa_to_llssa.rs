@@ -1366,6 +1366,35 @@ fn lower_instruction(
             assert(e, eq);
         }
 
+        OpCode::Rangecheck { value, max_bits } => {
+            let value_type = fn_type_info.get_value_type(*value);
+            assert!(
+                value_type.is_field(),
+                "HLSSA->LLSSA Rangecheck expects a Field, got {value_type}"
+            );
+            assert!(
+                *max_bits < 254,
+                "HLSSA->LLSSA Rangecheck width {max_bits} is outside the bn254 field"
+            );
+
+            // A canonical field value fits in `max_bits` exactly when it is less than 2^max_bits.
+            let mut limbs = Vec::with_capacity(4);
+            let active_limb = max_bits / 64;
+            let active_bit = max_bits % 64;
+            for limb in 0..4 {
+                let value = if limb == active_limb {
+                    1_u64 << active_bit
+                } else {
+                    0
+                };
+                limbs.push(e.emit_int_const(64, value));
+            }
+            let limit_limbs = e.mk_struct(LLStruct::limbs(), limbs);
+            let limit = e.field_from_limbs(limit_limbs);
+            let in_range = e.field_lt(val_map[value], limit);
+            assert(e, in_range);
+        }
+
         OpCode::InitGlobal { global, value } => {
             let ll_value = val_map[value];
             let r = e.fresh_value();
@@ -3423,12 +3452,23 @@ fn emit_forward_key_value_lookup(
 
 fn int_to_field(e: &mut LLBlockEmitter<'_>, value: ValueId, bits: usize) -> ValueId {
     assert!(
-        bits <= 64,
-        "Array lookup only supports integer elements up to 64 bits, got {}",
+        bits <= 128,
+        "Array lookup only supports integer elements up to 128 bits, got {}",
         bits
     );
-    let value64 = if bits == 64 { value } else { e.zext(value, 64) };
-    u64_as_field(e, value64)
+    let (lo, hi) = if bits < 64 {
+        (e.zext(value, 64), e.emit_int_const(64, 0))
+    } else if bits == 64 {
+        (value, e.emit_int_const(64, 0))
+    } else {
+        let lo = e.truncate(value, 64);
+        let shift = e.emit_int_const(bits as u32, 64);
+        let shifted = e.int_arith(IntArithOp::UShr, value, shift);
+        (lo, e.truncate(shifted, 64))
+    };
+    let zero = e.emit_int_const(64, 0);
+    let limbs = e.mk_struct(LLStruct::limbs(), vec![lo, hi, zero, zero]);
+    e.field_from_limbs(limbs)
 }
 
 fn load_pure_lookup_elem_as_field(
