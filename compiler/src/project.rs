@@ -189,7 +189,7 @@ fn replace_foreign_function(function: &mut NoirFunction, replaced: &mut HashSet<
 
 fn parse_workspace(
     workspace: &Workspace,
-    ecdsa_sources: &[(PathBuf, String)],
+    source_overrides: &[(PathBuf, String)],
 ) -> (FileManager, ParsedFiles) {
     // Build the file manager manually so we can expose the Mavros extensions from the embedded
     // stdlib root without maintaining a copy of upstream's `std/lib.nr`.
@@ -213,7 +213,7 @@ fn parse_workspace(
     }
 
     // 3. Insert rewritten ECDSA callers before nargo adds the original workspace sources.
-    for (path, source) in ecdsa_sources {
+    for (path, source) in source_overrides {
         file_manager.add_file_with_source_canonical_path(path, source.clone());
     }
 
@@ -226,20 +226,25 @@ fn parse_workspace(
     (file_manager, parsed_files)
 }
 
-fn collect_ecdsa_sources(dir: &Path, sources: &mut Vec<(PathBuf, String)>) {
+fn collect_rewritten_sources(
+    dir: &Path,
+    from: &str,
+    to: &str,
+    source_overrides: &mut Vec<(PathBuf, String)>,
+) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_ecdsa_sources(&path, sources);
+            collect_rewritten_sources(&path, from, to, source_overrides);
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("nr") {
             let Ok(source) = fs::read_to_string(&path) else {
                 continue;
             };
-            if source.contains(ECDSA_MODULE) {
-                sources.push((path, source.replace(ECDSA_MODULE, ECDSA_REPLACEMENT)));
+            if source.contains(from) {
+                source_overrides.push((path, source.replace(from, to)));
             }
         }
     }
@@ -252,11 +257,16 @@ impl Project {
 
         let mut nargo_workspace = nargo_toml::resolve_workspace_from_toml(&toml_path, All, None)?;
 
-        let mut ecdsa_sources = Vec::new();
+        let mut source_overrides = Vec::new();
         for package in &nargo_workspace.members {
-            collect_ecdsa_sources(&package.root_dir.join("src"), &mut ecdsa_sources);
+            collect_rewritten_sources(
+                &package.root_dir.join("src"),
+                ECDSA_MODULE,
+                ECDSA_REPLACEMENT,
+                &mut source_overrides,
+            );
         }
-        if !ecdsa_sources.is_empty() {
+        if !source_overrides.is_empty() {
             let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../mavros_stdlib/ecdsa_dependencies/Nargo.toml");
             let replacement_workspace =
@@ -275,7 +285,7 @@ impl Project {
             let path = bignum.root_dir.join("src/fns/expressions.nr");
             let source = fs::read_to_string(&path).expect("failed to read noir-bignum source");
             assert_eq!(source.matches(BIGNUM_HINT_ASSERT).count(), 1);
-            ecdsa_sources.push((path, source.replacen(BIGNUM_HINT_ASSERT, "", 1)));
+            source_overrides.push((path, source.replacen(BIGNUM_HINT_ASSERT, "", 1)));
 
             for package in &mut nargo_workspace.members {
                 package
@@ -288,7 +298,7 @@ impl Project {
         }
 
         let (nargo_file_manager, nargo_parsed_files) =
-            parse_workspace(&nargo_workspace, &ecdsa_sources);
+            parse_workspace(&nargo_workspace, &source_overrides);
 
         Ok(Self {
             project_root,
