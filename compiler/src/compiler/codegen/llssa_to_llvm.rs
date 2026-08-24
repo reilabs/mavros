@@ -7,6 +7,7 @@ use std::{num::NonZeroU32, path::Path};
 
 use inkwell::{
     AddressSpace, IntPredicate, OptimizationLevel,
+    attributes::{Attribute, AttributeLoc},
     builder::Builder,
     context::Context,
     debug_info::{
@@ -42,14 +43,17 @@ const WASM_STACK_SIZE_BYTES: u32 = 256 * 1024;
 pub struct WasmCompileOpts {
     /// LLVM mid-end pass pipeline to run before codegen (e.g. `"default<O1>"`).
     pub midend_pipeline: Option<&'static str>,
+
     /// Codegen (instruction selection) optimization level.
     pub codegen_level: OptimizationLevel,
-    /// Pre-built wasm-runtime static library to link against. Callers are
-    /// responsible for building it (see [`crate::wasm_runtime`]); codegen
-    /// never invokes cargo.
+
+    /// Pre-built wasm-runtime static library to link against. Callers are responsible for building
+    /// it (see [`crate::wasm_runtime`]); codegen never invokes cargo.
     pub runtime_lib: std::path::PathBuf,
+
     /// Strip this prefix from source paths embedded in DWARF.
     pub debug_path_root: Option<std::path::PathBuf>,
+
     /// Emit DWARF sections into a standalone debug WASM beside the stripped executable.
     pub include_debug_info: bool,
 }
@@ -701,6 +705,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
         self.builder.unset_current_debug_location();
         self.debug_builder.finalize();
+
+        // The LLSSA type checker of last resort, and the only one that reads the IR that actually
+        // gets emitted. It costs ~0.04% of a compile which is cheap enough to run under every
+        // build.
+        if let Err(message) = self.module.verify() {
+            panic!("LLVM rejected the generated module:\n{message}");
+        }
     }
 
     fn declare_function(
@@ -921,55 +932,75 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
     // ── Instruction compilation ─────────────────────────────────────────
 
+    /// Emit one integer arithmetic operation on an exact-width `iN`.
+    ///
+    /// Split out of [`Self::compile_instruction`] so that the conformance test can call **this**
+    /// with constant operands and read LLVM's own constant fold back.
+    ///
+    /// `convert_type` maps `Type::Int(bits)` to a `custom_width_int_type(bits)`, so the operands
+    /// are the operation's declared width rather than a host-sized register. This ensures that
+    /// `sdiv`/`srem`/`ashr` read the sign bit in the right place with no preamble, where the VM's
+    /// `_int` lane needs `signed_cell` to recover it from a wider cell.
+    fn build_int_arith(
+        &self,
+        kind: &IntArithOp,
+        lhs: IntValue<'ctx>,
+        rhs: IntValue<'ctx>,
+        name: &str,
+    ) -> IntValue<'ctx> {
+        match kind {
+            IntArithOp::Add => self.builder.build_int_add(lhs, rhs, name).unwrap(),
+            IntArithOp::Sub => self.builder.build_int_sub(lhs, rhs, name).unwrap(),
+            IntArithOp::Mul => self.builder.build_int_mul(lhs, rhs, name).unwrap(),
+            IntArithOp::UDiv => self.builder.build_int_unsigned_div(lhs, rhs, name).unwrap(),
+            IntArithOp::URem => self.builder.build_int_unsigned_rem(lhs, rhs, name).unwrap(),
+            IntArithOp::SDiv => self.builder.build_int_signed_div(lhs, rhs, name).unwrap(),
+            IntArithOp::SRem => self.builder.build_int_signed_rem(lhs, rhs, name).unwrap(),
+            IntArithOp::And => self.builder.build_and(lhs, rhs, name).unwrap(),
+            IntArithOp::Or => self.builder.build_or(lhs, rhs, name).unwrap(),
+            IntArithOp::Xor => self.builder.build_xor(lhs, rhs, name).unwrap(),
+            IntArithOp::Shl => {
+                let masked_rhs = self.mask_shift_count(lhs, rhs);
+                self.builder
+                    .build_left_shift(lhs, masked_rhs, name)
+                    .unwrap()
+            }
+            // `sign_extend` is the only difference between the two right shifts; the shift-count
+            // masking is identical and for the same reason as `Shl`.
+            IntArithOp::UShr | IntArithOp::AShr => {
+                let masked_rhs = self.mask_shift_count(lhs, rhs);
+                self.builder
+                    .build_right_shift(lhs, masked_rhs, matches!(kind, IntArithOp::AShr), name)
+                    .unwrap()
+            }
+        }
+    }
+
+    /// Hold a shift count below the operand width, as `count & (bit_width - 1)`.
+    ///
+    /// LLVM makes a shift by at or past the width **poison**, so a total backend cannot simply pass
+    /// the count through. Masking is what the VM's `shift_amount` does with the same operands, so
+    /// the two backends answer the same thing on an amount neither should have been handed.
+    ///
+    /// The mask is a genuine modulo only where the width is a power of two, which is every width a
+    /// shift is ever built at — `witness_bitwise::lower_shift` asserts exactly that.
+    fn mask_shift_count(&self, lhs: IntValue<'ctx>, rhs: IntValue<'ctx>) -> IntValue<'ctx> {
+        let bw = lhs.get_type().get_bit_width();
+        let mask = lhs.get_type().const_int(u64::from(bw - 1), false);
+        self.builder.build_and(rhs, mask, "shamt").unwrap()
+    }
+
+    /// Lower one LLSSA instruction.
+    ///
+    /// The match is **exhaustive on purpose**. Every `LLOp` has a lowering here, so a new variant
+    /// should be a compile error naming this function rather than a panic reached by whichever
+    /// program happens to emit one first.
     fn compile_instruction(&mut self, op: &LLOp) {
         match op {
             LLOp::IntArith { kind, result, a, b } => {
                 let lhs = self.value_map[a].into_int_value();
                 let rhs = self.value_map[b].into_int_value();
-                let name = &format!("v{}", result.0);
-
-                let val = match kind {
-                    IntArithOp::Add => self.builder.build_int_add(lhs, rhs, name).unwrap(),
-                    IntArithOp::Sub => self.builder.build_int_sub(lhs, rhs, name).unwrap(),
-                    IntArithOp::Mul => self.builder.build_int_mul(lhs, rhs, name).unwrap(),
-                    IntArithOp::UDiv => {
-                        self.builder.build_int_unsigned_div(lhs, rhs, name).unwrap()
-                    }
-                    IntArithOp::URem => {
-                        self.builder.build_int_unsigned_rem(lhs, rhs, name).unwrap()
-                    }
-                    IntArithOp::SDiv => self.builder.build_int_signed_div(lhs, rhs, name).unwrap(),
-                    IntArithOp::SRem => self.builder.build_int_signed_rem(lhs, rhs, name).unwrap(),
-                    IntArithOp::And => self.builder.build_and(lhs, rhs, name).unwrap(),
-                    IntArithOp::Or => self.builder.build_or(lhs, rhs, name).unwrap(),
-                    IntArithOp::Xor => self.builder.build_xor(lhs, rhs, name).unwrap(),
-                    IntArithOp::Shl => {
-                        // Mask shift count modulo bit width — LLVM treats shifts
-                        // by >= bit_width as poison, but the VM's Rust `<<` on
-                        // x86 masks to bit_width-1. Match the VM.
-                        let bw = lhs.get_type().get_bit_width();
-                        let mask = lhs.get_type().const_int((bw - 1) as u64, false);
-                        let masked_rhs = self.builder.build_and(rhs, mask, "shamt").unwrap();
-                        self.builder
-                            .build_left_shift(lhs, masked_rhs, name)
-                            .unwrap()
-                    }
-                    // `sign_extend` is the only difference between the two right shifts; the
-                    // shift-count masking is identical and for the same reason as `Shl`.
-                    IntArithOp::UShr | IntArithOp::AShr => {
-                        let bw = lhs.get_type().get_bit_width();
-                        let mask = lhs.get_type().const_int((bw - 1) as u64, false);
-                        let masked_rhs = self.builder.build_and(rhs, mask, "shamt").unwrap();
-                        self.builder
-                            .build_right_shift(
-                                lhs,
-                                masked_rhs,
-                                matches!(kind, IntArithOp::AShr),
-                                name,
-                            )
-                            .unwrap()
-                    }
-                };
+                let val = self.build_int_arith(kind, lhs, rhs, &format!("v{}", result.0));
                 self.value_map.insert(*result, val.into());
             }
 
@@ -1425,10 +1456,29 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let trap_fn = self.module.get_function("llvm.trap").unwrap_or_else(|| {
                     let void_type = self.context.void_type();
                     let trap_type = void_type.fn_type(&[], false);
-                    self.module.add_function("llvm.trap", trap_type, None)
+                    let f = self.module.add_function("llvm.trap", trap_type, None);
+                    // LLVM recognizes the intrinsic by name and supplies its attribute set itself —
+                    // the emitted IR reads `cold noreturn nounwind memory(inaccessiblemem: write)`,
+                    // none of which is set here. `noreturn` is restated anyway because this
+                    // lowering _depends_ on it: it is what tells LLVM that everything after the
+                    // call is dead.
+                    let noreturn = Attribute::get_named_enum_kind_id("noreturn");
+                    f.add_attribute(
+                        AttributeLoc::Function,
+                        self.context.create_enum_attribute(noreturn, 0),
+                    );
+                    f
                 });
+                // No `unreachable` here. `Trap` is an LLSSA _instruction_, so the block it sits in
+                // carries on and ends with a terminator of its own; `unreachable` is an LLVM
+                // _terminator_, and two terminators in one basic block is invalid IR.
+                //
+                // Closing the block properly instead would mean opening a fresh one for the
+                // remainder, and the phi wiring in `compile_function` names the block that ends an
+                // LLSSA block by its `block_map` entry — so the successors' incoming edges would
+                // all be wrong. `noreturn` says the same thing to the optimizer at no structural
+                // cost.
                 self.builder.build_call(trap_fn, &[], "").unwrap();
-                self.builder.build_unreachable().unwrap();
             }
 
             // ── Calls ───────────────────────────────────────────────────
@@ -1477,8 +1527,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let ptr = global.as_pointer_value();
                 self.value_map.insert(*result, ptr.into());
             }
-
-            _ => panic!("Unsupported LLOp in LLSSA codegen: {:?}", op),
         }
     }
 
@@ -1738,6 +1786,160 @@ mod tests {
                 line.contains("call") && line.contains("@__field_add") && line.contains("!dbg")
             }),
             "field add must carry a debug location:\n{ir}"
+        );
+    }
+}
+
+/// The LLVM backend's conformance relation to the normative model in `mavros-int-semantics`.
+///
+/// The backend emits IR rather than computing values, so it cannot be checked the way an
+/// interpreter can. What it can be checked against is **LLVM's own constant folder**: build the
+/// real lowering — [`LLVMCodeGen::build_int_arith`], not a mirror of it — with two constant
+/// operands, and LLVM folds the instruction as it emits it, handing back the value that lowering
+/// means. That composes the two decisions the backend actually makes, which instruction each
+/// `IntArithOp` picks and how the shift count is masked, with LLVM's definition of the instruction
+/// chosen.
+///
+/// The relation is the VM's: equal to [`residue`](mavros_int_semantics::residue) wherever the model
+/// has an opinion, and total. It is vacuous on a zero divisor and a signed `INT_MIN / -1`.
+///
+/// Which `IntArithOp` an operation lowers to is not transcribed here either: the sweep calls
+/// `hlssa_to_llssa::int_arith_op`, the same table the real lowering applies, reached through
+/// the model's own
+/// `IntOp -> ArithGroup` renaming. A copy of that table would only have checked itself.
+///
+/// What this does **not** prove is that the emitted IR reaches a backend unchanged.
+#[cfg(test)]
+mod int_semantics_conformance {
+    use inkwell::{context::Context, values::AnyValue};
+    use mavros_int_semantics::{IntOp, Raw, Sign, corners, mask, residue};
+
+    use super::*;
+    use crate::compiler::ssa::{hlssa::ArithGroup, hlssa_to_llssa::int_arith_op};
+
+    /// The `IntArithOp` a given model operation lowers to under a given reading.
+    ///
+    /// Delegates to the compiler's own table rather than restating it, so that this sweep covers
+    /// the lowering's instruction choice as well as LLVM's definition of the instruction chosen.
+    /// Note there is no `sshl`: a left shift is one map on the bit pattern, which is why
+    /// `int_arith_op` ignores the sign for it just as the VM has no signed `cell_shl`.
+    fn lowering(op: IntOp, sign: Sign) -> IntArithOp {
+        int_arith_op(ArithGroup::from(op), sign.is_signed())
+    }
+
+    /// The raw pattern a folded constant holds, or [`None`] if LLVM did not fold it to one.
+    ///
+    /// LLVM prints an `iN` constant as a **signed** decimal, so `i8 -1` is the pattern `0xFF`;
+    /// parsing as `i128` and re-masking is what recovers the pattern. `i1` is the exception,
+    /// printed as `true`/`false` — which is the same corner the model calls out, `bool` being the
+    /// one width whose only negative value is `1`. A `poison` matches none of these and yields
+    /// [`None`], which is the intended reading of it here.
+    fn folded_pattern(value: IntValue<'_>, bits: usize) -> Option<Raw> {
+        let printed = value.print_to_string().to_string();
+        let literal = printed.rsplit(' ').next()?;
+        let signed: i128 = match literal {
+            "true" => 1,
+            "false" => 0,
+            other => other.parse().ok()?,
+        };
+        Some((signed as Raw) & mask(bits))
+    }
+
+    /// Widths a shift is swept at.
+    ///
+    /// Powers of two only, and for exactly the reason `mask_shift_count` documents: `count &
+    /// (bit_width - 1)` is a modulo only there, and at a non-power-of-two width it corrupts
+    /// **in-range** counts as well.
+    fn shift_widths(sign: Sign) -> Vec<usize> {
+        corners::widths_for(sign.is_signed())
+            .iter()
+            .copied()
+            .filter(|bits| bits.is_power_of_two())
+            .collect()
+    }
+
+    #[test]
+    fn the_emitted_instructions_agree_with_the_model() {
+        let context = Context::create();
+        let codegen = LLVMCodeGen::new(&context, "int_semantics_conformance");
+
+        // The builder has to be positioned somewhere before it will emit, even for operands it is
+        // about to fold away. Nothing is ever read back out of this function.
+        let scratch =
+            codegen
+                .module
+                .add_function("scratch", context.void_type().fn_type(&[], false), None);
+        codegen
+            .builder
+            .position_at_end(context.append_basic_block(scratch, "entry"));
+
+        let mut checked = 0usize;
+        let mut unfolded = Vec::new();
+
+        for sign in Sign::ALL {
+            for op in IntOp::ALL {
+                let widths = if matches!(op, IntOp::Shl | IntOp::Shr) {
+                    shift_widths(sign)
+                } else {
+                    corners::widths_for(sign.is_signed()).to_vec()
+                };
+
+                for bits in widths {
+                    let ty = context
+                        .custom_width_int_type(NonZeroU32::new(bits as u32).unwrap())
+                        .unwrap();
+                    let rhs_values = if matches!(op, IntOp::Shl | IntOp::Shr) {
+                        corners::shift_amounts(bits, bits)
+                    } else {
+                        corners::values(bits)
+                    };
+
+                    for a in corners::values(bits) {
+                        for b in &rhs_values {
+                            let lhs =
+                                ty.const_int_arbitrary_precision(&[a as u64, (a >> 64) as u64]);
+                            let rhs =
+                                ty.const_int_arbitrary_precision(&[*b as u64, (*b >> 64) as u64]);
+                            let val = codegen.build_int_arith(&lowering(op, sign), lhs, rhs, "");
+
+                            let Some(want) = residue(op, sign, bits, a, bits, *b) else {
+                                // The model declines; LLVM folds to `poison`. Nothing to compare,
+                                // and nothing may crash getting here, which is the whole claim.
+                                continue;
+                            };
+
+                            match folded_pattern(val, bits) {
+                                Some(got) => {
+                                    assert_eq!(
+                                        got, want,
+                                        "{op:?}/{sign:?} at {bits} bits: {a:#x} {b:#x} folded to \
+                                         {got:#x}, model says {want:#x}"
+                                    );
+                                    checked += 1;
+                                }
+                                // Recorded rather than asserted on the spot so that a folder that
+                                // stopped folding shows up as one summary rather than one failure.
+                                None => {
+                                    unfolded.push(format!("{op:?}/{sign:?} {bits} {a:#x} {b:#x}"))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            unfolded.is_empty(),
+            "LLVM did not fold {} constant operations, e.g. {:?}",
+            unfolded.len(),
+            &unfolded[..unfolded.len().min(5)]
+        );
+
+        // Without this an implementation that folded nothing would pass every assertion above.
+        assert!(
+            checked > 25_000,
+            "the sweep only reached {checked} specified points"
         );
     }
 }

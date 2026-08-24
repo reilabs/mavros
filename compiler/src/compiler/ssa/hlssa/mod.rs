@@ -1934,6 +1934,47 @@ pub enum ArithGroup {
     Xor,
 }
 
+impl From<ArithGroup> for mavros_int_semantics::IntOp {
+    /// The reference model names the same ten operations, so this is a total renaming.
+    ///
+    /// It is spelled out rather than derived so that adding a variant to either side is a compile
+    /// error here, which is the only place the two vocabularies meet.
+    fn from(group: ArithGroup) -> Self {
+        match group {
+            ArithGroup::Add => Self::Add,
+            ArithGroup::Sub => Self::Sub,
+            ArithGroup::Mul => Self::Mul,
+            ArithGroup::Div => Self::Div,
+            ArithGroup::Rem => Self::Rem,
+            ArithGroup::Shl => Self::Shl,
+            ArithGroup::Shr => Self::Shr,
+            ArithGroup::And => Self::And,
+            ArithGroup::Or => Self::Or,
+            ArithGroup::Xor => Self::Xor,
+        }
+    }
+}
+
+impl From<mavros_int_semantics::IntOp> for ArithGroup {
+    /// The inverse renaming, so that the two vocabularies are pinned to each other in both
+    /// directions.
+    fn from(op: mavros_int_semantics::IntOp) -> Self {
+        use mavros_int_semantics::IntOp;
+        match op {
+            IntOp::Add => Self::Add,
+            IntOp::Sub => Self::Sub,
+            IntOp::Mul => Self::Mul,
+            IntOp::Div => Self::Div,
+            IntOp::Rem => Self::Rem,
+            IntOp::Shl => Self::Shl,
+            IntOp::Shr => Self::Shr,
+            IntOp::And => Self::And,
+            IntOp::Or => Self::Or,
+            IntOp::Xor => Self::Xor,
+        }
+    }
+}
+
 impl BinaryArithOpKind {
     /// This operation with its sign erased.
     pub fn group(self) -> ArithGroup {
@@ -1958,6 +1999,18 @@ impl BinaryArithOpKind {
     /// "sign does not apply" want [`BinaryArithOpKind::signedness`].
     pub fn is_signed(self) -> bool {
         self.signedness().unwrap_or(false)
+    }
+
+    /// The reading this operation asks the reference model for.
+    ///
+    /// Bitwise operations have no signed form, and answer `Unsigned` because that is the reading
+    /// that describes what they do to the raw pattern.
+    pub fn sign(self) -> mavros_int_semantics::Sign {
+        if self.is_signed() {
+            mavros_int_semantics::Sign::Signed
+        } else {
+            mavros_int_semantics::Sign::Unsigned
+        }
     }
 
     /// The sign this operation reads its operands with, or `None` where the question does not

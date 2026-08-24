@@ -17,9 +17,9 @@ use crate::{
         ssa::{
             BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
-                ArithGroup, CmpKind, Constant, DMatrix, Endianness, HLFunction, HLSSA,
-                HLSSAConstantsSnapshot, MAX_SUPPORTED_UNSIGNED_BITS, SliceOpDir, Type as HLType,
-                TypeExpr as HLTypeExpr, assert_signed_op_width,
+                ArithGroup, BinaryArithOpKind, CmpKind, Constant, DMatrix, Endianness, HLFunction,
+                HLSSA, HLSSAConstantsSnapshot, MAX_SUPPORTED_UNSIGNED_BITS, SliceOpDir,
+                Type as HLType, TypeExpr as HLTypeExpr, assert_signed_op_width,
             },
             llssa::{
                 Blob as LLBlob, Constant as LLConstant, FieldArithOp, IntArithOp, IntCmpOp,
@@ -796,7 +796,7 @@ fn add_vm_parameter(func: &mut LLFunction, llssa: &mut LLSSA) -> ValueId {
 /// `Shl` has no signed form: a left shift is the same map on the bits either way, which is why
 /// HLSSA still distinguishes `UShl` from `SShl` (they differ in their overflow contract, not in
 /// their result) but LLSSA does not.
-fn int_arith_op(group: ArithGroup, signed: bool) -> IntArithOp {
+pub(crate) fn int_arith_op(group: ArithGroup, signed: bool) -> IntArithOp {
     match group {
         ArithGroup::Add => IntArithOp::Add,
         ArithGroup::Sub => IntArithOp::Sub,
@@ -814,6 +814,28 @@ fn int_arith_op(group: ArithGroup, signed: bool) -> IntArithOp {
         ArithGroup::Div => IntArithOp::UDiv,
         ArithGroup::Rem if signed => IntArithOp::SRem,
         ArithGroup::Rem => IntArithOp::URem,
+    }
+}
+
+/// Check that an integer `BinaryArithOp`'s operands are exactly as wide as its result.
+///
+/// HLSSA intentionally does not enforce this. [`HLType`]'s arithmetic rule makes a result as wide
+/// as the _wider_ operand, so a mismatched pair is representable. LLSSA's `IntArith` carries no
+/// widths of its own, and both backends read them off the operands. The LLVM one would then hand
+/// arithmetic builders differently-typed values, which results in invalid LLVM IR.
+fn assert_int_arith_widths(
+    fn_type_info: &FunctionTypeInfo,
+    kind: &BinaryArithOpKind,
+    result_bits: usize,
+    lhs: ValueId,
+    rhs: ValueId,
+) {
+    for (side, value) in [("lhs", lhs), ("rhs", rhs)] {
+        let ty = fn_type_info.get_value_type(value);
+        assert!(
+            matches!(ty.expr, HLTypeExpr::Int(bits) if bits == result_bits),
+            "{kind:?}'s {side} is {ty}, not the i{result_bits} its result is"
+        );
     }
 }
 
@@ -866,6 +888,7 @@ fn lower_instruction(
                     if signed {
                         assert_signed_op_width(*bits, "arithmetic");
                     }
+                    assert_int_arith_widths(fn_type_info, kind, *bits, *lhs, *rhs);
                     e.int_arith(int_arith_op(kind.group(), signed), ll_lhs, ll_rhs)
                 }
                 HLTypeExpr::WitnessOf(_) => {
@@ -3120,6 +3143,7 @@ fn u64_as_field(e: &mut LLBlockEmitter<'_>, lo: ValueId) -> ValueId {
     e.field_from_limbs(limbs)
 }
 
+/// Negate a Field as `0 - value`.
 fn field_neg_via_sub(e: &mut LLBlockEmitter<'_>, value: ValueId) -> ValueId {
     let zero_i64 = e.emit_int_const(64, 0);
     let zero_field = u64_as_field(e, zero_i64);
@@ -3964,12 +3988,9 @@ fn emit_rngchk_ad_init_body(
         // out_db[logup_challenge_off] += coeff
         e.ad_write_witness(DMatrix::B, logup_challenge_i32, coeff);
 
-        // out_db[0] += (-i_field) * coeff. `field_neg` isn't wired up in LLVM
-        // codegen — express as `0 - i` so it goes through `__field_sub`.
+        // out_db[0] += (-i_field) * coeff.
         let i_field = u64_as_field(e, i_i64);
-        let zero_i64_f = e.emit_int_const(64, 0);
-        let zero_field = u64_as_field(e, zero_i64_f);
-        let neg_i_field = e.field_arith(FieldArithOp::Sub, zero_field, i_field);
+        let neg_i_field = field_neg_via_sub(e, i_field);
         e.ad_write_const(DMatrix::B, neg_i_field, coeff);
 
         // out_dc[mults_wit_off + i] += coeff
@@ -4034,11 +4055,9 @@ fn emit_spread_ad_init_body(
         // B = α - i + β·spread(i):
         //   out_db[α] += coeff
         e.ad_write_witness(DMatrix::B, logup_alpha_i32, coeff);
-        //   out_db[0] += (-i) · coeff  (express `-i` as `0 - i`, no field_neg op)
+        //   out_db[0] += (-i) · coeff
         let i_field = u64_as_field(e, i_i64);
-        let zero_i64_f = e.emit_int_const(64, 0);
-        let zero_field = u64_as_field(e, zero_i64_f);
-        let neg_i_field = e.field_arith(FieldArithOp::Sub, zero_field, i_field);
+        let neg_i_field = field_neg_via_sub(e, i_field);
         e.ad_write_const(DMatrix::B, neg_i_field, coeff);
         //   out_db[β] += spread(i) · coeff
         let i_key = e.truncate(i_i64, bits as u32);
@@ -4443,6 +4462,38 @@ mod tests {
             "felt constant should not lower to an MkStruct instruction:\n{dump}"
         );
         assert_eq!(val_map.len(), 1, "the felt constant should be mapped");
+    }
+
+    /// A width-mismatched integer arithmetic op is representable in HLSSA — its result takes the
+    /// _wider_ operand's width — and must be caught here rather than in the LLVM builder, which
+    /// would be handed two differently-typed operands. See [`assert_int_arith_widths`].
+    #[test]
+    #[should_panic(expected = "its result is")]
+    fn a_width_mismatched_int_arith_is_rejected_before_llvm() {
+        use crate::compiler::{
+            analysis::types::Types,
+            ssa::hlssa::builder::{HLEmitter, HLSSABuilder},
+        };
+
+        let mut hlssa = HLSSA::with_main("width_mismatch_test".to_string());
+        let main_id = hlssa.get_unique_entrypoint_id();
+        hlssa
+            .get_function_mut(main_id)
+            .add_return_type(HLType::int(16));
+
+        let mut hb = HLSSABuilder::new(&mut hlssa);
+        hb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.test_block(entry);
+            let narrow = e.int_const(8, 1);
+            let wide = e.int_const(16, 1);
+            let sum = e.uadd(narrow, wide);
+            e.terminate_return(vec![sum]);
+        });
+
+        let flow = FlowAnalysis::run(&hlssa);
+        let types = Types::new().run(&hlssa, &flow);
+        lower_inner(&hlssa, &flow, &types, None, CodeGenOptions::default());
     }
 
     #[test]

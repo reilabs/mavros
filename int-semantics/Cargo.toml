@@ -1,0 +1,14 @@
+[package]
+name = "mavros-int-semantics"
+version.workspace = true
+edition.workspace = true
+
+# Deliberately dependency-free. This crate is the normative statement of what an integer operation
+# means, so it has to sit below every evaluator that must conform to it.
+[dependencies]
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
