@@ -3456,19 +3456,7 @@ fn int_to_field(e: &mut LLBlockEmitter<'_>, value: ValueId, bits: usize) -> Valu
         "Array lookup only supports integer elements up to 128 bits, got {}",
         bits
     );
-    let (lo, hi) = if bits < 64 {
-        (e.zext(value, 64), e.emit_int_const(64, 0))
-    } else if bits == 64 {
-        (value, e.emit_int_const(64, 0))
-    } else {
-        let lo = e.truncate(value, 64);
-        let shift = e.emit_int_const(bits as u32, 64);
-        let shifted = e.int_arith(IntArithOp::UShr, value, shift);
-        (lo, e.truncate(shifted, 64))
-    };
-    let zero = e.emit_int_const(64, 0);
-    let limbs = e.mk_struct(LLStruct::limbs(), vec![lo, hi, zero, zero]);
-    e.field_from_limbs(limbs)
+    ensure_field_sized(e, value, &HLType::int(bits))
 }
 
 fn load_pure_lookup_elem_as_field(

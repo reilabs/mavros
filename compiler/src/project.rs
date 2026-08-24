@@ -24,51 +24,9 @@ use noirc_frontend::{
 
 use crate::{collections::HashSet, error::Error};
 
-#[derive(Clone, Copy)]
-struct DependencySourceReplacement {
-    trigger: &'static str,
-    replacement: &'static str,
-    manifest: &'static str,
-    package: &'static str,
-    source_overrides: &'static [DependencySourceOverride],
-}
-
-#[derive(Clone, Copy)]
-struct DependencySourceOverride {
-    dependency: &'static str,
-    path: &'static str,
-    expected: &'static str,
-    replacement: &'static str,
-}
-
-// `noir-bignum` repeats a constrained relation check as an assertion inside its unconstrained
-// quotient hint. Invalid ECDSA inputs in an inactive circuit branch can reach that hint before
-// the branch guard masks the constrained checks, so the debugging assertion makes an otherwise
-// total black-box operation panic. The relation remains enforced by the gadget's range checks.
-// Match the complete pinned source line so a dependency update fails loudly instead of silently
-// applying this compatibility override to changed code.
-const ECDSA_DEPENDENCY_SOURCE_OVERRIDES: &[DependencySourceOverride] =
-    &[DependencySourceOverride {
-        dependency: "bignum",
-        path: "src/fns/expressions.nr",
-        expected: "    assert(__is_zero(remainder));\n",
-        replacement: "",
-    }];
-
-/// Circuit-backed replacements that live in standalone Noir packages.
-///
-/// Unlike `FOREIGN_REPLACEMENTS`, these cannot be called from a rewritten function in the
-/// embedded `std` crate: package dependencies are visible to the user's crate, not to `std`.
-/// Keep that frontend boundary isolated here until low-level calls can target circuit functions
-/// directly after name resolution.
-const DEPENDENCY_SOURCE_REPLACEMENTS: &[DependencySourceReplacement] =
-    &[DependencySourceReplacement {
-        trigger: "std::ecdsa_secp256r1::verify_signature",
-        replacement: "mavros_ecdsa::verify_signature",
-        manifest: "../mavros_stdlib/ecdsa_dependencies/Nargo.toml",
-        package: "mavros_ecdsa",
-        source_overrides: ECDSA_DEPENDENCY_SOURCE_OVERRIDES,
-    }];
+const ECDSA_MODULE: &str = "std::ecdsa_secp256r1";
+const ECDSA_REPLACEMENT: &str = "mavros_ecdsa";
+const BIGNUM_HINT_ASSERT: &str = "    assert(__is_zero(remainder));\n";
 
 pub struct Project {
     project_root: PathBuf,
@@ -231,8 +189,8 @@ fn replace_foreign_function(function: &mut NoirFunction, replaced: &mut HashSet<
 
 fn parse_workspace(
     workspace: &Workspace,
-    source_replacements: &[DependencySourceReplacement],
-) -> Result<(FileManager, ParsedFiles), Error> {
+    ecdsa_sources: &[(PathBuf, String)],
+) -> (FileManager, ParsedFiles) {
     // Build the file manager manually so we can expose the Mavros extensions from the embedded
     // stdlib root without maintaining a copy of upstream's `std/lib.nr`.
     let mut file_manager = FileManager::new(&workspace.root_dir);
@@ -254,135 +212,37 @@ fn parse_workspace(
         file_manager.add_file_with_source_canonical_path(Path::new(path), source.to_string());
     }
 
-    // 3. Rewrite calls backed by standalone circuit packages. Source files are inserted first so
-    // nargo's subsequent bulk insertion preserves these overrides.
-    for package in &workspace.members {
-        add_dependency_rewritten_sources(
-            &package.root_dir.join("src"),
-            source_replacements,
-            &mut file_manager,
-        );
+    // 3. Insert rewritten ECDSA callers before nargo adds the original workspace sources.
+    for (path, source) in ecdsa_sources {
+        file_manager.add_file_with_source_canonical_path(path, source.clone());
     }
-    add_dependency_source_overrides(workspace, source_replacements, &mut file_manager)?;
 
-    // 4. Add all remaining workspace and dependency files.
+    // 4. Add workspace and dependency files.
     nargo::insert_all_files_for_workspace_into_file_manager(workspace, &mut file_manager);
     let mut parsed_files = nargo::parse_all(&file_manager);
 
     // 5. Rewrite replaced foreign functions to call their pure-Noir implementations.
     replace_foreign_functions(&mut parsed_files);
-    Ok((file_manager, parsed_files))
+    (file_manager, parsed_files)
 }
 
-fn add_dependency_source_overrides(
-    workspace: &Workspace,
-    replacements: &[DependencySourceReplacement],
-    file_manager: &mut FileManager,
-) -> Result<(), Error> {
-    for replacement in replacements {
-        let replacement_package = workspace
-            .members
-            .iter()
-            .find_map(|member| find_direct_dependency(member, replacement.package))
-            .ok_or_else(|| {
-                Error::DependencySourceOverride(format!(
-                    "active source replacement package '{}' is not attached to the workspace",
-                    replacement.package
-                ))
-            })?;
-
-        for source_override in replacement.source_overrides {
-            let dependency = find_dependency(replacement_package, source_override.dependency)
-                .ok_or_else(|| {
-                    Error::DependencySourceOverride(format!(
-                        "replacement package '{}' has no '{}' dependency",
-                        replacement.package, source_override.dependency
-                    ))
-                })?;
-            let path = dependency.root_dir.join(source_override.path);
-            let source = fs::read_to_string(&path).map_err(|error| {
-                Error::DependencySourceOverride(format!(
-                    "failed to read pinned source {}: {error}",
-                    path.display()
-                ))
-            })?;
-            if source.matches(source_override.expected).count() != 1 {
-                return Err(Error::DependencySourceOverride(format!(
-                    "pinned compatibility source changed in {}",
-                    path.display()
-                )));
-            }
-            let rewritten =
-                source.replacen(source_override.expected, source_override.replacement, 1);
-            file_manager.add_file_with_source_canonical_path(&path, rewritten);
-        }
-    }
-    Ok(())
-}
-
-fn find_direct_dependency<'a>(package: &'a Package, name: &str) -> Option<&'a Package> {
-    package
-        .dependencies
-        .iter()
-        .find(|(dependency_name, _)| dependency_name.to_string() == name)
-        .map(|(_, dependency)| dependency.package())
-}
-
-fn find_dependency<'a>(package: &'a Package, name: &str) -> Option<&'a Package> {
-    if package.name.to_string() == name {
-        return Some(package);
-    }
-    package
-        .dependencies
-        .values()
-        .find_map(|dependency| find_dependency(dependency.package(), name))
-}
-
-fn add_dependency_rewritten_sources(
-    dir: &Path,
-    replacements: &[DependencySourceReplacement],
-    file_manager: &mut FileManager,
-) {
+fn collect_ecdsa_sources(dir: &Path, sources: &mut Vec<(PathBuf, String)>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            add_dependency_rewritten_sources(&path, replacements, file_manager);
+            collect_ecdsa_sources(&path, sources);
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("nr") {
             let Ok(source) = fs::read_to_string(&path) else {
                 continue;
             };
-            let rewritten = replacements
-                .iter()
-                .fold(source.clone(), |source, replacement| {
-                    source.replace(replacement.trigger, replacement.replacement)
-                });
-            if rewritten != source {
-                file_manager.add_file_with_source_canonical_path(&path, rewritten);
+            if source.contains(ECDSA_MODULE) {
+                sources.push((path, source.replace(ECDSA_MODULE, ECDSA_REPLACEMENT)));
             }
         }
     }
-}
-
-fn source_tree_contains(dir: &Path, needle: &str) -> bool {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if source_tree_contains(&path, needle) {
-                return true;
-            }
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("nr")
-            && fs::read_to_string(&path).is_ok_and(|source| source.contains(needle))
-        {
-            return true;
-        }
-    }
-    false
 }
 
 impl Project {
@@ -392,23 +252,31 @@ impl Project {
 
         let mut nargo_workspace = nargo_toml::resolve_workspace_from_toml(&toml_path, All, None)?;
 
-        // Nargo eagerly parses every declared dependency. Attach a replacement package only when
-        // its trigger occurs in a workspace source tree; eagerly attaching a large circuit graph
-        // penalizes unrelated compilations and can exhaust the small stack of Rust test threads.
-        let source_replacements: Vec<_> = DEPENDENCY_SOURCE_REPLACEMENTS
-            .iter()
-            .copied()
-            .filter(|replacement| {
-                nargo_workspace.members.iter().any(|package| {
-                    source_tree_contains(&package.root_dir.join("src"), replacement.trigger)
-                })
-            })
-            .collect();
-        for replacement in &source_replacements {
-            let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join(replacement.manifest);
+        let mut ecdsa_sources = Vec::new();
+        for package in &nargo_workspace.members {
+            collect_ecdsa_sources(&package.root_dir.join("src"), &mut ecdsa_sources);
+        }
+        if !ecdsa_sources.is_empty() {
+            let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../mavros_stdlib/ecdsa_dependencies/Nargo.toml");
             let replacement_workspace =
                 nargo_toml::resolve_workspace_from_toml(&manifest, All, None)?;
             let replacement_package = replacement_workspace.members[0].clone();
+
+            // The bignum hint repeats a constrained relation as a debugging assertion. Hints run
+            // in inactive branches, so remove that assertion while retaining the circuit checks.
+            let bignum = replacement_package
+                .dependencies
+                .iter()
+                .find(|(name, _)| name.to_string() == "bignum")
+                .expect("mavros_ecdsa has no bignum dependency")
+                .1
+                .package();
+            let path = bignum.root_dir.join("src/fns/expressions.nr");
+            let source = fs::read_to_string(&path).expect("failed to read noir-bignum source");
+            assert_eq!(source.matches(BIGNUM_HINT_ASSERT).count(), 1);
+            ecdsa_sources.push((path, source.replacen(BIGNUM_HINT_ASSERT, "", 1)));
+
             for package in &mut nargo_workspace.members {
                 package
                     .dependencies
@@ -420,7 +288,7 @@ impl Project {
         }
 
         let (nargo_file_manager, nargo_parsed_files) =
-            parse_workspace(&nargo_workspace, &source_replacements)?;
+            parse_workspace(&nargo_workspace, &ecdsa_sources);
 
         Ok(Self {
             project_root,
@@ -505,51 +373,5 @@ impl Debug for Project {
         writeln!(f, ")")?;
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dependency_detection_matches_the_source_rewrite_trigger() {
-        let project = tempfile::tempdir().unwrap();
-        let src = project.path().join("src");
-        let nested = src.join("nested");
-        let replacement = DEPENDENCY_SOURCE_REPLACEMENTS[0];
-        fs::create_dir_all(&nested).unwrap();
-
-        fs::write(src.join("main.nr"), "fn main() {}\n").unwrap();
-        fs::write(nested.join("ignored.txt"), replacement.trigger).unwrap();
-        assert!(!source_tree_contains(&src, replacement.trigger));
-
-        fs::write(
-            nested.join("signature.nr"),
-            format!("fn verify() {{ let _ = {}; }}\n", replacement.trigger),
-        )
-        .unwrap();
-        assert!(source_tree_contains(&src, replacement.trigger));
-    }
-
-    #[test]
-    fn project_without_ecdsa_does_not_attach_the_circuit_dependency() {
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir(root.path().join("src")).unwrap();
-        fs::write(
-            root.path().join("Nargo.toml"),
-            "[package]\nname = \"no_ecdsa\"\ntype = \"bin\"\nauthors = []\n\n[dependencies]\n",
-        )
-        .unwrap();
-        fs::write(root.path().join("src/main.nr"), "fn main() {}\n").unwrap();
-
-        let project = Project::new(root.path().to_path_buf()).unwrap();
-        assert!(
-            project
-                .get_only_crate()
-                .dependencies
-                .keys()
-                .all(|name| name.to_string() != "mavros_ecdsa")
-        );
     }
 }
