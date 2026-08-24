@@ -17,10 +17,16 @@ use crate::{
             value_range_analysis::{ValueRangeAnalysis, ValueRanges},
         },
         pass_manager::{AnalysisId, AnalysisStore, Pass},
-        passes::shared::divmod_guard::{
-            divmod_can_fail, divmod_provably_defined, emit_divmod_is_defined_assert,
+        passes::shared::{
+            divmod_guard::{
+                divmod_can_fail, divmod_provably_defined, emit_divmod_is_defined_assert,
+            },
+            seq_bounds::{SeqBoundsCheck, emit_bounds_assert, failable_bounds},
+            shift_guard::{
+                emit_shift_amount_is_valid_assert, shift_amount_provably_in_range,
+                shift_operand_bits,
+            },
         },
-        passes::shared::seq_bounds::{SeqBoundsCheck, emit_bounds_assert, failable_bounds},
         ssa::{
             BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
@@ -86,6 +92,26 @@ fn unguarded_divmod_operands(
     }
 }
 
+/// The operands of an unguarded `Shl`/`Shr`.
+///
+/// This is the third instruction, alongside `Div`/`Mod` and the failable sequence ops, that DCE may
+/// not simply delete when its result goes dead. A shift's only failure mode comes from its
+/// **amount**, so we build the check based on that.
+///
+/// Deliberately matches only at the top level, for the reason [`unguarded_divmod_operands`] does: a
+/// `Guard`-wrapped shift inside an inactive branch is required _not_ to fail, and
+/// `lower_shift_guard` already encodes that.
+fn unguarded_shift_operands(instruction: &OpCode) -> Option<(BinaryArithOpKind, ValueId, ValueId)> {
+    match instruction {
+        OpCode::BinaryArithOp { kind, lhs, rhs, .. }
+            if matches!(kind.group(), ArithGroup::Shl | ArithGroup::Shr) =>
+        {
+            Some((*kind, *lhs, *rhs))
+        }
+        _ => None,
+    }
+}
+
 pub struct DCE {
     config: Config,
 }
@@ -114,20 +140,19 @@ pub struct Config {
     /// blocks.
     pub preserve_all_blocks: bool,
 
-    /// Whether an unguarded partial op — a failable `Div`/`Mod`, or a
+    /// Whether an unguarded partial op — a failable `Div`/`Mod`, a `Shl`/`Shr`, or a
     /// `SlicePop`/`SliceInsert`/`SliceRemove` — whose results are dead is replaced by its failure
     /// check instead of being deleted outright.
     ///
     /// **Only ever true before witness lowering**. From `spill_witness` onward the IR also contains
     /// partial ops the compiler generated itself — `lower_unsigned_divmod` computes its quotient
-    /// and remainder *hints* with ordinary `Div`/`Mod` on `value_of(..)` operands. Those are not
-    /// user ops and carry no Noir-level failure semantics; the guarded path even substitutes a
-    /// divisor of `1` on purpose so an inactive branch's hint stays safe.
+    /// and remainder *hints* with ordinary `Div`/`Mod` on `value_of(..)` operands, and
+    /// `lower_constant_amount_shift` builds its `1 << n` factor with an ordinary `Shl`.
     ///
-    /// Restricting it this way loses nothing. Every *user* partial op is present from
-    /// `initial_ssa` onward, so the early runs see them all; and any that survives to
-    /// `spill_witness` gets its check from `LowerPureGuards` or its instruction lowering, which
-    /// run before anything there can kill it.
+    /// Restricting it this way loses nothing. Every *user* partial op is present from `initial_ssa`
+    /// onward, so the early runs see them all; and any that survives to `spill_witness` gets its
+    /// check from `LowerPureGuards` or its instruction lowering, which run before anything there
+    /// can kill it.
     pub rewrite_dead_partial_ops: bool,
 
     /// Whether an `ArraySet` on a fixed-length array whose result is dead is replaced by its bounds
@@ -280,6 +305,30 @@ impl DCE {
         )
     }
 
+    /// Whether a dead unguarded `Shl`/`Shr` still has to leave its amount check behind, returning
+    /// the width to build it at.
+    ///
+    /// The shift counterpart of [`Self::divmod_check_survives`], and it answers the same three
+    /// questions in the same order: is the rewrite on at all, can this operand type fail, and does
+    /// the range domain discharge it. An amount the domain pins below the width has nothing left to
+    /// fail, so the shift is simply deleted.
+    ///
+    /// `None` means no check: either [`Config::rewrite_dead_partial_ops`] is off (the ranges are
+    /// only computed when the flag is set, so this cannot silently re-enable itself), the operand
+    /// is not an integer, or the amount is provably in range.
+    fn shift_check_survives(
+        &self,
+        analyses: Option<(&TypeInfo, &ValueRanges)>,
+        function_id: FunctionId,
+        lhs: ValueId,
+        rhs: ValueId,
+    ) -> Option<usize> {
+        let (types, ranges) = analyses?;
+        let bits = shift_operand_bits(types.get_function(function_id).get_value_type(lhs))?;
+        let amount = ranges.get_function(function_id).get(rhs);
+        (!shift_amount_provably_in_range(&amount, bits)).then_some(bits)
+    }
+
     /// Whether this run may replace a dead array access with its bounds check.
     fn rewrites_dead_seq_access(&self) -> bool {
         debug_assert!(
@@ -379,22 +428,21 @@ impl DCE {
         // constant has just been pruned out from under it. Nothing between here and the sweep
         // touches the SSA, so running them at the top is strictly safer than running them later.
         //
-        // The types serve every rewrite path; only the divmod path consults the ranges, as the
+        // The types serve every rewrite path; only the arithmetic paths consult the ranges, as the
         // bounds paths have nothing for them to discharge (see the sweep below).
         let rewrite_types: Option<TypeInfo> = self
             .needs_rewrite_types()
             .then(|| Types::new().run(ssa, cfg));
-        let divmod_ranges: Option<ValueRanges> = rewrite_types
+        let partial_op_ranges: Option<ValueRanges> = rewrite_types
             .as_ref()
             .filter(|_| self.rewrites_dead_partial_ops())
             .map(|types| ValueRangeAnalysis::new().run(ssa, cfg, types));
-        let divmod_analyses = rewrite_types.as_ref().zip(divmod_ranges.as_ref());
+        let partial_op_analyses = rewrite_types.as_ref().zip(partial_op_ranges.as_ref());
 
         debug_assert_eq!(
-            divmod_analyses.is_some(),
+            partial_op_analyses.is_some(),
             self.rewrites_dead_partial_ops(),
-            "`divmod_check_survives` reads `None` as 'the divmod rewrite is off'; the two must \
-             agree exactly or it silently re-enables itself"
+            "`divmod_check_survives` and `shift_check_survives` read `None` as 'the partial-op rewrite is off'; the two must agree exactly or it silently re-enables itself"
         );
 
         let mut definitions_by_function: HashMap<FunctionId, HashMap<ValueId, ValueDefinition>> =
@@ -475,9 +523,26 @@ impl DCE {
                     // exemption for the sequence bounds below: nothing here can prove such a check
                     // away, so their operands are always seeded.
                     if let Some((kind, lhs, rhs)) = unguarded_divmod_operands(instruction)
-                        && self.divmod_check_survives(divmod_analyses, *function_id, kind, lhs, rhs)
+                        && self.divmod_check_survives(
+                            partial_op_analyses,
+                            *function_id,
+                            kind,
+                            lhs,
+                            rhs,
+                        )
                     {
                         worklist.push(WorkItem::LiveValue(*function_id, lhs));
+                        worklist.push(WorkItem::LiveValue(*function_id, rhs));
+                    }
+
+                    // A dead shift needs only its *amount* kept live. The width it is checked
+                    // against comes from the shifted value's type rather than from the value, so
+                    // `lhs` and everything feeding it stay dead.
+                    if let Some((_, lhs, rhs)) = unguarded_shift_operands(instruction)
+                        && self
+                            .shift_check_survives(partial_op_analyses, *function_id, lhs, rhs)
+                            .is_some()
+                    {
                         worklist.push(WorkItem::LiveValue(*function_id, rhs));
                     }
 
@@ -783,12 +848,13 @@ impl DCE {
                              behind: {instruction:?}"
                         );
 
-                        // A partial op whose results are dead must not vanish. Noir treats a bad
-                        // division and an out-of-bounds slice op as execution failures whether or
-                        // not anything reads the result, and mavros never sees Noir's SSA-level
-                        // check, so deleting the op here would delete the only thing that could
-                        // ever fail. Replace it with the check alone: the arithmetic still goes,
-                        // which is the whole point of eliminating it.
+                        // There is deliberately no matching assertion for a `Shl`/`Shr` as partial
+                        // op whose results are dead must not vanish. Noir treats a bad division, a
+                        // shift by an out-of-range amount and an out-of-bounds slice op as
+                        // execution failures whether or not anything reads the result, and mavros
+                        // never sees Noir's SSA-level check, so deleting the op here would delete
+                        // the only thing that could ever fail. Replace it with the check alone: the
+                        // arithmetic still goes, which is the whole point of eliminating it.
                         if let Some(types) = rewrite_types.as_ref() {
                             if let Some((kind, lhs, rhs)) = unguarded_divmod_operands(&instruction)
                             {
@@ -796,7 +862,7 @@ impl DCE {
                                 // and additionally lets the range domain discharge the check, in
                                 // which case the division just goes.
                                 if self.divmod_check_survives(
-                                    divmod_analyses,
+                                    partial_op_analyses,
                                     function_id,
                                     kind,
                                     lhs,
@@ -822,6 +888,30 @@ impl DCE {
                                         rhs,
                                         &lhs_type,
                                         signed,
+                                    );
+                                }
+                            } else if let Some((kind, lhs, rhs)) =
+                                unguarded_shift_operands(&instruction)
+                            {
+                                // `shift_check_survives` carries the width as well as the verdict,
+                                // so the assert is built at the same width the mark phase decided
+                                // the check against.
+                                if let Some(bits) = self.shift_check_survives(
+                                    partial_op_analyses,
+                                    function_id,
+                                    lhs,
+                                    rhs,
+                                ) {
+                                    let mut emitter = VecEmitter {
+                                        ssa,
+                                        out: &mut new_instructions,
+                                        location: instruction.location().clone(),
+                                    };
+                                    emit_shift_amount_is_valid_assert(
+                                        &mut emitter,
+                                        rhs,
+                                        bits,
+                                        kind.is_signed(),
                                     );
                                 }
                             } else if let Some(check) = failable_bounds(&instruction)

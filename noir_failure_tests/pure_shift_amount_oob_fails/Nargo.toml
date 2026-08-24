@@ -1,0 +1,6 @@
+[package]
+name = "pure_shift_amount_oob_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]

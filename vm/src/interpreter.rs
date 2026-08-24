@@ -14,7 +14,7 @@ use crate::bytecode::{ENTRY_AD, ENTRY_WITGEN, parse_program_header, spread_bits}
 use crate::{
     ConstraintsLayout, Field, TableKind, WitnessLayout,
     array::BoxedValue,
-    bytecode::{self, AllocationInstrumenter, AllocationType, OpCode, TableInfo, U128, VM},
+    bytecode::{self, AllocationInstrumenter, AllocationType, Int128, OpCode, TableInfo, VM},
 };
 
 /// An opcode handler. Returns the `(pc, frame)` to feed into the next
@@ -140,8 +140,8 @@ impl Frame {
     }
 
     #[inline(always)]
-    pub fn read_u128_mut(&self, offset: isize) -> *mut U128 {
-        unsafe { self.data.offset(offset) as *mut U128 }
+    pub fn read_int128_mut(&self, offset: isize) -> *mut Int128 {
+        unsafe { self.data.offset(offset) as *mut Int128 }
     }
 
     #[inline(always)]
@@ -150,8 +150,8 @@ impl Frame {
     }
 
     #[inline(always)]
-    pub fn read_u128(&self, offset: isize) -> U128 {
-        unsafe { *(self.data.offset(offset) as *const U128) }
+    pub fn read_int128(&self, offset: isize) -> Int128 {
+        unsafe { *(self.data.offset(offset) as *const Int128) }
     }
 
     #[inline(always)]

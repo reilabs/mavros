@@ -149,6 +149,34 @@ impl Value {
         encode_signed(bits, val)
     }
 
+    /// The count a shift applies, or `None` when the amount is out of range for a `bits`-wide
+    /// value.
+    ///
+    /// One function for both shift directions and both readings, because the two arms below have to
+    /// test the amount and then shift by **the same value**. They did not: each decoded the amount
+    /// at the _value's_ width `bits` rather than at the amount's own, so an amount of `256` against
+    /// an eight-bit value read as an in-range `0`. On `Shr` that returned the value unchanged where
+    /// the answer is an over-shift; on `Shl` the range test was made on the narrowed amount while
+    /// the shift itself used the raw one, which is a width overflow on the host `u128` — a debug
+    /// panic, and `256 & 127 == 0` in release.
+    ///
+    /// The amount's own width is the only one that says what its pattern means, so that is what is
+    /// read here. Noir unifies the two operands of a shift, so `amount_bits == bits` for anything
+    /// the frontend produces and the distinction makes no difference there; it exists so that a
+    /// shift the compiler builds with mismatched widths cannot become a wrong answer.
+    ///
+    /// A signed amount is decoded, so a negative one is negative rather than a large magnitude. An
+    /// unsigned one keeps its full width: `u128 -> i128` wraps a huge amount to a negative, which
+    /// misses the range just as its magnitude would have.
+    fn shift_count(amount: u128, amount_bits: usize, bits: usize, signed: bool) -> Option<u32> {
+        let count = if signed {
+            Self::to_signed(amount, amount_bits)
+        } else {
+            amount as i128
+        };
+        (0..bits as i128).contains(&count).then_some(count as u32)
+    }
+
     fn unwrap_witness(&self) -> &Value {
         match self {
             Value::WitnessOf(inner) => inner.as_ref(),
@@ -419,31 +447,14 @@ impl Value {
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
             ArithGroup::Shl => match (self, b) {
-                (Value::Int(s, a), Value::Int(_, b)) => {
-                    // The over-shift test is made at the amount's own width and only then narrowed.
-                    // Narrowing first would let an amount whose low bits happen to fall below `s`
-                    // — `1 << 32` on a `u128` shift, say — read as a small in-range shift and
-                    // return the value unchanged where it must return `0`.
-                    //
-                    // A signed amount is decoded, so a negative one is negative here rather than a
-                    // large magnitude; either way it misses `0..s` and lands in the over-shift
-                    // branch.
-                    let in_range = if signed {
-                        (0..*s as i128).contains(&Self::to_signed(*b, *s))
-                    } else {
-                        *b < *s as u128
-                    };
-                    Value::Int(
-                        *s,
-                        if in_range {
-                            // In range, so the amount is below `s` and non-negative under either
-                            // reading — which makes its raw pattern the count itself.
-                            (a << (*b as u32)) & bit_mask(*s)
-                        } else {
-                            0
-                        },
-                    )
-                }
+                // An out-of-range amount is an over-shift, so everything is shifted out.
+                (Value::Int(s, a), Value::Int(amount_bits, b)) => Value::Int(
+                    *s,
+                    match Self::shift_count(*b, *amount_bits, *s, signed) {
+                        Some(n) => (a << n) & bit_mask(*s),
+                        None => 0,
+                    },
+                ),
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
                     Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
                         b.unwrap_witness(),
@@ -455,35 +466,35 @@ impl Value {
                 _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
             },
             ArithGroup::Shr => match (self, b) {
-                (Value::Int(s, a), Value::Int(_, b)) => {
-                    // The amount is tested at its own width before being narrowed, as in `Shl`.
-                    // The unsigned arm used to shift by the raw `u128` directly, which is a
-                    // debug-build panic for any amount at or above 128 and, in release, a shift by
-                    // a count Rust had silently masked to `b & 127`.
-                    //
+                (Value::Int(s, a), Value::Int(amount_bits, b)) => {
                     // An out-of-range amount **saturates** here — to `0` when zero-filling, to
                     // `0`/`-1` by sign when sign-filling — rather than masking the count to
-                    // `bits - 1` the way the VM's `ushr_u64`/`ashr_u64` and LLVM's shifts do. That
+                    // `bits - 1` the way the VM's `ushr_int`/`ashr_int` and LLVM's shifts do. That
                     // disagreement is deliberate and predates the sign refactor: it is exactly why
                     // `lattice::eval_binary` refuses to fold an out-of-range shift at all, so no
                     // constant the backends would read differently is ever manufactured from it.
                     // Nothing inherits this answer but the cost estimate, for a program Noir
                     // rejects at runtime anyway.
+                    let count = Self::shift_count(*b, *amount_bits, *s, signed);
                     if signed {
                         let sa = Self::to_signed(*a, *s);
-                        let amount = Self::to_signed(*b, *s);
                         Value::Int(
                             *s,
-                            if (0..*s as i128).contains(&amount) {
-                                Self::from_signed(sa >> (amount as u32), *s)
-                            } else {
+                            match count {
+                                Some(n) => Self::from_signed(sa >> n, *s),
                                 // Sign-fill.
-                                Self::from_signed(if sa < 0 { -1 } else { 0 }, *s)
+                                None => Self::from_signed(if sa < 0 { -1 } else { 0 }, *s),
                             },
                         )
                     } else {
                         // Zero-fill.
-                        Value::Int(*s, if *b < *s as u128 { a >> (*b as u32) } else { 0 })
+                        Value::Int(
+                            *s,
+                            match count {
+                                Some(n) => a >> n,
+                                None => 0,
+                            },
+                        )
                     }
                 }
                 (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
@@ -2326,7 +2337,7 @@ impl Analysis for Summary {
 
 #[cfg(test)]
 mod tests {
-    use super::{CmpKind, CostEstimator, ScalarKind, Value};
+    use super::{BinaryArithOpKind, CmpKind, CostEstimator, DummyInstrumenter, ScalarKind, Value};
     use crate::compiler::{
         analysis::{flow_analysis::FlowAnalysis, types::Types},
         pass_manager::{AnalysisStore, Pass},
@@ -2336,6 +2347,7 @@ mod tests {
             hlssa::{Constant, Endianness, HLSSA, OpCode, Radix, Type},
         },
     };
+    use mavros_artifacts::FieldConfig;
 
     /// The comparison's reading comes from the opcode, so one pair of operands must compare two
     /// different ways under the two orderings.
@@ -2360,6 +2372,62 @@ mod tests {
         assert!(is(a.cmp_op(&b, CmpKind::SLt, Some(8)), 1), "-5 < 2 is true");
         assert!(is(a.cmp_op(&b, CmpKind::Eq, Some(8)), 0));
         assert!(is(a.cmp_op(&a, CmpKind::Eq, Some(8)), 1));
+    }
+
+    /// A shift reads its amount at the amount's own width, and tests and shifts by one count.
+    ///
+    /// The operands below are the ones that used to come apart. Each arm decoded the amount at the
+    /// _value's_ width, so `256` against an eight-bit value read as an in-range `0`: `Shr` returned
+    /// the value unchanged where the answer is an over-shift, and `Shl` tested the narrowed amount
+    /// but shifted by the raw one — `a << 256u32` on a `u128`, a debug panic and `a` unchanged in
+    /// release.
+    ///
+    /// Both directions and both readings are covered, because the point is that all four now agree
+    /// about what "out of range" means.
+    #[test]
+    fn a_shift_amount_is_tested_and_applied_as_one_count() {
+        use BinaryArithOpKind::{SShl, SShr, UShl, UShr};
+
+        let mut dummy = DummyInstrumenter {
+            field: FieldConfig::bn254(),
+        };
+        fn shift(
+            a: &Value,
+            b: &Value,
+            kind: BinaryArithOpKind,
+            dummy: &mut DummyInstrumenter,
+        ) -> u128 {
+            match a.binary_arith_op(b, &kind, dummy) {
+                Value::Int(_, v) => v,
+                other => panic!("expected an integer result, got {other:?}"),
+            }
+        }
+
+        // The amount is wider than the value and its low eight bits are `0`.
+        let value = Value::Int(8, 0x5A);
+        let wide = Value::Int(32, 256);
+        for kind in [SShl, UShl, SShr, UShr] {
+            assert_eq!(
+                shift(&value, &wide, kind, &mut dummy),
+                0,
+                "{kind:?} by 256 at eight bits must be an over-shift"
+            );
+        }
+
+        // An in-range amount is unaffected, which is what keeps the assertions above from passing
+        // on a shift that had simply stopped working.
+        let one = Value::Int(8, 1);
+        assert_eq!(shift(&value, &one, UShl, &mut dummy), 0xB4);
+        assert_eq!(shift(&value, &one, UShr, &mut dummy), 0x2D);
+
+        // A negative amount is an over-shift too, and `Shr` fills by its reading.
+        let negative = Value::Int(8, 0xFF);
+        assert_eq!(shift(&value, &negative, SShl, &mut dummy), 0);
+        assert_eq!(
+            shift(&Value::Int(8, 0xF0), &negative, SShr, &mut dummy),
+            0xFF,
+            "an over-shifted negative value sign-fills to -1"
+        );
     }
 
     /// `ToBits` always produces an array, including when the input's concrete value is unknown.

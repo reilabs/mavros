@@ -1865,7 +1865,7 @@ pub enum CallTarget {
 /// The binary arithmetic operations, with signedness carried by the **operation** rather than by
 /// the operand type.
 ///
-/// This mirrors LLSSA's `IntArithOp` and the VM's `div_u64`/`div_s64` split, and is the shape
+/// This mirrors LLSSA's `IntArithOp` and the VM's `udiv_int`/`sdiv_int` split, and is the shape
 /// every level below HLSSA already uses. The bitwise operations take no sign because they act on
 /// the raw pattern; everything else comes in a `U`/`S` pair, even where the two agree on the
 /// result bits.
@@ -2081,12 +2081,6 @@ impl CmpKind {
     /// which is accurate: it reads them as raw patterns.
     pub fn is_signed(self) -> bool {
         matches!(self, Self::SLt)
-    }
-
-    /// Whether this is an ordering comparison, i.e. one for which the sign selects a different
-    /// answer rather than the same one.
-    pub fn is_ordering(self) -> bool {
-        matches!(self, Self::ULt | Self::SLt)
     }
 
     /// The ordering comparison at the given sign.
@@ -2531,10 +2525,11 @@ mod tests {
 
     #[test]
     fn equality_is_the_sign_free_comparison() {
-        assert!(!CmpKind::Eq.is_ordering());
+        // `Eq` is the one comparison with no sign to carry, and `lt` reconstructs the other two
+        // from theirs -- which is what lets a consumer decompose a comparison, decide the sign
+        // separately, and put it back together.
         assert!(!CmpKind::Eq.is_signed());
         for kind in [CmpKind::ULt, CmpKind::SLt] {
-            assert!(kind.is_ordering());
             assert_eq!(CmpKind::lt(kind.is_signed()), kind);
         }
     }
