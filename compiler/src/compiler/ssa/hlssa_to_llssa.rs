@@ -17,9 +17,9 @@ use crate::{
         ssa::{
             BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
-                BinaryArithOpKind, CmpKind, Constant, DMatrix, Endianness, HLFunction, HLSSA,
-                HLSSAConstantsSnapshot, MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS,
-                SliceOpDir, Type as HLType, TypeExpr as HLTypeExpr,
+                ArithGroup, CmpKind, Constant, DMatrix, Endianness, HLFunction, HLSSA,
+                HLSSAConstantsSnapshot, MAX_SUPPORTED_UNSIGNED_BITS, SliceOpDir, Type as HLType,
+                TypeExpr as HLTypeExpr, assert_signed_op_width,
             },
             llssa::{
                 Blob as LLBlob, Constant as LLConstant, FieldArithOp, IntArithOp, IntCmpOp,
@@ -39,14 +39,7 @@ use crate::{
 fn lower_type(ty: &HLType) -> LLType {
     match &ty.expr {
         HLTypeExpr::Field => LLType::Struct(LLStruct::field_elem()),
-        HLTypeExpr::U(bits) => LLType::Int(*bits as u32),
-        HLTypeExpr::I(bits) => {
-            assert!(
-                *bits <= MAX_SUPPORTED_SIGNED_BITS,
-                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-            );
-            LLType::Int(*bits as u32)
-        }
+        HLTypeExpr::Int(bits) => LLType::Int(*bits as u32),
         HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => LLType::Ptr,
         // In the AD path, WitnessOf values are heap-allocated AD nodes
         HLTypeExpr::WitnessOf(_) => LLType::Ptr,
@@ -62,14 +55,7 @@ fn lower_type(ty: &HLType) -> LLType {
 fn elem_struct(ty: &HLType) -> LLStruct {
     match &ty.expr {
         HLTypeExpr::Field => LLStruct::field_elem(),
-        HLTypeExpr::U(bits) => LLStruct::new(vec![LLFieldType::Int(*bits as u32)]),
-        HLTypeExpr::I(bits) => {
-            assert!(
-                *bits <= MAX_SUPPORTED_SIGNED_BITS,
-                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-            );
-            LLStruct::new(vec![LLFieldType::Int(*bits as u32)])
-        }
+        HLTypeExpr::Int(bits) => LLStruct::new(vec![LLFieldType::Int(*bits as u32)]),
         HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => LLStruct::new(vec![LLFieldType::Ptr]),
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::WitnessOf(_) => LLStruct::new(vec![LLFieldType::Ptr]),
@@ -87,14 +73,7 @@ fn rc_seq_struct(elem_type: &HLType) -> LLStruct {
 fn tuple_field_type(ty: &HLType) -> LLFieldType {
     match &ty.expr {
         HLTypeExpr::Field => LLFieldType::Inline(LLStruct::field_elem()),
-        HLTypeExpr::U(bits) => LLFieldType::Int(*bits as u32),
-        HLTypeExpr::I(bits) => {
-            assert!(
-                *bits <= MAX_SUPPORTED_SIGNED_BITS,
-                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-            );
-            LLFieldType::Int(*bits as u32)
-        }
+        HLTypeExpr::Int(bits) => LLFieldType::Int(*bits as u32),
         HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => LLFieldType::Ptr,
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::WitnessOf(_) => LLFieldType::Ptr,
@@ -652,20 +631,11 @@ fn lower_constants_llssa(
 
 fn lower_constant_to_ll_constant(constant: &Constant) -> LLConstant {
     match constant {
-        Constant::U(bits, val) => LLConstant::Int {
+        // Both tags hold the same raw pattern, and LLSSA has one `Int`, so one arm serves both.
+        Constant::Int(bits, val) => LLConstant::Int {
             bits: *bits as u32,
             value: *val,
         },
-        Constant::I(bits, val) => {
-            assert!(
-                *bits <= MAX_SUPPORTED_SIGNED_BITS,
-                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-            );
-            LLConstant::Int {
-                bits: *bits as u32,
-                value: *val,
-            }
-        }
         // FIELD-ASSUMPTION: L2-lower
         Constant::Field(fr) => {
             let values = fr
@@ -817,6 +787,36 @@ fn add_vm_parameter(func: &mut LLFunction, llssa: &mut LLSSA) -> ValueId {
 // Instruction lowering
 // =============================================================================
 
+/// The LLSSA integer operation for an HLSSA arithmetic group read at a given signedness.
+///
+/// This is the whole of what `hlssa_to_llssa` used to spell out twice, once per integer type
+/// variant — the two tables were identical apart from the three groups where the sign selects a
+/// different machine operation.
+///
+/// `Shl` has no signed form: a left shift is the same map on the bits either way, which is why
+/// HLSSA still distinguishes `UShl` from `SShl` (they differ in their overflow contract, not in
+/// their result) but LLSSA does not.
+fn int_arith_op(group: ArithGroup, signed: bool) -> IntArithOp {
+    match group {
+        ArithGroup::Add => IntArithOp::Add,
+        ArithGroup::Sub => IntArithOp::Sub,
+        ArithGroup::Mul => IntArithOp::Mul,
+        ArithGroup::And => IntArithOp::And,
+        ArithGroup::Or => IntArithOp::Or,
+        ArithGroup::Xor => IntArithOp::Xor,
+        ArithGroup::Shl => IntArithOp::Shl,
+        // Arithmetic, not logical: Noir specifies sign-fill for a signed `>>`, and the cost
+        // interpreter (`instrumenter.rs`) has always agreed. This used to emit `UShr`, which made
+        // the backends disagree with both.
+        ArithGroup::Shr if signed => IntArithOp::AShr,
+        ArithGroup::Shr => IntArithOp::UShr,
+        ArithGroup::Div if signed => IntArithOp::SDiv,
+        ArithGroup::Div => IntArithOp::UDiv,
+        ArithGroup::Rem if signed => IntArithOp::SRem,
+        ArithGroup::Rem => IntArithOp::URem,
+    }
+}
+
 /// Lower a single HLSSA instruction to LLSSA ops.
 #[allow(clippy::too_many_arguments)]
 fn lower_instruction(
@@ -846,59 +846,32 @@ fn lower_instruction(
             let ll_rhs = val_map[rhs];
             let result_type = fn_type_info.get_value_type(*result);
 
+            // The operation decides the signedness; the result type supplies only the width.
+            let signed = kind.is_signed();
+
             let ll_result = match &result_type.expr {
                 HLTypeExpr::Field => {
-                    let op = match kind {
-                        BinaryArithOpKind::Mul => FieldArithOp::Mul,
-                        BinaryArithOpKind::Add => FieldArithOp::Add,
-                        BinaryArithOpKind::Sub => FieldArithOp::Sub,
-                        BinaryArithOpKind::Div => FieldArithOp::Div,
+                    let op = match kind.group() {
+                        ArithGroup::Mul => FieldArithOp::Mul,
+                        ArithGroup::Add => FieldArithOp::Add,
+                        ArithGroup::Sub => FieldArithOp::Sub,
+                        ArithGroup::Div => FieldArithOp::Div,
                         _ => panic!("Unsupported field arith op: {:?}", kind),
                     };
                     e.field_arith(op, ll_lhs, ll_rhs)
                 }
-                HLTypeExpr::U(_) => {
-                    let op = match kind {
-                        BinaryArithOpKind::Add => IntArithOp::Add,
-                        BinaryArithOpKind::Sub => IntArithOp::Sub,
-                        BinaryArithOpKind::Mul => IntArithOp::Mul,
-                        BinaryArithOpKind::And => IntArithOp::And,
-                        BinaryArithOpKind::Or => IntArithOp::Or,
-                        BinaryArithOpKind::Xor => IntArithOp::Xor,
-                        BinaryArithOpKind::Shl => IntArithOp::Shl,
-                        BinaryArithOpKind::Shr => IntArithOp::UShr,
-                        BinaryArithOpKind::Div => IntArithOp::UDiv,
-                        BinaryArithOpKind::Mod => IntArithOp::URem,
-                    };
-                    e.int_arith(op, ll_lhs, ll_rhs)
-                }
-                HLTypeExpr::I(bits) => {
-                    assert!(
-                        *bits <= MAX_SUPPORTED_SIGNED_BITS,
-                        "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-                    );
-                    let op = match kind {
-                        BinaryArithOpKind::Add => IntArithOp::Add,
-                        BinaryArithOpKind::Sub => IntArithOp::Sub,
-                        BinaryArithOpKind::Mul => IntArithOp::Mul,
-                        BinaryArithOpKind::And => IntArithOp::And,
-                        BinaryArithOpKind::Or => IntArithOp::Or,
-                        BinaryArithOpKind::Xor => IntArithOp::Xor,
-                        BinaryArithOpKind::Shl => IntArithOp::Shl,
-                        // Arithmetic, not logical: Noir specifies sign-fill for a signed `>>`,
-                        // and the cost interpreter (`instrumenter.rs:447`) has always agreed.
-                        // This arm used to emit `UShr`, which made the backends disagree with
-                        // both. `Shl` needs no signed form — it is the same map on bits.
-                        BinaryArithOpKind::Shr => IntArithOp::AShr,
-                        BinaryArithOpKind::Div => IntArithOp::SDiv,
-                        BinaryArithOpKind::Mod => IntArithOp::SRem,
-                    };
-                    e.int_arith(op, ll_lhs, ll_rhs)
+                HLTypeExpr::Int(bits) => {
+                    // Only the _signed_ operations carry the 64-bit bound. `And`/`Or`/`Xor` have no
+                    // signed form and an unsigned `int128` is perfectly ordinary here.
+                    if signed {
+                        assert_signed_op_width(*bits, "arithmetic");
+                    }
+                    e.int_arith(int_arith_op(kind.group(), signed), ll_lhs, ll_rhs)
                 }
                 HLTypeExpr::WitnessOf(_) => {
                     // AD path: Add on WitnessOf → allocate ADSumNode
-                    match kind {
-                        BinaryArithOpKind::Add => lower_ad_sum(e, ll_lhs, ll_rhs),
+                    match kind.group() {
+                        ArithGroup::Add => lower_ad_sum(e, ll_lhs, ll_rhs),
                         _ => panic!(
                             "Unsupported WitnessOf arith op: {:?} (should be lowered by WitnessLowering)",
                             kind
@@ -926,29 +899,32 @@ fn lower_instruction(
             let lhs_stripped = lhs_type.strip_witness();
             let rhs_stripped = rhs_type.strip_witness();
 
+            // The comparison the opcode names. The type is matched below only for the width.
+            let signed = kind.is_signed();
+            let lt = if signed { IntCmpOp::SLt } else { IntCmpOp::ULt };
+
             let ll_result = match (kind, &lhs_stripped.expr, &rhs_stripped.expr) {
-                (CmpKind::Eq, HLTypeExpr::U(lhs_bits), HLTypeExpr::U(rhs_bits))
+                (CmpKind::Eq, HLTypeExpr::Int(lhs_bits), HLTypeExpr::Int(rhs_bits))
                     if lhs_bits == rhs_bits =>
                 {
                     e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs)
                 }
-                (CmpKind::Lt, HLTypeExpr::U(lhs_bits), HLTypeExpr::U(rhs_bits))
-                    if lhs_bits == rhs_bits =>
-                {
-                    e.int_cmp(IntCmpOp::ULt, ll_lhs, ll_rhs)
-                }
-                (CmpKind::Eq, HLTypeExpr::I(lhs_bits), HLTypeExpr::I(rhs_bits))
-                    if lhs_bits == rhs_bits && *lhs_bits <= MAX_SUPPORTED_SIGNED_BITS =>
-                {
-                    e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs)
-                }
-                (CmpKind::Lt, HLTypeExpr::I(lhs_bits), HLTypeExpr::I(rhs_bits))
-                    if lhs_bits == rhs_bits && *lhs_bits <= MAX_SUPPORTED_SIGNED_BITS =>
-                {
-                    e.int_cmp(IntCmpOp::SLt, ll_lhs, ll_rhs)
+                (
+                    CmpKind::ULt | CmpKind::SLt,
+                    HLTypeExpr::Int(lhs_bits),
+                    HLTypeExpr::Int(rhs_bits),
+                ) if lhs_bits == rhs_bits => {
+                    if signed {
+                        assert_signed_op_width(*lhs_bits, "comparison");
+                    }
+                    e.int_cmp(lt, ll_lhs, ll_rhs)
                 }
                 (CmpKind::Eq, HLTypeExpr::Field, HLTypeExpr::Field) => e.field_eq(ll_lhs, ll_rhs),
-                (CmpKind::Lt, HLTypeExpr::Field, HLTypeExpr::Field) => e.field_lt(ll_lhs, ll_rhs),
+                // `ULt` alone: a field element has no two's complement reading, so an `SLt`
+                // over one is a compiler bug rather than a comparison to lower. It falls to the
+                // panic below, agreeing with `symbolic_executor::cmp_operand_bits`, which rejects
+                // the same combination on the path that does go through the executor.
+                (CmpKind::ULt, HLTypeExpr::Field, HLTypeExpr::Field) => e.field_lt(ll_lhs, ll_rhs),
                 _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
             };
             val_map.insert(*result, ll_result);
@@ -1192,14 +1168,7 @@ fn lower_instruction(
                         val_map.insert(*result, ll_value);
                     } else {
                         let source_bits = match &source_type.expr {
-                            HLTypeExpr::U(bits) => *bits,
-                            HLTypeExpr::I(bits) => {
-                                assert!(
-                                    *bits <= MAX_SUPPORTED_SIGNED_BITS,
-                                    "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-                                );
-                                *bits
-                            }
+                            HLTypeExpr::Int(bits) => *bits,
                             _ => panic!("Cast to Field from unsupported type: {}", source_type),
                         };
                         let lo = if source_bits < 64 {
@@ -1223,15 +1192,10 @@ fn lower_instruction(
                         val_map.insert(*result, field_val);
                     }
                 }
-                CastTarget::U(target_bits) | CastTarget::I(target_bits) => {
-                    if matches!(target, CastTarget::I(bits) if *bits > MAX_SUPPORTED_SIGNED_BITS) {
-                        panic!(
-                            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-                        );
-                    }
+                CastTarget::Int(target_bits) => {
                     let ll_result = match &source_type.expr {
                         HLTypeExpr::Field => {
-                            // Field → U(n)/I(n): FieldToLimbs, combine enough raw limbs, truncate.
+                            // Field → int(n): FieldToLimbs, combine enough raw limbs, truncate.
                             let limbs = e.field_to_limbs(ll_value);
                             let limb0 = e.extract_field(limbs, LLStruct::limbs(), 0);
                             if *target_bits < 64 {
@@ -1247,21 +1211,10 @@ fn lower_instruction(
                                 e.int_arith(IntArithOp::Or, lo, hi_shifted)
                             }
                         }
-                        HLTypeExpr::U(source_bits) => {
-                            // Integer → Integer: zext or truncate
-                            if *target_bits > *source_bits {
-                                e.zext(ll_value, *target_bits as u32)
-                            } else if *target_bits < *source_bits {
-                                e.truncate(ll_value, *target_bits as u32)
-                            } else {
-                                ll_value
-                            }
-                        }
-                        HLTypeExpr::I(source_bits) => {
-                            assert!(
-                                *source_bits <= MAX_SUPPORTED_SIGNED_BITS,
-                                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-                            );
+                        HLTypeExpr::Int(source_bits) => {
+                            // Integer → integer. A cast is a raw-bit conversion, so widening
+                            // zero-extends whatever the source is: `SExt` is the separate opcode
+                            // for the signed widening.
                             if *target_bits > *source_bits {
                                 e.zext(ll_value, *target_bits as u32)
                             } else if *target_bits < *source_bits {
@@ -1271,8 +1224,8 @@ fn lower_instruction(
                             }
                         }
                         _ => panic!(
-                            "Cast to U({})/I({}) from unsupported type: {}",
-                            target_bits, target_bits, source_type
+                            "Cast to int({}) from unsupported type: {}",
+                            target_bits, source_type
                         ),
                     };
                     val_map.insert(*result, ll_result);
@@ -1362,28 +1315,33 @@ fn lower_instruction(
             let cmp_result = match kind {
                 CmpKind::Eq => match (&lhs_type.expr, &rhs_type.expr) {
                     (HLTypeExpr::Field, HLTypeExpr::Field) => e.field_eq(ll_lhs, ll_rhs),
-                    (HLTypeExpr::U(lhs_bits), HLTypeExpr::U(rhs_bits)) if lhs_bits == rhs_bits => {
-                        e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs)
-                    }
-                    (HLTypeExpr::I(lhs_bits), HLTypeExpr::I(rhs_bits))
-                        if lhs_bits == rhs_bits && *lhs_bits <= MAX_SUPPORTED_SIGNED_BITS =>
+                    (HLTypeExpr::Int(lhs_bits), HLTypeExpr::Int(rhs_bits))
+                        if lhs_bits == rhs_bits =>
                     {
                         e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs)
                     }
                     _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
                 },
-                CmpKind::Lt => match (&lhs_type.expr, &rhs_type.expr) {
-                    (HLTypeExpr::U(lhs_bits), HLTypeExpr::U(rhs_bits)) if lhs_bits == rhs_bits => {
-                        e.int_cmp(IntCmpOp::ULt, ll_lhs, ll_rhs)
+                CmpKind::ULt | CmpKind::SLt => {
+                    let signed = kind.is_signed();
+                    let lt = if signed { IntCmpOp::SLt } else { IntCmpOp::ULt };
+                    match (&lhs_type.expr, &rhs_type.expr) {
+                        (HLTypeExpr::Int(lhs_bits), HLTypeExpr::Int(rhs_bits))
+                            if lhs_bits == rhs_bits =>
+                        {
+                            if signed {
+                                assert_signed_op_width(*lhs_bits, "assertion comparison");
+                            }
+                            e.int_cmp(lt, ll_lhs, ll_rhs)
+                        }
+                        // Unsigned alone, as at the `Cmp` site above: a signed comparison of field
+                        // elements has no reading to perform, so it falls to the panic.
+                        (HLTypeExpr::Field, HLTypeExpr::Field) if !signed => {
+                            e.field_lt(ll_lhs, ll_rhs)
+                        }
+                        _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
                     }
-                    (HLTypeExpr::I(lhs_bits), HLTypeExpr::I(rhs_bits))
-                        if lhs_bits == rhs_bits && *lhs_bits <= MAX_SUPPORTED_SIGNED_BITS =>
-                    {
-                        e.int_cmp(IntCmpOp::SLt, ll_lhs, ll_rhs)
-                    }
-                    (HLTypeExpr::Field, HLTypeExpr::Field) => e.field_lt(ll_lhs, ll_rhs),
-                    _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
-                },
+                }
             };
 
             assert(e, cmp_result);
@@ -1611,14 +1569,7 @@ fn lower_instruction(
 fn integer_width(ty: &HLType) -> u32 {
     let scalar_ty = ty.strip_witness();
     match scalar_ty.expr {
-        HLTypeExpr::U(bits) => bits as u32,
-        HLTypeExpr::I(bits) => {
-            assert!(
-                bits <= MAX_SUPPORTED_SIGNED_BITS,
-                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-            );
-            bits as u32
-        }
+        HLTypeExpr::Int(bits) => bits as u32,
         _ => panic!("Expected integer type, got {}", ty),
     }
 }
@@ -1923,7 +1874,7 @@ fn lower_to_bytes(
     }
 
     // Allocate RC'd array of u8
-    let u8_type = HLType::u(8);
+    let u8_type = HLType::int(8);
     let rc_struct = rc_seq_struct(&u8_type);
     let es = elem_struct(&u8_type);
 
@@ -1981,7 +1932,7 @@ fn lower_to_bits(
         bits_le.push(e.truncate(shifted, 1));
     }
 
-    let u1_type = HLType::u(1);
+    let u1_type = HLType::int(1);
     let rc_struct = rc_seq_struct(&u1_type);
     let es = elem_struct(&u1_type);
     let len = e.emit_int_const(64, count as u64);
@@ -2382,18 +2333,13 @@ fn ensure_field_sized(
         return ll_val;
     }
     let (lo, hi) = match &source_type.expr {
-        HLTypeExpr::U(bits) | HLTypeExpr::I(bits) if *bits < 64 => {
-            (e.zext(ll_val, 64), e.emit_int_const(64, 0))
-        }
-        HLTypeExpr::U(64) | HLTypeExpr::I(64) => (ll_val, e.emit_int_const(64, 0)),
-        HLTypeExpr::U(bits) if *bits <= MAX_SUPPORTED_UNSIGNED_BITS => {
+        HLTypeExpr::Int(bits) if *bits < 64 => (e.zext(ll_val, 64), e.emit_int_const(64, 0)),
+        HLTypeExpr::Int(64) => (ll_val, e.emit_int_const(64, 0)),
+        HLTypeExpr::Int(bits) if *bits <= MAX_SUPPORTED_UNSIGNED_BITS => {
             let lo = e.truncate(ll_val, 64);
             let shift = e.emit_int_const(*bits as u32, 64);
             let hi = e.int_arith(IntArithOp::UShr, ll_val, shift);
             (lo, e.truncate(hi, 64))
-        }
-        HLTypeExpr::I(_) => {
-            panic!("signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported")
         }
         _ => panic!("ensure_field_sized: unsupported type: {}", source_type),
     };
@@ -3492,15 +3438,7 @@ fn load_pure_lookup_elem_as_field(
 ) -> ValueId {
     match &elem_type.expr {
         HLTypeExpr::Field => e.ll_load(elem_ptr, LLType::Struct(LLStruct::field_elem())),
-        HLTypeExpr::U(bits) => {
-            let value = e.ll_load(elem_ptr, LLType::Int(*bits as u32));
-            int_to_field(e, value, *bits)
-        }
-        HLTypeExpr::I(bits) => {
-            assert!(
-                *bits <= MAX_SUPPORTED_SIGNED_BITS,
-                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-            );
+        HLTypeExpr::Int(bits) => {
             let value = e.ll_load(elem_ptr, LLType::Int(*bits as u32));
             int_to_field(e, value, *bits)
         }
@@ -3523,16 +3461,7 @@ fn ad_bump_lookup_elem_db(
             let value = e.ll_load(elem_ptr, LLType::Struct(LLStruct::field_elem()));
             e.ad_write_const(DMatrix::B, value, coeff);
         }
-        HLTypeExpr::U(bits) => {
-            let value = e.ll_load(elem_ptr, LLType::Int(*bits as u32));
-            let value_field = int_to_field(e, value, *bits);
-            e.ad_write_const(DMatrix::B, value_field, coeff);
-        }
-        HLTypeExpr::I(bits) => {
-            assert!(
-                *bits <= MAX_SUPPORTED_SIGNED_BITS,
-                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-            );
+        HLTypeExpr::Int(bits) => {
             let value = e.ll_load(elem_ptr, LLType::Int(*bits as u32));
             let value_field = int_to_field(e, value, *bits);
             e.ad_write_const(DMatrix::B, value_field, coeff);
@@ -3552,7 +3481,7 @@ fn ad_bump_lookup_elem_db(
 
 fn lookup_leaf_count(elem_type: &HLType) -> usize {
     match &elem_type.expr {
-        HLTypeExpr::Field | HLTypeExpr::U(_) | HLTypeExpr::I(_) | HLTypeExpr::WitnessOf(_) => 1,
+        HLTypeExpr::Field | HLTypeExpr::Int(_) | HLTypeExpr::WitnessOf(_) => 1,
         HLTypeExpr::Array(inner, n) => {
             let inner_count = lookup_leaf_count(inner);
             n.checked_mul(inner_count)
@@ -4073,8 +4002,8 @@ fn emit_spread_ad_init_body(
         bits
     );
     let lookup = LookupTableSpec::spread(bits);
-    let input_ty = HLType::u(bits as usize);
-    let result_ty = HLType::u(bits as usize * 2);
+    let input_ty = HLType::int(bits as usize);
+    let result_ty = HLType::int(bits as usize * 2);
 
     // The folded spread allocation is one constraint per entry:
     //   y · (α - i + β·spread(i)) = mᵢ
@@ -4385,7 +4314,7 @@ fn generate_drngchk_ad_call(
     // inv_coeff = ad_coeffs[lookups_cnst_start + (inv_wit_off - lookups_wit_start)]
     //
     // Random-access; the main AdCoeffs cursor is for the algebraic
-    // constraints, so it is *not* correct to advance it here. The
+    // constraints, so it is _not_ correct to advance it here. The
     // lookups-section start offsets are layout-structural (a Lookup
     // section is one contiguous slab whose start is fixed by the layout),
     // not table-allocation dynamic, so they can stay as constants.
@@ -4425,9 +4354,10 @@ fn generate_drngchk_ad_call(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::Field;
-    use crate::compiler::ssa::DefaultSSAAnnotator;
-    use crate::compiler::ssa::llssa::builder::LLSSABuilder;
+    use crate::compiler::{
+        Field,
+        ssa::{DefaultSSAAnnotator, llssa::builder::LLSSABuilder},
+    };
 
     /// A guarded refcount mutation must compare against `RC_IMMORTAL_OBJECT`
     /// before touching the refcount word.
@@ -4517,31 +4447,33 @@ mod tests {
 
     #[test]
     fn mk_seq_of_blob_lowers_to_const_data_memcpy() {
-        use crate::compiler::analysis::types::Types;
-        use crate::compiler::ssa::hlssa::{
-            Blob as HLBlob, Constant as HLConstant,
-            builder::{HLEmitter, HLSSABuilder},
+        use crate::compiler::{
+            analysis::types::Types,
+            ssa::hlssa::{
+                Blob as HLBlob, Constant as HLConstant,
+                builder::{HLEmitter, HLSSABuilder},
+            },
         };
 
         let mut hlssa = HLSSA::with_main("blob_seq_test".to_string());
         let main_id = hlssa.get_unique_entrypoint_id();
         hlssa
             .get_function_mut(main_id)
-            .add_return_type(HLType::u(8).array_of(3));
+            .add_return_type(HLType::int(8).array_of(3));
 
         let mut hb = HLSSABuilder::new(&mut hlssa);
         hb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.test_block(entry);
             let blob = e.emit_constant(HLConstant::Blob(HLBlob::new(
-                HLType::u(8),
+                HLType::int(8),
                 vec![
-                    HLConstant::U(8, 1),
-                    HLConstant::U(8, 2),
-                    HLConstant::U(8, 3),
+                    HLConstant::Int(8, 1),
+                    HLConstant::Int(8, 2),
+                    HLConstant::Int(8, 3),
                 ],
             )));
-            let arr = e.mk_seq_of_blob(HLType::u(8), blob);
+            let arr = e.mk_seq_of_blob(HLType::int(8), blob);
             e.terminate_return(vec![arr]);
         });
 
@@ -4566,14 +4498,16 @@ mod tests {
 
     #[test]
     fn field_to_bits_lowers_to_limb_extraction_and_an_array() {
-        use crate::compiler::analysis::types::Types;
-        use crate::compiler::ssa::hlssa::builder::{HLEmitter, HLSSABuilder};
+        use crate::compiler::{
+            analysis::types::Types,
+            ssa::hlssa::builder::{HLEmitter, HLSSABuilder},
+        };
 
         let mut hlssa = HLSSA::with_main("to_bits_test".to_string());
         let main_id = hlssa.get_unique_entrypoint_id();
         hlssa
             .get_function_mut(main_id)
-            .add_return_type(HLType::u(1).array_of(5));
+            .add_return_type(HLType::int(1).array_of(5));
 
         let mut hb = HLSSABuilder::new(&mut hlssa);
         hb.modify_function(main_id, |fb| {

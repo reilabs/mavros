@@ -6,25 +6,27 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::collections::{HashMap, HashSet};
-use crate::compiler::{
-    analysis::{
-        flow_analysis::FlowAnalysis,
-        shared::fixpoint::call_graph_fixpoint,
-        types::{FunctionTypeInfo, TypeInfo, Types},
-        witness_info::{FunctionWitnessType, WitnessShape, WitnessType},
-        witness_taint_inference::{
-            FunctionSummary, WitnessTaint,
-            builder::{build_graph, compute_block_conditions},
-            position::{Descent, Owner, Position, paths_of_type},
+use crate::{
+    collections::{HashMap, HashSet},
+    compiler::{
+        analysis::{
+            flow_analysis::FlowAnalysis,
+            shared::fixpoint::call_graph_fixpoint,
+            types::{FunctionTypeInfo, TypeInfo, Types},
+            witness_info::{FunctionWitnessType, WitnessShape, WitnessType},
+            witness_taint_inference::{
+                FunctionApproxShapes, FunctionSummary, WitnessTaint,
+                builder::{build_graph, compute_block_conditions},
+                position::{Descent, Owner, Position, paths_of_type},
+            },
         },
+        ssa::{
+            BlockId, FunctionId, ProgramPoint, ValueId,
+            hlssa::{CallTarget, HLFunction, HLSSA, OpCode, Type, TypeExpr},
+            traits::Instruction,
+        },
+        util::ice_non_elided_tuple,
     },
-    ssa::{
-        BlockId, FunctionId, ProgramPoint, ValueId,
-        hlssa::{CallTarget, HLFunction, HLSSA, OpCode, Type, TypeExpr},
-        traits::Instruction,
-    },
-    util::ice_non_elided_tuple,
 };
 
 // PHASE 1: POLYMORPHIC SUMMARIES
@@ -38,7 +40,7 @@ use crate::compiler::{
 /// converges to the least exact fixpoint. Recursion — including mutual recursion — is handled
 /// entirely by this fixpoint.
 ///
-/// The returned graphs are the ones built on each function's *last* worklist pop. Those are the
+/// The returned graphs are the ones built on each function's _last_ worklist pop. Those are the
 /// final-summary graphs: a callee summary change always re-queues its callers, so when the
 /// worklist drains, every function was last rebuilt after the final change of each of its callees'
 /// summaries. Returning them saves phase 2 a full rebuild pass.
@@ -99,11 +101,11 @@ fn compute_summaries(
 /// There is no inherent source/sink split between function parameters and returns; what matters is
 /// who determines a level's taint:
 ///
-/// - `inputs` are the levels the *caller* determines: every parameter level, the Deref-descended
+/// - `inputs` are the levels the _caller_ determines: every parameter level, the Deref-descended
 ///   levels of every return (a returned ref is as much "caller chooses" as a ref parameter — the
 ///   caller may write through it), the globals the function reads (transitively, through any
 ///   callee), the cfg flag, and `Top`.
-/// - `outputs` are the levels whose taint the *callee* communicates back: every return level and
+/// - `outputs` are the levels whose taint the _callee_ communicates back: every return level and
 ///   the Deref-descended levels of every parameter (the callee may write through a ref argument).
 ///
 /// Deref-descended levels are both: they name shared memory that either side can write.
@@ -134,7 +136,7 @@ fn summary_skeleton(
     // Globals the function reads — directly or through any callee — are summary inputs, so
     // `output ≥ Global(g)` edges propagate to callers when the callee summary is instantiated
     // (Global maps to itself across the call). Callee reads count too: instantiating a callee
-    // summary plants its `Global` sources in *this* function's graph, and a source that is not
+    // summary plants its `Global` sources in _this_ function's graph, and a source that is not
     // also an input here would be dropped from this function's own summary — the dependence
     // would be lost two or more call levels above the read.
     for g in read_globals {
@@ -374,7 +376,7 @@ pub fn run(ssa: &mut HLSSA, flow: &FlowAnalysis) -> HashMap<FunctionId, Function
     }
 
     // Once summaries are frozen, each function's `≥` graph is fixed (the witness-globals set and
-    // per-context argument shapes enter only through solver *seeds*, never the graph). Phase 1
+    // per-context argument shapes enter only through solver _seeds_, never the graph). Phase 1
     // already built every graph against the final summaries — the summaries themselves are baked
     // into those graphs as call-site edges — so the graphs are shared across all
     // `compute_witness_globals` iterations and all phase-2 contexts of the same function.
@@ -393,7 +395,7 @@ pub fn run(ssa: &mut HLSSA, flow: &FlowAnalysis) -> HashMap<FunctionId, Function
 /// freeze — contexts differ only in their seeds — so solving once at the joined context equals the
 /// pointwise join of every per-context solution. A value Pure here is Pure in every future clone.
 ///
-/// That guarantee is stated over the SSA as it stands *now*: a consumer acting on a Pure verdict
+/// That guarantee is stated over the SSA as it stands _now_: a consumer acting on a Pure verdict
 /// before the pipeline's real WTI run additionally relies on the intervening passes substituting
 /// only taint-equal values for the ones it judged (they mint no new witness sources).
 ///
@@ -405,7 +407,7 @@ pub(super) fn joined_value_shapes(
     ssa: &HLSSA,
     flow: &FlowAnalysis,
     types: &TypeInfo,
-) -> HashMap<FunctionId, HashMap<ValueId, WitnessShape>> {
+) -> HashMap<FunctionId, FunctionApproxShapes> {
     // Mirrors `run`'s setup, minus the `Types` recompute and minus phase-2 mutation.
     let fids: Vec<FunctionId> = ssa
         .get_function_ids()
@@ -430,7 +432,7 @@ pub(super) fn joined_value_shapes(
     // its joined context strictly grows.
     let main_id = ssa.get_unique_entrypoint_id();
     let mut joined: HashMap<FunctionId, Ctx> = HashMap::default();
-    let mut shapes: HashMap<FunctionId, HashMap<ValueId, WitnessShape>> = HashMap::default();
+    let mut shapes: HashMap<FunctionId, FunctionApproxShapes> = HashMap::default();
     let mut worklist: VecDeque<FunctionId> = VecDeque::new();
 
     // Queue membership, so re-enqueue checks are O(1) instead of scanning the deque.
@@ -469,7 +471,13 @@ pub(super) fn joined_value_shapes(
             }
         }
         // A re-solve at a grown context replaces the stale (smaller) solution.
-        shapes.insert(f, result.value_shapes);
+        shapes.insert(
+            f,
+            FunctionApproxShapes {
+                value_shapes: result.value_shapes,
+                return_shapes: result.return_shapes,
+            },
+        );
     }
     shapes
 }
@@ -481,7 +489,7 @@ pub(super) fn joined_value_shapes(
 ///
 /// Globals are program-wide state, not per-call formals, so their witness-ness is decided once here
 /// rather than threaded through call summaries. A global is witness if any `InitGlobal` writes a
-/// witness value (or writes under a witness branch *within* the initializer). To stay sound without
+/// witness value (or writes under a witness branch _within_ the initializer). To stay sound without
 /// context-sensitivity, each initializing function is solved with its parameters seeded Witness —
 /// the worst case for an argument-derived global write — and with the writer's own dominating
 /// witness branch conditions accounted for. The fixpoint accounts for an init that reads another
@@ -515,7 +523,7 @@ fn compute_witness_globals(
     // today by construction — `InitGlobal` is only ever emitted into the dedicated `globals_init`
     // function, which the entry wrapper calls exactly once, never under a witness branch — but
     // nothing else enforces it, so fail loudly if it breaks: a writer outside `globals_init`
-    // could run under a *caller's* witness control flow, and skipping its Cfg seed would
+    // could run under a _caller's_ witness control flow, and skipping its Cfg seed would
     // under-taint the global program-wide.
     assert!(
         writers
@@ -541,10 +549,10 @@ fn compute_witness_globals(
             //
             // We deliberately do NOT seed the writer's cfg flag (`Cfg`). Global initializers run
             // unconditionally — `globals_init` is called exactly once at program entry, never under a
-            // witness branch — so their cfg flag is structurally Pure. Seeding it Witness made *every*
+            // witness branch — so their cfg flag is structurally Pure. Seeding it Witness made _every_
             // initialized global witness, because each `InitGlobal` records `global ≥ Cfg` (see
             // `add_cf_taint_to`); that spurious taint then forced witness loop bounds and witness array
-            // reads downstream. A witness branch *inside* an initializer is still captured: that path
+            // reads downstream. A witness branch _inside_ an initializer is still captured: that path
             // adds `global ≥ cond` for the real branch conditions, and `cond` becomes witness through
             // the Top/param seeds.
             let mut seeds: Vec<Position> = vec![Position::top()];
@@ -590,7 +598,7 @@ fn compute_witness_globals(
 /// The concrete witness solution for one specialization context, before it is materialized onto a
 /// clone as a [`FunctionWitnessType`].
 struct ContextSolution {
-    /// The inferred `WitnessShape` of every SSA value (keyed by the *original* function's value
+    /// The inferred `WitnessShape` of every SSA value (keyed by the _original_ function's value
     /// ids; re-keyed onto the clone during materialization).
     value_shapes: HashMap<ValueId, WitnessShape>,
 
@@ -907,16 +915,31 @@ fn go_shape_from(
         WitnessType::Pure
     };
     match &ty.expr {
-        TypeExpr::Field
-        | TypeExpr::U(_)
-        | TypeExpr::I(_)
-        | TypeExpr::Function
-        | TypeExpr::Blob(..) => WitnessShape::Scalar(info),
-        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
+            WitnessShape::Scalar(info)
+        }
+        TypeExpr::Slice(inner) => {
+            path.push(Descent::Len);
+            let len = if read
+                && witness.contains(&Position {
+                    owner: owner.clone(),
+                    path: path.clone(),
+                }) {
+                WitnessType::Witness
+            } else {
+                WitnessType::Pure
+            };
+            path.pop();
             path.push(Descent::Elem);
             let c = go_shape_from(owner, path, inner, witness, read);
             path.pop();
-            WitnessShape::Array(info, Box::new(c))
+            WitnessShape::Slice(len, Box::new(c))
+        }
+        TypeExpr::Array(inner, _) => {
+            path.push(Descent::Elem);
+            let c = go_shape_from(owner, path, inner, witness, read);
+            path.pop();
+            WitnessShape::Array(Box::new(c))
         }
         TypeExpr::Ref(inner) => {
             path.push(Descent::Deref);
@@ -944,9 +967,22 @@ fn seed_shape(
     }
     match shape {
         WitnessShape::Scalar(_) => {}
-        WitnessShape::Array(_, inner) => {
+        WitnessShape::Array(inner) => {
             path.push(Descent::Elem);
             seed_shape(owner, inner, path, seeds);
+            path.pop();
+        }
+        WitnessShape::Slice(len, elem) => {
+            if len.is_witness() {
+                path.push(Descent::Len);
+                seeds.push(Position {
+                    owner: owner.clone(),
+                    path: path.clone(),
+                });
+                path.pop();
+            }
+            path.push(Descent::Elem);
+            seed_shape(owner, elem, path, seeds);
             path.pop();
         }
         WitnessShape::Ref(_, inner) => {

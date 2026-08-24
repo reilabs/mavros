@@ -1,0 +1,6 @@
+[package]
+name = "slice_witness_remove_guarded"
+type = "bin"
+authors = [""]
+
+[dependencies]

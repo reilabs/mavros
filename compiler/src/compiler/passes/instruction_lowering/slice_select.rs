@@ -1,0 +1,136 @@
+//! Lowers a witness `Select` on a slice.
+//!
+//! # Soundness
+//!
+//! Only the common prefix `0 .. min(len_a, len_c)` is elementwise-selected against the witness
+//! condition; the longer arm's tail is appended *unconditionally*. This is sound because a
+//! post-purify physical slice is only ever observed through its logical window `[start, start +
+//! log_len)`, and every purify-emitted op preserves the invariant `start + log_len <=
+//! physical.len()`. The merged tuple selects `log_len` and `start` with the same condition as the
+//! physical, so if the shorter arm is taken its window satisfies `start + log_len <= min(len_a,
+//! len_c)` — inside the selected prefix. A tail slot is inside the window only if the longer arm
+//! was taken, and there it holds exactly that arm's value.
+
+use crate::compiler::{
+    ssa::{
+        ValueId,
+        hlssa::{
+            CastTarget, OpCode, SequenceTargetType, SliceOpDir, Type, TypeExpr,
+            builder::{HLBlockEmitter, HLEmitter},
+        },
+    },
+    util::ice_non_elided_tuple,
+};
+
+use super::{InstructionLoweringRule, LoweringContext};
+
+fn emit_elem_select(
+    b: &mut HLBlockEmitter<'_>,
+    cond: ValueId,
+    lhs: ValueId,
+    rhs: ValueId,
+    typ: &Type,
+) -> ValueId {
+    match &typ.expr {
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::WitnessOf(_) => b.select(cond, lhs, rhs),
+        TypeExpr::Array(elem_type, size) => {
+            let elem_type = (**elem_type).clone();
+            b.build_array_loop(*size, elem_type.clone(), |b, idx| {
+                let lhs_elem = b.array_get(lhs, idx);
+                let rhs_elem = b.array_get(rhs, idx);
+                emit_elem_select(b, cond, lhs_elem, rhs_elem, &elem_type)
+            })
+        }
+        TypeExpr::Slice(_) => {
+            panic!("LowerSliceSelect: nested slice is not allowed")
+        }
+        TypeExpr::Tuple(_) => ice_non_elided_tuple(),
+        TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
+            panic!("LowerSliceSelect: witness select on element type {typ} is not supported")
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct LowerSliceSelect;
+
+impl InstructionLoweringRule for LowerSliceSelect {
+    fn lower_instruction(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        context: &LoweringContext<'_>,
+        instruction: &OpCode,
+    ) -> bool {
+        let (guard, op) = HLBlockEmitter::unwrap_guard(instruction);
+        let OpCode::Select {
+            result,
+            cond,
+            if_t,
+            if_f,
+        } = op
+        else {
+            return false;
+        };
+        let result_ty = context.types().get_value_type(*result).clone();
+        if !result_ty.is_slice() {
+            return false;
+        }
+        if !context.types().get_value_type(*cond).is_witness_of() {
+            return false;
+        }
+
+        // Nothing this rule emits can fail (every read is bounded by `len_a`/`len_c`), so the
+        // rewrite is emitted bare. That is only *equivalent* to a guarded select because
+        // `LowerSideEffectFreeGuards` — which lists `Select` as side-effect free and runs earlier
+        // in this phase, in `pure_guards` — has already dropped any such guard.
+        assert!(
+            guard.is_none(),
+            "LowerSliceSelect: guarded slice select should have been elided by \
+             LowerSideEffectFreeGuards"
+        );
+
+        let elem_ty = result_ty.get_array_element();
+        let cond = *cond;
+        let a = *if_t;
+        let c = *if_f;
+
+        let len_a = b.slice_len(a);
+        let len_c = b.slice_len(c);
+        let zero = b.int_const(32, 0);
+        let one = b.int_const(32, 1);
+        let acc = b.mk_seq(vec![], SequenceTargetType::Slice, elem_ty.clone());
+
+        // Prefix `0 .. min(len_a, len_c)`
+        let acc = b.build_loop(
+            vec![(zero, Type::int(32)), (acc, result_ty.clone())],
+            |hb, p| {
+                let in_a = hb.ult(p[0], len_a);
+                let in_c = hb.ult(p[0], len_c);
+                hb.and(in_a, in_c)
+            },
+            |bb, p| {
+                let i = p[0];
+                let a_i = bb.array_get(a, i);
+                let c_i = bb.array_get(c, i);
+                let sel = emit_elem_select(bb, cond, a_i, c_i, &elem_ty);
+                let acc = bb.slice_push(p[1], vec![sel], SliceOpDir::Back);
+                vec![bb.uadd(i, one), acc]
+            },
+        )[1];
+
+        // Suffix from `a` (`len(acc) .. len_a`): runs only when `a` is the longer arm.
+        let acc =
+            b.build_slice_extend_loop(len_a, (acc, result_ty.clone()), |b, i| b.array_get(a, i));
+
+        // Suffix from `c` (`len(acc) .. len_c`): runs only when `c` is the longer arm
+        let acc =
+            b.build_slice_extend_loop(len_c, (acc, result_ty.clone()), |b, i| b.array_get(c, i));
+
+        b.emit(OpCode::Cast {
+            result: *result,
+            value: acc,
+            target: CastTarget::Nop,
+        });
+        true
+    }
+}

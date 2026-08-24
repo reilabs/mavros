@@ -1,0 +1,6 @@
+[package]
+name = "slice_wl_get_set"
+type = "bin"
+authors = [""]
+
+[dependencies]

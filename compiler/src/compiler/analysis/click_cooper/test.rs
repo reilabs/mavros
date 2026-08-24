@@ -54,7 +54,7 @@ fn scalar_fold_is_the_single_classifier() {
     // must decompose to.
     let foldable: Vec<OpCode> = vec![
         OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: v(),
             lhs: v(),
             rhs: v(),
@@ -217,22 +217,22 @@ fn scalar_fold_is_the_single_classifier() {
 #[test]
 fn equal_constants_are_congruent() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c2 = ssa.add_const(Constant::U(32, 2));
-    let c3 = ssa.add_const(Constant::U(32, 3));
-    let c4 = ssa.add_const(Constant::U(32, 4));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c2 = ssa.add_const(Constant::Int(32, 2));
+    let c3 = ssa.add_const(Constant::Int(32, 3));
+    let c4 = ssa.add_const(Constant::Int(32, 4));
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: a,
         lhs: c2,
         rhs: c3,
     });
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: b,
         lhs: c1,
         rhs: c4,
@@ -261,29 +261,29 @@ fn structural_congruence_is_commutative() {
     );
 
     let f = ssa.get_unique_entrypoint_mut();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
-    f.get_entry_mut().push_parameter(y, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
+    f.get_entry_mut().push_parameter(y, Type::int(32));
     let entry = f.get_entry_mut();
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: a,
         lhs: x,
         rhs: y,
     });
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: b,
         lhs: x,
         rhs: y,
     });
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: c,
         lhs: y,
         rhs: x,
     });
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Sub,
+        kind: BinaryArithOpKind::USub,
         result: d,
         lhs: x,
         rhs: y,
@@ -321,8 +321,8 @@ fn array_ops_are_value_numbered() {
     let f = ssa.get_unique_entrypoint_mut();
     f.get_entry_mut()
         .push_parameter(arr, Type::field().array_of(4));
-    f.get_entry_mut().push_parameter(i, Type::u(32));
-    f.get_entry_mut().push_parameter(j, Type::u(32));
+    f.get_entry_mut().push_parameter(i, Type::int(32));
+    f.get_entry_mut().push_parameter(j, Type::int(32));
     let entry = f.get_entry_mut();
     // g1, g2 are arr[i]; g3 is arr[j].
     entry.push_test_instruction(OpCode::ArrayGet {
@@ -364,7 +364,7 @@ fn array_ops_are_value_numbered() {
         result: s4,
         elems: vec![g1, g3],
         seq_type: SequenceTargetType::Array(2),
-        elem_type: Type::u(32),
+        elem_type: Type::int(32),
     });
     entry.set_terminator(Terminator::Return(vec![g1, g2, g3, s1, s2, s3, s4]));
 
@@ -377,12 +377,125 @@ fn array_ops_are_value_numbered() {
     assert!(!cc.known_equal(fid, s1, s4)); // different elem_type
 }
 
+/// The slice ops are value-numbered: identical ops agree per result position (a pop's rest with
+/// rest, element with element) and never across positions; the push/pop direction and the
+/// index/value operand classes ride in the key or the signature, so differing ops split.
+#[test]
+fn slice_ops_are_value_numbered() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let (s, i, j, x) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let (rb1, eb1, rb2, eb2, rf, ef) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let (p1, p2, p3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let (ins1, ins2, ins3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let (rr1, re1, rr2, re2, rr3, re3) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+
+    let f = ssa.get_unique_entrypoint_mut();
+    f.get_entry_mut()
+        .push_parameter(s, Type::field().slice_of());
+    f.get_entry_mut().push_parameter(i, Type::int(32));
+    f.get_entry_mut().push_parameter(j, Type::int(32));
+    f.get_entry_mut().push_parameter(x, Type::field());
+    let entry = f.get_entry_mut();
+
+    // Two identical back pops, and a front pop of the same slice.
+    for (rest, elem, dir) in [
+        (rb1, eb1, SliceOpDir::Back),
+        (rb2, eb2, SliceOpDir::Back),
+        (rf, ef, SliceOpDir::Front),
+    ] {
+        entry.push_test_instruction(OpCode::SlicePop {
+            dir,
+            result_slice: rest,
+            result_elem: elem,
+            slice: s,
+        });
+    }
+    // Two identical back pushes and a front push.
+    for (result, dir) in [
+        (p1, SliceOpDir::Back),
+        (p2, SliceOpDir::Back),
+        (p3, SliceOpDir::Front),
+    ] {
+        entry.push_test_instruction(OpCode::SlicePush {
+            dir,
+            result,
+            slice: s,
+            values: vec![x],
+        });
+    }
+    // Two identical inserts and one at a different index.
+    for (result, index) in [(ins1, i), (ins2, i), (ins3, j)] {
+        entry.push_test_instruction(OpCode::SliceInsert {
+            result,
+            slice: s,
+            index,
+            value: x,
+        });
+    }
+    // Two identical removes and one at a different index.
+    for (rest, elem, index) in [(rr1, re1, i), (rr2, re2, i), (rr3, re3, j)] {
+        entry.push_test_instruction(OpCode::SliceRemove {
+            result_slice: rest,
+            result_elem: elem,
+            slice: s,
+            index,
+        });
+    }
+    entry.set_terminator(Terminator::Return(vec![
+        rb1, eb1, rb2, eb2, rf, ef, p1, p2, p3, ins1, ins2, ins3, rr1, re1, rr2, re2, rr3, re3,
+    ]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+
+    // Identical pops agree per position...
+    assert!(cc.known_equal(fid, rb1, rb2));
+    assert!(cc.known_equal(fid, eb1, eb2));
+    // ...but a pop's rest is never its element, and the direction rides in the key.
+    assert!(!cc.known_equal(fid, rb1, eb1));
+    assert!(!cc.known_equal(fid, rb1, rf));
+    assert!(!cc.known_equal(fid, eb1, ef));
+
+    // Pushes: identical merge, direction splits.
+    assert!(cc.known_equal(fid, p1, p2));
+    assert!(!cc.known_equal(fid, p1, p3));
+
+    // Inserts: identical merge, a different index class splits.
+    assert!(cc.known_equal(fid, ins1, ins2));
+    assert!(!cc.known_equal(fid, ins1, ins3));
+
+    // Removes: per-position agreement, never across positions, index splits.
+    assert!(cc.known_equal(fid, rr1, rr2));
+    assert!(cc.known_equal(fid, re1, re2));
+    assert!(!cc.known_equal(fid, rr1, re1));
+    assert!(!cc.known_equal(fid, rr1, rr3));
+}
+
 /// φ-operands come from _executable_ edges only: a parameter whose value differs solely on a
 /// dead in-edge is still congruent to one that agrees on the live edge.
 #[test]
 fn phi_congruence_excludes_dead_edges() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c_true = ssa.add_const(Constant::U(1, 1));
+    let c_true = ssa.add_const(Constant::Int(1, 1));
     let (x, y, p, q) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -430,7 +543,7 @@ fn phi_distinguished_when_both_edges_live() {
     let e1 = f.add_block();
     let e2 = f.add_block();
     let merge = f.add_block();
-    f.get_entry_mut().push_parameter(cond, Type::u(1));
+    f.get_entry_mut().push_parameter(cond, Type::int(1));
     f.get_entry_mut().push_parameter(x, Type::field());
     f.get_entry_mut().push_parameter(y, Type::field());
     f.get_entry_mut()
@@ -454,9 +567,9 @@ fn phi_distinguished_when_both_edges_live() {
 #[test]
 fn loop_carried_parallel_induction_is_congruent() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (i, j, lt, i2, j2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -473,10 +586,10 @@ fn loop_carried_parallel_induction_is_congruent() {
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(header, vec![c0, c0]));
     let header_block = f.get_block_mut(header);
-    header_block.push_parameter(i, Type::u(32));
-    header_block.push_parameter(j, Type::u(32));
+    header_block.push_parameter(i, Type::int(32));
+    header_block.push_parameter(j, Type::int(32));
     header_block.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: lt,
         lhs: i,
         rhs: c10,
@@ -484,13 +597,13 @@ fn loop_carried_parallel_induction_is_congruent() {
     header_block.set_terminator(Terminator::JmpIf(lt, body, exit));
     let body_block = f.get_block_mut(body);
     body_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: i2,
         lhs: i,
         rhs: c1,
     });
     body_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: j2,
         lhs: j,
         rhs: c1,
@@ -532,7 +645,7 @@ fn leader_is_dominating_definition() {
     // `a = x + y` in the entry, recomputed as `b = x + y` in a strictly dominated block.
     f.get_entry_mut()
         .push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: a,
             lhs: x,
             rhs: y,
@@ -541,7 +654,7 @@ fn leader_is_dominating_definition() {
         .set_terminator(Terminator::Jmp(next, vec![]));
     let next_block = f.get_block_mut(next);
     next_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: b,
         lhs: x,
         rhs: y,
@@ -571,13 +684,13 @@ fn leader_is_earlier_in_block() {
     f.get_entry_mut().push_parameter(y, Type::field());
     let entry = f.get_entry_mut();
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: a,
         lhs: x,
         rhs: y,
     });
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: b,
         lhs: x,
         rhs: y,
@@ -610,7 +723,7 @@ fn leader_never_crosses_incomparable_branches() {
     let e1 = f.add_block();
     let e2 = f.add_block();
     let merge = f.add_block();
-    f.get_entry_mut().push_parameter(cond, Type::u(1));
+    f.get_entry_mut().push_parameter(cond, Type::int(1));
     f.get_entry_mut().push_parameter(x, Type::field());
     f.get_entry_mut().push_parameter(y, Type::field());
     f.get_entry_mut()
@@ -618,7 +731,7 @@ fn leader_never_crosses_incomparable_branches() {
     // `x + y` recomputed in both incomparable branches and again at the merge.
     let e1_block = f.get_block_mut(e1);
     e1_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: a,
         lhs: x,
         rhs: y,
@@ -626,7 +739,7 @@ fn leader_never_crosses_incomparable_branches() {
     e1_block.set_terminator(Terminator::Jmp(merge, vec![]));
     let e2_block = f.get_block_mut(e2);
     e2_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: b,
         lhs: x,
         rhs: y,
@@ -634,7 +747,7 @@ fn leader_never_crosses_incomparable_branches() {
     e2_block.set_terminator(Terminator::Jmp(merge, vec![]));
     let merge_block = f.get_block_mut(merge);
     merge_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: c,
         lhs: x,
         rhs: y,
@@ -657,16 +770,16 @@ fn leader_never_crosses_incomparable_branches() {
 #[test]
 fn leader_of_constant_class_is_the_interned_constant() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c2 = ssa.add_const(Constant::U(32, 2));
-    let c3 = ssa.add_const(Constant::U(32, 3));
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c2 = ssa.add_const(Constant::Int(32, 2));
+    let c3 = ssa.add_const(Constant::Int(32, 3));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
     let a = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
     // `a = 2 + 3` folds to 5, congruent to the interned constant `c5`.
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: a,
         lhs: c2,
         rhs: c3,
@@ -685,13 +798,13 @@ fn leader_of_constant_class_is_the_interned_constant() {
 #[test]
 fn assert_eq_const_is_conditional_not_unconditional() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
     let x = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
     let after = f.add_block();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
     f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: x,
@@ -712,14 +825,14 @@ fn assert_eq_const_is_conditional_not_unconditional() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(after, 0), x)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     // ... and, at index granularity, in the asserting block itself _after_ the assert (the assert is
     // instruction 0, so the terminator at index 1 sees the pin) ...
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), x)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     // ... but never at the assert's own index, where folding `x` would vacuum the constraint.
     assert_eq!(
@@ -737,7 +850,7 @@ fn assert_bool_is_conditional() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
     let after = f.add_block();
-    f.get_entry_mut().push_parameter(b, Type::u(1));
+    f.get_entry_mut().push_parameter(b, Type::int(1));
     f.get_entry_mut()
         .push_test_instruction(OpCode::Assert { value: b });
     f.get_entry_mut()
@@ -751,14 +864,14 @@ fn assert_bool_is_conditional() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(after, 0), b)
             .as_deref(),
-        Some(&Constant::U(1, 1))
+        Some(&Constant::Int(1, 1))
     );
     // Index granularity: the bool pin also holds after the `Assert` (instruction 0) in its own
     // block, but not at the assert's own index.
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), b)
             .as_deref(),
-        Some(&Constant::U(1, 1))
+        Some(&Constant::Int(1, 1))
     );
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 0), b),
@@ -776,8 +889,8 @@ fn assert_eq_pure_equality_is_conditional() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
     let after = f.add_block();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
-    f.get_entry_mut().push_parameter(y, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
+    f.get_entry_mut().push_parameter(y, Type::int(32));
     f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: x,
@@ -812,13 +925,13 @@ fn asserted_leader_picks_dominating_member() {
 
     let f = ssa.get_unique_entrypoint_mut();
     let mid = f.add_block();
-    f.get_entry_mut().push_parameter(a, Type::u(32)); // def(a): entry
+    f.get_entry_mut().push_parameter(a, Type::int(32)); // def(a): entry
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(mid, vec![]));
     let mid_block = f.get_block_mut(mid);
     mid_block.push_test_instruction(OpCode::BinaryArithOp {
         // index 0: def(b) in mid, dominated by entry
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: b,
         lhs: a,
         rhs: a,
@@ -859,9 +972,9 @@ fn asserted_leader_is_transitive() {
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
-    f.get_entry_mut().push_parameter(a, Type::u(32));
-    f.get_entry_mut().push_parameter(b, Type::u(32));
-    f.get_entry_mut().push_parameter(c, Type::u(32));
+    f.get_entry_mut().push_parameter(a, Type::int(32));
+    f.get_entry_mut().push_parameter(b, Type::int(32));
+    f.get_entry_mut().push_parameter(c, Type::int(32));
     f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         // index 0: a == b
         kind: CmpKind::Eq,
@@ -904,8 +1017,8 @@ fn asserted_leader_index_granular() {
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
     let after = f.add_block();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
-    f.get_entry_mut().push_parameter(y, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
+    f.get_entry_mut().push_parameter(y, Type::int(32));
     f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         // index 0
         kind: CmpKind::Eq,
@@ -961,9 +1074,9 @@ fn asserted_leader_respects_dominance_fanout() {
     let then_b = f.add_block();
     let else_b = f.add_block();
     let merge = f.add_block();
-    f.get_entry_mut().push_parameter(cond, Type::u(1));
-    f.get_entry_mut().push_parameter(x, Type::u(32));
-    f.get_entry_mut().push_parameter(y, Type::u(32));
+    f.get_entry_mut().push_parameter(cond, Type::int(1));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
+    f.get_entry_mut().push_parameter(y, Type::int(32));
     f.get_entry_mut()
         .set_terminator(Terminator::JmpIf(cond, then_b, else_b));
     f.get_block_mut(then_b)
@@ -1016,13 +1129,13 @@ fn asserted_leader_respects_dominance_fanout() {
 #[test]
 fn asserted_leader_none_without_equality() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
     let (x, z) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
-    f.get_entry_mut().push_parameter(z, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
+    f.get_entry_mut().push_parameter(z, Type::int(32));
     f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         // index 0: x == 5 — a constant pin, not an equality pair
         kind: CmpKind::Eq,
@@ -1037,7 +1150,7 @@ fn asserted_leader_none_without_equality() {
     // Sanity: the constant pin is recorded as an `asserted_const`, not an equality.
     assert_eq!(
         cc.asserted_const(fid, p1, x).as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     // So `x` has no asserted-equal leader, and the untouched `z` has none anywhere.
     assert_eq!(cc.asserted_leader(fid, p1, x), None);
@@ -1054,9 +1167,9 @@ fn asserted_leader_none_for_non_pair_value_amid_classes() {
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
-    f.get_entry_mut().push_parameter(a, Type::u(32));
-    f.get_entry_mut().push_parameter(b, Type::u(32));
-    f.get_entry_mut().push_parameter(z, Type::u(32)); // never in any assert
+    f.get_entry_mut().push_parameter(a, Type::int(32));
+    f.get_entry_mut().push_parameter(b, Type::int(32));
+    f.get_entry_mut().push_parameter(z, Type::int(32)); // never in any assert
     f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         // index 0: a == b — a real equality pair, so the function has a non-empty `def_key`
         kind: CmpKind::Eq,
@@ -1086,9 +1199,9 @@ fn asserted_leader_multi_threshold_same_block() {
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
-    f.get_entry_mut().push_parameter(a, Type::u(32));
-    f.get_entry_mut().push_parameter(c, Type::u(32));
-    f.get_entry_mut().push_parameter(d, Type::u(32));
+    f.get_entry_mut().push_parameter(a, Type::int(32));
+    f.get_entry_mut().push_parameter(c, Type::int(32));
+    f.get_entry_mut().push_parameter(d, Type::int(32));
     f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         // index 0: c == d ⇒ class {c, d}, leader c
         kind: CmpKind::Eq,
@@ -1136,10 +1249,10 @@ fn asserted_leader_local_merges_two_cross_classes() {
 
     let f = ssa.get_unique_entrypoint_mut();
     let mid = f.add_block();
-    f.get_entry_mut().push_parameter(a, Type::u(32));
-    f.get_entry_mut().push_parameter(b, Type::u(32));
-    f.get_entry_mut().push_parameter(c, Type::u(32));
-    f.get_entry_mut().push_parameter(d, Type::u(32));
+    f.get_entry_mut().push_parameter(a, Type::int(32));
+    f.get_entry_mut().push_parameter(b, Type::int(32));
+    f.get_entry_mut().push_parameter(c, Type::int(32));
+    f.get_entry_mut().push_parameter(d, Type::int(32));
     f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         // index 0: a == b ⇒ dominating class {a, b}
         kind: CmpKind::Eq,
@@ -1192,8 +1305,8 @@ fn disequality_from_false_edge() {
     let then_b = f.add_block();
     let else_b = f.add_block();
     let after = f.add_block();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
-    f.get_entry_mut().push_parameter(y, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
+    f.get_entry_mut().push_parameter(y, Type::int(32));
     f.get_entry_mut().push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: eq,
@@ -1229,8 +1342,8 @@ fn unpinned_witness_forwards_distinct_not_merged() {
     let (r1, r2, rp) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
-    f.get_entry_mut().push_parameter(v1, Type::u(32));
-    f.get_entry_mut().push_parameter(v2, Type::u(32));
+    f.get_entry_mut().push_parameter(v1, Type::int(32));
+    f.get_entry_mut().push_parameter(v2, Type::int(32));
     let entry = f.get_entry_mut();
     entry.push_test_instruction(OpCode::WriteWitness {
         result: Some(r1),
@@ -1270,8 +1383,8 @@ fn witness_forward_unions_hint_and_value_of_reads() {
     let (w1, w2) = (ssa.fresh_value(), ssa.fresh_value()); // two distinct `value_of(r)` reads
 
     let f = ssa.get_unique_entrypoint_mut();
-    f.get_entry_mut().push_parameter(v, Type::u(32));
-    f.get_entry_mut().push_parameter(v2, Type::u(32));
+    f.get_entry_mut().push_parameter(v, Type::int(32));
+    f.get_entry_mut().push_parameter(v2, Type::int(32));
     let entry = f.get_entry_mut();
     entry.push_test_instruction(OpCode::WriteWitness {
         result: Some(r),
@@ -1320,14 +1433,14 @@ fn witness_forward_unions_hint_and_value_of_reads() {
 #[test]
 fn post_dominance_not_propagated_at_block_granularity() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
     let x = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
     let mid = f.add_block();
     let tail = f.add_block();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(mid, vec![]));
     f.get_block_mut(mid)
@@ -1355,12 +1468,12 @@ fn post_dominance_not_propagated_at_block_granularity() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(mid, 0), x)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(entry_id, 0), x)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     // In the asserting block, index granularity still recovers it _after_ the assert (index 0), but
     // not at the assert's own index — in either channel (the assert is `tail`'s first instruction,
@@ -1368,7 +1481,7 @@ fn post_dominance_not_propagated_at_block_granularity() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(tail, 1), x)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     assert_eq!(cc.asserted_const(fid, ProgramPoint::new(tail, 0), x), None);
     assert_eq!(
@@ -1390,10 +1503,10 @@ fn post_dominance_not_propagated_at_block_granularity() {
 #[test]
 fn post_dominating_assert_unsound_for_loop_carried_value() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c5 = ssa.add_const(Constant::U(32, 5));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let s = ssa.fresh_value();
     let (v, lt, v1) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
@@ -1402,13 +1515,13 @@ fn post_dominating_assert_unsound_for_loop_carried_value() {
     let body = f.add_block();
     let after = f.add_block();
 
-    f.get_entry_mut().push_parameter(s, Type::u(32));
+    f.get_entry_mut().push_parameter(s, Type::int(32));
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(header, vec![c0]));
     let header_block = f.get_block_mut(header);
-    header_block.push_parameter(v, Type::u(32));
+    header_block.push_parameter(v, Type::int(32));
     header_block.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: lt,
         lhs: v,
         rhs: c10,
@@ -1416,7 +1529,7 @@ fn post_dominating_assert_unsound_for_loop_carried_value() {
     header_block.set_terminator(Terminator::JmpIf(lt, body, after));
     let body_block = f.get_block_mut(body);
     body_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: v1,
         lhs: v,
         rhs: c1,
@@ -1459,7 +1572,7 @@ fn post_dominating_assert_unsound_for_loop_carried_value() {
         assert_eq!(
             cc.anticipated_const(fid, ProgramPoint::new(bid, 0), s)
                 .as_deref(),
-            Some(&Constant::U(32, 5)),
+            Some(&Constant::Int(32, 5)),
             "stable value must be anticipated in loop block {bid:?}"
         );
     }
@@ -1467,7 +1580,7 @@ fn post_dominating_assert_unsound_for_loop_carried_value() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(after, 1), v)
             .as_deref(),
-        Some(&Constant::U(32, 10))
+        Some(&Constant::Int(32, 10))
     );
 }
 
@@ -1476,7 +1589,7 @@ fn post_dominating_assert_unsound_for_loop_carried_value() {
 #[test]
 fn assert_on_one_branch_does_not_post_dominate() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
     let cond = ssa.fresh_value();
     let x = ssa.fresh_value();
 
@@ -1485,8 +1598,8 @@ fn assert_on_one_branch_does_not_post_dominate() {
     let then_b = f.add_block();
     let else_b = f.add_block();
     let merge = f.add_block();
-    f.get_entry_mut().push_parameter(cond, Type::u(1));
-    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(cond, Type::int(1));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
     f.get_entry_mut()
         .set_terminator(Terminator::JmpIf(cond, then_b, else_b));
     // The assert lives only on the `then` branch.
@@ -1524,7 +1637,7 @@ fn assert_on_one_branch_does_not_post_dominate() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(then_b, 1), x)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(then_b, 0), x),
@@ -1539,20 +1652,20 @@ fn assert_on_one_branch_does_not_post_dominate() {
 #[test]
 fn anticipated_fact_gated_on_scope() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
     let (x, v) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
     let mid = f.add_block();
     let tail = f.add_block();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(mid, vec![]));
     let mid_block = f.get_block_mut(mid);
     mid_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: v,
         lhs: x,
         rhs: c1,
@@ -1573,7 +1686,7 @@ fn anticipated_fact_gated_on_scope() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(mid, 1), v)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     // ...but at `entry` — which `tail` equally post-dominates — `def(v) = mid` does not dominate,
     // so the scope gate withholds it.
@@ -1589,15 +1702,15 @@ fn anticipated_fact_gated_on_scope() {
 #[test]
 fn no_exit_path_assert_contributes_nothing() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
     let (p, x) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
     let spin = f.add_block();
     let ret = f.add_block();
-    f.get_entry_mut().push_parameter(p, Type::u(1));
-    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(p, Type::int(1));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
     f.get_entry_mut()
         .set_terminator(Terminator::JmpIf(p, spin, ret));
     // The asserting block loops on itself forever: reachable, but never exiting.
@@ -1632,8 +1745,8 @@ fn no_exit_path_assert_contributes_nothing() {
 #[test]
 fn anticipated_gains_from_constant_branch() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c_true = ssa.add_const(Constant::U(1, 1));
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c_true = ssa.add_const(Constant::Int(1, 1));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
     let x = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1641,7 +1754,7 @@ fn anticipated_gains_from_constant_branch() {
     let then_b = f.add_block();
     let else_b = f.add_block();
     let merge = f.add_block();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
     f.get_entry_mut()
         .set_terminator(Terminator::JmpIf(c_true, then_b, else_b));
     f.get_block_mut(then_b)
@@ -1664,7 +1777,7 @@ fn anticipated_gains_from_constant_branch() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(entry_id, 0), x)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     // The dominance channel is untouched: `then_b` still does not _dominate_ anything here (the
     // static `else` edge into `merge` remains), so the already-ran direction stays empty...
@@ -1695,8 +1808,8 @@ fn anticipated_const_in_gains_from_pinned_branch() {
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let (p, x, x0) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
-    let c_true = ssa.add_const(Constant::U(1, 1));
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c_true = ssa.add_const(Constant::Int(1, 1));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
 
     let g_entry = {
         let hf = ssa.get_function_mut(g);
@@ -1704,8 +1817,8 @@ fn anticipated_const_in_gains_from_pinned_branch() {
         let then_b = hf.add_block();
         let else_b = hf.add_block();
         let merge = hf.add_block();
-        hf.get_entry_mut().push_parameter(p, Type::u(1));
-        hf.get_entry_mut().push_parameter(x, Type::u(32));
+        hf.get_entry_mut().push_parameter(p, Type::int(1));
+        hf.get_entry_mut().push_parameter(x, Type::int(32));
         hf.get_entry_mut()
             .set_terminator(Terminator::JmpIf(p, then_b, else_b));
         hf.get_block_mut(then_b)
@@ -1724,7 +1837,7 @@ fn anticipated_const_in_gains_from_pinned_branch() {
     };
     {
         let mf = ssa.get_function_mut(main_id);
-        mf.get_entry_mut().push_parameter(x0, Type::u(32));
+        mf.get_entry_mut().push_parameter(x0, Type::int(32));
         mf.get_entry_mut().push_test_instruction(OpCode::Call {
             results: vec![],
             function: CallTarget::Static(g),
@@ -1748,7 +1861,7 @@ fn anticipated_const_in_gains_from_pinned_branch() {
     // — the caller passes its own free parameter).
     assert_eq!(
         cc.anticipated_const_in(g, &ctx, pp, x).as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
 }
 
@@ -1769,24 +1882,24 @@ fn anticipated_gains_from_dead_back_edge() {
         ssa.fresh_value(),
         ssa.fresh_value(),
     );
-    let c_false = ssa.add_const(Constant::U(1, 0));
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c_false = ssa.add_const(Constant::Int(1, 0));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
 
     // `g(a) = a + fresh_witness`: nondeterministic, so no invariance rule — neither rule-3 form
     // (pure-op or det-call) nor a congruence witness — can admit its result; its stability rides on
     // cyclicity alone.
     {
         let hf = ssa.get_function_mut(g);
-        hf.add_return_type(Type::u(32));
-        hf.get_entry_mut().push_parameter(a, Type::u(32));
+        hf.add_return_type(Type::int(32));
+        hf.get_entry_mut().push_parameter(a, Type::int(32));
         hf.get_entry_mut()
             .push_test_instruction(OpCode::FreshWitness {
                 result: wit,
-                result_type: Type::u(32),
+                result_type: Type::int(32),
             });
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result: b,
                 lhs: a,
                 rhs: wit,
@@ -1799,7 +1912,7 @@ fn anticipated_gains_from_dead_back_edge() {
         let header = mf.add_block();
         let body = mf.add_block();
         let after = mf.add_block();
-        mf.get_entry_mut().push_parameter(w, Type::u(32));
+        mf.get_entry_mut().push_parameter(w, Type::int(32));
         mf.get_entry_mut()
             .set_terminator(Terminator::Jmp(header, vec![]));
         let header_block = mf.get_block_mut(header);
@@ -1833,7 +1946,7 @@ fn anticipated_gains_from_dead_back_edge() {
     assert_eq!(
         cc.anticipated_const(main_id, ProgramPoint::new(header, 1), r)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     // The dominance channel still owes nothing before the assert runs.
     assert_eq!(
@@ -1844,7 +1957,7 @@ fn anticipated_gains_from_dead_back_edge() {
     assert_eq!(
         cc.asserted_const(main_id, ProgramPoint::new(after, 1), r)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
 }
 
@@ -1867,21 +1980,21 @@ fn live_back_edge_keeps_call_result_unstable() {
         ssa.fresh_value(),
         ssa.fresh_value(),
     );
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
 
     // `g(a) = a + fresh_witness`: nondeterministic, so no invariance rule can admit its result.
     {
         let hf = ssa.get_function_mut(g);
-        hf.add_return_type(Type::u(32));
-        hf.get_entry_mut().push_parameter(a, Type::u(32));
+        hf.add_return_type(Type::int(32));
+        hf.get_entry_mut().push_parameter(a, Type::int(32));
         hf.get_entry_mut()
             .push_test_instruction(OpCode::FreshWitness {
                 result: wit,
-                result_type: Type::u(32),
+                result_type: Type::int(32),
             });
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result: b,
                 lhs: a,
                 rhs: wit,
@@ -1894,8 +2007,8 @@ fn live_back_edge_keeps_call_result_unstable() {
         let header = mf.add_block();
         let body = mf.add_block();
         let after = mf.add_block();
-        mf.get_entry_mut().push_parameter(p, Type::u(1));
-        mf.get_entry_mut().push_parameter(w, Type::u(32));
+        mf.get_entry_mut().push_parameter(p, Type::int(1));
+        mf.get_entry_mut().push_parameter(w, Type::int(32));
         mf.get_entry_mut()
             .set_terminator(Terminator::Jmp(header, vec![]));
         let header_block = mf.get_block_mut(header);
@@ -1936,10 +2049,10 @@ fn live_back_edge_keeps_call_result_unstable() {
 fn anticipated_finality_gains_from_pruned_back_path() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
-    let c_false = ssa.add_const(Constant::U(1, 0));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c_false = ssa.add_const(Constant::Int(1, 0));
     let (v, lt, v1) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1952,9 +2065,9 @@ fn anticipated_finality_gains_from_pruned_back_path() {
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(header, vec![c0]));
     let header_block = f.get_block_mut(header);
-    header_block.push_parameter(v, Type::u(32));
+    header_block.push_parameter(v, Type::int(32));
     header_block.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: lt,
         lhs: v,
         rhs: c10,
@@ -1962,7 +2075,7 @@ fn anticipated_finality_gains_from_pruned_back_path() {
     header_block.set_terminator(Terminator::JmpIf(lt, body, c_block));
     let body_block = f.get_block_mut(body);
     body_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: v1,
         lhs: v,
         rhs: c1,
@@ -1990,7 +2103,7 @@ fn anticipated_finality_gains_from_pruned_back_path() {
     assert_eq!(
         cc.anticipated_const(main_id, ProgramPoint::new(c_block, 0), v)
             .as_deref(),
-        Some(&Constant::U(32, 10))
+        Some(&Constant::Int(32, 10))
     );
     // Inside the live loop the executable back-reach is real in both views: no fact.
     assert_eq!(
@@ -2012,8 +2125,8 @@ fn anticipated_finality_gains_from_pruned_back_path() {
 #[test]
 fn pruned_build_keeps_static_post_dominance_fact() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c_false = ssa.add_const(Constant::U(1, 0));
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c_false = ssa.add_const(Constant::Int(1, 0));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
     let (p, x) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -2021,8 +2134,8 @@ fn pruned_build_keeps_static_post_dominance_fact() {
     let bypass = f.add_block();
     let check = f.add_block();
     let spin = f.add_block();
-    f.get_entry_mut().push_parameter(p, Type::u(1));
-    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(p, Type::int(1));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
     f.get_entry_mut()
         .set_terminator(Terminator::JmpIf(p, stuck, bypass));
     // `stuck`'s only static exit path is the `then` arm into `check` — pruned by the
@@ -2052,7 +2165,7 @@ fn pruned_build_keeps_static_post_dominance_fact() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(stuck, 0), x)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     // The dominance channel owes nothing: the assert has not run when control is at `stuck`.
     assert_eq!(cc.asserted_const(fid, ProgramPoint::new(stuck, 0), x), None);
@@ -2069,16 +2182,16 @@ fn pruned_build_keeps_static_post_dominance_fact() {
 #[test]
 fn local_anticipated_before_the_assert() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
     let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
     f.get_entry_mut()
         .push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: y,
             lhs: x,
             rhs: c1,
@@ -2096,7 +2209,7 @@ fn local_anticipated_before_the_assert() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(entry_id, 0), x)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 0), x),
@@ -2120,7 +2233,7 @@ fn local_anticipated_before_the_assert() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 2), x)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
 }
 
@@ -2131,10 +2244,10 @@ fn local_anticipated_before_the_assert() {
 #[test]
 fn local_anticipated_needs_no_stability_gate() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c9 = ssa.add_const(Constant::U(32, 9));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c9 = ssa.add_const(Constant::Int(32, 9));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (w, y, lt) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -2144,9 +2257,9 @@ fn local_anticipated_needs_no_stability_gate() {
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(looping, vec![c0]));
     let loop_block = f.get_block_mut(looping);
-    loop_block.push_parameter(w, Type::u(32));
+    loop_block.push_parameter(w, Type::int(32));
     loop_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: y,
         lhs: w,
         rhs: c1,
@@ -2157,7 +2270,7 @@ fn local_anticipated_needs_no_stability_gate() {
         rhs: c9,
     });
     loop_block.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: lt,
         lhs: y,
         rhs: c10,
@@ -2173,7 +2286,7 @@ fn local_anticipated_needs_no_stability_gate() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(looping, 0), w)
             .as_deref(),
-        Some(&Constant::U(32, 9))
+        Some(&Constant::Int(32, 9))
     );
     // Cross-block, `w` is withheld (both gates fail: it is loop-carried, hence unstable, and out
     // of scope at `entry`) — `entry` gets nothing even though the loop block post-dominates it.
@@ -2191,20 +2304,20 @@ fn local_anticipated_needs_no_stability_gate() {
 #[test]
 fn anticipated_equalities_and_leaders() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
     let (a, b, m) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
     let mid = f.add_block();
     let tail = f.add_block();
-    f.get_entry_mut().push_parameter(a, Type::u(32));
-    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_parameter(a, Type::int(32));
+    f.get_entry_mut().push_parameter(b, Type::int(32));
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(mid, vec![]));
     let mid_block = f.get_block_mut(mid);
     mid_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: m,
         lhs: a,
         rhs: c1,
@@ -2259,17 +2372,17 @@ fn anticipated_equalities_and_leaders() {
 #[test]
 fn anticipated_leader_before_same_block_assert() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
     let (a, b, m) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
-    f.get_entry_mut().push_parameter(a, Type::u(32));
-    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_parameter(a, Type::int(32));
+    f.get_entry_mut().push_parameter(b, Type::int(32));
     f.get_entry_mut()
         .push_test_instruction(OpCode::BinaryArithOp {
             // index 0: a pre-assert use of `b`
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: m,
             lhs: b,
             rhs: c1,
@@ -2313,9 +2426,9 @@ fn anticipated_leader_before_same_block_assert() {
 #[test]
 fn anticipated_leader_before_assert_in_cyclic_block() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (a, w, y, lt) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -2325,16 +2438,16 @@ fn anticipated_leader_before_assert_in_cyclic_block() {
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
-    f.get_entry_mut().push_parameter(a, Type::u(32));
+    f.get_entry_mut().push_parameter(a, Type::int(32));
     let looping = f.add_block();
     let exit = f.add_block();
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(looping, vec![c0]));
     let loop_block = f.get_block_mut(looping);
-    loop_block.push_parameter(w, Type::u(32));
+    loop_block.push_parameter(w, Type::int(32));
     loop_block.push_test_instruction(OpCode::BinaryArithOp {
         // index 0: a pre-assert use of `w`
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: y,
         lhs: w,
         rhs: c1,
@@ -2347,7 +2460,7 @@ fn anticipated_leader_before_assert_in_cyclic_block() {
     });
     loop_block.push_test_instruction(OpCode::Cmp {
         // index 2
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: lt,
         lhs: y,
         rhs: c10,
@@ -2392,8 +2505,8 @@ fn anticipated_leader_before_assert_in_cyclic_block() {
 #[test]
 fn anticipated_leader_threshold_for_block_defined_leader() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c2 = ssa.add_const(Constant::U(32, 2));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c2 = ssa.add_const(Constant::Int(32, 2));
     let (a, b, x, y) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -2403,12 +2516,12 @@ fn anticipated_leader_threshold_for_block_defined_leader() {
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
-    f.get_entry_mut().push_parameter(a, Type::u(32));
-    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_parameter(a, Type::int(32));
+    f.get_entry_mut().push_parameter(b, Type::int(32));
     f.get_entry_mut()
         .push_test_instruction(OpCode::BinaryArithOp {
             // index 0: def(x)
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: x,
             lhs: a,
             rhs: c1,
@@ -2416,7 +2529,7 @@ fn anticipated_leader_threshold_for_block_defined_leader() {
     f.get_entry_mut()
         .push_test_instruction(OpCode::BinaryArithOp {
             // index 1: def(y)
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: y,
             lhs: b,
             rhs: c2,
@@ -2458,7 +2571,7 @@ fn anticipated_leader_threshold_for_block_defined_leader() {
 #[test]
 fn anticipated_leader_merges_across_directions() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
     // Allocated in order ⇒ x.0 < y.0 < z.0; all entry params, so leaders are by id.
     let (x, y, z, m) = (
         ssa.fresh_value(),
@@ -2469,9 +2582,9 @@ fn anticipated_leader_merges_across_directions() {
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
-    f.get_entry_mut().push_parameter(y, Type::u(32));
-    f.get_entry_mut().push_parameter(z, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
+    f.get_entry_mut().push_parameter(y, Type::int(32));
+    f.get_entry_mut().push_parameter(z, Type::int(32));
     f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         // index 0: x == y
         kind: CmpKind::Eq,
@@ -2481,7 +2594,7 @@ fn anticipated_leader_merges_across_directions() {
     f.get_entry_mut()
         .push_test_instruction(OpCode::BinaryArithOp {
             // index 1: the between point
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: m,
             lhs: z,
             rhs: c1,
@@ -2519,8 +2632,8 @@ fn anticipated_leader_at_establishing_assert_is_gate3_guarded() {
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
-    f.get_entry_mut().push_parameter(a, Type::u(32));
-    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_parameter(a, Type::int(32));
+    f.get_entry_mut().push_parameter(b, Type::int(32));
     f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         // index 0: a == b
         kind: CmpKind::Eq,
@@ -2542,12 +2655,12 @@ fn anticipated_leader_at_establishing_assert_is_gate3_guarded() {
 #[test]
 fn anticipated_leader_cross_only_block_falls_back() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
     let (a, b, m) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
-    f.get_entry_mut().push_parameter(a, Type::u(32));
-    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_parameter(a, Type::int(32));
+    f.get_entry_mut().push_parameter(b, Type::int(32));
     f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         // index 0: a == b, fanned out to `tail` as a cross pair
         kind: CmpKind::Eq,
@@ -2560,7 +2673,7 @@ fn anticipated_leader_cross_only_block_falls_back() {
     let tail_block = f.get_block_mut(tail);
     tail_block.push_test_instruction(OpCode::BinaryArithOp {
         // index 0: an ordinary use point in `tail`
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: m,
         lhs: b,
         rhs: c1,
@@ -2584,10 +2697,10 @@ fn anticipated_leader_cross_only_block_falls_back() {
 #[test]
 fn anticipated_admits_loop_invariant_pure_chain() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c5 = ssa.add_const(Constant::U(32, 5));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (n, i, t, i2, lt) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -2600,27 +2713,27 @@ fn anticipated_admits_loop_invariant_pure_chain() {
     let entry_id = f.get_entry_id();
     let looping = f.add_block();
     let exit = f.add_block();
-    f.get_entry_mut().push_parameter(n, Type::u(32));
+    f.get_entry_mut().push_parameter(n, Type::int(32));
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(looping, vec![c0]));
     let loop_block = f.get_block_mut(looping);
-    loop_block.push_parameter(i, Type::u(32));
+    loop_block.push_parameter(i, Type::int(32));
     loop_block.push_test_instruction(OpCode::BinaryArithOp {
         // index 0: loop-invariant — pure over the stable `n` and a constant.
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: t,
         lhs: n,
         rhs: c1,
     });
     loop_block.push_test_instruction(OpCode::BinaryArithOp {
         // index 1: loop-variant — pure, but over the loop-carried `i`.
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: i2,
         lhs: i,
         rhs: c1,
     });
     loop_block.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: lt,
         lhs: i2,
         rhs: c10,
@@ -2646,7 +2759,7 @@ fn anticipated_admits_loop_invariant_pure_chain() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(looping, 1), t)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     // The same pure op over the loop-carried `i` stays out — one unstable operand poisons it —
     // and the loop must not collapse around a final-iteration-only fact.
@@ -2670,10 +2783,10 @@ fn anticipated_rejects_unconstrained_call_result_in_loop() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c5 = ssa.add_const(Constant::U(32, 5));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (p, n, i, r, i2, lt) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -2685,21 +2798,21 @@ fn anticipated_rejects_unconstrained_call_result_in_loop() {
 
     {
         let hf = ssa.get_function_mut(helper);
-        hf.add_return_type(Type::u(32));
-        hf.get_entry_mut().push_parameter(p, Type::u(32));
+        hf.add_return_type(Type::int(32));
+        hf.get_entry_mut().push_parameter(p, Type::int(32));
         hf.get_entry_mut()
             .set_terminator(Terminator::Return(vec![p]));
     }
     {
         let mf = ssa.get_function_mut(main_id);
         let entry = mf.get_entry_mut();
-        entry.push_parameter(n, Type::u(32));
+        entry.push_parameter(n, Type::int(32));
         let looping = mf.add_block();
         let exit = mf.add_block();
         mf.get_entry_mut()
             .set_terminator(Terminator::Jmp(looping, vec![c0]));
         let loop_block = mf.get_block_mut(looping);
-        loop_block.push_parameter(i, Type::u(32));
+        loop_block.push_parameter(i, Type::int(32));
         loop_block.push_test_instruction(OpCode::Call {
             // index 0: opaque — an unconstrained call, however stable its argument.
             results: vec![r],
@@ -2708,13 +2821,13 @@ fn anticipated_rejects_unconstrained_call_result_in_loop() {
             unconstrained: true,
         });
         loop_block.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: i2,
             lhs: i,
             rhs: c1,
         });
         loop_block.push_test_instruction(OpCode::Cmp {
-            kind: CmpKind::Lt,
+            kind: CmpKind::ULt,
             result: lt,
             lhs: i2,
             rhs: c10,
@@ -2743,9 +2856,9 @@ fn anticipated_rejects_unconstrained_call_result_in_loop() {
 #[test]
 fn anticipated_admits_accumulator_at_post_loop_block() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (v, lt, v1) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -2756,9 +2869,9 @@ fn anticipated_admits_accumulator_at_post_loop_block() {
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(header, vec![c0]));
     let header_block = f.get_block_mut(header);
-    header_block.push_parameter(v, Type::u(32));
+    header_block.push_parameter(v, Type::int(32));
     header_block.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: lt,
         lhs: v,
         rhs: c10,
@@ -2766,7 +2879,7 @@ fn anticipated_admits_accumulator_at_post_loop_block() {
     header_block.set_terminator(Terminator::JmpIf(lt, body, after));
     let body_block = f.get_block_mut(body);
     body_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: v1,
         lhs: v,
         rhs: c1,
@@ -2788,7 +2901,7 @@ fn anticipated_admits_accumulator_at_post_loop_block() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(after, 0), v)
             .as_deref(),
-        Some(&Constant::U(32, 10))
+        Some(&Constant::Int(32, 10))
     );
     // Inside the loop both invariance and finality fail — `header`/`body` re-reach the
     // definition — so mid-loop iterations keep their genuine bindings.
@@ -2808,9 +2921,9 @@ fn anticipated_admits_accumulator_at_post_loop_block() {
 #[test]
 fn anticipated_admits_first_loop_value_inside_second_loop() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (v, lt, v1, lt2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -2826,9 +2939,9 @@ fn anticipated_admits_first_loop_value_inside_second_loop() {
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(header, vec![c0]));
     let header_block = f.get_block_mut(header);
-    header_block.push_parameter(v, Type::u(32));
+    header_block.push_parameter(v, Type::int(32));
     header_block.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: lt,
         lhs: v,
         rhs: c10,
@@ -2836,7 +2949,7 @@ fn anticipated_admits_first_loop_value_inside_second_loop() {
     header_block.set_terminator(Terminator::JmpIf(lt, body, second));
     let body_block = f.get_block_mut(body);
     body_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: v1,
         lhs: v,
         rhs: c1,
@@ -2844,7 +2957,7 @@ fn anticipated_admits_first_loop_value_inside_second_loop() {
     body_block.set_terminator(Terminator::Jmp(header, vec![v1]));
     let second_block = f.get_block_mut(second);
     second_block.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: lt2,
         lhs: v,
         rhs: c1,
@@ -2864,7 +2977,7 @@ fn anticipated_admits_first_loop_value_inside_second_loop() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(second, 0), v)
             .as_deref(),
-        Some(&Constant::U(32, 10))
+        Some(&Constant::Int(32, 10))
     );
     // Still rejected inside the defining loop.
     assert_eq!(
@@ -2883,9 +2996,9 @@ fn anticipated_admits_first_loop_value_inside_second_loop() {
 #[test]
 fn anticipated_rejects_inner_loop_value_at_outer_block() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (w, lt_i, w2, lt_o) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -2904,9 +3017,9 @@ fn anticipated_rejects_inner_loop_value_at_outer_block() {
     f.get_block_mut(outer)
         .set_terminator(Terminator::Jmp(inner, vec![c0]));
     let inner_block = f.get_block_mut(inner);
-    inner_block.push_parameter(w, Type::u(32));
+    inner_block.push_parameter(w, Type::int(32));
     inner_block.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: lt_i,
         lhs: w,
         rhs: c10,
@@ -2914,7 +3027,7 @@ fn anticipated_rejects_inner_loop_value_at_outer_block() {
     inner_block.set_terminator(Terminator::JmpIf(lt_i, inner_body, latch));
     let inner_body_block = f.get_block_mut(inner_body);
     inner_body_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: w2,
         lhs: w,
         rhs: c1,
@@ -2922,7 +3035,7 @@ fn anticipated_rejects_inner_loop_value_at_outer_block() {
     inner_body_block.set_terminator(Terminator::Jmp(inner, vec![w2]));
     let latch_block = f.get_block_mut(latch);
     latch_block.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: lt_o,
         lhs: w,
         rhs: c1,
@@ -2962,10 +3075,10 @@ fn anticipated_admits_det_call_via_congruence_tier() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c5 = ssa.add_const(Constant::U(32, 5));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (p, q, n, w, i, r, i2, lt) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -2979,11 +3092,11 @@ fn anticipated_admits_det_call_via_congruence_tier() {
 
     {
         let hf = ssa.get_function_mut(helper);
-        hf.add_return_type(Type::u(32));
+        hf.add_return_type(Type::int(32));
         let entry = hf.get_entry_mut();
-        entry.push_parameter(p, Type::u(32));
+        entry.push_parameter(p, Type::int(32));
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: q,
             lhs: p,
             rhs: c1,
@@ -2995,7 +3108,7 @@ fn anticipated_admits_det_call_via_congruence_tier() {
         let looping = mf.add_block();
         let exit = mf.add_block();
         let entry = mf.get_entry_mut();
-        entry.push_parameter(n, Type::u(32));
+        entry.push_parameter(n, Type::int(32));
         entry.push_test_instruction(OpCode::Call {
             // The dominating witness: same callee, same argument, in an acyclic block.
             results: vec![w],
@@ -3005,7 +3118,7 @@ fn anticipated_admits_det_call_via_congruence_tier() {
         });
         entry.set_terminator(Terminator::Jmp(looping, vec![c0]));
         let loop_block = mf.get_block_mut(looping);
-        loop_block.push_parameter(i, Type::u(32));
+        loop_block.push_parameter(i, Type::int(32));
         loop_block.push_test_instruction(OpCode::Call {
             // index 0: congruent to `w` (deterministic static call, congruent arguments).
             results: vec![r],
@@ -3014,13 +3127,13 @@ fn anticipated_admits_det_call_via_congruence_tier() {
             unconstrained: false,
         });
         loop_block.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: i2,
             lhs: i,
             rhs: c1,
         });
         loop_block.push_test_instruction(OpCode::Cmp {
-            kind: CmpKind::Lt,
+            kind: CmpKind::ULt,
             result: lt,
             lhs: i2,
             rhs: c10,
@@ -3041,7 +3154,7 @@ fn anticipated_admits_det_call_via_congruence_tier() {
         assert_eq!(
             cc.anticipated_const(main_id, ProgramPoint::new(looping, 1), r)
                 .as_deref(),
-            Some(&Constant::U(32, 5))
+            Some(&Constant::Int(32, 5))
         );
         // Scope still bounds it: `r` is not defined at `entry`.
         let entry_id = ssa.get_unique_entrypoint().get_entry_id();
@@ -3068,19 +3181,19 @@ fn anticipated_admits_det_call_directly_in_loop() {
         ssa.fresh_value(),
         ssa.fresh_value(),
     );
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
 
     // `g(a) = a + 1`: deterministic but _not_ an identity, and called exactly once, so the
     // symbolic cross-call graft yields no congruent duplicate for `r` — admission is the det-call
     // form's alone.
     {
         let hf = ssa.get_function_mut(g);
-        hf.add_return_type(Type::u(32));
-        hf.get_entry_mut().push_parameter(a, Type::u(32));
+        hf.add_return_type(Type::int(32));
+        hf.get_entry_mut().push_parameter(a, Type::int(32));
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result: b,
                 lhs: a,
                 rhs: c1,
@@ -3093,8 +3206,8 @@ fn anticipated_admits_det_call_directly_in_loop() {
         let header = mf.add_block();
         let body = mf.add_block();
         let after = mf.add_block();
-        mf.get_entry_mut().push_parameter(p, Type::u(1));
-        mf.get_entry_mut().push_parameter(w, Type::u(32));
+        mf.get_entry_mut().push_parameter(p, Type::int(1));
+        mf.get_entry_mut().push_parameter(w, Type::int(32));
         mf.get_entry_mut()
             .set_terminator(Terminator::Jmp(header, vec![]));
         let header_block = mf.get_block_mut(header);
@@ -3124,7 +3237,7 @@ fn anticipated_admits_det_call_directly_in_loop() {
     assert_eq!(
         cc.anticipated_const(main_id, ProgramPoint::new(header, 1), r)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
 }
 
@@ -3136,10 +3249,10 @@ fn anticipated_rejects_det_call_over_loop_variant_arg() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c5 = ssa.add_const(Constant::U(32, 5));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (p, q, n, i, r, i2, lt) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3154,11 +3267,11 @@ fn anticipated_rejects_det_call_over_loop_variant_arg() {
     // no stable congruent witness either).
     {
         let hf = ssa.get_function_mut(helper);
-        hf.add_return_type(Type::u(32));
+        hf.add_return_type(Type::int(32));
         let entry = hf.get_entry_mut();
-        entry.push_parameter(p, Type::u(32));
+        entry.push_parameter(p, Type::int(32));
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: q,
             lhs: p,
             rhs: c1,
@@ -3167,13 +3280,13 @@ fn anticipated_rejects_det_call_over_loop_variant_arg() {
     }
     {
         let mf = ssa.get_function_mut(main_id);
-        mf.get_entry_mut().push_parameter(n, Type::u(32));
+        mf.get_entry_mut().push_parameter(n, Type::int(32));
         let looping = mf.add_block();
         let exit = mf.add_block();
         mf.get_entry_mut()
             .set_terminator(Terminator::Jmp(looping, vec![c0]));
         let loop_block = mf.get_block_mut(looping);
-        loop_block.push_parameter(i, Type::u(32));
+        loop_block.push_parameter(i, Type::int(32));
         loop_block.push_test_instruction(OpCode::Call {
             // index 0: a deterministic constrained call, but over the loop-variant `i`.
             results: vec![r],
@@ -3182,13 +3295,13 @@ fn anticipated_rejects_det_call_over_loop_variant_arg() {
             unconstrained: false,
         });
         loop_block.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: i2,
             lhs: i,
             rhs: c1,
         });
         loop_block.push_test_instruction(OpCode::Cmp {
-            kind: CmpKind::Lt,
+            kind: CmpKind::ULt,
             result: lt,
             lhs: i2,
             rhs: c10,
@@ -3218,9 +3331,9 @@ fn anticipated_det_call_multi_return_per_index_bits() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c5 = ssa.add_const(Constant::U(32, 5));
-    let c7 = ssa.add_const(Constant::U(32, 7));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c7 = ssa.add_const(Constant::Int(32, 7));
     let (p, q, wit, cond, n, r0, r1) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3234,19 +3347,19 @@ fn anticipated_det_call_multi_return_per_index_bits() {
     // `helper(p) = (p + 1, fresh_witness)`.
     {
         let hf = ssa.get_function_mut(helper);
-        hf.add_return_type(Type::u(32));
-        hf.add_return_type(Type::u(32));
+        hf.add_return_type(Type::int(32));
+        hf.add_return_type(Type::int(32));
         let entry = hf.get_entry_mut();
-        entry.push_parameter(p, Type::u(32));
+        entry.push_parameter(p, Type::int(32));
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: q,
             lhs: p,
             rhs: c1,
         });
         entry.push_test_instruction(OpCode::FreshWitness {
             result: wit,
-            result_type: Type::u(32),
+            result_type: Type::int(32),
         });
         entry.set_terminator(Terminator::Return(vec![q, wit]));
     }
@@ -3255,8 +3368,8 @@ fn anticipated_det_call_multi_return_per_index_bits() {
         let header = mf.add_block();
         let body = mf.add_block();
         let after = mf.add_block();
-        mf.get_entry_mut().push_parameter(cond, Type::u(1));
-        mf.get_entry_mut().push_parameter(n, Type::u(32));
+        mf.get_entry_mut().push_parameter(cond, Type::int(1));
+        mf.get_entry_mut().push_parameter(n, Type::int(32));
         mf.get_entry_mut()
             .set_terminator(Terminator::Jmp(header, vec![]));
         let header_block = mf.get_block_mut(header);
@@ -3289,7 +3402,7 @@ fn anticipated_det_call_multi_return_per_index_bits() {
     assert_eq!(
         cc.anticipated_const(main_id, ProgramPoint::new(header, 1), r0)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     // Return 1 is fresh advice each iteration: withheld.
     assert_eq!(
@@ -3306,7 +3419,7 @@ fn anticipated_det_call_multi_return_per_index_bits() {
 fn anticipated_admits_entry_param_in_cyclic_entry_block() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
     let (p, w) = (ssa.fresh_value(), ssa.fresh_value());
 
     let entry_id = {
@@ -3314,8 +3427,8 @@ fn anticipated_admits_entry_param_in_cyclic_entry_block() {
         let exit = mf.add_block();
         let entry_id = mf.get_entry_id();
         let entry = mf.get_entry_mut();
-        entry.push_parameter(p, Type::u(1));
-        entry.push_parameter(w, Type::u(32));
+        entry.push_parameter(p, Type::int(1));
+        entry.push_parameter(w, Type::int(32));
         // The self-edge makes the entry block cyclic; being conditional it carries no arguments,
         // so re-entry rebinds nothing.
         entry.set_terminator(Terminator::JmpIf(p, entry_id, exit));
@@ -3334,7 +3447,7 @@ fn anticipated_admits_entry_param_in_cyclic_entry_block() {
     assert_eq!(
         cc.anticipated_const(main_id, ProgramPoint::new(entry_id, 0), w)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
 }
 
@@ -3348,10 +3461,10 @@ fn anticipated_admits_det_call_via_congruence_over_unstable_arg() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c5 = ssa.add_const(Constant::U(32, 5));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (p, q, cond, v, v2, lt, w, r) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3366,11 +3479,11 @@ fn anticipated_admits_det_call_via_congruence_over_unstable_arg() {
     // `helper(p) = p + 1`: deterministic and non-identity.
     {
         let hf = ssa.get_function_mut(helper);
-        hf.add_return_type(Type::u(32));
+        hf.add_return_type(Type::int(32));
         let entry = hf.get_entry_mut();
-        entry.push_parameter(p, Type::u(32));
+        entry.push_parameter(p, Type::int(32));
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: q,
             lhs: p,
             rhs: c1,
@@ -3384,20 +3497,20 @@ fn anticipated_admits_det_call_via_congruence_over_unstable_arg() {
         let loop2 = mf.add_block();
         let body2 = mf.add_block();
         let after = mf.add_block();
-        mf.get_entry_mut().push_parameter(cond, Type::u(1));
+        mf.get_entry_mut().push_parameter(cond, Type::int(1));
         mf.get_entry_mut()
             .set_terminator(Terminator::Jmp(loop1, vec![c0]));
         // Loop 1 carries the accumulator `v`: multi-valued, hence unstable.
         let loop1_block = mf.get_block_mut(loop1);
-        loop1_block.push_parameter(v, Type::u(32));
+        loop1_block.push_parameter(v, Type::int(32));
         loop1_block.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: v2,
             lhs: v,
             rhs: c1,
         });
         loop1_block.push_test_instruction(OpCode::Cmp {
-            kind: CmpKind::Lt,
+            kind: CmpKind::ULt,
             result: lt,
             lhs: v2,
             rhs: c10,
@@ -3440,7 +3553,7 @@ fn anticipated_admits_det_call_via_congruence_over_unstable_arg() {
     assert_eq!(
         cc.anticipated_const(main_id, ProgramPoint::new(loop2, 1), r)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
 }
 
@@ -3450,9 +3563,9 @@ fn anticipated_admits_det_call_via_congruence_over_unstable_arg() {
 #[test]
 fn anticipated_eq_pair_mixed_gates() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (n, acc, lt, acc2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3465,13 +3578,13 @@ fn anticipated_eq_pair_mixed_gates() {
     let body = f.add_block();
     let after = f.add_block();
     let tail = f.add_block();
-    f.get_entry_mut().push_parameter(n, Type::u(32));
+    f.get_entry_mut().push_parameter(n, Type::int(32));
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(header, vec![c0]));
     let header_block = f.get_block_mut(header);
-    header_block.push_parameter(acc, Type::u(32));
+    header_block.push_parameter(acc, Type::int(32));
     header_block.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: lt,
         lhs: acc,
         rhs: c10,
@@ -3479,7 +3592,7 @@ fn anticipated_eq_pair_mixed_gates() {
     header_block.set_terminator(Terminator::JmpIf(lt, body, after));
     let body_block = f.get_block_mut(body);
     body_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: acc2,
         lhs: acc,
         rhs: c1,
@@ -3521,12 +3634,12 @@ fn anticipated_eq_pair_mixed_gates() {
 #[test]
 fn local_assert_reaches_terminator_use() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
     let (x, doubled) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
     f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         // index 0
         kind: CmpKind::Eq,
@@ -3536,7 +3649,7 @@ fn local_assert_reaches_terminator_use() {
     f.get_entry_mut()
         .push_test_instruction(OpCode::BinaryArithOp {
             // index 1
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: doubled,
             lhs: x,
             rhs: x,
@@ -3556,12 +3669,12 @@ fn local_assert_reaches_terminator_use() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, term_index), x)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), x)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     // ... but not at the assert's own index.
     assert_eq!(
@@ -3574,14 +3687,14 @@ fn local_assert_reaches_terminator_use() {
 #[test]
 fn multiple_local_asserts_each_recovered_after_its_index() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::U(32, 5));
-    let c6 = ssa.add_const(Constant::U(32, 6));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c6 = ssa.add_const(Constant::Int(32, 6));
     let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
-    f.get_entry_mut().push_parameter(y, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
+    f.get_entry_mut().push_parameter(y, Type::int(32));
     f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         // index 0: x == 5
         kind: CmpKind::Eq,
@@ -3602,7 +3715,7 @@ fn multiple_local_asserts_each_recovered_after_its_index() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), x)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), y),
@@ -3612,12 +3725,12 @@ fn multiple_local_asserts_each_recovered_after_its_index() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 2), x)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 2), y)
             .as_deref(),
-        Some(&Constant::U(32, 6))
+        Some(&Constant::Int(32, 6))
     );
 }
 
@@ -3627,13 +3740,13 @@ fn multiple_local_asserts_each_recovered_after_its_index() {
 #[test]
 fn contradictory_local_asserts_first_writer_wins() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::U(32, 5));
-    let c7 = ssa.add_const(Constant::U(32, 7));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c7 = ssa.add_const(Constant::Int(32, 7));
     let x = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
     f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         // index 0: x == 5
         kind: CmpKind::Eq,
@@ -3659,13 +3772,13 @@ fn contradictory_local_asserts_first_writer_wins() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), x)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     // After both, first-writer-wins keeps the earliest establisher.
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 2), x)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
 }
 
@@ -3676,15 +3789,15 @@ fn contradictory_local_asserts_first_writer_wins() {
 #[test]
 fn entry_and_local_assert_facts_layer() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::U(32, 5));
-    let c6 = ssa.add_const(Constant::U(32, 6));
-    let c7 = ssa.add_const(Constant::U(32, 7));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c6 = ssa.add_const(Constant::Int(32, 6));
+    let c7 = ssa.add_const(Constant::Int(32, 7));
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
     let inner = f.add_block();
-    f.get_entry_mut().push_parameter(a, Type::u(32));
-    f.get_entry_mut().push_parameter(b, Type::u(32));
+    f.get_entry_mut().push_parameter(a, Type::int(32));
+    f.get_entry_mut().push_parameter(b, Type::int(32));
     f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         // outer: a == 5
         kind: CmpKind::Eq,
@@ -3715,19 +3828,19 @@ fn entry_and_local_assert_facts_layer() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(inner, 0), a)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(inner, 2), a)
             .as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     // The local pin on `b` is the before-the-assert gap: absent at index 0, present after index 0.
     assert_eq!(cc.asserted_const(fid, ProgramPoint::new(inner, 0), b), None);
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(inner, 1), b)
             .as_deref(),
-        Some(&Constant::U(32, 6))
+        Some(&Constant::Int(32, 6))
     );
 }
 
@@ -3736,16 +3849,16 @@ fn entry_and_local_assert_facts_layer() {
 #[test]
 fn local_assert_on_value_defined_earlier_in_block() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (p, y) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry_id = f.get_entry_id();
-    f.get_entry_mut().push_parameter(p, Type::u(32));
+    f.get_entry_mut().push_parameter(p, Type::int(32));
     f.get_entry_mut()
         .push_test_instruction(OpCode::BinaryArithOp {
             // index 0: y = p + p
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: y,
             lhs: p,
             rhs: p,
@@ -3769,7 +3882,7 @@ fn local_assert_on_value_defined_earlier_in_block() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 2), y)
             .as_deref(),
-        Some(&Constant::U(32, 10))
+        Some(&Constant::Int(32, 10))
     );
 }
 
@@ -3778,8 +3891,8 @@ fn local_assert_on_value_defined_earlier_in_block() {
 #[test]
 fn local_assert_in_loop_body() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
     let (n, i, lt, next) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3791,13 +3904,13 @@ fn local_assert_in_loop_body() {
     let header = f.add_block();
     let body = f.add_block();
     let exit = f.add_block();
-    f.get_entry_mut().push_parameter(n, Type::u(32));
+    f.get_entry_mut().push_parameter(n, Type::int(32));
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(header, vec![c0]));
     let header_block = f.get_block_mut(header);
-    header_block.push_parameter(i, Type::u(32));
+    header_block.push_parameter(i, Type::int(32));
     header_block.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: lt,
         lhs: i,
         rhs: n,
@@ -3808,7 +3921,7 @@ fn local_assert_in_loop_body() {
     // would degrade to a constant pin rather than the pure equality this test exercises).
     body_block.push_test_instruction(OpCode::BinaryArithOp {
         // index 0
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: next,
         lhs: i,
         rhs: c1,
@@ -3925,7 +4038,7 @@ fn interproc_writeback_folds_congruent_comparison_return() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
-    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
     let (x, a, b, eq) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3937,17 +4050,17 @@ fn interproc_writeback_folds_congruent_comparison_return() {
     // g(x) = ((x + 1) == (x + 1)) — a vacuous comparison of congruent operands.
     {
         let gf = ssa.get_function_mut(g);
-        gf.add_return_type(Type::u(1));
-        gf.get_entry_mut().push_parameter(x, Type::u(32));
+        gf.add_return_type(Type::int(1));
+        gf.get_entry_mut().push_parameter(x, Type::int(32));
         let entry = gf.get_entry_mut();
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: a,
             lhs: x,
             rhs: c1,
         });
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: b,
             lhs: x,
             rhs: c1,
@@ -3962,8 +4075,8 @@ fn interproc_writeback_folds_congruent_comparison_return() {
     }
     {
         let mf = ssa.get_function_mut(main_id);
-        mf.add_return_type(Type::u(1));
-        mf.get_entry_mut().push_parameter(x0, Type::u(32));
+        mf.add_return_type(Type::int(1));
+        mf.get_entry_mut().push_parameter(x0, Type::int(32));
         let entry = mf.get_entry_mut();
         entry.push_test_instruction(OpCode::Call {
             results: vec![r],
@@ -3978,7 +4091,7 @@ fn interproc_writeback_folds_congruent_comparison_return() {
     // The summary return-jump is `Const(true)`, so the call result folds in the caller context.
     assert_eq!(
         cc.const_of_in(main_id, &Context::empty(), r).as_deref(),
-        Some(&Constant::U(1, 1))
+        Some(&Constant::Int(1, 1))
     );
     // The intraprocedural view (what SCS reads) never folds a call result.
     assert_eq!(cc.const_of(main_id, r), None);
@@ -3993,7 +4106,7 @@ fn interproc_writeback_folds_congruent_comparison_in_context() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
-    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
     let (x, a, b, eq) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -4006,17 +4119,17 @@ fn interproc_writeback_folds_congruent_comparison_in_context() {
     // through g's per-context facts.
     {
         let gf = ssa.get_function_mut(g);
-        gf.add_return_type(Type::u(32));
-        gf.get_entry_mut().push_parameter(x, Type::u(32));
+        gf.add_return_type(Type::int(32));
+        gf.get_entry_mut().push_parameter(x, Type::int(32));
         let entry = gf.get_entry_mut();
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: a,
             lhs: x,
             rhs: c1,
         });
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: b,
             lhs: x,
             rhs: c1,
@@ -4031,8 +4144,8 @@ fn interproc_writeback_folds_congruent_comparison_in_context() {
     }
     {
         let mf = ssa.get_function_mut(main_id);
-        mf.add_return_type(Type::u(32));
-        mf.get_entry_mut().push_parameter(x0, Type::u(32));
+        mf.add_return_type(Type::int(32));
+        mf.get_entry_mut().push_parameter(x0, Type::int(32));
         let entry = mf.get_entry_mut();
         entry.push_test_instruction(OpCode::Call {
             results: vec![r],
@@ -4049,7 +4162,7 @@ fn interproc_writeback_folds_congruent_comparison_in_context() {
     // The internal comparison folds within g's single context.
     assert_eq!(
         cc.const_of_in(g, &ctxs[0], eq).as_deref(),
-        Some(&Constant::U(1, 1))
+        Some(&Constant::Int(1, 1))
     );
     // Intraprocedurally (no context) the call result in main is still not folded.
     assert_eq!(cc.const_of(main_id, r), None);
@@ -4063,7 +4176,7 @@ fn interproc_writeback_terminates_under_recursion() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
-    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
     let (x, a, b, eq, t) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -4076,17 +4189,17 @@ fn interproc_writeback_terminates_under_recursion() {
     // g(x) = { eq = (x + 1) == (x + 1); let _ = g(x); eq } — self-recursive.
     {
         let gf = ssa.get_function_mut(g);
-        gf.add_return_type(Type::u(1));
-        gf.get_entry_mut().push_parameter(x, Type::u(32));
+        gf.add_return_type(Type::int(1));
+        gf.get_entry_mut().push_parameter(x, Type::int(32));
         let entry = gf.get_entry_mut();
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: a,
             lhs: x,
             rhs: c1,
         });
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: b,
             lhs: x,
             rhs: c1,
@@ -4107,8 +4220,8 @@ fn interproc_writeback_terminates_under_recursion() {
     }
     {
         let mf = ssa.get_function_mut(main_id);
-        mf.add_return_type(Type::u(1));
-        mf.get_entry_mut().push_parameter(x0, Type::u(32));
+        mf.add_return_type(Type::int(1));
+        mf.get_entry_mut().push_parameter(x0, Type::int(32));
         let entry = mf.get_entry_mut();
         entry.push_test_instruction(OpCode::Call {
             results: vec![r],
@@ -4125,7 +4238,7 @@ fn interproc_writeback_terminates_under_recursion() {
     for ctx in &ctxs {
         assert_eq!(
             cc.const_of_in(g, ctx, eq).as_deref(),
-            Some(&Constant::U(1, 1))
+            Some(&Constant::Int(1, 1))
         );
     }
 }
@@ -4243,7 +4356,7 @@ fn witness_forward_in_prunes_context_dead_forward() {
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let (p, w, r) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
-    let c_true = ssa.add_const(Constant::U(1, 1));
+    let c_true = ssa.add_const(Constant::Int(1, 1));
     let w0 = ssa.fresh_value();
 
     {
@@ -4251,8 +4364,8 @@ fn witness_forward_in_prunes_context_dead_forward() {
         let then_b = hf.add_block();
         let else_b = hf.add_block();
         let after = hf.add_block();
-        hf.get_entry_mut().push_parameter(p, Type::u(1));
-        hf.get_entry_mut().push_parameter(w, Type::u(32));
+        hf.get_entry_mut().push_parameter(p, Type::int(1));
+        hf.get_entry_mut().push_parameter(w, Type::int(32));
         hf.get_entry_mut()
             .set_terminator(Terminator::JmpIf(p, then_b, else_b));
         hf.get_block_mut(then_b)
@@ -4272,7 +4385,7 @@ fn witness_forward_in_prunes_context_dead_forward() {
     {
         let mf = ssa.get_function_mut(main_id);
         let entry = mf.get_entry_mut();
-        entry.push_parameter(w0, Type::u(32));
+        entry.push_parameter(w0, Type::int(32));
         entry.push_test_instruction(OpCode::Call {
             results: vec![],
             function: CallTarget::Static(g),
@@ -4302,14 +4415,14 @@ fn conditional_queries_parity_under_empty_context() {
     let (x, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let (d, e) = (ssa.fresh_value(), ssa.fresh_value());
     let (eq, r) = (ssa.fresh_value(), ssa.fresh_value());
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
 
     let f = ssa.get_unique_entrypoint_mut();
     let then_b = f.add_block();
     let else_b = f.add_block();
     let after = f.add_block();
     for v in [x, a, b, d, e] {
-        f.get_entry_mut().push_parameter(v, Type::u(32));
+        f.get_entry_mut().push_parameter(v, Type::int(32));
     }
     f.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
@@ -4349,7 +4462,7 @@ fn conditional_queries_parity_under_empty_context() {
     // Assert-const channel.
     assert_eq!(
         cc.asserted_const(main_id, pp, x).as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     assert_eq!(
         cc.asserted_const_in(main_id, &ctx, pp, x),
@@ -4383,13 +4496,13 @@ fn anticipated_queries_parity_under_empty_context() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let (x, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
-    let c5 = ssa.add_const(Constant::U(32, 5));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
 
     let f = ssa.get_unique_entrypoint_mut();
     let mid = f.add_block();
     let tail = f.add_block();
     for v in [x, a, b] {
-        f.get_entry_mut().push_parameter(v, Type::u(32));
+        f.get_entry_mut().push_parameter(v, Type::int(32));
     }
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(mid, vec![]));
@@ -4415,7 +4528,7 @@ fn anticipated_queries_parity_under_empty_context() {
     // Anticipated-const channel.
     assert_eq!(
         cc.anticipated_const(main_id, pp, x).as_deref(),
-        Some(&Constant::U(32, 5))
+        Some(&Constant::Int(32, 5))
     );
     assert_eq!(
         cc.anticipated_const_in(main_id, &ctx, pp, x),
@@ -4453,7 +4566,7 @@ fn known_unequal_in_gains_from_pruned_predecessor() {
         ssa.fresh_value(),
         ssa.fresh_value(),
     );
-    let c_false = ssa.add_const(Constant::U(1, 0));
+    let c_false = ssa.add_const(Constant::Int(1, 0));
     let (d0, e0) = (ssa.fresh_value(), ssa.fresh_value());
 
     let join = {
@@ -4462,9 +4575,9 @@ fn known_unequal_in_gains_from_pruned_predecessor() {
         let main_b = hf.add_block();
         let then_b = hf.add_block();
         let join = hf.add_block();
-        hf.get_entry_mut().push_parameter(p, Type::u(1));
-        hf.get_entry_mut().push_parameter(d, Type::u(32));
-        hf.get_entry_mut().push_parameter(e, Type::u(32));
+        hf.get_entry_mut().push_parameter(p, Type::int(1));
+        hf.get_entry_mut().push_parameter(d, Type::int(32));
+        hf.get_entry_mut().push_parameter(e, Type::int(32));
         hf.get_entry_mut().push_test_instruction(OpCode::Cmp {
             kind: CmpKind::Eq,
             result: eq,
@@ -4487,8 +4600,8 @@ fn known_unequal_in_gains_from_pruned_predecessor() {
     {
         let mf = ssa.get_function_mut(main_id);
         let entry = mf.get_entry_mut();
-        entry.push_parameter(d0, Type::u(32));
-        entry.push_parameter(e0, Type::u(32));
+        entry.push_parameter(d0, Type::int(32));
+        entry.push_parameter(e0, Type::int(32));
         entry.push_test_instruction(OpCode::Call {
             results: vec![],
             function: CallTarget::Static(g),
@@ -4516,20 +4629,21 @@ fn known_unequal_in_gains_from_pruned_predecessor() {
 fn asserted_const_never_aggregate() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
-    let c0 = ssa.add_const(Constant::U(32, 10));
-    let c1 = ssa.add_const(Constant::U(32, 20));
+    let c0 = ssa.add_const(Constant::Int(32, 10));
+    let c1 = ssa.add_const(Constant::Int(32, 20));
     let (x, s) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
     let after = f.add_block();
-    f.get_entry_mut().push_parameter(x, Type::u(32).array_of(2));
+    f.get_entry_mut()
+        .push_parameter(x, Type::int(32).array_of(2));
     let entry = f.get_entry_mut();
     // `s` aggregate-folds to a lattice `Const(Blob)`, so the assert pins `x` to a Blob.
     entry.push_test_instruction(OpCode::MkSeq {
         result: s,
         elems: vec![c0, c1],
         seq_type: SequenceTargetType::Array(2),
-        elem_type: Type::u(32),
+        elem_type: Type::int(32),
     });
     entry.push_test_instruction(OpCode::AssertCmp {
         kind: CmpKind::Eq,
@@ -4558,8 +4672,8 @@ fn asserted_const_in_never_aggregate() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 10));
-    let c1 = ssa.add_const(Constant::U(32, 20));
+    let c0 = ssa.add_const(Constant::Int(32, 10));
+    let c1 = ssa.add_const(Constant::Int(32, 20));
     let (a, x) = (ssa.fresh_value(), ssa.fresh_value());
     let (s, y) = (ssa.fresh_value(), ssa.fresh_value());
 
@@ -4567,9 +4681,9 @@ fn asserted_const_in_never_aggregate() {
         let hf = ssa.get_function_mut(g);
         let after = hf.add_block();
         hf.get_entry_mut()
-            .push_parameter(a, Type::u(32).array_of(2));
+            .push_parameter(a, Type::int(32).array_of(2));
         hf.get_entry_mut()
-            .push_parameter(x, Type::u(32).array_of(2));
+            .push_parameter(x, Type::int(32).array_of(2));
         hf.get_entry_mut().push_test_instruction(OpCode::AssertCmp {
             kind: CmpKind::Eq,
             lhs: x,
@@ -4584,12 +4698,12 @@ fn asserted_const_in_never_aggregate() {
     {
         let mf = ssa.get_function_mut(main_id);
         let entry = mf.get_entry_mut();
-        entry.push_parameter(y, Type::u(32).array_of(2));
+        entry.push_parameter(y, Type::int(32).array_of(2));
         entry.push_test_instruction(OpCode::MkSeq {
             result: s,
             elems: vec![c0, c1],
             seq_type: SequenceTargetType::Array(2),
-            elem_type: Type::u(32),
+            elem_type: Type::int(32),
         });
         entry.push_test_instruction(OpCode::Call {
             results: vec![],
@@ -4704,7 +4818,7 @@ fn context_constant_can_split_congruence() {
         hf.get_entry_mut().push_parameter(p, Type::field());
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Mul,
+                kind: BinaryArithOpKind::UMul,
                 result: m,
                 lhs: p,
                 rhs: c3,
@@ -4719,7 +4833,7 @@ fn context_constant_can_split_congruence() {
         let else_b = hf.add_block();
         let after = hf.add_block();
         hf.get_entry_mut().push_parameter(a, Type::field());
-        hf.get_entry_mut().push_parameter(w, Type::u(32));
+        hf.get_entry_mut().push_parameter(w, Type::int(32));
         hf.get_entry_mut().push_test_instruction(OpCode::Call {
             results: vec![x],
             function: CallTarget::Static(g),
@@ -4728,7 +4842,7 @@ fn context_constant_can_split_congruence() {
         });
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Mul,
+                kind: BinaryArithOpKind::UMul,
                 result: y,
                 lhs: a,
                 rhs: c3,
@@ -4757,7 +4871,7 @@ fn context_constant_can_split_congruence() {
     {
         let mf = ssa.get_function_mut(main_id);
         let entry = mf.get_entry_mut();
-        entry.push_parameter(w0, Type::u(32));
+        entry.push_parameter(w0, Type::int(32));
         entry.push_test_instruction(OpCode::Call {
             results: vec![],
             function: CallTarget::Static(f),
@@ -4900,7 +5014,7 @@ fn cross_call_congruence_for_deterministic_callee() {
         hf.get_entry_mut().push_parameter(p, Type::field());
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result: psum,
                 lhs: p,
                 rhs: p,
@@ -4923,13 +5037,13 @@ fn cross_call_congruence_for_deterministic_callee() {
         let entry = mf.get_entry_mut();
         // `a` and `b` are structurally congruent (both `x + 1`); `y` is distinct.
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: a,
             lhs: x,
             rhs: c1,
         });
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: b,
             lhs: x,
             rhs: c1,
@@ -5023,7 +5137,7 @@ fn cross_call_congruence_is_transitive() {
         hf.get_entry_mut().push_parameter(ip, Type::field());
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result: isum,
                 lhs: ip,
                 rhs: ip,
@@ -5058,13 +5172,13 @@ fn cross_call_congruence_is_transitive() {
         mf.get_entry_mut().push_parameter(x, Type::field());
         let entry = mf.get_entry_mut();
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: a,
             lhs: x,
             rhs: c1,
         });
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: b,
             lhs: x,
             rhs: c1,
@@ -5099,7 +5213,7 @@ fn cross_call_congruence_for_array_returning_callee() {
     let pick = ssa.add_function("pick".to_string());
     let p = ssa.fresh_value();
     let elem = ssa.fresh_value();
-    let c0 = ssa.add_const(Constant::U(32, 0));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
 
     // pick(p) = p[0] — deterministic in its array argument.
     {
@@ -5179,7 +5293,7 @@ fn cross_call_congruence_for_array_returning_callee() {
 #[test]
 fn cmp_eq_of_congruent_operands_folds_and_prunes_dead_edge() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
     let (x, a, b, eq) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -5190,17 +5304,17 @@ fn cmp_eq_of_congruent_operands_folds_and_prunes_dead_edge() {
     let f = ssa.get_unique_entrypoint_mut();
     let then_b = f.add_block();
     let else_b = f.add_block();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
     let entry = f.get_entry_mut();
     // a = x + 1 and b = x + 1 are structurally congruent but not constant.
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: a,
         lhs: x,
         rhs: c1,
     });
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: b,
         lhs: x,
         rhs: c1,
@@ -5223,7 +5337,7 @@ fn cmp_eq_of_congruent_operands_folds_and_prunes_dead_edge() {
 
     assert!(cc.known_equal(fid, a, b));
     // The comparison is now an unconditional constant `true`.
-    assert_eq!(cc.const_of(fid, eq).as_deref(), Some(&Constant::U(1, 1)));
+    assert_eq!(cc.const_of(fid, eq).as_deref(), Some(&Constant::Int(1, 1)));
     // ...so the branch is decided: only the then-edge is executable.
     assert!(cc.is_executable_edge(fid, entry_id, then_b));
     assert!(!cc.is_executable_edge(fid, entry_id, else_b));
@@ -5237,9 +5351,9 @@ fn cmp_eq_of_congruent_operands_folds_and_prunes_dead_edge() {
 #[test]
 fn writeback_cascades_to_downstream_constant() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c5 = ssa.add_const(Constant::U(32, 5));
-    let c7 = ssa.add_const(Constant::U(32, 7));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c7 = ssa.add_const(Constant::Int(32, 7));
     let (x, a, b, eq, p) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -5252,16 +5366,16 @@ fn writeback_cascades_to_downstream_constant() {
     let then_b = f.add_block();
     let else_b = f.add_block();
     let merge = f.add_block();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
     let entry = f.get_entry_mut();
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: a,
         lhs: x,
         rhs: c1,
     });
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: b,
         lhs: x,
         rhs: c1,
@@ -5280,14 +5394,14 @@ fn writeback_cascades_to_downstream_constant() {
     f.get_block_mut(else_b)
         .set_terminator(Terminator::Jmp(merge, vec![c7]));
     let merge_block = f.get_block_mut(merge);
-    merge_block.push_parameter(p, Type::u(32));
+    merge_block.push_parameter(p, Type::int(32));
     merge_block.set_terminator(Terminator::Return(vec![p]));
 
     let fid = ssa.get_unique_entrypoint_id();
     let cc = run_in_test(&ssa);
 
     assert!(!cc.is_reachable(fid, else_b));
-    assert_eq!(cc.const_of(fid, p).as_deref(), Some(&Constant::U(32, 5)));
+    assert_eq!(cc.const_of(fid, p).as_deref(), Some(&Constant::Int(32, 5)));
 }
 
 /// Guard: a comparison of values that are _not_ congruent stays unfolded and both branch targets
@@ -5300,8 +5414,8 @@ fn cmp_eq_of_noncongruent_operands_is_not_folded() {
     let f = ssa.get_unique_entrypoint_mut();
     let then_b = f.add_block();
     let else_b = f.add_block();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
-    f.get_entry_mut().push_parameter(y, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
+    f.get_entry_mut().push_parameter(y, Type::int(32));
     let entry = f.get_entry_mut();
     entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
@@ -5361,14 +5475,14 @@ fn free_witnesses_are_not_congruent_so_comparison_not_folded() {
 #[test]
 fn writeback_is_noop_without_congruent_comparison() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
     let (x, a) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
-    entry.push_parameter(x, Type::u(32));
+    entry.push_parameter(x, Type::int(32));
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: a,
         lhs: x,
         rhs: c1,
@@ -5386,7 +5500,7 @@ fn writeback_is_noop_without_congruent_comparison() {
 #[test]
 fn cmp_lt_of_congruent_operands_folds_false() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::U(32, 1));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
     let (x, a, b, lt) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -5395,22 +5509,22 @@ fn cmp_lt_of_congruent_operands_folds_false() {
     );
 
     let f = ssa.get_unique_entrypoint_mut();
-    f.get_entry_mut().push_parameter(x, Type::u(32));
+    f.get_entry_mut().push_parameter(x, Type::int(32));
     let entry = f.get_entry_mut();
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: a,
         lhs: x,
         rhs: c1,
     });
     entry.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: b,
         lhs: x,
         rhs: c1,
     });
     entry.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: lt,
         lhs: a,
         rhs: b,
@@ -5421,7 +5535,7 @@ fn cmp_lt_of_congruent_operands_folds_false() {
     let cc = run_in_test(&ssa);
 
     assert!(cc.known_equal(fid, a, b));
-    assert_eq!(cc.const_of(fid, lt).as_deref(), Some(&Constant::U(1, 0)));
+    assert_eq!(cc.const_of(fid, lt).as_deref(), Some(&Constant::Int(1, 0)));
 }
 
 /// A comparison of congruent operands folds to a constant `true` even when it is _witnessed_
@@ -5440,8 +5554,8 @@ fn witnessed_comparison_of_congruent_operands_is_promoted() {
 
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
-    entry.push_parameter(w, Type::witness_of(Type::u(32)));
-    entry.push_parameter(n, Type::u(32));
+    entry.push_parameter(w, Type::witness_of(Type::int(32)));
+    entry.push_parameter(n, Type::int(32));
     // Witnessed comparison: an operand is `WitnessOf`, so the result is `WitnessOf(u1)`.
     entry.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
@@ -5465,8 +5579,8 @@ fn witnessed_comparison_of_congruent_operands_is_promoted() {
     // too. (SCS then keeps `ww` witness-typed via a cast; the analysis fact is the same.)
     assert!(cc.known_equal(fid, w, w));
     assert!(cc.known_equal(fid, n, n));
-    assert_eq!(cc.const_of(fid, ww).as_deref(), Some(&Constant::U(1, 1)));
-    assert_eq!(cc.const_of(fid, nn).as_deref(), Some(&Constant::U(1, 1)));
+    assert_eq!(cc.const_of(fid, ww).as_deref(), Some(&Constant::Int(1, 1)));
+    assert_eq!(cc.const_of(fid, nn).as_deref(), Some(&Constant::Int(1, 1)));
 }
 
 /// Combined-analysis win unreachable to either factor alone: two loop-carried parallel induction
@@ -5475,9 +5589,9 @@ fn witnessed_comparison_of_congruent_operands_is_promoted() {
 #[test]
 fn loop_carried_congruent_comparison_folds_true() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 0));
-    let c1 = ssa.add_const(Constant::U(32, 1));
-    let c10 = ssa.add_const(Constant::U(32, 10));
+    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c10 = ssa.add_const(Constant::Int(32, 10));
     let (i, j, lt, eq, i2, j2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -5495,8 +5609,8 @@ fn loop_carried_congruent_comparison_folds_true() {
     f.get_entry_mut()
         .set_terminator(Terminator::Jmp(header, vec![c0, c0]));
     let header_block = f.get_block_mut(header);
-    header_block.push_parameter(i, Type::u(32));
-    header_block.push_parameter(j, Type::u(32));
+    header_block.push_parameter(i, Type::int(32));
+    header_block.push_parameter(j, Type::int(32));
     header_block.push_test_instruction(OpCode::Cmp {
         kind: CmpKind::Eq,
         result: eq,
@@ -5504,7 +5618,7 @@ fn loop_carried_congruent_comparison_folds_true() {
         rhs: j,
     });
     header_block.push_test_instruction(OpCode::Cmp {
-        kind: CmpKind::Lt,
+        kind: CmpKind::ULt,
         result: lt,
         lhs: i,
         rhs: c10,
@@ -5512,13 +5626,13 @@ fn loop_carried_congruent_comparison_folds_true() {
     header_block.set_terminator(Terminator::JmpIf(lt, body, exit));
     let body_block = f.get_block_mut(body);
     body_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: i2,
         lhs: i,
         rhs: c1,
     });
     body_block.push_test_instruction(OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::Add,
+        kind: BinaryArithOpKind::UAdd,
         result: j2,
         lhs: j,
         rhs: c1,
@@ -5531,7 +5645,7 @@ fn loop_carried_congruent_comparison_folds_true() {
     let cc = run_in_test(&ssa);
 
     assert!(cc.known_equal(fid, i, j));
-    assert_eq!(cc.const_of(fid, eq).as_deref(), Some(&Constant::U(1, 1)));
+    assert_eq!(cc.const_of(fid, eq).as_deref(), Some(&Constant::Int(1, 1)));
 }
 
 // AGGREGATE CONSTANT FOLDING
@@ -5543,10 +5657,10 @@ fn loop_carried_congruent_comparison_folds_true() {
 #[test]
 fn const_array_get_folds_to_scalar() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 10));
-    let c1 = ssa.add_const(Constant::U(32, 20));
-    let c2 = ssa.add_const(Constant::U(32, 30));
-    let idx = ssa.add_const(Constant::U(32, 1));
+    let c0 = ssa.add_const(Constant::Int(32, 10));
+    let c1 = ssa.add_const(Constant::Int(32, 20));
+    let c2 = ssa.add_const(Constant::Int(32, 30));
+    let idx = ssa.add_const(Constant::Int(32, 1));
     let (seq, got) = (ssa.fresh_value(), ssa.fresh_value());
 
     let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
@@ -5554,7 +5668,7 @@ fn const_array_get_folds_to_scalar() {
         result: seq,
         elems: vec![c0, c1, c2],
         seq_type: SequenceTargetType::Array(3),
-        elem_type: Type::u(32),
+        elem_type: Type::int(32),
     });
     entry.push_test_instruction(OpCode::ArrayGet {
         result: got,
@@ -5567,11 +5681,14 @@ fn const_array_get_folds_to_scalar() {
     let cc = run_in_test(&ssa);
 
     // The projection is a surfaced scalar constant.
-    assert_eq!(cc.const_of(fid, got).as_deref(), Some(&Constant::U(32, 20)));
+    assert_eq!(
+        cc.const_of(fid, got).as_deref(),
+        Some(&Constant::Int(32, 20))
+    );
     assert!(
         cc.new_const_values(fid)
             .iter()
-            .any(|(v, c)| *v == got && **c == Constant::U(32, 20))
+            .any(|(v, c)| *v == got && **c == Constant::Int(32, 20))
     );
     // The aggregate stays internal: never surfaced as a constant.
     assert_eq!(cc.const_of(fid, seq), None);
@@ -5583,8 +5700,8 @@ fn const_array_get_folds_to_scalar() {
 #[test]
 fn const_repeated_array_get_and_slice_len() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let elem = ssa.add_const(Constant::U(32, 7));
-    let idx = ssa.add_const(Constant::U(32, 2));
+    let elem = ssa.add_const(Constant::Int(32, 7));
+    let idx = ssa.add_const(Constant::Int(32, 2));
     let (seq, got, len) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
@@ -5593,7 +5710,7 @@ fn const_repeated_array_get_and_slice_len() {
         element: elem,
         seq_type: SequenceTargetType::Array(4),
         count: 4,
-        elem_type: Type::u(32),
+        elem_type: Type::int(32),
     });
     entry.push_test_instruction(OpCode::ArrayGet {
         result: got,
@@ -5609,8 +5726,14 @@ fn const_repeated_array_get_and_slice_len() {
     let fid = ssa.get_unique_entrypoint_id();
     let cc = run_in_test(&ssa);
 
-    assert_eq!(cc.const_of(fid, got).as_deref(), Some(&Constant::U(32, 7)));
-    assert_eq!(cc.const_of(fid, len).as_deref(), Some(&Constant::U(32, 4)));
+    assert_eq!(
+        cc.const_of(fid, got).as_deref(),
+        Some(&Constant::Int(32, 7))
+    );
+    assert_eq!(
+        cc.const_of(fid, len).as_deref(),
+        Some(&Constant::Int(32, 4))
+    );
 }
 
 /// `ArraySet` of a constant aggregate is itself a constant aggregate: a later `ArrayGet` sees
@@ -5618,12 +5741,12 @@ fn const_repeated_array_get_and_slice_len() {
 #[test]
 fn const_array_set_then_get() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 10));
-    let c1 = ssa.add_const(Constant::U(32, 20));
-    let c2 = ssa.add_const(Constant::U(32, 30));
-    let new_val = ssa.add_const(Constant::U(32, 99));
-    let idx0 = ssa.add_const(Constant::U(32, 0));
-    let idx1 = ssa.add_const(Constant::U(32, 1));
+    let c0 = ssa.add_const(Constant::Int(32, 10));
+    let c1 = ssa.add_const(Constant::Int(32, 20));
+    let c2 = ssa.add_const(Constant::Int(32, 30));
+    let new_val = ssa.add_const(Constant::Int(32, 99));
+    let idx0 = ssa.add_const(Constant::Int(32, 0));
+    let idx1 = ssa.add_const(Constant::Int(32, 1));
     let (seq, seq2, at_set, at_orig) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -5636,7 +5759,7 @@ fn const_array_set_then_get() {
         result: seq,
         elems: vec![c0, c1, c2],
         seq_type: SequenceTargetType::Array(3),
-        elem_type: Type::u(32),
+        elem_type: Type::int(32),
     });
     entry.push_test_instruction(OpCode::ArraySet {
         result: seq2,
@@ -5661,11 +5784,11 @@ fn const_array_set_then_get() {
 
     assert_eq!(
         cc.const_of(fid, at_set).as_deref(),
-        Some(&Constant::U(32, 99))
+        Some(&Constant::Int(32, 99))
     );
     assert_eq!(
         cc.const_of(fid, at_orig).as_deref(),
-        Some(&Constant::U(32, 10))
+        Some(&Constant::Int(32, 10))
     );
 }
 
@@ -5673,11 +5796,11 @@ fn const_array_set_then_get() {
 #[test]
 fn const_slice_push_front_and_back() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let mid = ssa.add_const(Constant::U(32, 1));
-    let front = ssa.add_const(Constant::U(32, 0));
-    let back = ssa.add_const(Constant::U(32, 2));
-    let idx0 = ssa.add_const(Constant::U(32, 0));
-    let idx1 = ssa.add_const(Constant::U(32, 1));
+    let mid = ssa.add_const(Constant::Int(32, 1));
+    let front = ssa.add_const(Constant::Int(32, 0));
+    let back = ssa.add_const(Constant::Int(32, 2));
+    let idx0 = ssa.add_const(Constant::Int(32, 0));
+    let idx1 = ssa.add_const(Constant::Int(32, 1));
     let (base, pushed_front, pushed_back, head, tail) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -5691,7 +5814,7 @@ fn const_slice_push_front_and_back() {
         result: base,
         elems: vec![mid],
         seq_type: SequenceTargetType::Slice,
-        elem_type: Type::u(32),
+        elem_type: Type::int(32),
     });
     // Front: [front, mid]; element 0 is the pushed value.
     entry.push_test_instruction(OpCode::SlicePush {
@@ -5722,8 +5845,146 @@ fn const_slice_push_front_and_back() {
     let fid = ssa.get_unique_entrypoint_id();
     let cc = run_in_test(&ssa);
 
-    assert_eq!(cc.const_of(fid, head).as_deref(), Some(&Constant::U(32, 0)));
-    assert_eq!(cc.const_of(fid, tail).as_deref(), Some(&Constant::U(32, 2)));
+    assert_eq!(
+        cc.const_of(fid, head).as_deref(),
+        Some(&Constant::Int(32, 0))
+    );
+    assert_eq!(
+        cc.const_of(fid, tail).as_deref(),
+        Some(&Constant::Int(32, 2))
+    );
+}
+
+/// `SlicePop` splits a constant aggregate into two constants: the popped element and the shrunk
+/// slice, whose `SliceLen` folds — the `v.pop_back().len()` chain the pre-WTI SCS/PRE runs need.
+/// A front pop of the shrunk slice keeps folding (pops compose).
+#[test]
+fn const_slice_pop_folds_both_results() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c0 = ssa.add_const(Constant::Int(32, 10));
+    let c1 = ssa.add_const(Constant::Int(32, 20));
+    let c2 = ssa.add_const(Constant::Int(32, 30));
+    let (seq, rest, last, len) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let (rest2, first) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: seq,
+        elems: vec![c0, c1, c2],
+        seq_type: SequenceTargetType::Slice,
+        elem_type: Type::int(32),
+    });
+    entry.push_test_instruction(OpCode::SlicePop {
+        dir: SliceOpDir::Back,
+        result_slice: rest,
+        result_elem: last,
+        slice: seq,
+    });
+    entry.push_test_instruction(OpCode::SliceLen {
+        result: len,
+        slice: rest,
+    });
+    entry.push_test_instruction(OpCode::SlicePop {
+        dir: SliceOpDir::Front,
+        result_slice: rest2,
+        result_elem: first,
+        slice: rest,
+    });
+    entry.set_terminator(Terminator::Return(vec![last, len, first, rest2]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+
+    assert_eq!(
+        cc.const_of(fid, last).as_deref(),
+        Some(&Constant::Int(32, 30))
+    );
+    assert_eq!(
+        cc.const_of(fid, len).as_deref(),
+        Some(&Constant::Int(32, 2))
+    );
+    assert_eq!(
+        cc.const_of(fid, first).as_deref(),
+        Some(&Constant::Int(32, 10))
+    );
+}
+
+/// `SliceInsert` and `SliceRemove` fold over constant aggregates at a constant index: the
+/// inserted element is visible at its index, the removed element and the shrunk length both fold.
+#[test]
+fn const_slice_insert_and_remove_fold() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c0 = ssa.add_const(Constant::Int(32, 10));
+    let c2 = ssa.add_const(Constant::Int(32, 30));
+    let mid = ssa.add_const(Constant::Int(32, 20));
+    let idx0 = ssa.add_const(Constant::Int(32, 0));
+    let idx1 = ssa.add_const(Constant::Int(32, 1));
+    let (seq, grown, at_ins, glen) = (
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+        ssa.fresh_value(),
+    );
+    let (shrunk, removed, slen) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: seq,
+        elems: vec![c0, c2],
+        seq_type: SequenceTargetType::Slice,
+        elem_type: Type::int(32),
+    });
+    entry.push_test_instruction(OpCode::SliceInsert {
+        result: grown,
+        slice: seq,
+        index: idx1,
+        value: mid,
+    });
+    entry.push_test_instruction(OpCode::ArrayGet {
+        result: at_ins,
+        array: grown,
+        index: idx1,
+    });
+    entry.push_test_instruction(OpCode::SliceLen {
+        result: glen,
+        slice: grown,
+    });
+    entry.push_test_instruction(OpCode::SliceRemove {
+        result_slice: shrunk,
+        result_elem: removed,
+        slice: grown,
+        index: idx0,
+    });
+    entry.push_test_instruction(OpCode::SliceLen {
+        result: slen,
+        slice: shrunk,
+    });
+    entry.set_terminator(Terminator::Return(vec![at_ins, glen, removed, slen]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+
+    assert_eq!(
+        cc.const_of(fid, at_ins).as_deref(),
+        Some(&Constant::Int(32, 20))
+    );
+    assert_eq!(
+        cc.const_of(fid, glen).as_deref(),
+        Some(&Constant::Int(32, 3))
+    );
+    assert_eq!(
+        cc.const_of(fid, removed).as_deref(),
+        Some(&Constant::Int(32, 10))
+    );
+    assert_eq!(
+        cc.const_of(fid, slen).as_deref(),
+        Some(&Constant::Int(32, 2))
+    );
 }
 
 /// `MkSeqOfBlob` re-views a constant blob as a sequence; projecting a constant index folds.
@@ -5731,16 +5992,16 @@ fn const_slice_push_front_and_back() {
 fn const_mk_seq_of_blob_folds() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let blob = ssa.add_const(Constant::Blob(Blob::new(
-        Type::u(32),
-        vec![Constant::U(32, 100), Constant::U(32, 200)],
+        Type::int(32),
+        vec![Constant::Int(32, 100), Constant::Int(32, 200)],
     )));
-    let idx = ssa.add_const(Constant::U(32, 1));
+    let idx = ssa.add_const(Constant::Int(32, 1));
     let (seq, got) = (ssa.fresh_value(), ssa.fresh_value());
 
     let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
     entry.push_test_instruction(OpCode::MkSeqOfBlob {
         result: seq,
-        element_type: Type::u(32),
+        element_type: Type::int(32),
         blob,
     });
     entry.push_test_instruction(OpCode::ArrayGet {
@@ -5755,7 +6016,7 @@ fn const_mk_seq_of_blob_folds() {
 
     assert_eq!(
         cc.const_of(fid, got).as_deref(),
-        Some(&Constant::U(32, 200))
+        Some(&Constant::Int(32, 200))
     );
     // The aggregate stays internal.
     assert_eq!(cc.const_of(fid, seq), None);
@@ -5766,10 +6027,10 @@ fn const_mk_seq_of_blob_folds() {
 #[test]
 fn aggregate_folding_negative_cases() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 10));
-    let c1 = ssa.add_const(Constant::U(32, 20));
-    let idx0 = ssa.add_const(Constant::U(32, 0));
-    let idx_oob = ssa.add_const(Constant::U(32, 5));
+    let c0 = ssa.add_const(Constant::Int(32, 10));
+    let c1 = ssa.add_const(Constant::Int(32, 20));
+    let idx0 = ssa.add_const(Constant::Int(32, 0));
+    let idx_oob = ssa.add_const(Constant::Int(32, 5));
     let p = ssa.fresh_value();
     let (seq, g_oob, seq_nc, g_nc, big, g_big) = (
         ssa.fresh_value(),
@@ -5781,14 +6042,14 @@ fn aggregate_folding_negative_cases() {
     );
 
     let f = ssa.get_unique_entrypoint_mut();
-    f.get_entry_mut().push_parameter(p, Type::u(32));
+    f.get_entry_mut().push_parameter(p, Type::int(32));
     let entry = f.get_entry_mut();
     // Out of bounds: index 5 into a length-2 array.
     entry.push_test_instruction(OpCode::MkSeq {
         result: seq,
         elems: vec![c0, c1],
         seq_type: SequenceTargetType::Array(2),
-        elem_type: Type::u(32),
+        elem_type: Type::int(32),
     });
     entry.push_test_instruction(OpCode::ArrayGet {
         result: g_oob,
@@ -5800,7 +6061,7 @@ fn aggregate_folding_negative_cases() {
         result: seq_nc,
         elems: vec![c0, p],
         seq_type: SequenceTargetType::Array(2),
-        elem_type: Type::u(32),
+        elem_type: Type::int(32),
     });
     entry.push_test_instruction(OpCode::ArrayGet {
         result: g_nc,
@@ -5813,7 +6074,7 @@ fn aggregate_folding_negative_cases() {
         element: c0,
         seq_type: SequenceTargetType::Array((1 << 16) + 1),
         count: (1 << 16) + 1,
-        elem_type: Type::u(32),
+        elem_type: Type::int(32),
     });
     entry.push_test_instruction(OpCode::ArrayGet {
         result: g_big,
@@ -5837,10 +6098,10 @@ fn aggregate_folding_negative_cases() {
 #[test]
 fn aggregate_folding_refuses_oob_set_and_over_cap_constructors() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::U(32, 10));
-    let c1 = ssa.add_const(Constant::U(32, 20));
-    let idx0 = ssa.add_const(Constant::U(32, 0));
-    let idx_oob = ssa.add_const(Constant::U(32, 5));
+    let c0 = ssa.add_const(Constant::Int(32, 10));
+    let c1 = ssa.add_const(Constant::Int(32, 20));
+    let idx0 = ssa.add_const(Constant::Int(32, 0));
+    let idx_oob = ssa.add_const(Constant::Int(32, 5));
     let over_cap = (1usize << 12) + 1; // AGGREGATE_FOLD_CAP + 1
 
     let (base, set_oob, at_set_oob) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
@@ -5854,7 +6115,7 @@ fn aggregate_folding_refuses_oob_set_and_over_cap_constructors() {
         result: base,
         elems: vec![c0, c1],
         seq_type: SequenceTargetType::Array(2),
-        elem_type: Type::u(32),
+        elem_type: Type::int(32),
     });
     entry.push_test_instruction(OpCode::ArraySet {
         result: set_oob,
@@ -5873,7 +6134,7 @@ fn aggregate_folding_refuses_oob_set_and_over_cap_constructors() {
         result: one,
         elems: vec![c0],
         seq_type: SequenceTargetType::Slice,
-        elem_type: Type::u(32),
+        elem_type: Type::int(32),
     });
     entry.push_test_instruction(OpCode::SlicePush {
         dir: SliceOpDir::Back,
@@ -5892,7 +6153,7 @@ fn aggregate_folding_refuses_oob_set_and_over_cap_constructors() {
         result: big_seq,
         elems: vec![c0; over_cap],
         seq_type: SequenceTargetType::Array(over_cap),
-        elem_type: Type::u(32),
+        elem_type: Type::int(32),
     });
     entry.push_test_instruction(OpCode::ArrayGet {
         result: at_big,
@@ -5908,6 +6169,74 @@ fn aggregate_folding_refuses_oob_set_and_over_cap_constructors() {
     assert_eq!(cc.const_of(fid, at_set_oob), None);
     assert_eq!(cc.const_of(fid, at_pushed), None);
     assert_eq!(cc.const_of(fid, at_big), None);
+}
+
+/// A statically-empty pop and a statically out-of-bounds insert/remove are erroneous programs:
+/// the folds are refused (both results stay `Bottom`) rather than guessed — R1CS generation is
+/// the canonical rejecter.
+#[test]
+fn slice_pop_insert_remove_refuse_oob() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c0 = ssa.add_const(Constant::Int(32, 10));
+    let idx_oob = ssa.add_const(Constant::Int(32, 5));
+    let (empty, rest, elem) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+    let (frest, felem) = (ssa.fresh_value(), ssa.fresh_value());
+    let (one, inserted) = (ssa.fresh_value(), ssa.fresh_value());
+    let (rem_rest, rem_elem) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: empty,
+        elems: vec![],
+        seq_type: SequenceTargetType::Slice,
+        elem_type: Type::int(32),
+    });
+    // Both directions: the empty guards are distinct code paths (`pop()?` vs an explicit
+    // `is_empty` check in front of `remove(0)`, which would panic rather than refuse).
+    entry.push_test_instruction(OpCode::SlicePop {
+        dir: SliceOpDir::Back,
+        result_slice: rest,
+        result_elem: elem,
+        slice: empty,
+    });
+    entry.push_test_instruction(OpCode::SlicePop {
+        dir: SliceOpDir::Front,
+        result_slice: frest,
+        result_elem: felem,
+        slice: empty,
+    });
+    entry.push_test_instruction(OpCode::MkSeq {
+        result: one,
+        elems: vec![c0],
+        seq_type: SequenceTargetType::Slice,
+        elem_type: Type::int(32),
+    });
+    entry.push_test_instruction(OpCode::SliceInsert {
+        result: inserted,
+        slice: one,
+        index: idx_oob,
+        value: c0,
+    });
+    entry.push_test_instruction(OpCode::SliceRemove {
+        result_slice: rem_rest,
+        result_elem: rem_elem,
+        slice: one,
+        index: idx_oob,
+    });
+    entry.set_terminator(Terminator::Return(vec![
+        elem, rest, felem, frest, inserted, rem_elem,
+    ]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+
+    assert_eq!(cc.const_of(fid, rest), None);
+    assert_eq!(cc.const_of(fid, elem), None);
+    assert_eq!(cc.const_of(fid, frest), None);
+    assert_eq!(cc.const_of(fid, felem), None);
+    assert_eq!(cc.const_of(fid, inserted), None);
+    assert_eq!(cc.const_of(fid, rem_rest), None);
+    assert_eq!(cc.const_of(fid, rem_elem), None);
 }
 
 // SYMBOLIC INTERPROCEDURAL CONGRUENCE
@@ -5932,7 +6261,7 @@ fn symbolic_jump_ignores_dead_argument() {
         hf.get_entry_mut().push_parameter(y, Type::field());
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result: fa,
                 lhs: x,
                 rhs: c1,
@@ -5994,7 +6323,7 @@ fn symbolic_jump_relates_call_to_open_expression() {
         hf.get_entry_mut().push_parameter(x, Type::field());
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result: fa,
                 lhs: x,
                 rhs: c5,
@@ -6017,13 +6346,13 @@ fn symbolic_jump_relates_call_to_open_expression() {
             unconstrained: false,
         });
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: w,
             lhs: a,
             rhs: c5,
         });
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: w2,
             lhs: a,
             rhs: c6,
@@ -6059,14 +6388,14 @@ fn symbolic_jump_depth_two_grafts_via_synthetic() {
         hf.get_entry_mut().push_parameter(x, Type::field());
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result: ft,
                 lhs: x,
                 rhs: c5,
             });
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Mul,
+                kind: BinaryArithOpKind::UMul,
                 result: fa,
                 lhs: ft,
                 rhs: c2,
@@ -6089,13 +6418,13 @@ fn symbolic_jump_depth_two_grafts_via_synthetic() {
             unconstrained: false,
         });
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: wt,
             lhs: a,
             rhs: c5,
         });
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Mul,
+            kind: BinaryArithOpKind::UMul,
             result: w,
             lhs: wt,
             rhs: c2,
@@ -6147,14 +6476,14 @@ fn symbolic_jump_dead_argument_behind_depth_two() {
         hf.get_entry_mut().push_parameter(y, Type::field());
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result: ft,
                 lhs: x,
                 rhs: c5,
             });
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Mul,
+                kind: BinaryArithOpKind::UMul,
                 result: fa,
                 lhs: ft,
                 rhs: c2,
@@ -6221,21 +6550,21 @@ fn symbolic_jump_depth_over_cap_falls_back_to_calldet() {
         hf.get_entry_mut().push_parameter(x, Type::field());
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result: ft,
                 lhs: x,
                 rhs: c1,
             });
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Mul,
+                kind: BinaryArithOpKind::UMul,
                 result: fu,
                 lhs: ft,
                 rhs: c2,
             });
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result: fa,
                 lhs: fu,
                 rhs: c3,
@@ -6265,19 +6594,19 @@ fn symbolic_jump_depth_over_cap_falls_back_to_calldet() {
         }
         // The caller-local `((a + 1) * 2) + 3`.
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: wt,
             lhs: a,
             rhs: c1,
         });
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Mul,
+            kind: BinaryArithOpKind::UMul,
             result: wu,
             lhs: wt,
             rhs: c2,
         });
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: w,
             lhs: wu,
             rhs: c3,
@@ -6310,7 +6639,7 @@ fn symbolic_jump_nested_call_falls_back_to_calldet() {
         hf.get_entry_mut().push_parameter(hx, Type::field());
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result: hr,
                 lhs: hx,
                 rhs: c1,
@@ -6333,7 +6662,7 @@ fn symbolic_jump_nested_call_falls_back_to_calldet() {
         });
         gf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result: ga,
                 lhs: gc,
                 rhs: c1,
@@ -6386,7 +6715,7 @@ fn symbolic_jump_preserves_noncommutativity() {
         hf.get_entry_mut().push_parameter(y, Type::field());
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Sub,
+                kind: BinaryArithOpKind::USub,
                 result: fa,
                 lhs: x,
                 rhs: y,
@@ -6443,7 +6772,7 @@ fn symbolic_jump_witness_operand_is_not_grafted() {
             });
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result: fa,
                 lhs: x,
                 rhs: wit,
@@ -6516,14 +6845,14 @@ fn symbolic_jump_synthetic_does_not_collide_with_callee_only_constant() {
         hf.get_entry_mut().push_parameter(x, Type::field());
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Mul,
+                kind: BinaryArithOpKind::UMul,
                 result: ft,
                 lhs: x,
                 rhs: c,
             });
         hf.get_entry_mut()
             .push_test_instruction(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result: fa,
                 lhs: x,
                 rhs: ft,
@@ -6540,7 +6869,7 @@ fn symbolic_jump_synthetic_does_not_collide_with_callee_only_constant() {
         let entry = mf.get_entry_mut();
         // v = 2 + 3, which folds to Field(5) — the same constant class as `c`.
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: v,
             lhs: two,
             rhs: three,
@@ -6554,7 +6883,7 @@ fn symbolic_jump_synthetic_does_not_collide_with_callee_only_constant() {
         });
         // w = a + v, a genuine `a + 5`.
         entry.push_test_instruction(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind: BinaryArithOpKind::UAdd,
             result: w,
             lhs: a,
             rhs: v,

@@ -5,12 +5,12 @@
 //! that only change witness representation (`WitnessOf`, and `Map`s thereof over arrays
 //! and slices), which become identities once the types are stripped.
 
-use crate::compiler::util::{ice_non_elided_tuple, ice_unvalidated_assert_constant};
 use crate::compiler::{
     analysis::flow_analysis::FlowAnalysis,
     pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::shared::value_replacements::ValueReplacements,
     ssa::hlssa::{HLSSA, OpCode, Type},
+    util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
 };
 
 pub struct StripWitnessOf {}
@@ -129,6 +129,9 @@ impl StripWitnessOf {
             | OpCode::ArrayGet { .. }
             | OpCode::ArraySet { .. }
             | OpCode::SlicePush { .. }
+            | OpCode::SlicePop { .. }
+            | OpCode::SliceInsert { .. }
+            | OpCode::SliceRemove { .. }
             | OpCode::SliceLen { .. }
             | OpCode::Select { .. }
             | OpCode::ToBits { .. }

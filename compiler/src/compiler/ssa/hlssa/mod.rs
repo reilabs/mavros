@@ -11,7 +11,9 @@ use crate::compiler::ssa::{
     SourceLocation, ValueId,
 };
 
-pub use type_system::{MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type, TypeExpr};
+pub use type_system::{
+    MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type, TypeExpr, assert_signed_op_width,
+};
 
 // HLSSA
 // ================================================================================================
@@ -154,6 +156,24 @@ pub enum OpCode {
         result: ValueId,
         slice: ValueId,
         values: Vec<ValueId>,
+    },
+    SlicePop {
+        dir: SliceOpDir,
+        result_slice: ValueId,
+        result_elem: ValueId,
+        slice: ValueId,
+    },
+    SliceInsert {
+        result: ValueId,
+        slice: ValueId,
+        index: ValueId,
+        value: ValueId,
+    },
+    SliceRemove {
+        result_slice: ValueId,
+        result_elem: ValueId,
+        slice: ValueId,
+        index: ValueId,
     },
     SliceLen {
         result: ValueId,
@@ -340,6 +360,9 @@ impl OpCode {
             | OpCode::ArrayGet { .. }
             | OpCode::ArraySet { .. }
             | OpCode::SlicePush { .. }
+            | OpCode::SlicePop { .. }
+            | OpCode::SliceInsert { .. }
+            | OpCode::SliceRemove { .. }
             | OpCode::SliceLen { .. }
             | OpCode::ToBits { .. }
             | OpCode::ToRadix { .. }
@@ -427,16 +450,12 @@ impl Instruction for OpCode {
                 lhs,
                 rhs,
             } => {
-                let op_str = match kind {
-                    CmpKind::Lt => "<",
-                    CmpKind::Eq => "==",
-                };
                 format!(
                     "v{}{} = v{} {} v{}",
                     result.0,
                     annotate_value(*result),
                     lhs.0,
-                    op_str,
+                    kind.symbol(),
                     rhs.0
                 )
             }
@@ -446,24 +465,12 @@ impl Instruction for OpCode {
                 lhs,
                 rhs,
             } => {
-                let op_str = match kind {
-                    BinaryArithOpKind::Add => "+",
-                    BinaryArithOpKind::Sub => "-",
-                    BinaryArithOpKind::Mul => "*",
-                    BinaryArithOpKind::Div => "/",
-                    BinaryArithOpKind::And => "&",
-                    BinaryArithOpKind::Or => "|",
-                    BinaryArithOpKind::Xor => "^",
-                    BinaryArithOpKind::Shl => "<<",
-                    BinaryArithOpKind::Shr => ">>",
-                    BinaryArithOpKind::Mod => "%",
-                };
                 format!(
                     "v{}{} = v{} {} v{}",
                     result.0,
                     annotate_value(*result),
                     lhs.0,
-                    op_str,
+                    kind.symbol(),
                     rhs.0
                 )
             }
@@ -482,11 +489,7 @@ impl Instruction for OpCode {
             OpCode::Assert { value } => format!("assert v{}", value.0),
             OpCode::AssertConstant { value } => format!("assert_constant v{}", value.0),
             OpCode::AssertCmp { kind, lhs, rhs } => {
-                let op_str = match kind {
-                    CmpKind::Lt => "<",
-                    CmpKind::Eq => "==",
-                };
-                format!("assert v{} {} v{}", lhs.0, op_str, rhs.0)
+                format!("assert v{} {} v{}", lhs.0, kind.symbol(), rhs.0)
             }
             OpCode::AssertR1C {
                 a: lhs,
@@ -576,6 +579,57 @@ impl Instruction for OpCode {
                     dir_str,
                     slice.0,
                     values_str
+                )
+            }
+            OpCode::SlicePop {
+                dir,
+                result_slice,
+                result_elem,
+                slice,
+            } => {
+                let dir_str = match dir {
+                    SliceOpDir::Front => "front",
+                    SliceOpDir::Back => "back",
+                };
+                format!(
+                    "v{}{}, v{}{} = slice_pop_{}(v{})",
+                    result_slice.0,
+                    annotate_value(*result_slice),
+                    result_elem.0,
+                    annotate_value(*result_elem),
+                    dir_str,
+                    slice.0
+                )
+            }
+            OpCode::SliceInsert {
+                result,
+                slice,
+                index,
+                value,
+            } => {
+                format!(
+                    "v{}{} = slice_insert(v{}, v{}, v{})",
+                    result.0,
+                    annotate_value(*result),
+                    slice.0,
+                    index.0,
+                    value.0
+                )
+            }
+            OpCode::SliceRemove {
+                result_slice,
+                result_elem,
+                slice,
+                index,
+            } => {
+                format!(
+                    "v{}{}, v{}{} = slice_remove(v{}, v{})",
+                    result_slice.0,
+                    annotate_value(*result_slice),
+                    result_elem.0,
+                    annotate_value(*result_elem),
+                    slice.0,
+                    index.0
                 )
             }
             OpCode::SliceLen { result, slice } => {
@@ -957,6 +1011,24 @@ impl Instruction for OpCode {
                 value: v,
                 ..
             } => vec![v].into_iter(),
+            Self::SlicePop {
+                result_slice: _,
+                result_elem: _,
+                slice: b,
+                ..
+            } => vec![b].into_iter(),
+            Self::SliceInsert {
+                result: _,
+                slice: s,
+                index: i,
+                value: v,
+            } => vec![s, i, v].into_iter(),
+            Self::SliceRemove {
+                result_slice: _,
+                result_elem: _,
+                slice: s,
+                index: i,
+            } => vec![s, i].into_iter(),
             Self::ArraySet {
                 result: _,
                 array: b,
@@ -1176,6 +1248,17 @@ impl Instruction for OpCode {
                 result_even,
                 ..
             } => vec![result_odd, result_even].into_iter(),
+            Self::SlicePop {
+                result_slice,
+                result_elem,
+                ..
+            } => vec![result_slice, result_elem].into_iter(),
+            Self::SliceInsert { result, .. } => vec![result].into_iter(),
+            Self::SliceRemove {
+                result_slice,
+                result_elem,
+                ..
+            } => vec![result_slice, result_elem].into_iter(),
             Self::ToBits { result: r, .. } => vec![r].into_iter(),
             Self::ToRadix { result: r, .. } => vec![r].into_iter(),
             Self::ReadGlobal { result: r, .. } => vec![r].into_iter(),
@@ -1233,6 +1316,17 @@ impl Instruction for OpCode {
                 result_even,
                 ..
             } => vec![result_odd, result_even].into_iter(),
+            Self::SlicePop {
+                result_slice,
+                result_elem,
+                ..
+            } => vec![result_slice, result_elem].into_iter(),
+            Self::SliceInsert { result, .. } => vec![result].into_iter(),
+            Self::SliceRemove {
+                result_slice,
+                result_elem,
+                ..
+            } => vec![result_slice, result_elem].into_iter(),
             Self::ToBits { result: r, .. } => vec![r].into_iter(),
             Self::ToRadix { result: r, .. } => vec![r].into_iter(),
             Self::ReadGlobal { result: r, .. } => vec![r].into_iter(),
@@ -1291,6 +1385,24 @@ impl Instruction for OpCode {
                 value: v,
                 ..
             } => vec![v].into_iter(),
+            Self::SlicePop {
+                result_slice: _,
+                result_elem: _,
+                slice: b,
+                ..
+            } => vec![b].into_iter(),
+            Self::SliceInsert {
+                result: _,
+                slice: s,
+                index: i,
+                value: v,
+            } => vec![s, i, v].into_iter(),
+            Self::SliceRemove {
+                result_slice: _,
+                result_elem: _,
+                slice: s,
+                index: i,
+            } => vec![s, i].into_iter(),
             Self::ArraySet {
                 result: _,
                 array: b,
@@ -1628,6 +1740,24 @@ impl Instruction for OpCode {
                 value: v,
                 ..
             } => vec![a, b, v].into_iter(),
+            Self::SlicePop {
+                result_slice: a,
+                result_elem: b,
+                slice: c,
+                ..
+            } => vec![a, b, c].into_iter(),
+            Self::SliceInsert {
+                result: a,
+                slice: b,
+                index: i,
+                value: v,
+            } => vec![a, b, i, v].into_iter(),
+            Self::SliceRemove {
+                result_slice: a,
+                result_elem: b,
+                slice: c,
+                index: i,
+            } => vec![a, b, c, i].into_iter(),
             Self::ToBits {
                 result: r,
                 value: v,
@@ -1732,27 +1862,246 @@ pub enum CallTarget {
 // BINARY ARITH OPERATION KIND
 // ================================================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The binary arithmetic operations, with signedness carried by the **operation** rather than by
+/// the operand type.
+///
+/// This mirrors LLSSA's `IntArithOp` and the VM's `div_u64`/`div_s64` split, and is the shape
+/// every level below HLSSA already uses. The bitwise operations take no sign because they act on
+/// the raw pattern; everything else comes in a `U`/`S` pair, even where the two agree on the
+/// result bits.
+///
+/// The pairs differ from each other in two separate ways, and only the first is visible in a
+/// result:
+///
+/// - `Div`, `Rem` and `Shr` compute **different values** for the same operands. Getting the sign
+///   wrong there is a miscompile of the result itself.
+/// - `Add`, `Sub`, `Mul` and `Shl` produce the **same bits** on every execution that succeeds; the
+///   sign selects only _when_ the operation fails.
+///
+/// That second difference is not a lesser one, and it is worth being blunt about it because it
+/// reads like it is. A failure contract is a rejection the circuit owes: `lower_unsigned_addsub`
+/// range-checks the field sum to `bits`, while `lower_signed_addsub` decodes both operands and
+/// range-checks the sign limb to `bits - 1`. On the raw pair `(200, 100)` at eight bits the
+/// unsigned lowering rejects (`300 >= 256`) and the signed one accepts (`-56 + 100 == 44`). An
+/// operation that swapped one for the other would accept a program the circuit must reject, which
+/// is the worst direction for a compiler that emits constraints.
+///
+/// So **nothing may treat two forms of one group as interchangeable**, whichever kind of pair they
+/// are — see [`BinaryArithOpKind::signedness`], which is the discriminator every value-numbering
+/// key carries.
+///
+/// `Shl` is worth naming separately even so, because its failure is not about overflow at all. It
+/// wraps under both readings, and what the signed form additionally rejects is a negative _amount_
+/// (`pure_guards::emit_invalid_shift_cond`), which the unsigned form has no way to express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinaryArithOpKind {
-    Add,
-    Mul,
-    Div,
-    Sub,
+    UAdd,
+    SAdd,
+    USub,
+    SSub,
+    UMul,
+    SMul,
+    UDiv,
+    SDiv,
+    URem,
+    SRem,
+    UShl,
+    SShl,
+    UShr,
+    SShr,
     And,
     Or,
     Xor,
+}
+
+/// A [`BinaryArithOpKind`] with its sign erased — _which_ operation, irrespective of how it reads
+/// its operands.
+///
+/// Use this only where the sign genuinely does not participate (naming an operation in a
+/// diagnostic, say). Consumers that make a decision should match the sign-carrying variants
+/// directly, so that adding one is a compile error rather than a silent fall-through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArithGroup {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
     Shl,
     Shr,
-    Mod,
+    And,
+    Or,
+    Xor,
+}
+
+impl BinaryArithOpKind {
+    /// This operation with its sign erased.
+    pub fn group(self) -> ArithGroup {
+        match self {
+            Self::UAdd | Self::SAdd => ArithGroup::Add,
+            Self::USub | Self::SSub => ArithGroup::Sub,
+            Self::UMul | Self::SMul => ArithGroup::Mul,
+            Self::UDiv | Self::SDiv => ArithGroup::Div,
+            Self::URem | Self::SRem => ArithGroup::Rem,
+            Self::UShl | Self::SShl => ArithGroup::Shl,
+            Self::UShr | Self::SShr => ArithGroup::Shr,
+            Self::And => ArithGroup::And,
+            Self::Or => ArithGroup::Or,
+            Self::Xor => ArithGroup::Xor,
+        }
+    }
+
+    /// Whether this operation reads its operands as two's complement.
+    ///
+    /// The bitwise operations answer `false`: they have no signed form, and `false` is the reading
+    /// that describes what they do to the raw pattern. Callers that need to tell "unsigned" from
+    /// "sign does not apply" want [`BinaryArithOpKind::signedness`].
+    pub fn is_signed(self) -> bool {
+        self.signedness().unwrap_or(false)
+    }
+
+    /// The sign this operation reads its operands with, or `None` where the question does not
+    /// arise — `And`, `Or` and `Xor` act on the bit pattern alone.
+    ///
+    /// # The Value-Numbering Discriminator
+    ///
+    /// Paired with [`BinaryArithOpKind::group`] this is the key the three value-numbering sites
+    /// use — `click_cooper::congruence::op_signature`, `CSE`'s `ExprNode`, and
+    /// `partial_redundancy_elimination::eliminate`'s `CanonNode`. Two `BinaryArithOp`s may share a
+    /// key only when they agree on **both**, so a signed and an unsigned form are never merged.
+    ///
+    /// A narrower rule was tried and is wrong. It split only `Div`, `Rem` and `Shr` — the groups
+    /// whose two forms compute different values — and let `Add`/`Sub`/`Mul`/`Shl` share a key on
+    /// the grounds that their results agree bit for bit. What that overlooks is that the merge
+    /// picks a survivor, and the survivor's opcode is what `LowerWitnessIntegerArithOps` and
+    /// `LowerPureGuards` read to decide which _rejecting constraints_ to emit. Merging `UAdd` into
+    /// `SAdd` therefore deletes the unsigned overflow check outright: `noir_failure_tests/`
+    /// `signed_unsigned_vn_merge` is a program that must fail and did not.
+    ///
+    /// The argument offered for the narrower rule was that one operand pair cannot reach both a
+    /// signed and an unsigned opcode, because a `ValueId` has a single Noir-level origin and
+    /// `expression_converter::operand_is_signed` reads the sign off that origin. That is a claim
+    /// about `ValueId` **identity**, and value numbering does not key on identity — it keys on
+    /// operand _congruence classes_. `x as u8` and `x as i8` are one class (both are
+    /// `Cast(CastTarget::Int(8))` over the same operand), as are `u8 200` and `i8 -56` (one
+    /// [`Constant::Int`]), so a differently-signed pair over congruent operands is ordinary rather
+    /// than exotic. Before the `U`/`I` collapse the two were kept apart by their differing cast
+    /// targets and result types; nothing separates them now except this discriminator.
+    ///
+    /// [`Constant::Int`]: Constant::Int
+    pub fn signedness(self) -> Option<bool> {
+        match self {
+            Self::SAdd
+            | Self::SSub
+            | Self::SMul
+            | Self::SDiv
+            | Self::SRem
+            | Self::SShl
+            | Self::SShr => Some(true),
+            Self::UAdd
+            | Self::USub
+            | Self::UMul
+            | Self::UDiv
+            | Self::URem
+            | Self::UShl
+            | Self::UShr => Some(false),
+            Self::And | Self::Or | Self::Xor => None,
+        }
+    }
+
+    /// Rebuild an operation from its group and a sign.
+    ///
+    /// The sign is ignored for the bitwise groups, which have only one form.
+    pub fn with_sign(group: ArithGroup, signed: bool) -> Self {
+        match group {
+            ArithGroup::Add if signed => Self::SAdd,
+            ArithGroup::Add => Self::UAdd,
+            ArithGroup::Sub if signed => Self::SSub,
+            ArithGroup::Sub => Self::USub,
+            ArithGroup::Mul if signed => Self::SMul,
+            ArithGroup::Mul => Self::UMul,
+            ArithGroup::Div if signed => Self::SDiv,
+            ArithGroup::Div => Self::UDiv,
+            ArithGroup::Rem if signed => Self::SRem,
+            ArithGroup::Rem => Self::URem,
+            ArithGroup::Shl if signed => Self::SShl,
+            ArithGroup::Shl => Self::UShl,
+            ArithGroup::Shr if signed => Self::SShr,
+            ArithGroup::Shr => Self::UShr,
+            ArithGroup::And => Self::And,
+            ArithGroup::Or => Self::Or,
+            ArithGroup::Xor => Self::Xor,
+        }
+    }
+
+    /// How this operation prints in an SSA dump.
+    ///
+    /// Unsigned keeps the bare symbol and signed takes an `s` prefix, so that the unsigned
+    /// majority reads exactly as it always has and a signed operation stands out.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::UAdd => "+",
+            Self::SAdd => "s+",
+            Self::USub => "-",
+            Self::SSub => "s-",
+            Self::UMul => "*",
+            Self::SMul => "s*",
+            Self::UDiv => "/",
+            Self::SDiv => "s/",
+            Self::URem => "%",
+            Self::SRem => "s%",
+            Self::UShl => "<<",
+            Self::SShl => "s<<",
+            Self::UShr => ">>",
+            Self::SShr => "s>>",
+            Self::And => "&",
+            Self::Or => "|",
+            Self::Xor => "^",
+        }
+    }
 }
 
 // COMPARISON KIND
 // ================================================================================================
 
-#[derive(Debug, Clone, Copy)]
+/// The comparisons, with signedness on the operation for the same reasons as
+/// [`BinaryArithOpKind`].
+///
+/// Equality needs no sign — two patterns are equal or they are not, under either reading — so
+/// only the ordering comes in a pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CmpKind {
-    Lt,
+    ULt,
+    SLt,
     Eq,
+}
+
+impl CmpKind {
+    /// Whether this comparison reads its operands as two's complement. `Eq` answers `false`,
+    /// which is accurate: it reads them as raw patterns.
+    pub fn is_signed(self) -> bool {
+        matches!(self, Self::SLt)
+    }
+
+    /// Whether this is an ordering comparison, i.e. one for which the sign selects a different
+    /// answer rather than the same one.
+    pub fn is_ordering(self) -> bool {
+        matches!(self, Self::ULt | Self::SLt)
+    }
+
+    /// The ordering comparison at the given sign.
+    pub fn lt(signed: bool) -> Self {
+        if signed { Self::SLt } else { Self::ULt }
+    }
+
+    /// How this comparison prints in an SSA dump; see [`BinaryArithOpKind::symbol`].
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::ULt => "<",
+            Self::SLt => "s<",
+            Self::Eq => "==",
+        }
+    }
 }
 
 // SEQUENCE TYPE
@@ -1791,8 +2140,8 @@ impl Display for SequenceTargetType {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CastTarget {
     Field,
-    U(usize),
-    I(usize),
+    /// An integer of `bits` raw two's-complement bits.
+    Int(usize),
     WitnessOf,
     /// Strips one `WitnessOf` wrapper.
     ValueOf,
@@ -1811,7 +2160,7 @@ impl CastTarget {
     /// representation).
     ///
     /// Panics on conversions casts cannot express — in particular on
-    /// witness *strips* (`WitnessOf(X) → X`): silently erasing witness-ness at
+    /// witness _strips_ (`WitnessOf(X) → X`): silently erasing witness-ness at
     /// a typed-slot boundary would drop the constraint connection, so such a
     /// request always indicates a witness-inference inconsistency. Strips are
     /// only legal for unconstrained call arguments, via [`Self::strip_conversion`].
@@ -1831,12 +2180,10 @@ impl CastTarget {
             return None;
         }
         match (&src.expr, &tgt.expr) {
-            (TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_), TypeExpr::WitnessOf(_))
-                if !strip =>
-            {
+            (TypeExpr::Field | TypeExpr::Int(_), TypeExpr::WitnessOf(_)) if !strip => {
                 Some(CastTarget::WitnessOf)
             }
-            (TypeExpr::WitnessOf(inner), TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_))
+            (TypeExpr::WitnessOf(inner), TypeExpr::Field | TypeExpr::Int(_))
                 if strip && inner.as_ref() == tgt =>
             {
                 Some(CastTarget::ValueOf)
@@ -1871,18 +2218,11 @@ impl CastTarget {
                     Type::field()
                 }
             }
-            CastTarget::U(size) => {
+            CastTarget::Int(size) => {
                 if value_type.is_witness_of() {
-                    Type::witness_of(Type::u(*size))
+                    Type::witness_of(Type::int(*size))
                 } else {
-                    Type::u(*size)
-                }
-            }
-            CastTarget::I(size) => {
-                if value_type.is_witness_of() {
-                    Type::witness_of(Type::i(*size))
-                } else {
-                    Type::i(*size)
+                    Type::int(*size)
                 }
             }
             CastTarget::Nop => value_type.clone(),
@@ -1910,11 +2250,9 @@ impl CastTarget {
         match self {
             CastTarget::WitnessOf | CastTarget::ValueOf => true,
             CastTarget::Map(inner) => inner.is_witness_repr_only(),
-            CastTarget::Field
-            | CastTarget::U(_)
-            | CastTarget::I(_)
-            | CastTarget::Nop
-            | CastTarget::ArrayToSlice => false,
+            CastTarget::Field | CastTarget::Int(_) | CastTarget::Nop | CastTarget::ArrayToSlice => {
+                false
+            }
         }
     }
 
@@ -1926,8 +2264,7 @@ impl CastTarget {
             CastTarget::ValueOf => true,
             CastTarget::Map(inner) => inner.is_value_of(),
             CastTarget::Field
-            | CastTarget::U(_)
-            | CastTarget::I(_)
+            | CastTarget::Int(_)
             | CastTarget::WitnessOf
             | CastTarget::Nop
             | CastTarget::ArrayToSlice => false,
@@ -1939,8 +2276,7 @@ impl Display for CastTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CastTarget::Field => write!(f, "Field"),
-            CastTarget::U(size) => write!(f, "u{}", size),
-            CastTarget::I(size) => write!(f, "i{}", size),
+            CastTarget::Int(size) => write!(f, "int{}", size),
             CastTarget::WitnessOf => write!(f, "WitnessOf"),
             CastTarget::ValueOf => write!(f, "ValueOf"),
             CastTarget::Nop => write!(f, "Nop"),
@@ -2008,8 +2344,15 @@ impl Blob {
 /// The value type stored in the high-level SSA's constants side-table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Constant {
-    U(usize, u128),
-    I(usize, u128),
+    /// `bits` raw two's-complement bits, with **no reading attached**.
+    ///
+    /// There is no signed/unsigned pair here for the same reason [`TypeExpr::Int`] has no sign:
+    /// nothing about a bit pattern says how to read it, and every consumer that cares takes the
+    /// reading from the opcode applied to the value. That also makes interning exact — one pattern
+    /// is one constant, so `u32 0xFFFFFFFE` and `i32 -2` are the same `ValueId`.
+    ///
+    /// [`TypeExpr::Int`]: crate::compiler::ssa::hlssa::TypeExpr::Int
+    Int(usize, u128),
     // FIELD-ASSUMPTION: L2-ir-const
     Field(crate::compiler::Field),
     FnPtr(FunctionId),
@@ -2020,7 +2363,7 @@ impl Constant {
     /// `true` if this is a scalar constant (not an aggregate `Blob`).
     pub fn is_scalar(&self) -> bool {
         match self {
-            Self::U(_, _) | Self::I(_, _) | Self::Field(_) | Self::FnPtr(_) => true,
+            Self::Int(_, _) | Self::Field(_) | Self::FnPtr(_) => true,
             Self::Blob(_) => false,
         }
     }
@@ -2078,4 +2421,121 @@ impl<V> LookupTarget<V> {
 pub enum Radix<V> {
     Bytes,
     Dyn(V),
+}
+
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every operation, so a new variant cannot be added without appearing here.
+    const ALL_ARITH: [BinaryArithOpKind; 17] = [
+        BinaryArithOpKind::UAdd,
+        BinaryArithOpKind::SAdd,
+        BinaryArithOpKind::USub,
+        BinaryArithOpKind::SSub,
+        BinaryArithOpKind::UMul,
+        BinaryArithOpKind::SMul,
+        BinaryArithOpKind::UDiv,
+        BinaryArithOpKind::SDiv,
+        BinaryArithOpKind::URem,
+        BinaryArithOpKind::SRem,
+        BinaryArithOpKind::UShl,
+        BinaryArithOpKind::SShl,
+        BinaryArithOpKind::UShr,
+        BinaryArithOpKind::SShr,
+        BinaryArithOpKind::And,
+        BinaryArithOpKind::Or,
+        BinaryArithOpKind::Xor,
+    ];
+
+    #[test]
+    fn group_and_sign_reconstruct_the_operation() {
+        // `with_sign` is the inverse of `(group, signedness)` on everything that has a sign, which
+        // is what lets a consumer decompose an operation, decide on the sign separately, and put
+        // it back together -- the shape the whole Stage-2 shim depends on.
+        for op in ALL_ARITH {
+            match op.signedness() {
+                Some(signed) => assert_eq!(BinaryArithOpKind::with_sign(op.group(), signed), op),
+                // The bitwise groups have one form, so both signs must land back on it.
+                None => {
+                    assert_eq!(BinaryArithOpKind::with_sign(op.group(), false), op);
+                    assert_eq!(BinaryArithOpKind::with_sign(op.group(), true), op);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_bitwise_operations_are_the_only_sign_free_ones() {
+        for op in ALL_ARITH {
+            let sign_free = op.signedness().is_none();
+            assert_eq!(
+                sign_free,
+                matches!(
+                    op.group(),
+                    ArithGroup::And | ArithGroup::Or | ArithGroup::Xor
+                ),
+                "{op:?}"
+            );
+            // `is_signed` collapses "unsigned" and "no sign" onto `false`, which is the reading
+            // that describes what a bitwise op does to the raw pattern.
+            assert_eq!(op.is_signed(), op.signedness() == Some(true), "{op:?}");
+        }
+    }
+
+    #[test]
+    fn no_two_operations_share_a_group_and_a_sign() {
+        // `(group, signedness)` is the value-numbering key, so it has to be injective over the
+        // opcode set: if two distinct operations ever answered the same pair, every value-numbering
+        // site would merge them and the survivor's lowering would silently stand in for the other.
+        let mut keys: Vec<_> = ALL_ARITH
+            .iter()
+            .map(|op| (op.group(), op.signedness()))
+            .collect();
+        let count = keys.len();
+        keys.sort_unstable_by_key(|(g, s)| (format!("{g:?}"), *s));
+        keys.dedup();
+        assert_eq!(
+            keys.len(),
+            count,
+            "two operations share a value-numbering key"
+        );
+    }
+
+    #[test]
+    fn unsigned_operations_print_exactly_as_they_always_have() {
+        // Today's dumps must not move for the unsigned majority; a signed operation takes an `s`
+        // prefix so it stands out.
+        assert_eq!(BinaryArithOpKind::UAdd.symbol(), "+");
+        assert_eq!(BinaryArithOpKind::SAdd.symbol(), "s+");
+        assert_eq!(BinaryArithOpKind::UDiv.symbol(), "/");
+        assert_eq!(BinaryArithOpKind::SDiv.symbol(), "s/");
+        assert_eq!(BinaryArithOpKind::UShr.symbol(), ">>");
+        assert_eq!(BinaryArithOpKind::SShr.symbol(), "s>>");
+        assert_eq!(BinaryArithOpKind::And.symbol(), "&");
+        assert_eq!(CmpKind::ULt.symbol(), "<");
+        assert_eq!(CmpKind::SLt.symbol(), "s<");
+        assert_eq!(CmpKind::Eq.symbol(), "==");
+
+        // Every symbol is distinct, so a dump can be read back unambiguously.
+        let mut symbols: Vec<_> = ALL_ARITH.iter().map(|op| op.symbol()).collect();
+        symbols.extend([CmpKind::ULt, CmpKind::SLt, CmpKind::Eq].map(|k| k.symbol()));
+        let count = symbols.len();
+        symbols.sort_unstable();
+        symbols.dedup();
+        assert_eq!(symbols.len(), count, "two operations print the same way");
+    }
+
+    #[test]
+    fn equality_is_the_sign_free_comparison() {
+        assert!(!CmpKind::Eq.is_ordering());
+        assert!(!CmpKind::Eq.is_signed());
+        for kind in [CmpKind::ULt, CmpKind::SLt] {
+            assert!(kind.is_ordering());
+            assert_eq!(CmpKind::lt(kind.is_signed()), kind);
+        }
+    }
 }

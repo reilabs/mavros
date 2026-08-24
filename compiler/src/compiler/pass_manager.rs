@@ -133,7 +133,7 @@ impl AnalysisStore {
             .and_then(|b| b.downcast_ref::<A>())
     }
 
-    fn insert_with_deps<A: 'static>(&mut self, val: A, dep_ids: Vec<TypeId>) {
+    pub(crate) fn insert_with_deps<A: 'static>(&mut self, val: A, dep_ids: Vec<TypeId>) {
         let tid = TypeId::of::<A>();
         self.data.insert(tid, Box::new(val));
         if !dep_ids.is_empty() {

@@ -10,6 +10,7 @@ use crate::{
     collections::HashMap,
     compiler::{
         analysis::flow_analysis::{CFG, FlowAnalysis},
+        pass_manager::{Analysis, AnalysisId, AnalysisStore},
         ssa::{
             FunctionId, ValueId,
             hlssa::{
@@ -22,18 +23,17 @@ use crate::{
 
 pub fn const_value_type(value: &Constant) -> Type {
     match value {
-        Constant::U(size, _) => Type::u(*size),
-        Constant::I(size, _) => Type::i(*size),
+        Constant::Int(size, _) => Type::int(*size),
         Constant::Field(_) => Type::field(),
         Constant::FnPtr(_) => Type::function(),
         Constant::Blob(blob) => Type::blob(blob.elem_type.clone(), blob.len()),
     }
 }
 
-fn push_witness_of_to_leaves(t: Type) -> Type {
+pub(crate) fn push_witness_of_to_leaves(t: Type) -> Type {
     match t.expr {
         TypeExpr::WitnessOf(_) => t,
-        TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => Type::witness_of(t),
+        TypeExpr::Field | TypeExpr::Int(_) => Type::witness_of(t),
         TypeExpr::Array(inner, n) => push_witness_of_to_leaves(*inner).array_of(n),
         TypeExpr::Slice(inner) => push_witness_of_to_leaves(*inner).slice_of(),
         TypeExpr::Tuple(fields) => {
@@ -120,23 +120,14 @@ impl Types {
     fn spread_result_type(value_type: &Type) -> Result<Type, String> {
         match &value_type.expr {
             TypeExpr::WitnessOf(inner) => Ok(Type::witness_of(Self::spread_result_type(inner)?)),
-            TypeExpr::U(bits) => {
+            TypeExpr::Int(bits) => {
                 if *bits > MAX_SUPPORTED_UNSIGNED_BITS {
                     return Err(format!(
-                        "Spread expects u(n) with n <= {MAX_SUPPORTED_UNSIGNED_BITS}, got {}",
+                        "Spread expects int(n) with n <= {MAX_SUPPORTED_UNSIGNED_BITS}, got {}",
                         value_type
                     ));
                 }
-                Ok(Type::u(bits * 2))
-            }
-            TypeExpr::I(bits) => {
-                if *bits > MAX_SUPPORTED_UNSIGNED_BITS {
-                    return Err(format!(
-                        "Spread expects i(n) with n <= {MAX_SUPPORTED_UNSIGNED_BITS}, got {}",
-                        value_type
-                    ));
-                }
-                Ok(Type::i(bits * 2))
+                Ok(Type::int(bits * 2))
             }
             TypeExpr::Field => Err("Spread does not support field inputs".to_string()),
             _ => Err(format!(
@@ -152,25 +143,15 @@ impl Types {
                 let (odd, even) = Self::unspread_result_types(inner)?;
                 Ok((Type::witness_of(odd), Type::witness_of(even)))
             }
-            TypeExpr::U(bits) => {
+            TypeExpr::Int(bits) => {
                 if *bits % 2 != 0 || (*bits / 2) > 64 {
                     return Err(format!(
-                        "Unspread expects u(2n) with n <= 64, got {}",
+                        "Unspread expects int(2n) with n <= 64, got {}",
                         value_type
                     ));
                 }
                 let half_bits = bits / 2;
-                Ok((Type::u(half_bits), Type::u(half_bits)))
-            }
-            TypeExpr::I(bits) => {
-                if *bits % 2 != 0 || (*bits / 2) > 64 {
-                    return Err(format!(
-                        "Unspread expects i(2n) with n <= 64, got {}",
-                        value_type
-                    ));
-                }
-                let half_bits = bits / 2;
-                Ok((Type::i(half_bits), Type::i(half_bits)))
+                Ok((Type::int(half_bits), Type::int(half_bits)))
             }
             TypeExpr::Field => Err("Unspread does not support field inputs".to_string()),
             _ => Err(format!(
@@ -218,10 +199,7 @@ impl Types {
     ) -> Result<(), String> {
         match opcode {
             OpCode::Cmp {
-                kind: _kind,
-                result,
-                lhs,
-                rhs,
+                result, lhs, rhs, ..
             } => {
                 let lhs_type = function_info.values.get(lhs).ok_or_else(|| {
                     format!(
@@ -235,19 +213,17 @@ impl Types {
                         rhs
                     )
                 })?;
+                // `bool`, whatever the operands are and however the comparison reads them.
                 let result_type = if lhs_type.is_witness_of() || rhs_type.is_witness_of() {
-                    Type::witness_of(Type::u(1))
+                    Type::witness_of(Type::int(1))
                 } else {
-                    Type::u(1)
+                    Type::int(1)
                 };
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
             OpCode::BinaryArithOp {
-                kind: _kind,
-                result,
-                lhs,
-                rhs,
+                result, lhs, rhs, ..
             } => {
                 let lhs_type = function_info.values.get(lhs).ok_or_else(|| {
                     format!(
@@ -261,6 +237,8 @@ impl Types {
                         rhs
                     )
                 })?;
+                // Width only: an operation's result is as wide as its wider operand, and how the
+                // operands are read is the opcode's business, not this rule's.
                 function_info
                     .values
                     .insert(*result, lhs_type.get_arithmetic_result_type(rhs_type));
@@ -418,9 +396,93 @@ impl Types {
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
-            OpCode::SliceLen { result, slice: _ } => {
-                // Result is always u32
-                function_info.values.insert(*result, Type::u(32));
+            OpCode::SlicePop {
+                result_slice,
+                result_elem,
+                slice,
+                dir: _,
+            } => {
+                let slice_type = function_info.values.get(slice).ok_or_else(|| {
+                    format!("Slice value {:?} not found in type assignments", slice)
+                })?;
+                // `result_elem` gets the plain element type; the extra witness-ness of a back
+                // pop is applied to types later by untaint. Keep in sync with the `SlicePop`
+                // rule in `witness_taint_inference/builder.rs`.
+                let elem_type = slice_type.get_array_element();
+                function_info
+                    .values
+                    .insert(*result_slice, slice_type.clone());
+                function_info.values.insert(*result_elem, elem_type);
+                Ok(())
+            }
+            OpCode::SliceInsert {
+                result,
+                slice,
+                index,
+                value,
+            } => {
+                let slice_type = function_info.values.get(slice).ok_or_else(|| {
+                    format!("Slice value {:?} not found in type assignments", slice)
+                })?;
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+                let index_type = function_info.values.get(index).ok_or_else(|| {
+                    format!("Index value {:?} not found in type assignments", index)
+                })?;
+
+                let elem_type = slice_type.get_array_element();
+                let result_elem_type = if index_type.is_witness_of() {
+                    push_witness_of_to_leaves(Type::join(&elem_type, value_type))
+                } else {
+                    Type::join(&elem_type, value_type)
+                };
+                let result_type = if result_elem_type == elem_type {
+                    slice_type.clone()
+                } else {
+                    replace_array_element_type(slice_type, result_elem_type)
+                };
+                function_info.values.insert(*result, result_type);
+                Ok(())
+            }
+            OpCode::SliceRemove {
+                result_slice,
+                result_elem,
+                slice,
+                index,
+            } => {
+                let slice_type = function_info.values.get(slice).ok_or_else(|| {
+                    format!("Slice value {:?} not found in type assignments", slice)
+                })?;
+                let index_type = function_info.values.get(index).ok_or_else(|| {
+                    format!("Index value {:?} not found in type assignments", index)
+                })?;
+
+                let elem_type = slice_type.get_array_element();
+                // A witness-index shift makes every surviving element (and the removed one) a
+                // select result.
+                let result_elem_type = if index_type.is_witness_of() {
+                    push_witness_of_to_leaves(elem_type.clone())
+                } else {
+                    elem_type.clone()
+                };
+                let result_slice_type = if result_elem_type == elem_type {
+                    slice_type.clone()
+                } else {
+                    replace_array_element_type(slice_type, result_elem_type.clone())
+                };
+                function_info
+                    .values
+                    .insert(*result_slice, result_slice_type);
+                function_info.values.insert(*result_elem, result_elem_type);
+                Ok(())
+            }
+            OpCode::SliceLen { result, slice } => {
+                let _ = function_info.values.get(slice).ok_or_else(|| {
+                    format!("Slice value {:?} not found in type assignments", slice)
+                })?;
+                function_info.values.insert(*result, Type::int(32));
                 Ok(())
             }
             OpCode::Select {
@@ -441,16 +503,21 @@ impl Types {
                         otherwise
                     )
                 })?;
+
                 // Alternatives must match (after potential WitnessCastInsertion).
                 // The matched alternative type comes from unifying the two branches.
-                let alt_type = then_type.get_arithmetic_result_type(otherwise_type);
-                // If cond is WitnessOf and alternatives are not already WitnessOf,
-                // the result is WitnessOf(alt_type). Otherwise result = alt_type.
+                let alt_type = then_type.get_select_result_type(otherwise_type);
+
+                // If cond is WitnessOf and alternatives are not already WitnessOf, the witness
+                // influence lands on the result's LEAVES: scalars/refs get wrapped, but containers
+                // don't. Note that a slice's length is not tainted here: `purify_witness_slices`
+                // has already moved any witness length onto a `log_len` scalar.
                 let result_type = if cond_type.is_witness_of() && !alt_type.is_witness_of() {
-                    Type::witness_of(alt_type)
+                    push_witness_of_to_leaves(alt_type)
                 } else {
                     alt_type
                 };
+
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
@@ -546,11 +613,10 @@ impl Types {
                     .get(value)
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
 
-                // Widen to target bits, preserving signedness and witness wrapper
+                // Widen (signed) to the target width, keeping the witness wrapper.
                 let inner = value_type.strip_witness();
                 let widened = match &inner.expr {
-                    TypeExpr::I(_) => Type::i(*to_bits),
-                    TypeExpr::U(_) => Type::u(*to_bits),
+                    TypeExpr::Int(_) => Type::int(*to_bits),
                     _ => panic!("SExt on non-integer type: {:?}", value_type),
                 };
                 let result_type = if value_type.is_witness_of() {
@@ -603,9 +669,9 @@ impl Types {
                     .get(value)
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
                 let bit_type = if value_type.is_witness_of() {
-                    Type::witness_of(Type::u(1))
+                    Type::witness_of(Type::int(1))
                 } else {
-                    Type::u(1)
+                    Type::int(1)
                 };
                 let result_type = bit_type.array_of(*output_size);
                 function_info.values.insert(*result, result_type);
@@ -623,9 +689,9 @@ impl Types {
                     .get(value)
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
                 let digit_type = if value_type.is_witness_of() {
-                    Type::witness_of(Type::u(8))
+                    Type::witness_of(Type::int(8))
                 } else {
-                    Type::u(8)
+                    Type::int(8)
                 };
                 let result_type = digit_type.array_of(*output_size);
                 function_info.values.insert(*result, result_type);
@@ -757,8 +823,6 @@ impl Types {
         }
     }
 }
-
-use crate::compiler::pass_manager::{Analysis, AnalysisId, AnalysisStore};
 
 impl Analysis for TypeInfo {
     fn dependencies() -> Vec<AnalysisId> {

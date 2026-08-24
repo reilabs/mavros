@@ -2,14 +2,14 @@
 //!
 //! PRE may evaluate an op at a point where the original program was not bound to evaluate it
 //! (speculation — e.g. hoisting a loop-body computation above a zero-trip-able loop header) only
-//! if the op is *total at the emplacement point*: on every run reaching that point it can neither
+//! if the op is _total at the emplacement point_: on every run reaching that point it can neither
 //! trap any engine (witgen VM, LLVM/WASM, the R1CS generator's constant evaluation) nor introduce
 //! a constraint able to reject. Otherwise a run the original program accepted could come to reject
 //! — or stop compiling — which breaks obligation 1 of the accept/reject model (see `click_cooper`'s
 //! "Soundness on Rejecting Runs").
 //!
 //! Down-safe motion needs no such gate: an op bound to execute on every path from the insertion
-//! point merely traps *earlier* on runs already doomed to reject, and behaves identically on
+//! point merely traps _earlier_ on runs already doomed to reject, and behaves identically on
 //! accepting runs. This module is consulted exclusively for placements that are **not** down-safe.
 //!
 //! The verdicts encode the engines' actual semantics:
@@ -17,29 +17,29 @@
 //! - **U/I `Add`/`Sub`/`Mul` are Never Speculated** Even though the executable backends wrap
 //!   (`vm/src/bytecode.rs` `add_int`/`add_u128` mask to width): overflow is Noir-semantically an
 //!   error — the constant lattice refuses overflow folds as "an erroneous evaluation with a
-//!   backend-specific residue" — and a *witness-typed* op's gadget lowering emits a rejecting
+//!   backend-specific residue" — and a _witness-typed_ op's gadget lowering emits a rejecting
 //!   overflow `Rangecheck` when the value-range analysis cannot prove fit. Field arithmetic has no
 //!   such predicate and is total.
 //! - **`Div`/`Mod` Trap on a Zero Divisor**: Integer division traps in every engine (raw Rust `/`
-//!   in the VM, `div` instructions in LLVM), while *field* division is total in the VM (`div_field`
+//!   in the VM, `div` instructions in LLVM), while _field_ division is total in the VM (`div_field`
 //!   yields 0) but is rejected by the R1CS generator's constant evaluation (an ICE naming the
-//!   broken invariant — a *compile-time* failure, strictly worse than a reject), so both domains
-//!   are gated. This is about the *opcode* since every `Div`/`Mod` also carries a preceding assert
+//!   broken invariant — a _compile-time_ failure, strictly worse than a reject), so both domains
+//!   are gated. This is about the _opcode_ since every `Div`/`Mod` also carries a preceding assert
 //!   that the operands are defined, so a bad division fails the program even where the opcode
 //!   itself would not. That assert is a separate instruction this oracle never speculates, which is
 //!   why the gating below is still exactly what keeps a division and its check together. Divisions
 //!   are speculated only where the divisor is provably nonzero: a nonzero constant, or the
 //!   analysis's disequality channel ([`ClickCooper::known_unequal`] against the interned zero of
-//!   the divisor's type) at the insertion block. Signed division at exactly 64 bits can
-//!   additionally overflow in the VM (`div_s64` computes `i64::MIN / -1`), so it also requires the
-//!   constant divisor to not be `-1`.
+//!   the divisor's type) at the insertion block. A **signed** division additionally owes the
+//!   `INT_MIN / -1` overflow rejection that `divmod_guard::emit_divmod_failure_cond` emits at every
+//!   width, so it is speculated only where the divisor is a constant other than `-1`.
 //! - **`Shl`/`Shr` Diverge Across Backends:** Once the amount reaches the operand width the
 //!   behaviors differ (the VM's `shl_u64` is an unmasked Rust shift, its `u128` variants wrap,
 //!   R1CGen wraps at 128 bits), so only a constant, in-range amount is speculated.
 //! - **`ArrayGet`/`ArraySet` Trap on OOB:** VM asserts, R1CGen constant evaluation panics; only a
 //!   constant index provably below a static array length is speculated.
-//! - Comparisons, `Not`, `Select`, `SExt`, `BitRange`, bitwise ops, and Casts are Total:** Their
-//!   witness gadget lowerings emit only *functional* decomposition constraints (satisfiable for
+//! - **Comparisons, `Not`, `Select`, `SExt`, `BitRange`, bitwise ops, and Casts are Total:** Their
+//!   witness gadget lowerings emit only _functional_ decomposition constraints (satisfiable for
 //!   every in-range input), never a semantic predicate.
 //!
 //! The oracle answers for individual ops; whether an op is a motion candidate at all (the
@@ -57,7 +57,9 @@ use crate::compiler::{
     },
     ssa::{
         BlockId, FunctionId, ValueId,
-        hlssa::{BinaryArithOpKind, CastTarget, Constant, HLSSA, OpCode, Type, TypeExpr},
+        hlssa::{
+            ArithGroup, BinaryArithOpKind, CastTarget, Constant, HLSSA, OpCode, Type, TypeExpr,
+        },
     },
 };
 
@@ -83,7 +85,7 @@ pub struct TotalityOracle<'a> {
     fid: FunctionId,
 
     /// `fid`'s value types, used to pick the semantic domain of a verdict (Field vs. U/I, bit
-    /// widths, static array lengths) and to refuse witness-typed shapes. Must be the *pristine*
+    /// widths, static array lengths) and to refuse witness-typed shapes. Must be the _pristine_
     /// typing of the function being planned over: [`FunctionTypeInfo::get_value_type`] panics on
     /// ids it has not seen, so no queried op may mention a value minted after this was computed.
     types: &'a FunctionTypeInfo,
@@ -127,21 +129,23 @@ impl<'a> TotalityOracle<'a> {
     }
 
     /// `true` if evaluating `op` on entry to `block` can neither trap nor emit a rejecting
-    /// constraint on *any* run reaching `block` — the license to place it at a point where it was
+    /// constraint on _any_ run reaching `block` — the license to place it at a point where it was
     /// not bound to execute.
     ///
     /// Every queried operand must be known to the pass's input `TypeInfo` (the caller plans against
     /// the pristine function, so this holds by construction).
     pub fn is_total_at(&self, op: &OpCode, block: BlockId) -> bool {
-        use BinaryArithOpKind::*;
+        use ArithGroup::*;
         match op {
-            OpCode::BinaryArithOp { kind, lhs, rhs, .. } => match kind {
+            OpCode::BinaryArithOp { kind, lhs, rhs, .. } => match kind.group() {
                 And | Or | Xor => true,
                 // Field arithmetic (witness-typed or not) is total; U/I overflow is an error.
                 Add | Sub | Mul => self.value_type(*lhs).peel_witness().is_field(),
-                // A division with *any* witness-typed operand lowers to a constraint-emitting
+                // A division with _any_ witness-typed operand lowers to a constraint-emitting
                 // gadget whose guarded and unguarded shapes differ; never speculated.
-                Div | Mod => !self.is_witness(*lhs) && self.divisor_provably_safe(*rhs, block),
+                Div | Rem => {
+                    !self.is_witness(*lhs) && self.divisor_provably_safe(*kind, *rhs, block)
+                }
                 Shl | Shr => self.shift_amount_in_range(*lhs, *rhs),
             },
             // Multiplication by an interned constant: the same overflow story as `Mul`.
@@ -156,8 +160,7 @@ impl<'a> TotalityOracle<'a> {
                 // engine (`cast_field_to_u64` takes the low limb), it does not trap.
                 CastTarget::Nop
                 | CastTarget::Field
-                | CastTarget::U(_)
-                | CastTarget::I(_)
+                | CastTarget::Int(_)
                 | CastTarget::WitnessOf
                 | CastTarget::ValueOf
                 | CastTarget::ArrayToSlice => true,
@@ -198,16 +201,28 @@ impl<'a> TotalityOracle<'a> {
 
     /// The divisor of a `Div`/`Mod` is provably safe at `block`: nonzero via a constant or the
     /// disequality channel, and free of the `i64::MIN / -1` overflow.
-    fn divisor_provably_safe(&self, divisor: ValueId, block: BlockId) -> bool {
+    fn divisor_provably_safe(
+        &self,
+        kind: BinaryArithOpKind,
+        divisor: ValueId,
+        block: BlockId,
+    ) -> bool {
         if self.is_witness(divisor) {
             return false;
         }
         let field = self.ssa.field();
         let ty = self.value_type(divisor);
 
-        // `div_s64`/`mod_s64` sign-extend to i64, where MIN / -1 overflows. Only 64-bit operands
-        // reach the full i64 range, so narrower signed widths are safe once nonzero.
-        let minus_one_hazard = ty.is_i() && ty.get_bit_size(field) == 64;
+        // `INT_MIN / -1` is a failure at **every** signed width, not just 64. What the operation
+        // owes is set by `divmod_guard::emit_divmod_failure_cond`, which builds the overflow
+        // disjunct from `1 << (bits - 1)` for any `bits` — so an `i8` division by a constant `-1`
+        // can still fail, and speculating it moves that failure onto a path that did not have it.
+        //
+        // This used to be gated on `bits == 64`, reasoning from the VM instead: `div_s64`
+        // sign-extends to i64, where only a 64-bit `MIN / -1` actually overflows. That is a true
+        // statement about `div_s64` and the wrong question — the check the speculation has to
+        // respect is the one mavros emits, not the one the interpreter would trap on.
+        let minus_one_hazard = kind.is_signed();
 
         if let Some(c) = self.cc.const_of(self.fid, divisor) {
             return !constant_is_zero(&c, field) && !(minus_one_hazard && constant_is_all_ones(&c));
@@ -245,12 +260,13 @@ impl<'a> TotalityOracle<'a> {
         amount < lhs_ty.get_bit_size(self.ssa.field()) as u128
     }
 
-    /// The index is a constant strictly below a *static* array length.
+    /// The index is a constant strictly below a _static_ array length.
     ///
-    /// Slices have no static length and witness-typed accesses lower to constraint-emitting gadgets
-    /// — both refused.
+    /// Slices have no static length and a witness-typed *index* lowers to a constraint-emitting
+    /// gadget — both refused. The array itself is never consulted for witness-ness: container
+    /// tops carry no taint, so it cannot be witness-typed.
     fn const_index_in_bounds(&self, array: ValueId, index: ValueId) -> bool {
-        if self.is_witness(array) || self.is_witness(index) {
+        if self.is_witness(index) {
             return false;
         }
         let arr_ty = self.value_type(array);
@@ -272,12 +288,12 @@ impl<'a> TotalityOracle<'a> {
 
 /// Where the oracle reads a value's witness-ness from.
 ///
-/// Four verdicts gate on witness-ness because the op's *witness* lowering emits rejecting
+/// Four verdicts gate on witness-ness because the op's _witness_ lowering emits rejecting
 /// constraints its pure lowering does not (`Div`/`Mod` gadgets, shift decompositions, array-access
 /// gadgets). Post-untaint that is a type property (`TypeExpr::WitnessOf`); pre-untaint those types
 /// do not exist yet, and reading them would silently answer "pure" for every value — licensing
 /// unsound speculation. A pre-untaint caller must instead supply the taint approximation
-/// ([`ApproximateWitnessTaint`]), which answers the same question about every *future*
+/// ([`ApproximateWitnessTaint`]), which answers the same question about every _future_
 /// specialization.
 pub enum WitnessnessSource<'a> {
     /// Post-untaint: witness-ness is baked into the types the oracle already holds.
@@ -293,8 +309,7 @@ pub enum WitnessnessSource<'a> {
 /// The zero constant of a scalar type, or `None` for non-scalar types.
 fn zero_constant_of(ty: &Type, field: FieldConfig) -> Option<Constant> {
     match &ty.expr {
-        TypeExpr::U(bits) => Some(Constant::U(*bits, 0)),
-        TypeExpr::I(bits) => Some(Constant::I(*bits, 0)),
+        TypeExpr::Int(bits) => Some(Constant::Int(*bits, 0)),
         TypeExpr::Field => Some(Constant::Field(field.zero())),
         _ => None,
     }
@@ -303,7 +318,7 @@ fn zero_constant_of(ty: &Type, field: FieldConfig) -> Option<Constant> {
 /// `true` if `c` is the zero of its scalar domain (`FnPtr`/`Blob` constants have none).
 fn constant_is_zero(c: &Constant, field: FieldConfig) -> bool {
     match c {
-        Constant::U(_, v) | Constant::I(_, v) => *v == 0,
+        Constant::Int(_, v) => *v == 0,
         Constant::Field(f) => *f == field.zero(),
         Constant::FnPtr(_) | Constant::Blob(_) => false,
     }
@@ -313,7 +328,7 @@ fn constant_is_zero(c: &Constant, field: FieldConfig) -> bool {
 /// signed constant.
 fn constant_is_all_ones(c: &Constant) -> bool {
     match c {
-        Constant::U(bits, v) | Constant::I(bits, v) => {
+        Constant::Int(bits, v) => {
             let mask = if *bits >= 128 {
                 u128::MAX
             } else {
@@ -328,7 +343,7 @@ fn constant_is_all_ones(c: &Constant) -> bool {
 /// The raw bit pattern of an integer constant, or `None` for the non-integer variants.
 fn constant_as_u128(c: &Constant) -> Option<u128> {
     match c {
-        Constant::U(_, v) | Constant::I(_, v) => Some(*v),
+        Constant::Int(_, v) => Some(*v),
         Constant::Field(_) | Constant::FnPtr(_) | Constant::Blob(_) => None,
     }
 }

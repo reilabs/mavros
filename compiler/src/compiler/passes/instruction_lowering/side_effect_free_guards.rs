@@ -3,7 +3,7 @@
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
     ssa::hlssa::{
-        BinaryArithOpKind, OpCode, TypeExpr,
+        ArithGroup, OpCode, TypeExpr,
         builder::{HLBlockEmitter, HLEmitter},
     },
     util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
@@ -41,28 +41,17 @@ impl LowerSideEffectFreeGuards {
     fn can_drop_guard(&self, op: &OpCode, type_info: &FunctionTypeInfo) -> bool {
         match op {
             OpCode::Cmp { .. } => true,
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add | BinaryArithOpKind::Sub | BinaryArithOpKind::Mul,
-                lhs,
-                ..
-            } => {
-                matches!(
+            // Sign-blind by construction: what makes an `Add` droppable is that field addition
+            // cannot fail, and what makes a `Div` undroppable is that a zero divisor can — neither
+            // depends on how the operands are read.
+            OpCode::BinaryArithOp { kind, lhs, .. } => match kind.group() {
+                ArithGroup::Add | ArithGroup::Sub | ArithGroup::Mul => matches!(
                     type_info.get_value_type(*lhs).strip_witness().expr,
                     TypeExpr::Field
-                )
-            }
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::And | BinaryArithOpKind::Or | BinaryArithOpKind::Xor,
-                ..
-            } => true,
-            OpCode::BinaryArithOp {
-                kind:
-                    BinaryArithOpKind::Div
-                    | BinaryArithOpKind::Mod
-                    | BinaryArithOpKind::Shl
-                    | BinaryArithOpKind::Shr,
-                ..
-            } => false,
+                ),
+                ArithGroup::And | ArithGroup::Or | ArithGroup::Xor => true,
+                ArithGroup::Div | ArithGroup::Rem | ArithGroup::Shl | ArithGroup::Shr => false,
+            },
             OpCode::Cast { .. }
             | OpCode::SExt { .. }
             | OpCode::BitRange { .. }
@@ -88,6 +77,11 @@ impl LowerSideEffectFreeGuards {
             | OpCode::Todo { .. } => true,
             OpCode::ToBits { value, .. } => !type_info.get_value_type(*value).is_witness_of(),
             OpCode::ToRadix { value, .. } => !type_info.get_value_type(*value).is_witness_of(),
+            // Guard-elision judgment, not liveness. A pop from empty or an OOB insert/remove fails,
+            // so running one unconditionally would fail a world whose guard is off.
+            OpCode::SlicePop { .. } | OpCode::SliceInsert { .. } | OpCode::SliceRemove { .. } => {
+                false
+            }
             OpCode::Store { .. }
             | OpCode::Assert { .. }
             | OpCode::AssertCmp { .. }

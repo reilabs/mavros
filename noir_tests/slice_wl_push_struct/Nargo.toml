@@ -1,0 +1,6 @@
+[package]
+name = "slice_wl_push_struct"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -20,11 +20,12 @@ use crate::{
         passes::shared::divmod_guard::{
             divmod_can_fail, divmod_provably_defined, emit_divmod_is_defined_assert,
         },
+        passes::shared::seq_bounds::{SeqBoundsCheck, emit_bounds_assert, failable_bounds},
         ssa::{
             BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
-                BinaryArithOpKind, CallTarget, Constant, HLFunction, HLSSA, LocatedOpCode, OpCode,
-                builder::HLEmitter,
+                ArithGroup, BinaryArithOpKind, CallTarget, Constant, HLFunction, HLSSA,
+                LocatedOpCode, OpCode, builder::HLEmitter,
             },
         },
         util::ice_non_elided_tuple,
@@ -33,10 +34,10 @@ use crate::{
 
 /// An [`HLEmitter`] that appends into a plain instruction vector.
 ///
-/// DCE's sweep builds each block's new instruction list by hand rather than through a
-/// `HLBlockEmitter`, but the divmod check has to be built exactly the way every other pass builds
-/// it (see [`crate::compiler::passes::shared::divmod_guard`]). This adapter bridges the two so
-/// there is only ever one definition of the check.
+/// DCE's sweep builds each block's new instruction list by hand rather than using `HLBlockEmitter`,
+/// but a partial op's failure check has to be built exactly the way every other pass builds it (see
+/// [`crate::compiler::passes::shared`]'s `divmod_guard` and `seq_bounds`). This adapter bridges the
+/// two so there is only ever one definition of each check.
 struct VecEmitter<'a, 'b> {
     ssa: &'a HLSSA,
     out: &'b mut Vec<LocatedOpCode>,
@@ -66,20 +67,21 @@ impl HLEmitter for VecEmitter<'_, '_> {
     }
 }
 
-/// The operands of an unguarded `Div`/`Mod`, which is the only instruction DCE may not simply
-/// delete when its result goes dead.
+/// The operands of an unguarded `Div`/`Mod`, which with the failable sequence ops are the
+/// instructions DCE may not simply delete when their results go dead.
 ///
 /// Deliberately matches only at the top level: a `Guard`-wrapped division must keep today's
-/// behaviour, because inside an inactive branch it is required *not* to fail and
+/// behavior, because inside an inactive branch it is required _not_ to fail and
 /// `lower_divmod_guard` already encodes that.
-fn unguarded_divmod_operands(instruction: &OpCode) -> Option<(ValueId, ValueId)> {
+fn unguarded_divmod_operands(
+    instruction: &OpCode,
+) -> Option<(BinaryArithOpKind, ValueId, ValueId)> {
     match instruction {
-        OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Div | BinaryArithOpKind::Mod,
-            lhs,
-            rhs,
-            ..
-        } => Some((*lhs, *rhs)),
+        OpCode::BinaryArithOp { kind, lhs, rhs, .. }
+            if matches!(kind.group(), ArithGroup::Div | ArithGroup::Rem) =>
+        {
+            Some((*kind, *lhs, *rhs))
+        }
         _ => None,
     }
 }
@@ -112,19 +114,67 @@ pub struct Config {
     /// blocks.
     pub preserve_all_blocks: bool,
 
-    /// Whether an unguarded `Div`/`Mod` whose quotient is dead is replaced by its failure check
-    /// instead of being deleted outright.
+    /// Whether an unguarded partial op — a failable `Div`/`Mod`, or a
+    /// `SlicePop`/`SliceInsert`/`SliceRemove` — whose results are dead is replaced by its failure
+    /// check instead of being deleted outright.
     ///
     /// **Only ever true before witness lowering**. From `spill_witness` onward the IR also contains
-    /// divisions the compiler generated itself — `lower_unsigned_divmod` computes its quotient and
-    /// remainder *hints* with ordinary `Div`/`Mod` on `value_of(..)` operands. Those are not user
-    /// divisions and carry no Noir-level failure semantics; the guarded path even substitutes a
+    /// partial ops the compiler generated itself — `lower_unsigned_divmod` computes its quotient
+    /// and remainder *hints* with ordinary `Div`/`Mod` on `value_of(..)` operands. Those are not
+    /// user ops and carry no Noir-level failure semantics; the guarded path even substitutes a
     /// divisor of `1` on purpose so an inactive branch's hint stays safe.
     ///
-    /// Restricting it this way loses nothing. Every *user* division is present from `initial_ssa`
-    /// onward, so the early runs see them all; and any that survives to `spill_witness` gets its
-    /// check from `LowerPureGuards`, which runs before anything there can kill it.
-    pub rewrite_dead_divmod: bool,
+    /// Restricting it this way loses nothing. Every *user* partial op is present from
+    /// `initial_ssa` onward, so the early runs see them all; and any that survives to
+    /// `spill_witness` gets its check from `LowerPureGuards` or its instruction lowering, which
+    /// run before anything there can kill it.
+    pub rewrite_dead_partial_ops: bool,
+
+    /// Whether an `ArraySet` on a fixed-length array whose result is dead is replaced by its bounds
+    /// check instead of being deleted outright. Reads are excluded on cost grounds, see
+    /// [`SeqBoundsCheck::SeqAccess`].
+    ///
+    /// A witness-indexed array access does not get a bounds check until `LowerWitnessArrayOps`,
+    /// which runs at `driver.rs:484`. Deleting the access before that takes the only thing that
+    /// could ever fail with it, and nothing downstream puts it back; a program whose out-of-range
+    /// write happens to be unread would verify. Rewriting the dead access into the check keeps it.
+    ///
+    /// **Only ever true before witness lowering**. From `spill_witness` onward the IR also holds
+    /// array writes the compiler generated itself (the per-slot `array_set` of every rebuild scan)
+    /// which carry no Noir-level failure semantics, so a check on one is wasted work. Its index is
+    /// a loop counter and its bound the array's static length, so the assert folds away having
+    /// bought nothing. Doing that at every slot of every scan is the cost this avoids.
+    ///
+    /// Restricting it that way keeps the guarantee that matters. A *user* array access is present
+    /// from `initial_ssa` onward and is dead from the start if nothing ever reads it, so the early
+    /// runs see it and leave the check behind as an ordinary `AssertCmp` — which is
+    /// `is_initially_live`, so every later run preserves it.
+    ///
+    /// What is **not** covered is an access that is live pre-untaint and only becomes dead
+    /// afterwards; that is the same residual the divmod rewrite carries, and closing it needs a
+    /// check emitted before `driver.rs:480` rather than a different DCE configuration.
+    ///
+    /// Cheap where it does not matter: a check on an in-range constant index folds away downstream,
+    /// and with a pure index and no guard `LowerWitnessAssertOps` leaves the `AssertCmp` alone, so
+    /// it stays a witness-generation-time check and costs no R1CS row.
+    ///
+    /// This mirrors Noir, which re-inserts the bounds check when DIE drops an unused array access
+    /// rather than losing it (`ssa/opt/die.rs`, `insert_out_of_bounds_checks`).
+    ///
+    /// A witness-*conditional* dead write is covered, and needs nothing extra from
+    /// `failable_bounds` matching only at the top level. Every run that rewrites is pre-untaint —
+    /// each `Config::preserve_blocks()` site is in `make_struct_access_static` or `pre_wti` — while
+    /// `Guard` is introduced by `untaint_control_flow`, whose own type-application step panics on
+    /// any it meets on input. So a rewriting run never sees a guarded access in the first place: at
+    /// that point the condition is still ordinary control flow, the `AssertCmp` lands in the branch
+    /// block, and untaint predicates it along with everything else there. That is what keeps the
+    /// guard-off world satisfiable rather than rejecting on an index it never uses; both worlds are
+    /// pinned by `array_witness_set_dead_guarded_{true,false}`.
+    ///
+    /// The top-level match would only need revisiting to close the residual above, since *there*
+    /// the dead access is `Guard`-wrapped and the assert would have to be re-wrapped in the same
+    /// condition to keep an inactive branch from failing.
+    pub rewrite_dead_seq_access: bool,
 }
 
 impl Config {
@@ -132,7 +182,8 @@ impl Config {
         Self {
             witness_shape_frozen: false,
             preserve_all_blocks: false,
-            rewrite_dead_divmod: false,
+            rewrite_dead_partial_ops: false,
+            rewrite_dead_seq_access: false,
         }
     }
 
@@ -140,17 +191,20 @@ impl Config {
         Self {
             witness_shape_frozen: true,
             preserve_all_blocks: false,
-            rewrite_dead_divmod: false,
+            rewrite_dead_partial_ops: false,
+            rewrite_dead_seq_access: false,
         }
     }
 
     /// The pre-untaint configuration, used by the phases that still hold purely user-level IR.
-    /// This is the only one that rewrites dead divisions — see [`Config::rewrite_dead_divmod`].
+    /// This is the only one that rewrites dead partial ops — see
+    /// [`Config::rewrite_dead_partial_ops`].
     pub fn preserve_blocks() -> Self {
         Self {
             witness_shape_frozen: false,
             preserve_all_blocks: true,
-            rewrite_dead_divmod: true,
+            rewrite_dead_partial_ops: true,
+            rewrite_dead_seq_access: true,
         }
     }
 }
@@ -174,13 +228,13 @@ impl DCE {
         Self { config }
     }
 
-    /// Whether this run may replace a dead unguarded `Div`/`Mod` with its failure check.
-    fn rewrites_dead_divmod(&self) -> bool {
+    /// Whether this run may replace a dead unguarded partial op with its failure check.
+    fn rewrites_dead_partial_ops(&self) -> bool {
         debug_assert!(
-            !(self.config.rewrite_dead_divmod && self.config.witness_shape_frozen),
-            "rewriting dead divisions would add constraints after the witness shape is frozen"
+            !(self.config.rewrite_dead_partial_ops && self.config.witness_shape_frozen),
+            "rewriting dead partial ops would add constraints after the witness shape is frozen"
         );
-        self.config.rewrite_dead_divmod
+        self.config.rewrite_dead_partial_ops
     }
 
     /// Whether a dead unguarded `Div`/`Mod` still has to leave its failure check behind.
@@ -191,27 +245,69 @@ impl DCE {
     /// mark phase consults this too. Keeping the check would otherwise resurrect the entire chain
     /// that computes the operands, purely to assert something already known.
     ///
-    /// The type this asks about is the *stripped* operand type, matching `LowerPureGuards`.
+    /// The type this asks about is the _stripped_ operand type, matching `LowerPureGuards`.
+    ///
+    /// `None` means [`Config::rewrite_dead_partial_ops`] is off: the ranges are only calculated
+    /// when the flag is set. This avoids being able to turn it back on by accident.
     fn divmod_check_survives(
         &self,
-        analyses: Option<&(TypeInfo, ValueRanges)>,
+        analyses: Option<(&TypeInfo, &ValueRanges)>,
         function_id: FunctionId,
+        kind: BinaryArithOpKind,
         lhs: ValueId,
         rhs: ValueId,
     ) -> bool {
         let Some((types, ranges)) = analyses else {
             return false;
         };
+
         let lhs_type = types.get_function(function_id).get_value_type(lhs);
         if !divmod_can_fail(lhs_type) {
             return false;
         }
+
+        // The division's own signedness. `divmod_guard` takes the resulting flag rather than the
+        // type so that this discharge, the check it elides, and the one the sweep emits below are
+        // all decided by one source.
+        let signed = kind.is_signed();
         let function_ranges = ranges.get_function(function_id);
+
         !divmod_provably_defined(
             &function_ranges.get(lhs),
             &function_ranges.get(rhs),
             lhs_type.peel_witness(),
+            signed,
         )
+    }
+
+    /// Whether this run may replace a dead array access with its bounds check.
+    fn rewrites_dead_seq_access(&self) -> bool {
+        debug_assert!(
+            !(self.config.rewrite_dead_seq_access && self.config.witness_shape_frozen),
+            "rewriting dead array accesses would add constraints after the witness shape is frozen"
+        );
+        debug_assert!(
+            !(self.config.rewrite_dead_seq_access && !self.config.preserve_all_blocks),
+            "rewriting dead array accesses is only sound before witness lowering, where every array access is still a user one — see `Config::rewrite_dead_seq_access`"
+        );
+        self.config.rewrite_dead_seq_access
+    }
+
+    /// Whether either dead-op rewrite is enabled, and so whether the sweep needs type information.
+    fn needs_rewrite_types(&self) -> bool {
+        self.rewrites_dead_partial_ops() || self.rewrites_dead_seq_access()
+    }
+
+    /// Whether this run rewrites this particular dead bounds-checked op. The two families are
+    /// enabled by different flags because they get their checks back at different points in the
+    /// pipeline — see [`Config::rewrite_dead_seq_access`].
+    fn rewrites_bounds_of(&self, check: &SeqBoundsCheck) -> bool {
+        match check {
+            SeqBoundsCheck::Pop { .. }
+            | SeqBoundsCheck::Insert { .. }
+            | SeqBoundsCheck::Remove { .. } => self.rewrites_dead_partial_ops(),
+            SeqBoundsCheck::SeqAccess { .. } => self.rewrites_dead_seq_access(),
+        }
     }
 
     fn is_initially_live(&self, instruction: &OpCode) -> bool {
@@ -246,6 +342,9 @@ impl DCE {
             | OpCode::ArrayGet { .. }
             | OpCode::ArraySet { .. }
             | OpCode::SlicePush { .. }
+            | OpCode::SlicePop { .. }
+            | OpCode::SliceInsert { .. }
+            | OpCode::SliceRemove { .. }
             | OpCode::SliceLen { .. }
             | OpCode::MkSeq { .. }
             | OpCode::MkSeqOfBlob { .. }
@@ -272,19 +371,31 @@ impl DCE {
         // checking whether there is anything to rewrite: finding out would cost a full instruction
         // walk of its own, which is the same order as the analyses it would be guarding.
         //
-        // Both must be computed *here*, before the mark phase, because the discharge below decides
+        // Both must be computed _here_, before the mark phase, because the discharge below decides
         // whether a dead division's operands are seeded live at all — and before anything mutates
         // the module. `Types` walks every instruction in every block, including the dead ones still
         // waiting to be removed, so it has to see the module whole: typing after `retain_constants`
         // panics with "Error running opcode Cast { .. }" the moment a dead instruction's only-use
         // constant has just been pruned out from under it. Nothing between here and the sweep
         // touches the SSA, so running them at the top is strictly safer than running them later.
-        let divmod_analyses: Option<(TypeInfo, ValueRanges)> =
-            self.rewrites_dead_divmod().then(|| {
-                let types = Types::new().run(ssa, cfg);
-                let ranges = ValueRangeAnalysis::new().run(ssa, cfg, &types);
-                (types, ranges)
-            });
+        //
+        // The types serve every rewrite path; only the divmod path consults the ranges, as the
+        // bounds paths have nothing for them to discharge (see the sweep below).
+        let rewrite_types: Option<TypeInfo> = self
+            .needs_rewrite_types()
+            .then(|| Types::new().run(ssa, cfg));
+        let divmod_ranges: Option<ValueRanges> = rewrite_types
+            .as_ref()
+            .filter(|_| self.rewrites_dead_partial_ops())
+            .map(|types| ValueRangeAnalysis::new().run(ssa, cfg, types));
+        let divmod_analyses = rewrite_types.as_ref().zip(divmod_ranges.as_ref());
+
+        debug_assert_eq!(
+            divmod_analyses.is_some(),
+            self.rewrites_dead_partial_ops(),
+            "`divmod_check_survives` reads `None` as 'the divmod rewrite is off'; the two must \
+             agree exactly or it silently re-enables itself"
+        );
 
         let mut definitions_by_function: HashMap<FunctionId, HashMap<ValueId, ValueDefinition>> =
             HashMap::default();
@@ -340,36 +451,60 @@ impl DCE {
                         worklist.push(WorkItem::LiveInstruction(*function_id, *block_id, i));
                     }
 
-                    // An unguarded `Div`/`Mod` keeps its operands alive even when its quotient is
-                    // dead, because the sweep replaces such a division with a check *on those
+                    // An unguarded partial op keeps its operands alive even when its results are
+                    // dead, because the sweep replaces such an op with a check *on those
                     // operands* rather than deleting it. Note this deliberately does not mark the
-                    // division itself live: `live_instructions` staying false for it is precisely
+                    // op itself live: `live_instructions` staying false for it is precisely
                     // the signal the sweep uses to know it should rewrite.
                     //
-                    // Nothing is pessimised for a division that stays: its operands were already
+                    // Nothing is pessimised for an op that stays: its operands were already
                     // live. Where the rewrite does fire, an operand the check turns out not to need
-                    // — `lhs`, for everything but signed — is held live one run longer than it has
-                    // to be, because the seeding runs before there is any type information to tell
-                    // the two cases apart. It goes dead again immediately and the *next* DCE run
-                    // drops it, which at the `pre_wti` site is a later pass in the same phase; at
-                    // the `make_struct_access_static` site (the last pass of that phase) it instead
-                    // carries into the next phase's input, where the first DCE reclaims it.
+                    // — `lhs`, for everything but signed division — is held live one run longer
+                    // than it has to be, because the seeding runs before there is any type
+                    // information to tell the cases apart. It goes dead again immediately and the
+                    // *next* DCE run drops it, which at the `pre_wti` site is a later pass in the
+                    // same phase; at the `make_struct_access_static` site (the last pass of that
+                    // phase) it instead carries into the next phase's input, where the first DCE
+                    // reclaims it.
                     //
                     // A division the range domain proves defined is exempt: no check will be left
                     // behind for it, so holding its operands live would keep the chain that
                     // computes them alive for nothing. This is where most of the saving is — the
                     // sweep only ever *avoids emitting* a few instructions, while the mark phase
-                    // decides whether an entire dependency chain survives.
-                    if let Some((lhs, rhs)) = unguarded_divmod_operands(instruction)
-                        && self.divmod_check_survives(
-                            divmod_analyses.as_ref(),
-                            *function_id,
-                            lhs,
-                            rhs,
-                        )
+                    // decides whether an entire dependency chain survives. There is no matching
+                    // exemption for the sequence bounds below: nothing here can prove such a check
+                    // away, so their operands are always seeded.
+                    if let Some((kind, lhs, rhs)) = unguarded_divmod_operands(instruction)
+                        && self.divmod_check_survives(divmod_analyses, *function_id, kind, lhs, rhs)
                     {
                         worklist.push(WorkItem::LiveValue(*function_id, lhs));
                         worklist.push(WorkItem::LiveValue(*function_id, rhs));
+                    }
+
+                    if self.rewrites_dead_partial_ops()
+                        && let Some(
+                            check @ (SeqBoundsCheck::Pop { .. }
+                            | SeqBoundsCheck::Insert { .. }
+                            | SeqBoundsCheck::Remove { .. }),
+                        ) = failable_bounds(instruction)
+                    {
+                        let (slice, index) = check.operands();
+                        worklist.push(WorkItem::LiveValue(*function_id, slice));
+                        if let Some(index) = index {
+                            worklist.push(WorkItem::LiveValue(*function_id, index));
+                        }
+                    }
+
+                    // A dead array write needs only its *index* held live: the bound it is checked
+                    // against comes from the array's type, not from the array value, so the
+                    // container itself and everything feeding it stay collectable. Noir's DIE keeps
+                    // exactly the same operand for the same reason. A slice access needs nothing,
+                    // since the sweep emits no check for one.
+                    if self.rewrites_dead_seq_access()
+                        && let Some(SeqBoundsCheck::SeqAccess { index, .. }) =
+                            failable_bounds(instruction)
+                    {
+                        worklist.push(WorkItem::LiveValue(*function_id, index));
                     }
                 }
 
@@ -613,32 +748,109 @@ impl DCE {
 
                 for (i, mut instruction) in instructions.into_iter().enumerate() {
                     if !self.instruction_live(&live_instructions, function_id, block_id, i) {
-                        // A `Div`/`Mod` whose quotient is dead is the one instruction that must not
-                        // vanish. Noir treats a bad division as an execution failure whether or not
-                        // anything reads the quotient, and mavros never sees Noir's SSA-level
-                        // check, so deleting the division here would delete the only thing that
-                        // could ever fail. Replace it with the check alone: the arithmetic still
-                        // goes, which is the whole point of eliminating it.
-                        if let Some((lhs, rhs)) = unguarded_divmod_operands(&instruction)
-                            && self.divmod_check_survives(
-                                divmod_analyses.as_ref(),
-                                function_id,
-                                lhs,
-                                rhs,
-                            )
-                        {
-                            let (types, _) = divmod_analyses.as_ref().expect("checked above");
-                            let lhs_type = types
-                                .get_function(function_id)
-                                .get_value_type(lhs)
-                                .strip_witness()
-                                .clone();
-                            let mut emitter = VecEmitter {
-                                ssa,
-                                out: &mut new_instructions,
-                                location: instruction.location().clone(),
-                            };
-                            emit_divmod_is_defined_assert(&mut emitter, lhs, rhs, &lhs_type);
+                        // The pipeline contract behind [`Config::rewrite_dead_partial_ops`], which
+                        // nothing else enforces: a run that does *not* rewrite must never be the
+                        // one that deletes a failable slice op, because the only other thing that
+                        // ever emits its bounds check is `InstructionLowering::slice_ops`, which
+                        // replaces the op rather than surviving alongside it. Dropping one here
+                        // would silently take the check with it, and an out-of-range witness index
+                        // in a program that never reads the result would verify.
+                        //
+                        // It holds today because every DCE that can still see one of these carries
+                        // `preserve_blocks()` (the two direct runs, plus SCS's and
+                        // `PRE::pre_untaint`'s), untaint runs none, and `slice_ops` is the first
+                        // pass of `witness_spilling`. Moving that lowering later, or adding a
+                        // `pre_r1c()` run before it, breaks the contract — and fails here rather
+                        // than in whichever program happens to have the unread out-of-range op.
+                        //
+                        // Guarded ops are deliberately out of scope, matching `failable_bounds`:
+                        // inside an inactive branch they are required not to fail, so deleting one
+                        // loses nothing. So is `SeqAccess` — its check comes back from
+                        // `LowerWitnessArrayOps` rather than from a lowering of its own, and
+                        // [`Config::rewrite_dead_seq_access`] documents the live-then-dead residual
+                        // that leaves, so a non-rewriting run dropping one is expected.
+                        debug_assert!(
+                            self.rewrites_dead_partial_ops()
+                                || !matches!(
+                                    failable_bounds(&instruction),
+                                    Some(
+                                        SeqBoundsCheck::Pop { .. }
+                                            | SeqBoundsCheck::Insert { .. }
+                                            | SeqBoundsCheck::Remove { .. }
+                                    )
+                                ),
+                            "DCE deleted a failable slice op without leaving its bounds check \
+                             behind: {instruction:?}"
+                        );
+
+                        // A partial op whose results are dead must not vanish. Noir treats a bad
+                        // division and an out-of-bounds slice op as execution failures whether or
+                        // not anything reads the result, and mavros never sees Noir's SSA-level
+                        // check, so deleting the op here would delete the only thing that could
+                        // ever fail. Replace it with the check alone: the arithmetic still goes,
+                        // which is the whole point of eliminating it.
+                        if let Some(types) = rewrite_types.as_ref() {
+                            if let Some((kind, lhs, rhs)) = unguarded_divmod_operands(&instruction)
+                            {
+                                // `divmod_check_survives` subsumes the `divmod_can_fail` type gate
+                                // and additionally lets the range domain discharge the check, in
+                                // which case the division just goes.
+                                if self.divmod_check_survives(
+                                    divmod_analyses,
+                                    function_id,
+                                    kind,
+                                    lhs,
+                                    rhs,
+                                ) {
+                                    // The same resolution the mark phase made for this
+                                    // instruction, so the check that survives there is the check
+                                    // emitted here.
+                                    let signed = kind.is_signed();
+                                    let lhs_type = types
+                                        .get_function(function_id)
+                                        .get_value_type(lhs)
+                                        .strip_witness()
+                                        .clone();
+                                    let mut emitter = VecEmitter {
+                                        ssa,
+                                        out: &mut new_instructions,
+                                        location: instruction.location().clone(),
+                                    };
+                                    emit_divmod_is_defined_assert(
+                                        &mut emitter,
+                                        lhs,
+                                        rhs,
+                                        &lhs_type,
+                                        signed,
+                                    );
+                                }
+                            } else if let Some(check) = failable_bounds(&instruction)
+                                && self.rewrites_bounds_of(&check)
+                            {
+                                // No `can_fail` gate to mirror `divmod_can_fail`: whether a seq op
+                                // is in bounds turns on the index, and for a slice on the *length*,
+                                // neither of which is a type property, so nothing here can decide
+                                // it. The check is always emitted and folds away downstream
+                                // (Click-Cooper knows the constant lengths, `SimplifyAsserts` drops
+                                // the tautologies) whenever the op was in fact total — which is
+                                // also what keeps a constant in-range index free.
+                                let (seq, index) = check.operands();
+                                let function_types = types.get_function(function_id);
+                                let seq_ty = function_types.get_value_type(seq).clone();
+                                let index_ty =
+                                    index.map(|index| function_types.get_value_type(index).clone());
+                                let mut emitter = VecEmitter {
+                                    ssa,
+                                    out: &mut new_instructions,
+                                    location: instruction.location().clone(),
+                                };
+                                emit_bounds_assert(
+                                    &mut emitter,
+                                    &check,
+                                    Some(&seq_ty),
+                                    index_ty.as_ref(),
+                                );
+                            }
                         }
                         continue;
                     }

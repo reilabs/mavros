@@ -10,11 +10,12 @@ use crate::compiler::{
         types::FunctionTypeInfo,
         value_range_analysis::{Interval, field_modulus},
     },
+    passes::instruction_lowering::{InstructionLoweringRule, LoweringContext, integer_bits},
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, MAX_SUPPORTED_SIGNED_BITS,
-            MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type, TypeExpr,
+            ArithGroup, BinaryArithOpKind, CastTarget, CmpKind, MAX_SUPPORTED_UNSIGNED_BITS,
+            OpCode, Type, TypeExpr, assert_signed_op_width,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -23,8 +24,6 @@ use crate::compiler::{
 use mavros_artifacts::FieldConfig;
 use num_bigint::BigInt;
 use num_traits::{One, ToPrimitive};
-
-use super::{InstructionLoweringRule, LoweringContext, integer_bits_and_signedness};
 
 pub struct LowerWitnessBitwiseOps {}
 
@@ -90,17 +89,18 @@ impl LowerWitnessBitwiseOps {
                 value,
                 from_bits,
                 to_bits,
-            } if integer_bits_and_signedness(context.types().get_value_type(*value)).is_some() => {
+            } if integer_bits(context.types().get_value_type(*value)).is_some() => {
                 self.lower_integer_sext(b, context, *result, *value, *from_bits, *to_bits);
                 true
             }
             OpCode::BinaryArithOp {
-                kind: kind @ (BinaryArithOpKind::Shl | BinaryArithOpKind::Shr),
+                kind,
                 result,
                 lhs,
                 rhs,
-            } if context.types().get_value_type(*lhs).is_witness_of()
-                || context.types().get_value_type(*rhs).is_witness_of() =>
+            } if matches!(kind.group(), ArithGroup::Shl | ArithGroup::Shr)
+                && (context.types().get_value_type(*lhs).is_witness_of()
+                    || context.types().get_value_type(*rhs).is_witness_of()) =>
             {
                 self.lower_shift(b, context, None, *kind, *result, *lhs, *rhs);
                 true
@@ -118,12 +118,13 @@ impl LowerWitnessBitwiseOps {
     ) -> bool {
         match op {
             OpCode::BinaryArithOp {
-                kind: kind @ (BinaryArithOpKind::Shl | BinaryArithOpKind::Shr),
+                kind,
                 result,
                 lhs,
                 rhs,
-            } if context.types().get_value_type(*lhs).is_witness_of()
-                || context.types().get_value_type(*rhs).is_witness_of() =>
+            } if matches!(kind.group(), ArithGroup::Shl | ArithGroup::Shr)
+                && (context.types().get_value_type(*lhs).is_witness_of()
+                    || context.types().get_value_type(*rhs).is_witness_of()) =>
             {
                 self.lower_shift(b, context, Some(condition), *kind, *result, *lhs, *rhs);
                 true
@@ -151,8 +152,8 @@ impl LowerWitnessBitwiseOps {
             "bitwise spread width too large for natural-width Spread lowering: {bits}"
         );
 
-        let lhs = b.cast_to(CastTarget::U(bits), lhs);
-        let rhs = b.cast_to(CastTarget::U(bits), rhs);
+        let lhs = b.cast_to(CastTarget::Int(bits), lhs);
+        let rhs = b.cast_to(CastTarget::Int(bits), rhs);
 
         if bits == 1 {
             self.lower_u1_bitwise(b, kind, result, lhs, rhs);
@@ -195,23 +196,23 @@ impl LowerWitnessBitwiseOps {
         lhs: ValueId,
         rhs: ValueId,
     ) {
-        let target = CastTarget::U(1);
+        let target = CastTarget::Int(1);
         let lhs_field = b.cast_to_field(lhs);
         let rhs_field = b.cast_to_field(rhs);
 
         let result_field = match kind {
-            BinaryArithOpKind::And => b.mul(lhs_field, rhs_field),
+            BinaryArithOpKind::And => b.umul(lhs_field, rhs_field),
             BinaryArithOpKind::Or => {
-                let sum = b.add(lhs_field, rhs_field);
-                let product = b.mul(lhs_field, rhs_field);
-                b.sub(sum, product)
+                let sum = b.uadd(lhs_field, rhs_field);
+                let product = b.umul(lhs_field, rhs_field);
+                b.usub(sum, product)
             }
             BinaryArithOpKind::Xor => {
-                let sum = b.add(lhs_field, rhs_field);
+                let sum = b.uadd(lhs_field, rhs_field);
                 let two = b.field_const(b.field().constant(2));
-                let product = b.mul(lhs_field, rhs_field);
-                let two_product = b.mul(two, product);
-                b.sub(sum, two_product)
+                let product = b.umul(lhs_field, rhs_field);
+                let two_product = b.umul(two, product);
+                b.usub(sum, two_product)
             }
             _ => unreachable!(),
         };
@@ -237,7 +238,7 @@ impl LowerWitnessBitwiseOps {
         // FIELD-ASSUMPTION: L4-decompose
         let ones = b.field_const(b.field().two_pow(bits) - b.field().one());
         let value_field = b.cast_to_field(value);
-        let not_value = b.sub(ones, value_field);
+        let not_value = b.usub(ones, value_field);
         b.emit(OpCode::Cast {
             result,
             value: not_value,
@@ -257,10 +258,7 @@ impl LowerWitnessBitwiseOps {
         from_bits: usize,
         to_bits: usize,
     ) {
-        assert!(
-            to_bits <= MAX_SUPPORTED_SIGNED_BITS,
-            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-        );
+        assert_signed_op_width(to_bits, "sign extension");
 
         // The question is whether bit `from_bits - 1` of the encoding is provably clear, so it is
         // asked of the range record rather than of one chosen reading — `SExt`'s source may be
@@ -274,8 +272,8 @@ impl LowerWitnessBitwiseOps {
         let value_field = b.cast_to_field(value);
         // FIELD-ASSUMPTION: L4-decompose
         let extension = b.field_const(b.field().two_pow(to_bits) - b.field().two_pow(from_bits));
-        let offset = b.mul(sign, extension);
-        let extended = b.add(value_field, offset);
+        let offset = b.umul(sign, extension);
+        let extended = b.uadd(value_field, offset);
         b.emit(OpCode::Cast {
             result,
             value: extended,
@@ -285,7 +283,7 @@ impl LowerWitnessBitwiseOps {
 
     /// Lowers a shift with at least one witness operand.
     ///
-    /// An unsigned left-hand side shifted by a *pure* amount keeps its own lowering, which folds
+    /// An unsigned left-hand side shifted by a _pure_ amount keeps its own lowering, which folds
     /// the amount into a constant and is what every shift in the corpus takes today. A signed
     /// left-hand side or a witness amount goes to [`Self::lower_general_shift`], which pays for a
     /// runtime shift-amount decomposition.
@@ -301,8 +299,10 @@ impl LowerWitnessBitwiseOps {
         rhs: ValueId,
     ) {
         let lhs_type = context.types().get_value_type(lhs);
-        let (bits, lhs_signed) = integer_bits_and_signedness(lhs_type)
+        let bits = integer_bits(lhs_type)
             .unwrap_or_else(|| panic!("witness shift on non-integer lhs type {lhs_type:?}"));
+        // The shift's own sign decides which lowering runs.
+        let lhs_signed = kind.is_signed();
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
 
         if !rhs_witness && !lhs_signed {
@@ -314,7 +314,7 @@ impl LowerWitnessBitwiseOps {
 
     /// The pre-existing lowering: an unsigned left-hand side shifted by a pure amount.
     ///
-    /// The `1 << rhs` here is a *pure* `Shl`, which constant-folds later. It has to: `Shl` on a
+    /// The `1 << rhs` here is a _pure_ `Shl`, which constant-folds later. It has to: `Shl` on a
     /// `U(bits)` reaches `hlssa_to_r1cs` only with both operands constant, so this shape is viable
     /// precisely because the amount is not a witness.
     #[allow(clippy::too_many_arguments)]
@@ -329,33 +329,35 @@ impl LowerWitnessBitwiseOps {
         rhs: ValueId,
         bits: usize,
     ) {
-        let one_u = b.u_const(bits, 1);
+        let one_u = b.int_const(bits, 1);
         let factor = b.fresh_value();
         b.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Shl,
+            kind: BinaryArithOpKind::UShl,
             result: factor,
             lhs: one_u,
             rhs,
         });
 
-        match kind {
-            BinaryArithOpKind::Shl => {
+        match kind.group() {
+            ArithGroup::Shl => {
                 let lhs_field = b.cast_to_field(lhs);
                 let factor_field = b.cast_to_field(factor);
-                let shifted = b.mul(lhs_field, factor_field);
+                let shifted = b.umul(lhs_field, factor_field);
                 let value = wrap_shifted_product(b, context, shifted, rhs, bits, guard);
                 b.emit(OpCode::Cast {
                     result,
                     value,
-                    target: CastTarget::U(bits),
+                    target: CastTarget::Int(bits),
                 });
             }
-            BinaryArithOpKind::Shr => {
-                emit_guarded(
-                    b,
+            ArithGroup::Shr => {
+                b.emit_guarded(
                     guard,
                     OpCode::BinaryArithOp {
-                        kind: BinaryArithOpKind::Div,
+                        // The value being divided is `U(bits)` on this path — the signed
+                        // left-hand side goes to `lower_general_shift` — so this is an unsigned
+                        // division, not a re-tagging of the shift's own sign.
+                        kind: BinaryArithOpKind::UDiv,
                         result,
                         lhs,
                         rhs: factor,
@@ -394,14 +396,11 @@ impl LowerWitnessBitwiseOps {
             "the shift-amount check assumes a power-of-two integer width, got {bits}"
         );
         if lhs_signed {
-            assert!(
-                bits <= MAX_SUPPORTED_SIGNED_BITS,
-                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-            );
+            assert_signed_op_width(bits, "shift");
         }
 
         let rhs_type = context.types().get_value_type(rhs);
-        let (rhs_bits, _) = integer_bits_and_signedness(rhs_type)
+        let rhs_bits = integer_bits(rhs_type)
             .unwrap_or_else(|| panic!("witness shift by a non-integer amount type {rhs_type:?}"));
         let amount_bits = bits.trailing_zeros() as usize;
 
@@ -409,14 +408,17 @@ impl LowerWitnessBitwiseOps {
         let amount = extract_amount_bits(b, rhs, rhs_bits, amount_bits);
         let factor = build_shift_factor(b, &amount);
 
-        match (kind, lhs_signed) {
-            (BinaryArithOpKind::Shl, _) => self.lower_shl(
-                b, context, guard, result, lhs, rhs, factor, bits, lhs_signed,
-            ),
-            (BinaryArithOpKind::Shr, false) => {
+        match (kind.group(), lhs_signed) {
+            // `Shl` is the one shift that takes no sign: the shifted product is wrapped and then
+            // reinterpreted at `bits`, which is the same bit pattern under either reading. The
+            // match arm was already sign-agnostic; now the callee is too.
+            (ArithGroup::Shl, _) => {
+                self.lower_shl(b, context, guard, result, lhs, rhs, factor, bits)
+            }
+            (ArithGroup::Shr, false) => {
                 self.lower_unsigned_shr(b, guard, result, lhs, factor, bits)
             }
-            (BinaryArithOpKind::Shr, true) => self.lower_signed_shr(
+            (ArithGroup::Shr, true) => self.lower_signed_shr(
                 b,
                 context,
                 guard,
@@ -448,19 +450,14 @@ impl LowerWitnessBitwiseOps {
         rhs: ValueId,
         factor: ValueId,
         bits: usize,
-        signed: bool,
     ) {
         let lhs_field = b.cast_to_field(lhs);
-        let shifted = b.mul(lhs_field, factor);
+        let shifted = b.umul(lhs_field, factor);
         let value = wrap_shifted_product(b, context, shifted, rhs, bits, guard);
         b.emit(OpCode::Cast {
             result,
             value,
-            target: if signed {
-                CastTarget::I(bits)
-            } else {
-                CastTarget::U(bits)
-            },
+            target: CastTarget::Int(bits),
         });
     }
 
@@ -475,12 +472,11 @@ impl LowerWitnessBitwiseOps {
         factor: ValueId,
         bits: usize,
     ) {
-        let factor_u = b.cast_to(CastTarget::U(bits), factor);
-        emit_guarded(
-            b,
+        let factor_u = b.cast_to(CastTarget::Int(bits), factor);
+        b.emit_guarded(
             guard,
             OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Div,
+                kind: BinaryArithOpKind::UDiv,
                 result,
                 lhs,
                 rhs: factor_u,
@@ -490,7 +486,7 @@ impl LowerWitnessBitwiseOps {
 
     /// An arithmetic right shift, as `q + sign * (2^bits - 2^(bits-n))`.
     ///
-    /// `q` is the *unsigned* division of the raw bits, which is the right answer for a non-negative
+    /// `q` is the _unsigned_ division of the raw bits, which is the right answer for a non-negative
     /// value and `2^(bits-n)` too small for a negative one — because `floor((raw - 2^bits) / 2^n) =
     /// q - 2^(bits-n)`, and re-encoding that adds `2^bits` back. So the correction is exactly
     /// `2^bits - 2^(bits-n)`, and it sign-fills as `>>` must: on `i8`, `-4 >> 1` is `126 + 128 =
@@ -509,14 +505,13 @@ impl LowerWitnessBitwiseOps {
         amount_bits: usize,
         bits: usize,
     ) {
-        let raw = b.cast_to(CastTarget::U(bits), lhs);
-        let factor_u = b.cast_to(CastTarget::U(bits), factor);
+        let raw = b.cast_to(CastTarget::Int(bits), lhs);
+        let factor_u = b.cast_to(CastTarget::Int(bits), factor);
         let quotient = b.fresh_value();
-        emit_guarded(
-            b,
+        b.emit_guarded(
             guard,
             OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Div,
+                kind: BinaryArithOpKind::UDiv,
                 result: quotient,
                 lhs: raw,
                 rhs: factor_u,
@@ -530,16 +525,16 @@ impl LowerWitnessBitwiseOps {
                 let cofactor = build_shift_cofactor(b, amount, amount_bits);
                 // FIELD-ASSUMPTION: L4-decompose
                 let two_pow_bits = b.field_const(b.field().two_pow(bits));
-                let fill = b.sub(two_pow_bits, cofactor);
-                let offset = b.mul(sign, fill);
-                b.add(quotient_field, offset)
+                let fill = b.usub(two_pow_bits, cofactor);
+                let offset = b.umul(sign, fill);
+                b.uadd(quotient_field, offset)
             }
         };
 
         b.emit(OpCode::Cast {
             result,
             value,
-            target: CastTarget::I(bits),
+            target: CastTarget::Int(bits),
         });
     }
 }
@@ -547,7 +542,7 @@ impl LowerWitnessBitwiseOps {
 /// Asserts that the shift amount is smaller than the width being shifted.
 ///
 /// Since the width is a power of two, "too large" is just "some bit at or above `log2(bits)` is
-/// set" — and that one test also catches a *negative* amount, whose raw encoding always has its
+/// set" — and that one test also catches a _negative_ amount, whose raw encoding always has its
 /// top bit set and so is at least `2^(rhs_bits-1) >= bits`.
 ///
 /// Guarded, so an inactive guard around an out-of-range shift is vacuous rather than a failure.
@@ -591,8 +586,7 @@ fn emit_shift_amount_check(
     let high_field = b.cast_to_field(high);
     let zero = b.field_const(b.field().zero());
 
-    emit_guarded(
-        b,
+    b.emit_guarded(
         guard,
         OpCode::AssertCmp {
             kind: CmpKind::Eq,
@@ -612,7 +606,7 @@ fn extract_amount_bits(
     (0..amount_bits.min(rhs_bits))
         .map(|i| {
             let bit = b.bit_range(rhs, i, 1);
-            let bit_u1 = b.cast_to(CastTarget::U(1), bit);
+            let bit_u1 = b.cast_to(CastTarget::Int(1), bit);
             b.cast_to_field(bit_u1)
         })
         .collect()
@@ -629,12 +623,12 @@ fn build_shift_factor(b: &mut impl HLEmitter, amount: &[ValueId]) -> ValueId {
     for (i, bit) in amount.iter().enumerate() {
         // FIELD-ASSUMPTION: L4-decompose
         let step = b.field_const(b.field().two_pow(1 << i) - b.field().one());
-        let scaled = b.mul(*bit, step);
-        let term = b.add(one, scaled);
+        let scaled = b.umul(*bit, step);
+        let term = b.uadd(one, scaled);
 
         acc = Some(match acc {
             None => term,
-            Some(acc) => b.mul(acc, term),
+            Some(acc) => b.umul(acc, term),
         });
     }
 
@@ -662,10 +656,10 @@ fn build_shift_cofactor(b: &mut impl HLEmitter, amount: &[ValueId], amount_bits:
     for (i, bit) in amount.iter().enumerate() {
         let full = b.field().two_pow(1 << i);
         let step = b.field_const(full - b.field().one());
-        let scaled = b.mul(*bit, step);
+        let scaled = b.umul(*bit, step);
         let full_const = b.field_const(full);
-        let term = b.sub(full_const, scaled);
-        acc = b.mul(acc, term);
+        let term = b.usub(full_const, scaled);
+        acc = b.umul(acc, term);
     }
     acc
 }
@@ -682,14 +676,14 @@ fn sign_bit_of(
     }
 
     let sign_bits = b.bit_range(value, bits - 1, 1);
-    let sign_u1 = b.cast_to(CastTarget::U(1), sign_bits);
+    let sign_u1 = b.cast_to(CastTarget::Int(1), sign_bits);
 
     Some(b.cast_to_field(sign_u1))
 }
 
 /// The low `bits` bits of `lhs * 2^n`, which is what Noir's `<<` evaluates to.
 ///
-/// **A left shift wraps.** Noir reports a runtime error when the *amount* reaches the width, but a
+/// **A left shift wraps.** Noir reports a runtime error when the _amount_ reaches the width, but a
 /// shift that merely pushes bits off the top truncates: `x << 63` is `0` for `x = 64: u64`
 /// (`execution_success/bit_shifts_comptime`), and `64: i8 << 1` is `-128`
 /// (`execution_success/bit_shifts_runtime`). Mavros' own interpreter already agreed with that; only
@@ -700,7 +694,7 @@ fn sign_bit_of(
 /// to be bounded.** It is tempting to argue that `discarded` needs no rangecheck of its own,
 /// because `product - high * 2^bits` lands in `[0, 2^bits)` for exactly one integer `high` — but
 /// `discarded` is a field element, not an integer. `2^bits` is invertible mod `p`, so without a
-/// bound a prover can pick *any* `wrapped` in `[0, 2^bits)` and solve
+/// bound a prover can pick _any_ `wrapped` in `[0, 2^bits)` and solve
 /// `discarded = (product - wrapped) * (2^bits)^-1`, leaving the shift result entirely unconstrained.
 /// Bounding both is what makes the field identity lift to the integers, and hence unique. This is
 /// the same discipline `bit_range.rs::lower_witness_bit_range` follows for every piece it splits
@@ -712,11 +706,11 @@ fn sign_bit_of(
 /// pays a correspondingly small rangecheck, and an amount provably zero pays nothing at all.
 ///
 /// FIELD-ASSUMPTION: L4-decompose. This needs `lhs * 2^n` not to wrap mod `p` — see
-/// [`product_headroom_or_bail`], which is the precondition *both* paths below are held to — and it
+/// [`product_headroom_or_bail`], which is the precondition _both_ paths below are held to — and it
 /// reads the discarded half through a `U(2 * bits)` intermediate. The second requirement fails at
 /// `bits = 128`, where there is no `U(256)` to decompose the product with; that width therefore
 /// keeps the old trapping rangecheck, which rejects a shift Noir would have wrapped and is wrong in
-/// the same way it has always been wrong. Correcting *that* needs a limb-wise lowering rather than a
+/// the same way it has always been wrong. Correcting _that_ needs a limb-wise lowering rather than a
 /// single field product.
 fn wrap_shifted_product(
     b: &mut HLBlockEmitter<'_>,
@@ -743,24 +737,24 @@ fn wrap_shifted_product(
     }
 
     let pure_product = b.value_of(product);
-    let wide = b.cast_to(CastTarget::U(wide_bits), pure_product);
+    let wide = b.cast_to(CastTarget::Int(wide_bits), pure_product);
     let discarded_hint = b.bit_range(wide, bits, bits);
     let discarded_hint = b.cast_to_field(discarded_hint);
     let discarded = b.write_witness(discarded_hint);
-    // Deliberately *not* `guarded_rangecheck`. Both halves are bounded structurally rather than by
+    // Deliberately _not_ `guarded_rangecheck`. Both halves are bounded structurally rather than by
     // anything the guard controls: `factor` is at most `2^(bits - 1)` however the amount is built,
     // and every guarded failable lowering routes its result through
     // `witness_integer_arith::guarded_or_zero_field`, so `lhs` is inside its declared width even on
     // an inactive path. `product` is therefore below `2^(bits + discarded_bits)` unconditionally and
     // both checks are satisfiable whatever the guard does — which is what lets the result be bounded
     // on every path rather than only on the live one. The `bits = 128` fallback above is the one
-    // lowering that does *not* bound its result this way.
+    // lowering that does _not_ bound its result this way.
     b.rangecheck(discarded, discarded_bits);
 
     // FIELD-ASSUMPTION: L4-decompose
     let two_pow_bits = b.field_const(b.field().two_pow(bits));
-    let overflow = b.mul(discarded, two_pow_bits);
-    let wrapped = b.sub(product, overflow);
+    let overflow = b.umul(discarded, two_pow_bits);
+    let wrapped = b.usub(product, overflow);
     b.rangecheck(wrapped, bits);
 
     wrapped
@@ -785,8 +779,8 @@ fn wrap_shifted_product(
 /// has room to spare, which is why this has never fired there.
 ///
 /// So the headroom is a precondition rather than an assumption, and a program that cannot meet it
-/// fails loudly at compile time. That is deliberately *not* how the fallback's other defect is
-/// handled: at `bits = 128` it also *rejects* a shift that should have wrapped, which needs the
+/// fails loudly at compile time. That is deliberately _not_ how the fallback's other defect is
+/// handled: at `bits = 128` it also _rejects_ a shift that should have wrapped, which needs the
 /// limb-wise lowering of wide integer operations (Layer 6, `L6-int-op-strategy` in
 /// `docs/field-agnosticism.md`) and is deferred. A rejection is visible; a wrong answer is not.
 ///
@@ -821,12 +815,12 @@ fn product_fits_field(bits: usize, discarded_bits: usize, field: FieldConfig) ->
 /// `lhs` is below `2^bits` by its own type, so the product is below `2^(bits + n)` and the discarded
 /// half below `2^n`. The amount is capped at `bits - 1` regardless of what the range domain says:
 /// `lower_general_shift` builds its factor from only the low `log2(bits)` bits of the amount, so the
-/// *effective* shift is always in range even when the declared range is not — and when it is not,
+/// _effective_ shift is always in range even when the declared range is not — and when it is not,
 /// the guarded amount check is what rejects the program.
 ///
 /// ⊥ falls back to the cap rather than measuring as a zero-bit amount. `Interval::empty` is `[1, 0]`,
 /// so its `hi` is a perfectly plausible-looking `0` — and answering `0` here does not merely narrow
-/// a check, it makes [`wrap_shifted_product`] skip the truncation *and both* of its rangechecks,
+/// a check, it makes [`wrap_shifted_product`] skip the truncation _and both_ of its rangechecks,
 /// leaving a product that the following `Cast` reinterprets for free. That the analysis believes the
 /// amount unreachable is no evidence: it believes it on the strength of constraints elsewhere in
 /// this same circuit. See the `proves_*` predicates on `Interval`.
@@ -860,8 +854,7 @@ fn guarded_rangecheck(
     guard: Option<ValueId>,
 ) {
     assert!(bits >= 1, "rangecheck width must be at least 1 bit");
-    emit_guarded(
-        b,
+    b.emit_guarded(
         guard,
         OpCode::Rangecheck {
             value,
@@ -870,27 +863,11 @@ fn guarded_rangecheck(
     );
 }
 
-fn emit_guarded(b: &mut HLBlockEmitter<'_>, guard: Option<ValueId>, op: OpCode) {
-    if let Some(condition) = guard {
-        b.emit(OpCode::Guard {
-            condition,
-            inner: Box::new(op),
-        });
-    } else {
-        b.emit(op);
-    }
-}
-
 fn cast_target_for_integer_type(ty: &Type) -> CastTarget {
     match ty.strip_witness().expr {
-        TypeExpr::U(bits) => CastTarget::U(bits),
-        TypeExpr::I(bits) => {
-            assert!(
-                bits <= MAX_SUPPORTED_SIGNED_BITS,
-                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-            );
-            CastTarget::I(bits)
-        }
+        // A `CastTarget` is a raw-bits conversion, so there is one target per width and no sign to
+        // choose. Sign extension is the separate `SExt` opcode.
+        TypeExpr::Int(bits) => CastTarget::Int(bits),
         other => panic!("expected integer type, got {:?}", other),
     }
 }
@@ -905,14 +882,8 @@ fn integer_bits_and_cast(
         .strip_witness()
         .expr
     {
-        TypeExpr::U(bits) => (bits, CastTarget::U(bits)),
-        TypeExpr::I(bits) => {
-            assert!(
-                bits <= MAX_SUPPORTED_SIGNED_BITS,
-                "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-            );
-            (bits, CastTarget::I(bits))
-        }
+        // One target per width, no sign to choose; see `cast_target_for_integer_type`.
+        TypeExpr::Int(bits) => (bits, CastTarget::Int(bits)),
         other => panic!("{context}: expected integer type, got {:?}", other),
     }
 }
@@ -935,14 +906,14 @@ fn lower_word_bitwise(
 ) -> ValueId {
     let lhs_spread = spread_as_field(b, lhs, bits);
     let rhs_spread = spread_as_field(b, rhs, bits);
-    let input_spread_sum = b.add(lhs_spread, rhs_spread);
-    let input_spread_sum = b.cast_to(CastTarget::U(bits as usize * 2), input_spread_sum);
+    let input_spread_sum = b.uadd(lhs_spread, rhs_spread);
+    let input_spread_sum = b.cast_to(CastTarget::Int(bits as usize * 2), input_spread_sum);
     let (and_word, xor_word) = b.unspread(input_spread_sum, bits);
 
     match kind {
         BinaryArithOpKind::And => and_word,
         BinaryArithOpKind::Xor => xor_word,
-        BinaryArithOpKind::Or => b.add(and_word, xor_word),
+        BinaryArithOpKind::Or => b.uadd(and_word, xor_word),
         _ => unreachable!(),
     }
 }
@@ -967,8 +938,8 @@ fn combine_u32_limbs(b: &mut impl HLEmitter, limbs: U64Limbs) -> ValueId {
     let lo = b.cast_to_field(limbs.lo);
     let hi = b.cast_to_field(limbs.hi);
     let shift = b.field_const(b.field().constant(1u128 << 32));
-    let shifted_hi = b.mul(hi, shift);
-    b.add(lo, shifted_hi)
+    let shifted_hi = b.umul(hi, shift);
+    b.uadd(lo, shifted_hi)
 }
 
 fn combine_u64_fields(b: &mut impl HLEmitter, lo: ValueId, hi: ValueId) -> ValueId {
@@ -976,8 +947,8 @@ fn combine_u64_fields(b: &mut impl HLEmitter, lo: ValueId, hi: ValueId) -> Value
     let hi = b.cast_to_field(hi);
     // FIELD-ASSUMPTION: L4-decompose
     let shift = b.field_const(b.field().two_pow(64));
-    let shifted_hi = b.mul(hi, shift);
-    b.add(lo, shifted_hi)
+    let shifted_hi = b.umul(hi, shift);
+    b.uadd(lo, shifted_hi)
 }
 
 fn extract_u128_limbs(b: &mut impl HLEmitter, value: ValueId) -> U128Limbs {
@@ -989,7 +960,7 @@ fn extract_u128_limbs(b: &mut impl HLEmitter, value: ValueId) -> U128Limbs {
 
 fn extract_u128_limb(b: &mut impl HLEmitter, value: ValueId, offset: usize) -> ValueId {
     let limb = b.bit_range(value, offset, 64);
-    b.cast_to(CastTarget::U(64), limb)
+    b.cast_to(CastTarget::Int(64), limb)
 }
 
 fn decompose_u64_input(b: &mut impl HLEmitter, value: ValueId, is_witness: bool) -> U64Limbs {
@@ -1005,7 +976,7 @@ fn decompose_u64_input(b: &mut impl HLEmitter, value: ValueId, is_witness: bool)
 
     U64Limbs {
         lo,
-        hi: b.cast_to(CastTarget::U(32), hi_wit),
+        hi: b.cast_to(CastTarget::Int(32), hi_wit),
     }
 }
 
@@ -1018,15 +989,15 @@ fn extract_u64_limbs(b: &mut impl HLEmitter, value: ValueId) -> U64Limbs {
 
 fn extract_u64_limb(b: &mut impl HLEmitter, value: ValueId, offset: usize) -> ValueId {
     let limb = b.bit_range(value, offset, 32);
-    b.cast_to(CastTarget::U(32), limb)
+    b.cast_to(CastTarget::Int(32), limb)
 }
 
 fn derive_low_u32_limb(b: &mut impl HLEmitter, value: ValueId, hi_field: ValueId) -> ValueId {
     let value_field = b.cast_to_field(value);
     let shift = b.field_const(b.field().constant(1u128 << 32));
-    let shifted_hi = b.mul(hi_field, shift);
-    let lo_field = b.sub(value_field, shifted_hi);
-    b.cast_to(CastTarget::U(32), lo_field)
+    let shifted_hi = b.umul(hi_field, shift);
+    let lo_field = b.usub(value_field, shifted_hi);
+    b.cast_to(CastTarget::Int(32), lo_field)
 }
 
 #[cfg(test)]
@@ -1035,7 +1006,7 @@ mod tests {
 
     #[test]
     fn a_wide_shift_is_refused_exactly_when_its_product_can_wrap_the_field() {
-        // The precondition *both* halves of `wrap_shifted_product` depend on: once `raw * 2^n` can
+        // The precondition _both_ halves of `wrap_shifted_product` depend on: once `raw * 2^n` can
         // pass the modulus, neither a rangecheck on the product nor the truncation identity can
         // tell the residue apart from an honest one. On bn254 (~2^253.5) the boundary sits at
         // `n = 125`.
@@ -1054,7 +1025,7 @@ mod tests {
     #[test]
     fn bottom_does_not_shrink_the_discarded_half() {
         // ⊥ is `[1, 0]`, whose `hi` reads as a plausible zero -- and a zero here is not a narrower
-        // check but *no* check: `wrap_shifted_product` returns the raw product untruncated and the
+        // check but _no_ check: `wrap_shifted_product` returns the raw product untruncated and the
         // following `Cast` reinterprets it for free. The analysis only believes the amount
         // unreachable because of constraints this same circuit emits, so it is not evidence.
         assert_eq!(discarded_width(&Interval::empty(), 32), 31);

@@ -28,10 +28,14 @@ pub trait HLEmitter {
 
     // -- Arithmetic --
 
-    fn add(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+    /// Emit any binary arithmetic operation.
+    ///
+    /// The named helpers below are thin wrappers on this; use it directly when the operation is
+    /// itself a variable, e.g. when a pass is rebuilding an instruction it matched on.
+    fn bin(&mut self, kind: BinaryArithOpKind, lhs: ValueId, rhs: ValueId) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Add,
+            kind,
             result: r,
             lhs,
             rhs,
@@ -39,103 +43,72 @@ pub trait HLEmitter {
         r
     }
 
-    fn sub(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Sub,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+    fn uadd(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::UAdd, lhs, rhs)
     }
 
-    fn mul(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Mul,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+    fn sadd(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::SAdd, lhs, rhs)
     }
 
-    fn div(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Div,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+    fn usub(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::USub, lhs, rhs)
     }
 
-    fn modulo(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Mod,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+    fn ssub(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::SSub, lhs, rhs)
+    }
+
+    fn umul(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::UMul, lhs, rhs)
+    }
+
+    fn smul(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::SMul, lhs, rhs)
+    }
+
+    fn udiv(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::UDiv, lhs, rhs)
+    }
+
+    fn sdiv(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::SDiv, lhs, rhs)
+    }
+
+    fn urem(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::URem, lhs, rhs)
+    }
+
+    fn srem(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::SRem, lhs, rhs)
     }
 
     fn and(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::And,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+        self.bin(BinaryArithOpKind::And, lhs, rhs)
     }
 
     fn or(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Or,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+        self.bin(BinaryArithOpKind::Or, lhs, rhs)
     }
 
     fn xor(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Xor,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+        self.bin(BinaryArithOpKind::Xor, lhs, rhs)
     }
 
-    fn shl(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Shl,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+    fn ushl(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::UShl, lhs, rhs)
     }
 
-    fn shr(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::Shr,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+    fn sshl(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::SShl, lhs, rhs)
+    }
+
+    fn ushr(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::UShr, lhs, rhs)
+    }
+
+    fn sshr(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.bin(BinaryArithOpKind::SShr, lhs, rhs)
     }
 
     fn not(&mut self, value: ValueId) -> ValueId {
@@ -158,25 +131,15 @@ pub trait HLEmitter {
     }
 
     fn eq(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Cmp {
-            kind: CmpKind::Eq,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+        self.cmp(lhs, rhs, CmpKind::Eq)
     }
 
-    fn lt(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit(OpCode::Cmp {
-            kind: CmpKind::Lt,
-            result: r,
-            lhs,
-            rhs,
-        });
-        r
+    fn ult(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.cmp(lhs, rhs, CmpKind::ULt)
+    }
+
+    fn slt(&mut self, lhs: ValueId, rhs: ValueId) -> ValueId {
+        self.cmp(lhs, rhs, CmpKind::SLt)
     }
 
     // -- Casts --
@@ -207,6 +170,18 @@ pub trait HLEmitter {
             target,
         });
         r
+    }
+
+    fn widen_u(&mut self, value: ValueId, from_bits: usize, to_bits: usize) -> ValueId {
+        assert!(
+            from_bits <= to_bits,
+            "widen_u cannot narrow ({from_bits} -> {to_bits} bits)"
+        );
+        if from_bits == to_bits {
+            value
+        } else {
+            self.cast_to(CastTarget::Int(to_bits), value)
+        }
     }
 
     fn cast_to_witness_of(&mut self, value: ValueId) -> ValueId {
@@ -250,12 +225,12 @@ pub trait HLEmitter {
         self.emit_constant(Constant::Field(value.into()))
     }
 
-    fn u_const(&mut self, bits: usize, value: u128) -> ValueId {
-        self.emit_constant(Constant::U(bits, value))
-    }
-
-    fn i_const(&mut self, bits: usize, value: u128) -> ValueId {
-        self.emit_constant(Constant::I(bits, value))
+    /// A constant integer of `bits` raw two's-complement bits.
+    ///
+    /// There is no signed/unsigned pair here because there is no sign to record: what the bits mean
+    /// is decided by the opcode that consumes them.
+    fn int_const(&mut self, bits: usize, value: u128) -> ValueId {
+        self.emit_constant(Constant::Int(bits, value))
     }
 
     // -- Witness --
@@ -421,6 +396,41 @@ pub trait HLEmitter {
             dir,
         });
         r
+    }
+
+    fn slice_pop(&mut self, slice: ValueId, dir: SliceOpDir) -> (ValueId, ValueId) {
+        let result_slice = self.fresh_value();
+        let result_elem = self.fresh_value();
+        self.emit(OpCode::SlicePop {
+            dir,
+            result_slice,
+            result_elem,
+            slice,
+        });
+        (result_slice, result_elem)
+    }
+
+    fn slice_insert(&mut self, slice: ValueId, index: ValueId, value: ValueId) -> ValueId {
+        let result = self.fresh_value();
+        self.emit(OpCode::SliceInsert {
+            result,
+            slice,
+            index,
+            value,
+        });
+        result
+    }
+
+    fn slice_remove(&mut self, slice: ValueId, index: ValueId) -> (ValueId, ValueId) {
+        let result_slice = self.fresh_value();
+        let result_elem = self.fresh_value();
+        self.emit(OpCode::SliceRemove {
+            result_slice,
+            result_elem,
+            slice,
+            index,
+        });
+        (result_slice, result_elem)
     }
 
     fn slice_len(&mut self, slice: ValueId) -> ValueId {
@@ -695,11 +705,27 @@ impl HLEmitter for HLBlockEmitter<'_> {
 }
 
 impl HLBlockEmitter<'_> {
+    pub(crate) fn unwrap_guard(instruction: &OpCode) -> (Option<ValueId>, &OpCode) {
+        match instruction {
+            OpCode::Guard { condition, inner } => (Some(*condition), inner.as_ref()),
+            other => (None, other),
+        }
+    }
+
+    pub(crate) fn emit_guarded(&mut self, guard: Option<ValueId>, op: OpCode) {
+        match guard {
+            Some(condition) => self.emit(OpCode::Guard {
+                condition,
+                inner: Box::new(op),
+            }),
+            None => self.emit(op),
+        }
+    }
+
     pub(crate) fn default_value(&mut self, typ: &Type) -> ValueId {
         match &typ.expr {
             TypeExpr::Field => self.field_const(0u64),
-            TypeExpr::U(size) => self.u_const(*size, 0),
-            TypeExpr::I(size) => self.i_const(*size, 0),
+            TypeExpr::Int(size) => self.int_const(*size, 0),
             TypeExpr::WitnessOf(inner) => {
                 let inner_default = self.default_value(inner);
                 self.cast_to_witness_of(inner_default)
@@ -749,10 +775,45 @@ impl HLBlockEmitter<'_> {
         results[0]
     }
 
+    /// [`Self::build_array_loop`], threading one extra accumulator through the same loop.
+    ///
+    /// `body` receives the current `u32` index and the accumulator, and returns the value to store
+    /// at that index together with the updated accumulator. Use this when a per-slot quantity has
+    /// to be folded across the whole scan: this is a real SSA loop, not an unrolled one, so a value
+    /// computed inside `body` is not otherwise reachable from outside it.
+    ///
+    /// When `len == 0` there is no loop to run, so `acc_init` comes straight back out — a caller
+    /// folding over the slots gets the identity it started with, which is the right answer for an
+    /// empty scan.
+    pub fn build_array_loop_with_acc(
+        &mut self,
+        len: usize,
+        elem_type: Type,
+        acc: (ValueId, Type),
+        body: impl FnOnce(&mut Self, ValueId, ValueId) -> (ValueId, ValueId),
+    ) -> (ValueId, ValueId) {
+        let (acc_init, acc_type) = acc;
+        let initial = self.default_array(&elem_type, len);
+        if len == 0 {
+            return (initial, acc_init);
+        }
+        let array_type = elem_type.clone().array_of(len);
+        let results = self.build_counted_loop(
+            len,
+            vec![(initial, array_type), (acc_init, acc_type)],
+            |emitter, index, accs| {
+                let (value, next_acc) = body(emitter, index, accs[1]);
+                let updated = emitter.array_set(accs[0], index, value);
+                vec![updated, next_acc]
+            },
+        );
+        (results[0], results[1])
+    }
+
     /// Build a counted loop: `for i in 0..len { body(i, accumulators) -> updated_accumulators }`
     ///
-    /// Wrapper around `build_loop` that handles the u32 index, condition (`i < len`),
-    /// and increment (`i + 1`). Returns only the accumulator values at loop exit.
+    /// Wrapper around `build_loop` that handles the u32 index, condition (`i < len`), and increment
+    /// (`i + 1`). Returns only the accumulator values at loop exit.
     pub fn build_counted_loop(
         &mut self,
         len: usize,
@@ -760,22 +821,22 @@ impl HLBlockEmitter<'_> {
         body: impl FnOnce(&mut Self, ValueId, &[ValueId]) -> Vec<ValueId>,
     ) -> Vec<ValueId> {
         // Emit constants into current block (before the loop)
-        let const_0 = self.u_const(32, 0);
-        let const_1 = self.u_const(32, 1);
-        let const_len = self.u_const(32, len as u128);
+        let const_0 = self.int_const(32, 0);
+        let const_1 = self.int_const(32, 1);
+        let const_len = self.int_const(32, len as u128);
 
         // Loop params: [index, ...accumulators]
-        let mut params = vec![(const_0, Type::u(32))];
+        let mut params = vec![(const_0, Type::int(32))];
         params.extend(accumulators);
 
         let results = self.build_loop(
             params,
-            |b, loop_params| b.lt(loop_params[0], const_len),
+            |b, loop_params| b.ult(loop_params[0], const_len),
             |emitter, loop_params| {
                 let i_val = loop_params[0];
                 let acc_params = &loop_params[1..];
                 let updated_accs = body(emitter, i_val, acc_params);
-                let next_i = emitter.add(i_val, const_1);
+                let next_i = emitter.uadd(i_val, const_1);
                 let mut result = vec![next_i];
                 result.extend(updated_accs);
                 result
@@ -784,5 +845,149 @@ impl HLBlockEmitter<'_> {
 
         // Skip index, return accumulator results
         results[1..].to_vec()
+    }
+
+    /// Extend a slice with a counted SSA loop, one `push_back` per iteration:
+    /// `for i in acc.len()..end { acc = acc.push_back(body(i)) }`.
+    pub fn build_slice_extend_loop(
+        &mut self,
+        end: ValueId,
+        acc: (ValueId, Type),
+        body: impl FnOnce(&mut Self, ValueId) -> ValueId,
+    ) -> ValueId {
+        let (acc_init, acc_type) = acc;
+        let start = self.slice_len(acc_init);
+        let const_1 = self.int_const(32, 1);
+        let results = self.build_loop(
+            vec![(start, Type::int(32)), (acc_init, acc_type)],
+            |b, params| b.ult(params[0], end),
+            |b, params| {
+                let (i, acc) = (params[0], params[1]);
+                let elem = body(b, i);
+                let pushed = b.slice_push(acc, vec![elem], SliceOpDir::Back);
+                let next_i = b.uadd(i, const_1);
+                vec![next_i, pushed]
+            },
+        );
+        results[1]
+    }
+}
+
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::ssa::SourceLocation;
+    use crate::compiler::ssa::hlssa::HLSSA;
+
+    /// Run `widen_u(from_bits -> to_bits)` on a fresh value; returns the result id, the input
+    /// id, and the emitted instructions.
+    fn widen(from_bits: usize, to_bits: usize) -> (ValueId, ValueId, Vec<LocatedOpCode>) {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let fid = ssa.get_unique_entrypoint_id();
+        let mut function = ssa.take_function(fid);
+        let v = ssa.fresh_value();
+        let mut instrs = Vec::new();
+        let w = {
+            let mut b = HLInstrBuilder::new(
+                &mut function,
+                &mut ssa,
+                &mut instrs,
+                SourceLocation::synthetic("test"),
+            );
+            b.widen_u(v, from_bits, to_bits)
+        };
+        (w, v, instrs)
+    }
+
+    /// The truncation-fix invariant: a narrow comparison operand is brought up with a single
+    /// widening cast (never the wide operand brought down, which truncates and aliases).
+    #[test]
+    fn widen_u_emits_a_single_widening_cast() {
+        let (w, v, instrs) = widen(8, 32);
+        assert_ne!(w, v);
+        assert_eq!(instrs.len(), 1);
+        let (op, _) = instrs.into_iter().next().unwrap().take();
+        match op {
+            OpCode::Cast {
+                result,
+                value,
+                target: CastTarget::Int(32),
+            } => {
+                assert_eq!(value, v);
+                assert_eq!(result, w);
+            }
+            other => panic!("expected a widening cast to u32, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn widen_u_is_the_identity_at_equal_width() {
+        let (w, v, instrs) = widen(32, 32);
+        assert_eq!(w, v);
+        assert!(instrs.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "widen_u cannot narrow")]
+    fn widen_u_refuses_to_narrow() {
+        let _ = widen(32, 8);
+    }
+
+    /// Run `build_array_loop_with_acc` over `len` slots, storing the index at each one and
+    /// counting the slots visited. Returns `(array, accumulator, saw_indices)`.
+    fn array_loop_with_acc(len: usize) -> (ValueId, ValueId, Vec<ValueId>) {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let fid = ssa.get_unique_entrypoint_id();
+        let mut function = ssa.take_function(fid);
+        let entry = function.get_entry_id();
+        let mut builder = HLFunctionBuilder::new(&mut function, &mut ssa);
+        let mut b = builder.test_block(entry);
+
+        let zero = b.int_const(32, 0);
+        let mut seen = Vec::new();
+        let (array, acc) =
+            b.build_array_loop_with_acc(len, Type::int(32), (zero, Type::int(32)), |b, i, acc| {
+                seen.push(i);
+                let one = b.int_const(32, 1);
+                (i, b.uadd(acc, one))
+            });
+        (array, acc, seen)
+    }
+
+    #[test]
+    fn build_array_loop_with_acc_threads_the_accumulator_through_the_loop() {
+        let (array, acc, seen) = array_loop_with_acc(4);
+        // One SSA loop, so the body is built once regardless of the trip count -- the count lives
+        // in the loop, not in the number of emitted bodies.
+        assert_eq!(seen.len(), 1);
+        // The accumulator comes back as the loop's own result, distinct from both the array and
+        // the initial value that was fed in.
+        assert_ne!(acc, array);
+        assert_ne!(acc, seen[0]);
+    }
+
+    #[test]
+    fn build_array_loop_with_acc_returns_the_initial_accumulator_at_zero_length() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let fid = ssa.get_unique_entrypoint_id();
+        let mut function = ssa.take_function(fid);
+        let entry = function.get_entry_id();
+        let mut builder = HLFunctionBuilder::new(&mut function, &mut ssa);
+        let mut b = builder.test_block(entry);
+
+        let init = b.int_const(32, 7);
+        let mut ran = false;
+        let (_, acc) =
+            b.build_array_loop_with_acc(0, Type::int(32), (init, Type::int(32)), |_, i, acc| {
+                ran = true;
+                (i, acc)
+            });
+        // No loop is built, so the body never runs and the caller gets its identity back --
+        // which is what makes an empty scan's fold well defined.
+        assert!(!ran, "the body must not run for a zero-length array");
+        assert_eq!(acc, init);
     }
 }
