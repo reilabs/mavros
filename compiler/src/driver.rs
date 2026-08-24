@@ -52,6 +52,7 @@ use crate::{
             normalize_asserts::NormalizeAsserts,
             partial_redundancy_elimination::PRE,
             prepare_entry_point::PrepareEntryPoint,
+            purify_witness_slices::PurifyWitnessSlices,
             rc_insertion::RCInsertion,
             remove_unreachable_blocks::RemoveUnreachableBlocks,
             remove_unreachable_functions::RemoveUnreachableFunctions,
@@ -281,7 +282,7 @@ impl Driver {
                 // asserted-constant facts. Run pre-WTI: operands are still scalar, so asserted
                 // constants fold away here and never become witnesses/constraints downstream.
                 Box::new(NormalizeAsserts::new()),
-                // Algebraic identities before the fold, because some of them *produce* the
+                // Algebraic identities before the fold, because some of them _produce_ the
                 // constants the fold then propagates — `x - x -> 0` above all. This is the only
                 // pre-untaint Simplifier run, and it has to be here rather than later: the DCE
                 // below is the first that rewrites a dead `Div`/`Mod` into its check, and once a
@@ -344,7 +345,7 @@ impl Driver {
                 // A third Mem2Reg promotes the materialized callee allocs and the now-local caller
                 // allocs that arg promotion exposed.
                 Box::new(Mem2Reg::new()),
-                // Sever array *call boundaries*: expand an array parameter/return whose only
+                // Sever array _call boundaries_: expand an array parameter/return whose only
                 // obstacle to being `Split` is crossing the boundary into per-cell scalars,
                 // reconstructing the array locally on each side.
                 Box::new(ArrayBoundaryExpansion::new()),
@@ -389,6 +390,12 @@ impl Driver {
                 // an aggregate threaded through control flow that is mostly trivial phis (the same
                 // value from every predecessor); collapse them before they reach WTI and codegen.
                 Box::new(TrivialPhiElimination::new()),
+                Box::new(RemoveUnreachableFunctions::new()),
+                // Purify witness-length slices into `(physical, log_len, start)` tuples. Reads
+                // the read-only joined WTI approximation (no specialization — context splitting
+                // happens exactly once, below); the elision cleans up the tuples it introduces.
+                Box::new(PurifyWitnessSlices::new()),
+                Box::new(ElideTuples::new()),
                 Box::new(RemoveUnreachableFunctions::new()),
             ],
         )
@@ -450,6 +457,9 @@ impl Driver {
             "witness_spilling".to_string(),
             self.draw_cfg,
             vec![
+                // Lower the remaining (pure-length) slice pops/inserts/removes. The
+                // witness-length ones were already rewritten by `PurifyWitnessSlices`.
+                Box::new(InstructionLowering::slice_ops()),
                 Box::new(InstructionLowering::pure_guards()),
                 Box::new(InstructionLowering::witness_memory_ops()),
                 Box::new(FixDoubleJumps::new()),
@@ -480,6 +490,7 @@ impl Driver {
                 Box::new(SimplifyAsserts::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(InstructionLowering::witness_array_access()),
+                Box::new(InstructionLowering::slice_select()),
                 Box::new(InstructionLowering::witness_integer_ops()),
                 // After the last pre-spilling lowering, run cleanup twice
                 // back-to-back. The first round exposes folds/dedup opportunities
@@ -870,7 +881,7 @@ fn const_contains_fn_ptr(constant: &Constant) -> bool {
     match constant {
         Constant::FnPtr(_) => true,
         Constant::Blob(blob) => blob.elements.iter().any(const_contains_fn_ptr),
-        Constant::U(..) | Constant::I(..) | Constant::Field(_) => false,
+        Constant::Int(..) | Constant::Field(_) => false,
     }
 }
 
@@ -898,18 +909,27 @@ mod tests {
                     sign: Sign::Unsigned,
                     width: 32,
                 },
-                Type::u(32),
+                Type::int(32),
             ),
             (
                 AbiType::Integer {
                     sign: Sign::Signed,
                     width: 64,
                 },
-                Type::i(64),
+                Type::int(64),
             ),
-            (AbiType::Boolean, Type::u(1)),
+            // Same width, opposite sign. Both map to `Type::int(32)` because the HLSSA type has no
+            // sign left to carry.
+            (
+                AbiType::Integer {
+                    sign: Sign::Signed,
+                    width: 32,
+                },
+                Type::int(32),
+            ),
+            (AbiType::Boolean, Type::int(1)),
             // A Noir `str<12>` lowers to an array of 12 bytes.
-            (AbiType::String { length: 12 }, Type::u(8).array_of(12)),
+            (AbiType::String { length: 12 }, Type::int(8).array_of(12)),
             (
                 AbiType::Array {
                     length: 4,
@@ -932,7 +952,7 @@ mod tests {
                         ),
                     ],
                 },
-                Type::tuple_of(vec![Type::field(), Type::u(1).array_of(2)]),
+                Type::tuple_of(vec![Type::field(), Type::int(1).array_of(2)]),
             ),
             // Nesting: array of tuples.
             (
@@ -948,7 +968,7 @@ mod tests {
                         ],
                     }),
                 },
-                Type::tuple_of(vec![Type::field(), Type::u(8)]).array_of(3),
+                Type::tuple_of(vec![Type::field(), Type::int(8)]).array_of(3),
             ),
             // WitnessOf is transparent on the HLSSA side; the ABI never sees it.
             (AbiType::Field, Type::witness_of(Type::field())),
@@ -1010,8 +1030,8 @@ mod tests {
                         width: 8,
                     }),
                 }),
-                vec![Type::u(1)],
-                vec![Type::u(8).array_of(3)],
+                vec![Type::int(1)],
+                vec![Type::int(8).array_of(3)],
             ),
         ];
         for (abi_params, abi_return, hlssa_params, hlssa_returns) in cases {
@@ -1021,6 +1041,40 @@ mod tests {
                 PrepareEntryPoint::entry_blob_field_count(&hlssa_params, &hlssa_returns),
                 "blob size mismatch for ABI {:?} vs HLSSA ({hlssa_params:?}, {hlssa_returns:?})",
                 (&abi.parameters, &abi.return_type),
+            );
+        }
+    }
+
+    /// The ABI keeps a [`Sign`] that the HLSSA type no longer has, so the two sides now disagree
+    /// about how many things an integer type _is_ -- two on one side, one on the other. That is
+    /// only safe while the sign makes no difference to the flattened width, which is what this
+    /// pins.
+    ///
+    /// It cannot fail today: `Type::int` takes no sign, so both rows below build the same value and
+    /// the assertion is a tautology on the HLSSA side. Its job is on the ABI side and in the
+    /// future -- `count_abi_type_elements` matches `AbiType::Integer { .. }` with the sign bound to
+    /// a wildcard, and a later reader who narrows that pattern to consult the sign would silently
+    /// resize the protected column block for exactly half of all integer parameters.
+    #[test]
+    fn the_two_signs_flatten_to_the_same_width() {
+        for width in [1u32, 8, 32, 64] {
+            let unsigned = AbiType::Integer {
+                sign: Sign::Unsigned,
+                width,
+            };
+            let signed = AbiType::Integer {
+                sign: Sign::Signed,
+                width,
+            };
+            assert_eq!(
+                count_abi_type_elements(&unsigned),
+                count_abi_type_elements(&signed),
+                "the ABI's two signs disagree on the flattened width at {width} bits",
+            );
+            assert_eq!(
+                count_abi_type_elements(&signed),
+                PrepareEntryPoint::flattened_field_count(&Type::int(width as usize)),
+                "signed ABI integer disagrees with the sign-free HLSSA type at {width} bits",
             );
         }
     }

@@ -112,8 +112,7 @@ impl LowerGuards {
     fn default_value(emitter: &mut HLBlockEmitter<'_>, ty: &Type) -> ValueId {
         match &ty.expr {
             TypeExpr::Field => emitter.field_const(emitter.field().constant(0u64)),
-            TypeExpr::U(bits) => emitter.u_const(*bits, 0),
-            TypeExpr::I(bits) => emitter.i_const(*bits, 0),
+            TypeExpr::Int(bits) => emitter.int_const(*bits, 0),
             TypeExpr::WitnessOf(inner) => {
                 let inner_val = Self::default_value(emitter, inner);
                 emitter.cast_to(CastTarget::WitnessOf, inner_val)

@@ -34,9 +34,9 @@
     "flake.lock",
     "noir_examples/**/*.md",
     "noir_examples/**/*.toml",
-    "noir_compile_failure_tests/**/*.md",
-    "noir_compile_failure_tests/**/*.toml",
-    "noir_compile_failure_tests/**/*.yaml",
+    "noir_failure_tests/**/*.md",
+    "noir_failure_tests/**/*.toml",
+    "noir_failure_tests/**/*.yaml",
     "noir_tests/**/*.md",
     "noir_tests/**/*.toml",
     "tmp/*"

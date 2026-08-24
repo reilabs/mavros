@@ -1,6 +1,6 @@
 //! Taint positions, used as the nodes of the `≥` graph.
 //!
-//! Witness-ness is tracked per *level* of a type. A [`Position`] names one such level as
+//! Witness-ness is tracked per _level_ of a type. A [`Position`] names one such level as
 //! `(owner, path)`, where `path` descends through `Deref` (a `Ref` pointee) and `Elem` (an
 //! `Array`/`Slice` element).
 //!
@@ -77,6 +77,9 @@ pub enum Descent {
 
     /// Through an `Array<T>`/`Slice<T>` to its element `T`.
     Elem,
+
+    /// To a `Slice<T>`'s *length*
+    Len,
 }
 
 /// What a [`Position`] belongs to.
@@ -105,7 +108,7 @@ pub enum Owner {
     /// witness-ness is decided once, program-wide, rather than threaded through call summaries).
     ///
     /// Globals are init-time constants in this IR today, so `compute_witness_globals` finds none to
-    /// be Witness. The position model covers cross-function global *reads*; see the module docs for
+    /// be Witness. The position model covers cross-function global _reads_; see the module docs for
     /// the extensions mutable globals would require.
     Global(usize),
 
@@ -117,7 +120,7 @@ pub enum Owner {
 // ================================================================================================
 
 /// Enumerate, in pre-order, the path to every level of `ty` (the empty path for the top level, then
-/// each `Deref`/`Elem` descent).
+/// each `Deref`/`Elem`/`Len` descent).
 ///
 /// Two values of the same type share this path set, so copying taint from value `a` to value `b` is
 /// just "for every path `p`, add `b·p ≥ a·p`".
@@ -132,12 +135,16 @@ fn collect_paths(ty: &Type, prefix: &mut Vec<Descent>, out: &mut Vec<Vec<Descent
     let ty = ty.peel_witness();
     out.push(prefix.clone());
     match &ty.expr {
-        TypeExpr::Field
-        | TypeExpr::U(_)
-        | TypeExpr::I(_)
-        | TypeExpr::Function
-        | TypeExpr::Blob(..) => {}
-        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => {}
+        TypeExpr::Slice(inner) => {
+            prefix.push(Descent::Len);
+            out.push(prefix.clone());
+            prefix.pop();
+            prefix.push(Descent::Elem);
+            collect_paths(inner, prefix, out);
+            prefix.pop();
+        }
+        TypeExpr::Array(inner, _) => {
             prefix.push(Descent::Elem);
             collect_paths(inner, prefix, out);
             prefix.pop();

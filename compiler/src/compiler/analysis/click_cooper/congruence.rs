@@ -14,7 +14,7 @@
 //!   labelled by `c`, so two values equal to the same constant are congruent (the const →
 //!   congruence coupling).
 //! - **Reachability** scopes φ-operands — a block parameter's operands are the incoming jump-args
-//!   on each *executable* predecessor edge only, so a dead in-edge never forces two φ's apart.
+//!   on each _executable_ predecessor edge only, so a dead in-edge never forces two φ's apart.
 
 use super::summary::{Sym, SymSummaries};
 use crate::{
@@ -24,7 +24,7 @@ use crate::{
         ssa::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
             hlssa::{
-                BinaryArithOpKind, CallTarget, CastTarget, CmpKind, Constant, HLFunction, OpCode,
+                ArithGroup, CallTarget, CastTarget, CmpKind, Constant, HLFunction, OpCode,
                 ScalarFold, SequenceTargetType, SliceOpDir, Type,
             },
         },
@@ -158,7 +158,7 @@ impl Congruence {
         // must be disjoint from every real id `const_of` can resolve — not merely this function's
         // `universe`, but every program-interned constant id, since `const_of` queries the
         // whole-program snapshot and the single global monotonic id counter can place a constant
-        // used only by another function *above* this function's local max.
+        // used only by another function _above_ this function's local max.
         let mut synthetic: HashSet<ValueId> = HashSet::default();
         let mut hashcons: HashMap<(OpKey, Vec<ValueId>), ValueId> = HashMap::default();
         let mut next_synth = u64::MAX;
@@ -191,10 +191,10 @@ impl Congruence {
                 // congruent results (cross-call value numbering). Any other call result stays an
                 // opaque singleton.
                 //
-                // An *unconstrained* call is excluded (it stays opaque) for soundness, not just
+                // An _unconstrained_ call is excluded (it stays opaque) for soundness, not just
                 // conservatism: its result is prover advice, not pinned by any constraint, so two
                 // such calls with congruent arguments are equal only in honest witness generation,
-                // never forced equal in-circuit. Congruence here means equal in *every* admissible
+                // never forced equal in-circuit. Congruence here means equal in _every_ admissible
                 // witness, so numbering unconstrained results congruent would underconstrain the
                 // circuit. Such results are already tainted non-deterministic by
                 // `analyze_determinism`, so `call_det` returns `false` for them regardless; this
@@ -209,7 +209,7 @@ impl Congruence {
                     for (j, r) in results.iter().enumerate() {
                         universe.insert(*r);
 
-                        // A symbolic jump grafts the callee's return *expression* over the actual
+                        // A symbolic jump grafts the callee's return _expression_ over the actual
                         // arguments; it strictly refines the whole-argument `CallDet` numbering (it
                         // can ignore an unused argument and relate the result to an open
                         // expression), so prefer it. Grafting is inline: synthetic ids for internal
@@ -238,6 +238,38 @@ impl Congruence {
                             Node::Opaque
                         };
                         nodes.insert(*r, node);
+                    }
+                    continue;
+                }
+
+                // The two-result slice ops are numbered per result position over the same
+                // operands.
+                if let OpCode::SlicePop {
+                    dir,
+                    result_slice,
+                    result_elem,
+                    slice,
+                } = instr
+                {
+                    for (j, r) in [result_slice, result_elem].into_iter().enumerate() {
+                        universe.insert(*r);
+                        nodes.insert(*r, Node::op(OpKey::SlicePop(*dir, j), vec![*slice], false));
+                    }
+                    continue;
+                }
+                if let OpCode::SliceRemove {
+                    result_slice,
+                    result_elem,
+                    slice,
+                    index,
+                } = instr
+                {
+                    for (j, r) in [result_slice, result_elem].into_iter().enumerate() {
+                        universe.insert(*r);
+                        nodes.insert(
+                            *r,
+                            Node::op(OpKey::SliceRemove(j), vec![*slice, *index], false),
+                        );
                     }
                     continue;
                 }
@@ -366,7 +398,7 @@ impl Congruence {
             }
         }
 
-        // Strip the synthetic graft scaffolding. Refinement has finalized every *real* value's
+        // Strip the synthetic graft scaffolding. Refinement has finalized every _real_ value's
         // class (two real call results unified only through shared synthetic subnodes keep the same
         // class id), so dropping the synthetics preserves all real-value congruences while keeping
         // a def-less id out of `compute_leaders` (where `DefOrder` would treat it as defined at
@@ -408,7 +440,7 @@ impl Graft<'_> {
     /// Instantiate an `Op`-rooted return `sym` as the node for a call result.
     ///
     /// The root becomes a real [`Node::Op`] over `sym`'s grafted operands — no synthetic for the
-    /// root, which *is* the call result value. A non-`Op` root (already covered by the constant /
+    /// root, which _is_ the call result value. A non-`Op` root (already covered by the constant /
     /// pass-through [`ReturnJump`](super::summary::ReturnJump)) or any unresolvable leaf yields
     /// [`Node::Opaque`].
     fn instantiate_root(&mut self, sym: &Sym, args: &[ValueId]) -> Node {
@@ -466,14 +498,14 @@ impl Graft<'_> {
 // CLASSIFICATION
 // ================================================================================================
 
-/// What a value *is*, for congruence purposes.
+/// What a value _is_, for congruence purposes.
 enum Node {
     /// A block parameter (φ) of a non-entry block.
     ///
     /// Its operands are the incoming jump-args, one per executable predecessor edge.
     Phi { block: BlockId, index: usize },
 
-    /// A pure, deterministic operator whose result is a function of its operand *values*.
+    /// A pure, deterministic operator whose result is a function of its operand _values_.
     Op { key: OpKey, operands: Vec<ValueId>, commutative: bool },
 
     /// Anything else (memory, witnesses, calls, witness/runtime casts, …): not value-numbered, so it
@@ -497,18 +529,13 @@ impl Node {
 /// if they share this key (same operator and the same immediate, non-value attributes).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum OpKey {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Mod,
-    And,
-    Or,
-    Xor,
-    Shl,
-    Shr,
+    /// A binary arithmetic operation: which operation, plus the sign it reads its operands with.
+    ///
+    /// `None` is not "unsigned" — it says the operation has no signed form at all, which is true
+    /// only of `And`, `Or` and `Xor`. Every other group keeps its two forms in separate classes.
+    Bin(ArithGroup, Option<bool>),
     CmpEq,
-    CmpLt,
+    CmpLt(bool),
     MulConst,
     Cast(CastTarget),
     SExt(usize, usize),
@@ -516,7 +543,7 @@ pub(crate) enum OpKey {
     Not,
     Select,
 
-    // Pure, value-semantic sequence ops. These are *not* scalar-foldable for now, so they are
+    // Pure, value-semantic sequence ops. These are _not_ scalar-foldable for now, so they are
     // value-numbered but never constant-folded. The non-value attributes (`seq_type`, `elem_type`,
     // repeat count, push direction) ride in the key so differently-shaped sequences never share a
     // class.
@@ -527,6 +554,9 @@ pub(crate) enum OpKey {
     MkRepeated(SequenceTargetType, usize, Type),
     MkSeqOfBlob(Type),
     SlicePush(SliceOpDir),
+    SliceInsert,
+    SlicePop(SliceOpDir, usize),
+    SliceRemove(usize),
 
     /// Return position `usize` of a constrained static call to `FunctionId` whose result is a
     /// deterministic function of the call's arguments (its operands). Two such calls to the same
@@ -572,7 +602,7 @@ pub(crate) fn pure_op_operands(instr: &OpCode) -> Option<Vec<ValueId>> {
 /// The pure, deterministic ops eligible for value numbering, paired with their operands and
 /// commutativity.
 ///
-/// Value numbering is a strict *superset* of [`OpCode::scalar_fold`]: it covers every foldable
+/// Value numbering is a strict _superset_ of [`OpCode::scalar_fold`]: it covers every foldable
 /// scalar op (minus witness casts, which are foldable in name but never value-numbered) **plus**
 /// the pure, value-semantic sequence ops, which are value-numbered here yet are not scalar-foldable
 /// (their aggregate results never enter the constant lattice). So it may disagree with
@@ -632,33 +662,46 @@ pub(crate) fn op_signature(instr: &OpCode) -> Option<(OpKey, Vec<ValueId>, bool)
             operands.extend(values.iter().copied());
             return Some((OpKey::SlicePush(*dir), operands, false));
         }
+        OpCode::SliceInsert {
+            slice,
+            index,
+            value,
+            ..
+        } => {
+            return Some((OpKey::SliceInsert, vec![*slice, *index, *value], false));
+        }
         _ => {}
     }
 
-    use BinaryArithOpKind::*;
+    // The sign participates in the key wherever the operation has one, and the opcode is the
+    // authority on it — never the operand type, which no longer carries a sign to read.
+    //
+    // A signed and an unsigned form never share a key, including for `Add`/`Sub`/`Mul`/`Shl` whose
+    // results agree bit for bit: the merge picks a survivor, and the survivor's opcode is what
+    // selects the rejecting constraints emitted later. See `BinaryArithOpKind::signedness`.
+    use ArithGroup::*;
     Some(match instr.scalar_fold()? {
         ScalarFold::Bin { kind, lhs, rhs } => {
-            let (key, commutative) = match kind {
-                Add => (OpKey::Add, true),
-                Sub => (OpKey::Sub, false),
-                Mul => (OpKey::Mul, true),
-                Div => (OpKey::Div, false),
-                Mod => (OpKey::Mod, false),
-                And => (OpKey::And, true),
-                Or => (OpKey::Or, true),
-                Xor => (OpKey::Xor, true),
-                Shl => (OpKey::Shl, false),
-                Shr => (OpKey::Shr, false),
+            let group = kind.group();
+            let commutative = match group {
+                Add | Mul | And | Or | Xor => true,
+                Sub | Div | Rem | Shl | Shr => false,
             };
-            (key, vec![lhs, rhs], commutative)
+            (
+                OpKey::Bin(group, kind.signedness()),
+                vec![lhs, rhs],
+                commutative,
+            )
         }
+        // `CmpKind::is_ordering` is the counterpart predicate: the ordering arm carries its sign,
+        // but `Eq` has none to carry.
         ScalarFold::Cmp { kind, lhs, rhs } => match kind {
             CmpKind::Eq => (OpKey::CmpEq, vec![lhs, rhs], true),
-            CmpKind::Lt => (OpKey::CmpLt, vec![lhs, rhs], false),
+            CmpKind::ULt | CmpKind::SLt => (OpKey::CmpLt(kind.is_signed()), vec![lhs, rhs], false),
         },
         ScalarFold::MulConst { const_val, var } => (OpKey::MulConst, vec![const_val, var], true),
         ScalarFold::Cast { target, value } => match target {
-            CastTarget::Nop | CastTarget::Field | CastTarget::U(_) | CastTarget::I(_) => {
+            CastTarget::Nop | CastTarget::Field | CastTarget::Int(_) => {
                 (OpKey::Cast(target.clone()), vec![value], false)
             }
             // Foldable scalar ops, but never value-numbered: a witness cast is opaque.
@@ -728,5 +771,77 @@ fn signature(
             Sig::Operands(classes)
         }
         Some(Node::Opaque) | None => Sig::Opaque(v),
+    }
+}
+
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::ssa::hlssa::BinaryArithOpKind;
+
+    fn key(instr: OpCode) -> OpKey {
+        op_signature(&instr)
+            .expect("a binary operation has a value-numbering key")
+            .0
+    }
+
+    fn arith(kind: BinaryArithOpKind) -> OpKey {
+        key(OpCode::BinaryArithOp {
+            kind,
+            result: ValueId(0),
+            lhs: ValueId(1),
+            rhs: ValueId(2),
+        })
+    }
+
+    fn cmp(kind: CmpKind) -> OpKey {
+        key(OpCode::Cmp {
+            kind,
+            result: ValueId(0),
+            lhs: ValueId(1),
+            rhs: ValueId(2),
+        })
+    }
+
+    /// Every group that has two forms, paired unsigned-first.
+    const SIGNED_PAIRS: [(BinaryArithOpKind, BinaryArithOpKind); 7] = [
+        (BinaryArithOpKind::UAdd, BinaryArithOpKind::SAdd),
+        (BinaryArithOpKind::USub, BinaryArithOpKind::SSub),
+        (BinaryArithOpKind::UMul, BinaryArithOpKind::SMul),
+        (BinaryArithOpKind::UDiv, BinaryArithOpKind::SDiv),
+        (BinaryArithOpKind::URem, BinaryArithOpKind::SRem),
+        (BinaryArithOpKind::UShl, BinaryArithOpKind::SShl),
+        (BinaryArithOpKind::UShr, BinaryArithOpKind::SShr),
+    ];
+
+    #[test]
+    fn a_signed_and_an_unsigned_form_never_share_a_key() {
+        // Merging these does not lose an optimisation, it computes the wrong thing: the survivor of
+        // the class is lowered for the sign it happens to carry, and for `Add`/`Sub`/`Mul` that
+        // silently swaps one overflow check for the other. No exceptions -- in particular not for
+        // the groups whose two forms agree bit for bit, which is the exception that used to be here.
+        for (unsigned, signed) in SIGNED_PAIRS {
+            assert_ne!(
+                arith(unsigned),
+                arith(signed),
+                "{unsigned:?} and {signed:?} must not be congruent over the same operands"
+            );
+        }
+        assert_ne!(cmp(CmpKind::ULt), cmp(CmpKind::SLt));
+    }
+
+    #[test]
+    fn the_sign_free_operations_are_unaffected() {
+        // `And`/`Or`/`Xor` have one form, but `Eq` reads no sign. None of them may acquire a
+        // discriminator that would stop them merging with themselves.
+        use BinaryArithOpKind::*;
+        for kind in [And, Or, Xor] {
+            assert_eq!(arith(kind), arith(kind));
+        }
+        assert_eq!(cmp(CmpKind::Eq), cmp(CmpKind::Eq));
+        assert_ne!(cmp(CmpKind::Eq), cmp(CmpKind::ULt));
     }
 }

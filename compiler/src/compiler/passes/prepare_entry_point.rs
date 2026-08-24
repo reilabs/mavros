@@ -97,7 +97,7 @@ impl PrepareEntryPoint {
         // Reconstruct functions rebuild each typed input value from its
         // flattened field representation, range-checking integers on the way.
         let has_return = !return_types.is_empty();
-        let guard_type = Type::u(1);
+        let guard_type = Type::int(1);
         let mut reconstruct_fns = Vec::new();
         for typ in param_types.iter().chain(return_types.iter()) {
             Self::get_or_create_reconstruct_fn(typ, ssa, &mut reconstruct_fns);
@@ -151,13 +151,10 @@ impl PrepareEntryPoint {
                 let width = Self::flattened_field_count(typ);
                 let value = match &typ.expr {
                     TypeExpr::Field => {
-                        let index = e.u_const(32, offset as u128);
+                        let index = e.int_const(32, offset as u128);
                         e.array_get(witness_inputs, index)
                     }
-                    TypeExpr::U(_)
-                    | TypeExpr::I(_)
-                    | TypeExpr::Array(_, _)
-                    | TypeExpr::Tuple(_) => {
+                    TypeExpr::Int(_) | TypeExpr::Array(_, _) | TypeExpr::Tuple(_) => {
                         let child = Self::emit_reconstruct_child_input_array(
                             e,
                             witness_inputs,
@@ -234,7 +231,7 @@ impl PrepareEntryPoint {
         match &typ.expr {
             TypeExpr::Array(inner, size) => {
                 for i in 0..*size {
-                    let index = b.u_const(32, i as u128);
+                    let index = b.int_const(32, i as u128);
                     let result_elem = b.array_get(result, index);
                     let input_elem = b.array_get(public_input, index);
                     Self::assert_eq_deep_guarded(b, guard_field, result_elem, input_elem, inner);
@@ -256,8 +253,8 @@ impl PrepareEntryPoint {
             _ => {
                 let result_field = b.ensure_field(result, typ);
                 let input_field = b.ensure_field(public_input, typ);
-                let diff = b.sub(result_field, input_field);
-                let gated = b.mul(guard_field, diff);
+                let diff = b.usub(result_field, input_field);
+                let gated = b.umul(guard_field, diff);
                 let zero = b.field_const(b.field().constant(0u64));
                 b.assert_eq(gated, zero);
             }
@@ -392,7 +389,7 @@ impl PrepareEntryPoint {
 
     pub(crate) fn flattened_field_count(typ: &Type) -> usize {
         match &typ.expr {
-            TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_) => 1,
+            TypeExpr::Field | TypeExpr::Int(_) => 1,
             TypeExpr::Array(inner, size) => Self::flattened_field_count(inner) * size,
             TypeExpr::Tuple(element_types) => {
                 element_types.iter().map(Self::flattened_field_count).sum()
@@ -450,20 +447,16 @@ impl PrepareEntryPoint {
     ) -> ValueId {
         match &typ.expr {
             TypeExpr::Field => e.write_witness(value_id),
-            TypeExpr::U(size) | TypeExpr::I(size) => {
-                let cast_back = match &typ.expr {
-                    TypeExpr::U(s) => CastTarget::U(*s),
-                    TypeExpr::I(s) => CastTarget::I(*s),
-                    _ => unreachable!(),
-                };
+            TypeExpr::Int(size) => {
+                let cast_back = CastTarget::Int(*size);
                 let as_field = e.cast_to_field(value_id);
                 let witness = e.write_witness(as_field);
 
                 if *size == 1 {
                     let zero = e.field_const(e.field().constant(0));
                     let one = e.field_const(e.field().constant(1));
-                    let x_sub_1 = e.sub(witness, one);
-                    let x_times_x_sub_1 = e.mul(witness, x_sub_1);
+                    let x_sub_1 = e.usub(witness, one);
+                    let x_times_x_sub_1 = e.umul(witness, x_sub_1);
                     e.assert_eq(x_times_x_sub_1, zero);
                 } else {
                     e.rangecheck(witness, *size);
@@ -569,28 +562,23 @@ impl PrepareEntryPoint {
     ) -> ValueId {
         match &typ.expr {
             TypeExpr::Field => {
-                let zero = e.u_const(32, 0);
+                let zero = e.int_const(32, 0);
                 e.array_get(input_array, zero)
             }
-            TypeExpr::U(size) | TypeExpr::I(size) => {
-                let zero = e.u_const(32, 0);
+            TypeExpr::Int(size) => {
+                let zero = e.int_const(32, 0);
                 let field_param = e.array_get(input_array, zero);
                 if *size == 1 {
                     let zero = e.field_const(e.field().constant(0));
                     let one = e.field_const(e.field().constant(1));
-                    let x_sub_1 = e.sub(field_param, one);
-                    let x_times_x_sub_1 = e.mul(field_param, x_sub_1);
+                    let x_sub_1 = e.usub(field_param, one);
+                    let x_times_x_sub_1 = e.umul(field_param, x_sub_1);
                     e.assert_eq(x_times_x_sub_1, zero);
                 } else {
                     e.rangecheck(field_param, *size);
                 }
 
-                let cast_back = match &typ.expr {
-                    TypeExpr::U(s) => CastTarget::U(*s),
-                    TypeExpr::I(s) => CastTarget::I(*s),
-                    _ => unreachable!(),
-                };
-                e.cast_to(cast_back, field_param)
+                e.cast_to(CastTarget::Int(*size), field_param)
             }
             TypeExpr::Array(inner, size) => {
                 let child_fn = Self::find_reconstruct_fn(inner, reconstruct_fns);
@@ -653,12 +641,8 @@ impl PrepareEntryPoint {
                 let zero = e.field_const(e.field().constant(0));
                 e.cast_to_witness_of(zero)
             }
-            TypeExpr::U(size) => {
-                let zero = e.u_const(*size, 0);
-                e.cast_to_witness_of(zero)
-            }
-            TypeExpr::I(size) => {
-                let zero = e.i_const(*size, 0);
+            TypeExpr::Int(size) => {
+                let zero = e.int_const(*size, 0);
                 e.cast_to_witness_of(zero)
             }
             TypeExpr::Array(inner, size) => Self::emit_default_witness_array(e, inner, *size),
@@ -697,7 +681,7 @@ impl PrepareEntryPoint {
         start: usize,
         len: usize,
     ) -> ValueId {
-        let start = e.u_const(32, start as u128);
+        let start = e.int_const(32, start as u128);
         Self::emit_reconstruct_child_input_array_from(e, input_array, start, len)
     }
 
@@ -710,8 +694,8 @@ impl PrepareEntryPoint {
         let start = if width == 1 {
             index
         } else {
-            let width_value = e.u_const(32, width as u128);
-            e.mul(index, width_value)
+            let width_value = e.int_const(32, width as u128);
+            e.umul(index, width_value)
         };
         Self::emit_reconstruct_child_input_array_from(e, input_array, start, width)
     }
@@ -739,7 +723,7 @@ impl PrepareEntryPoint {
             width,
             vec![(initial_array, Type::field().array_of(width))],
             |e, i, accumulators| {
-                let src_index = e.add(start, i);
+                let src_index = e.uadd(start, i);
                 let elem = e.array_get(input_array, src_index);
                 let updated = e.array_set(accumulators[0], i, elem);
                 vec![updated]

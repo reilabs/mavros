@@ -6,18 +6,47 @@ use crate::compiler::ssa::SSAType;
 
 // FIELD-ASSUMPTION: L6-int-representation
 //
-// These bound the integer *type system* (the widest int a Noir program may use); they are
+// These bound the integer _type system_ (the widest int a Noir program may use); they are
 // field-independent and stay fixed regardless of field size. Integers wider than can fit into the
 // field natively must still be supported. A value whose type range is >= p cannot be held
 // natively in one field cell, so must be carried as multi-cell (limb-based) values end-to-end.
 pub const MAX_SUPPORTED_UNSIGNED_BITS: usize = 128;
+
+/// The widest integer a _signed_ operation may act on.
+///
+/// This is a bound on operations, not on types: [`TypeExpr::Int`] is just "an `n`-bit integer" and
+/// tops out at [`MAX_SUPPORTED_UNSIGNED_BITS`] like any other. What is unsupported is asking a
+/// signed opcode to read a pattern wider than this, because the signed lowerings and the VM's
+/// `div_s64`/`lt_s64` are 64-bit. Enforce it with [`assert_signed_op_width`] at the point the
+/// signed operation is chosen, never by inspecting a type.
 pub const MAX_SUPPORTED_SIGNED_BITS: usize = 64;
 
+/// Reject a signed _operation_ on a pattern wider than [`MAX_SUPPORTED_SIGNED_BITS`].
+///
+/// `what` names the operation for the panic, e.g. `"division"`. Call this from the arm that has
+/// already decided the operation is signed — the width alone is never the problem, and an
+/// `int128` that no signed opcode touches is perfectly legal.
+pub fn assert_signed_op_width(bits: usize, what: &str) {
+    assert!(
+        bits <= MAX_SUPPORTED_SIGNED_BITS,
+        "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported: \
+         {what} on a {bits}-bit value"
+    );
+}
+
+/// A type expression.
+///
+/// Integers carry only a width: [`TypeExpr::Int`] is "an `n`-bit integer", _not_ "a signed `n`-bit
+/// integer". Signedness is a property of the operation ([`BinaryArithOpKind`], [`CmpKind`]), which
+/// is where every level below HLSSA already keeps it — LLSSA's `Type::Int` with `UDiv`/`SDiv`, the
+/// VM's `div_u64`/`div_s64`, LLVM's `build_int_signed_div`. Nothing may recover a sign from a type.
+///
+/// [`BinaryArithOpKind`]: super::BinaryArithOpKind
+/// [`CmpKind`]: super::CmpKind
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeExpr {
     Field,
-    U(usize),
-    I(usize),
+    Int(usize),
     WitnessOf(Box<Type>),
     Array(Box<Type>, usize),
     Slice(Box<Type>),
@@ -36,8 +65,7 @@ impl Display for Type {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
         match &self.expr {
             TypeExpr::Field => write!(f, "Field"),
-            TypeExpr::U(size) => write!(f, "u{}", size),
-            TypeExpr::I(size) => write!(f, "i{}", size),
+            TypeExpr::Int(size) => write!(f, "int{}", size),
             TypeExpr::WitnessOf(inner) => write!(f, "WitnessOf({})", inner),
             TypeExpr::Array(inner, size) => write!(f, "Array<{}, {}>", inner, size),
             TypeExpr::Slice(inner) => write!(f, "Slice<{}>", inner),
@@ -66,24 +94,19 @@ impl Type {
         }
     }
 
-    pub fn u(size: usize) -> Self {
+    /// An `n`-bit integer. Signedness belongs to the operation, not here — see [`TypeExpr`].
+    pub fn int(size: usize) -> Self {
         Type {
-            expr: TypeExpr::U(size),
-        }
-    }
-
-    pub fn i(size: usize) -> Self {
-        Type {
-            expr: TypeExpr::I(size),
+            expr: TypeExpr::Int(size),
         }
     }
 
     pub fn bool() -> Self {
-        Type::u(1)
+        Type::int(1)
     }
 
-    pub fn u32() -> Self {
-        Type::u(32)
+    pub fn int32() -> Self {
+        Type::int(32)
     }
 
     pub fn function() -> Self {
@@ -136,7 +159,7 @@ impl Type {
     }
 
     /// Wrap `inner` in WitnessOf unless it already is witnessed — the idempotent variant of
-    /// [`Self::witness_of`], used where a level *inherits* witness-ness from its container and an
+    /// [`Self::witness_of`], used where a level _inherits_ witness-ness from its container and an
     /// already-witnessed inner must not be wrapped twice (witness-of-witness collapses).
     pub fn witness_of_collapsed(inner: Type) -> Self {
         if inner.is_witness_of() {
@@ -150,7 +173,7 @@ impl Type {
 
     pub fn is_numeric(&self) -> bool {
         match &self.expr {
-            TypeExpr::U(_) | TypeExpr::I(_) | TypeExpr::Field => true,
+            TypeExpr::Int(_) | TypeExpr::Field => true,
             TypeExpr::WitnessOf(inner) => inner.is_numeric(),
             _ => false,
         }
@@ -176,20 +199,12 @@ impl Type {
         matches!(self.expr, TypeExpr::WitnessOf(_))
     }
 
-    pub fn is_u(&self) -> bool {
-        matches!(self.expr, TypeExpr::U(_))
-    }
-
-    pub fn is_i(&self) -> bool {
-        matches!(self.expr, TypeExpr::I(_))
-    }
-
     pub fn is_integer(&self) -> bool {
-        matches!(self.expr, TypeExpr::U(_) | TypeExpr::I(_))
+        matches!(self.expr, TypeExpr::Int(_))
     }
 
-    pub fn is_u32(&self) -> bool {
-        matches!(self.expr, TypeExpr::U(32))
+    pub fn is_int32(&self) -> bool {
+        matches!(self.expr, TypeExpr::Int(32))
     }
 
     pub fn is_heap_allocated(&self) -> bool {
@@ -212,7 +227,7 @@ impl Type {
     }
 
     pub fn has_eq(&self) -> bool {
-        matches!(self.expr, TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_))
+        matches!(self.expr, TypeExpr::Field | TypeExpr::Int(_))
     }
 
     pub fn is_ref(&self) -> bool {
@@ -283,7 +298,7 @@ impl Type {
     /// `ssa.field()` / `b.field()`).
     pub fn get_bit_size(&self, field: FieldConfig) -> usize {
         match &self.expr {
-            TypeExpr::U(size) | TypeExpr::I(size) => *size,
+            TypeExpr::Int(size) => *size,
             TypeExpr::Field => field.field_bit_size() as usize,
             TypeExpr::WitnessOf(inner) => inner.get_bit_size(field),
             _ => panic!("Type is not numeric: {}", self),
@@ -371,8 +386,7 @@ impl Type {
             (TypeExpr::WitnessOf(_), _) => false,
             // Structural (neither is WitnessOf)
             (TypeExpr::Field, TypeExpr::Field) => true,
-            (TypeExpr::U(n), TypeExpr::U(m)) => n == m,
-            (TypeExpr::I(n), TypeExpr::I(m)) => n == m,
+            (TypeExpr::Int(n), TypeExpr::Int(m)) => n == m,
             (TypeExpr::Array(x, n), TypeExpr::Array(y, m)) => n == m && x.is_subtype_of(y),
             (TypeExpr::Slice(x), TypeExpr::Slice(y)) => x.is_subtype_of(y),
             (TypeExpr::Tuple(xs), TypeExpr::Tuple(ys)) => {
@@ -408,13 +422,9 @@ impl Type {
             (_, TypeExpr::WitnessOf(inner_b)) => Type::witness_of(Type::join(a, inner_b)),
             // Structural (neither is WitnessOf)
             (TypeExpr::Field, TypeExpr::Field) => Type::field(),
-            (TypeExpr::U(n), TypeExpr::U(m)) => {
-                assert_eq!(n, m, "Cannot join U({}) and U({})", n, m);
-                Type::u(*n)
-            }
-            (TypeExpr::I(n), TypeExpr::I(m)) => {
-                assert_eq!(n, m, "Cannot join I({}) and I({})", n, m);
-                Type::i(*n)
+            (TypeExpr::Int(n), TypeExpr::Int(m)) => {
+                assert_eq!(n, m, "Cannot join int({}) and int({})", n, m);
+                Type::int(*n)
             }
             (TypeExpr::Array(x, n), TypeExpr::Array(y, m)) => {
                 assert_eq!(
@@ -474,9 +484,33 @@ impl Type {
                 Type::witness_of(self.get_arithmetic_result_type(inner))
             }
             (TypeExpr::Field, _) | (_, TypeExpr::Field) => Type::field(),
-            (TypeExpr::U(size1), TypeExpr::U(size2)) => Type::u(*size1.max(size2)),
-            (TypeExpr::I(size1), TypeExpr::I(size2)) => Type::i(*size1.max(size2)),
+            (TypeExpr::Int(size1), TypeExpr::Int(size2)) => Type::int(*size1.max(size2)),
             _ => panic!("Cannot perform arithmetic on types {} and {}", self, other),
+        }
+    }
+
+    /// The unified type of a `Select`'s two alternatives.
+    ///
+    /// Numeric alternatives unify by the arithmetic rule. The two container kinds `Select` also
+    /// ranges over — but on which no arithmetic is defined — unify elementwise via
+    /// [`Self::join`] instead:
+    ///
+    /// - **Slices:** `untaint_control_flow`'s `emit_merge_select` merges witness-length physical
+    ///   slices with a `Select`.
+    /// - **Tuples:** `purify_witness_slices`'s `Select` arm rewrites both alternatives of a
+    ///   witness-length slice select into `(physical, log_len, start)` tuples. That form is
+    ///   transient — `ElideTuples` runs next and splits the select per component — but `TypeInfo`
+    ///   is recomputed in between (the pass preserves no analyses, and `ElideTuples` needs types),
+    ///   so it must type.
+    ///
+    /// `join` still asserts on arity/shape mismatch, and everything else is still refused, so this
+    /// stays a real check rather than a widened [`Self::get_arithmetic_result_type`].
+    pub fn get_select_result_type(&self, other: &Self) -> Self {
+        match (&self.expr, &other.expr) {
+            (TypeExpr::Slice(_), TypeExpr::Slice(_)) | (TypeExpr::Tuple(_), TypeExpr::Tuple(_)) => {
+                Type::join(self, other)
+            }
+            _ => self.get_arithmetic_result_type(other),
         }
     }
 
@@ -489,8 +523,7 @@ impl Type {
             TypeExpr::Slice(inner) => inner.contains_ptrs(),
             TypeExpr::WitnessOf(inner) => inner.contains_ptrs(),
             TypeExpr::Field => false,
-            TypeExpr::U(_) => false,
-            TypeExpr::I(_) => false,
+            TypeExpr::Int(_) => false,
             TypeExpr::Function => false,
             TypeExpr::Blob(inner, _) => inner.contains_ptrs(),
             TypeExpr::Tuple(elements) => elements.iter().any(|e| e.contains_ptrs()),
@@ -507,8 +540,7 @@ impl Type {
             TypeExpr::Function => 1,
             // Blobs are by-value sequences, not pointers to heap data.
             TypeExpr::Blob(inner, n) => inner.calculate_type_size() * n,
-            TypeExpr::U(_) => 1,
-            TypeExpr::I(_) => 1,
+            TypeExpr::Int(_) => 1,
             TypeExpr::WitnessOf(_) => 1, // pointer-sized (witness tape reference)
             _ => panic!("Cannot currently calculate size for type {}", self),
         }
@@ -520,6 +552,23 @@ impl SSAType for Type {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- the signed width bound ---
+
+    #[test]
+    fn the_signed_width_bound_is_about_the_operation_not_the_type() {
+        // An `int128` is a perfectly ordinary type: only asking a _signed_ operation to read one
+        // is unsupported. Nothing here may inspect a type to decide that -- a type is a width.
+        assert_signed_op_width(64, "division");
+        assert_signed_op_width(1, "division");
+        assert_eq!(Type::int(128).get_bit_size(FieldConfig::bn254()), 128);
+    }
+
+    #[test]
+    #[should_panic(expected = "signed integers wider than i64 are unsupported")]
+    fn a_signed_operation_wider_than_i64_is_rejected() {
+        assert_signed_op_width(128, "division");
+    }
 
     // --- get_bit_size ---
 
@@ -538,8 +587,8 @@ mod tests {
             Type::field().get_bit_size(field)
         );
         // Integer widths are field-independent.
-        assert_eq!(Type::u(32).get_bit_size(field), 32);
-        assert_eq!(Type::i(64).get_bit_size(field), 64);
+        assert_eq!(Type::int(32).get_bit_size(field), 32);
+        assert_eq!(Type::int(64).get_bit_size(field), 64);
     }
 
     // --- is_subtype_of ---
@@ -547,7 +596,7 @@ mod tests {
     #[test]
     fn subtype_reflexive() {
         assert!(Type::field().is_subtype_of(&Type::field()));
-        assert!(Type::u(32).is_subtype_of(&Type::u(32)));
+        assert!(Type::int(32).is_subtype_of(&Type::int(32)));
         assert!(Type::function().is_subtype_of(&Type::function()));
         let wf = Type::witness_of(Type::field());
         assert!(wf.is_subtype_of(&wf));
@@ -563,8 +612,8 @@ mod tests {
 
     #[test]
     fn subtype_u32_witness_of_u32() {
-        let u = Type::u(32);
-        let wu = Type::witness_of(Type::u(32));
+        let u = Type::int(32);
+        let wu = Type::witness_of(Type::int(32));
         assert!(u.is_subtype_of(&wu));
         assert!(!wu.is_subtype_of(&u));
     }
@@ -605,8 +654,8 @@ mod tests {
 
     #[test]
     fn subtype_tuple_covariant() {
-        let t1 = Type::tuple_of(vec![Type::field(), Type::u(32)]);
-        let t2 = Type::tuple_of(vec![Type::witness_of(Type::field()), Type::u(32)]);
+        let t1 = Type::tuple_of(vec![Type::field(), Type::int(32)]);
+        let t2 = Type::tuple_of(vec![Type::witness_of(Type::field()), Type::int(32)]);
         assert!(t1.is_subtype_of(&t2));
         assert!(!t2.is_subtype_of(&t1));
     }
@@ -621,9 +670,9 @@ mod tests {
 
     #[test]
     fn subtype_different_base_types() {
-        assert!(!Type::field().is_subtype_of(&Type::u(32)));
-        assert!(!Type::u(32).is_subtype_of(&Type::field()));
-        assert!(!Type::u(8).is_subtype_of(&Type::u(32)));
+        assert!(!Type::field().is_subtype_of(&Type::int(32)));
+        assert!(!Type::int(32).is_subtype_of(&Type::field()));
+        assert!(!Type::int(8).is_subtype_of(&Type::int(32)));
     }
 
     // --- needs_witness_cast ---
@@ -649,7 +698,7 @@ mod tests {
 
     #[test]
     fn needs_cast_incompatible() {
-        assert!(!Type::field().needs_witness_cast(&Type::u(32)));
+        assert!(!Type::field().needs_witness_cast(&Type::int(32)));
     }
 
     // --- join ---
@@ -657,7 +706,7 @@ mod tests {
     #[test]
     fn join_same_types() {
         assert_eq!(Type::join(&Type::field(), &Type::field()), Type::field());
-        assert_eq!(Type::join(&Type::u(32), &Type::u(32)), Type::u(32));
+        assert_eq!(Type::join(&Type::int(32), &Type::int(32)), Type::int(32));
     }
 
     #[test]
@@ -695,9 +744,9 @@ mod tests {
 
     #[test]
     fn join_tuple() {
-        let t1 = Type::tuple_of(vec![Type::field(), Type::u(32)]);
-        let t2 = Type::tuple_of(vec![Type::witness_of(Type::field()), Type::u(32)]);
-        let expected = Type::tuple_of(vec![Type::witness_of(Type::field()), Type::u(32)]);
+        let t1 = Type::tuple_of(vec![Type::field(), Type::int(32)]);
+        let t2 = Type::tuple_of(vec![Type::witness_of(Type::field()), Type::int(32)]);
+        let expected = Type::tuple_of(vec![Type::witness_of(Type::field()), Type::int(32)]);
         assert_eq!(Type::join(&t1, &t2), expected);
     }
 
@@ -799,8 +848,8 @@ mod tests {
                 Type::witness_of(Type::field().array_of(3)),
             ),
             (
-                Type::tuple_of(vec![Type::field(), Type::u(8)]),
-                Type::tuple_of(vec![Type::witness_of(Type::field()), Type::u(8)]),
+                Type::tuple_of(vec![Type::field(), Type::int(8)]),
+                Type::tuple_of(vec![Type::witness_of(Type::field()), Type::int(8)]),
             ),
         ];
         for (sub, sup) in &pairs {

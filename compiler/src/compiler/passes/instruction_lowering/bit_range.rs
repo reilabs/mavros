@@ -154,16 +154,16 @@ impl LowerBitRangeOps {
 
         let mut reconstructed = low.unwrap_or_else(|| b.field_const(b.field().zero()));
         let result_shift = b.field_const(b.field().two_pow(offset));
-        let result_shifted = b.mul(result_field, result_shift);
-        reconstructed = b.add(reconstructed, result_shifted);
+        let result_shifted = b.umul(result_field, result_shift);
+        reconstructed = b.uadd(reconstructed, result_shifted);
         if let Some(high) = high {
             let high_shift = b.field_const(b.field().two_pow(offset + width));
-            let high_shifted = b.mul(high, high_shift);
-            reconstructed = b.add(reconstructed, high_shifted);
+            let high_shifted = b.umul(high, high_shift);
+            reconstructed = b.uadd(reconstructed, high_shifted);
         }
 
         let value_field = b.cast_to_field(value);
-        let diff = b.sub(value_field, reconstructed);
+        let diff = b.usub(value_field, reconstructed);
         let zero = b.field_const(b.field().zero());
         let flag = b.field_const(b.field().one());
         b.constrain(flag, diff, zero);
@@ -220,7 +220,7 @@ fn decompose_canonical_field_bytes(
     let mut limbs = [zero; 4];
     let mut full_sum = zero;
     for i in 0..31 {
-        let idx = b.u_const(32, i as u128);
+        let idx = b.int_const(32, i as u128);
         let byte = b.array_get(bytes_arr, idx);
         let byte_field = b.cast_to_field(byte);
         let byte_wit = b.write_witness(byte_field);
@@ -228,52 +228,52 @@ fn decompose_canonical_field_bytes(
         bytes.push(byte_wit);
 
         let limb_idx = i / 8;
-        let shifted_limb = b.mul(limbs[limb_idx], two_to_8);
-        limbs[limb_idx] = b.add(shifted_limb, byte_wit);
+        let shifted_limb = b.umul(limbs[limb_idx], two_to_8);
+        limbs[limb_idx] = b.uadd(shifted_limb, byte_wit);
 
-        let shifted_full = b.mul(full_sum, two_to_8);
-        full_sum = b.add(shifted_full, byte_wit);
+        let shifted_full = b.umul(full_sum, two_to_8);
+        full_sum = b.uadd(shifted_full, byte_wit);
     }
 
-    let full_sum_shifted = b.mul(full_sum, two_to_8);
-    let lsb = b.sub(value, full_sum_shifted);
+    let full_sum_shifted = b.umul(full_sum, two_to_8);
+    let lsb = b.usub(value, full_sum_shifted);
     b.lookup_rngchk_8(lsb, flag);
     bytes.push(lsb);
 
-    let shifted_limb = b.mul(limbs[3], two_to_8);
-    limbs[3] = b.add(shifted_limb, lsb);
+    let shifted_limb = b.umul(limbs[3], two_to_8);
+    limbs[3] = b.uadd(shifted_limb, lsb);
 
-    let hi_upper = b.mul(limbs[0], two_to_64);
-    let hi = b.add(hi_upper, limbs[1]);
-    let lo_upper = b.mul(limbs[2], two_to_64);
-    let lo = b.add(lo_upper, limbs[3]);
+    let hi_upper = b.umul(limbs[0], two_to_64);
+    let hi = b.uadd(hi_upper, limbs[1]);
+    let lo_upper = b.umul(limbs[2], two_to_64);
+    let lo = b.uadd(lo_upper, limbs[3]);
 
     let limb2_pure = b.value_of(limbs[2]);
     let limb3_pure = b.value_of(limbs[3]);
-    let limb2_u64 = b.cast_to(CastTarget::U(64), limb2_pure);
-    let limb3_u64 = b.cast_to(CastTarget::U(64), limb3_pure);
+    let limb2_u64 = b.cast_to(CastTarget::Int(64), limb2_pure);
+    let limb3_u64 = b.cast_to(CastTarget::Int(64), limb3_pure);
 
     // The two 64-bit limbs of the low half of `p - 1`, in the same big-endian limb order the byte
     // decomposition above produces; derived from the configured field rather than written out.
-    let mod_limb2 = b.u_const(64, u128::from((modulus_lo_m1_u128 >> 64) as u64));
-    let mod_limb3 = b.u_const(64, u128::from(modulus_lo_m1_u128 as u64));
-    let hi_lt = b.lt(mod_limb2, limb2_u64);
+    let mod_limb2 = b.int_const(64, u128::from((modulus_lo_m1_u128 >> 64) as u64));
+    let mod_limb3 = b.int_const(64, u128::from(modulus_lo_m1_u128 as u64));
+    let hi_lt = b.ult(mod_limb2, limb2_u64);
     let hi_eq = b.eq(mod_limb2, limb2_u64);
-    let lo_lt = b.lt(mod_limb3, limb3_u64);
+    let lo_lt = b.ult(mod_limb3, limb3_u64);
     let hi_eq_f = b.cast_to_field(hi_eq);
     let lo_lt_f = b.cast_to_field(lo_lt);
-    let hi_eq_and_lo_lt = b.mul(hi_eq_f, lo_lt_f);
+    let hi_eq_and_lo_lt = b.umul(hi_eq_f, lo_lt_f);
     let hi_lt_f = b.cast_to_field(hi_lt);
-    let borrow_hint = b.add(hi_lt_f, hi_eq_and_lo_lt);
+    let borrow_hint = b.uadd(hi_lt_f, hi_eq_and_lo_lt);
     let borrow_wit = b.write_witness(borrow_hint);
     b.constrain(borrow_wit, borrow_wit, borrow_wit);
 
-    let borrow_shift = b.mul(borrow_wit, two_to_128);
-    let tmp1 = b.sub(modulus_lo_m1, lo);
-    let result_lo = b.add(tmp1, borrow_shift);
+    let borrow_shift = b.umul(borrow_wit, two_to_128);
+    let tmp1 = b.usub(modulus_lo_m1, lo);
+    let result_lo = b.uadd(tmp1, borrow_shift);
 
-    let tmp3 = b.sub(modulus_hi, hi);
-    let result_hi = b.sub(tmp3, borrow_wit);
+    let tmp3 = b.usub(modulus_hi, hi);
+    let result_hi = b.usub(tmp3, borrow_wit);
     b.rangecheck(result_hi, 128);
     b.rangecheck(result_lo, 128);
 
@@ -289,9 +289,9 @@ fn lower_field_bit_range_from_bytes(
 ) -> ValueId {
     let low_end = lower_field_low_bits_from_bytes(b, bytes, offset + width, flag);
     let low_start = lower_field_low_bits_from_bytes(b, bytes, offset, flag);
-    let selected_shifted = b.sub(low_end, low_start);
+    let selected_shifted = b.usub(low_end, low_start);
     let divisor = b.field_const(b.field().two_pow(offset));
-    b.div(selected_shifted, divisor)
+    b.udiv(selected_shifted, divisor)
 }
 
 fn lower_field_low_bits_from_bytes(
@@ -319,8 +319,8 @@ fn lower_field_low_bits_from_bytes(
         } else {
             *byte
         };
-        let shifted = b.mul(value, two_to_8);
-        value = b.add(shifted, elem);
+        let shifted = b.umul(value, two_to_8);
+        value = b.uadd(shifted, elem);
     }
     value
 }
@@ -339,21 +339,21 @@ fn split_partial_field_byte(
     let two_to_lo = b.field_const(b.field().constant(1u128 << lo_size));
 
     let byte_pure = b.value_of(byte_wit);
-    let byte_u8 = b.cast_to(CastTarget::U(8), byte_pure);
-    let divisor = b.u_const(8, 1u128 << lo_size);
-    let hi_hint_u8 = b.div(byte_u8, divisor);
+    let byte_u8 = b.cast_to(CastTarget::Int(8), byte_pure);
+    let divisor = b.int_const(8, 1u128 << lo_size);
+    let hi_hint_u8 = b.udiv(byte_u8, divisor);
     let hi_hint = b.cast_to_field(hi_hint_u8);
     let hi_wit = b.write_witness(hi_hint);
 
     let hi_bound = b.field_const(b.field().constant((1u128 << hi_size) - 1));
-    let hi_gap = b.sub(hi_bound, hi_wit);
+    let hi_gap = b.usub(hi_bound, hi_wit);
     b.lookup_rngchk_8(hi_gap, flag);
 
-    let hi_shifted = b.mul(hi_wit, two_to_lo);
-    let lo = b.sub(byte_wit, hi_shifted);
+    let hi_shifted = b.umul(hi_wit, two_to_lo);
+    let lo = b.usub(byte_wit, hi_shifted);
 
     let lo_bound = b.field_const(b.field().constant((1u128 << lo_size) - 1));
-    let lo_gap = b.sub(lo_bound, lo);
+    let lo_gap = b.usub(lo_bound, lo);
     b.lookup_rngchk_8(lo_gap, flag);
 
     lo
@@ -367,13 +367,13 @@ fn lower_pure_bit_range_value(
     width: usize,
 ) -> ValueId {
     match value_type.strip_witness().expr {
-        TypeExpr::U(bits) | TypeExpr::I(bits) => {
+        TypeExpr::Int(bits) => {
             assert!(
                 bits <= MAX_SUPPORTED_UNSIGNED_BITS,
                 "pure integer BitRange lowering only supports up to {MAX_SUPPORTED_UNSIGNED_BITS}-bit integers"
             );
-            let unsigned = b.cast_to(CastTarget::U(bits), value);
-            let mask = b.u_const(bits, bit_mask(bits, offset, width));
+            let unsigned = b.cast_to(CastTarget::Int(bits), value);
+            let mask = b.int_const(bits, bit_mask(bits, offset, width));
             let masked = b.fresh_value();
             b.emit(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::And,
@@ -381,8 +381,8 @@ fn lower_pure_bit_range_value(
                 lhs: unsigned,
                 rhs: mask,
             });
-            let divisor = b.u_const(bits, 1u128 << offset);
-            b.div(masked, divisor)
+            let divisor = b.int_const(bits, 1u128 << offset);
+            b.udiv(masked, divisor)
         }
         TypeExpr::Field => lower_pure_field_bit_range_value(b, value, offset, width),
         other => panic!("BitRange expects a scalar source, got {:?}", other),
@@ -397,9 +397,9 @@ fn lower_pure_field_bit_range_value(
 ) -> ValueId {
     let low_end = lower_pure_field_low_bits(b, value, offset + width);
     let low_start = lower_pure_field_low_bits(b, value, offset);
-    let selected_shifted = b.sub(low_end, low_start);
+    let selected_shifted = b.usub(low_end, low_start);
     let divisor = b.field_const(b.field().two_pow(offset));
-    b.div(selected_shifted, divisor)
+    b.udiv(selected_shifted, divisor)
 }
 
 fn lower_pure_field_low_bits(b: &mut HLBlockEmitter<'_>, value: ValueId, bits: usize) -> ValueId {
@@ -418,7 +418,7 @@ fn lower_pure_field_low_bits(b: &mut HLBlockEmitter<'_>, value: ValueId, bits: u
     let start = 32 - full_bytes - usize::from(partial_bits > 0);
     let mut result = b.field_const(b.field().zero());
     for i in start..32 {
-        let idx = b.u_const(32, i as u128);
+        let idx = b.int_const(32, i as u128);
         let byte = b.array_get(bytes_arr, idx);
         let byte = if i == start && partial_bits > 0 {
             lower_pure_byte_low_bits(b, byte, partial_bits)
@@ -426,8 +426,8 @@ fn lower_pure_field_low_bits(b: &mut HLBlockEmitter<'_>, value: ValueId, bits: u
             byte
         };
         let byte_field = b.cast_to_field(byte);
-        let shifted = b.mul(result, two_to_8);
-        result = b.add(shifted, byte_field);
+        let shifted = b.umul(result, two_to_8);
+        result = b.uadd(shifted, byte_field);
     }
     result
 }
@@ -437,10 +437,10 @@ fn lower_pure_byte_low_bits(b: &mut HLBlockEmitter<'_>, byte: ValueId, bits: usi
         (1..8).contains(&bits),
         "partial byte width must be non-empty"
     );
-    let divisor = b.u_const(8, 1u128 << bits);
-    let high = b.div(byte, divisor);
-    let high_shifted = b.mul(high, divisor);
-    b.sub(byte, high_shifted)
+    let divisor = b.int_const(8, 1u128 << bits);
+    let high = b.udiv(byte, divisor);
+    let high_shifted = b.umul(high, divisor);
+    b.usub(byte, high_shifted)
 }
 
 fn bit_mask(bits: usize, offset: usize, width: usize) -> u128 {
@@ -460,8 +460,10 @@ fn bit_mask(bits: usize, offset: usize, width: usize) -> u128 {
 fn cast_target_for_scalar_type(ty: &Type) -> CastTarget {
     match ty.strip_witness().expr {
         TypeExpr::Field => CastTarget::Field,
-        TypeExpr::U(bits) => CastTarget::U(bits),
-        TypeExpr::I(bits) => CastTarget::I(bits),
+        // A `CastTarget` is a raw-bits conversion, so there is one target per width and no sign to
+        // choose: `TypeExpr::Int(n)` says only "an n-bit integer", and `CastTarget::Int(n)` says
+        // only "reinterpret at n bits". Sign extension is the separate `SExt` opcode.
+        TypeExpr::Int(bits) => CastTarget::Int(bits),
         other => panic!("BitRange result must be scalar, got {:?}", other),
     }
 }

@@ -1,11 +1,11 @@
 //! Interprocedural reference-parameter promotion.
 //!
 //! Where `mem2reg` promotes a function's own non-escaping local `Alloc`s to SSA values, this pass
-//! promotes memory passed *across call boundaries* through `Ref<T>` parameters. A promotable
+//! promotes memory passed _across call boundaries_ through `Ref<T>` parameters. A promotable
 //! `Ref<T>` parameter is turned into a **by-value `T` input** parameter plus (when the callee
 //! writes through it) a **by-value `T` out** return; every call site reads the pointee before the
 //! call and writes the result back after. That severs the boundary so a follow-up `mem2reg` then
-//! promotes the now-local allocations on *both* sides.
+//! promotes the now-local allocations on _both_ sides.
 //!
 //! ## Reuse, not Re-Threading
 //!
@@ -14,7 +14,7 @@
 //!
 //! - **Callee:** The `Ref<T>` parameter `i` of `g` becomes a fresh by-value `T` parameter; a fresh
 //!   local `Alloc<T>` is materialized at entry and seeded from it (`Store a <- pv`). Every use of
-//!   the old ref parameter is repointed at `a`; and for a *written* parameter the final value is
+//!   the old ref parameter is repointed at `a`; and for a _written_ parameter the final value is
 //!   loaded before each `Return` and appended to the return list (one appended return per written
 //!   param, in ascending parameter order).
 //! - **Caller:** At every `Call{Static(g)}` site, each promoted argument's pointee is `Load`ed
@@ -34,7 +34,7 @@
 //! A parameter `i` of function `g` can be promoted if all of the following conditions hold.
 //!
 //! - **Owned & Enumerable:** `g` is not an entry point, not the globals init/deinit function, not
-//!   reachable via a dynamic call, and has at least one static call site, so *every* call site is a
+//!   reachable via a dynamic call, and has at least one static call site, so _every_ call site is a
 //!   `Call{Static(g)}` this pass can rewrite.
 //! - **C1, Pointee Shape:** `Ref<T>` with `T` a scalar (`Field`/`u*`/`i*`).
 //! - **C2, Non-Leakage:** The parameter's pointee does not escape inside `g`.
@@ -54,13 +54,13 @@
 //!
 //! These are sound-but-suboptimal cases; none represent correctness gaps, as the imprecision only
 //! ever blocks (or fails to skip) a promotion, never produces an unsound one. Most are unhandled
-//! cases blocked by a condition above; the last is a missing cost guard on a promotion that *does*
+//! cases blocked by a condition above; the last is a missing cost guard on a promotion that _does_
 //! fire.
 //!
 //! - **Aggregate Pointees** An aggregate passed by value across a call boundary is itself an
 //!   ArraySroa collapse trigger, so it can never be re-peeled; promoting it trades one ref-pass for
 //!   an N-element value copy plus an N-element return (a net loss). Handling them well needs
-//!   per-element boundary *flattening* (à la `elide_tuples` for tuples), not by-value aggregate
+//!   per-element boundary _flattening_ (à la `elide_tuples` for tuples), not by-value aggregate
 //!   passing. Blocked by C1.
 //! - **Ref-Bearing Pointees** `Ref<T>` where `T` itself contains pointers (`Ref<Ref<..>>`,
 //!   array-of-ref); promoting these would mint ref-typed phis the analysis never saw. Blocked by
@@ -74,10 +74,10 @@
 //!   `pre_wti` re-run the whole-program Andersen solve several times; an incremental update or a
 //!   "rewrote nothing" fast-path could skip the extra passes.
 //! - **Caller-Side Promotability:** C4 proves the caller object `o` is a non-escaping singleton,
-//!   but *not* that `o` is itself `mem2reg`-clean in the caller (the way C3 guarantees the
+//!   but _not_ that `o` is itself `mem2reg`-clean in the caller (the way C3 guarantees the
 //!   materialized alloc is clean in the callee). If `o` does not scalarize there, the inserted
 //!   pre-call `Load` / post-call `Store` survive; and since the deref moves from one site in the
-//!   callee to *every* call site, a callee with many callers can become a net static-size
+//!   callee to _every_ call site, a callee with many callers can become a net static-size
 //!   **increase**. Promotion stays sound — this is a missing cost guard: mirror
 //!   `placeholder_is_clean` for `o` in the caller (or gate on the call-site count) before
 //!   committing. Empirically 0 corpus regressions so far, so it is a latent risk, not an observed
@@ -160,7 +160,7 @@ struct CalleePlan {
     /// Promoted parameters, ascending by index.
     params: Vec<ParamPlan>,
 
-    /// For each `Return` block, the fresh `Load` result ids to append — one per *written* (in/out)
+    /// For each `Return` block, the fresh `Load` result ids to append — one per _written_ (in/out)
     /// parameter, in ascending parameter order.
     return_loads: HashMap<BlockId, Vec<ValueId>>,
 }
@@ -245,13 +245,13 @@ fn select_params(
             }
 
             // C1: the pointee is a scalar (`Field`/`u*`/`i*`). Aggregate (array/slice) and ref
-            // pointees are deferred: an aggregate passed *by value* across a call boundary is
+            // pointees are deferred: an aggregate passed _by value_ across a call boundary is
             // itself an ArraySroa collapse trigger, so it can never be re-peeled — promoting it
             // trades one ref-pass for an N-element value copy + N-element return, a net bytecode
             // loss.
             if !matches!(
                 ref_ty.get_pointed().peel_witness().expr,
-                TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_)
+                TypeExpr::Field | TypeExpr::Int(_)
             ) {
                 continue;
             }
@@ -285,7 +285,7 @@ fn select_params(
                 }
 
                 // Out-direction: append a by-value return only if the callee writes the pointee
-                // *and* can return (a diverging callee never resumes the caller, so its writes are
+                // _and_ can return (a diverging callee never resumes the caller, so its writes are
                 // unobservable — promote in-only).
                 params.insert(*i, has_return && writes);
             }
@@ -794,7 +794,7 @@ mod tests {
                 let p = e.add_parameter(Type::field().ref_of());
                 let v = e.load(p);
                 let one = e.field_const(fr(1));
-                let w = e.add(v, one);
+                let w = e.uadd(v, one);
                 e.store(p, w);
                 e.terminate_return(vec![]);
             });
@@ -850,7 +850,7 @@ mod tests {
                     let mut e = b.test_block(entry);
                     let p = e.add_parameter(arr_ty.ref_of());
                     let arr = e.load(p);
-                    let i0 = e.u_const(32, 0);
+                    let i0 = e.int_const(32, 0);
                     let x = e.field_const(fr(7));
                     let updated = e.array_set(arr, i0, x);
                     e.store(p, updated);
@@ -943,7 +943,7 @@ mod tests {
                 let p1 = e.add_parameter(Type::field().ref_of());
                 let v0 = e.load(p0);
                 let v1 = e.load(p1);
-                let s = e.add(v0, v1);
+                let s = e.uadd(v0, v1);
                 e.store(p0, s);
                 let zero = e.field_const(fr(0));
                 e.store(p1, zero);
@@ -982,7 +982,7 @@ mod tests {
         assert_eq!(op_counts(&ssa, g).0, 0);
     }
 
-    /// A callee promoted only when *every* call site agrees: two distinct callers both pass clean
+    /// A callee promoted only when _every_ call site agrees: two distinct callers both pass clean
     /// locals, so the parameter promotes and both call sites are rewritten.
     #[test]
     fn two_call_sites_promote() {
@@ -1000,7 +1000,7 @@ mod tests {
                 let p = e.add_parameter(Type::field().ref_of());
                 let v = e.load(p);
                 let one = e.field_const(fr(1));
-                let w = e.add(v, one);
+                let w = e.uadd(v, one);
                 e.store(p, w);
                 e.terminate_return(vec![]);
             });
@@ -1035,7 +1035,7 @@ mod tests {
         assert_eq!(first_call_arity(&ssa, h), Some((1, 1)));
     }
 
-    /// Recursion: `g` recurses through a *local* (not its own ref parameter), so the parameter
+    /// Recursion: `g` recurses through a _local_ (not its own ref parameter), so the parameter
     /// still promotes and the self-call site is rewritten without crashing or diverging the
     /// one-shot pass.
     #[test]
@@ -1139,7 +1139,7 @@ mod tests {
                 let p1 = e.add_parameter(Type::field().ref_of());
                 let v0 = e.load(p0);
                 let v1 = e.load(p1);
-                let s = e.add(v0, v1);
+                let s = e.uadd(v0, v1);
                 e.store(p0, s);
                 let zero = e.field_const(fr(0));
                 e.store(p1, zero);
@@ -1181,7 +1181,7 @@ mod tests {
                 let _pp = e.add_parameter(Type::field().ref_of().ref_of());
                 let v = e.load(p0);
                 let one = e.field_const(fr(1));
-                let w = e.add(v, one);
+                let w = e.uadd(v, one);
                 e.store(p0, w);
                 e.terminate_return(vec![]);
             });
@@ -1273,7 +1273,7 @@ mod tests {
                 let p = e.add_parameter(Type::field().ref_of());
                 let v = e.load(p);
                 let one = e.field_const(fr(1));
-                let w = e.add(v, one);
+                let w = e.uadd(v, one);
                 e.store(p, w);
                 e.terminate_return(vec![]);
             });

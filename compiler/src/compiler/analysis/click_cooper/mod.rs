@@ -52,7 +52,8 @@
 //! - **Constants:** The transfer functions fold a value only when the result is exact for the
 //!   operand widths so `value == c` holds under any advice.
 //! - **Aggregate Folding:** The pure, value-semantic sequence ops (`MkSeq`, `MkRepeated`,
-//!   `MkSeqOfBlob`, `ArrayGet`, `ArraySet`, `SlicePush`, `SliceLen`) are folded over the same
+//!   `MkSeqOfBlob`, `ArrayGet`, `ArraySet`, `SlicePush`, `SlicePop`, `SliceInsert`,
+//!   `SliceRemove`, `SliceLen`) are folded over the same
 //!   exact-constant lattice — a projection at an out-of-bounds constant index is refused rather
 //!   than guessed — so every folded element equals its runtime value. The aggregate (`Blob`)
 //!   constants are never surfaced (only the scalar projections flow out), so a consumer only ever

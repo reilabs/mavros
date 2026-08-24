@@ -1,6 +1,6 @@
 //! A pass that eliminates all tuple types from the HLSSA.
 //!
-//! Tuples are spilled into individual values, with the tuple constructor pushed *upward* through
+//! Tuples are spilled into individual values, with the tuple constructor pushed _upward_ through
 //! `Ref`, `Array`, `Slice` and `WitnessOf` until it disappears entirely:
 //!
 //! - `(A, B)`              becomes values `A, B`
@@ -8,11 +8,11 @@
 //! - `Array<(A, B), n>`    becomes `Array<A, n>, Array<B, n>`
 //! - ...applied recursively.
 //!
-//! The net effect is that every value whose type *contains* a tuple expands into a fixed, ordered
+//! The net effect is that every value whose type _contains_ a tuple expands into a fixed, ordered
 //! list of tuple-free "leaf" values, so a single `ValueId` is represented by a `Vec<ValueId>`.
 //! After this pass runs, no [`TypeExpr::Tuple`], `MkTuple`, `TupleProj` or `TupleRefProj` reaches
 //! any subsequent pass: the IR is tuple-free from here through the rest of HLSSA. Several downstream
-//! passes still *contain* tuple-handling arms (`untaint_control_flow`, `witness_lowering`,
+//! passes still _contain_ tuple-handling arms (`untaint_control_flow`, `witness_lowering`,
 //! `rc_insertion`, codegen); those are now dead and can be removed as follow-up.
 //!
 //! This pass is intended to run directly after `PrepareEntryPoint` (which itself synthesizes tuples
@@ -26,7 +26,7 @@
 //!
 //! 1. **Plan:** build a `value_map: ValueId -> Vec<ValueId>` mapping every original value to its
 //!    component leaves. Tuple-free values map to themselves (no churn); tuple-bearing values get
-//!    freshly minted component ids. `MkTuple`/`TupleProj`/`TupleRefProj` results are *aliased* to
+//!    freshly minted component ids. `MkTuple`/`TupleProj`/`TupleRefProj` results are _aliased_ to
 //!    slices of their operands' components rather than allocated (they emit no instruction).
 //! 2. **Rewrite (mutating):** flatten function returns, block parameters, instructions and
 //!    terminators using the `value_map`. Unreachable blocks (which the type snapshot never typed)
@@ -551,6 +551,62 @@ fn lower_instruction(
                 slice: slices[0],
             });
         }
+        OpCode::SlicePop {
+            dir,
+            result_slice,
+            result_elem,
+            slice,
+        } => {
+            let slices = components(value_map, *slice);
+            let result_slices = components(value_map, *result_slice);
+            let result_elems = components(value_map, *result_elem);
+            for ((s, rs), re) in slices.into_iter().zip(result_slices).zip(result_elems) {
+                out.push(OpCode::SlicePop {
+                    dir: *dir,
+                    result_slice: rs,
+                    result_elem: re,
+                    slice: s,
+                });
+            }
+        }
+        OpCode::SliceInsert {
+            result,
+            slice,
+            index,
+            value,
+        } => {
+            let idx = single(value_map, *index);
+            let slices = components(value_map, *slice);
+            let values = components(value_map, *value);
+            let results = components(value_map, *result);
+            for ((s, v), r) in slices.into_iter().zip(values).zip(results) {
+                out.push(OpCode::SliceInsert {
+                    result: r,
+                    slice: s,
+                    index: idx,
+                    value: v,
+                });
+            }
+        }
+        OpCode::SliceRemove {
+            result_slice,
+            result_elem,
+            slice,
+            index,
+        } => {
+            let idx = single(value_map, *index);
+            let slices = components(value_map, *slice);
+            let result_slices = components(value_map, *result_slice);
+            let result_elems = components(value_map, *result_elem);
+            for ((s, rs), re) in slices.into_iter().zip(result_slices).zip(result_elems) {
+                out.push(OpCode::SliceRemove {
+                    result_slice: rs,
+                    result_elem: re,
+                    slice: s,
+                    index: idx,
+                });
+            }
+        }
         OpCode::AssertConstant { value } => {
             // A tuple/struct is constant iff each tuple-free component is constant.
             for value in components(value_map, *value) {
@@ -653,11 +709,7 @@ pub fn contains_tuple(ty: &Type) -> bool {
         | TypeExpr::Slice(inner)
         | TypeExpr::Ref(inner)
         | TypeExpr::WitnessOf(inner) => contains_tuple(inner),
-        TypeExpr::Field
-        | TypeExpr::U(_)
-        | TypeExpr::I(_)
-        | TypeExpr::Function
-        | TypeExpr::Blob(..) => false,
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => false,
     }
 }
 
@@ -669,11 +721,7 @@ fn slot_count(ty: &Type) -> usize {
         | TypeExpr::Slice(inner)
         | TypeExpr::Ref(inner)
         | TypeExpr::WitnessOf(inner) => slot_count(inner),
-        TypeExpr::Field
-        | TypeExpr::U(_)
-        | TypeExpr::I(_)
-        | TypeExpr::Function
-        | TypeExpr::Blob(..) => 1,
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => 1,
     }
 }
 
@@ -690,11 +738,9 @@ fn witness_of_leaf(leaf: Type) -> Type {
 /// upward through `Array`/`Slice`/`Ref`/`WitnessOf`.
 fn leaf_types(ty: &Type) -> Vec<Type> {
     match &ty.expr {
-        TypeExpr::Field
-        | TypeExpr::U(_)
-        | TypeExpr::I(_)
-        | TypeExpr::Function
-        | TypeExpr::Blob(..) => vec![ty.clone()],
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
+            vec![ty.clone()]
+        }
         TypeExpr::Tuple(elements) => elements.iter().flat_map(leaf_types).collect(),
         TypeExpr::Array(inner, n) => leaf_types(inner)
             .into_iter()
@@ -801,7 +847,7 @@ mod tests {
         Type::field()
     }
     fn u32t() -> Type {
-        Type::u(32)
+        Type::int(32)
     }
 
     #[test]

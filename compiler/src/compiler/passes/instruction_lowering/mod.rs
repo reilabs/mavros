@@ -2,6 +2,9 @@ mod bit_range;
 mod degree_spilling;
 mod pure_guards;
 mod side_effect_free_guards;
+mod slice_insert_remove;
+mod slice_pop;
+mod slice_select;
 mod witness_array;
 mod witness_assert;
 mod witness_bitwise;
@@ -30,12 +33,21 @@ use crate::compiler::{
 };
 
 use self::{
-    bit_range::LowerBitRangeOps, degree_spilling::LowerDegreeSpillingOps,
-    pure_guards::LowerPureGuards, side_effect_free_guards::LowerSideEffectFreeGuards,
-    witness_array::LowerWitnessArrayOps, witness_assert::LowerWitnessAssertOps,
-    witness_bitwise::LowerWitnessBitwiseOps, witness_compare::LowerWitnessCompareOps,
-    witness_field::LowerWitnessFieldOps, witness_integer_arith::LowerWitnessIntegerArithOps,
-    witness_memory::LowerWitnessMemoryOps, witness_spread::LowerWitnessSpreadOps,
+    bit_range::LowerBitRangeOps,
+    degree_spilling::LowerDegreeSpillingOps,
+    pure_guards::LowerPureGuards,
+    side_effect_free_guards::LowerSideEffectFreeGuards,
+    slice_insert_remove::{LowerSliceInsert, LowerSliceRemove},
+    slice_pop::LowerSlicePop,
+    slice_select::LowerSliceSelect,
+    witness_array::LowerWitnessArrayOps,
+    witness_assert::LowerWitnessAssertOps,
+    witness_bitwise::LowerWitnessBitwiseOps,
+    witness_compare::LowerWitnessCompareOps,
+    witness_field::LowerWitnessFieldOps,
+    witness_integer_arith::LowerWitnessIntegerArithOps,
+    witness_memory::LowerWitnessMemoryOps,
+    witness_spread::LowerWitnessSpreadOps,
 };
 
 const ITERATION_LIMIT: usize = 32;
@@ -90,12 +102,11 @@ impl<'a> LoweringContext<'a> {
 /// The bit width and signedness of an integer type, ignoring any `WitnessOf` wrapper, or `None`
 /// if the type is not an integer.
 ///
-/// Signedness lives in the type today, so every lowering rule that needs it has to recover it
-/// here. Once it moves onto the opcodes this reduces to a width lookup and the `bool` goes away.
-pub(super) fn integer_bits_and_signedness(ty: &Type) -> Option<(usize, bool)> {
+/// Signedness is not among the answers: it belongs to the operation, and a rule that needs it
+/// takes it from its opcode.
+pub(super) fn integer_bits(ty: &Type) -> Option<usize> {
     match ty.strip_witness().expr {
-        TypeExpr::U(bits) => Some((bits, false)),
-        TypeExpr::I(bits) => Some((bits, true)),
+        TypeExpr::Int(bits) => Some(bits),
         _ => None,
     }
 }
@@ -124,6 +135,26 @@ impl InstructionLowering {
                 Box::new(LowerWitnessFieldOps::new()),
             ],
             true,
+        )
+    }
+
+    pub fn slice_select() -> Self {
+        Self::with_lowerers(
+            "instruction_lowering_slice_select",
+            vec![Box::new(LowerSliceSelect::default())],
+            false,
+        )
+    }
+
+    pub fn slice_ops() -> Self {
+        Self::with_lowerers(
+            "instruction_lowering_slice_ops",
+            vec![
+                Box::new(LowerSlicePop::default()),
+                Box::new(LowerSliceInsert::default()),
+                Box::new(LowerSliceRemove::default()),
+            ],
+            false,
         )
     }
 

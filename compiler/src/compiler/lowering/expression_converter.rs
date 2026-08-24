@@ -19,8 +19,9 @@ use crate::{
         ssa::{
             BlockId, FunctionId, SourceLocation, ValueId,
             hlssa::{
-                Blob, CastTarget, Constant, Endianness, MAX_SUPPORTED_SIGNED_BITS, Radix,
-                SequenceTargetType, SliceOpDir, Type, TypeExpr,
+                ArithGroup, BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness,
+                MAX_SUPPORTED_SIGNED_BITS, Radix, SequenceTargetType, SliceOpDir, Type, TypeExpr,
+                assert_signed_op_width,
                 builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder},
             },
         },
@@ -38,8 +39,21 @@ struct LoopContext {
     /// Source anchor for desugared instructions emitted on behalf of the loop body.
     body_source_location: SourceLocation,
 
-    /// Only for `for` loops — (index_value, bit_size), used by Continue to increment.
-    for_loop_index: Option<(ValueId, usize)>,
+    /// Only for `for` loops, used by Continue to increment.
+    for_loop_index: Option<ForLoopIndex>,
+}
+
+/// The loop index of a `for`, as everything that has to increment it needs to see it.
+///
+/// The signedness rides along deliberately. The index is incremented in two places — falling off
+/// the end of the body, and `continue` — and they must agree with each other _and_ with the exit
+/// test in the header, which is a comparison at the same signedness. Deriving it separately at
+/// each site is how those three drift apart.
+#[derive(Clone, Copy)]
+struct ForLoopIndex {
+    value: ValueId,
+    bit_size: usize,
+    signed: bool,
 }
 
 /// Converts expressions within a single function.
@@ -339,11 +353,15 @@ impl<'a> ExpressionConverter<'a> {
                         ctx.body_source_location.clone(),
                     )
                 };
-                if let Some((loop_index, index_bit_size)) = for_loop_index {
+                if let Some(index) = for_loop_index {
                     // For loop: increment index and jump back to header
-                    let one = b.emit_const(Constant::U(index_bit_size, 1));
+                    let one = b.emit_const(index_step_one(index.bit_size));
                     let next_index = self.emit_at_source_location(b, body_source_location, |e| {
-                        e.add(loop_index, one)
+                        e.bin(
+                            BinaryArithOpKind::with_sign(ArithGroup::Add, index.signed),
+                            index.value,
+                            one,
+                        )
                     });
                     b.block(self.current_block)
                         .terminate_jmp(loop_header, vec![next_index]);
@@ -427,32 +445,44 @@ impl<'a> ExpressionConverter<'a> {
         let lhs = self.convert_expression(&binary.lhs, b).unwrap();
         let rhs = self.convert_expression(&binary.rhs, b).unwrap();
 
+        // This is where signedness enters the compiler, and after it there is no second source: the
+        // HLSSA type carries no sign, so every downstream decision reads the opcode this line ends
+        // up choosing. Get it wrong here and nothing below can notice.
+        //
+        // It comes from the **left operand**, never from `binary` itself: `return_type()` on a
+        // `Binary` short-circuits to `Bool` for every comparator, which would silently erase the
+        // operand sign for `Less`. Noir requires the two operands of a binary operator to have the
+        // same type -- including a shift, whose amount takes the value's own type rather than a
+        // fixed `u8` -- so the left one is authoritative and the right cannot disagree.
+        let signed = operand_is_signed(&binary.lhs);
+
+        let arith = |g| BinaryArithOpKind::with_sign(g, signed);
         let result = self.emit_located(b, Some(binary.location), |e| match binary.operator {
-            BinaryOpKind::Add => e.add(lhs, rhs),
-            BinaryOpKind::Subtract => e.sub(lhs, rhs),
-            BinaryOpKind::Multiply => e.mul(lhs, rhs),
-            BinaryOpKind::Divide => e.div(lhs, rhs),
+            BinaryOpKind::Add => e.bin(arith(ArithGroup::Add), lhs, rhs),
+            BinaryOpKind::Subtract => e.bin(arith(ArithGroup::Sub), lhs, rhs),
+            BinaryOpKind::Multiply => e.bin(arith(ArithGroup::Mul), lhs, rhs),
+            BinaryOpKind::Divide => e.bin(arith(ArithGroup::Div), lhs, rhs),
             BinaryOpKind::Equal => e.eq(lhs, rhs),
             BinaryOpKind::NotEqual => {
                 let eq = e.eq(lhs, rhs);
                 e.not(eq)
             }
-            BinaryOpKind::Less => e.lt(lhs, rhs),
+            BinaryOpKind::Less => e.cmp(lhs, rhs, CmpKind::lt(signed)),
             BinaryOpKind::LessEqual => {
-                let gt = e.lt(rhs, lhs);
+                let gt = e.cmp(rhs, lhs, CmpKind::lt(signed));
                 e.not(gt)
             }
-            BinaryOpKind::Greater => e.lt(rhs, lhs),
+            BinaryOpKind::Greater => e.cmp(rhs, lhs, CmpKind::lt(signed)),
             BinaryOpKind::GreaterEqual => {
-                let lt = e.lt(lhs, rhs);
+                let lt = e.cmp(lhs, rhs, CmpKind::lt(signed));
                 e.not(lt)
             }
             BinaryOpKind::And => e.and(lhs, rhs),
             BinaryOpKind::Or => e.or(lhs, rhs),
             BinaryOpKind::Xor => e.xor(lhs, rhs),
-            BinaryOpKind::Modulo => e.modulo(lhs, rhs),
-            BinaryOpKind::ShiftLeft => e.shl(lhs, rhs),
-            BinaryOpKind::ShiftRight => e.shr(lhs, rhs),
+            BinaryOpKind::Modulo => e.bin(arith(ArithGroup::Rem), lhs, rhs),
+            BinaryOpKind::ShiftLeft => e.bin(arith(ArithGroup::Shl), lhs, rhs),
+            BinaryOpKind::ShiftRight => e.bin(arith(ArithGroup::Shr), lhs, rhs),
         });
 
         Some(result)
@@ -642,11 +672,20 @@ impl<'a> ExpressionConverter<'a> {
         let index_type = self.type_converter.convert_type(&for_expr.index_type);
         let field = b.field();
 
+        // The loop index carries the range's own signedness, and both the bump and the exit test
+        // are operations _on_ it, so they take their sign from it rather than defaulting. It is
+        // read from the Noir type, not from the converted one: an HLSSA integer type is a width.
+        let index_signed = ast_type_is_signed(&for_expr.index_type);
+
         // if range is inclusive, bump by one
         let end = if for_expr.inclusive {
-            let one = b.emit_const(Constant::U(index_type.get_bit_size(field), 1));
+            let one = b.emit_const(index_step_one(index_type.get_bit_size(field)));
             self.emit_located(b, Some(for_expr.end_range_location), |e| {
-                e.add(end_raw, one)
+                e.bin(
+                    BinaryArithOpKind::with_sign(ArithGroup::Add, index_signed),
+                    end_raw,
+                    one,
+                )
             })
         } else {
             end_raw
@@ -662,7 +701,7 @@ impl<'a> ExpressionConverter<'a> {
             let header_location = self.resolve_location(Some(for_expr.end_range_location));
             let mut header = b.block(loop_header).with_source_location(header_location);
             let loop_index = header.add_parameter(index_type);
-            let cond = header.lt(loop_index, end);
+            let cond = header.cmp(loop_index, end, CmpKind::lt(index_signed));
             header.terminate_jmp_if(cond, loop_body, exit_block);
             loop_index
         };
@@ -685,7 +724,11 @@ impl<'a> ExpressionConverter<'a> {
             loop_header,
             exit_block,
             body_source_location,
-            for_loop_index: Some((loop_index, index_bit_size)),
+            for_loop_index: Some(ForLoopIndex {
+                value: loop_index,
+                bit_size: index_bit_size,
+                signed: index_signed,
+            }),
         });
 
         // Execute the loop body
@@ -696,9 +739,13 @@ impl<'a> ExpressionConverter<'a> {
         // Increment the index and jump back to header
         // (only if current block is not already terminated by break/continue)
         if !b.block(self.current_block).is_terminated() {
-            let one = b.emit_const(Constant::U(index_bit_size, 1));
+            let one = b.emit_const(index_step_one(index_bit_size));
             let next_index = self.emit_located(b, Some(for_expr.start_range_location), |e| {
-                e.add(loop_index, one)
+                e.bin(
+                    BinaryArithOpKind::with_sign(ArithGroup::Add, index_signed),
+                    loop_index,
+                    one,
+                )
             });
             b.block(self.current_block)
                 .terminate_jmp(loop_header, vec![next_index]);
@@ -927,14 +974,12 @@ impl<'a> ExpressionConverter<'a> {
                 let zero_const = if matches!(unary.operator, noirc_frontend::ast::UnaryOp::Minus) {
                     use noirc_frontend::monomorphization::ast::Type as AstType;
                     Some(match unary.rhs.return_type().as_deref() {
-                        Some(AstType::Integer(
-                            noirc_frontend::shared::Signedness::Signed,
-                            bit_size,
-                        )) => Constant::I(bit_size.bit_size() as usize, 0),
-                        Some(AstType::Integer(
-                            noirc_frontend::shared::Signedness::Unsigned,
-                            bit_size,
-                        )) => Constant::U(bit_size.bit_size() as usize, 0),
+                        Some(AstType::Integer(signedness, bit_size)) => {
+                            // Only for the width gate: zero is zero under either reading, and the
+                            // negation that consumes it takes its sign from its own opcode.
+                            let (_, bits) = checked_int_cast_target(*signedness, *bit_size);
+                            Constant::Int(bits, 0)
+                        }
                         _ => Constant::Field(b.field().constant(0u64)),
                     })
                 } else {
@@ -945,7 +990,17 @@ impl<'a> ExpressionConverter<'a> {
                     noirc_frontend::ast::UnaryOp::Dereference { .. } => unreachable!(),
                     noirc_frontend::ast::UnaryOp::Not => e.not(value),
                     noirc_frontend::ast::UnaryOp::Minus => {
-                        e.sub(zero.expect("minus should have a zero constant"), value)
+                        // Negation is `0 - x`, and it takes its sign from `x` — the same source
+                        // the zero constant above was already chosen from.
+                        let kind = BinaryArithOpKind::with_sign(
+                            ArithGroup::Sub,
+                            operand_is_signed(&unary.rhs),
+                        );
+                        e.bin(
+                            kind,
+                            zero.expect("minus should have a zero constant"),
+                            value,
+                        )
                     }
                     _ => unreachable!(),
                 });
@@ -1111,13 +1166,9 @@ impl<'a> ExpressionConverter<'a> {
         let (target, target_bits) = match &cast.r#type {
             AstType::Field => (CastTarget::Field, field_bits),
             AstType::Integer(signedness, bit_size) => {
-                let bits = bit_size.bit_size() as usize;
-                match signedness {
-                    Signedness::Unsigned => (CastTarget::U(bits), bits),
-                    Signedness::Signed => (CastTarget::I(bits), bits),
-                }
+                checked_int_cast_target(*signedness, *bit_size)
             }
-            AstType::Bool => (CastTarget::U(1), 1),
+            AstType::Bool => (CastTarget::Int(1), 1),
             _ => panic!("Unsupported cast target type: {:?}", cast.r#type),
         };
 
@@ -1197,8 +1248,11 @@ impl<'a> ExpressionConverter<'a> {
             }
             Literal::Str(s) => {
                 // str<N>: array of u8 (UTF-8 bytes)
-                let elem_type = Type::u(8);
-                let elems = s.iter().map(|byte| Constant::U(8, *byte as u128)).collect();
+                let elem_type = Type::int(8);
+                let elems = s
+                    .iter()
+                    .map(|byte| Constant::Int(8, *byte as u128))
+                    .collect();
                 let blob = b.emit_const(Constant::Blob(Blob::new(elem_type.clone(), elems)));
                 let location = self.current_source_location.clone();
                 let arr = self
@@ -1217,19 +1271,21 @@ impl<'a> ExpressionConverter<'a> {
                         FmtStrFragment::Interpolation(name, _) => format!("{{{name}}}"),
                     };
                     for c in text.chars() {
-                        codepoint_constants.push(Constant::U(32, c as u128));
+                        codepoint_constants.push(Constant::Int(32, c as u128));
                     }
                 }
                 let cp_len = codepoint_constants.len();
-                let blob =
-                    b.emit_const(Constant::Blob(Blob::new(Type::u(32), codepoint_constants)));
+                let blob = b.emit_const(Constant::Blob(Blob::new(
+                    Type::int(32),
+                    codepoint_constants,
+                )));
                 let cp_array = self.emit_located(b, Self::expression_location(captures), |e| {
-                    e.mk_seq_of_blob(Type::u(32), blob)
+                    e.mk_seq_of_blob(Type::int(32), blob)
                 });
 
                 // Convert captures (always a Tuple expression) and flatten
                 let mut tuple_elems = vec![cp_array];
-                let mut elem_types = vec![Type::u(32).array_of(cp_len)];
+                let mut elem_types = vec![Type::int(32).array_of(cp_len)];
                 if let Expression::Tuple(capture_exprs) = captures.as_ref() {
                     for expr in capture_exprs {
                         let val = self.convert_expression(expr, b).unwrap();
@@ -1344,7 +1400,7 @@ impl<'a> ExpressionConverter<'a> {
         match lit {
             Literal::Bool(bv) => {
                 let value = if *bv { 1 } else { 0 };
-                Some(Constant::U(1, value))
+                Some(Constant::Int(1, value))
             }
             Literal::Integer(field_element, typ, _location) => match typ {
                 AstType::Field => {
@@ -1360,17 +1416,20 @@ impl<'a> ExpressionConverter<'a> {
                             bits <= MAX_SUPPORTED_SIGNED_BITS,
                             "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
                         );
+                        // The _encoding_ still depends on the declared signedness even though the
+                        // constant no longer records it: a negative literal has to reach the IR as
+                        // its two's-complement pattern, which `to_u128` would not produce.
                         let val = field_element.to_i128();
                         let twos_complement = (val as u128) & ((1u128 << bits) - 1);
-                        Some(Constant::I(bits, twos_complement))
+                        Some(Constant::Int(bits, twos_complement))
                     } else {
                         let value = field_element.to_u128();
-                        Some(Constant::U(bits, value))
+                        Some(Constant::Int(bits, value))
                     }
                 }
                 AstType::Bool => {
                     let value = field_element.to_u128();
-                    Some(Constant::U(1, value))
+                    Some(Constant::Int(1, value))
                 }
                 _ => panic!("Unexpected type for integer literal: {:?}", typ),
             },
@@ -1379,14 +1438,13 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn is_const_seq_scalar_type(typ: &Type) -> bool {
-        matches!(typ.expr, TypeExpr::Field | TypeExpr::U(_) | TypeExpr::I(_))
+        matches!(typ.expr, TypeExpr::Field | TypeExpr::Int(_))
     }
 
     fn constant_matches_type(constant: &Constant, typ: &Type) -> bool {
         match (constant, &typ.expr) {
             (Constant::Field(_), TypeExpr::Field) => true,
-            (Constant::U(bits, _), TypeExpr::U(type_bits)) => bits == type_bits,
-            (Constant::I(bits, _), TypeExpr::I(type_bits)) => bits == type_bits,
+            (Constant::Int(bits, _), TypeExpr::Int(type_bits)) => bits == type_bits,
             _ => false,
         }
     }
@@ -1550,7 +1608,7 @@ impl<'a> ExpressionConverter<'a> {
                         // function call that emits constraints), then return the
                         // compile-time-known length.
                         self.convert_expression(&call.arguments[0], b);
-                        let value = b.emit_const(Constant::U(32, *len as u128));
+                        let value = b.emit_const(Constant::Int(32, *len as u128));
                         Some(value)
                     }
                     noirc_frontend::monomorphization::ast::Type::Vector(_) => {
@@ -1611,13 +1669,13 @@ impl<'a> ExpressionConverter<'a> {
             "field_less_than" => {
                 let lhs = self.convert_expression(&call.arguments[0], b).unwrap();
                 let rhs = self.convert_expression(&call.arguments[1], b).unwrap();
-                let result = self.emit_located(b, Some(call.location), |e| e.lt(lhs, rhs));
+                let result = self.emit_located(b, Some(call.location), |e| e.ult(lhs, rhs));
                 Some(result)
             }
             "is_unconstrained" => {
                 let value = b
                     .ssa
-                    .add_const(Constant::U(1, if self.in_unconstrained { 1 } else { 0 }));
+                    .add_const(Constant::Int(1, if self.in_unconstrained { 1 } else { 0 }));
                 Some(value)
             }
             "as_witness" => {
@@ -1703,6 +1761,52 @@ impl<'a> ExpressionConverter<'a> {
                     e.slice_push(slice, vec![elem], SliceOpDir::Back)
                 }))
             }
+            "vector_push_front" => {
+                let slice = self.convert_expression(&call.arguments[0], b).unwrap();
+                let elem = self.convert_expression(&call.arguments[1], b).unwrap();
+                Some(self.emit_located(b, Some(call.location), |e| {
+                    e.slice_push(slice, vec![elem], SliceOpDir::Front)
+                }))
+            }
+            "vector_pop_back" | "vector_pop_front" => {
+                let front = name == "vector_pop_front";
+                let slice = self.convert_expression(&call.arguments[0], b).unwrap();
+                let tuple_ty = self.type_converter.convert_type(&call.return_type);
+                let TypeExpr::Tuple(parts) = &tuple_ty.expr else {
+                    panic!("vector pop builtin must return a tuple, got {tuple_ty}")
+                };
+                let parts = parts.clone();
+                Some(self.emit_located(b, Some(call.location), |e| {
+                    if front {
+                        let (shrunk, elem) = e.slice_pop(slice, SliceOpDir::Front);
+                        e.mk_tuple(vec![elem, shrunk], parts)
+                    } else {
+                        let (shrunk, elem) = e.slice_pop(slice, SliceOpDir::Back);
+                        e.mk_tuple(vec![shrunk, elem], parts)
+                    }
+                }))
+            }
+            "vector_insert" => {
+                let slice = self.convert_expression(&call.arguments[0], b).unwrap();
+                let index = self.convert_expression(&call.arguments[1], b).unwrap();
+                let elem = self.convert_expression(&call.arguments[2], b).unwrap();
+                Some(self.emit_located(b, Some(call.location), |e| {
+                    e.slice_insert(slice, index, elem)
+                }))
+            }
+            "vector_remove" => {
+                let slice = self.convert_expression(&call.arguments[0], b).unwrap();
+                let index = self.convert_expression(&call.arguments[1], b).unwrap();
+                let tuple_ty = self.type_converter.convert_type(&call.return_type);
+                let TypeExpr::Tuple(parts) = &tuple_ty.expr else {
+                    panic!("vector remove builtin must return a tuple, got {tuple_ty}")
+                };
+                let parts = parts.clone();
+                Some(self.emit_located(b, Some(call.location), |e| {
+                    let (shrunk, elem) = e.slice_remove(slice, index);
+                    e.mk_tuple(vec![shrunk, elem], parts)
+                }))
+            }
             _ => todo!("Builtin function '{}' not yet supported", name),
         }
     }
@@ -1732,17 +1836,12 @@ impl<'a> ExpressionConverter<'a> {
         match name {
             "unsafe_cast" => {
                 use noirc_frontend::monomorphization::ast::Type as AstType;
-                use noirc_frontend::shared::Signedness;
 
                 let target = match &call.return_type {
                     AstType::Field => CastTarget::Field,
-                    AstType::Bool => CastTarget::U(1),
+                    AstType::Bool => CastTarget::Int(1),
                     AstType::Integer(signedness, bit_size) => {
-                        let bits = bit_size.bit_size() as usize;
-                        match signedness {
-                            Signedness::Unsigned => CastTarget::U(bits),
-                            Signedness::Signed => CastTarget::I(bits),
-                        }
+                        checked_int_cast_target(*signedness, *bit_size).0
                     }
                     other => panic!("unsafe_cast: unsupported target type {:?}", other),
                 };
@@ -1772,7 +1871,7 @@ impl<'a> ExpressionConverter<'a> {
                 let value = self.convert_expression(&call.arguments[0], b).unwrap();
                 let result = self.emit_located(b, Some(call.location), |e| {
                     let (odd, even) = e.unspread(value, bits as u8);
-                    e.mk_tuple(vec![odd, even], vec![Type::u(32), Type::u(32)])
+                    e.mk_tuple(vec![odd, even], vec![Type::int(32), Type::int(32)])
                 });
                 Some(result)
             }
@@ -1791,4 +1890,77 @@ impl<'a> ExpressionConverter<'a> {
             _ => panic!("Expected a constant integer argument, got {:?}", expr),
         }
     }
+}
+
+/// The width and cast target of a Noir integer type, rejecting a signed one the signed operations
+/// cannot read.
+///
+/// This is the frontend's half of the width bound. `TypeExpr::Int(n)` is a width and nothing more,
+/// so an `i128` has to be refused while a `Signedness` still exists to refuse it — after this point
+/// nothing downstream can tell it from a `u128`, which is legal. `TypeConverter::convert_type` and
+/// `scalar_literal_to_constant` carry the same gate for the paths that arrive as a type or as a
+/// literal rather than as a cast target.
+///
+/// Enforcing that bound is the _only_ thing the `Signedness` is read for: both arms build the same
+/// `CastTarget::Int(bits)`, because a cast to an integer is a raw-bit conversion that truncates or
+/// zero-extends identically under either reading. The match is kept split rather than collapsed to
+/// one line precisely so the assert has somewhere to live. This is the last point at which the sign
+/// is knowable.
+fn checked_int_cast_target(
+    signedness: noirc_frontend::shared::Signedness,
+    bit_size: noirc_frontend::ast::IntegerBitSize,
+) -> (CastTarget, usize) {
+    use noirc_frontend::shared::Signedness;
+
+    let bits = bit_size.bit_size() as usize;
+    match signedness {
+        Signedness::Unsigned => (CastTarget::Int(bits), bits),
+        Signedness::Signed => {
+            assert_signed_op_width(bits, "cast target");
+            (CastTarget::Int(bits), bits)
+        }
+    }
+}
+
+/// The constant `1` a `for` loop steps its index by.
+///
+/// `1` is the same pattern under either reading, and the `Add` that consumes it carries the index's
+/// signedness on the opcode — so this needs only the width. It used to need the index's sign too,
+/// because the constant tags were what several consumers dispatched on and a mismatched pair made
+/// `instrumenter::binary_arith_op` panic rather than merely decline; with one `Constant::Int` there
+/// is no pair to mismatch.
+fn index_step_one(bit_size: usize) -> Constant {
+    Constant::Int(bit_size, 1)
+}
+
+/// Whether a Noir expression's value is read as two's complement.
+///
+/// This is the frontend's _only_ signedness source for the sign-carrying opcodes, so the whole
+/// refactor's correctness reduces to it. `return_type()` already serves exactly this purpose in
+/// `convert_cast` and in `convert_unary`'s `Minus`, so no new mechanism is involved.
+///
+/// `Field` and `bool` answer `false` — they take the unsigned forms, which is what every consumer
+/// already does with them. `None` is returned only for the statement-shaped expressions
+/// (`For`, `Loop`, `While`, `Let`, `Constrain`, `Assign`, `Semi`, `Drop`, `Break`, `Continue`),
+/// which are unit- or never-typed and so cannot be an arithmetic operand; they fall to `false`,
+/// matching the existing `_ => (0, false)` fallback in `convert_cast`.
+///
+/// That `None` is unreachable for anything this is asked about, and the enumeration above is the
+/// proof: a well-typed Noir program cannot make a statement the operand of an arithmetic operator.
+/// A cross-check between the two operands of a binary expression used to stand behind that claim
+/// as well; it was removed once it had run clean over the whole corpus twice, because it could only
+/// ever have caught input that Noir's own typechecker rejects first.
+fn operand_is_signed(e: &Expression) -> bool {
+    matches!(e.return_type().as_deref(), Some(t) if ast_type_is_signed(t))
+}
+
+/// Whether a Noir type is a signed integer.
+///
+/// The frontend is the only place that can answer this: it is the last point at which a
+/// `Signedness` exists, and everything downstream reads the sign off the operation instead.
+fn ast_type_is_signed(t: &noirc_frontend::monomorphization::ast::Type) -> bool {
+    use noirc_frontend::monomorphization::ast::Type as AstType;
+    use noirc_frontend::shared::Signedness;
+
+    matches!(t, AstType::Integer(Signedness::Signed, _))
 }

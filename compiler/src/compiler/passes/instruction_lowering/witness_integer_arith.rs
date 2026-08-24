@@ -5,16 +5,15 @@ use mavros_artifacts::FieldConfig;
 
 use crate::compiler::{
     analysis::value_range_analysis::{Interval, field_modulus},
+    passes::instruction_lowering::{InstructionLoweringRule, LoweringContext, integer_bits},
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, MAX_SUPPORTED_SIGNED_BITS, OpCode,
+            ArithGroup, BinaryArithOpKind, CastTarget, CmpKind, OpCode, assert_signed_op_width,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
 };
-
-use super::{InstructionLoweringRule, LoweringContext, integer_bits_and_signedness};
 
 pub struct LowerWitnessIntegerArithOps {}
 
@@ -25,11 +24,8 @@ impl InstructionLoweringRule for LowerWitnessIntegerArithOps {
         context: &LoweringContext<'_>,
         instruction: &OpCode,
     ) -> bool {
-        if let OpCode::Guard { condition, inner } = instruction {
-            self.process_arith(b, context, Some(*condition), inner.as_ref())
-        } else {
-            self.process_arith(b, context, None, instruction)
-        }
+        let (guard, op) = HLBlockEmitter::unwrap_guard(instruction);
+        self.process_arith(b, context, guard, op)
     }
 }
 
@@ -47,51 +43,75 @@ impl LowerWitnessIntegerArithOps {
     ) -> bool {
         match op {
             OpCode::BinaryArithOp {
-                kind: kind @ (BinaryArithOpKind::Add | BinaryArithOpKind::Sub),
+                kind,
                 result,
                 lhs,
                 rhs,
             } if self.should_lower_integer_arith(context, *lhs, *rhs) => {
-                let (bits, signed) =
-                    integer_bits_and_signedness(context.types().get_value_type(*lhs)).unwrap();
-                if signed {
-                    self.lower_signed_addsub(b, context, guard, *kind, *result, *lhs, *rhs, bits);
-                } else {
-                    self.lower_unsigned_addsub(b, context, guard, *kind, *result, *lhs, *rhs, bits);
+                // The bitwise operations and the shifts are `LowerWitnessBitwiseOps`' business, and
+                // this rule runs first in `witness_integer_ops`, so it has to decline them for
+                // that one to see them. Returning `false` is what passes them on; the `unreachable`
+                // at the bottom of the match is the other half of the same statement.
+                if !matches!(
+                    kind.group(),
+                    ArithGroup::Add
+                        | ArithGroup::Sub
+                        | ArithGroup::Mul
+                        | ArithGroup::Div
+                        | ArithGroup::Rem
+                ) {
+                    return false;
                 }
-                true
-            }
-            OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Mul,
-                result,
-                lhs,
-                rhs,
-            } if self.should_lower_integer_arith(context, *lhs, *rhs) => {
-                let (bits, signed) =
-                    integer_bits_and_signedness(context.types().get_value_type(*lhs)).unwrap();
-                if signed {
-                    self.lower_signed_mul(b, context, guard, *result, *lhs, *rhs, bits);
-                } else {
-                    self.lower_unsigned_mul(b, context, guard, *result, *lhs, *rhs, bits);
+
+                let lhs_ty = context.types().get_value_type(*lhs);
+                let bits = integer_bits(lhs_ty).unwrap();
+                // The operation picks the lowering; the type above supplied only the width. Every
+                // arm below is handed `kind` itself rather than a rebuilt one, so the hints and
+                // helper operations a lowering emits carry the same sign as the operation that
+                // selected it.
+                let signed = kind.is_signed();
+                let kind = *kind;
+
+                match kind.group() {
+                    ArithGroup::Add | ArithGroup::Sub => {
+                        if signed {
+                            self.lower_signed_addsub(
+                                b, context, guard, kind, *result, *lhs, *rhs, bits,
+                            );
+                        } else {
+                            self.lower_unsigned_addsub(
+                                b, context, guard, kind, *result, *lhs, *rhs, bits,
+                            );
+                        }
+                        true
+                    }
+                    ArithGroup::Mul => {
+                        if signed {
+                            self.lower_signed_mul(b, context, guard, *result, *lhs, *rhs, bits);
+                        } else {
+                            self.lower_unsigned_mul(b, context, guard, *result, *lhs, *rhs, bits);
+                        }
+                        true
+                    }
+                    ArithGroup::Div | ArithGroup::Rem => {
+                        if signed {
+                            self.lower_signed_divmod(
+                                b, context, guard, kind, *result, *lhs, *rhs, bits,
+                            );
+                        } else {
+                            self.lower_unsigned_divmod_result(
+                                b, context, guard, kind, *result, *lhs, *rhs, bits,
+                            );
+                        }
+                        true
+                    }
+                    // Rejected above, before the sign was resolved.
+                    ArithGroup::And
+                    | ArithGroup::Or
+                    | ArithGroup::Xor
+                    | ArithGroup::Shl
+                    | ArithGroup::Shr => unreachable!("filtered out above"),
                 }
-                true
-            }
-            OpCode::BinaryArithOp {
-                kind: kind @ (BinaryArithOpKind::Div | BinaryArithOpKind::Mod),
-                result,
-                lhs,
-                rhs,
-            } if self.should_lower_integer_arith(context, *lhs, *rhs) => {
-                let (bits, signed) =
-                    integer_bits_and_signedness(context.types().get_value_type(*lhs)).unwrap();
-                if signed {
-                    self.lower_signed_divmod(b, context, guard, *kind, *result, *lhs, *rhs, bits);
-                } else {
-                    self.lower_unsigned_divmod_result(
-                        b, context, guard, *kind, *result, *lhs, *rhs, bits,
-                    );
-                }
-                true
             }
             _ => false,
         }
@@ -105,8 +125,7 @@ impl LowerWitnessIntegerArithOps {
     ) -> bool {
         let lhs_ty = context.types().get_value_type(lhs);
         let rhs_ty = context.types().get_value_type(rhs);
-        (lhs_ty.is_witness_of() || rhs_ty.is_witness_of())
-            && integer_bits_and_signedness(lhs_ty).is_some()
+        (lhs_ty.is_witness_of() || rhs_ty.is_witness_of()) && integer_bits(lhs_ty).is_some()
     }
 
     // FIELD-ASSUMPTION: L6-int-op-strategy
@@ -125,14 +144,15 @@ impl LowerWitnessIntegerArithOps {
     ) {
         let lhs_field = b.cast_to_field(lhs);
         let rhs_field = b.cast_to_field(rhs);
-        let value = match kind {
-            BinaryArithOpKind::Add => b.add(lhs_field, rhs_field),
-            BinaryArithOpKind::Sub => b.sub(lhs_field, rhs_field),
+        // The sum is a _field_ value, so the unsigned forms are the right ones to build it with.
+        let value = match kind.group() {
+            ArithGroup::Add => b.uadd(lhs_field, rhs_field),
+            ArithGroup::Sub => b.usub(lhs_field, rhs_field),
             _ => unreachable!(),
         };
-        let range = match kind {
-            BinaryArithOpKind::Add => context.urange(lhs).add(&context.urange(rhs)),
-            BinaryArithOpKind::Sub => context.urange(lhs).sub(&context.urange(rhs)),
+        let range = match kind.group() {
+            ArithGroup::Add => context.urange(lhs).add(&context.urange(rhs)),
+            ArithGroup::Sub => context.urange(lhs).sub(&context.urange(rhs)),
             _ => unreachable!(),
         };
         if !range.proves_fits_in_unsigned_bits(bits) {
@@ -143,7 +163,7 @@ impl LowerWitnessIntegerArithOps {
         b.emit(OpCode::Cast {
             result,
             value,
-            target: CastTarget::U(bits),
+            target: CastTarget::Int(bits),
         });
     }
 
@@ -172,26 +192,26 @@ impl LowerWitnessIntegerArithOps {
             let rhs_lo = b.cast_to_field(rhs_limbs.lo);
             let rhs_hi = b.cast_to_field(rhs_limbs.hi);
 
-            let lo_product = b.mul(lhs_lo, rhs_lo);
-            let lhs_cross = b.mul(lhs_lo, rhs_hi);
-            let rhs_cross = b.mul(lhs_hi, rhs_lo);
-            let high_product = b.mul(lhs_hi, rhs_hi);
+            let lo_product = b.umul(lhs_lo, rhs_lo);
+            let lhs_cross = b.umul(lhs_lo, rhs_hi);
+            let rhs_cross = b.umul(lhs_hi, rhs_lo);
+            let high_product = b.umul(lhs_hi, rhs_hi);
             let zero = b.field_const(b.field().zero());
             let flag = guard
                 .map(|condition| b.cast_to_field(condition))
                 .unwrap_or_else(|| b.field_const(b.field().one()));
             b.constrain(flag, high_product, zero);
 
-            let cross = b.add(lhs_cross, rhs_cross);
+            let cross = b.uadd(lhs_cross, rhs_cross);
             let shift = b.field_const(b.field().two_pow(64));
-            let shifted_cross = b.mul(cross, shift);
-            let value = b.add(lo_product, shifted_cross);
+            let shifted_cross = b.umul(cross, shift);
+            let value = b.uadd(lo_product, shifted_cross);
             guarded_rangecheck(b, value, bits, guard);
             let value = guarded_or_zero_field(b, value, guard);
             b.emit(OpCode::Cast {
                 result,
                 value,
-                target: CastTarget::U(bits),
+                target: CastTarget::Int(bits),
             });
             return;
         }
@@ -203,7 +223,7 @@ impl LowerWitnessIntegerArithOps {
 
         let lhs_field = b.cast_to_field(lhs);
         let rhs_field = b.cast_to_field(rhs);
-        let value = b.mul(lhs_field, rhs_field);
+        let value = b.umul(lhs_field, rhs_field);
         if !product_range.proves_fits_in_unsigned_bits(bits) {
             let rc_bits = narrow_rangecheck_width(&product_range, bits);
             guarded_rangecheck(b, value, rc_bits, guard);
@@ -212,7 +232,7 @@ impl LowerWitnessIntegerArithOps {
         b.emit(OpCode::Cast {
             result,
             value,
-            target: CastTarget::U(bits),
+            target: CastTarget::Int(bits),
         });
     }
 
@@ -232,10 +252,7 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
-        assert!(
-            bits <= MAX_SUPPORTED_SIGNED_BITS,
-            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-        );
+        assert_signed_op_width(bits, "signed addition");
         let lhs_range = context.srange(lhs);
         let rhs_range = context.srange(rhs);
         let sign_l = match known_sign(&lhs_range, bits) {
@@ -259,9 +276,9 @@ impl LowerWitnessIntegerArithOps {
         let lhs_signed = signed_value_from_encoded(b, lhs_field, sign_l, bits);
         let rhs_signed = signed_value_from_encoded(b, rhs_field, sign_r, bits);
 
-        let result_range = match kind {
-            BinaryArithOpKind::Add => lhs_range.add(&rhs_range),
-            BinaryArithOpKind::Sub => lhs_range.sub(&rhs_range),
+        let result_range = match kind.group() {
+            ArithGroup::Add => lhs_range.add(&rhs_range),
+            ArithGroup::Sub => lhs_range.sub(&rhs_range),
             _ => unreachable!(),
         };
         assert!(
@@ -269,9 +286,11 @@ impl LowerWitnessIntegerArithOps {
             "signed add/sub result range is too wide for a single-field encoding"
         );
 
-        let signed_raw = match kind {
-            BinaryArithOpKind::Add => b.add(lhs_signed, rhs_signed),
-            BinaryArithOpKind::Sub => b.sub(lhs_signed, rhs_signed),
+        // `lhs_signed`/`rhs_signed` are decoded _field_ values, so this is field arithmetic and
+        // takes the unsigned forms even though the operands it came from are signed integers.
+        let signed_raw = match kind.group() {
+            ArithGroup::Add => b.uadd(lhs_signed, rhs_signed),
+            ArithGroup::Sub => b.usub(lhs_signed, rhs_signed),
             _ => unreachable!(),
         };
 
@@ -279,12 +298,11 @@ impl LowerWitnessIntegerArithOps {
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
         let lhs_pure = if lhs_witness { b.value_of(lhs) } else { lhs };
         let rhs_pure = if rhs_witness { b.value_of(rhs) } else { rhs };
-        let result_hint = match kind {
-            BinaryArithOpKind::Add => b.add(lhs_pure, rhs_pure),
-            BinaryArithOpKind::Sub => b.sub(lhs_pure, rhs_pure),
-            _ => unreachable!(),
-        };
-        let result_hint_unsigned = b.cast_to(CastTarget::U(bits), result_hint);
+        // Unlike `signed_raw` above, this one is computed on the _integer_ operands at their own
+        // width, so it carries the original operation — including its sign — rather than an
+        // unsigned stand-in.
+        let result_hint = b.bin(kind, lhs_pure, rhs_pure);
+        let result_hint_unsigned = b.cast_to(CastTarget::Int(bits), result_hint);
         let result_value = encode_signed_value(
             b,
             signed_raw,
@@ -296,7 +314,7 @@ impl LowerWitnessIntegerArithOps {
         b.emit(OpCode::Cast {
             result,
             value: result_value,
-            target: CastTarget::I(bits),
+            target: CastTarget::Int(bits),
         });
     }
 
@@ -314,10 +332,7 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
-        assert!(
-            bits <= MAX_SUPPORTED_SIGNED_BITS,
-            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-        );
+        assert_signed_op_width(bits, "signed multiplication");
         let lhs_range = context.srange(lhs);
         let rhs_range = context.srange(rhs);
         let product_range = lhs_range.mul(&rhs_range);
@@ -351,9 +366,12 @@ impl LowerWitnessIntegerArithOps {
 
         let lhs_pure = if lhs_witness { b.value_of(lhs) } else { lhs };
         let rhs_pure = if rhs_witness { b.value_of(rhs) } else { rhs };
-        let result_hint = b.mul(lhs_pure, rhs_pure);
-        let result_hint_unsigned = b.cast_to(CastTarget::U(bits), result_hint);
-        let product = b.mul(lhs_signed, rhs_signed);
+        // The hint is a _signed_ multiply — `smul` is what says so, the operand type no longer
+        // can — taken at the operands' own width. It is the sibling of the `result_hint` in
+        // `lower_signed_addsub`. The product below is on decoded field values and stays unsigned.
+        let result_hint = b.smul(lhs_pure, rhs_pure);
+        let result_hint_unsigned = b.cast_to(CastTarget::Int(bits), result_hint);
+        let product = b.umul(lhs_signed, rhs_signed);
         let result_value = encode_signed_value(
             b,
             product,
@@ -366,7 +384,7 @@ impl LowerWitnessIntegerArithOps {
         b.emit(OpCode::Cast {
             result,
             value: result_value,
-            target: CastTarget::I(bits),
+            target: CastTarget::Int(bits),
         });
     }
 
@@ -397,15 +415,15 @@ impl LowerWitnessIntegerArithOps {
             guard,
             guard_is_witness,
         );
-        let value = match kind {
-            BinaryArithOpKind::Div => divmod.q,
-            BinaryArithOpKind::Mod => divmod.r,
+        let value = match kind.group() {
+            ArithGroup::Div => divmod.q,
+            ArithGroup::Rem => divmod.r,
             _ => unreachable!(),
         };
         b.emit(OpCode::Cast {
             result,
             value,
-            target: CastTarget::U(bits),
+            target: CastTarget::Int(bits),
         });
     }
 
@@ -421,10 +439,7 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
-        assert!(
-            bits <= MAX_SUPPORTED_SIGNED_BITS,
-            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-        );
+        assert_signed_op_width(bits, "signed division");
         let lhs_witness = context.types().get_value_type(lhs).is_witness_of();
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
         let lhs_range = context.srange(lhs);
@@ -433,11 +448,11 @@ impl LowerWitnessIntegerArithOps {
         let lhs_known_sign = known_sign(&lhs_range, bits);
         let sign_l_is_witness = lhs_witness && lhs_known_sign.is_none();
         let (sign_l_u1, sign_l) = match lhs_known_sign {
-            Some(false) => (b.u_const(1, 0), b.field_const(b.field().zero())),
-            Some(true) => (b.u_const(1, 1), b.field_const(b.field().one())),
+            Some(false) => (b.int_const(1, 0), b.field_const(b.field().zero())),
+            Some(true) => (b.int_const(1, 1), b.field_const(b.field().one())),
             None => {
                 let sign_l_bits = b.bit_range(lhs, bits - 1, 1);
-                let sign_l_u1 = b.cast_to(CastTarget::U(1), sign_l_bits);
+                let sign_l_u1 = b.cast_to(CastTarget::Int(1), sign_l_bits);
                 let sign_l = b.cast_to_field(sign_l_u1);
                 (sign_l_u1, sign_l)
             }
@@ -452,11 +467,11 @@ impl LowerWitnessIntegerArithOps {
             (sign_l_u1, sign_l)
         } else {
             match rhs_known_sign {
-                Some(false) => (b.u_const(1, 0), b.field_const(b.field().zero())),
-                Some(true) => (b.u_const(1, 1), b.field_const(b.field().one())),
+                Some(false) => (b.int_const(1, 0), b.field_const(b.field().zero())),
+                Some(true) => (b.int_const(1, 1), b.field_const(b.field().one())),
                 None => {
                     let sign_r_bits = b.bit_range(rhs, bits - 1, 1);
-                    let sign_r_u1 = b.cast_to(CastTarget::U(1), sign_r_bits);
+                    let sign_r_u1 = b.cast_to(CastTarget::Int(1), sign_r_bits);
                     let sign_r = b.cast_to_field(sign_r_u1);
                     (sign_r_u1, sign_r)
                 }
@@ -525,15 +540,15 @@ impl LowerWitnessIntegerArithOps {
             guard,
         );
 
-        let value = match kind {
-            BinaryArithOpKind::Div => quotient,
-            BinaryArithOpKind::Mod => remainder,
+        let value = match kind.group() {
+            ArithGroup::Div => quotient,
+            ArithGroup::Rem => remainder,
             _ => unreachable!(),
         };
         b.emit(OpCode::Cast {
             result,
             value,
-            target: CastTarget::I(bits),
+            target: CastTarget::Int(bits),
         });
     }
 
@@ -546,10 +561,10 @@ impl LowerWitnessIntegerArithOps {
     ) -> ValueId {
         let signed_value = signed_value_from_encoded(b, value_field, sign, bits);
         let two = b.field_const(b.field().constant(2));
-        let two_sign = b.mul(two, sign);
+        let two_sign = b.umul(two, sign);
         let one = b.field_const(b.field().one());
-        let factor = b.sub(one, two_sign);
-        b.mul(signed_value, factor)
+        let factor = b.usub(one, two_sign);
+        b.umul(signed_value, factor)
     }
 
     fn write_signed_magnitude_result(
@@ -575,18 +590,18 @@ impl LowerWitnessIntegerArithOps {
         };
         let magnitude_field = b.cast_to_field(magnitude_pure);
         let two_n_field = b.field_const(b.field().two_pow(bits));
-        let neg = b.sub(two_n_field, magnitude_field);
+        let neg = b.usub(two_n_field, magnitude_field);
         let encoded_if_nonzero = b.select(sign_for_hint, neg, magnitude_field);
         let zero = b.field_const(b.field().zero());
         let magnitude_is_zero = b.eq(magnitude_field, zero);
         let two = b.field_const(b.field().constant(2));
-        let two_sign = b.mul(two, sign);
+        let two_sign = b.umul(two, sign);
         let one = b.field_const(b.field().one());
-        let factor = b.sub(one, two_sign);
-        let signed_value = b.mul(magnitude, factor);
+        let factor = b.usub(one, two_sign);
+        let signed_value = b.umul(magnitude, factor);
 
         let encoded_hint = b.select(magnitude_is_zero, zero, encoded_if_nonzero);
-        let encoded_hint = b.cast_to(CastTarget::U(bits), encoded_hint);
+        let encoded_hint = b.cast_to(CastTarget::Int(bits), encoded_hint);
         encode_signed_value(b, signed_value, encoded_hint, &Interval::top(), bits, guard)
     }
 }
@@ -598,29 +613,13 @@ fn guarded_rangecheck(
     guard: Option<ValueId>,
 ) {
     assert!(bits >= 1, "rangecheck width must be at least 1 bit");
-    let rangecheck = OpCode::Rangecheck {
-        value,
-        max_bits: bits,
-    };
-    if let Some(condition) = guard {
-        b.emit(OpCode::Guard {
-            condition,
-            inner: Box::new(rangecheck),
-        });
-    } else {
-        b.emit(rangecheck);
-    }
-}
-
-fn emit_guarded(b: &mut HLBlockEmitter<'_>, guard: Option<ValueId>, op: OpCode) {
-    if let Some(condition) = guard {
-        b.emit(OpCode::Guard {
-            condition,
-            inner: Box::new(op),
-        });
-    } else {
-        b.emit(op);
-    }
+    b.emit_guarded(
+        guard,
+        OpCode::Rangecheck {
+            value,
+            max_bits: bits,
+        },
+    );
 }
 
 fn guarded_or_zero_field(
@@ -637,7 +636,7 @@ fn guarded_or_zero_field(
 }
 
 fn narrow_rangecheck_width(range: &Interval, default_bits: usize) -> usize {
-    // ⊥ is `[1, 0]`, which would otherwise measure as a *one-bit* check on a value the analysis
+    // ⊥ is `[1, 0]`, which would otherwise measure as a _one-bit_ check on a value the analysis
     // only believes unreachable because of this very check. Fall back to the declared width.
     if range.is_empty() {
         return default_bits;
@@ -686,8 +685,8 @@ fn signed_value_from_encoded(
     bits: usize,
 ) -> ValueId {
     let sign_shift = b.field_const(b.field().two_pow(bits));
-    let sign_shifted = b.mul(sign, sign_shift);
-    b.sub(encoded_field, sign_shifted)
+    let sign_shifted = b.umul(sign, sign_shift);
+    b.usub(encoded_field, sign_shifted)
 }
 
 /// The provable sign of a value, or `None` when it is not known. Callers hardcode a constant sign
@@ -723,18 +722,18 @@ fn encode_signed_value(
     };
 
     let sign_shift = b.field_const(b.field().two_pow(bits));
-    let sign_shifted = b.mul(sign, sign_shift);
-    let encoded = b.add(signed_value, sign_shifted);
+    let sign_shifted = b.umul(sign, sign_shift);
+    let encoded = b.uadd(signed_value, sign_shifted);
     if !signed_range.proves_fits_in_signed_bits(bits) || known_sign(signed_range, bits).is_none() {
         if bits == 1 {
-            let diff = b.sub(encoded, sign);
+            let diff = b.usub(encoded, sign);
             guarded_rangecheck(b, diff, 1, guard);
-            let neg_diff = b.sub(sign, encoded);
+            let neg_diff = b.usub(sign, encoded);
             guarded_rangecheck(b, neg_diff, 1, guard);
         } else {
             let half = b.field_const(b.field().two_pow(bits - 1));
-            let sign_half = b.mul(sign, half);
-            let sign_limb = b.sub(encoded, sign_half);
+            let sign_half = b.umul(sign, half);
+            let sign_limb = b.usub(encoded, sign_half);
             guarded_rangecheck(b, sign_limb, bits - 1, guard);
         }
     }
@@ -762,7 +761,7 @@ struct U128Limbs {
 // A fixed 2x64-bit split of a u128. On a small field the limb width must derive from the
 // field size (h ~= field_bits/2), and wide integers become multi-cell values end-to-end.
 fn split_u128_value(b: &mut impl HLEmitter, value: ValueId) -> U128Limbs {
-    let value = b.cast_to(CastTarget::U(128), value);
+    let value = b.cast_to(CastTarget::Int(128), value);
     U128Limbs {
         lo: split_u128_limb(b, value, 0),
         hi: split_u128_limb(b, value, 64),
@@ -771,7 +770,7 @@ fn split_u128_value(b: &mut impl HLEmitter, value: ValueId) -> U128Limbs {
 
 fn split_u128_limb(b: &mut impl HLEmitter, value: ValueId, offset: usize) -> ValueId {
     let limb = b.bit_range(value, offset, 64);
-    b.cast_to(CastTarget::U(64), limb)
+    b.cast_to(CastTarget::Int(64), limb)
 }
 
 // FIELD-ASSUMPTION: L6-int-op-strategy
@@ -801,7 +800,7 @@ fn lower_unsigned_divmod(
             let zero = b.field_const(b.field().zero());
             let one = b.field_const(b.field().one());
             let divisor_field = b.cast_to_field(divisor);
-            let divisor_minus_one = b.sub(divisor_field, one);
+            let divisor_minus_one = b.usub(divisor_field, one);
             guarded_rangecheck(b, divisor_minus_one, 128, guard);
             return DivModResult {
                 q: active,
@@ -822,22 +821,22 @@ fn lower_unsigned_divmod(
             divisor
         };
 
-        let mut dividend_hint = b.cast_to(CastTarget::U(128), dividend_pure);
-        let mut divisor_hint = b.cast_to(CastTarget::U(128), divisor_pure);
+        let mut dividend_hint = b.cast_to(CastTarget::Int(128), dividend_pure);
+        let mut divisor_hint = b.cast_to(CastTarget::Int(128), divisor_pure);
         if let Some(condition) = guard {
             let condition = if guard_is_witness {
                 b.value_of(condition)
             } else {
                 condition
             };
-            let zero = b.u_const(128, 0);
-            let one = b.u_const(128, 1);
+            let zero = b.int_const(128, 0);
+            let one = b.int_const(128, 1);
             dividend_hint = b.select(condition, dividend_hint, zero);
             divisor_hint = b.select(condition, divisor_hint, one);
         }
 
-        let q_hint = b.div(dividend_hint, divisor_hint);
-        let r_hint = b.modulo(dividend_hint, divisor_hint);
+        let q_hint = b.udiv(dividend_hint, divisor_hint);
+        let r_hint = b.urem(dividend_hint, divisor_hint);
         let q_hint_field = b.cast_to_field(q_hint);
         let r_hint_field = b.cast_to_field(r_hint);
         let q_wit = b.write_witness(q_hint_field);
@@ -855,32 +854,29 @@ fn lower_unsigned_divmod(
             guard,
         );
 
-        let r_u128 = b.cast_to(CastTarget::U(128), r_wit);
-        let q_u128 = b.cast_to(CastTarget::U(128), q_wit);
+        let r_u128 = b.cast_to(CastTarget::Int(128), r_wit);
+        let q_u128 = b.cast_to(CastTarget::Int(128), q_wit);
         let product = b.fresh_value();
-        emit_guarded(
-            b,
+        b.emit_guarded(
             guard,
             OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Mul,
+                kind: BinaryArithOpKind::UMul,
                 result: product,
                 lhs: divisor,
                 rhs: q_u128,
             },
         );
         let sum = b.fresh_value();
-        emit_guarded(
-            b,
+        b.emit_guarded(
             guard,
             OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::Add,
+                kind: BinaryArithOpKind::UAdd,
                 result: sum,
                 lhs: product,
                 rhs: r_u128,
             },
         );
-        emit_guarded(
-            b,
+        b.emit_guarded(
             guard,
             OpCode::AssertCmp {
                 kind: CmpKind::Eq,
@@ -888,11 +884,10 @@ fn lower_unsigned_divmod(
                 rhs: dividend,
             },
         );
-        emit_guarded(
-            b,
+        b.emit_guarded(
             guard,
             OpCode::AssertCmp {
-                kind: CmpKind::Lt,
+                kind: CmpKind::ULt,
                 lhs: r_u128,
                 rhs: divisor,
             },
@@ -916,7 +911,7 @@ fn lower_unsigned_divmod(
         let one = b.field_const(b.field().one());
 
         let divisor_field = b.cast_to_field(divisor);
-        let divisor_minus_one = b.sub(divisor_field, one);
+        let divisor_minus_one = b.usub(divisor_field, one);
         guarded_rangecheck(b, divisor_minus_one, bits, guard);
 
         return DivModResult {
@@ -938,27 +933,27 @@ fn lower_unsigned_divmod(
         divisor
     };
 
-    let mut dividend_hint = b.cast_to(CastTarget::U(bits), dividend_pure);
-    let mut divisor_hint = b.cast_to(CastTarget::U(bits), divisor_pure);
+    let mut dividend_hint = b.cast_to(CastTarget::Int(bits), dividend_pure);
+    let mut divisor_hint = b.cast_to(CastTarget::Int(bits), divisor_pure);
     if let Some(condition) = guard {
         let condition = if guard_is_witness {
             b.value_of(condition)
         } else {
             condition
         };
-        let zero = b.u_const(bits, 0);
-        let one = b.u_const(bits, 1);
+        let zero = b.int_const(bits, 0);
+        let one = b.int_const(bits, 1);
         dividend_hint = b.select(condition, dividend_hint, zero);
         divisor_hint = b.select(condition, divisor_hint, one);
     }
-    let q_hint = b.div(dividend_hint, divisor_hint);
+    let q_hint = b.udiv(dividend_hint, divisor_hint);
     let q_hint_field = b.cast_to_field(q_hint);
     let q_wit = b.write_witness(q_hint_field);
 
     let dividend_field = b.cast_to_field(dividend);
     let divisor_field = b.cast_to_field(divisor);
-    let product = b.mul(q_wit, divisor_field);
-    let r_raw = b.sub(dividend_field, product);
+    let product = b.umul(q_wit, divisor_field);
+    let r_raw = b.usub(dividend_field, product);
 
     let q_bits = narrow_rangecheck_width(&quotient_bound(dividend_range, divisor_range), bits);
     let r_bound = remainder_bound(divisor_range);
@@ -967,8 +962,8 @@ fn lower_unsigned_divmod(
     guarded_rangecheck(b, r_raw, r_bits, guard);
 
     let one = b.field_const(b.field().one());
-    let divisor_minus_r = b.sub(divisor_field, r_raw);
-    let divisor_minus_r_minus_one = b.sub(divisor_minus_r, one);
+    let divisor_minus_r = b.usub(divisor_field, r_raw);
+    let divisor_minus_r_minus_one = b.usub(divisor_minus_r, one);
     guarded_rangecheck(b, divisor_minus_r_minus_one, r_bits, guard);
 
     DivModResult {
@@ -1027,7 +1022,7 @@ mod tests {
 
     // ⊥ means "the range analysis believes this value cannot occur" — but the belief rests on the
     // constraints this module is about to emit, so none of these helpers may treat it as evidence.
-    // Left unguarded, `narrow_rangecheck_width` measures `[1, 0]` as a *one-bit* check.
+    // Left unguarded, `narrow_rangecheck_width` measures `[1, 0]` as a _one-bit_ check.
 
     #[test]
     fn bottom_does_not_narrow_a_rangecheck() {
