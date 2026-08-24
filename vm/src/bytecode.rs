@@ -279,7 +279,7 @@ unsafe fn lookup_elem_bump_db(ptr: *mut u64, elem_kind: usize, coeff: Field, vm:
             *vm.data.as_ad.out_db += coeff * v;
         },
         ELEM_U128 => unsafe {
-            let v = Field::from((*(ptr as *const U128)).to_u128());
+            let v = Field::from((*(ptr as *const Int128)).to_u128());
             *vm.data.as_ad.out_db += coeff * v;
         },
         ELEM_WITNESS => {
@@ -296,7 +296,7 @@ unsafe fn read_pure_elem_as_field(ptr: *mut u64, elem_kind: usize) -> Field {
     match elem_kind {
         ELEM_WORD => Field::from(unsafe { *(ptr as *const u64) }),
         ELEM_FIELD => unsafe { *(ptr as *const Field) },
-        ELEM_U128 => Field::from(unsafe { (*(ptr as *const U128)).to_u128() }),
+        ELEM_U128 => Field::from(unsafe { (*(ptr as *const Int128)).to_u128() }),
         _ => unreachable!(),
     }
 }
