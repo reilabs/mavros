@@ -9,7 +9,7 @@ use syn::{FnArg, Ident, Pat, parse_macro_input};
 enum GuestType {
     Field,
     U64,
-    U128,
+    Int128,
     Ptr,
     BoxedValue,
 }
@@ -557,7 +557,7 @@ fn parse_guest_type(ty: &syn::Type) -> GuestType {
             match ident.to_string().as_str() {
                 "Field" => GuestType::Field,
                 "u64" => GuestType::U64,
-                "U128" => GuestType::U128,
+                "Int128" => GuestType::Int128,
                 "BoxedValue" => GuestType::BoxedValue,
                 _ => panic!("unsupported guest path type {:?}", ty),
             }
@@ -619,7 +619,7 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
                 let getter = match tp {
                     GuestType::Field => format_ident!("read_field"),
                     GuestType::U64 => format_ident!("read_u64"),
-                    GuestType::U128 => format_ident!("read_u128"),
+                    GuestType::Int128 => format_ident!("read_int128"),
                     GuestType::Ptr => format_ident!("read_ptr"),
                     GuestType::BoxedValue => format_ident!("read_array"),
                 };
@@ -638,7 +638,7 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
                 let getter = match tp {
                     GuestType::Field => format_ident!("read_field_mut"),
                     GuestType::U64 => format_ident!("read_u64_mut"),
-                    GuestType::U128 => format_ident!("read_u128_mut"),
+                    GuestType::Int128 => format_ident!("read_int128_mut"),
                     GuestType::Ptr => format_ident!("read_ptr_mut"),
                     GuestType::BoxedValue => format_ident!("read_array_mut"),
                 };

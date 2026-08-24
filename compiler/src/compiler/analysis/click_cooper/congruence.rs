@@ -693,8 +693,9 @@ pub(crate) fn op_signature(instr: &OpCode) -> Option<(OpKey, Vec<ValueId>, bool)
                 commutative,
             )
         }
-        // `CmpKind::is_ordering` is the counterpart predicate: the ordering arm carries its sign,
-        // but `Eq` has none to carry.
+        // The comparisons split the same way: the ordering arm carries its sign, `Eq` has none to
+        // carry. Matched so that a new `CmpKind` is a compile error here rather than a silent
+        // fall-through into one of these two keys.
         ScalarFold::Cmp { kind, lhs, rhs } => match kind {
             CmpKind::Eq => (OpKey::CmpEq, vec![lhs, rhs], true),
             CmpKind::ULt | CmpKind::SLt => (OpKey::CmpLt(kind.is_signed()), vec![lhs, rhs], false),

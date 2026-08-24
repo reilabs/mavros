@@ -34,8 +34,9 @@
 //!   `INT_MIN / -1` overflow rejection that `divmod_guard::emit_divmod_failure_cond` emits at every
 //!   width, so it is speculated only where the divisor is a constant other than `-1`.
 //! - **`Shl`/`Shr` Diverge Across Backends:** Once the amount reaches the operand width the
-//!   behaviors differ (the VM's `shl_u64` is an unmasked Rust shift, its `u128` variants wrap,
-//!   R1CGen wraps at 128 bits), so only a constant, in-range amount is speculated.
+//!   behaviors differ. The VM and LLVM now agree (both mask the amount to `bits - 1`) but R1CGen
+//!   wraps at 128 bits and `instrumenter` saturates, so only a constant, in-range amount is
+//!   speculated.
 //! - **`ArrayGet`/`ArraySet` Trap on OOB:** VM asserts, R1CGen constant evaluation panics; only a
 //!   constant index provably below a static array length is speculated.
 //! - **Comparisons, `Not`, `Select`, `SExt`, `BitRange`, bitwise ops, and Casts are Total:** Their
@@ -218,9 +219,9 @@ impl<'a> TotalityOracle<'a> {
         // disjunct from `1 << (bits - 1)` for any `bits` — so an `i8` division by a constant `-1`
         // can still fail, and speculating it moves that failure onto a path that did not have it.
         //
-        // This used to be gated on `bits == 64`, reasoning from the VM instead: `div_s64`
+        // This used to be gated on `bits == 64`, reasoning from the VM instead: `sdiv_int`
         // sign-extends to i64, where only a 64-bit `MIN / -1` actually overflows. That is a true
-        // statement about `div_s64` and the wrong question — the check the speculation has to
+        // statement about `sdiv_int` and the wrong question — the check the speculation has to
         // respect is the one mavros emits, not the one the interpreter would trap on.
         let minus_one_hazard = kind.is_signed();
 

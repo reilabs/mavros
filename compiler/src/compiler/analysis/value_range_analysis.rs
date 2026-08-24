@@ -379,6 +379,18 @@ impl ValueRangeAnalysis {
                 // `MulConst` is a _field_ multiply of raw patterns, so the multiplier is read as
                 // the pattern it is. There is no opcode here to carry a sign and nothing to read
                 // one from.
+                //
+                // That is only the whole story while the result really is a field element, which is
+                // what makes the `false` below a fact rather than a default: `types.rs` gives
+                // `MulConst` its `var`'s type, and `witness_lowering` — the only thing that builds
+                // one — builds it from `WitnessOf(Field)` operands. Were an integer ever to reach
+                // here, `wrap_or_trap` would intersect the reading the operation does *not* trap
+                // on, so the invariant is asserted rather than left to the comment.
+                debug_assert!(
+                    matches!(width, Width::Field(_)),
+                    "MulConst is a field multiply; a {width:?} result would need a sign to read \
+                     its operands with"
+                );
                 let factor = c.unsigned();
                 let r = if c.is_empty() || v.is_empty() || width_of(*var) != width {
                     Self::unknown_or_empty(width, c.is_empty() || v.is_empty())
@@ -1373,6 +1385,31 @@ impl ValueRange {
         }
     }
 
+    /// Whether the raw pattern is provably a valid shift amount for a `bound`-bit operand, i.e.
+    /// provably in `[0, bound)`.
+    ///
+    /// Asked of the pattern rather than of a chosen reading, because that allows the answer to
+    /// serve both shift kinds. `pure_guards::emit_invalid_shift_cond` zero-extends the amount to
+    /// `max(bound, 64)` bits before comparing, so a pattern below `bound` is non-negative and in
+    /// range under the signed reading too, and a signed shift needs no separate query.
+    ///
+    /// ⊥ answers `false`, like every other `proves_*` query: the caller is about to drop the very
+    /// check the analysis would be reasoning from.
+    pub fn proves_shift_amount_below(&self, bound: usize) -> bool {
+        if self.is_empty() || bound == 0 {
+            return false;
+        }
+        // Only the upper end is asked about. The lower one carries nothing: the unsigned reading is
+        // a raw bit pattern, so it is non-negative at every `Width` by construction, and a
+        // negative amount shows up here as the *large* magnitude its bits spell — which is exactly
+        // what the upper test rejects.
+        match self.unsigned.hi() {
+            Some(hi) => hi < &BigInt::from(bound),
+            // An unbounded end proves nothing.
+            None => false,
+        }
+    }
+
     /// Lattice join, componentwise and then reduced.
     pub fn join(&self, other: &Self) -> Self {
         debug_assert_eq!(
@@ -2148,6 +2185,49 @@ mod tests {
                 range.proves_non_negative_in_signed(8)
             );
         }
+    }
+
+    #[test]
+    fn a_shift_amount_is_proved_in_range_from_the_raw_pattern() {
+        // In range under both readings, so the check `LowerPureGuards` would emit is redundant.
+        let small = ValueRange::from_unsigned(Width::Bits(8), Interval::closed(0, 7));
+        assert!(small.proves_shift_amount_below(8));
+        assert!(small.proves_shift_amount_below(32));
+
+        // At the bound, not below it. A shift *by* the width is the failure being checked for.
+        let at_bound = ValueRange::from_unsigned(Width::Bits(8), Interval::closed(8, 8));
+        assert!(!at_bound.proves_shift_amount_below(8));
+        assert!(at_bound.proves_shift_amount_below(9));
+
+        // A width's worth of unknown proves nothing, which is the common case at this pass: the
+        // amount often only becomes a literal after inlining.
+        assert!(!ValueRange::full(Width::Bits(8)).proves_shift_amount_below(8));
+        assert!(!ValueRange::full(Width::Bits(32)).proves_shift_amount_below(32));
+
+        // A *negative* amount is a failure too, and it is caught without asking the signed
+        // reading: `-1` at eight bits is the pattern `255`, which is not below any width.
+        let negative = ValueRange::from_signed(Width::Bits(8), Interval::closed(-1, -1));
+        assert!(!negative.proves_shift_amount_below(8));
+        let maybe_negative = ValueRange::from_signed(Width::Bits(8), Interval::closed(-1, 3));
+        assert!(!maybe_negative.proves_shift_amount_below(8));
+        // Non-negative and small under the signed reading is in range under both.
+        let signed_small = ValueRange::from_signed(Width::Bits(8), Interval::closed(0, 3));
+        assert!(signed_small.proves_shift_amount_below(8));
+
+        // Nothing is ever proved of a non-scalar, whose readings are top by invariant.
+        assert!(!ValueRange::full(Width::NonScalar).proves_shift_amount_below(8));
+
+        // ⊥ answers `false`, like every other `proves_*` query: the caller is about to drop the
+        // check the analysis would have been reasoning from.
+        let bottom = ValueRange::from_unsigned(Width::Bits(8), Interval::empty());
+        assert!(bottom.is_empty());
+        assert!(!bottom.proves_shift_amount_below(8));
+
+        // A zero bound admits no amount at all, so it discharges nothing however tight the range
+        // is. The narrowest operand that does have a legal shift is one bit, by zero.
+        assert!(!small.proves_shift_amount_below(0));
+        let zero = ValueRange::from_unsigned(Width::Bits(1), Interval::closed(0, 0));
+        assert!(zero.proves_shift_amount_below(1));
     }
 
     #[test]
