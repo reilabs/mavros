@@ -1,5 +1,6 @@
 use noirc_abi::{AbiType, MAIN_RETURN_NAME, input_parser::InputValue};
 use std::collections::BTreeMap;
+use tracing::warn;
 
 use mavros_artifacts::InputValueOrdered;
 
@@ -33,10 +34,10 @@ pub fn ordered_params_from_btreemap(
                 ordered_params.push(ordered_param(&return_type.abi_type, return_value));
             }
             None => {
-                eprintln!(
-                    "warning: the ABI declares a return value but the inputs do not supply \
+                warn!(message = %format!(
+                    "the ABI declares a return value but the inputs do not supply \
                      `{MAIN_RETURN_NAME}`; the return-value check is disabled (guard = 0)"
-                );
+                ));
                 ordered_params.push(field_param(0));
                 ordered_params.push(zero_param(&return_type.abi_type));
             }
