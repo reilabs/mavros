@@ -315,7 +315,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             &result.out_a,
             &result.out_b,
             &result.out_c,
-        );
+        ) && check_return_guard(&driver, &ordered_params, &result.out_wit_pre_comm);
         emit(if correct {
             "END:WITGEN_CORRECT:ok"
         } else {
@@ -469,7 +469,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             &result.out_a,
             &result.out_b,
             &result.out_c,
-        );
+        ) && check_return_guard(&driver, &ordered_params, &result.out_wit_pre_comm);
         emit(if correct {
             "END:WITGEN_WASM_CORRECT:ok"
         } else {
@@ -528,6 +528,20 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             "END:AD_WASM_NOLEAK:fail"
         });
     }
+}
+
+/// True when the generated witness's return-guard column matches the parsed inputs.
+fn check_return_guard(
+    driver: &Driver,
+    ordered_params: &Result<Vec<interpreter::InputValueOrdered>, String>,
+    wit_pre_comm: &[RawField],
+) -> bool {
+    let Ok(params) = ordered_params else {
+        return false;
+    };
+    abi_helpers::check_return_guard(driver.abi(), params, wit_pre_comm)
+        .inspect_err(|reason| eprintln!("return-guard check failed: {reason}"))
+        .is_ok()
 }
 
 /// Load and order the entry-point inputs, or explain why witgen cannot run.

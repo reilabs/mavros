@@ -54,6 +54,36 @@ pub fn ordered_params_from_btreemap(
     Ok(ordered_params)
 }
 
+pub fn check_return_guard(
+    abi: &noirc_abi::Abi,
+    ordered_params: &[InputValueOrdered],
+    wit_pre_comm: &[mavros_artifacts::Field],
+) -> Result<(), String> {
+    if abi.return_type.is_none() {
+        return Ok(());
+    }
+
+    let expected = match ordered_params.get(abi.parameters.len()) {
+        Some(InputValueOrdered::Field(guard)) => *guard,
+        other => return Err(format!("guard slot is not a field: {other:?}")),
+    };
+    let guard_index = 1 + abi
+        .parameters
+        .iter()
+        .map(|param| param.typ.field_count() as usize)
+        .sum::<usize>();
+    match wit_pre_comm.get(guard_index) {
+        Some(actual) if *actual == expected => Ok(()),
+        Some(actual) => Err(format!(
+            "guard column (witness[{guard_index}]) holds {actual} but the inputs set the \
+             guard to {expected}"
+        )),
+        None => Err(format!(
+            "witness has no guard column: index {guard_index} is out of bounds"
+        )),
+    }
+}
+
 pub fn flattened_io_count(abi: &noirc_abi::Abi) -> usize {
     let params: usize = abi
         .parameters

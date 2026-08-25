@@ -328,6 +328,13 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     } else {
         info!(message = %"Witgen output is correct");
     }
+    if let Err(reason) = mavros_compiler::abi_helpers::check_return_guard(
+        driver.abi(),
+        &params,
+        &witgen_result.out_wit_pre_comm,
+    ) {
+        error!(message = %"Return-guard public input is inconsistent", reason = %reason);
+    }
 
     let leftover_memory = plotting::plot_memory_chart(
         &witgen_result.instrumenter,
