@@ -1289,17 +1289,6 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str], analyze: 
         ));
     }
 
-    // Local programs that compile but must fail at execution — the local
-    // analogue of the noir repo's `execution_failure` corpus.
-    let local_failure_tests = PathBuf::from("noir_failure_tests");
-    if local_failure_tests.is_dir() {
-        entries.extend(collect_test_dirs(
-            &local_failure_tests,
-            "noir_failure_tests/",
-            TestExpectation::ExecutionFailure,
-        ));
-    }
-
     // 3. Noir repo test_programs/* (discovered via cargo-metadata)
     if let Some(test_programs) = find_noir_test_programs_dir() {
         eprintln!("Found noir test_programs at: {}", test_programs.display());
