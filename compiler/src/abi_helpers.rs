@@ -24,14 +24,14 @@ pub fn ordered_params_from_btreemap(
             .get(&param.name)
             .ok_or_else(|| format!("inputs do not supply parameter `{}`", param.name))?;
 
-        ordered_params.push(ordered_param(&param.typ, param_value));
+        ordered_params.push(ordered_param(&param.typ, param_value)?);
     }
 
     if let Some(return_type) = &abi.return_type {
         match unordered_params.get(MAIN_RETURN_NAME) {
             Some(return_value) => {
                 ordered_params.push(field_param(1));
-                ordered_params.push(ordered_param(&return_type.abi_type, return_value));
+                ordered_params.push(ordered_param(&return_type.abi_type, return_value)?);
             }
             None => {
                 warn!(message = %format!(
@@ -96,38 +96,36 @@ fn zero_param(abi_type: &AbiType) -> InputValueOrdered {
     }
 }
 
-fn ordered_param(abi_type: &AbiType, value: &InputValue) -> InputValueOrdered {
-    match (value, abi_type) {
+fn ordered_param(abi_type: &AbiType, value: &InputValue) -> Result<InputValueOrdered, String> {
+    Ok(match (value, abi_type) {
         (InputValue::Field(elem), _) => InputValueOrdered::Field(elem.into_repr()),
         (InputValue::Vec(vec_elements), AbiType::Array { typ, length }) => {
-            assert_eq!(
-                vec_elements.len(),
-                *length as usize,
-                "Array value length does not match ABI array length"
-            );
+            if vec_elements.len() != *length as usize {
+                return Err("Array value length does not match ABI array length".to_string());
+            }
             InputValueOrdered::Vec(
                 vec_elements
                     .iter()
                     .map(|elem| ordered_param(typ, elem))
-                    .collect(),
+                    .collect::<Result<_, _>>()?,
             )
         }
         (InputValue::Struct(object), AbiType::Struct { fields, .. }) => InputValueOrdered::Struct(
             fields
                 .iter()
                 .map(|(field_name, field_type)| {
-                    let field_value = object.get(field_name).expect("Field not found in struct");
-                    (field_name.clone(), ordered_param(field_type, field_value))
+                    let field_value = object
+                        .get(field_name)
+                        .ok_or_else(|| "Field not found in struct".to_string())?;
+                    Ok((field_name.clone(), ordered_param(field_type, field_value)?))
                 })
-                .collect::<Vec<_>>(),
+                .collect::<Result<Vec<_>, String>>()?,
         ),
         (InputValue::String(string), AbiType::String { length }) => {
             let bytes = string.as_bytes();
-            assert_eq!(
-                bytes.len(),
-                *length as usize,
-                "String value length does not match ABI string length"
-            );
+            if bytes.len() != *length as usize {
+                return Err("String value length does not match ABI string length".to_string());
+            }
             InputValueOrdered::Vec(
                 bytes
                     .iter()
@@ -136,27 +134,27 @@ fn ordered_param(abi_type: &AbiType, value: &InputValue) -> InputValueOrdered {
             )
         }
         (InputValue::String(_string), _) => {
-            panic!("String input did not match ABI string type");
+            return Err("String input did not match ABI string type".to_string());
         }
         (InputValue::Vec(vec_elements), AbiType::Tuple { fields }) => {
-            assert_eq!(
-                vec_elements.len(),
-                fields.len(),
-                "Tuple value length does not match ABI tuple field count"
-            );
+            if vec_elements.len() != fields.len() {
+                return Err("Tuple value length does not match ABI tuple field count".to_string());
+            }
             InputValueOrdered::Struct(
                 fields
                     .iter()
                     .zip(vec_elements.iter())
                     .enumerate()
                     .map(|(idx, (field_type, field_value))| {
-                        (idx.to_string(), ordered_param(field_type, field_value))
+                        Ok((idx.to_string(), ordered_param(field_type, field_value)?))
                     })
-                    .collect(),
+                    .collect::<Result<Vec<_>, String>>()?,
             )
         }
-        _ => unreachable!("value should have already been checked to match abi type"),
-    }
+        _ => {
+            return Err("value should have already been checked to match abi type".to_string());
+        }
+    })
 }
 
 // TESTS
