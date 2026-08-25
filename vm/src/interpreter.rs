@@ -898,7 +898,8 @@ fn run_ad_impl(
     ))
 }
 
-fn flatten_param_vec(vec: &[InputValueOrdered]) -> Vec<Field> {
+/// Flatten ordered input values into the entry blob's field sequence.
+pub fn flatten_param_vec(vec: &[InputValueOrdered]) -> Vec<Field> {
     let mut encoded_value = Vec::new();
     for elem in vec {
         encoded_value.extend(flatten_params(elem));

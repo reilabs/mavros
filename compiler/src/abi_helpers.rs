@@ -44,7 +44,7 @@ pub fn ordered_params_from_btreemap(
         }
     }
 
-    let flattened: usize = ordered_params.iter().map(flattened_value_count).sum();
+    let flattened = crate::vm::interpreter::flatten_param_vec(&ordered_params).len();
     assert_eq!(
         flattened,
         flattened_io_count(abi),
@@ -58,39 +58,13 @@ pub fn flattened_io_count(abi: &noirc_abi::Abi) -> usize {
     let params: usize = abi
         .parameters
         .iter()
-        .map(|param| count_abi_type_elements(&param.typ))
+        .map(|param| param.typ.field_count() as usize)
         .sum();
     let returns = abi
         .return_type
         .as_ref()
-        .map_or(0, |ret| 1 + count_abi_type_elements(&ret.abi_type));
+        .map_or(0, |ret| 1 + ret.abi_type.field_count() as usize);
     params + returns
-}
-
-/// Count the number of field elements in an ABI type.
-pub fn count_abi_type_elements(typ: &AbiType) -> usize {
-    match typ {
-        AbiType::Field => 1,
-        AbiType::Integer { .. } => 1,
-        AbiType::Boolean => 1,
-        AbiType::String { length } => *length as usize,
-        AbiType::Array { length, typ } => (*length as usize) * count_abi_type_elements(typ),
-        AbiType::Struct { fields, .. } => {
-            fields.iter().map(|(_, t)| count_abi_type_elements(t)).sum()
-        }
-        AbiType::Tuple { fields } => fields.iter().map(count_abi_type_elements).sum(),
-    }
-}
-
-fn flattened_value_count(value: &InputValueOrdered) -> usize {
-    match value {
-        InputValueOrdered::Field(_) => 1,
-        InputValueOrdered::Vec(elements) => elements.iter().map(flattened_value_count).sum(),
-        InputValueOrdered::Struct(fields) => {
-            fields.iter().map(|(_, v)| flattened_value_count(v)).sum()
-        }
-        InputValueOrdered::String(_) => unreachable!("ordered params encode strings as Vec"),
-    }
 }
 
 fn field_param(value: u64) -> InputValueOrdered {

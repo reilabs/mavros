@@ -850,7 +850,7 @@ impl Driver {
         // Build parameter info
         let mut parameters = Vec::new();
         for param in &abi.parameters {
-            let element_count = crate::abi_helpers::count_abi_type_elements(&param.typ);
+            let element_count = param.typ.field_count();
             parameters.push(serde_json::json!({
                 "name": param.name,
                 "elementCount": element_count
@@ -892,11 +892,11 @@ fn const_contains_fn_ptr(constant: &Constant) -> bool {
 mod tests {
     use noirc_abi::{Abi, AbiParameter, AbiReturnType, AbiType, AbiVisibility, Sign};
 
-    use crate::abi_helpers::{count_abi_type_elements, flattened_io_count};
+    use crate::abi_helpers::flattened_io_count;
     use crate::compiler::{passes::prepare_entry_point::PrepareEntryPoint, ssa::hlssa::Type};
 
     /// `entry_point_flattened_io_count` sizes the protected column block from the ABI via
-    /// [`count_abi_type_elements`], while the wrapper's actual pinned witness block is sized from
+    /// [`AbiType::field_count`], while the wrapper's actual pinned witness block is sized from
     /// the HLSSA signature via [`PrepareEntryPoint::flattened_field_count`]. The two counts must
     /// agree on corresponding types, or the R1CS compaction analysis would protect the wrong column
     /// range.
@@ -975,7 +975,7 @@ mod tests {
         ];
         for (abi, hlssa) in &cases {
             assert_eq!(
-                count_abi_type_elements(abi),
+                abi.field_count() as usize,
                 PrepareEntryPoint::flattened_field_count(hlssa),
                 "flattening mismatch for ABI type {abi:?} vs HLSSA type {hlssa:?}",
             );
@@ -1052,7 +1052,7 @@ mod tests {
     ///
     /// It cannot fail today: `Type::int` takes no sign, so both rows below build the same value and
     /// the assertion is a tautology on the HLSSA side. Its job is on the ABI side and in the
-    /// future -- `count_abi_type_elements` matches `AbiType::Integer { .. }` with the sign bound to
+    /// future -- `AbiType::field_count` matches `AbiType::Integer { .. }` with the sign bound to
     /// a wildcard, and a later reader who narrows that pattern to consult the sign would silently
     /// resize the protected column block for exactly half of all integer parameters.
     #[test]
@@ -1067,12 +1067,12 @@ mod tests {
                 width,
             };
             assert_eq!(
-                count_abi_type_elements(&unsigned),
-                count_abi_type_elements(&signed),
+                unsigned.field_count(),
+                signed.field_count(),
                 "the ABI's two signs disagree on the flattened width at {width} bits",
             );
             assert_eq!(
-                count_abi_type_elements(&signed),
+                signed.field_count() as usize,
                 PrepareEntryPoint::flattened_field_count(&Type::int(width as usize)),
                 "signed ABI integer disagrees with the sign-free HLSSA type at {width} bits",
             );
