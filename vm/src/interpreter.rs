@@ -399,12 +399,12 @@ fn run_phase1_impl(
 
     // Main takes its inputs as a single Blob<Field; N> parameter stored by
     // value in the frame, starting right after the two return slots.
-    let frame_size = program[entry + 1] as usize;
-    assert!(
-        2 + 4 * flat_inputs.len() <= frame_size,
-        "{} flattened input fields overflow the {frame_size}-word entry frame: \
-         the inputs do not match the compiled artifact",
+    assert_eq!(
         flat_inputs.len(),
+        header.entry_blob_field_count,
+        "{} flattened input fields supplied but the entry has {}",
+        flat_inputs.len(),
+        header.entry_blob_field_count,
     );
     for (input_index, el) in flat_inputs.iter().enumerate() {
         unsafe {
