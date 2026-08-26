@@ -14,7 +14,8 @@
 //!   check overflow with native-width predicates, if overflow assert !cond and produce 0.
 //! - **Lower with shift check** (pure inputs only, can fail): Integer Shl/Shr — validate the shift
 //!   _amount_ before shifting. The value is not checked: a shift that pushes bits off the top
-//!   wraps, it does not fail.
+//!   wraps, it does not fail. A shift the range domain proves in range skips this entirely, on the
+//!   same terms as the division below.
 //! - **Lower with div-zero check** (pure inputs only, can fail): Div/Mod — if divisor==0 assert
 //!   !cond and produce 0; else compute. A division the range domain proves defined skips this
 //!   entirely: guarded, the guard is dropped and the bare operation emitted; unguarded, the
@@ -33,6 +34,10 @@ use crate::compiler::{
                 emit_divmod_is_defined_assert,
             },
             seq_bounds::seq_bounds_operands,
+            shift_guard::{
+                emit_invalid_shift_cond, emit_shift_amount_is_valid_assert,
+                shift_amount_provably_in_range, shift_operand_bits,
+            },
         },
     },
     ssa::{
@@ -101,9 +106,46 @@ impl InstructionLoweringRule for LowerPureGuards {
 
                 // As in the guarded arm: the operation decides, and both the check and the division
                 // are built from that one answer.
-                let signed = Self::divmod_sign(*kind);
-                self.lower_unguarded_divmod(emitter, *kind, *result, *lhs, *rhs, &lhs_type, signed);
+                self.lower_unguarded_divmod(
+                    emitter,
+                    *kind,
+                    *result,
+                    *lhs,
+                    *rhs,
+                    &lhs_type,
+                    kind.is_signed(),
+                );
                 true
+            }
+
+            // An unguarded shift needs its amount checked for exactly the reason the unguarded
+            // div/mod above does: `Guard` only wraps the ops under witness-dependent control flow,
+            // so an unconditional shift reached `lower_shift_guard` never.
+            //
+            // Pure inputs only, matching the guarded arm. A shift with a witness operand is left
+            // for `LowerWitnessBitwiseOps::lower_shift`, which emits the equivalent check itself
+            // (`emit_shift_amount_check`, on both of its lowerings) because it has to be able to
+            // build that check out of constraints rather than out of a pure comparison.
+            OpCode::BinaryArithOp {
+                kind,
+                result,
+                lhs,
+                rhs,
+            } if matches!(kind.group(), ArithGroup::Shl | ArithGroup::Shr)
+                && self.all_inputs_pure(instruction, type_info) =>
+            {
+                match shift_operand_bits(type_info.get_value_type(*lhs)) {
+                    Some(bits) => {
+                        // Discharged where the domain already pins the amount in range, exactly as
+                        // the guarded arm below discharges it.
+                        if self.shift_discharged(context, bits, *rhs) {
+                            return false;
+                        }
+                        self.lower_unguarded_shift(emitter, *kind, *result, *lhs, *rhs, bits);
+                        true
+                    }
+                    None => false,
+                }
             }
             _ => false,
         }
@@ -123,16 +165,6 @@ impl LowerPureGuards {
         })
     }
 
-    /// A division's signedness.
-    ///
-    /// Both divmod sites in this rule take their answer from here, as does the discharge below, so
-    /// that the failure condition, the discharge that elides it and the division re-planted beside
-    /// it cannot end up reading different sources. `divmod_guard` deliberately takes the resulting
-    /// flag rather than the type for the same reason.
-    fn divmod_sign(kind: BinaryArithOpKind) -> bool {
-        kind.is_signed()
-    }
-
     /// Whether the range domain discharges this division's failure check, making both the check and
     /// — under a guard — the branch built around it dead.
     ///
@@ -145,9 +177,30 @@ impl LowerPureGuards {
         lhs: ValueId,
         rhs: ValueId,
     ) -> bool {
-        let signed = Self::divmod_sign(kind);
+        let signed = kind.is_signed();
         let lhs_type = context.types().get_value_type(lhs).peel_witness();
         divmod_provably_defined(&context.range(lhs), &context.range(rhs), lhs_type, signed)
+    }
+
+    /// Whether the range domain discharges this shift's amount check, making both the check and —
+    /// under a guard — the branch built around it dead.
+    ///
+    /// The single query behind both shift sites in this rule, for the reason
+    /// [`Self::divmod_discharged`] is the single query behind both division sites.
+    ///
+    /// Asked of the raw pattern rather than of a chosen reading, which is why it takes no sign: an
+    /// amount below the width is non-negative under the signed reading too, so one answer serves
+    /// both shift kinds. See [`ValueRange::proves_shift_amount_below`].
+    ///
+    /// It does not fire nearly as often as it could. `LowerPureGuards` runs long before
+    /// `Specializer`, so an amount that only becomes a literal after inlining still reads as
+    /// full-width here; measured over the local corpus, 100 of 212 unguarded sites discharge. That
+    /// is the same blind spot the divmod discharge has, and closing it would mean re-checking later
+    /// rather than weakening this.
+    ///
+    /// [`ValueRange::proves_shift_amount_below`]: crate::compiler::analysis::value_range_analysis::ValueRange::proves_shift_amount_below
+    fn shift_discharged(&self, context: &LoweringContext<'_>, bits: usize, rhs: ValueId) -> bool {
+        shift_amount_provably_in_range(&context.range(rhs), bits)
     }
 
     /// Lower a single Guard instruction.
@@ -214,13 +267,22 @@ impl LowerPureGuards {
                 rhs,
             } if matches!(kind.group(), ArithGroup::Shl | ArithGroup::Shr) => {
                 let lhs_type = type_info.get_value_type(lhs);
-                // As for the overflow guard above.
-                let signed = kind.is_signed();
-                match &lhs_type.strip_witness().expr {
-                    TypeExpr::Int(bits) if self.all_inputs_pure(&inner, type_info) => {
-                        self.lower_shift_guard(
-                            emitter, condition, kind, result, lhs, rhs, *bits, signed,
-                        );
+                match shift_operand_bits(lhs_type) {
+                    Some(bits) if self.all_inputs_pure(&inner, type_info) => {
+                        // Provably in range: the shift is total, so its guard carries no
+                        // information about it and the bare operation can simply replace the whole
+                        // diamond. This is the divmod discharge's argument, on the same query, and
+                        // it is consulted from both shift sites so the two cannot drift apart.
+                        if self.shift_discharged(context, bits, rhs) {
+                            emitter.emit(OpCode::BinaryArithOp {
+                                kind,
+                                result,
+                                lhs,
+                                rhs,
+                            });
+                            return true;
+                        }
+                        self.lower_shift_guard(emitter, condition, kind, result, lhs, rhs, bits);
                         true
                     }
                     _ => false,
@@ -256,7 +318,7 @@ impl LowerPureGuards {
                 // re-planted inside the guard keeps the opcode it arrived with, and
                 // `emit_divmod_failure_cond` builds the check from the same flag, so the two halves
                 // of this lowering cannot read different sources.
-                let signed = Self::divmod_sign(kind);
+                let signed = kind.is_signed();
 
                 let lhs_type = type_info.get_value_type(lhs);
                 match &lhs_type.strip_witness().expr {
@@ -404,9 +466,7 @@ impl LowerPureGuards {
         rhs: ValueId,
         bits: usize,
     ) {
-        let result_type = Type {
-            expr: TypeExpr::Int(bits),
-        };
+        let result_type = Type::int(bits);
         let native_result = emitter.fresh_value();
         emitter.emit(OpCode::BinaryArithOp {
             kind,
@@ -478,9 +538,7 @@ impl LowerPureGuards {
         rhs: ValueId,
         bits: usize,
     ) {
-        let result_type = Type {
-            expr: TypeExpr::Int(bits),
-        };
+        let result_type = Type::int(bits);
         let sign_l = self.sign_bit(emitter, lhs, bits);
         let sign_r = self.sign_bit(emitter, rhs, bits);
         let result_sign = emitter.xor(sign_l, sign_r);
@@ -544,8 +602,9 @@ impl LowerPureGuards {
     ///
     /// The _amount_ is the only failure mode. A `<<` whose result leaves the width wraps, with Noir
     /// reporting an error only for the amount, so the valid path is the bare operation for both
-    /// kinds, and the backends all truncate it to `bits` (`shl_u64` masks, LLVM's `shl` is already
+    /// kinds, and the backends all truncate it to `bits` (`shl_int` masks, LLVM's `shl` is already
     /// at the operand width, and `hlssa_to_r1cs`'s constant fold wraps).
+    #[allow(clippy::too_many_arguments)]
     fn lower_shift_guard(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -555,7 +614,6 @@ impl LowerPureGuards {
         lhs: ValueId,
         rhs: ValueId,
         bits: usize,
-        signed: bool,
     ) {
         debug_assert!(
             matches!(kind.group(), ArithGroup::Shl | ArithGroup::Shr),
@@ -563,7 +621,7 @@ impl LowerPureGuards {
         );
 
         let result_type = Type::int(bits);
-        let invalid_shift = self.emit_invalid_shift_cond(emitter, rhs, bits, signed);
+        let invalid_shift = emit_invalid_shift_cond(emitter, rhs, bits, kind.is_signed());
 
         emitter.build_if_else_into(
             invalid_shift,
@@ -582,57 +640,19 @@ impl LowerPureGuards {
         );
     }
 
-    fn emit_invalid_shift_cond(
-        &self,
-        emitter: &mut HLBlockEmitter<'_>,
-        rhs: ValueId,
-        bits: usize,
-        signed: bool,
-    ) -> ValueId {
-        let cmp_bits = bits.max(64);
-
-        // The cast is the same under either reading (it widens by zero-extending raw bits) so it
-        // takes no sign. `signed` still decides the two comparisons below, which is where the
-        // reading actually matters.
-        let rhs_cmp = emitter.cast_to(CastTarget::Int(cmp_bits), rhs);
-        let rhs_bound = emitter.int_const(cmp_bits, bits as u128);
-        let lt = CmpKind::lt(signed);
-        let rhs_lt_bits = emitter.cmp(rhs_cmp, rhs_bound, lt);
-        let rhs_too_large = emitter.not(rhs_lt_bits);
-
-        if signed {
-            // LIVE at `bits == 64`, and the only check that catches a negative amount there. Noir
-            // types a shift's amount as the _value's_ own type (`noir_tests/signed_shift` shifts an
-            // `i8` by an `i8` and an `i32` by an `i32`), so on an `i64` the amount is an `i64` too
-            // -- and `cmp_bits` is then `64`, which makes the cast above an identity rather than a
-            // widening. A negative amount therefore keeps its sign bit, and `rhs_too_large` does
-            // _not_ catch it: `-1 s< 64` is true, so the bound test reports the shift as valid.
-            //
-            // Below 64 bits it is indeed dead, because the widening cast is a raw-bit
-            // zero-extension (`Cast` masks, sign extension is the separate `SExt`) and so clears
-            // the sign bit at `cmp_bits`. That is a fact about the narrow widths only; do not
-            // generalize it into deleting this.
-            let zero = emitter.int_const(cmp_bits, 0);
-            let rhs_negative = emitter.cmp(rhs_cmp, zero, lt);
-            emitter.or(rhs_negative, rhs_too_large)
-        } else {
-            rhs_too_large
-        }
-    }
-
     /// Lower an _unguarded_ pure `Div`/`Mod` by asserting it is defined, then performing it
     /// unchanged.
     ///
     /// Without this, an undefined division reaches the backends unchecked and each one disagrees
     /// about what it means:
     ///
-    /// - **Zero divisor, integer:** The VM's `div_u64`/`div_u128`/`div_s64` are plain Rust `/`, so
-    ///   witness generation aborts the process with an arithmetic panic instead of reporting a
-    ///   failed execution. LLVM's `udiv`/`sdiv` by zero is undefined behavior outright.
+    /// - **Zero divisor, integer:** The VM's `udiv_int`/`udiv_int128`/`sdiv_int` are plain Rust
+    ///   `/`, so witness generation aborts the process with an arithmetic panic instead of
+    ///   reporting a failed execution. LLVM's `udiv`/`sdiv` by zero is undefined behavior outright.
     /// - **Zero divisor, field:** `div_field` answers `0`, so nothing traps — and at `0 / 0` the
     ///   `result * rhs == lhs` constraint is satisfied by any quotient, so the value is not pinned
     ///   at all. The worst of the three: silent, and unsound rather than merely wrong.
-    /// - **`INT_MIN / -1`:** `div_s64` sign-extends to `i64` and wraps on the way back down; LLVM
+    /// - **`INT_MIN / -1`:** `sdiv_int` sign-extends to `i64` and wraps on the way back down; LLVM
     ///   calls signed-division overflow undefined behaviour.
     ///
     /// Noir treats all of these as execution failures, so we check in the IR so all backends can
@@ -649,6 +669,31 @@ impl LowerPureGuards {
         signed: bool,
     ) {
         emit_divmod_is_defined_assert(emitter, lhs, rhs, lhs_type, signed);
+        emitter.emit(OpCode::BinaryArithOp {
+            kind,
+            result,
+            lhs,
+            rhs,
+        });
+    }
+
+    /// Assert the shift amount is in range, then emit the bare shift.
+    ///
+    /// The unguarded counterpart of [`Self::lower_shift_guard`]. Both build their condition from
+    /// the same two comparisons in [`crate::compiler::passes::shared::shift_guard`], so they cannot
+    /// disagree about what "in range" means. The guarded form substitutes a default value on the
+    /// invalid path because the shift may be inactive; here there is no guard, so an invalid amount
+    /// is simply a failure.
+    fn lower_unguarded_shift(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        kind: BinaryArithOpKind,
+        result: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        bits: usize,
+    ) {
+        emit_shift_amount_is_valid_assert(emitter, rhs, bits, kind.is_signed());
         emitter.emit(OpCode::BinaryArithOp {
             kind,
             result,

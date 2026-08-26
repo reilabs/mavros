@@ -287,6 +287,15 @@ impl LowerWitnessBitwiseOps {
     /// the amount into a constant and is what every shift in the corpus takes today. A signed
     /// left-hand side or a witness amount goes to [`Self::lower_general_shift`], which pays for a
     /// runtime shift-amount decomposition.
+    ///
+    /// The amount check is emitted **here**, above the split, because it is owed by both of them
+    /// and only one of them used to pay it. [`Self::lower_general_shift`] needs it to bound the
+    /// decomposition it is about to build, which made it easy to read as part of that lowering;
+    /// [`Self::lower_constant_amount_shift`] hands the raw amount to a backend shift instead, so
+    /// its need for the check is just as real and far less visible. Without it an out-of-range
+    /// amount reached `1 << rhs`, where the VM's `shl_int` masks it to `bits - 1` and the program
+    /// quietly computes a shift Noir rejects. Hoisting it is what makes the check a property of
+    /// "a shift" rather than of one of the two ways to lower one.
     #[allow(clippy::too_many_arguments)]
     fn lower_shift(
         &self,
@@ -305,10 +314,26 @@ impl LowerWitnessBitwiseOps {
         let lhs_signed = kind.is_signed();
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
 
+        // The check below indexes bit `log2(bits)` upwards as "too large", which is only the right
+        // test when `bits` is a power of two. Every Noir integer width is, but the lowering would
+        // be silently wrong rather than merely unsupported if that ever changed.
+        assert!(
+            bits.is_power_of_two(),
+            "the shift-amount check assumes a power-of-two integer width, got {bits}"
+        );
+        if lhs_signed {
+            assert_signed_op_width(bits, "shift");
+        }
+
+        let widths = shift_amount_bits(context, rhs, bits);
+        emit_shift_amount_check(b, context, guard, rhs, widths);
+
         if !rhs_witness && !lhs_signed {
             self.lower_constant_amount_shift(b, context, guard, kind, result, lhs, rhs, bits);
         } else {
-            self.lower_general_shift(b, context, guard, kind, result, lhs, rhs, bits, lhs_signed);
+            self.lower_general_shift(
+                b, context, guard, kind, result, lhs, rhs, bits, lhs_signed, widths,
+            );
         }
     }
 
@@ -317,6 +342,13 @@ impl LowerWitnessBitwiseOps {
     /// The `1 << rhs` here is a _pure_ `Shl`, which constant-folds later. It has to: `Shl` on a
     /// `U(bits)` reaches `hlssa_to_r1cs` only with both operands constant, so this shape is viable
     /// precisely because the amount is not a witness.
+    ///
+    /// That `Shl` is emitted **after** `LowerPureGuards` has run, so nothing checks its amount
+    /// downstream of here and nothing can: it is the last chance. [`Self::lower_shift`] has already
+    /// taken it. Do not move that check into the sibling lowering on the grounds that it is where
+    /// the decomposition needs it — an unchecked amount is harmless-looking on this path and is
+    /// not harmless, because the backend shift masks it to `bits - 1` and answers rather than
+    /// failing.
     #[allow(clippy::too_many_arguments)]
     fn lower_constant_amount_shift(
         &self,
@@ -387,24 +419,12 @@ impl LowerWitnessBitwiseOps {
         rhs: ValueId,
         bits: usize,
         lhs_signed: bool,
+        widths: ShiftAmountWidths,
     ) {
-        // The amount decomposition below indexes bit `log2(bits)` upwards as "too large", which is
-        // only the right test when `bits` is a power of two. Every Noir integer width is, but the
-        // lowering would be silently wrong rather than merely unsupported if that ever changed.
-        assert!(
-            bits.is_power_of_two(),
-            "the shift-amount check assumes a power-of-two integer width, got {bits}"
-        );
-        if lhs_signed {
-            assert_signed_op_width(bits, "shift");
-        }
-
-        let rhs_type = context.types().get_value_type(rhs);
-        let rhs_bits = integer_bits(rhs_type)
-            .unwrap_or_else(|| panic!("witness shift by a non-integer amount type {rhs_type:?}"));
-        let amount_bits = bits.trailing_zeros() as usize;
-
-        emit_shift_amount_check(b, context, guard, rhs, rhs_bits, amount_bits);
+        let ShiftAmountWidths {
+            rhs_bits,
+            amount_bits,
+        } = widths;
         let amount = extract_amount_bits(b, rhs, rhs_bits, amount_bits);
         let factor = build_shift_factor(b, &amount);
 
@@ -539,6 +559,30 @@ impl LowerWitnessBitwiseOps {
     }
 }
 
+/// The two widths a shift-amount check and decomposition are cut against.
+#[derive(Clone, Copy)]
+struct ShiftAmountWidths {
+    /// The declared width of the amount operand.
+    rhs_bits: usize,
+    /// `log2(bits)`: how many bits of the amount a valid shift can use.
+    amount_bits: usize,
+}
+
+/// The widths for a shift of a `bits`-wide value by `rhs`.
+fn shift_amount_bits(
+    context: &LoweringContext<'_>,
+    rhs: ValueId,
+    bits: usize,
+) -> ShiftAmountWidths {
+    let rhs_type = context.types().get_value_type(rhs);
+    let rhs_bits = integer_bits(rhs_type)
+        .unwrap_or_else(|| panic!("witness shift by a non-integer amount type {rhs_type:?}"));
+    ShiftAmountWidths {
+        rhs_bits,
+        amount_bits: bits.trailing_zeros() as usize,
+    }
+}
+
 /// Asserts that the shift amount is smaller than the width being shifted.
 ///
 /// Since the width is a power of two, "too large" is just "some bit at or above `log2(bits)` is
@@ -551,9 +595,12 @@ fn emit_shift_amount_check(
     context: &LoweringContext<'_>,
     guard: Option<ValueId>,
     rhs: ValueId,
-    rhs_bits: usize,
-    amount_bits: usize,
+    widths: ShiftAmountWidths,
 ) {
+    let ShiftAmountWidths {
+        rhs_bits,
+        amount_bits,
+    } = widths;
     // No bit that high exists, so every amount this type can hold is in range.
     //
     // This also drops the negative-amount rejection that the doc above relies on, so it must only

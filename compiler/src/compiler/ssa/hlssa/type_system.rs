@@ -17,7 +17,7 @@ pub const MAX_SUPPORTED_UNSIGNED_BITS: usize = 128;
 /// This is a bound on operations, not on types: [`TypeExpr::Int`] is just "an `n`-bit integer" and
 /// tops out at [`MAX_SUPPORTED_UNSIGNED_BITS`] like any other. What is unsupported is asking a
 /// signed opcode to read a pattern wider than this, because the signed lowerings and the VM's
-/// `div_s64`/`lt_s64` are 64-bit. Enforce it with [`assert_signed_op_width`] at the point the
+/// `sdiv_int`/`slt_int` are 64-bit. Enforce it with [`assert_signed_op_width`] at the point the
 /// signed operation is chosen, never by inspecting a type.
 pub const MAX_SUPPORTED_SIGNED_BITS: usize = 64;
 
@@ -39,7 +39,7 @@ pub fn assert_signed_op_width(bits: usize, what: &str) {
 /// Integers carry only a width: [`TypeExpr::Int`] is "an `n`-bit integer", _not_ "a signed `n`-bit
 /// integer". Signedness is a property of the operation ([`BinaryArithOpKind`], [`CmpKind`]), which
 /// is where every level below HLSSA already keeps it — LLSSA's `Type::Int` with `UDiv`/`SDiv`, the
-/// VM's `div_u64`/`div_s64`, LLVM's `build_int_signed_div`. Nothing may recover a sign from a type.
+/// VM's `udiv_int`/`sdiv_int`, LLVM's `build_int_signed_div`. Nothing may recover a sign from a type.
 ///
 /// [`BinaryArithOpKind`]: super::BinaryArithOpKind
 /// [`CmpKind`]: super::CmpKind

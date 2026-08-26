@@ -304,20 +304,104 @@ fn int_mask(bits: u64) -> u128 {
     }
 }
 
+/// The mask that holds a `bits`-wide value inside a single `u64` frame cell.
+///
+/// This is the masked-cell invariant in one place: an opcode whose result can exceed `bits`
+/// re-applies it before storing, so the next opcode to read the cell (signed or unsigned) sees a
+/// pattern with nothing above bit `bits - 1`.
+///
+/// One opcode is deliberately not held to that on its own. `cast_field_to_int` stores the whole low
+/// limb of the field element, because it has no `bits` to narrow to; the invariant is restored by
+/// codegen, which follows it with a `truncate_int` whenever the target is narrower than the cell
+/// (`bytecode/mod.rs`, the `Field -> Int` cast arms). At `bits == 64` no truncation is needed and
+/// none is emitted.
+#[inline(always)]
+fn cell_mask(bits: u64) -> u64 {
+    if bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    }
+}
+
+/// The amount a `bits`-wide shift actually applies, given a requested amount of `b`.
+///
+/// Masked to `bits - 1`. It matches the LLVM backend, which masks to the LLVM type's `bit_width - 1`
+/// (`llssa_to_llvm.rs`, both shift arms) because LLVM treats a shift at or past the width as
+/// poison. It also keeps the count in range for Rust's shift operators, which panic on an
+/// over-shift in a debug build and mask to the *host* width (`b & 63`) in release, a divergence
+/// that is wrong for any `bits < 64`.
+///
+/// The result is below `bits` at **every** width, not only the powers of two: `b & (bits - 1)` is a
+/// submask of `bits - 1`, so it can never exceed it. That is what makes this safe as a blanket
+/// backstop rather than only where the width happens to make the mask a modulo.
+///
+/// A well-formed program never reaches the mask. Both routes to a shift reject an out-of-range
+/// amount before the opcode runs: `pure_guards`' shift-amount check for a pure amount, and
+/// `witness_bitwise::emit_shift_amount_check` for a witness one. This is the backstop for when
+/// they do not.
+#[inline(always)]
+fn shift_amount(b: u64, bits: u64) -> u32 {
+    (b & (bits - 1)) as u32
+}
+
+/// Read a `bits`-wide cell as two's complement, in the `i64` the host can compute with.
+///
+/// Shift the pattern up so its sign bit is the host's, then shift back arithmetically. This is the
+/// preamble every signed `_int` opcode shares — `sdiv_int`, `srem_int`, `slt_int`, `ashr_int` — and
+/// it is what makes them robust to a cell that is dirty above `bits` as well: the up-shift discards
+/// those bits before anything reads them.
+#[inline(always)]
+fn signed_cell(a: u64, bits: u64) -> i64 {
+    let shift = 64 - bits;
+    ((a << shift) as i64) >> shift
+}
+
+/// `!a`, held to the operand width. The body of `not_int`.
+#[inline(always)]
+fn cell_complement(a: u64, bits: u64) -> u64 {
+    !a & cell_mask(bits)
+}
+
+/// `a << b`, wrapping at the operand width. The body of `shl_int`.
+#[inline(always)]
+fn cell_shl(a: u64, b: u64, bits: u64) -> u64 {
+    (a << shift_amount(b, bits)) & cell_mask(bits)
+}
+
+/// `a >> b`, zero-filling. The body of `ushr_int`.
+///
+/// No re-mask: zero-filling an already-masked operand cannot leave the width.
+#[inline(always)]
+fn cell_ushr(a: u64, b: u64, bits: u64) -> u64 {
+    a >> shift_amount(b, bits)
+}
+
+/// `a >> b`, sign-filling. The body of `ashr_int`.
+#[inline(always)]
+fn cell_ashr(a: u64, b: u64, bits: u64) -> u64 {
+    (signed_cell(a, bits) >> shift_amount(b, bits)) as u64 & cell_mask(bits)
+}
+
+/// A 128-bit frame value: two `u64` cells holding a raw bit pattern, with no reading attached.
+///
+/// `Eq`/`PartialEq` are derived because bit-pattern equality is the same question under either
+/// reading — which is why there is one `eq_int128` opcode and not a pair. The operations that
+/// *do* depend on the reading are the `unsigned_*` methods below.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct U128 {
+pub struct Int128 {
     pub lo: u64,
     pub hi: u64,
 }
 
 const _: () = assert!(
-    std::mem::size_of::<U128>() == 2 * std::mem::size_of::<u64>()
-        && std::mem::align_of::<U128>() == std::mem::align_of::<u64>(),
-    "U128 must have the same cell layout as two u64 words"
+    std::mem::size_of::<Int128>() == 2 * std::mem::size_of::<u64>()
+        && std::mem::align_of::<Int128>() == std::mem::align_of::<u64>(),
+    "Int128 must have the same cell layout as two u64 words"
 );
 
-impl U128 {
+impl Int128 {
     #[inline(always)]
     pub fn from_u128(value: u128) -> Self {
         Self {
@@ -360,37 +444,32 @@ impl U128 {
     pub fn truncate(self, bits: u64) -> Self {
         Self::from_u128(self.to_u128() & int_mask(bits))
     }
-}
 
-impl Ord for U128 {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.hi.cmp(&other.hi).then(self.lo.cmp(&other.lo))
+    /// Order the pattern as an unsigned 128-bit integer.
+    ///
+    /// This and the two below are deliberately inherent methods rather than `Ord`/`Div`/`Rem`:
+    /// they are exactly the operations whose answer depends on how the bits are read, so each
+    /// caller has to name the reading. An operator would have let `a < b` mean "unsigned" by
+    /// default, which is the same lie the old `_u128` opcode names told.
+    #[inline(always)]
+    pub fn unsigned_lt(self, rhs: Self) -> bool {
+        self.to_u128() < rhs.to_u128()
     }
-}
 
-impl PartialOrd for U128 {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl std::ops::Div for U128 {
-    type Output = Self;
-
-    fn div(self, rhs: Self) -> Self::Output {
+    /// Divide, reading both patterns as unsigned 128-bit integers.
+    #[inline(always)]
+    pub fn unsigned_div(self, rhs: Self) -> Self {
         Self::from_u128(self.to_u128() / rhs.to_u128())
     }
-}
 
-impl std::ops::Rem for U128 {
-    type Output = Self;
-
-    fn rem(self, rhs: Self) -> Self::Output {
+    /// Remainder, reading both patterns as unsigned 128-bit integers.
+    #[inline(always)]
+    pub fn unsigned_rem(self, rhs: Self) -> Self {
         Self::from_u128(self.to_u128() % rhs.to_u128())
     }
 }
 
-impl std::ops::BitAnd for U128 {
+impl std::ops::BitAnd for Int128 {
     type Output = Self;
 
     fn bitand(self, rhs: Self) -> Self::Output {
@@ -401,7 +480,7 @@ impl std::ops::BitAnd for U128 {
     }
 }
 
-impl std::ops::BitOr for U128 {
+impl std::ops::BitOr for Int128 {
     type Output = Self;
 
     fn bitor(self, rhs: Self) -> Self::Output {
@@ -412,7 +491,7 @@ impl std::ops::BitOr for U128 {
     }
 }
 
-impl std::ops::BitXor for U128 {
+impl std::ops::BitXor for Int128 {
     type Output = Self;
 
     fn bitxor(self, rhs: Self) -> Self::Output {
@@ -423,7 +502,7 @@ impl std::ops::BitXor for U128 {
     }
 }
 
-impl std::ops::Not for U128 {
+impl std::ops::Not for Int128 {
     type Output = Self;
 
     fn not(self) -> Self::Output {
@@ -1067,6 +1146,39 @@ unsafe fn ad_kv_lookup_emit(
     }
 }
 
+/// The VM's opcode set.
+///
+/// # Reading the bits, and the width they sit in
+///
+/// An integer frame cell holds a value **masked to its declared width**: an `i8 -1` and a `u8 255`
+/// are the same cell, `0x00000000000000FF`. Nothing about that pattern says how to read it, which
+/// is the same position HLSSA's `TypeExpr::Int(bits)` and LLSSA's `Type::Int` take. So:
+///
+/// - **The reading is in the opcode's name.** Where signed and unsigned disagree on the answer,
+///   there are two opcodes and each names its reading: `udiv_int`/`sdiv_int`,
+///   `urem_int`/`srem_int`, `ult_int`/`slt_int`, and `ushr_int`/`ashr_int` — the one pair that
+///   spells the reading as `u`/`a` (logical against arithmetic) rather than `u`/`s`, because that
+///   is what LLVM's `lshr`/`ashr` and LLSSA's `UShr`/`AShr` already call them. Where they agree —
+///   `add`, `sub`, `mul`, `shl`, `and`, `or`, `xor`, `eq` — there is one opcode and no prefix. (The
+///   pairs HLSSA keeps distinct for `Add`/`Sub`/`Mul`/`Shl` differ only in *when they trap*, and
+///   the VM does not trap: overflow rejection is guard IR emitted before codegen. See
+///   `BinaryArithOpKind`'s doc.)
+/// - **The suffix is the lane, not a reading**: `_int` is one 64-bit cell (widths 1..=64),
+///   `_int128` is two, `_field` is four. It used to be `_u64`/`_u128`, which named the host storage
+///   and then lied about the reading — most loudly in `ashr_u64`, the *signed* right shift.
+/// - **`bits` is the width and nothing else.** It is never a signedness marker. An opcode takes it
+///   exactly when its *result* depends on it: to re-mask an output that can exceed the width
+///   (`add_int`, `sub_int`, `mul_int`, `shl_int`, `not_int`), to mask a shift amount, or to locate
+///   the sign bit at `bits - 1` (`sdiv_int`, `srem_int`, `slt_int`, `ashr_int`). Operations that
+///   are correct on any two already-masked operands — `and_int`, `or_int`, `xor_int`, `eq_int`,
+///   `ult_int`, `udiv_int`, `urem_int` — take no width and must not grow one.
+///
+/// That last rule is what keeps `bits` from reading as the flag it used to look like: `sdiv_int`
+/// carries it and `udiv_int` does not, but the reason is that the signed form needs to know where
+/// the sign bit *is*, which is a fact about the encoding rather than a fact about the operation.
+///
+/// The `_int128` lane has no signed member at all, which is what
+/// `hlssa::type_system::MAX_SUPPORTED_SIGNED_BITS = 64` exists to enforce.
 #[interpreter]
 mod def {
     #[raw_opcode]
@@ -1209,11 +1321,7 @@ mod def {
     fn add_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
             let sum = a.wrapping_add(b);
-            *res = if bits >= 64 {
-                sum
-            } else {
-                sum & ((1u64 << bits) - 1)
-            };
+            *res = sum & cell_mask(bits);
         }
     }
 
@@ -1221,11 +1329,7 @@ mod def {
     fn sub_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
             let diff = a.wrapping_sub(b);
-            *res = if bits >= 64 {
-                diff
-            } else {
-                diff & ((1u64 << bits) - 1)
-            };
+            *res = diff & cell_mask(bits);
         }
     }
 
@@ -1233,135 +1337,120 @@ mod def {
     fn mul_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
             let prod = a.wrapping_mul(b);
-            *res = if bits >= 64 {
-                prod
-            } else {
-                prod & ((1u64 << bits) - 1)
-            };
+            *res = prod & cell_mask(bits);
         }
     }
 
     #[opcode]
-    fn add_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+    fn add_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128) {
         unsafe { *res = a.wrapping_add(b) };
     }
 
     #[opcode]
-    fn sub_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+    fn sub_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128) {
         unsafe { *res = a.wrapping_sub(b) };
     }
 
     #[opcode]
-    fn mul_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+    fn mul_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128) {
         unsafe { *res = a.wrapping_mul(b) };
     }
 
     #[opcode]
-    fn div_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
+    fn udiv_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
         unsafe {
             *res = a / b;
         }
     }
 
     #[opcode]
-    fn mod_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
+    fn urem_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
         unsafe {
             *res = a % b;
         }
     }
 
     #[opcode]
-    fn div_s64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
+    fn sdiv_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
-            let shift = 64 - bits;
-            let a = ((a << shift) as i64) >> shift;
-            let b = ((b << shift) as i64) >> shift;
-            *res = (a / b) as u64
-                & if bits >= 64 {
-                    u64::MAX
-                } else {
-                    (1u64 << bits) - 1
-                };
+            *res = (signed_cell(a, bits) / signed_cell(b, bits)) as u64 & cell_mask(bits);
         }
     }
 
     #[opcode]
-    fn mod_s64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
+    fn srem_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
-            let shift = 64 - bits;
-            let a = ((a << shift) as i64) >> shift;
-            let b = ((b << shift) as i64) >> shift;
-            *res = (a % b) as u64
-                & if bits >= 64 {
-                    u64::MAX
-                } else {
-                    (1u64 << bits) - 1
-                };
+            *res = (signed_cell(a, bits) % signed_cell(b, bits)) as u64 & cell_mask(bits);
         }
     }
 
     #[opcode]
-    fn div_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
-        unsafe { *res = a / b };
+    fn udiv_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128) {
+        unsafe { *res = a.unsigned_div(b) };
     }
 
     #[opcode]
-    fn mod_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
-        unsafe { *res = a % b };
+    fn urem_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128) {
+        unsafe { *res = a.unsigned_rem(b) };
     }
 
     #[opcode]
-    fn and_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
+    fn and_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
         unsafe {
             *res = a & b;
         }
     }
 
     #[opcode]
-    fn or_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
+    fn or_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
         unsafe {
             *res = a | b;
         }
     }
 
     #[opcode]
-    fn xor_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
+    fn xor_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
         unsafe {
             *res = a ^ b;
         }
     }
 
     #[opcode]
-    fn and_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+    fn and_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128) {
         unsafe { *res = a & b };
     }
 
     #[opcode]
-    fn or_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+    fn or_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128) {
         unsafe { *res = a | b };
     }
 
     #[opcode]
-    fn xor_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+    fn xor_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128) {
         unsafe { *res = a ^ b };
     }
 
+    /// Left shift, wrapping at the operand width.
+    ///
+    /// A left shift is one map on the bit pattern, so there is no signed form: what the signed
+    /// HLSSA `SShl` additionally rejects is a *negative amount*, and that rejection is guard IR
+    /// (`pure_guards::emit_invalid_shift_cond`), not something this opcode can see.
     #[opcode]
-    fn shl_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
+    fn shl_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
-            let shifted = a << b;
-            *res = if bits >= 64 {
-                shifted
-            } else {
-                shifted & ((1u64 << bits) - 1)
-            };
+            *res = cell_shl(a, b, bits);
         }
     }
 
+    /// Logical right shift: zero-fill, the lowering for an unsigned `>>`.
+    ///
+    /// Takes `bits` only to mask the amount — the result of a zero-filling shift on an
+    /// already-masked operand cannot exceed the width, so there is nothing to re-mask. `ashr_int`
+    /// below needs `bits` for a second reason as well: to find the sign bit.
     #[opcode]
-    fn ushr_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
+    fn ushr_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
-            *res = a >> b;
+            *res = cell_ushr(a, b, bits);
         }
     }
 
@@ -1369,76 +1458,91 @@ mod def {
     ///
     /// A signed value is held masked to `bits` inside a `u64`, so the sign has to be recovered
     /// before shifting — sign-extend to `i64`, shift there, then re-mask. That is the same
-    /// preamble `div_s64`/`mod_s64` use.
+    /// `signed_cell` preamble `sdiv_int`/`srem_int`/`slt_int` use.
     ///
     /// The shift count is masked to `bits - 1` to match what the LLVM backend does for this op
     /// (`llssa_to_llvm.rs`, which masks to the LLVM type's `bit_width - 1`), so an over-shift
     /// cannot make the two backends disagree — and cannot panic on the `i64` shift.
     #[opcode]
-    fn ashr_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
+    fn ashr_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
-            let shift = 64 - bits;
-            let signed = ((a << shift) as i64) >> shift;
-            let amount = b & (bits - 1);
-            *res = (signed >> amount) as u64
-                & if bits >= 64 {
-                    u64::MAX
-                } else {
-                    (1u64 << bits) - 1
-                };
+            *res = cell_ashr(a, b, bits);
         }
     }
 
     #[opcode]
-    fn shl_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+    fn shl_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128) {
         unsafe { *res = a.wrapping_shl(b.lo as u32) };
     }
 
     #[opcode]
-    fn ushr_u128(#[out] res: *mut U128, #[frame] a: U128, #[frame] b: U128) {
+    fn ushr_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128) {
         unsafe { *res = a.wrapping_shr(b.lo as u32) };
     }
 
+    /// Bitwise complement, re-masked to the operand width.
+    ///
+    /// Takes `bits` because `!a` sets every bit of the host `u64`, including the ones above the
+    /// declared width — which would break the masked-cell invariant for every later reader.
+    /// `lattice::eval_not` folds this as `!x & bit_mask(bits)` and LLVM's `not` is on an
+    /// exact-width `iN`, so the mask is also what keeps the three implementations in agreement.
+    ///
+    /// **Currently unreachable**, and the mask is defence for when it stops being so:
+    /// `LowerWitnessBitwiseOps::lower_not` rewrites *every* `Not` — pure ones as well as witness
+    /// ones, unlike the `And`/`Or`/`Xor` arm beside it — into `(2^bits - 1) - value` before
+    /// codegen, so nothing emits this opcode today. Lowering a pure `Not` to it instead is the
+    /// obvious optimisation, and that is the moment an unmasked `!a` would start returning wrong
+    /// answers.
     #[opcode]
-    fn not_u64(#[out] res: *mut u64, #[frame] a: u64) {
+    fn not_int(#[out] res: *mut u64, #[frame] a: u64, bits: u64) {
         unsafe {
-            *res = !a;
+            *res = cell_complement(a, bits);
         }
     }
 
+    /// Bitwise complement of a 128-bit cell.
+    ///
+    /// No `bits`, and that is the contract rather than an oversight: this lane's declared width is
+    /// exactly 128, so the complement cannot set a bit above it. Unreachable today for the same
+    /// reason as `not_int`.
     #[opcode]
-    fn not_u128(#[out] res: *mut U128, #[frame] a: U128) {
+    fn not_int128(#[out] res: *mut Int128, #[frame] a: Int128) {
         unsafe { *res = !a };
     }
 
     #[opcode]
-    fn eq_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
+    fn eq_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
         unsafe {
             *res = (a == b) as u64;
         }
     }
 
     #[opcode]
-    fn lt_u64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
+    fn ult_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
         unsafe {
             *res = (a < b) as u64;
         }
     }
 
     #[opcode]
-    fn eq_u128(#[out] res: *mut u64, #[frame] a: U128, #[frame] b: U128) {
+    fn eq_int128(#[out] res: *mut u64, #[frame] a: Int128, #[frame] b: Int128) {
         unsafe {
             *res = (a == b) as u64;
         }
     }
 
     #[opcode]
-    fn field_eq(#[out] res: *mut u64, #[frame] a: Field, #[frame] b: Field) {
+    fn eq_field(#[out] res: *mut u64, #[frame] a: Field, #[frame] b: Field) {
         unsafe {
             *res = (a == b) as u64;
         }
     }
 
+    /// Order two field elements by their canonical integer representative.
+    ///
+    /// No `u`/`s` prefix, unlike `ult_int`: a field element has no two's-complement reading, so
+    /// there is no second ordering for this one to be distinguished from. `hlssa_to_llssa` says
+    /// the same thing by making an `SLt` over a `Field` an ICE rather than a lowering.
     #[opcode]
     fn lt_field(#[out] res: *mut u64, #[frame] a: Field, #[frame] b: Field) {
         unsafe {
@@ -1447,49 +1551,38 @@ mod def {
     }
 
     #[opcode]
-    fn lt_u128(#[out] res: *mut u64, #[frame] a: U128, #[frame] b: U128) {
+    fn ult_int128(#[out] res: *mut u64, #[frame] a: Int128, #[frame] b: Int128) {
         unsafe {
-            *res = (a < b) as u64;
+            *res = a.unsigned_lt(b) as u64;
         }
     }
 
     #[opcode]
-    fn lt_s64(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
+    fn slt_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
-            let shift = 64 - bits;
-            let a = ((a << shift) as i64) >> shift;
-            let b = ((b << shift) as i64) >> shift;
-            *res = (a < b) as u64;
+            *res = (signed_cell(a, bits) < signed_cell(b, bits)) as u64;
         }
     }
 
     #[opcode]
-    fn truncate_u64(#[out] res: *mut u64, #[frame] a: u64, to_bits: u64) {
+    fn truncate_int(#[out] res: *mut u64, #[frame] a: u64, to_bits: u64) {
         unsafe {
-            let mask = if to_bits >= 64 {
-                u64::MAX
-            } else {
-                (1u64 << to_bits) - 1
-            };
+            let mask = cell_mask(to_bits);
             *res = a & mask;
         }
     }
 
     #[opcode]
-    fn truncate_u128(#[out] res: *mut U128, #[frame] a: U128, to_bits: u64) {
+    fn truncate_int128(#[out] res: *mut Int128, #[frame] a: Int128, to_bits: u64) {
         unsafe { *res = a.truncate(to_bits) };
     }
 
     #[opcode]
     // FIELD-ASSUMPTION: L4-decompose
-    fn truncate_f_to_u(#[out] res: *mut Field, #[frame] a: Field, to_bits: u64) {
+    fn truncate_field_to_int(#[out] res: *mut Field, #[frame] a: Field, to_bits: u64) {
         unsafe {
             let limb0 = ark_ff::PrimeField::into_bigint(a).0[0];
-            let mask = if to_bits >= 64 {
-                u64::MAX
-            } else {
-                (1u64 << to_bits) - 1
-            };
+            let mask = cell_mask(to_bits);
             *res = From::from(limb0 & mask);
         }
     }
@@ -1525,17 +1618,17 @@ mod def {
     }
 
     #[opcode]
-    fn cast_field_to_u64(#[out] res: *mut u64, #[frame] a: Field) {
+    fn cast_field_to_int(#[out] res: *mut u64, #[frame] a: Field) {
         unsafe {
             *res = ark_ff::PrimeField::into_bigint(a).0[0];
         }
     }
 
     #[opcode]
-    fn cast_field_to_u128(#[out] res: *mut U128, #[frame] a: Field) {
+    fn cast_field_to_int128(#[out] res: *mut Int128, #[frame] a: Field) {
         let limbs = ark_ff::PrimeField::into_bigint(a).0;
         unsafe {
-            *res = U128 {
+            *res = Int128 {
                 lo: limbs[0],
                 hi: limbs[1],
             }
@@ -1543,14 +1636,14 @@ mod def {
     }
 
     #[opcode]
-    fn cast_u64_to_field(#[out] res: *mut Field, #[frame] a: u64) {
+    fn cast_int_to_field(#[out] res: *mut Field, #[frame] a: u64) {
         unsafe {
             *res = From::from(a);
         }
     }
 
     #[opcode]
-    fn cast_u128_to_field(#[out] res: *mut Field, #[frame] a: U128) {
+    fn cast_int128_to_field(#[out] res: *mut Field, #[frame] a: Int128) {
         unsafe {
             *res = Field::from(a.to_u128());
         }
@@ -1942,7 +2035,7 @@ mod def {
     }
 
     #[raw_opcode]
-    fn assert_eq_u64(
+    fn assert_eq_int(
         pc: *const u64,
         frame: Frame,
         vm: &mut VM,
@@ -1956,12 +2049,12 @@ mod def {
     }
 
     #[raw_opcode]
-    fn assert_eq_u128(
+    fn assert_eq_int128(
         pc: *const u64,
         frame: Frame,
         vm: &mut VM,
-        #[frame] a: U128,
-        #[frame] b: U128,
+        #[frame] a: Int128,
+        #[frame] b: Int128,
     ) -> (*const u64, Frame) {
         if a != b {
             return trap(pc, frame, vm);
@@ -2099,6 +2192,10 @@ mod def {
         }
     }
 
+    /// Interleave the low 32 bits of `val` with zeros, giving a 64-bit spread pattern.
+    ///
+    /// The `u32`/`u64` in this pair's names are the *input* widths of a bit-layout transform, not
+    /// a claimed reading, which is why they survived the `_u64` -> `_int` rename.
     #[opcode]
     fn spread_u32(#[out] res: *mut u64, #[frame] val: u64) {
         let result = spread_bits(val as u32);
@@ -3172,5 +3269,154 @@ mod tests {
         // The same shape at the top of the field: `-1` truncates to an arbitrary `u64`, which is
         // the case that used to land outside the multiplicities buffer entirely.
         assert_eq!(table_row_index(-Field::from(1u64), 8), None);
+    }
+
+    #[test]
+    fn cell_mask_holds_a_value_to_its_declared_width() {
+        assert_eq!(cell_mask(1), 0x1);
+        assert_eq!(cell_mask(8), 0xFF);
+        assert_eq!(cell_mask(32), 0xFFFF_FFFF);
+        // At and past the cell width the mask is a no-op, and must not be computed as
+        // `(1 << bits) - 1` -- that shift is an overflow at 64.
+        assert_eq!(cell_mask(64), u64::MAX);
+        assert_eq!(cell_mask(128), u64::MAX);
+    }
+
+    #[test]
+    fn a_shift_amount_is_masked_to_the_operand_width() {
+        // In range: the amount passes through untouched.
+        assert_eq!(shift_amount(0, 8), 0);
+        assert_eq!(shift_amount(7, 8), 7);
+        assert_eq!(shift_amount(63, 64), 63);
+
+        // Out of range: masked to `bits - 1`, which is what LLVM does with the same operands
+        // (`llssa_to_llvm.rs` ands the count with `bit_width - 1` on both shift arms). Before this
+        // was shared, `shl_int` and `ushr_int` used the raw amount and disagreed with LLVM here.
+        assert_eq!(shift_amount(8, 8), 0);
+        assert_eq!(shift_amount(9, 8), 1);
+        assert_eq!(shift_amount(64, 64), 0);
+        assert_eq!(shift_amount(65, 64), 1);
+    }
+
+    #[test]
+    fn a_shift_amount_lands_below_the_width_at_every_width() {
+        // The property the backstop rests on, and the reason it is safe to apply blanket rather
+        // than only where `bits` makes the mask a modulo: `b & (bits - 1)` is a submask of
+        // `bits - 1`, so it cannot exceed it. Checked at the non-powers of two too, which
+        // `BitRange` can mint even though no shift reaches one today.
+        for bits in [1u64, 3, 8, 17, 24, 32, 63, 64] {
+            for b in [0u64, 1, 7, 23, 63, 64, 200, u64::MAX] {
+                let amount = u64::from(shift_amount(b, bits));
+                assert!(
+                    amount < bits,
+                    "amount {amount} escaped a {bits}-bit width from {b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_over_shift_masks_rather_than_panicking() {
+        // The whole point of routing the amount through `shift_amount`: a bare `a << b` panics in
+        // a debug build for `b >= 64` and is silently `b & 63` in release, which is the wrong
+        // answer for every width below 64. Both directions, through the opcode bodies themselves.
+        let a = 0xABu64;
+        assert_eq!(cell_shl(a, 8, 8), a, "an 8-bit `<<` by 8 masks to `<< 0`");
+        assert_eq!(cell_ushr(a, 8, 8), a, "an 8-bit `>>` by 8 masks to `>> 0`");
+
+        // An amount past the *host* width too, which is where the debug panic used to fire.
+        assert_eq!(cell_shl(a, 200, 8), a);
+        assert_eq!(cell_ushr(a, 200, 8), a);
+        assert_eq!(cell_ashr(a, 200, 8), a);
+        // At the host width the mask is `& 63`, so the largest amount there is a shift by 63
+        // rather than a panic.
+        assert_eq!(cell_shl(a, u64::MAX, 64), a << 63);
+    }
+
+    #[test]
+    fn a_shift_result_stays_inside_its_declared_width() {
+        // `shl_int` re-masks because bits pushed off the top are discarded rather than kept, which
+        // is Noir's semantics for a `<<` that overflows -- `200u8 << 1` is 144, not 400.
+        assert_eq!(cell_shl(200, 1, 8), 144);
+        assert_eq!(cell_shl(1, 7, 8), 128);
+        assert_eq!(cell_shl(1, 0, 8), 1);
+        // Every result is inside the width, whatever the operands.
+        for bits in [1u64, 8, 32, 64] {
+            for a in [0u64, 1, 0x5A, u64::MAX] {
+                for b in [0u64, 1, 7, 63, 200] {
+                    let a = a & cell_mask(bits);
+                    for out in [
+                        cell_shl(a, b, bits),
+                        cell_ushr(a, b, bits),
+                        cell_ashr(a, b, bits),
+                        cell_complement(a, bits),
+                    ] {
+                        assert_eq!(
+                            out & !cell_mask(bits),
+                            0,
+                            "a {bits}-bit result escaped its width from a={a} b={b}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_right_shift_fills_by_its_reading() {
+        // The one pair where the reading changes the answer, which is why there are two opcodes.
+        // `0xF0` is `-16` at eight bits, so an arithmetic `>> 2` keeps the sign and a logical one
+        // does not.
+        assert_eq!(cell_ashr(0xF0, 2, 8), 0xFC, "sign-filled: -16 >> 2 == -4");
+        assert_eq!(cell_ushr(0xF0, 2, 8), 0x3C, "zero-filled: 240 >> 2 == 60");
+        // A non-negative operand is the case where they agree.
+        assert_eq!(cell_ashr(0x70, 2, 8), 0x1C);
+        assert_eq!(cell_ushr(0x70, 2, 8), 0x1C);
+        // At the host width, where the sign-extend preamble is the identity.
+        assert_eq!(cell_ashr(u64::MAX, 3, 64), u64::MAX);
+        assert_eq!(cell_ushr(u64::MAX, 3, 64), u64::MAX >> 3);
+    }
+
+    #[test]
+    fn a_signed_cell_is_read_at_its_own_width() {
+        // The preamble `sdiv_int`, `srem_int`, `slt_int` and `ashr_int` share.
+        assert_eq!(signed_cell(0xFF, 8), -1);
+        assert_eq!(signed_cell(0x80, 8), -128);
+        assert_eq!(signed_cell(0x7F, 8), 127);
+        assert_eq!(signed_cell(0, 1), 0);
+        assert_eq!(signed_cell(1, 1), -1, "the only negative a `u1` cell holds");
+        assert_eq!(signed_cell(u64::MAX, 64), -1);
+        // Dirty bits above the width are discarded by the up-shift, which is what makes the
+        // signed opcodes robust to a cell the masked-cell invariant did not reach.
+        assert_eq!(signed_cell(0xFFFF_FFFF_FFFF_FF7F, 8), 127);
+    }
+
+    #[test]
+    fn a_complement_stays_inside_its_declared_width() {
+        // An unmasked `!a` sets all 64 host bits, so an 8-bit `!0` would leave
+        // `0xFFFF_FFFF_FFFF_FFFF` in a cell every later reader treats as 8 bits wide -- and, at
+        // one bit, would make `!1` a *truthy* value where the answer is `0`.
+        assert_eq!(cell_complement(0x0F, 8), 0xF0);
+        assert_eq!(cell_complement(0x00, 8), 0xFF);
+        assert_eq!(cell_complement(0, 1), 1, "!false is true");
+        assert_eq!(
+            cell_complement(1, 1),
+            0,
+            "!true is false, not a large truthy value"
+        );
+        assert_eq!(cell_complement(0, 64), u64::MAX);
+
+        // Agrees with the constant folder, `click_cooper::lattice::eval_not`, which is
+        // `!x & bit_mask(bits)`. The two used to disagree for every width below 64.
+        for bits in [1u64, 8, 32, 64] {
+            for a in [0u64, 1, 0x5A, u64::MAX] {
+                let a = a & cell_mask(bits);
+                assert_eq!(
+                    cell_complement(a, bits),
+                    !a & cell_mask(bits),
+                    "complement escaped its width at {bits} bits"
+                );
+            }
+        }
     }
 }

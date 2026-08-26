@@ -394,6 +394,17 @@ impl CodeGen {
             .unwrap_or_else(|| SourceLocation::synthetic(function.get_name()));
         emitter.set_source_location(vm_source_location(&block_location));
         emitter.enter_block(block_id);
+
+        // Two arm shapes appear below.
+        //
+        // An operation whose two signed forms emit the **same** opcode lists both variants in the
+        // pattern — `UAdd | SAdd`, `UMul | SMul`, `UShl | SShl` — so that adding a
+        // `BinaryArithOpKind` is a compile error here rather than a silent fall-through to the
+        // catch-all panic.
+        //
+        // One whose forms emit **different** opcodes binds the kind instead
+        // (`kind @ (UDiv | SDiv)`) and matches on `kind.is_signed()` alongside the operand type,
+        // because then the opcode choice is a joint fact about both the reading and the width.
         for (instruction, source_location) in block.get_instructions_with_source_locations() {
             emitter.set_source_location(vm_source_location(source_location));
 
@@ -423,7 +434,7 @@ impl CodeGen {
                     }
                     TypeExpr::Int(128) => {
                         let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::AddU128 {
+                        emitter.push_op(bytecode::OpCode::AddInt128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -464,7 +475,7 @@ impl CodeGen {
                     }
                     TypeExpr::Int(128) => {
                         let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::SubU128 {
+                        emitter.push_op(bytecode::OpCode::SubInt128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -488,7 +499,7 @@ impl CodeGen {
                     }
                     (false, TypeExpr::Int(bits)) if *bits <= 64 => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::DivU64 {
+                        emitter.push_op(bytecode::OpCode::UdivInt {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -496,7 +507,7 @@ impl CodeGen {
                     }
                     (true, TypeExpr::Int(bits)) if *bits <= MAX_SUPPORTED_SIGNED_BITS => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::DivS64 {
+                        emitter.push_op(bytecode::OpCode::SdivInt {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -505,7 +516,7 @@ impl CodeGen {
                     }
                     (false, TypeExpr::Int(128)) => {
                         let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::DivU128 {
+                        emitter.push_op(bytecode::OpCode::UdivInt128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -528,7 +539,7 @@ impl CodeGen {
                     }
                     (false, TypeExpr::Int(bits)) if *bits <= 64 => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::ModU64 {
+                        emitter.push_op(bytecode::OpCode::UremInt {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -536,7 +547,7 @@ impl CodeGen {
                     }
                     (true, TypeExpr::Int(bits)) if *bits <= MAX_SUPPORTED_SIGNED_BITS => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::ModS64 {
+                        emitter.push_op(bytecode::OpCode::SremInt {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -545,7 +556,7 @@ impl CodeGen {
                     }
                     (false, TypeExpr::Int(128)) => {
                         let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::ModU128 {
+                        emitter.push_op(bytecode::OpCode::UremInt128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -582,7 +593,7 @@ impl CodeGen {
                     }
                     TypeExpr::Int(128) => {
                         let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::MulU128 {
+                        emitter.push_op(bytecode::OpCode::MulInt128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -601,7 +612,7 @@ impl CodeGen {
                     }
                     TypeExpr::Int(bits) if *bits <= 64 => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::AndU64 {
+                        emitter.push_op(bytecode::OpCode::AndInt {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -609,7 +620,7 @@ impl CodeGen {
                     }
                     TypeExpr::Int(128) => {
                         let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::AndU128 {
+                        emitter.push_op(bytecode::OpCode::AndInt128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -625,7 +636,7 @@ impl CodeGen {
                 } => match &type_info.get_value_type(*val).expr {
                     TypeExpr::Int(bits) if *bits <= 64 => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::OrU64 {
+                        emitter.push_op(bytecode::OpCode::OrInt {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -633,7 +644,7 @@ impl CodeGen {
                     }
                     TypeExpr::Int(128) => {
                         let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::OrU128 {
+                        emitter.push_op(bytecode::OpCode::OrInt128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -649,7 +660,7 @@ impl CodeGen {
                 } => match &type_info.get_value_type(*val).expr {
                     TypeExpr::Int(bits) if *bits <= 64 => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::XorU64 {
+                        emitter.push_op(bytecode::OpCode::XorInt {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -657,7 +668,7 @@ impl CodeGen {
                     }
                     TypeExpr::Int(128) => {
                         let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::XorU128 {
+                        emitter.push_op(bytecode::OpCode::XorInt128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -673,7 +684,7 @@ impl CodeGen {
                 } => match &type_info.get_value_type(*val).expr {
                     TypeExpr::Int(bits) if *bits <= 64 => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::ShlU64 {
+                        emitter.push_op(bytecode::OpCode::ShlInt {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -682,7 +693,7 @@ impl CodeGen {
                     }
                     TypeExpr::Int(128) => {
                         let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::ShlU128 {
+                        emitter.push_op(bytecode::OpCode::ShlInt128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -698,17 +709,23 @@ impl CodeGen {
                 } => match (kind.is_signed(), &type_info.get_value_type(*val).expr) {
                     (false, TypeExpr::Int(bits)) if *bits <= 64 => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::UshrU64 {
+                        // Zero-fill. Needs `bits` only to mask the shift amount to `bits - 1`, the
+                        // way LLVM does; the result of a logical shift cannot exceed the width, so
+                        // nothing is re-masked.
+                        emitter.push_op(bytecode::OpCode::UshrInt {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
+                            bits: *bits as u64,
                         });
                     }
+
                     // Sign-fill, matching Noir and `IntArithOp::AShr` on the LLVM side. Needs
-                    // `bits` because the sign lives at `bits - 1`, not at 63.
+                    // `bits` both to mask the amount and because the sign lives at `bits - 1`,
+                    // not at 63.
                     (true, TypeExpr::Int(bits)) if *bits <= MAX_SUPPORTED_SIGNED_BITS => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::AshrU64 {
+                        emitter.push_op(bytecode::OpCode::AshrInt {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -717,7 +734,7 @@ impl CodeGen {
                     }
                     (false, TypeExpr::Int(128)) => {
                         let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::UshrU128 {
+                        emitter.push_op(bytecode::OpCode::UshrInt128 {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -746,7 +763,7 @@ impl CodeGen {
                         (true, TypeExpr::Int(lhs_bits), TypeExpr::Int(rhs_bits))
                             if *lhs_bits == *rhs_bits && *lhs_bits <= MAX_SUPPORTED_SIGNED_BITS =>
                         {
-                            emitter.push_op(bytecode::OpCode::LtS64 {
+                            emitter.push_op(bytecode::OpCode::SltInt {
                                 res: result,
                                 a: layouter.get_value(*op1),
                                 b: layouter.get_value(*op2),
@@ -756,14 +773,14 @@ impl CodeGen {
                         (false, TypeExpr::Int(lhs_bits), TypeExpr::Int(rhs_bits))
                             if *lhs_bits == *rhs_bits && *lhs_bits <= 64 =>
                         {
-                            emitter.push_op(bytecode::OpCode::LtU64 {
+                            emitter.push_op(bytecode::OpCode::UltInt {
                                 res: result,
                                 a: layouter.get_value(*op1),
                                 b: layouter.get_value(*op2),
                             });
                         }
                         (false, TypeExpr::Int(128), TypeExpr::Int(128)) => {
-                            emitter.push_op(bytecode::OpCode::LtU128 {
+                            emitter.push_op(bytecode::OpCode::UltInt128 {
                                 res: result,
                                 a: layouter.get_value(*op1),
                                 b: layouter.get_value(*op2),
@@ -802,21 +819,21 @@ impl CodeGen {
                         (TypeExpr::Int(lhs_bits), TypeExpr::Int(rhs_bits))
                             if *lhs_bits == *rhs_bits && *lhs_bits <= 64 =>
                         {
-                            emitter.push_op(bytecode::OpCode::EqU64 {
+                            emitter.push_op(bytecode::OpCode::EqInt {
                                 res: result,
                                 a: layouter.get_value(*op1),
                                 b: layouter.get_value(*op2),
                             });
                         }
                         (TypeExpr::Int(128), TypeExpr::Int(128)) => {
-                            emitter.push_op(bytecode::OpCode::EqU128 {
+                            emitter.push_op(bytecode::OpCode::EqInt128 {
                                 res: result,
                                 a: layouter.get_value(*op1),
                                 b: layouter.get_value(*op2),
                             });
                         }
                         (TypeExpr::Field, TypeExpr::Field) => {
-                            emitter.push_op(bytecode::OpCode::FieldEq {
+                            emitter.push_op(bytecode::OpCode::EqField {
                                 res: result,
                                 a: layouter.get_value(*op1),
                                 b: layouter.get_value(*op2),
@@ -845,13 +862,13 @@ impl CodeGen {
                             let tmp = layouter.alloc_temp_field();
                             match &l_type.expr {
                                 TypeExpr::Int(bits) if *bits <= 64 => {
-                                    emitter.push_op(bytecode::OpCode::CastU64ToField {
+                                    emitter.push_op(bytecode::OpCode::CastIntToField {
                                         res: tmp,
                                         a: layouter.get_value(*v),
                                     });
                                 }
                                 TypeExpr::Int(128) => {
-                                    emitter.push_op(bytecode::OpCode::CastU128ToField {
+                                    emitter.push_op(bytecode::OpCode::CastInt128ToField {
                                         res: tmp,
                                         a: layouter.get_value(*v),
                                     });
@@ -900,7 +917,7 @@ impl CodeGen {
                                 }
                             }
                             if target_bits < source_bits {
-                                emitter.push_op(bytecode::OpCode::TruncateU64 {
+                                emitter.push_op(bytecode::OpCode::TruncateInt {
                                     res: result,
                                     a: result,
                                     to_bits: *target_bits as u64,
@@ -914,7 +931,7 @@ impl CodeGen {
                                 size: 1,
                             });
                             if *target_bits < 64 {
-                                emitter.push_op(bytecode::OpCode::TruncateU64 {
+                                emitter.push_op(bytecode::OpCode::TruncateInt {
                                     res: result,
                                     a: result,
                                     to_bits: *target_bits as u64,
@@ -933,12 +950,12 @@ impl CodeGen {
                             });
                         }
                         (TypeExpr::Field, TypeExpr::Int(bits)) if *bits <= 64 => {
-                            emitter.push_op(bytecode::OpCode::CastFieldToU64 {
+                            emitter.push_op(bytecode::OpCode::CastFieldToInt {
                                 res: result,
                                 a: layouter.get_value(*v),
                             });
                             if *bits < 64 {
-                                emitter.push_op(bytecode::OpCode::TruncateU64 {
+                                emitter.push_op(bytecode::OpCode::TruncateInt {
                                     res: result,
                                     a: result,
                                     to_bits: *bits as u64,
@@ -946,19 +963,19 @@ impl CodeGen {
                             }
                         }
                         (TypeExpr::Field, TypeExpr::Int(128)) => {
-                            emitter.push_op(bytecode::OpCode::CastFieldToU128 {
+                            emitter.push_op(bytecode::OpCode::CastFieldToInt128 {
                                 res: result,
                                 a: layouter.get_value(*v),
                             });
                         }
                         (TypeExpr::Int(bits), TypeExpr::Field) if *bits <= 64 => {
-                            emitter.push_op(bytecode::OpCode::CastU64ToField {
+                            emitter.push_op(bytecode::OpCode::CastIntToField {
                                 res: result,
                                 a: layouter.get_value(*v),
                             });
                         }
                         (TypeExpr::Int(128), TypeExpr::Field) => {
-                            emitter.push_op(bytecode::OpCode::CastU128ToField {
+                            emitter.push_op(bytecode::OpCode::CastInt128ToField {
                                 res: result,
                                 a: layouter.get_value(*v),
                             });
@@ -966,6 +983,11 @@ impl CodeGen {
                         _ => panic!("unsupported args {} {}", l_type, r_type),
                     }
                 }
+
+                // Unreachable on any program that gets here: `LowerWitnessBitwiseOps::lower_not`
+                // rewrites every `Not`, pure or witness, into `(2^bits - 1) - value` during
+                // `spill_witness`. Kept because lowering a pure `Not` straight to `NotInt` is the
+                // obvious way to make it one instruction instead of a field subtraction.
                 hlssa::OpCode::Not {
                     result: r,
                     value: v,
@@ -974,14 +996,15 @@ impl CodeGen {
                     match &result_type.expr {
                         TypeExpr::Int(bits) if *bits <= 64 => {
                             let result = layouter.alloc_value(*r, result_type);
-                            emitter.push_op(bytecode::OpCode::NotU64 {
+                            emitter.push_op(bytecode::OpCode::NotInt {
                                 res: result,
                                 a: layouter.get_value(*v),
+                                bits: *bits as u64,
                             });
                         }
                         TypeExpr::Int(128) => {
                             let result = layouter.alloc_value(*r, result_type);
-                            emitter.push_op(bytecode::OpCode::NotU128 {
+                            emitter.push_op(bytecode::OpCode::NotInt128 {
                                 res: result,
                                 a: layouter.get_value(*v),
                             });
@@ -1230,13 +1253,13 @@ impl CodeGen {
                             (TypeExpr::Int(lhs_bits), TypeExpr::Int(rhs_bits))
                                 if *lhs_bits == *rhs_bits && *lhs_bits <= 64 =>
                             {
-                                emitter.push_op(bytecode::OpCode::AssertEqU64 {
+                                emitter.push_op(bytecode::OpCode::AssertEqInt {
                                     a: layouter.get_value(*lhs),
                                     b: layouter.get_value(*rhs),
                                 });
                             }
                             (TypeExpr::Int(128), TypeExpr::Int(128)) => {
-                                emitter.push_op(bytecode::OpCode::AssertEqU128 {
+                                emitter.push_op(bytecode::OpCode::AssertEqInt128 {
                                     a: layouter.get_value(*lhs),
                                     b: layouter.get_value(*rhs),
                                 });
@@ -1253,7 +1276,7 @@ impl CodeGen {
                                 if *lhs_bits == *rhs_bits
                                     && *lhs_bits <= MAX_SUPPORTED_SIGNED_BITS =>
                             {
-                                emitter.push_op(bytecode::OpCode::LtS64 {
+                                emitter.push_op(bytecode::OpCode::SltInt {
                                     res: cmp_result,
                                     a: layouter.get_value(*lhs),
                                     b: layouter.get_value(*rhs),
@@ -1263,14 +1286,14 @@ impl CodeGen {
                             (false, TypeExpr::Int(lhs_bits), TypeExpr::Int(rhs_bits))
                                 if *lhs_bits == *rhs_bits && *lhs_bits <= 64 =>
                             {
-                                emitter.push_op(bytecode::OpCode::LtU64 {
+                                emitter.push_op(bytecode::OpCode::UltInt {
                                     res: cmp_result,
                                     a: layouter.get_value(*lhs),
                                     b: layouter.get_value(*rhs),
                                 });
                             }
                             (false, TypeExpr::Int(128), TypeExpr::Int(128)) => {
-                                emitter.push_op(bytecode::OpCode::LtU128 {
+                                emitter.push_op(bytecode::OpCode::UltInt128 {
                                     res: cmp_result,
                                     a: layouter.get_value(*lhs),
                                     b: layouter.get_value(*rhs),
@@ -1292,7 +1315,7 @@ impl CodeGen {
                         }
                         let one = layouter.alloc_scratch(1);
                         emitter.push_op(bytecode::OpCode::MovConst { res: one, val: 1 });
-                        emitter.push_op(bytecode::OpCode::AssertEqU64 {
+                        emitter.push_op(bytecode::OpCode::AssertEqInt {
                             a: cmp_result,
                             b: one,
                         });
@@ -1301,7 +1324,7 @@ impl CodeGen {
                 hlssa::OpCode::Assert { value } => {
                     let one = layouter.alloc_scratch(1);
                     emitter.push_op(bytecode::OpCode::MovConst { res: one, val: 1 });
-                    emitter.push_op(bytecode::OpCode::AssertEqU64 {
+                    emitter.push_op(bytecode::OpCode::AssertEqInt {
                         a: layouter.get_value(*value),
                         b: one,
                     });
@@ -1401,7 +1424,7 @@ impl CodeGen {
                         TypeExpr::Field => layouter.get_value(*c),
                         TypeExpr::Int(bits) if *bits <= 64 => {
                             let tmp = layouter.alloc_temp_field();
-                            emitter.push_op(bytecode::OpCode::CastU64ToField {
+                            emitter.push_op(bytecode::OpCode::CastIntToField {
                                 res: tmp,
                                 a: layouter.get_value(*c),
                             });
@@ -1409,7 +1432,7 @@ impl CodeGen {
                         }
                         TypeExpr::Int(128) => {
                             let tmp = layouter.alloc_temp_field();
-                            emitter.push_op(bytecode::OpCode::CastU128ToField {
+                            emitter.push_op(bytecode::OpCode::CastInt128ToField {
                                 res: tmp,
                                 a: layouter.get_value(*c),
                             });

@@ -215,8 +215,6 @@ impl Eliminator<'_> {
             } => {
                 let node = match kind {
                     CmpKind::Eq => self.binary(*lhs, *rhs, |lhs, rhs| CanonNode::Eq { lhs, rhs }),
-
-                    // `CmpKind::is_ordering` is the comparison counterpart of the predicate above.
                     CmpKind::ULt | CmpKind::SLt => {
                         self.binary(*lhs, *rhs, |lhs, rhs| CanonNode::Lt {
                             lhs,

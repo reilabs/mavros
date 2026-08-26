@@ -648,7 +648,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     // Arithmetic, not logical. `a` is already the decoded signed value, so shifting
                     // it directly sign-fills; the previous `wrap_unsigned(..)` re-encoded to raw
                     // bits first and so zero-filled. The shift count is masked to `bits - 1` to
-                    // match the VM's `ashr_u64` and LLVM's `AShr` — the right-shift trio does
+                    // match the VM's `ashr_int` and LLVM's `AShr` — the right-shift trio does
                     // agree, unlike `Shl` above.
                     ArithGroup::Shr => {
                         Self::encode_signed(a >> (b_bits & (*bits as u32 - 1)), *bits)
