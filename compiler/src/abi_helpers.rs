@@ -45,12 +45,9 @@ pub fn ordered_params_from_btreemap(
     }
 
     let flattened = crate::vm::interpreter::flatten_param_vec(&ordered_params).len();
-    assert_eq!(
-        flattened,
-        flattened_io_count(abi),
-        "ordered params do not flatten to the ABI's io count"
-    );
-
+    if flattened != flattened_io_count(abi) {
+        return Err("ordered params do not flatten to the ABI's io count".to_string());
+    }
     Ok(ordered_params)
 }
 
