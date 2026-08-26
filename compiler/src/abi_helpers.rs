@@ -51,24 +51,38 @@ pub fn ordered_params_from_btreemap(
     Ok(ordered_params)
 }
 
+pub fn guard_layout(abi: &noirc_abi::Abi) -> Option<(usize, usize)> {
+    abi.return_type.as_ref().map(|ret| {
+        let params: usize = abi
+            .parameters
+            .iter()
+            .map(|param| param.typ.field_count() as usize)
+            .sum();
+        (1 + params, ret.abi_type.field_count() as usize)
+    })
+}
+
 pub fn check_return_guard(
     abi: &noirc_abi::Abi,
+    layout: &mavros_artifacts::WitnessLayout,
     ordered_params: &[InputValueOrdered],
     wit_pre_comm: &[mavros_artifacts::Field],
 ) -> Result<(), String> {
-    if abi.return_type.is_none() {
-        return Ok(());
-    }
+    let guard_index = match (abi.return_type.as_ref(), layout.guard_index) {
+        (None, None) => return Ok(()),
+        (Some(_), Some(index)) => index,
+        (declared, recorded) => {
+            return Err(format!(
+                "the ABI declares a return: {}, but the R1CS records a guard column: {recorded:?}",
+                declared.is_some()
+            ));
+        }
+    };
 
     let expected = match ordered_params.get(abi.parameters.len()) {
         Some(InputValueOrdered::Field(guard)) => *guard,
         other => return Err(format!("guard slot is not a field: {other:?}")),
     };
-    let guard_index = 1 + abi
-        .parameters
-        .iter()
-        .map(|param| param.typ.field_count() as usize)
-        .sum::<usize>();
     match wit_pre_comm.get(guard_index) {
         Some(actual) if *actual == expected => Ok(()),
         Some(actual) => Err(format!(

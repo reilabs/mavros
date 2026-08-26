@@ -309,13 +309,14 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     // 5. Check witgen correctness  (depends on WITGEN_RUN)
     if let (Some(result), Some(r1cs)) = (&witgen_result, &r1cs) {
         emit("START:WITGEN_CORRECT");
-        let correct = r1cs.check_witgen_output(
-            &result.out_wit_pre_comm,
-            &result.out_wit_post_comm,
-            &result.out_a,
-            &result.out_b,
-            &result.out_c,
-        ) && check_return_guard(&driver, &ordered_params, &result.out_wit_pre_comm);
+        let correct =
+            r1cs.check_witgen_output(
+                &result.out_wit_pre_comm,
+                &result.out_wit_post_comm,
+                &result.out_a,
+                &result.out_b,
+                &result.out_c,
+            ) && check_return_guard(&driver, r1cs, &ordered_params, &result.out_wit_pre_comm);
         emit(if correct {
             "END:WITGEN_CORRECT:ok"
         } else {
@@ -468,13 +469,14 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     if let (Some(result), Some(r1cs)) = (&wasm_result, &r1cs) {
         emit("START:WITGEN_WASM_CORRECT");
 
-        let correct = r1cs.check_witgen_output(
-            &result.out_wit_pre_comm,
-            &result.out_wit_post_comm,
-            &result.out_a,
-            &result.out_b,
-            &result.out_c,
-        ) && check_return_guard(&driver, &ordered_params, &result.out_wit_pre_comm);
+        let correct =
+            r1cs.check_witgen_output(
+                &result.out_wit_pre_comm,
+                &result.out_wit_post_comm,
+                &result.out_a,
+                &result.out_b,
+                &result.out_c,
+            ) && check_return_guard(&driver, r1cs, &ordered_params, &result.out_wit_pre_comm);
         emit(if correct {
             "END:WITGEN_WASM_CORRECT:ok"
         } else {
@@ -538,13 +540,14 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
 /// True when the generated witness's return-guard column matches the parsed inputs.
 fn check_return_guard(
     driver: &Driver,
+    r1cs: &R1CS,
     ordered_params: &Result<Vec<interpreter::InputValueOrdered>, String>,
     wit_pre_comm: &[RawField],
 ) -> bool {
     let Ok(params) = ordered_params else {
         return false;
     };
-    abi_helpers::check_return_guard(driver.abi(), params, wit_pre_comm)
+    abi_helpers::check_return_guard(driver.abi(), &r1cs.witness_layout, params, wit_pre_comm)
         .inspect_err(|reason| eprintln!("return-guard check failed: {reason}"))
         .is_ok()
 }
@@ -691,7 +694,7 @@ fn run_wasm(
     let constraint_count = r1cs.constraints.len();
     let input_fields: Vec<RawField> = params.iter().flat_map(flatten_input_value).collect();
     if input_fields.len() != expected_input_field_count {
-        return Err("Unexpected number of inputs supplied").into();
+        return Err("Unexpected number of inputs supplied".into());
     }
 
     let vm_struct_size: u32 = WITGEN_VM_STRUCT_SIZE;

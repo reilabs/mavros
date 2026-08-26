@@ -332,6 +332,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let is_return_guard_consistent = if let Err(reason) =
         mavros_compiler::abi_helpers::check_return_guard(
             driver.abi(),
+            &r1cs.witness_layout,
             &params,
             &witgen_result.out_wit_pre_comm,
         ) {

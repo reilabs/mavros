@@ -553,10 +553,11 @@ impl Driver {
         let num_lookups = r1cs_gen.num_lookups();
         // Captured before `r1cs_ssa` is stored away; sizes the LogUp per-challenge soundness.
         let field = r1cs_ssa.field();
-        let (r1cs, profile) = match r1cs_gen.seal_with_profile() {
-            Ok((r1cs, profile)) => (r1cs, Some(profile)),
-            Err(error) => (error.into_r1cs(), None),
-        };
+        let (r1cs, profile) =
+            match r1cs_gen.seal_with_profile(crate::abi_helpers::guard_layout(self.abi())) {
+                Ok((r1cs, profile)) => (r1cs, Some(profile)),
+                Err(error) => (error.into_r1cs(), None),
+            };
         let mut num_non_zero_terms = 0;
         for r1c in r1cs.constraints.iter() {
             for (_, coeff) in r1c.a.iter() {
