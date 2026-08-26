@@ -1683,6 +1683,28 @@ impl<'a> ExpressionConverter<'a> {
                 self.convert_expression(&call.arguments[0], b);
                 None
             }
+            "black_box" => {
+                assert_eq!(
+                    call.arguments.len(),
+                    1,
+                    "black_box must have exactly one argument"
+                );
+                let argument_type = call.arguments[0]
+                    .return_type()
+                    .expect("black_box argument must have a known type");
+                let input_type = self.type_converter.convert_type(argument_type.as_ref());
+                let output_type = self.type_converter.convert_type(&call.return_type);
+                assert_eq!(
+                    input_type, output_type,
+                    "black_box input and output representations must match"
+                );
+
+                // `std::hint::black_box` is semantically an identity function. Its optimization
+                // barrier is deliberately only a hint, which a compiler may ignore. Mavros lowers
+                // the monomorphized AST directly rather than using Noir's SSA optimizer, so return
+                // the one evaluated argument without introducing a backend operation.
+                self.convert_expression(&call.arguments[0], b)
+            }
             "assert_constant" => {
                 // Unit-valued expressions have no SSA value and are trivially constant.
                 if let Some(value) = self.convert_expression(&call.arguments[0], b) {

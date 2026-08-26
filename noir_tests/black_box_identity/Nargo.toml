@@ -1,0 +1,6 @@
+[package]
+name = "black_box_identity"
+type = "bin"
+authors = [""]
+
+[dependencies]
