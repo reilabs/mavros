@@ -446,7 +446,12 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
                 return None;
             }
         };
-        match run_wasm(wasm_path, r1cs, params) {
+        match run_wasm(
+            wasm_path,
+            r1cs,
+            params,
+            driver.entry_point_flattened_io_count(),
+        ) {
             Ok(result) => {
                 emit("END:WITGEN_WASM_RUN:ok");
                 Some(result)
@@ -680,10 +685,14 @@ fn run_wasm(
     wasm_path: &Path,
     r1cs: &R1CS,
     params: &[interpreter::InputValueOrdered],
+    expected_input_field_count: usize,
 ) -> Result<WasmResult, Box<dyn std::error::Error>> {
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
     let input_fields: Vec<RawField> = params.iter().flat_map(flatten_input_value).collect();
+    if input_fields.len() != expected_input_field_count {
+        return Err("Unexpected number of inputs supplied").into();
+    }
 
     let vm_struct_size: u32 = WITGEN_VM_STRUCT_SIZE;
     // FIELD-ASSUMPTION: L3-field-size
