@@ -4,6 +4,7 @@
 //! of the frontend treats them as ordinary functions.
 
 pub mod blake3;
+pub mod ecdsa_secp256r1;
 pub mod embedded_curve_add;
 pub mod multi_scalar_mul;
 pub mod poseidon2_permutation;

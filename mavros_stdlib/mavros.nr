@@ -16,3 +16,4 @@ pub fn unspread<let N: u32>(value: u64) -> (u32, u32) {
 }
 
 pub mod replacements;
+pub mod vendor;

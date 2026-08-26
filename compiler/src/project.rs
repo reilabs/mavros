@@ -45,6 +45,10 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
         include_str!("../../mavros_stdlib/replacements/blake3.nr"),
     ),
     (
+        "std/mavros/replacements/ecdsa_secp256r1.nr",
+        include_str!("../../mavros_stdlib/replacements/ecdsa_secp256r1.nr"),
+    ),
+    (
         "std/mavros/replacements/embedded_curve_add.nr",
         include_str!("../../mavros_stdlib/replacements/embedded_curve_add.nr"),
     ),
@@ -60,6 +64,10 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
         "std/mavros/replacements/sha256_compression.nr",
         include_str!("../../mavros_stdlib/replacements/sha256_compression.nr"),
     ),
+    (
+        "std/mavros/vendor.nr",
+        include_str!("../../mavros_stdlib/vendor/ecdsa_secp256r1.nr"),
+    ),
 ];
 
 /// Foreign stdlib functions that mavros replaces with pure-Noir implementations from
@@ -73,6 +81,7 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
 /// pairing all apply natively, and the mavros pipeline never sees a lowlevel call for it.
 const FOREIGN_REPLACEMENTS: &[&str] = &[
     "blake3",
+    "ecdsa_secp256r1",
     "embedded_curve_add",
     "multi_scalar_mul",
     "poseidon2_permutation",
