@@ -328,13 +328,18 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     } else {
         info!(message = %"Witgen output is correct");
     }
-    if let Err(reason) = mavros_compiler::abi_helpers::check_return_guard(
-        driver.abi(),
-        &params,
-        &witgen_result.out_wit_pre_comm,
-    ) {
+
+    let is_return_guard_consistent = if let Err(reason) =
+        mavros_compiler::abi_helpers::check_return_guard(
+            driver.abi(),
+            &params,
+            &witgen_result.out_wit_pre_comm,
+        ) {
         error!(message = %"Return-guard public input is inconsistent", reason = %reason);
-    }
+        false
+    } else {
+        true
+    };
 
     let leftover_memory = plotting::plot_memory_chart(
         &witgen_result.instrumenter,
@@ -505,7 +510,11 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         }
     }
 
-    Ok(ExitCode::SUCCESS)
+    if is_return_guard_consistent {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::FAILURE)
+    }
 }
 
 // Copied from: https://github.com/noir-lang/noir/blob/5071093f9b51e111a49a5f78d827774ef8e80c74/tooling/nargo_cli/src/cli/mod.rs#L301
