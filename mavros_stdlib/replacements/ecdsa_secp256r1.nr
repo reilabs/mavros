@@ -1,7 +1,11 @@
-use crate::mavros::vendor::bigcurve::{BigCurve, ScalarField};
-use crate::mavros::vendor::bigcurve::curves::secp256r1::Secp256r1;
-use crate::mavros::vendor::bignum::bignum::conditional_select;
-use crate::mavros::vendor::bignum::{BigNum, Secp256r1_Fq, Secp256r1_Fr};
+use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::{BigCurve, ScalarField};
+use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::curves::secp256r1::{
+    Secp256r1, SECP256r1_PARAM,
+};
+use crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::conditional_select;
+use crate::mavros::vendor::ecdsa_secp256r1::bignum::{
+    BigNum, Secp256r1_Fq, Secp256r1_Fr,
+};
 
 fn verify(
     public_key_x: Secp256r1_Fq,
@@ -21,8 +25,8 @@ fn verify(
     let u_1: ScalarField<65> = ScalarField::from_bignum(e * w);
     let u_2: ScalarField<65> = ScalarField::from_bignum(r * w);
 
-    let public_key = Secp256r1::from_coordinates(public_key_x, public_key_y, false);
-    public_key.validate_on_curve();
+    // The caller validates and sanitizes the coordinates before entering the verifier.
+    let public_key = Secp256r1::from_coordinates_unsafe(public_key_x, public_key_y, false);
     let result = Secp256r1::evaluate_linear_expression(
         [Secp256r1::one(), public_key],
         [u_1, u_2],
@@ -59,18 +63,6 @@ pub fn ecdsa_secp256r1(
     // The native black box is total for malformed inputs and when its predicate is false. The
     // bignum gadget uses assertions internally, so substitute one known-good vector before
     // entering it and mask the result afterwards.
-    let curve_a = Secp256r1_Fq::from_be_bytes([
-        0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfc,
-    ]);
-    let curve_b = Secp256r1_Fq::from_be_bytes([
-        0x5a, 0xc6, 0x35, 0xd8, 0xaa, 0x3a, 0x93, 0xe7,
-        0xb3, 0xeb, 0xbd, 0x55, 0x76, 0x98, 0x86, 0xbc,
-        0x65, 0x1d, 0x06, 0xb0, 0xcc, 0x53, 0xb0, 0xf6,
-        0x3b, 0xce, 0x3c, 0x3e, 0x27, 0xd2, 0x60, 0x4b,
-    ]);
     let safe_public_key_x = Secp256r1_Fq::from_be_bytes([
         85, 15, 71, 16, 3, 243, 223, 151,
         195, 223, 80, 106, 199, 151, 246, 114,
@@ -93,7 +85,9 @@ pub fn ecdsa_secp256r1(
     let checked_public_key_y =
         conditional_select(public_key_y, safe_public_key_y, point_in_range);
     let point_on_curve = checked_public_key_y * checked_public_key_y
-        == (checked_public_key_x * checked_public_key_x + curve_a) * checked_public_key_x + curve_b;
+        == (checked_public_key_x * checked_public_key_x + SECP256r1_PARAM.a)
+                * checked_public_key_x
+            + SECP256r1_PARAM.b;
     let point_valid = point_in_range & point_on_curve;
 
     let half_order = Secp256r1_Fr::from_be_bytes([

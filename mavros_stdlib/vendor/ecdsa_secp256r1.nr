@@ -1,6 +1,7 @@
-// Adapted compatibility subset of zkpassport/noir-bignum v0.10.0-1 and
-// zkpassport/noir_bigcurve v0.14.0-1. Kept inside the injected std crate so low-level foreign
-// replacements follow Mavros' existing pure-Noir path. See THIRD_PARTY_NOTICES.md.
+// Adapted compatibility subset of zkpassport/noir-bignum v0.10.0-1 and the bigcurve package in
+// AztecProtocol/aztec-packages at commit 9df414ec0e810d46d44b0357341f8dae0abe82b9. Kept inside the
+// injected std crate so low-level foreign replacements follow Mavros' existing pure-Noir path. See
+// the root THIRD_PARTY_LICENSES file.
 
 pub mod bignum {
 
@@ -38,7 +39,7 @@ pub mod bignum {
         use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
         pub mod split_bits {
             use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-            use crate::mavros::vendor::bignum::constants::TWO_POW_120;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::constants::TWO_POW_120;
 
             pub(crate) unconstrained fn __split_120_bits(mut x: Field) -> (u128, Field) {
                 let low: u128 = (x as u128) % TWO_POW_120;
@@ -98,14 +99,14 @@ pub mod bignum {
             use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
             // This file contains the unconstrained operations that are used directly by BigNum class
 
-            use crate::mavros::vendor::bignum::fns::unconstrained_helpers::{
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::fns::unconstrained_helpers::{
                 __barrett_reduction, __half_mod_odd, __helper_mul, __helper_sub, __is_even, __one,
                 __shr1,
             };
 
-            use crate::mavros::vendor::bignum::constants::TWO_POW_120;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::constants::TWO_POW_120;
 
-            use crate::mavros::vendor::bignum::params::BigNumParams;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::params::BigNumParams;
 
             // ------------------------------ COMPARISON FUNCTIONS ------------------------------
 
@@ -264,15 +265,15 @@ pub mod bignum {
         pub mod constrained_ops {
 
             use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-            use crate::mavros::vendor::bignum::constants::TWO_POW_120;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::constants::TWO_POW_120;
 
-            use crate::mavros::vendor::bignum::fns::{
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::fns::{
                 expressions::evaluate_quadratic_expression,
                 unconstrained_helpers::{compute_add_flags, compute_borrow_flags, compute_gte_flags, compute_sub_flags},
                 unconstrained_ops::{__add, __mul, __neg, __sub},
             };
 
-            use crate::mavros::vendor::bignum::params::BigNumParams;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::params::BigNumParams;
 
             use crate::cmp::Ordering;
 
@@ -619,12 +620,12 @@ pub mod bignum {
             use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
             // This file contains the unconstrained helpers that are mostly used by unconstrained ops
 
-            use crate::mavros::vendor::bignum::constants::TWO_POW_120;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::constants::TWO_POW_120;
 
-            use crate::mavros::vendor::bignum::fns::unconstrained_ops::{__gte, __neg};
-            use crate::mavros::vendor::bignum::utils::split_bits::{__normalize_limbs, __split_120_bits};
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::fns::unconstrained_ops::{__gte, __neg};
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::utils::split_bits::{__normalize_limbs, __split_120_bits};
 
-            use crate::mavros::vendor::bignum::params::BigNumParams;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::params::BigNumParams;
 
             // ------------------------------ DERIVATION HELPER FUNCTIONS ------------------------------
 
@@ -886,15 +887,15 @@ pub mod bignum {
         pub mod expressions {
 
             use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-            use crate::mavros::vendor::bignum::utils::split_bits;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::utils::split_bits;
 
-            use crate::mavros::vendor::bignum::constants::{TWO_POW_120, TWO_POW_126, TWO_POW_246};
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::constants::{TWO_POW_120, TWO_POW_126, TWO_POW_246};
 
-            use crate::mavros::vendor::bignum::fns::constrained_ops::{validate_in_range, validate_quotient_in_range};
-            use crate::mavros::vendor::bignum::fns::unconstrained_helpers::__barrett_reduction;
-            use crate::mavros::vendor::bignum::fns::unconstrained_ops::__is_zero;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::fns::constrained_ops::{validate_in_range, validate_quotient_in_range};
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::fns::unconstrained_helpers::__barrett_reduction;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::fns::unconstrained_ops::__is_zero;
 
-            use crate::mavros::vendor::bignum::params::BigNumParams;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::params::BigNumParams;
 
             // ------------------------------ UNCONSTRAINED EXPRESSIONS ------------------------------
 
@@ -1250,7 +1251,7 @@ pub mod bignum {
         pub mod serialization {
 
             use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-            use crate::mavros::vendor::bignum::utils::map::invert_array;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::utils::map::invert_array;
 
             // Conversions between big endian and little endian byte arrays and BigNum instances
             // the byte serialization should have `(MOD_BITS + 7) / 8` bytes.
@@ -1327,7 +1328,7 @@ pub mod bignum {
     pub mod bignum {
 
         use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-        use crate::mavros::vendor::bignum::params::BigNumParams;
+        use crate::mavros::vendor::ecdsa_secp256r1::bignum::params::BigNumParams;
         use crate::ops::{Add, Mul, Neg, Sub};
 
         pub trait BigNum: Neg + Add + Sub + Mul + crate::cmp::Eq {
@@ -1370,11 +1371,11 @@ pub mod bignum {
         ) -> Quoted {
             let typ = strukt.as_type();
             quote {
-                impl $crate::mavros::vendor::bignum::BigNum for $typ {
+                impl $crate::mavros::vendor::ecdsa_secp256r1::bignum::BigNum for $typ {
                     let N: u32 = $N;
                     let MOD_BITS: u32 = $MOD_BITS;
 
-                    fn params() -> $crate::mavros::vendor::bignum::params::BigNumParams<$N, $MOD_BITS> {
+                    fn params() -> $crate::mavros::vendor::ecdsa_secp256r1::bignum::params::BigNumParams<$N, $MOD_BITS> {
                         $params
                     }
 
@@ -1400,44 +1401,44 @@ pub mod bignum {
 
                     fn from_be_bytes(x: [u8; ($MOD_BITS + 7) / 8]) -> Self {
                         Self {
-                            limbs: $crate::mavros::vendor::bignum::internal::from_be_bytes::<$N, $MOD_BITS>(x)
+                            limbs: $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::from_be_bytes::<$N, $MOD_BITS>(x)
                         }
                     }
 
                     fn to_le_bytes(self) -> [u8; ($MOD_BITS + 7) / 8] {
-                        $crate::mavros::vendor::bignum::internal::to_le_bytes::<$N, $MOD_BITS>(self.limbs)
+                        $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::to_le_bytes::<$N, $MOD_BITS>(self.limbs)
                     }
 
                     unconstrained fn __eq(self: Self, other: Self) -> bool {
-                        $crate::mavros::vendor::bignum::internal::__eq(self.limbs, other.limbs)
+                        $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::__eq(self.limbs, other.limbs)
                     }
 
                     unconstrained fn __is_zero(self: Self) -> bool {
-                        $crate::mavros::vendor::bignum::internal::__is_zero(self.limbs)
+                        $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::__is_zero(self.limbs)
                     }
 
                     unconstrained fn __neg(self: Self) -> Self {
-                        Self { limbs: $crate::mavros::vendor::bignum::internal::__neg(Self::params().modulus, self.limbs) }
+                        Self { limbs: $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::__neg(Self::params().modulus, self.limbs) }
                     }
 
                     unconstrained fn __add(self: Self, other: Self) -> Self {
-                        Self { limbs: $crate::mavros::vendor::bignum::internal::__add(Self::params().modulus, self.limbs, other.limbs) }
+                        Self { limbs: $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::__add(Self::params().modulus, self.limbs, other.limbs) }
                     }
 
                     unconstrained fn __sub(self: Self, other: Self) -> Self {
-                        Self { limbs: $crate::mavros::vendor::bignum::internal::__sub(Self::params().modulus, self.limbs, other.limbs) }
+                        Self { limbs: $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::__sub(Self::params().modulus, self.limbs, other.limbs) }
                     }
 
                     unconstrained fn __mul(self: Self, other: Self) -> Self {
-                        Self { limbs: $crate::mavros::vendor::bignum::internal::__mul(Self::params(), self.limbs, other.limbs) }
+                        Self { limbs: $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::__mul(Self::params(), self.limbs, other.limbs) }
                     }
 
                     unconstrained fn __invmod(self: Self) -> Self {
-                        Self { limbs: $crate::mavros::vendor::bignum::internal::__invmod(Self::params(), self.limbs) }
+                        Self { limbs: $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::__invmod(Self::params(), self.limbs) }
                     }
 
                     fn assert_is_not_equal(self: Self, other: Self) {
-                        $crate::mavros::vendor::bignum::internal::assert_is_not_equal(
+                        $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::assert_is_not_equal(
                             Self::params(),
                             self.limbs,
                             other.limbs,
@@ -1445,50 +1446,50 @@ pub mod bignum {
                     }
 
                     fn validate_in_field(self: Self) {
-                        $crate::mavros::vendor::bignum::internal::validate_in_field::<$N, $MOD_BITS>(
+                        $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::validate_in_field::<$N, $MOD_BITS>(
                             Self::params(),
                             self.limbs,
                         );
                     }
 
                     fn validate_in_range(self: Self) {
-                        $crate::mavros::vendor::bignum::internal::validate_in_range::<u128, $N, $MOD_BITS>(self.limbs);
+                        $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::validate_in_range::<u128, $N, $MOD_BITS>(self.limbs);
                     }
                 }
 
                 impl crate::ops::Neg for $typ {
                     fn neg(self) -> Self {
-                        $typ { limbs: $crate::mavros::vendor::bignum::internal::neg::<$N, $MOD_BITS>($params, self.limbs) }
+                        $typ { limbs: $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::neg::<$N, $MOD_BITS>($params, self.limbs) }
                     }
                 }
 
                 impl crate::ops::Add for $typ {
                     fn add(self, other: Self) -> Self {
-                        $typ { limbs: $crate::mavros::vendor::bignum::internal::add::<$N, $MOD_BITS>($params, self.limbs, other.limbs) }
+                        $typ { limbs: $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::add::<$N, $MOD_BITS>($params, self.limbs, other.limbs) }
                     }
                 }
 
                 impl crate::ops::Sub for $typ {
                     fn sub(self, other: Self) -> Self {
-                        $typ { limbs: $crate::mavros::vendor::bignum::internal::sub::<$N, $MOD_BITS>($params, self.limbs, other.limbs) }
+                        $typ { limbs: $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::sub::<$N, $MOD_BITS>($params, self.limbs, other.limbs) }
                     }
                 }
 
                 impl crate::ops::Mul for $typ {
                     fn mul(self, other: Self) -> Self {
-                        $typ { limbs: $crate::mavros::vendor::bignum::internal::mul::<$N, $MOD_BITS>($params, self.limbs, other.limbs) }
+                        $typ { limbs: $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::mul::<$N, $MOD_BITS>($params, self.limbs, other.limbs) }
                     }
                 }
 
                 impl crate::cmp::Eq for $typ {
                     fn eq(self, other: Self) -> bool {
-                        $crate::mavros::vendor::bignum::internal::eq::<$N, $MOD_BITS>($params, self.limbs, other.limbs)
+                        $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::eq::<$N, $MOD_BITS>($params, self.limbs, other.limbs)
                     }
                 }
 
                 impl crate::cmp::Ord for $typ {
                     fn cmp(self, other: Self) -> crate::cmp::Ordering {
-                        $crate::mavros::vendor::bignum::internal::cmp::<$N, $MOD_BITS>(self.limbs, other.limbs)
+                        $crate::mavros::vendor::ecdsa_secp256r1::bignum::internal::cmp::<$N, $MOD_BITS>(self.limbs, other.limbs)
                     }
                 }
             }
@@ -1512,19 +1513,19 @@ pub mod bignum {
             linear_flags: [bool; ADD_N],
         ) -> (T, T) {
             let params = T::params();
-            let (q_limbs, r_limbs) = crate::mavros::vendor::bignum::fns::expressions::__compute_quadratic_expression(
+            let (q_limbs, r_limbs) = crate::mavros::vendor::ecdsa_secp256r1::bignum::fns::expressions::__compute_quadratic_expression(
                 params,
-                crate::mavros::vendor::bignum::utils::map::map(
+                crate::mavros::vendor::ecdsa_secp256r1::bignum::utils::map::map(
                     lhs_terms,
-                    |bns| crate::mavros::vendor::bignum::utils::map::map(bns, |bn: T| bn.get_limbs()),
+                    |bns| crate::mavros::vendor::ecdsa_secp256r1::bignum::utils::map::map(bns, |bn: T| bn.get_limbs()),
                 ),
                 lhs_flags,
-                crate::mavros::vendor::bignum::utils::map::map(
+                crate::mavros::vendor::ecdsa_secp256r1::bignum::utils::map::map(
                     rhs_terms,
-                    |bns| crate::mavros::vendor::bignum::utils::map::map(bns, |bn: T| bn.get_limbs()),
+                    |bns| crate::mavros::vendor::ecdsa_secp256r1::bignum::utils::map::map(bns, |bn: T| bn.get_limbs()),
                 ),
                 rhs_flags,
-                crate::mavros::vendor::bignum::utils::map::map(linear_terms, |bn: T| bn.get_limbs()),
+                crate::mavros::vendor::ecdsa_secp256r1::bignum::utils::map::map(linear_terms, |bn: T| bn.get_limbs()),
                 linear_flags,
             );
             (T::from_limbs(q_limbs), T::from_limbs(r_limbs))
@@ -1539,19 +1540,19 @@ pub mod bignum {
             linear_flags: [bool; ADD_N],
         ) {
             let params = T::params();
-            crate::mavros::vendor::bignum::fns::expressions::evaluate_quadratic_expression(
+            crate::mavros::vendor::ecdsa_secp256r1::bignum::fns::expressions::evaluate_quadratic_expression(
                 params,
-                crate::mavros::vendor::bignum::utils::map::map(
+                crate::mavros::vendor::ecdsa_secp256r1::bignum::utils::map::map(
                     lhs_terms,
-                    |bns| crate::mavros::vendor::bignum::utils::map::map(bns, |bn: T| bn.get_limbs()),
+                    |bns| crate::mavros::vendor::ecdsa_secp256r1::bignum::utils::map::map(bns, |bn: T| bn.get_limbs()),
                 ),
                 lhs_flags,
-                crate::mavros::vendor::bignum::utils::map::map(
+                crate::mavros::vendor::ecdsa_secp256r1::bignum::utils::map::map(
                     rhs_terms,
-                    |bns| crate::mavros::vendor::bignum::utils::map::map(bns, |bn: T| bn.get_limbs()),
+                    |bns| crate::mavros::vendor::ecdsa_secp256r1::bignum::utils::map::map(bns, |bn: T| bn.get_limbs()),
                 ),
                 rhs_flags,
-                crate::mavros::vendor::bignum::utils::map::map(linear_terms, |bn: T| bn.get_limbs()),
+                crate::mavros::vendor::ecdsa_secp256r1::bignum::utils::map::map(linear_terms, |bn: T| bn.get_limbs()),
                 linear_flags,
             )
         }
@@ -1559,7 +1560,7 @@ pub mod bignum {
         pub unconstrained fn batch_invert<T: BigNum, let M: u32>(x: [T; M]) -> [T; M] {
             let params = T::params();
             assert(params.has_multiplicative_inverse);
-            crate::mavros::vendor::bignum::fns::unconstrained_ops::batch_invert(params, x.map(|bn: T| bn.get_limbs())).map(|limbs| {
+            crate::mavros::vendor::ecdsa_secp256r1::bignum::fns::unconstrained_ops::batch_invert(params, x.map(|bn: T| bn.get_limbs())).map(|limbs| {
                 T::from_limbs(limbs)
             })
         }
@@ -1571,9 +1572,9 @@ pub mod bignum {
         use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
         pub mod secp256r1Fq {
             use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-            use crate::mavros::vendor::bignum::bignum::BigNum;
-            use crate::mavros::vendor::bignum::bignum::derive_bignum;
-            use crate::mavros::vendor::bignum::params::BigNumParams;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::BigNum;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::derive_bignum;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::params::BigNumParams;
 
             pub global Secp256r1_Fq_PARAMS: BigNumParams<3, 256> = BigNumParams {
                 has_multiplicative_inverse: true,
@@ -1599,9 +1600,9 @@ pub mod bignum {
         pub mod secp256r1Fr {
 
             use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-            use crate::mavros::vendor::bignum::bignum::BigNum;
-            use crate::mavros::vendor::bignum::bignum::derive_bignum;
-            use crate::mavros::vendor::bignum::params::BigNumParams;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::BigNum;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::derive_bignum;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::params::BigNumParams;
 
             pub global Secp256r1_Fr_PARAMS: BigNumParams<3, 256> = BigNumParams {
                 has_multiplicative_inverse: true,
@@ -1651,8 +1652,8 @@ pub mod bigcurve {
     pub mod scalar_field {
 
         use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-        use crate::mavros::vendor::bigcurve::constants::TWO_POW_120;
-        use crate::mavros::vendor::bignum::BigNum;
+        use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::constants::TWO_POW_120;
+        use crate::mavros::vendor::ecdsa_secp256r1::bignum::BigNum;
 
         pub struct ScalarField<let N: u32> {
             pub(crate) base4_slices: [u8; N],
@@ -1795,9 +1796,9 @@ pub mod bigcurve {
     pub mod bigcurve {
 
         use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-        use crate::mavros::vendor::bigcurve::curve_jac::types::AffineTranscript;
-        use crate::mavros::vendor::bigcurve::scalar_field::ScalarField;
-        use crate::mavros::vendor::bignum::BigNum;
+        use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::curve_jac::types::AffineTranscript;
+        use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::scalar_field::ScalarField;
+        use crate::mavros::vendor::ecdsa_secp256r1::bignum::BigNum;
 
         pub struct BigCurveParams<BN> {
             pub a: BN,
@@ -1815,6 +1816,8 @@ pub mod bigcurve {
             fn a() -> BN;
 
             fn from_coordinates(x: BN, y: BN, is_infinity: bool) -> Self;
+
+            fn from_coordinates_unsafe(x: BN, y: BN, is_infinity: bool) -> Self;
 
             fn is_infinity(self) -> bool;
 
@@ -1840,7 +1843,7 @@ pub mod bigcurve {
         ) -> Quoted {
             let typ = struct_def.as_type();
             quote {
-                impl $crate::mavros::vendor::bigcurve::BigCurve<$field_type> for $typ {
+                impl $crate::mavros::vendor::ecdsa_secp256r1::bigcurve::BigCurve<$field_type> for $typ {
                     fn x(self) -> $field_type {
                         self.x
                     }
@@ -1858,6 +1861,12 @@ pub mod bigcurve {
                     }
 
                     fn from_coordinates(x: $field_type, y: $field_type, is_infinity: bool) -> Self {
+                        let result = Self { x, y, is_infinity };
+                        result.validate_on_curve();
+                        result
+                    }
+
+                    fn from_coordinates_unsafe(x: $field_type, y: $field_type, is_infinity: bool) -> Self {
                         Self { x, y, is_infinity }
                     }
 
@@ -1895,7 +1904,7 @@ pub mod bigcurve {
                         let y: $field_type = if self.is_infinity { one.y } else { self.y };
                         let xx = crate::ops::Mul::mul(x, x);
                         // (xx + a) * x - y*y + b = 0  i.e.  x^3 + a*x + b - y^2 = 0
-                        $crate::mavros::vendor::bigcurve::internal::evaluate_quadratic_expression(
+                        $crate::mavros::vendor::ecdsa_secp256r1::bigcurve::internal::evaluate_quadratic_expression(
                             [[xx, $params.a], [y, $field_type::zero()]],
                             [[false, false], [false, false]],
                             [[x], [y]],
@@ -1910,7 +1919,7 @@ pub mod bigcurve {
                         mul_scalars: [ScalarField<NScalarSlices>; NMuls],
                         add_points: [Self; NAdds],
                     ) -> Self {
-                        $crate::mavros::vendor::bigcurve::internal::evaluate_linear_expression::<$field_type,$typ, _, _, _>(mul_points, mul_scalars, add_points)
+                        $crate::mavros::vendor::ecdsa_secp256r1::bigcurve::internal::evaluate_linear_expression::<$field_type,$typ, _, _, _>(mul_points, mul_scalars, add_points)
                     }}
 
             }
@@ -1923,7 +1932,7 @@ pub mod bigcurve {
         use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
         pub mod types {
             use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-            use crate::mavros::vendor::bignum::BigNum;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::BigNum;
 
             pub struct CurveJ<BN, BigCurve> {
                 pub(crate) x: BN,
@@ -1973,7 +1982,7 @@ pub mod bigcurve {
                     }
 
                     // Montgomery batch inversion: one modular inverse for all Z3 values
-                    let inverses: [BN; NumEntries] = crate::mavros::vendor::bignum::bignum::batch_invert(inverses);
+                    let inverses: [BN; NumEntries] = crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::batch_invert(inverses);
 
                     for i in 0..j_tx.len() {
                         let z_inv = inverses[i];
@@ -1992,9 +2001,9 @@ pub mod bigcurve {
         pub mod point_table {
 
             use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-            use crate::mavros::vendor::bigcurve::bigcurve::BigCurve;
-            use crate::mavros::vendor::bigcurve::curve_jac::types::{CurveJ, JTranscript};
-            use crate::mavros::vendor::bignum::BigNum;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::bigcurve::BigCurve;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::curve_jac::types::{CurveJ, JTranscript};
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::BigNum;
 
             pub struct PointTable<BN> {
                 x: [BN; 16],
@@ -2062,11 +2071,11 @@ pub mod bigcurve {
         pub mod ops {
 
             use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-            use crate::mavros::vendor::bigcurve::bigcurve::BigCurve;
-            use crate::mavros::vendor::bigcurve::curve_jac::point_table::PointTable;
-            use crate::mavros::vendor::bigcurve::curve_jac::types::{AffineTranscript, CurveJ, JTranscript};
-            use crate::mavros::vendor::bigcurve::scalar_field::ScalarField;
-            use crate::mavros::vendor::bignum::BigNum;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::bigcurve::BigCurve;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::curve_jac::point_table::PointTable;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::curve_jac::types::{AffineTranscript, CurveJ, JTranscript};
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::scalar_field::ScalarField;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::BigNum;
 
             impl<BN, Curve> crate::convert::From<Curve> for CurveJ<BN, Curve>
             where
@@ -2210,7 +2219,7 @@ pub mod bigcurve {
                     let R = S2.__sub(S1);
 
                     // PP = (U2 - U1)^2
-                    let (_, PP): (BN, BN) = crate::mavros::vendor::bignum::bignum::compute_quadratic_expression(
+                    let (_, PP): (BN, BN) = crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::compute_quadratic_expression(
                         [[U2, U1]],
                         [[false, true]],
                         [[U2, U1]],
@@ -2220,7 +2229,7 @@ pub mod bigcurve {
                     );
 
                     // X3 = -PP * (U1 + U2) + R * R
-                    let (_, X3): (BN, BN) = crate::mavros::vendor::bignum::bignum::compute_quadratic_expression(
+                    let (_, X3): (BN, BN) = crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::compute_quadratic_expression(
                         [[BN::zero(), PP], [R, BN::zero()]],
                         [[false, true], [false, false]],
                         [[U1, U2], [R, BN::zero()]],
@@ -2230,7 +2239,7 @@ pub mod bigcurve {
                     );
 
                     // U1S2_minus_U2S1 = U1 * S2 - U2 * S1
-                    let (_, U1S2_minus_U2S1): (BN, BN) = crate::mavros::vendor::bignum::bignum::compute_quadratic_expression(
+                    let (_, U1S2_minus_U2S1): (BN, BN) = crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::compute_quadratic_expression(
                         [[U1], [U2]],
                         [[false], [true]],
                         [[S2], [S1]],
@@ -2240,7 +2249,7 @@ pub mod bigcurve {
                     );
 
                     // Y3 = PP * (U1 * S2 - U2 * S1) + X3 * (-R)
-                    let (_, Y3): (BN, BN) = crate::mavros::vendor::bignum::bignum::compute_quadratic_expression(
+                    let (_, Y3): (BN, BN) = crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::compute_quadratic_expression(
                         [[PP], [X3]],
                         [[false], [false]],
                         [[U1S2_minus_U2S1], [R]],
@@ -2252,7 +2261,7 @@ pub mod bigcurve {
                     let Z1Z2 = Z1.__mul(Z2);
 
                     // Z3 = Z1*Z2 * (U2 - U1)
-                    let (_, Z3): (BN, BN) = crate::mavros::vendor::bignum::bignum::compute_quadratic_expression(
+                    let (_, Z3): (BN, BN) = crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::compute_quadratic_expression(
                         [[Z1Z2, BN::zero()]],
                         [[false, false]],
                         [[U2, U1]],
@@ -2283,7 +2292,7 @@ pub mod bigcurve {
                     let Z = self.z;
 
                     // YY_mul_2 = Y * (Y + Y)
-                    let (_, YY_mul_2): (BN, BN) = crate::mavros::vendor::bignum::bignum::compute_quadratic_expression(
+                    let (_, YY_mul_2): (BN, BN) = crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::compute_quadratic_expression(
                         [[Y]],
                         [[false]],
                         [[Y, Y]],
@@ -2293,7 +2302,7 @@ pub mod bigcurve {
                     );
 
                     // XX_mul_3 = X * (X + X + X)
-                    let mut (_, XX_mul_3): (BN, BN) = crate::mavros::vendor::bignum::bignum::compute_quadratic_expression(
+                    let mut (_, XX_mul_3): (BN, BN) = crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::compute_quadratic_expression(
                         [[X]],
                         [[false]],
                         [[X, X, X]],
@@ -2309,7 +2318,7 @@ pub mod bigcurve {
                     }
 
                     // D = (X + X) * YY_mul_2
-                    let (_, D): (BN, BN) = crate::mavros::vendor::bignum::bignum::compute_quadratic_expression(
+                    let (_, D): (BN, BN) = crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::compute_quadratic_expression(
                         [[X, X]],
                         [[false, false]],
                         [[YY_mul_2]],
@@ -2319,7 +2328,7 @@ pub mod bigcurve {
                     );
 
                     // X3 = XX_mul_3 * XX_mul_3 - D - D
-                    let (_, X3): (BN, BN) = crate::mavros::vendor::bignum::bignum::compute_quadratic_expression(
+                    let (_, X3): (BN, BN) = crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::compute_quadratic_expression(
                         [[XX_mul_3]],
                         [[false]],
                         [[XX_mul_3]],
@@ -2329,7 +2338,7 @@ pub mod bigcurve {
                     );
 
                     // Y3 = XX_mul_3 * (D - X3) + YY_mul_2 * (YY_mul_2 + YY_mul_2)
-                    let (_, Y3): (BN, BN) = crate::mavros::vendor::bignum::bignum::compute_quadratic_expression(
+                    let (_, Y3): (BN, BN) = crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::compute_quadratic_expression(
                         [[XX_mul_3], [YY_mul_2]],
                         [[false], [true]],
                         [[D, X3], [YY_mul_2, YY_mul_2]],
@@ -2339,7 +2348,7 @@ pub mod bigcurve {
                     );
 
                     // Z3 = Y * (Z + Z)
-                    let (_, Z3): (BN, BN) = crate::mavros::vendor::bignum::bignum::compute_quadratic_expression(
+                    let (_, Z3): (BN, BN) = crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::compute_quadratic_expression(
                         [[Y]],
                         [[false]],
                         [[Z, Z]],
@@ -2381,7 +2390,7 @@ pub mod bigcurve {
                     let mut _scalars: [ScalarField<NScalarSlices>; Size] = [ScalarField::zero(); Size];
                     for i in 0..Size {
                         let (input, scalar) = if points[i].is_infinity {
-                            (CurveJ::one(), crate::mavros::vendor::bigcurve::scalar_field::ScalarField::zero())
+                            (CurveJ::one(), crate::mavros::vendor::ecdsa_secp256r1::bigcurve::scalar_field::ScalarField::zero())
                         } else {
                             (points[i], scalars[i])
                         };
@@ -2480,10 +2489,10 @@ pub mod bigcurve {
         use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
         pub mod affine {
             use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-            use crate::mavros::vendor::bigcurve::bigcurve::BigCurve;
-            use crate::mavros::vendor::bigcurve::curve_jac::types::AffineTranscript;
-            use crate::mavros::vendor::bignum::BigNum;
-            use crate::mavros::vendor::bignum::bignum::evaluate_quadratic_expression;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::bigcurve::BigCurve;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::curve_jac::types::AffineTranscript;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::BigNum;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::evaluate_quadratic_expression;
 
             pub(crate) fn double_with_hint<BN: BigNum, P: BigCurve<BN>>(
                 point: P,
@@ -2530,7 +2539,7 @@ pub mod bigcurve {
                     [false, false],
                 );
 
-                P::from_coordinates(x3, y3, false)
+                P::from_coordinates_unsafe(x3, y3, false)
             }
 
             pub(crate) fn incomplete_add_with_hint<BN: BigNum, P: BigCurve<BN>>(
@@ -2584,7 +2593,7 @@ pub mod bigcurve {
                     [false, false],
                 );
 
-                P::from_coordinates(x3, y3, false)
+                P::from_coordinates_unsafe(x3, y3, false)
             }
 
             pub(crate) fn conditional_incomplete_add_with_hint<BN: BigNum, P: BigCurve<BN>>(
@@ -2666,7 +2675,7 @@ pub mod bigcurve {
                     [false, false],
                 );
 
-                P::from_coordinates(x3, y3, false)
+                P::from_coordinates_unsafe(x3, y3, false)
             }
 
             pub fn sub_with_hint<BN: BigNum, P: BigCurve<BN>>(
@@ -2804,17 +2813,17 @@ pub mod bigcurve {
                     infinity_out
                 };
 
-                P::from_coordinates(x_out, y_out, infinity_out)
+                P::from_coordinates_unsafe(x_out, y_out, infinity_out)
             }
         }
 
         pub mod point_table {
 
             use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-            use crate::mavros::vendor::bigcurve::bigcurve::BigCurve;
-            use crate::mavros::vendor::bigcurve::curve_jac::types::AffineTranscript;
-            use crate::mavros::vendor::bigcurve::ops::affine::{double_with_hint, incomplete_add_with_hint};
-            use crate::mavros::vendor::bignum::BigNum;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::bigcurve::BigCurve;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::curve_jac::types::AffineTranscript;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::ops::affine::{double_with_hint, incomplete_add_with_hint};
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::BigNum;
 
             pub(crate) struct PointTable<BN> {
                 x: [BN; 16],
@@ -2851,7 +2860,7 @@ pub mod bigcurve {
                 }
 
                 pub(crate) fn get<P: BigCurve<BN>>(self, idx: u32) -> P {
-                    P::from_coordinates(self.x[idx], self.y[idx], false)
+                    P::from_coordinates_unsafe(self.x[idx], self.y[idx], false)
                 }
             }
         }
@@ -2859,15 +2868,15 @@ pub mod bigcurve {
         pub mod msm {
 
             use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-            use crate::mavros::vendor::bigcurve::bigcurve::BigCurve;
-            use crate::mavros::vendor::bigcurve::curve_jac::types::{AffineTranscript, CurveJ};
-            use crate::mavros::vendor::bigcurve::ops::affine::{
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::bigcurve::BigCurve;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::curve_jac::types::{AffineTranscript, CurveJ};
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::ops::affine::{
                 conditional_incomplete_add_with_hint, conditional_incomplete_subtract_with_hint,
                 double_with_hint, incomplete_add_with_hint, sub_with_hint,
             };
-            use crate::mavros::vendor::bigcurve::ops::point_table::PointTable;
-            use crate::mavros::vendor::bigcurve::scalar_field::ScalarField;
-            use crate::mavros::vendor::bignum::BigNum;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::ops::point_table::PointTable;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::scalar_field::ScalarField;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::BigNum;
 
             pub fn evaluate_linear_expression<BN: BigNum, Curve: BigCurve<BN>, let NScalarSlices: u32, let NMuls: u32, let NAdds: u32>(
                 mul_points: [Curve; NMuls],
@@ -2988,14 +2997,14 @@ pub mod bigcurve {
         use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
         pub mod secp256r1 {
             use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-            use crate::mavros::vendor::bignum::BigNum;
-            pub use crate::mavros::vendor::bignum::{Secp256r1_Fq, Secp256r1_Fr};
-            use crate::mavros::vendor::bignum::fields::secp256r1Fq::secp256r1_fq_from_limbs;
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::BigNum;
+            pub use crate::mavros::vendor::ecdsa_secp256r1::bignum::{Secp256r1_Fq, Secp256r1_Fr};
+            use crate::mavros::vendor::ecdsa_secp256r1::bignum::fields::secp256r1Fq::secp256r1_fq_from_limbs;
 
-            use crate::mavros::vendor::bigcurve::bigcurve::BigCurve;
-            use crate::mavros::vendor::bigcurve::bigcurve::BigCurveParams;
-            use crate::mavros::vendor::bigcurve::bigcurve::derive_curve_impl;
-            use crate::mavros::vendor::bigcurve::scalar_field::ScalarField;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::bigcurve::BigCurve;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::bigcurve::BigCurveParams;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::bigcurve::derive_curve_impl;
+            use crate::mavros::vendor::ecdsa_secp256r1::bigcurve::scalar_field::ScalarField;
 
             pub global SECP256r1_PARAM: BigCurveParams<Secp256r1_Fq> = BigCurveParams {
                 a: secp256r1_fq_from_limbs([
@@ -3022,31 +3031,31 @@ pub mod bigcurve {
                 ],
                 offset_generator: [
                     secp256r1_fq_from_limbs([
-                        351296668306655348126371036589410180,
-                        14099522553413269749449432069244305,
-                        23572,
+                        0x221da828a9fac3f3182aab2336419f,
+                        0x1d4b43fc35f66f89260a3e92036a69,
+                        0x0865,
                     ]),
                     secp256r1_fq_from_limbs([
-                        531116666173442154165394067505655294,
-                        354979494418088410567905796042406908,
-                        33819,
+                        0x0cb150c8de290839e3ba7ac9ca4e9a,
+                        0x747dd91cdd0f0e456c02e570d40b9a,
+                        0x56ef,
                     ]),
                 ],
                 offset_generator_final: [
                     secp256r1_fq_from_limbs([
-                        0x4e53e542bc502419d0cb4b99c0aa48,
-                        0x74d3a045b26542b1a5931d721650ab,
-                        0x6982,
+                        0x9145ddf08596099a7d522ff60feeff,
+                        0x26f0893dce2ba7914f469b05749605,
+                        0xcebf,
                     ]),
                     secp256r1_fq_from_limbs([
-                        0xbe3c1ef0581c8f76517e499277b269,
-                        0xfd562740986614ce3b7025c0dfb8aa,
-                        0xfc88,
+                        0xb9172e6de500d0d4b72cf2322515ac,
+                        0x1fc60013458aa1f5666f15620c3dcf,
+                        0x371d,
                     ]),
                 ],
             };
 
-            #[derive_curve_impl(quote { crate::mavros::vendor::bignum::Secp256r1_Fq }, quote { SECP256r1_PARAM })]
+            #[derive_curve_impl(quote { crate::mavros::vendor::ecdsa_secp256r1::bignum::Secp256r1_Fq }, quote { SECP256r1_PARAM })]
             pub struct Secp256r1 {
                 pub x: Secp256r1_Fq,
                 pub y: Secp256r1_Fq,
@@ -3058,7 +3067,7 @@ pub mod bigcurve {
     pub mod internal {
 
         use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
-        pub use crate::mavros::vendor::bignum::bignum::evaluate_quadratic_expression;
+        pub use crate::mavros::vendor::ecdsa_secp256r1::bignum::bignum::evaluate_quadratic_expression;
         pub use super::ops::msm::evaluate_linear_expression;
         pub use super::ops::affine::sub_with_hint;
     }

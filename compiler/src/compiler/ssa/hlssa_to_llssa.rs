@@ -1366,6 +1366,7 @@ fn lower_instruction(
             assert(e, eq);
         }
 
+        // FIELD-ASSUMPTION: L4-decompose
         OpCode::Rangecheck { value, max_bits } => {
             let value_type = fn_type_info.get_value_type(*value);
             assert!(

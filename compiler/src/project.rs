@@ -66,6 +66,10 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
     ),
     (
         "std/mavros/vendor.nr",
+        include_str!("../../mavros_stdlib/vendor.nr"),
+    ),
+    (
+        "std/mavros/vendor/ecdsa_secp256r1.nr",
         include_str!("../../mavros_stdlib/vendor/ecdsa_secp256r1.nr"),
     ),
 ];
