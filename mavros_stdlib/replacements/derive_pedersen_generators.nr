@@ -1,8 +1,11 @@
 // Pure-Noir implementation of Noir's `derive_pedersen_generators` builtin.
+// FIELD-ASSUMPTION: L5-embedded-curve
 //
 // This follows the backend's canonical generator derivation exactly: BLAKE3 hashes the domain,
-// the generator index is appended in big-endian form, and a second pair of BLAKE3 hashes supplies
-// an x-coordinate and sign bit for try-and-increment hash-to-curve on Grumpkin.
+// then a 64-byte preimage is formed from that 32-byte hash followed by 32 zero bytes. The
+// big-endian generator index overwrites bytes 32-35; bytes 36-63 deliberately remain zero. A
+// second pair of BLAKE3 hashes supplies an x-coordinate and sign bit for try-and-increment
+// hash-to-curve on Grumpkin.
 
 use crate::embedded_curve_ops::EmbeddedCurvePoint;
 use super::blake3::blake3;
@@ -16,6 +19,11 @@ global TONELLI_SHANKS_Q_PLUS_ONE_OVER_TWO_HI: u128 = 0x183227397098d014dc2822db4
 global LEGENDRE_EXPONENT_LO: u128 = 0x9419f4243cdcb848a1f0fac9f8000000;
 global LEGENDRE_EXPONENT_HI: u128 = 0x183227397098d014dc2822db40c0ac2e;
 
+// These are the same fast paths as `bn254_blackbox_solver::derive_generators`: the first eight
+// generators for `DEFAULT_DOMAIN_SEPARATOR`, plus the generator used by `pedersen_hash_length`.
+// The coordinates come from that solver's generator test vectors; the domain hashes are BLAKE3 of
+// the corresponding separator bytes. The default table is used only when the requested interval
+// is wholly inside [0, 8); the length entry is used only for exactly one generator at index zero.
 global DEFAULT_DOMAIN_HASH: [u8; 32] = [
     0xa3, 0x52, 0x4b, 0x24, 0x60, 0x99, 0xc5, 0x06, 0x3c, 0xdb, 0xe3, 0x60, 0x5b, 0x6d, 0xc9, 0xff,
     0x4b, 0x11, 0x65, 0x90, 0x09, 0xd3, 0xfb, 0x97, 0xef, 0x8f, 0x1c, 0x66, 0x74, 0xfb, 0x08, 0xeb,
@@ -171,6 +179,8 @@ pub fn derive_pedersen_generators<let N: u32, let M: u32>(
     let domain_hash = blake3(domain_separator_bytes);
     let mut generators = [EmbeddedCurvePoint::point_at_infinity(); N];
 
+    // These additions intentionally retain Noir's checked-u32 trapping behaviour: an overflowing
+    // interval is rejected instead of wrapping around to a different generator sequence.
     if (domain_hash == DEFAULT_DOMAIN_HASH) & (starting_index + N <= 8) {
         for i in 0..N {
             let index = starting_index + i;
