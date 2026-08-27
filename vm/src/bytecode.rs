@@ -835,6 +835,8 @@ pub struct VM {
     /// Lazily-allocated rangecheck tables, indexed by table size in bits (a `2^bits`-row table).
     pub rgchk_tables: [Option<usize>; NUM_TABLE_SIZE_SLOTS],
     pub spread_tables: [Option<usize>; NUM_TABLE_SIZE_SLOTS],
+    /// Indexed by `log2` of the shifted width, so only slots 0..=7 are ever used.
+    pub pow2_tables: [Option<usize>; NUM_TABLE_SIZE_SLOTS],
     pub globals: *mut u64,
     pub struct_layouts: Vec<StructDescriptor>,
     /// Interned constant pool (flat words), read by the `mov_const_pool` opcode.
@@ -890,6 +892,7 @@ impl VM {
             tables: vec![],
             rgchk_tables: [None; NUM_TABLE_SIZE_SLOTS],
             spread_tables: [None; NUM_TABLE_SIZE_SLOTS],
+            pow2_tables: [None; NUM_TABLE_SIZE_SLOTS],
             globals,
             struct_layouts,
             constants,
@@ -941,6 +944,7 @@ impl VM {
             tables: vec![],
             rgchk_tables: [None; NUM_TABLE_SIZE_SLOTS],
             spread_tables: [None; NUM_TABLE_SIZE_SLOTS],
+            pow2_tables: [None; NUM_TABLE_SIZE_SLOTS],
             globals,
             struct_layouts,
             constants,
@@ -1095,6 +1099,22 @@ fn program_offset(program_base: *const u64, program_len: usize, pc: *const u64) 
     (offset >= 0 && (offset as usize) < program_len).then_some(offset as usize)
 }
 
+/// The value column of a powers-of-two table: `2^n` as a field element, for `n` in `0..len`.
+///
+/// Shared by both VM fills — `run_phase2`'s and `dpow2_lookup_field`'s — so they cannot diverge.
+/// Two more fills build the same column independently and must agree at every row or the backends
+/// disagree about the table's contents: `hlssa_to_llssa::emit_pow2_ad_init_body` carries this same
+/// accumulator through the loop it generates, and `hlssa_to_r1cs`'s `Table::Pow2` arm exponentiates
+/// instead.
+pub(crate) fn pow2_rows(len: usize) -> impl Iterator<Item = Field> {
+    let mut acc = Field::from(1u64);
+    (0..len).map(move |_| {
+        let row = acc;
+        acc += acc;
+        row
+    })
+}
+
 /// Compute spread of a u32: interleave zero bits between each bit.
 pub(crate) fn spread_bits(v: u32) -> u64 {
     let mut x = v as u64;
@@ -1205,11 +1225,11 @@ unsafe fn ad_kv_lookup_emit(
     let table_info = &vm.tables[table_idx];
     let cnst_off = table_info.elem_inverses_constraint_section_offset;
     let length = table_info.length;
-    // Sum constraint sits past the table's per-entry constraints: spread tables
-    // fold each entry into one constraint, arrays use two. Rangecheck tables
+    // Sum constraint sits past the table's per-entry constraints: spread and powers-of-two
+    // tables fold each entry into one constraint, arrays use two. Rangecheck tables
     // are key-only and never reach this key-value lookup path.
     let sum_off = match table_info.kind {
-        TableKind::Spread => cnst_off + length,
+        TableKind::Spread | TableKind::Pow2 => cnst_off + length,
         TableKind::Array => cnst_off + 2 * length,
         TableKind::RangeCheck => panic!("ad_kv_lookup_emit called on a rangecheck table"),
     };
@@ -2490,6 +2510,155 @@ mod def {
         unsafe { ad_kv_lookup_emit(table_idx, val, result, flag, vm) };
     }
 
+    /// Prove `factor == 2^amount` with `amount` below the shifted operand's width, by bumping
+    /// the matching row's multiplicity in the powers-of-two table.
+    ///
+    /// `size` is `log2` of that width, so the table has `1 << size == bits` rows keyed by the
+    /// legal amounts. An amount at or past the width -- including a negative one, whose raw
+    /// encoding is far larger -- has no row and traps, which is how a witness-amount shift gets
+    /// the rejection that `shift_guard` builds out of a comparison on the pure path.
+    #[raw_opcode]
+    fn pow2_lookup_field(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
+        #[frame] amount: Field,
+        #[frame] factor: Field,
+        #[frame] flag: Field,
+        size: usize,
+    ) -> (*const u64, Frame) {
+        // Initialize the powers-of-two table for this width on first call. Laid out exactly like
+        // a spread table -- both operands of every entry are constants, so each entry folds to
+        // one constraint/witness. Phase 2 recomputes 2^n from the row index, so nothing is
+        // dumped here.
+        if vm.pow2_tables[size].is_none() {
+            let length = 1usize << size;
+            let table_info = TableInfo {
+                multiplicities_wit: unsafe { vm.data.as_forward.multiplicities_witness },
+                num_indices: 1,
+                kind: TableKind::Pow2,
+                length,
+                elem_inverses_constraint_section_offset: unsafe {
+                    vm.data.as_forward.elem_inverses_constraint_section_offset
+                },
+                elem_inverses_witness_section_offset: unsafe {
+                    vm.data.as_forward.elem_inverses_witness_section_offset
+                },
+            };
+            vm.pow2_tables[size] = Some(vm.tables.len());
+            vm.tables.push(table_info);
+
+            unsafe {
+                vm.data.as_forward.multiplicities_witness =
+                    vm.data.as_forward.multiplicities_witness.add(length);
+                vm.data.as_forward.elem_inverses_constraint_section_offset += length + 1;
+                vm.data.as_forward.elem_inverses_witness_section_offset += length;
+            }
+        }
+
+        let table_idx = vm.pow2_tables[size].unwrap();
+        let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
+        // The table's keys are `0..2^size`, so an out-of-range amount has nothing to look up.
+        if !unsafe { forward_kv_lookup_emit(table_idx, amount, factor, flag_u64, vm) } {
+            return trap(pc, frame, vm);
+        }
+
+        (unsafe { pc.offset(5) }, frame)
+    }
+
+    /// The AD twin of [`Self::pow2_lookup_field`].
+    #[opcode]
+    fn dpow2_lookup_field(
+        #[frame] amount: BoxedValue,
+        #[frame] factor: BoxedValue,
+        #[frame] flag: BoxedValue,
+        size: usize,
+        vm: &mut VM,
+    ) {
+        if vm.pow2_tables[size].is_none() {
+            let length = 1usize << size;
+            let inverses_constraint_section_offset =
+                unsafe { vm.data.as_ad.current_cnst_tables_off };
+            let inverses_witness_section_offset = unsafe { vm.data.as_ad.current_wit_tables_off };
+            let multiplicities_wit_offset = unsafe { vm.data.as_ad.current_wit_multiplicities_off };
+            let table_info = TableInfo {
+                multiplicities_wit: ptr::null_mut(),
+                num_indices: 1,
+                kind: TableKind::Pow2,
+                length,
+                elem_inverses_witness_section_offset: inverses_witness_section_offset,
+                elem_inverses_constraint_section_offset: inverses_constraint_section_offset,
+            };
+            vm.pow2_tables[size] = Some(vm.tables.len());
+            vm.tables.push(table_info);
+            unsafe {
+                // Folded allocation: one constraint per entry + one sum
+                // constraint; one witness per entry.
+                vm.data.as_ad.current_wit_multiplicities_off += length;
+                vm.data.as_ad.current_wit_tables_off += length;
+                vm.data.as_ad.current_cnst_tables_off += length + 1;
+            }
+
+            let inv_sum_coeff = unsafe {
+                *vm.data
+                    .as_ad
+                    .ad_coeffs
+                    .offset(inverses_constraint_section_offset as isize + length as isize)
+            };
+
+            for (i, pow) in pow2_rows(length).enumerate() {
+                // Single folded constraint: y · (α - i + β·2^i) - m = 0
+                //   A = (y), B = (α) + (w0, -i) + (β, 2^i), C = (m)
+                let coeff = unsafe {
+                    *vm.data
+                        .as_ad
+                        .ad_coeffs
+                        .offset(inverses_constraint_section_offset as isize + i as isize)
+                };
+                unsafe {
+                    // da[y_wit] += coeff
+                    *vm.data
+                        .as_ad
+                        .out_da
+                        .offset(inverses_witness_section_offset as isize + i as isize) += coeff;
+
+                    // db[α] += coeff
+                    *vm.data
+                        .as_ad
+                        .out_db
+                        .add(vm.data.as_ad.logup_wit_challenge_off) += coeff;
+                    // db[w0] -= coeff * i
+                    *vm.data.as_ad.out_db -= coeff * Field::from(i as u64);
+                    // db[β] += coeff * 2^i
+                    *vm.data
+                        .as_ad
+                        .out_db
+                        .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) += coeff * pow;
+
+                    // dc[m] += coeff
+                    *vm.data
+                        .as_ad
+                        .out_dc
+                        .offset(multiplicities_wit_offset as isize + i as isize) += coeff;
+
+                    // Sum: inv goes into A position
+                    *vm.data
+                        .as_ad
+                        .out_da
+                        .offset(inverses_witness_section_offset as isize + i as isize) +=
+                        inv_sum_coeff;
+                }
+            }
+
+            unsafe {
+                *vm.data.as_ad.out_db += inv_sum_coeff;
+            }
+        }
+
+        let table_idx = vm.pow2_tables[size].unwrap();
+        unsafe { ad_kv_lookup_emit(table_idx, amount, factor, flag, vm) };
+    }
+
     /// The lookup-argument form of [`Self::rangecheck`]: instead of decomposing
     /// `val` inline, prove `val < 2^bits` by bumping its multiplicity in the
     /// `bits`-wide rangecheck table. A value with no row in that table fails the
@@ -3399,6 +3568,35 @@ mod tests {
         // `(1 << bits) - 1` -- that shift is an overflow at 64.
         assert_eq!(cell_mask(64), u64::MAX);
         assert_eq!(cell_mask(128), u64::MAX);
+    }
+
+    #[test]
+    fn a_pow2_table_row_is_two_to_its_index() {
+        let rows: Vec<Field> = pow2_rows(128).collect();
+        assert_eq!(rows.len(), 128);
+        assert_eq!(rows[0], Field::from(1u64));
+        assert_eq!(rows[1], Field::from(2u64));
+
+        // Every row expressible as a `u64`, pinned against the host shift.
+        for n in 0..64 {
+            assert_eq!(rows[n], Field::from(1u64 << n), "row {n}");
+        }
+
+        // Past a `u64`, which the widest table -- a 128-bit shift -- reaches. `pow2_rows` doubles
+        // rather than shifting for exactly this reason. Checked against square-and-multiply rather
+        // than against doubling, which would only restate the implementation: this is the row a
+        // second algorithm agrees on, and `emit_pow2_ad_init_body` must produce the same one or the
+        // backends disagree about the table's contents.
+        for (n, row) in rows.iter().enumerate() {
+            let by_exponentiation = <Field as ark_ff::Field>::pow(&Field::from(2u64), [n as u64]);
+            assert_eq!(*row, by_exponentiation, "row {n}");
+        }
+
+        // And the widest row is a genuine power of two rather than a residue: `MAX_POW2_TABLE_SIZE`
+        // is set so the table clears the modulus, and a table that wrapped would still pass every
+        // assertion above, since both algorithms wrap alike.
+        let widest = ark_ff::PrimeField::into_bigint(rows[127]).0;
+        assert_eq!(widest, [0, 1u64 << 63, 0, 0], "row 127 is not 2^127");
     }
 
     #[test]

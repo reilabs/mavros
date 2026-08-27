@@ -418,6 +418,10 @@ pub enum TableKind {
     /// denominator and each entry needs only one constraint
     /// (`y·(α - i + β·spread(i)) = m`).
     Spread,
+    /// Key-value whose values are the compile-time constants `2^i`. Folded exactly like
+    /// [`TableKind::Spread`] -- one constraint per entry, `y·(α - i + β·2^i) = m` -- and laid out
+    /// identically; the two differ only in which constant Phase 2 recomputes per row.
+    Pow2,
 }
 
 impl TableKind {
@@ -427,6 +431,7 @@ impl TableKind {
             TableKind::RangeCheck => 0,
             TableKind::Array => 1,
             TableKind::Spread => 2,
+            TableKind::Pow2 => 3,
         }
     }
 
@@ -435,6 +440,7 @@ impl TableKind {
             0 => TableKind::RangeCheck,
             1 => TableKind::Array,
             2 => TableKind::Spread,
+            3 => TableKind::Pow2,
             other => panic!("invalid TableKind code: {other}"),
         }
     }

@@ -1304,8 +1304,15 @@ struct Instrumenter {
     /// Rangecheck lookup requests by `(width, is_unconditional)` — `true` when the lookup's flag is
     /// the literal constant `1`, which lets its bit chunks spill to the free `b·(b−1)=0` form.
     rangecheck_lookups: HashMap<(u8, bool), usize>,
+
     /// Spread lookup requests by `(width, is_unconditional)`; see `rangecheck_lookups`.
     spread_lookups: HashMap<(u8, bool), usize>,
+
+    /// Powers-of-two lookup requests by table size `s`, i.e. `log2` of the shifted width.
+    ///
+    /// Keyed by `s` alone rather than by `(s, is_unconditional)` like the two above: those spill
+    /// into chunks whose cost depends on the flag, but a `Pow2` lookup never spills.
+    pow2_lookups: HashMap<u8, usize>,
     array_lookups: usize,
 }
 
@@ -1339,6 +1346,9 @@ impl OpInstrumenter for Instrumenter {
                     .entry((*bits, unconditional))
                     .or_insert(0) += 1;
             }
+            LookupTarget::Pow2(size) => {
+                *self.pow2_lookups.entry(*size).or_insert(0) += 1;
+            }
             LookupTarget::Array(_) => self.array_lookups += 1,
         }
     }
@@ -1358,6 +1368,7 @@ impl Instrumenter {
             high_degree_muls: 0,
             rangecheck_lookups: HashMap::default(),
             spread_lookups: HashMap::default(),
+            pow2_lookups: HashMap::default(),
             array_lookups: 0,
         }
     }
@@ -1434,6 +1445,7 @@ impl Instrumenter {
     fn total_table_lookups(&self) -> usize {
         self.final_rangecheck8_lookups()
             + self.final_spread_lookups().values().sum::<usize>()
+            + self.pow2_lookups.values().sum::<usize>()
             + self.array_lookups
     }
 
@@ -1461,13 +1473,28 @@ impl Instrumenter {
             .filter(|bits| **bits >= 2)
             .map(|bits| (1usize << *bits as usize) + 1)
             .sum::<usize>();
-        range_constraints + spread_constraints
+
+        // A `Pow2` entry folds for the same reason a spread one does: both columns are compile-time
+        // constants, so it is `rows + 1` constraints. Costed per-function like spread rather than
+        // skipped like array, because the table is keyed by width, so any function reaching one
+        // implies it.
+        let pow2_constraints = self
+            .pow2_lookups
+            .keys()
+            .map(|size| (1usize << *size as usize) + 1)
+            .sum::<usize>();
+        range_constraints + spread_constraints + pow2_constraints
     }
 
     fn lookup_data_constraints(&self) -> usize {
         self.final_rangecheck8_lookups()
             + self
                 .final_spread_lookups()
+                .values()
+                .map(|count| count * 2)
+                .sum::<usize>()
+            + self
+                .pow2_lookups
                 .values()
                 .map(|count| count * 2)
                 .sum::<usize>()
@@ -1492,13 +1519,21 @@ impl Instrumenter {
         } else {
             0
         };
+
         let spread_rows = self
             .final_spread_lookups()
             .keys()
             .filter(|bits| **bits >= 2)
             .map(|bits| 1usize << *bits as usize)
             .sum::<usize>();
-        range_rows + spread_rows
+
+        let pow2_rows = self
+            .pow2_lookups
+            .keys()
+            .map(|size| 1usize << *size as usize)
+            .sum::<usize>();
+
+        range_rows + spread_rows + pow2_rows
     }
 
     fn detail_line(&self) -> String {
@@ -1832,6 +1867,7 @@ struct AggregatedConstraintCost {
     recurring_constraints: usize,
     rangecheck_lookups: HashMap<u8, usize>,
     final_spread_lookups: HashMap<u8, usize>,
+    pow2_lookups: HashMap<u8, usize>,
 }
 
 impl AggregatedConstraintCost {
@@ -1846,6 +1882,9 @@ impl AggregatedConstraintCost {
         for (bits, count) in cost.final_spread_lookups() {
             *self.final_spread_lookups.entry(bits).or_insert(0) += count * calls;
         }
+        for (&size, &count) in cost.pow2_lookups.iter() {
+            *self.pow2_lookups.entry(size).or_insert(0) += count * calls;
+        }
     }
 
     fn shared_table_constraints(&self) -> usize {
@@ -1854,13 +1893,25 @@ impl AggregatedConstraintCost {
         } else {
             0
         };
+
+        // `rows + 1`, matching `Instrumenter::table_allocation_constraints` and the layout the
+        // codegen actually emits (`Table::profile_size`, `LookupTableSpec::constraint_slots`): a
+        // spread entry folds to a single constraint because both its columns are compile-time
+        // constants.
         let spread_constraints = self
             .final_spread_lookups
             .keys()
             .filter(|bits| **bits >= 2)
-            .map(|bits| 2 * (1usize << *bits as usize) + 1)
+            .map(|bits| (1usize << *bits as usize) + 1)
             .sum::<usize>();
-        range_constraints + spread_constraints
+
+        let pow2_constraints = self
+            .pow2_lookups
+            .keys()
+            .map(|size| (1usize << *size as usize) + 1)
+            .sum::<usize>();
+
+        range_constraints + spread_constraints + pow2_constraints
     }
 
     fn total_constraints(&self) -> usize {

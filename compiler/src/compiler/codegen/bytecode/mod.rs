@@ -1527,10 +1527,36 @@ impl CodeGen {
                         bits: *bits as usize,
                     });
                 }
+                hlssa::OpCode::Lookup {
+                    target: LookupTarget::Pow2(size),
+                    args,
+                    flag,
+                } => {
+                    assert!(args.len() == 2);
+                    emitter.push_op(bytecode::OpCode::Pow2LookupField {
+                        amount: layouter.get_value(args[0]),
+                        factor: layouter.get_value(args[1]),
+                        flag: layouter.get_value(*flag),
+                        size: *size as usize,
+                    });
+                }
+                hlssa::OpCode::DLookup {
+                    target: LookupTarget::Pow2(size),
+                    args,
+                    flag,
+                } => {
+                    assert!(args.len() == 2);
+                    emitter.push_op(bytecode::OpCode::Dpow2LookupField {
+                        amount: layouter.get_value(args[0]),
+                        factor: layouter.get_value(args[1]),
+                        flag: layouter.get_value(*flag),
+                        size: *size as usize,
+                    });
+                }
                 hlssa::OpCode::Spread { result, value, .. } => {
                     let value_type = type_info.get_value_type(*value);
-                    // `Spread` interleaves a bit pattern with zeros; there is no signed form of
-                    // it, and the width it actually supports is the `> 32` bound just below.
+                    // `Spread` interleaves a bit pattern with zeros; there is no signed form of it,
+                    // and the width it actually supports is the `> 32` bound just below.
                     let value_bits = match value_type.strip_witness().expr {
                         TypeExpr::Int(bits) => bits,
                         t => panic!("Unsupported spread value type: {:?}", t),

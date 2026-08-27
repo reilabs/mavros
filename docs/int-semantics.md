@@ -46,8 +46,10 @@ The rules themselves:
 - **A failing operation is not dead.** `die.rs` makes a `Binary` eliminable only when it does not
   require an ACIR-gen predicate, and a checked `Add`/`Sub`/`Mul` — or a shift whose amount is
   non-constant or out of range — does.
-- **A rejection is a runtime constrain failure, not a compile error.** This is why the out-of-range
-  tests live in `noir_failure_tests/` and not in a compile-failure corpus.
+- **A rejection is a runtime failure, not a compile error.** This is why the out-of-range tests live
+  in `noir_failure_tests/` and not in a compile-failure corpus. Mavros makes it happen in one of two
+  shapes: an unsatisfiable constraint, or (where the rejection is carried by a lookup's membership)
+  a witness-generation trap. Both reject the program; neither is a compile error.
 - **Unconstrained code follows the same rules.** Brillig's VM happens to answer `0` for an
   over-shift, but `brillig_gen` emits the check ahead of the operation, so that fallback is
   unreachable in generated code.
@@ -201,13 +203,23 @@ plus `DivOverflow` sharing the division one. Every other entry in this register 
 _accepted_ execution answers. This one is about which executions are accepted at all, and it is the
 only entry whose failure mode is a program Noir rejects producing a proof.
 
-Two of these rejections are stated twice, because an operand that is a witness cannot be checked
-with a pure comparison: `witness_bitwise.rs::emit_shift_amount_check` owes the amount bound and
-`witness_integer_arith.rs`'s guarded rangechecks owe overflow, both built out of constraints
-instead. They are registered alongside the `shared/` modules for that reason and the pairs are held
-together by the corpus below, which renders every rejecting program with **witness** operands, and
-by the hand-written `pure_shift_amount_oob_fails` / `witness_shift_amount_oob_fails` pair that
-exercises one rejection down both routes.
+Two of these rejections are stated twice, because a witness operand cannot be checked with a pure
+comparison: `witness_bitwise.rs` must provide the amount bound and `witness_integer_arith.rs`'s
+guarded rangechecks must overflow, both built out of constraints. A **witness** shift amount gets no
+check at all: the powers-of-two table's keys are exactly the legal amounts, so `emit_pow2_factor`'s
+lookup rejects an out-of-range one as a side effect of reading the factor it was going to need
+anyway.
+
+Two cases still pay the explicit `emit_shift_amount_check`. A **pure** amount pays it on either
+lowering — the constant-amount one when the left-hand side is unsigned, the general one when it is
+signed — which is the common case, and the one `witness_shift_amount_oob_fails` covers. So does a
+witness amount the range domain has **pinned** to a literal, when the left-hand side is unsigned:
+there the check is emitted and then discharges itself against the same range that pinned the amount.
+
+Those restated rejections are registered alongside the `shared/` modules for that reason, and the
+pairs are held together by the corpus below, which renders every rejecting program with **witness**
+operands, and by the hand-written `pure_shift_amount_oob_fails` / `witness_shift_amount_oob_fails`
+pair that exercises one rejection down both routes.
 
 Mavros builds HLSSA straight from the monomorphized AST and never runs Noir's own SSA pipeline, so
 nothing upstream has already attached a failure to a failable operation. Every rejection in a

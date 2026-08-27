@@ -622,7 +622,7 @@ fn guarded_rangecheck(
     );
 }
 
-fn guarded_or_zero_field(
+pub(super) fn guarded_or_zero_field(
     b: &mut HLBlockEmitter<'_>,
     value: ValueId,
     guard: Option<ValueId>,
