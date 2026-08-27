@@ -1,0 +1,6 @@
+[package]
+name = "int_semantics_mul_i_overflow_widest_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -12,6 +12,10 @@
 //!   !cond and pass through array; else array_set.
 //! - **Lower with overflow check** (pure inputs only, can fail): Integer Add/Sub/Mul — compute,
 //!   check overflow with native-width predicates, if overflow assert !cond and produce 0.
+//!   Unguarded, the operation is performed and the check simply asserted. An operation the range
+//!   domain proves stays inside its width skips this entirely, on the same terms as the shift and
+//!   division below: guarded, the guard is dropped and the bare operation emitted; unguarded, the
+//!   instruction is left alone with no assertion attached.
 //! - **Lower with shift check** (pure inputs only, can fail): Integer Shl/Shr — validate the shift
 //!   _amount_ before shifting. The value is not checked: a shift that pushes bits off the top
 //!   wraps, it does not fail. A shift the range domain proves in range skips this entirely, on the
@@ -33,6 +37,11 @@ use crate::compiler::{
                 divmod_can_fail, divmod_provably_defined, emit_divmod_failure_cond,
                 emit_divmod_is_defined_assert,
             },
+            overflow_guard::{
+                emit_no_overflow_assert, emit_overflow_cond, mul_overflows_nonzero,
+                overflow_operand_bits, overflow_provably_impossible,
+                signed_mul_magnitude_overflows, signed_mul_operands,
+            },
             seq_bounds::seq_bounds_operands,
             shift_guard::{
                 emit_invalid_shift_cond, emit_shift_amount_is_valid_assert,
@@ -43,12 +52,11 @@ use crate::compiler::{
     ssa::{
         Instruction, ValueId,
         hlssa::{
-            ArithGroup, BinaryArithOpKind, CastTarget, CmpKind, MAX_SUPPORTED_UNSIGNED_BITS,
-            OpCode, Type, TypeExpr, assert_signed_op_width,
+            ArithGroup, BinaryArithOpKind, CmpKind, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type,
+            TypeExpr, assert_signed_op_width,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
-    util::bit_mask,
 };
 
 pub struct LowerPureGuards {}
@@ -147,6 +155,43 @@ impl InstructionLoweringRule for LowerPureGuards {
                     None => false,
                 }
             }
+
+            // An unguarded `Add`/`Sub`/`Mul` needs its overflow checked for exactly the reason the
+            // unguarded div/mod and shift above do: `Guard` only wraps the operations under
+            // witness-dependent control flow, so an unconditional one never reached
+            // `lower_overflow_guard`.
+            //
+            // Noir rejects an overflowing `+`, `-` or `*` in both constrained and unconstrained
+            // code, so we have to ensure we match that behavior here.
+            //
+            // Pure inputs only, matching the shift arm. A witness operand belongs to
+            // `LowerWitnessIntegerArithOps`, which rejects the same executions by computing in the
+            // field and range-checking the result back down to the width; emitting this check as
+            // well would be a second, differently encoded copy of the same condition.
+            OpCode::BinaryArithOp {
+                kind,
+                result,
+                lhs,
+                rhs,
+            } if matches!(
+                kind.group(),
+                ArithGroup::Add | ArithGroup::Sub | ArithGroup::Mul
+            ) && self.all_inputs_pure(instruction, type_info) =>
+            {
+                match overflow_operand_bits(type_info.get_value_type(*lhs)) {
+                    Some(bits) => {
+                        // Discharged where the domain already pins the result inside the width,
+                        // exactly as the two arms above discharge theirs. This is what keeps an
+                        // ordinary loop counter's `i + 1` from paying for a check.
+                        if self.overflow_discharged(context, *kind, bits, *lhs, *rhs) {
+                            return false;
+                        }
+                        self.lower_unguarded_overflow(emitter, *kind, *result, *lhs, *rhs, bits);
+                        true
+                    }
+                    None => false,
+                }
+            }
             _ => false,
         }
     }
@@ -203,6 +248,29 @@ impl LowerPureGuards {
         shift_amount_provably_in_range(&context.range(rhs), bits)
     }
 
+    /// Whether the range domain discharges this operation's overflow check, making both the check
+    /// and (under a guard) the branch built around it dead.
+    ///
+    /// Unlike the shift discharge this one _does_ take a sign, because the two readings ask
+    /// different questions of the same operands: `100 + 100` fits a `u8` and overflows an `i8`. It
+    /// comes from the opcode, which is also what selects the check being discharged.
+    fn overflow_discharged(
+        &self,
+        context: &LoweringContext<'_>,
+        kind: BinaryArithOpKind,
+        bits: usize,
+        lhs: ValueId,
+        rhs: ValueId,
+    ) -> bool {
+        overflow_provably_impossible(
+            &context.range(lhs),
+            &context.range(rhs),
+            kind.group(),
+            bits,
+            kind.is_signed(),
+        )
+    }
+
     /// Lower a single Guard instruction.
     fn lower_guard(
         &self,
@@ -249,6 +317,18 @@ impl LowerPureGuards {
                 let signed = kind.is_signed();
                 match &lhs_type.strip_witness().expr {
                     TypeExpr::Int(bits) if self.all_inputs_pure(&inner, type_info) => {
+                        // Provably inside the width: the operation is total, so its guard carries
+                        // no information about it and the bare operation can simply replace the
+                        // whole diamond. Consulted from both overflow sites.
+                        if self.overflow_discharged(context, kind, *bits, lhs, rhs) {
+                            emitter.emit(OpCode::BinaryArithOp {
+                                kind,
+                                result,
+                                lhs,
+                                rhs,
+                            });
+                            return true;
+                        }
                         self.lower_overflow_guard(
                             emitter, condition, kind, result, lhs, rhs, *bits, signed,
                         );
@@ -388,115 +468,32 @@ impl LowerPureGuards {
             assert_signed_op_width(bits, "guarded overflow check");
         }
 
-        match (signed, kind.group()) {
-            (false, ArithGroup::Add | ArithGroup::Sub) => self.lower_unsigned_add_sub_guard(
-                emitter,
-                condition,
-                kind,
-                original_result,
-                lhs,
-                rhs,
-                bits,
-            ),
-            (false, ArithGroup::Mul) => {
-                self.lower_unsigned_mul_guard(emitter, condition, original_result, lhs, rhs, bits);
+        match kind.group() {
+            // The operation is performed first and unconditionally. It wraps rather than trapping,
+            // so an overflowing one in an inactive branch is harmless, and the check needs the
+            // wrapped result anyway, which is why both polarities read it rather than recomputing
+            // anything. Only the multiplies below need the operation kept off the failing path.
+            ArithGroup::Add | ArithGroup::Sub => {
+                let wrapped = emitter.bin(kind, lhs, rhs);
+                let overflow = emit_overflow_cond(emitter, kind, lhs, rhs, Some(wrapped), bits);
+                self.emit_guarded_branch(
+                    emitter,
+                    condition,
+                    overflow,
+                    original_result,
+                    &Type::int(bits),
+                    |_| wrapped,
+                    bits,
+                );
             }
-            (true, ArithGroup::Add | ArithGroup::Sub) => self.lower_signed_add_sub_guard(
-                emitter,
-                condition,
-                kind,
-                original_result,
-                lhs,
-                rhs,
-                bits,
-            ),
-            (true, ArithGroup::Mul) => {
+            ArithGroup::Mul if signed => {
                 self.lower_signed_mul_guard(emitter, condition, original_result, lhs, rhs, bits);
+            }
+            ArithGroup::Mul => {
+                self.lower_unsigned_mul_guard(emitter, condition, original_result, lhs, rhs, bits);
             }
             _ => unreachable!("lower_overflow_guard called for {:?}", kind),
         }
-    }
-
-    fn lower_unsigned_add_sub_guard(
-        &self,
-        emitter: &mut HLBlockEmitter<'_>,
-        condition: ValueId,
-        kind: BinaryArithOpKind,
-        original_result: ValueId,
-        lhs: ValueId,
-        rhs: ValueId,
-        bits: usize,
-    ) {
-        let result_type = Type::int(bits);
-
-        let native_result = emitter.fresh_value();
-        emitter.emit(OpCode::BinaryArithOp {
-            kind,
-            result: native_result,
-            lhs,
-            rhs,
-        });
-
-        // The operation reached this arm because it is unsigned, so the wrap test is an unsigned
-        // comparison. The operand type says nothing about that either way.
-        let overflow = match kind.group() {
-            ArithGroup::Add => emitter.ult(native_result, lhs),
-            ArithGroup::Sub => emitter.ult(lhs, native_result),
-            _ => unreachable!("lower_unsigned_add_sub_guard called for {:?}", kind),
-        };
-
-        self.emit_guarded_branch(
-            emitter,
-            condition,
-            overflow,
-            original_result,
-            &result_type,
-            |_| native_result,
-            bits,
-        );
-    }
-
-    fn lower_signed_add_sub_guard(
-        &self,
-        emitter: &mut HLBlockEmitter<'_>,
-        condition: ValueId,
-        kind: BinaryArithOpKind,
-        original_result: ValueId,
-        lhs: ValueId,
-        rhs: ValueId,
-        bits: usize,
-    ) {
-        let result_type = Type::int(bits);
-        let native_result = emitter.fresh_value();
-        emitter.emit(OpCode::BinaryArithOp {
-            kind,
-            result: native_result,
-            lhs,
-            rhs,
-        });
-
-        let sign_l = self.sign_bit(emitter, lhs, bits);
-        let sign_r = self.sign_bit(emitter, rhs, bits);
-        let sign_result = self.sign_bit(emitter, native_result, bits);
-        let sign_l_xor_r = emitter.xor(sign_l, sign_r);
-        let signs_same = emitter.not(sign_l_xor_r);
-        let sign_l_xor_result = emitter.xor(sign_l, sign_result);
-        let signs_differ = sign_l_xor_r;
-        let overflow = match kind.group() {
-            ArithGroup::Add => emitter.and(signs_same, sign_l_xor_result),
-            ArithGroup::Sub => emitter.and(signs_differ, sign_l_xor_result),
-            _ => unreachable!("signed add/sub guard called for {:?}", kind),
-        };
-
-        self.emit_guarded_branch(
-            emitter,
-            condition,
-            overflow,
-            original_result,
-            &result_type,
-            |_| native_result,
-            bits,
-        );
     }
 
     fn lower_unsigned_mul_guard(
@@ -516,9 +513,10 @@ impl LowerPureGuards {
             vec![(original_result, result_type.clone())],
             |e| vec![e.umul(lhs, rhs)],
             |e| {
-                let max = e.int_const(bits, bit_mask(bits));
-                let limit = e.udiv(max, rhs);
-                let overflow = e.ult(limit, lhs);
+                // Reached only where `rhs != 0`, which is the precondition
+                // `mul_overflows_nonzero` is stated under. The unguarded lowering selects a safe
+                // divisor instead of branching; both ask this one predicate.
+                let overflow = mul_overflows_nonzero(e, lhs, rhs, bits);
                 e.build_if_else(
                     overflow,
                     vec![result_type.clone()],
@@ -539,13 +537,9 @@ impl LowerPureGuards {
         bits: usize,
     ) {
         let result_type = Type::int(bits);
-        let sign_l = self.sign_bit(emitter, lhs, bits);
-        let sign_r = self.sign_bit(emitter, rhs, bits);
-        let result_sign = emitter.xor(sign_l, sign_r);
-        let abs_l = self.abs_as_u(emitter, lhs, sign_l, bits);
-        let abs_r = self.abs_as_u(emitter, rhs, sign_r, bits);
+        let operands = signed_mul_operands(emitter, lhs, rhs, bits);
         let zero = emitter.int_const(bits, 0);
-        let abs_r_zero = emitter.eq(abs_r, zero);
+        let abs_r_zero = emitter.eq(operands.abs_rhs, zero);
         emitter.build_if_else_into(
             abs_r_zero,
             vec![(original_result, result_type.clone())],
@@ -554,11 +548,14 @@ impl LowerPureGuards {
             // values under unsigned opcodes and stays unsigned.
             |e| vec![e.smul(lhs, rhs)],
             |e| {
-                let positive_max = e.int_const(bits, (1u128 << (bits - 1)) - 1);
-                let result_sign = e.cast_to(CastTarget::Int(bits), result_sign);
-                let max_mag = e.uadd(positive_max, result_sign);
-                let limit = e.udiv(max_mag, abs_r);
-                let overflow = e.ult(limit, abs_l);
+                // As above: this arm has already established `|rhs| != 0`.
+                let overflow = signed_mul_magnitude_overflows(
+                    e,
+                    operands.abs_lhs,
+                    operands.abs_rhs,
+                    operands.result_sign,
+                    bits,
+                );
                 e.build_if_else(
                     overflow,
                     vec![result_type.clone()],
@@ -569,31 +566,6 @@ impl LowerPureGuards {
         );
     }
 
-    fn sign_bit(&self, emitter: &mut HLBlockEmitter<'_>, value: ValueId, bits: usize) -> ValueId {
-        let sign = emitter.bit_range(value, bits - 1, 1);
-        emitter.cast_to(CastTarget::Int(1), sign)
-    }
-
-    fn abs_as_u(
-        &self,
-        emitter: &mut HLBlockEmitter<'_>,
-        value: ValueId,
-        sign_u1: ValueId,
-        bits: usize,
-    ) -> ValueId {
-        let value_field = emitter.cast_to_field(value);
-        let sign = emitter.cast_to_field(sign_u1);
-        let sign_shift = emitter.field_const(emitter.field().two_pow(bits));
-        let sign_shifted = emitter.umul(sign, sign_shift);
-        let signed_value = emitter.usub(value_field, sign_shifted);
-        let two = emitter.field_const(emitter.field().constant(2));
-        let two_sign = emitter.umul(two, sign);
-        let one = emitter.field_const(emitter.field().constant(1));
-        let factor = emitter.usub(one, two_sign);
-        let abs = emitter.umul(signed_value, factor);
-        emitter.cast_to(CastTarget::Int(bits), abs)
-    }
-
     /// Lower `Guard(cond, shift(lhs, rhs) -> result)`.
     ///
     /// Shifts are only valid for amounts in `[0, bits)`. The range check must dominate the shift
@@ -602,8 +574,9 @@ impl LowerPureGuards {
     ///
     /// The _amount_ is the only failure mode. A `<<` whose result leaves the width wraps, with Noir
     /// reporting an error only for the amount, so the valid path is the bare operation for both
-    /// kinds, and the backends all truncate it to `bits` (`shl_int` masks, LLVM's `shl` is already
-    /// at the operand width, and `hlssa_to_r1cs`'s constant fold wraps).
+    /// kinds, and the backends all truncate it to `bits`: `shl_int` masks, LLVM's `shl` is already
+    /// at the operand width, and `hlssa_to_r1cs`'s constant fold delegates to
+    /// [`mavros_int_semantics::residue`].
     #[allow(clippy::too_many_arguments)]
     fn lower_shift_guard(
         &self,
@@ -646,9 +619,11 @@ impl LowerPureGuards {
     /// Without this, an undefined division reaches the backends unchecked and each one disagrees
     /// about what it means:
     ///
-    /// - **Zero divisor, integer:** The VM's `udiv_int`/`udiv_int128`/`sdiv_int` are plain Rust
-    ///   `/`, so witness generation aborts the process with an arithmetic panic instead of
-    ///   reporting a failed execution. LLVM's `udiv`/`sdiv` by zero is undefined behavior outright.
+    /// - **Zero divisor, integer:** LLVM's `udiv`/`sdiv` by zero is undefined behavior outright.
+    ///   The VM answers zero as a backstop, not a definition: `cell_udiv` picks it so a program
+    ///   that got here reports a failed execution rather than aborting witness generation with an
+    ///   arithmetic panic, and [`mavros_int_semantics::residue`] declines to specify these inputs
+    ///   precisely because the two do not agree.
     /// - **Zero divisor, field:** `div_field` answers `0`, so nothing traps — and at `0 / 0` the
     ///   `result * rhs == lhs` constraint is satisfied by any quotient, so the value is not pinned
     ///   at all. The worst of the three: silent, and unsound rather than merely wrong.
@@ -700,6 +675,34 @@ impl LowerPureGuards {
             lhs,
             rhs,
         });
+    }
+
+    /// Perform an _unguarded_ pure `Add`/`Sub`/`Mul`, then assert it did not overflow.
+    ///
+    /// The operation comes **first**, which is the opposite of [`Self::lower_unguarded_divmod`]'s
+    /// order and deliberate. A division has to be dominated by its check because an undefined one
+    /// is undefined behavior in LLVM; an overflowing add is neither. It wraps, every backend wraps
+    /// it identically, and the wrapped value is exactly what the check compares; emitting it first
+    /// lets the check read the result rather than build a second copy of the arithmetic.
+    ///
+    /// A multiply needs no such result, and passes it only because one entry point serves all three
+    /// groups; see [`emit_overflow_cond`].
+    fn lower_unguarded_overflow(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        kind: BinaryArithOpKind,
+        result: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        bits: usize,
+    ) {
+        emitter.emit(OpCode::BinaryArithOp {
+            kind,
+            result,
+            lhs,
+            rhs,
+        });
+        emit_no_overflow_assert(emitter, kind, lhs, rhs, Some(result), bits);
     }
 
     #[allow(clippy::too_many_arguments)]

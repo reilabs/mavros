@@ -1,9 +1,16 @@
 //! Lowers `Guard` and `Select` instructions to control flow (JmpIf).
 //!
-//! This pass runs in the witgen pipeline, converting:
+//! This rule runs in the witgen pipeline, converting:
 //!
 //! - Guard(cond, op) → JmpIf(cond, exec_block, skip_block)
 //! - Select(cond, l, r) → JmpIf(cond, t_block, f_block) → merge with phi params
+//!
+//! It is the only rule here that reads no value range, and it says so
+//! ([`InstructionLoweringRule::needs_value_ranges`]) rather than being handed one it ignores.
+//! That also settles the question this rule's move into the shared framework raised. The driver
+//! narrows every rule's ranges to the block being lowered, and a rule that never asked for ranges
+//! ought not to inherit a narrowing by accident — here there are none computed to narrow, so the
+//! answer is structural rather than a promise.
 
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
@@ -16,36 +23,40 @@ use crate::compiler::{
     },
 };
 
-use super::lowering_pass::{LoweringContext, LoweringPass};
+use super::{InstructionLoweringRule, LoweringContext};
 
-pub struct LowerGuards {}
+pub(super) struct LowerGuards {}
 
-impl LoweringPass for LowerGuards {
-    const NAME: &'static str = "lower_guards";
+impl InstructionLoweringRule for LowerGuards {
+    fn needs_value_ranges(&self) -> bool {
+        false
+    }
 
-    fn process_instruction(
+    fn lower_instruction(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
-        instruction: OpCode,
-    ) {
+        instruction: &OpCode,
+    ) -> bool {
         let type_info = context.types();
         match instruction {
             OpCode::Guard { condition, inner } => {
                 let results: Vec<_> = inner.get_results().copied().collect();
                 if results.is_empty() {
+                    let inner = (**inner).clone();
                     emitter.build_if_else_into(
-                        condition,
+                        *condition,
                         vec![],
                         |e| {
-                            e.emit(*inner);
+                            e.emit(inner);
                             vec![]
                         },
                         |_| vec![],
                     );
                 } else {
-                    Self::lower_guard_with_result(emitter, condition, *inner, &results, type_info);
+                    Self::lower_guard_with_result(emitter, *condition, inner, &results, type_info);
                 }
+                true
             }
             OpCode::Select {
                 result,
@@ -53,30 +64,29 @@ impl LoweringPass for LowerGuards {
                 if_t,
                 if_f,
             } => {
-                let result_type = type_info.get_value_type(result).clone();
+                let result_type = type_info.get_value_type(*result).clone();
                 emitter.build_if_else_into(
-                    cond,
-                    vec![(result, result_type)],
-                    |_| vec![if_t],
-                    |_| vec![if_f],
+                    *cond,
+                    vec![(*result, result_type)],
+                    |_| vec![*if_t],
+                    |_| vec![*if_f],
                 );
+                true
             }
-            other => {
-                emitter.emit(other);
-            }
+            _ => false,
         }
     }
 }
 
 impl LowerGuards {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {}
     }
 
     fn lower_guard_with_result(
         emitter: &mut HLBlockEmitter<'_>,
         condition: ValueId,
-        inner: OpCode,
+        inner: &OpCode,
         results: &[ValueId],
         type_info: &FunctionTypeInfo,
     ) {

@@ -24,6 +24,9 @@ serde.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The normative integer-semantics model, used only by the conformance tests in `bytecode.rs`.
+# A dev-dependency rather than a real one: the VM computes, it does not consult a spec at runtime.
+mavros-int-semantics.workspace = true
 serde_json = { version = "1.0" }
 
 [lints]

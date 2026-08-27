@@ -1,55 +1,12 @@
 //! A collection of miscellaneous utils for the compiler that don't necessarily have a good place.
 
-use crate::compiler::ssa::hlssa::{MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS};
+use crate::compiler::ssa::hlssa::MAX_SUPPORTED_UNSIGNED_BITS;
 
-/// All-ones mask for the low `bits` bits. Total on the edges: `bits == 0` gives `0` and
-/// `bits >= 128` gives all ones, so callers never need their own width guards.
-pub fn bit_mask(bits: usize) -> u128 {
-    if bits == 0 {
-        0
-    } else if bits >= 128 {
-        u128::MAX
-    } else {
-        (1u128 << bits) - 1
-    }
-}
-
-/// Decode an `s`-bit two's-complement raw value (`raw < 2^s`) into the integer it represents.
-pub fn decode_signed(s: usize, raw: u128) -> i128 {
-    debug_assert!((1..=MAX_SUPPORTED_SIGNED_BITS).contains(&s));
-    if (raw >> (s - 1)) & 1 == 1 {
-        (raw as i128) - (1i128 << s)
-    } else {
-        raw as i128
-    }
-}
-
-/// Whether `v` is representable in `s`-bit two's complement.
-pub fn fits_signed(s: usize, v: i128) -> bool {
-    v >= -(1i128 << (s - 1)) && v < (1i128 << (s - 1))
-}
-
-/// Encode `v` as an `s`-bit two's-complement raw value.
-pub fn encode_signed(s: usize, v: i128) -> u128 {
-    (v as u128) & bit_mask(s)
-}
-
-/// Widen a `from`-bit two's-complement raw value to `to` bits, replicating the sign bit.
-///
-/// Operates purely on the bit pattern, so it is correct whichever way the caller tags the result.
-/// Narrowing (`to < from`) is not sign extension and is rejected rather than silently truncating.
-pub fn sign_extend_bits(v: u128, from: usize, to: usize) -> u128 {
-    debug_assert!(
-        from > 0 && to >= from,
-        "cannot sign-extend {from} bits to {to}"
-    );
-    let v = v & bit_mask(from);
-    if (v >> (from - 1)) & 1 == 1 {
-        v | (bit_mask(to) ^ bit_mask(from))
-    } else {
-        v
-    }
-}
+// The bit-pattern helpers are `mavros-int-semantics`', re-exported under the names the compiler has
+// always used for them.
+pub use mavros_int_semantics::{
+    decode_signed, encode_signed, fits_signed, mask as bit_mask, sign_extend as sign_extend_bits,
+};
 
 /// Panic with the canonical ICE for a tuple surviving past the `ElideTuples` pass.
 ///

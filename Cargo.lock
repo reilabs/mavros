@@ -2211,6 +2211,7 @@ dependencies = [
  "inkwell",
  "itertools 0.14.0",
  "mavros-artifacts",
+ "mavros-int-semantics",
  "mavros-vm",
  "mavros-wasm-layout",
  "nargo",
@@ -2237,6 +2238,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mavros-int-semantics"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "mavros-opcode-gen"
 version = "0.1.0"
 dependencies = [
@@ -2252,6 +2260,7 @@ version = "0.1.0"
 dependencies = [
  "ark-ff",
  "mavros-artifacts",
+ "mavros-int-semantics",
  "mavros-opcode-gen",
  "serde",
  "serde_json",
@@ -2926,6 +2935,8 @@ dependencies = [
  "rand_chacha 0.9.0",
  "rand_xorshift 0.4.0",
  "regex-syntax",
+ "rusty-fork",
+ "tempfile",
  "unarray",
 ]
 
@@ -2949,6 +2960,12 @@ dependencies = [
  "log",
  "wasmtime-math",
 ]
+
+[[package]]
+name = "quick-error"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
 
 [[package]]
 name = "quote"
@@ -3321,6 +3338,18 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+
+[[package]]
+name = "rusty-fork"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc6bf79ff24e648f6da1f8d1f011e9cac26491b619e6b9280f2b47f1774e6ee2"
+dependencies = [
+ "fnv",
+ "quick-error",
+ "tempfile",
+ "wait-timeout",
+]
 
 [[package]]
 name = "safe-proc-macro2"
@@ -4129,6 +4158,15 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "wait-timeout"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09ac3b126d3914f9849036f826e054cbabdc8519970b8998ddaf3b5bd3c65f11"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "walkdir"

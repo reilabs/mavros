@@ -25,23 +25,70 @@ use crate::{
             BlockId, FunctionId, SourceLocation, ValueId,
             hlssa::{
                 ArithGroup, BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness,
-                HLFunction, HLSSA, LocatedOpCode, LookupTarget, MAX_SUPPORTED_SIGNED_BITS,
-                MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix, RefCountOp, SequenceTargetType, Type,
-                TypeExpr,
+                HLFunction, HLSSA, LocatedOpCode, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS,
+                OpCode, Radix, RefCountOp, SequenceTargetType, Type,
                 builder::{HLEmitter, HLFunctionBuilder},
             },
         },
-        util::{decode_signed, spread_bits, unspread_bits},
+        util::{spread_bits, unspread_bits},
     },
 };
 
-fn bit_mask(width: usize) -> Option<u128> {
-    if width == 0 || width > 128 {
-        None
-    } else if width == 128 {
-        Some(u128::MAX)
-    } else {
-        Some((1u128 << width) - 1)
+/// Whether this pass folds `group` on a constant pair whose left side is `lhs`, or leaves it to
+/// `ClickCooper`.
+///
+/// Everything except a **field division**. `lattice::eval_binary` does fold one by a nonzero
+/// constant divisor — but minting that constant _here_ would move the cost estimate this pass takes
+/// its own specialization decisions on, which is a change to what gets specialized rather than the
+/// meaning of an operation. `ClickCooper` folds it either way, after those decisions are made.
+fn folds_here(group: ArithGroup, lhs: &Constant) -> bool {
+    !(group == ArithGroup::Div && matches!(lhs, Constant::Field(_)))
+}
+
+/// The scalar [`Constant`] a `ConstVal` denotes, for handing to the shared lattice folders.
+///
+/// Aggregates answer `None`: the folders are scalar, and an `Array`/`Blob`/`BitsOf` holds
+/// `ValueId`s rather than a value this pass can evaluate.
+fn const_val_scalar(value: Option<&ConstVal>) -> Option<Constant> {
+    match value? {
+        ConstVal::Int(s, v) => Some(Constant::Int(*s, *v)),
+        ConstVal::Field(f) => Some(Constant::Field(*f)),
+        ConstVal::Array(_) | ConstVal::Blob(_) | ConstVal::BitsOf(..) => None,
+    }
+}
+
+/// Assert that a recorded integer constant is the width the operation says its operands are.
+///
+/// A no-op for a `Field` (which has no width to disagree about) and for a value with no recorded
+/// constant, and for an operation that did not name a width. See [`Val::cmp`] for why the two
+/// widths agreeing is what lets the fold read one off the constant.
+fn assert_recorded_width(bits: Option<usize>, recorded: Option<&Constant>, kind: CmpKind) {
+    if let (Some(bits), Some(Constant::Int(s, v))) = (bits, recorded) {
+        assert_eq!(
+            *s, bits,
+            "{kind:?} on a {bits}-bit operand whose recorded constant {v:#x} is {s}-bit: the two \
+             readings of that pattern differ"
+        );
+    }
+}
+
+/// Intern a folded scalar constant and record its value, so later folds in the same run see it.
+///
+/// The specializer folds a whole callee body against one call site's arguments, so a constant it
+/// mints here is an input to the next instruction it walks.
+fn intern_folded(ctx: &mut SpecializationState, folded: Constant) -> Option<Val> {
+    match folded {
+        Constant::Int(s, v) => {
+            let id = ctx.int_const(s, v);
+            ctx.const_vals.insert(id, ConstVal::Int(s, v));
+            Some(Val(id))
+        }
+        Constant::Field(f) => {
+            let id = ctx.field_const(f);
+            ctx.const_vals.insert(id, ConstVal::Field(f));
+            Some(Val(id))
+        }
+        Constant::FnPtr(_) | Constant::Blob(_) => None,
     }
 }
 
@@ -145,6 +192,13 @@ impl HLEmitter for SpecializationState<'_> {
 
 // FIELD-ASSUMPTION: L4-eval
 impl symbolic_executor::Value<SpecializationState<'_>> for Val {
+    /// `bits` is the caller's view of the operand width, and the fold reads its own off the
+    /// `ConstVal::Int`s instead — the lattice needs a width from the constants anyway, and it folds
+    /// only when the two operands agree on one. The two records must then _be_ the same width,
+    /// which is what [`assert_recorded_width`] states: a signed comparison decodes at whichever it
+    /// is told, and `Int(8, 0xFF)` is `-1` at 8 bits and `255` at 32. Asserted rather than
+    /// preferred, because choosing between them would be choosing which of two disagreeing records
+    /// to believe.
     fn cmp(
         &self,
         b: &Self,
@@ -152,37 +206,18 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         bits: Option<usize>,
         ctx: &mut SpecializationState,
     ) -> Self {
-        let l_const = ctx.const_vals.get(&self.0).cloned();
-        let r_const = ctx.const_vals.get(&b.0).cloned();
-        let folded = match (
-            int_bits_and_raw(l_const.as_ref()),
-            int_bits_and_raw(r_const.as_ref()),
-        ) {
-            (Some((_, l_val)), Some((_, r_val))) => match kind {
-                // Equality is a property of the bit pattern, and `ULt` is the unsigned comparison,
-                // so both compare the raw payloads directly.
-                CmpKind::Eq => Some(l_val == r_val),
-                CmpKind::ULt => Some(l_val < r_val),
-                // Decode with `bits` before comparing so we perform the correct comparison.
-                CmpKind::SLt => {
-                    let bits = bits.expect("ICE: signed comparison without an operand width");
-                    (1..=MAX_SUPPORTED_SIGNED_BITS)
-                        .contains(&bits)
-                        .then(|| decode_signed(bits, l_val) < decode_signed(bits, r_val))
-                }
-            },
-            _ => None,
-        };
-        match folded {
-            Some(result) => {
-                let res_u = result as u128;
-                let res = ctx.int_const(1, res_u);
-                ctx.const_vals.insert(res, ConstVal::Int(1, res_u));
-                Self(res)
-            }
-            // Re-emitted under the same `kind` it came in as.
-            None => Self(ctx.cmp(self.0, b.0, kind)),
+        let l = const_val_scalar(ctx.const_vals.get(&self.0));
+        let r = const_val_scalar(ctx.const_vals.get(&b.0));
+        assert_recorded_width(bits, l.as_ref(), kind);
+        assert_recorded_width(bits, r.as_ref(), kind);
+        if let (Some(l), Some(r)) = (l, r)
+            && let Some(folded) = lattice::eval_cmp(kind, &l, &r)
+            && let Some(val) = intern_folded(ctx, folded)
+        {
+            return val;
         }
+        // Re-emitted under the same `kind` it came in as.
+        Self(ctx.cmp(self.0, b.0, kind))
     }
 
     fn arith(
@@ -195,54 +230,22 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         let a_const = ctx.const_vals.get(&self.0).cloned();
         let b_const = ctx.const_vals.get(&b.0).cloned();
 
-        // Every integer constant pair is folded by the shared lattice evaluator rather than by a
-        // second implementation here. It is opcode-driven, so it reads the operands the way the
-        // operation says; it refuses the cases that must not fold — overflow, division by zero,
-        // `INT_MIN / -1`, out-of-range and over-wide shift amounts; and it is the implementation
-        // that has tests. When it declines, control falls through to the match below, which emits
-        // the operation unfolded: correct, just not constant-folded.
-        //
-        // What this replaces was seven hand-rolled arms over raw `u128`s, reachable only for pairs
-        // that happened to be tagged `U`. Two of them (`Add`, `Sub`) used bare `+`/`-`, which
-        // _panics_ on overflow in a debug build rather than declining, and `Shr` could shift by a
-        // 128-or-more amount. Those were survivable only while a signed pair was diverted by its
-        // tag; with one `ConstVal::Int` there is no tag to divert it, so they had to go rather than
-        // silently compute the unsigned answer for a signed operation.
-        if let (Some((a_s, a_val)), Some((b_s, b_val))) = (
-            int_bits_and_raw(a_const.as_ref()),
-            int_bits_and_raw(b_const.as_ref()),
-        ) && let Some(Constant::Int(res_s, res_v)) = lattice::eval_binary(
-            binary_arith_op_kind,
-            &Constant::Int(a_s, a_val),
-            &Constant::Int(b_s, b_val),
-            ctx.field(),
-        ) {
-            let res = ctx.int_const(res_s, res_v);
-            ctx.const_vals.insert(res, ConstVal::Int(res_s, res_v));
-            return Self(res);
+        // Every constant pair is folded by the shared lattice evaluator rather than by a second
+        // implementation here. When it declines, control falls through to the match below, which
+        // emits the operation unfolded.
+        if let (Some(l), Some(r)) = (
+            const_val_scalar(a_const.as_ref()),
+            const_val_scalar(b_const.as_ref()),
+        ) && folds_here(binary_arith_op_kind.group(), &l)
+            && let Some(folded) = lattice::eval_binary(binary_arith_op_kind, &l, &r, ctx.field())
+            && let Some(val) = intern_folded(ctx, folded)
+        {
+            return val;
         }
 
+        // The identity rules below are this pass's own, not the lattice's: they fire on a pair
+        // where only _one_ side is constant, which is not a fold at all.
         match (binary_arith_op_kind.group(), a_const, b_const) {
-            (ArithGroup::Mul, Some(ConstVal::Field(l_val)), Some(ConstVal::Field(r_val))) => {
-                // FIELD-ASSUMPTION: L4-eval
-                let res = l_val * r_val;
-                let res_v = ctx.field_const(res);
-                ctx.const_vals.insert(res_v, ConstVal::Field(res));
-                Self(res_v)
-            }
-            (ArithGroup::Sub, Some(ConstVal::Field(f)), Some(ConstVal::Field(f2))) => {
-                let res = f - f2;
-                let res_v = ctx.field_const(res);
-                ctx.const_vals.insert(res_v, ConstVal::Field(res));
-                Self(res_v)
-            }
-            (ArithGroup::Add, Some(ConstVal::Field(f)), Some(ConstVal::Field(f2))) => {
-                let res = f + f2;
-                let res_v = ctx.field_const(res);
-                ctx.const_vals.insert(res_v, ConstVal::Field(res));
-                Self(res_v)
-            }
-
             (ArithGroup::Mul, Some(ConstVal::Field(f)), _) if f == ctx.field().one() => *b,
             (ArithGroup::Mul, _, Some(ConstVal::Field(f))) if f == ctx.field().one() => *self,
             (ArithGroup::Mul, Some(ConstVal::Field(f)), _) if f == ctx.field().zero() => *self,
@@ -417,56 +420,29 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         _out_type: &Type,
         ctx: &mut SpecializationState,
     ) -> Self {
-        let self_const = ctx.const_vals.get(&self.0).cloned();
-        match self_const {
-            Some(ConstVal::Int(_, v)) => {
-                let sign_bit = if from > 0 { (v >> (from - 1)) & 1 } else { 0 };
-                let res = if sign_bit == 1 {
-                    let mask = bit_mask(to).unwrap() ^ bit_mask(from).unwrap();
-                    v | mask
-                } else {
-                    v
-                };
-                let res_v = ctx.int_const(to, res);
-                ctx.const_vals.insert(res_v, ConstVal::Int(to, res));
-                Self(res_v)
-            }
-            _ => {
-                let res = ctx.sext(self.0, from, to);
-                Self(res)
-            }
+        if let Some(c) = const_val_scalar(ctx.const_vals.get(&self.0))
+            && let Some(folded) = lattice::eval_sext(&c, from, to)
+            && let Some(val) = intern_folded(ctx, folded)
+        {
+            return val;
         }
+        Self(ctx.sext(self.0, from, to))
     }
 
     fn bit_range(
         &self,
         offset: usize,
         width: usize,
-        out_type: &Type,
+        _out_type: &Type,
         ctx: &mut SpecializationState,
     ) -> Self {
-        let self_const = ctx.const_vals.get(&self.0).cloned();
-        let mask = bit_mask(width);
-        match (self_const, &out_type.strip_witness().expr, mask) {
-            (Some(ConstVal::Int(bits, v)), _, Some(mask)) => {
-                let res = (v >> offset) & mask;
-                let res_v = ctx.int_const(bits, res);
-                ctx.const_vals.insert(res_v, ConstVal::Int(bits, res));
-                Self(res_v)
-            }
-            // FIELD-ASSUMPTION: L4-decompose
-            (Some(ConstVal::Field(f)), TypeExpr::Field, Some(mask)) if offset < 128 => {
-                let v: u128 = f.into_bigint().as_ref()[0] as u128;
-                let res = ctx.field().constant((v >> offset) & mask);
-                let res_v = ctx.field_const(res);
-                ctx.const_vals.insert(res_v, ConstVal::Field(res));
-                Self(res_v)
-            }
-            _ => {
-                let res = ctx.bit_range(self.0, offset, width);
-                Self(res)
-            }
+        if let Some(c) = const_val_scalar(ctx.const_vals.get(&self.0))
+            && let Some(folded) = lattice::eval_bit_range(&c, offset, width, ctx.field())
+            && let Some(val) = intern_folded(ctx, folded)
+        {
+            return val;
         }
+        Self(ctx.bit_range(self.0, offset, width))
     }
 
     fn cast(
@@ -475,54 +451,27 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         _out_type: &Type,
         ctx: &mut SpecializationState,
     ) -> Self {
-        let self_const = ctx.const_vals.get(&self.0).cloned();
-        match self_const {
-            Some(ConstVal::Int(_, v)) => match cast_target {
-                CastTarget::Int(s) => {
-                    let res = v & bit_mask(*s).unwrap();
-                    let res_v = ctx.int_const(*s, res);
-                    ctx.const_vals.insert(res_v, ConstVal::Int(*s, res));
-                    Self(res_v)
-                }
-                CastTarget::Field => {
-                    let res = ctx.field().constant(v);
-                    let res_v = ctx.field_const(res);
-                    ctx.const_vals.insert(res_v, ConstVal::Field(res));
-                    Self(res_v)
-                }
-                CastTarget::Nop | CastTarget::ArrayToSlice | CastTarget::WitnessOf => *self,
-                CastTarget::ValueOf | CastTarget::Map(_) => {
-                    let res = ctx.cast_to(cast_target.clone(), self.0);
-                    Self(res)
-                }
-            },
-            // FIELD-ASSUMPTION: L4-decompose
-            Some(ConstVal::Field(f)) => match cast_target {
-                CastTarget::Int(s) => {
-                    let v: u128 = f.into_bigint().as_ref()[0] as u128;
-                    let res = v & bit_mask(*s).unwrap();
-                    let res_v = ctx.int_const(*s, res);
-                    ctx.const_vals.insert(res_v, ConstVal::Int(*s, res));
-                    Self(res_v)
-                }
-                CastTarget::Field
-                | CastTarget::Nop
-                | CastTarget::ArrayToSlice
-                | CastTarget::WitnessOf => *self,
-                CastTarget::ValueOf | CastTarget::Map(_) => {
-                    let res = ctx.cast_to(cast_target.clone(), self.0);
-                    Self(res)
-                }
-            },
-            None => {
-                let res = ctx.cast_to(cast_target.clone(), self.0);
-                Self(res)
-            }
-            _ => {
-                let res = ctx.cast_to(cast_target.clone(), self.0);
-                Self(res)
-            }
+        let Some(c) = const_val_scalar(ctx.const_vals.get(&self.0)) else {
+            return Self(ctx.cast_to(cast_target.clone(), self.0));
+        };
+        let identity = match (cast_target, &c) {
+            (
+                CastTarget::Nop | CastTarget::ArrayToSlice | CastTarget::WitnessOf,
+                Constant::Int(..) | Constant::Field(_),
+            ) => true,
+            (CastTarget::Field, Constant::Field(_)) => true,
+            _ => false,
+        };
+        if identity {
+            return *self;
         }
+
+        if let Some(folded) = lattice::eval_cast(cast_target, &c, ctx.field())
+            && let Some(val) = intern_folded(ctx, folded)
+        {
+            return val;
+        }
+        Self(ctx.cast_to(cast_target.clone(), self.0))
     }
 
     fn constrain(
@@ -559,20 +508,13 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
     }
 
     fn not(&self, _out_type: &Type, ctx: &mut SpecializationState) -> Self {
-        let const_val = ctx.const_vals.get(&self.0).cloned();
-        match const_val {
-            Some(ConstVal::Int(s, v)) => {
-                let res = !v & bit_mask(s).unwrap();
-                let res_v = ctx.int_const(s, res);
-                ctx.const_vals.insert(res_v, ConstVal::Int(s, res));
-                Self(res_v)
-            }
-            None => {
-                let res = HLEmitter::not(ctx, self.0);
-                Self(res)
-            }
-            _ => todo!(),
+        if let Some(c) = const_val_scalar(ctx.const_vals.get(&self.0))
+            && let Some(folded) = lattice::eval_not(&c)
+            && let Some(val) = intern_folded(ctx, folded)
+        {
+            return val;
         }
+        Self(HLEmitter::not(ctx, self.0))
     }
 
     fn of_int(s: usize, v: u128, ctx: &mut SpecializationState) -> Self {
@@ -1274,13 +1216,19 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_shl_declines_an_amount_wider_than_the_value() {
-        // The type analysis types this result as `U(max(s1, s2))`, so folding it to the value's
-        // width would silently narrow it. Declining leaves the shift in place, which is correct
-        // whatever the widths.
+    fn unsigned_shl_declines_a_mixed_width_pair_in_either_direction() {
+        // Neither direction folds, and the reason is the same both ways: `assert_int_arith_widths`
+        // requires an integer `BinaryArithOp`'s operands to be exactly the width of its result, so
+        // a mixed-width shift is IR nothing may build and there is no constant to mint for it. A
+        // wider amount would additionally narrow the result -- the type analysis types it as
+        // `U(max(s1, s2))` -- but that is a second reason rather than the deciding one.
+        //
+        // The narrower-amount direction used to fold, on the grounds that the *model* gives a shift
+        // amount a width of its own. It does, and that freedom is real for the evaluators that meet
+        // one at runtime; it is not a licence for a folder to mint IR the rest of the pipeline
+        // rejects.
         assert_eq!(specializer_shl((8, 1), (32, 1)), None);
-        // The mirror case is fine: a narrower amount says nothing about the result width.
-        assert_eq!(specializer_shl((32, 1), (8, 1)), Some((32, 2)));
+        assert_eq!(specializer_shl((32, 1), (8, 1)), None);
     }
 
     #[test]
