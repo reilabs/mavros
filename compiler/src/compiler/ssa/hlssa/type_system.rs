@@ -21,6 +21,17 @@ pub const MAX_SUPPORTED_UNSIGNED_BITS: usize = 128;
 /// signed operation is chosen, never by inspecting a type.
 pub const MAX_SUPPORTED_SIGNED_BITS: usize = 64;
 
+// The reference model bounds its own operations by the same two numbers, and a conformance test
+// that swept a width the type system forbids (or missed one it allows) would be quietly checking
+// the wrong thing. Neither constant is derived from the other -- they mean different things, one a
+// type-system rule and one the model's domain -- so this asserts they agree rather than aliasing
+// them together.
+const _: () = assert!(
+    MAX_SUPPORTED_UNSIGNED_BITS == mavros_int_semantics::MAX_BITS
+        && MAX_SUPPORTED_SIGNED_BITS == mavros_int_semantics::MAX_SIGNED_BITS,
+    "the integer type caps and `mavros-int-semantics`'s width bounds have drifted apart"
+);
+
 /// Reject a signed _operation_ on a pattern wider than [`MAX_SUPPORTED_SIGNED_BITS`].
 ///
 /// `what` names the operation for the panic, e.g. `"division"`. Call this from the arm that has

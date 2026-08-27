@@ -20,6 +20,14 @@
 //! [`Interval`] itself is the calculator, implementing ordinary interval arithmetic over ℤ, with no
 //! opinion about widths or signs. `ValueRange` is the domain element.
 //!
+//! # Flow Sensitivity
+//!
+//! One range per value, valid wherever it is live, with a single exception. A conditional branch
+//! decides a comparison, and inside the region it uniquely enters that comparison is a fact about
+//! its operands. [`FunctionValueRanges::get_at`] serves the narrowed reading and
+//! [`FunctionValueRanges::get`] the flow-insensitive one; see [`BranchFact`] for why a consumer may
+//! elide a check on the strength of the former.
+//!
 //! # Width::Field
 //!
 //! A field element's canonical integer _is_ its value; there is no second reading. So
@@ -29,7 +37,7 @@
 use mavros_artifacts::FieldConfig;
 use num_bigint::{BigInt, Sign};
 use num_traits::{One, Signed, ToPrimitive, Zero};
-use tracing::{Level, instrument};
+use tracing::{Level, instrument, warn};
 
 use crate::{
     collections::HashMap,
@@ -43,8 +51,8 @@ use crate::{
         ssa::{
             BlockId, FunctionId, Instruction, Terminator, ValueId,
             hlssa::{
-                ArithGroup, BinaryArithOpKind, CastTarget, Constant, HLFunction, HLSSA, OpCode,
-                Type, TypeExpr,
+                ArithGroup, BinaryArithOpKind, CastTarget, CmpKind, Constant, HLFunction, HLSSA,
+                OpCode, Type, TypeExpr,
             },
         },
     },
@@ -55,7 +63,21 @@ use crate::{
 
 pub struct ValueRangeAnalysis;
 
-const ITER_LIMIT: usize = 8;
+/// How many times a single value's range may be refined before the solver gives up on the descent
+/// terminating and widens it instead.
+///
+/// It's generous because most programs terminate in a measured 3-5 rounds. The loop-heavy ones need
+/// some real depth, so the budget is sized to allow those to converge too (e.g. `passport_08`
+/// converges at 86 rounds).
+const WIDEN_AFTER: usize = 96;
+
+/// Backstop on the rounds, not the termination argument.
+///
+/// [`Interval::widen`] is what guarantees the solver stops: every endpoint is given up on at most
+/// once, so the iteration is bounded by [`WIDEN_AFTER`] plus a couple of rounds to settle. This
+/// limit exists so that a bug in that argument costs a wide answer rather than a hang, and so
+/// reaching it is reported.
+const ITER_LIMIT: usize = 256;
 
 impl ValueRangeAnalysis {
     pub fn new() -> Self {
@@ -95,6 +117,8 @@ impl ValueRangeAnalysis {
         field: FieldConfig,
     ) -> FunctionValueRanges {
         let mut bounds: HashMap<ValueId, ValueRange> = constant_bounds.clone();
+        // How many times each value has been refined, which is what `overwrite` widens against.
+        let mut refinements: HashMap<ValueId, usize> = HashMap::default();
 
         // Initial state: every value's bound is its declared type's full range.
         // Iteration only narrows from there.
@@ -114,7 +138,10 @@ impl ValueRangeAnalysis {
 
         let entry_block_id = function.get_entry_id();
         let order: Vec<BlockId> = cfg.get_domination_pre_order().collect();
+        // Structural, so it is computed once and reused by every round of the fixed point.
+        let branch_facts = collect_branch_facts(function, cfg);
 
+        let mut converged = false;
         for _iter in 0..ITER_LIMIT {
             let mut changed = false;
 
@@ -163,50 +190,117 @@ impl ValueRangeAnalysis {
                         }
                         let new_range =
                             joined.unwrap_or_else(|| ValueRange::for_type(param_type, field));
-                        Self::overwrite(&mut bounds, *param_id, new_range, &mut changed);
+                        Self::overwrite(
+                            &mut bounds,
+                            &mut refinements,
+                            *param_id,
+                            new_range,
+                            &mut changed,
+                        );
                     }
                 }
 
+                let facts = branch_facts
+                    .get(&block_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
                 for instr in block.get_instructions() {
-                    self.transfer(instr, types, &mut bounds, &mut changed, field);
+                    self.transfer(
+                        instr,
+                        types,
+                        &mut bounds,
+                        &mut refinements,
+                        &mut changed,
+                        field,
+                        facts,
+                    );
                 }
             }
 
             if !changed {
+                converged = true;
                 break;
             }
         }
 
-        FunctionValueRanges { values: bounds }
+        // Not a failure, but not nothing either: this function's ranges are wider than the domain
+        // could have made them, so a consumer that discharges checks off them will discharge fewer.
+        // Silent until now, which is why nobody knew how often it happens. See [`ITER_LIMIT`].
+        if !converged {
+            warn!(
+                function = function.get_name(),
+                rounds = ITER_LIMIT,
+                "value-range analysis stopped before reaching a fixed point"
+            );
+        }
+
+        FunctionValueRanges {
+            values: bounds,
+            facts: branch_facts,
+        }
     }
 
+    /// Store `new` as `v`'s range, widening once `v` has been refined [`WIDEN_AFTER`] times.
+    ///
+    /// The widening is per _value_ rather than per round. A value that settles quickly is never
+    /// widened however long some other value in the same function keeps the solver going.
     fn overwrite(
         bounds: &mut HashMap<ValueId, ValueRange>,
+        refinements: &mut HashMap<ValueId, usize>,
         v: ValueId,
         new: ValueRange,
         changed: &mut bool,
     ) {
-        if bounds.get(&v) != Some(&new) {
+        let Some(old) = bounds.get(&v).cloned() else {
             bounds.insert(v, new);
+            *changed = true;
+            return;
+        };
+        if old == new {
+            return;
+        }
+
+        let seen = refinements.entry(v).or_insert(0);
+        *seen += 1;
+        let next = if *seen > WIDEN_AFTER {
+            old.widen(&new)
+        } else {
+            new
+        };
+
+        if old != next {
+            bounds.insert(v, next);
             *changed = true;
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn transfer(
         &self,
         instr: &OpCode,
         types: &FunctionTypeInfo,
         bounds: &mut HashMap<ValueId, ValueRange>,
+        refinements: &mut HashMap<ValueId, usize>,
         changed: &mut bool,
         field: FieldConfig,
+        facts: &[BranchFact],
     ) {
-        // Both readings of an operand's bit pattern. Every rule below picks its reading from the
-        // _operation_, not from the operand's declared signedness — that is the point of the pair.
-        let range = |bounds: &HashMap<ValueId, ValueRange>, v: ValueId| -> ValueRange {
+        // The flow-insensitive bound: what is true of a value everywhere it is live.
+        let flat = |bounds: &HashMap<ValueId, ValueRange>, v: ValueId| -> ValueRange {
             match bounds.get(&v) {
                 Some(r) => r.clone(),
                 None => ValueRange::for_type(types.get_value_type(v), field),
             }
+        };
+
+        // Both readings of an operand's bit pattern.
+        //
+        // Reading an operand _here_ additionally narrows it by whatever the branches dominating
+        // this block have already decided about it. Only reads are narrowed; what the rules below
+        // store is the range of a value **defined in this block**, and SSA dominance puts every use
+        // of such a value inside the same region, so the narrower bound holds at all of them.
+        let range = |bounds: &HashMap<ValueId, ValueRange>, v: ValueId| -> ValueRange {
+            narrow(v, flat(bounds, v), facts, |other| flat(bounds, other))
         };
         let width_of = |v: ValueId| Width::of_type(types.get_value_type(v), field);
 
@@ -231,7 +325,7 @@ impl ValueRangeAnalysis {
                         ValueRange::full(Width::NonScalar)
                     }
                 };
-                Self::set(bounds, *result, types, field, r, changed);
+                Self::set(bounds, refinements, *result, types, field, r, changed);
             }
 
             OpCode::SExt {
@@ -250,6 +344,7 @@ impl ValueRangeAnalysis {
                 let width = width_of(*result);
                 Self::set(
                     bounds,
+                    refinements,
                     *result,
                     types,
                     field,
@@ -277,6 +372,7 @@ impl ValueRangeAnalysis {
                 let out_width = width_of(*result);
                 Self::set(
                     bounds,
+                    refinements,
                     *result,
                     types,
                     field,
@@ -300,7 +396,7 @@ impl ValueRangeAnalysis {
                 ..
             } => {
                 let in_r = range(bounds, *value);
-                Self::set(bounds, *r, types, field, in_r, changed);
+                Self::set(bounds, refinements, *r, types, field, in_r, changed);
             }
             OpCode::WriteWitness { result: None, .. } => {}
 
@@ -310,6 +406,7 @@ impl ValueRangeAnalysis {
             } => {
                 Self::overwrite(
                     bounds,
+                    refinements,
                     *result,
                     ValueRange::for_type(result_type, field),
                     changed,
@@ -320,6 +417,7 @@ impl ValueRangeAnalysis {
                 // Both Eq and Lt yield a u1 boolean regardless of operand types.
                 Self::overwrite(
                     bounds,
+                    refinements,
                     *result,
                     ValueRange::from_unsigned(Width::Bits(1), Interval::unsigned_full(1)),
                     changed,
@@ -342,7 +440,7 @@ impl ValueRangeAnalysis {
                     }
                     Width::Field(_) | Width::NonScalar => ValueRange::full(width),
                 };
-                Self::set(bounds, *result, types, field, r, changed);
+                Self::set(bounds, refinements, *result, types, field, r, changed);
             }
 
             OpCode::BinaryArithOp {
@@ -363,7 +461,7 @@ impl ValueRangeAnalysis {
                     width_of(*lhs) == width,
                     width_of(*rhs) == width,
                 );
-                Self::set(bounds, *result, types, field, r, changed);
+                Self::set(bounds, refinements, *result, types, field, r, changed);
             }
 
             OpCode::MulConst {
@@ -402,7 +500,7 @@ impl ValueRangeAnalysis {
                         factor.mul(v.signed()),
                     )
                 };
-                Self::set(bounds, *result, types, field, r, changed);
+                Self::set(bounds, refinements, *result, types, field, r, changed);
             }
 
             OpCode::Select {
@@ -411,11 +509,43 @@ impl ValueRangeAnalysis {
                 let width = width_of(*result);
                 let t = range(bounds, *if_t).constrain_to(width);
                 let f = range(bounds, *if_f).constrain_to(width);
-                Self::set(bounds, *result, types, field, t.join(&f), changed);
+                Self::set(
+                    bounds,
+                    refinements,
+                    *result,
+                    types,
+                    field,
+                    t.join(&f),
+                    changed,
+                );
             }
 
             OpCode::Guard { inner, .. } => {
-                self.transfer(inner, types, bounds, changed, field);
+                // This arm writes each result **twice**: once for the inner operation, and once
+                // again below with zero joined in. The inner call reports into a scratch flag and
+                // `changed` is decided once, by comparing what the results hold now against what
+                // they held before the guard ran.
+                let before: Vec<(ValueId, Option<ValueRange>, usize)> = inner
+                    .get_results()
+                    .map(|vid| {
+                        (
+                            *vid,
+                            bounds.get(vid).cloned(),
+                            refinements.get(vid).copied().unwrap_or(0),
+                        )
+                    })
+                    .collect();
+                let mut transient = false;
+                self.transfer(
+                    inner,
+                    types,
+                    bounds,
+                    refinements,
+                    &mut transient,
+                    field,
+                    facts,
+                );
+
                 // A guarded _failable_ operation is not simply its inner operation.
                 // `LowerPureGuards` branches on the failure condition: the failing side asserts the
                 // guard's condition is false and yields the result type's zero, so an inactive
@@ -429,8 +559,14 @@ impl ValueRangeAnalysis {
                             Some(computed) => computed.join(&zero),
                             None => zero,
                         };
-                        Self::overwrite(bounds, *vid, joined, changed);
+                        Self::overwrite(bounds, refinements, *vid, joined, &mut transient);
                     }
+                }
+
+                for (vid, prior, prior_refinements) in before {
+                    let moved = bounds.get(&vid) != prior.as_ref();
+                    *changed |= moved;
+                    refinements.insert(vid, prior_refinements + usize::from(moved));
                 }
             }
 
@@ -441,7 +577,7 @@ impl ValueRangeAnalysis {
             _ => {
                 for vid in instr.get_results() {
                     let r = ValueRange::for_type(types.get_value_type(*vid), field);
-                    Self::overwrite(bounds, *vid, r, changed);
+                    Self::overwrite(bounds, refinements, *vid, r, changed);
                 }
             }
         }
@@ -700,8 +836,10 @@ impl ValueRangeAnalysis {
     }
 
     /// Store a computed range as the range of `result`, constraining it to the declared width.
+    #[allow(clippy::too_many_arguments)]
     fn set(
         bounds: &mut HashMap<ValueId, ValueRange>,
+        refinements: &mut HashMap<ValueId, usize>,
         result: ValueId,
         types: &FunctionTypeInfo,
         field: FieldConfig,
@@ -709,7 +847,13 @@ impl ValueRangeAnalysis {
         changed: &mut bool,
     ) {
         let width = Width::of_type(types.get_value_type(result), field);
-        Self::overwrite(bounds, result, range.constrain_to(width), changed);
+        Self::overwrite(
+            bounds,
+            refinements,
+            result,
+            range.constrain_to(width),
+            changed,
+        );
     }
 }
 
@@ -723,6 +867,210 @@ impl Analysis for ValueRanges {
         let types = store.get::<TypeInfo>();
         ValueRangeAnalysis::new().run(ssa, cfg, types)
     }
+}
+
+// BRANCH REFINEMENT
+// ================================================================================================
+
+/// A comparison that a conditional branch has already decided, on the edge that decided it.
+///
+/// The analysis is otherwise flow-insensitive. It is also what lets a loop counter be bounded at
+/// all. A loop header's parameter joins its own back-edge argument, so without the guard it is ⊤
+/// from the first round and stays there; with it, the body sees `i < n`, the increment is bounded
+/// by `n`, and the join closes on `[0, n]`. That is the difference between proving and not proving
+/// that `n - 1 - i` cannot underflow, which is one R1CS row per iteration of every loop in the
+/// standard library that counts down.
+///
+/// A consumer that discharges a runtime check on the strength of one of these is asserting that the
+/// check cannot fail *on any execution that reaches the instruction*. Both regimes this analysis
+/// runs in support that, for different reasons:
+///
+/// - **After `UntaintControlFlow`**, every surviving `JmpIf` is on a *pure* condition: witness ones
+///   have been linearized into `Select`s with their blocks' instructions wrapped in `Guard`. A pure
+///   branch is real control flow in both backends, and `hlssa_to_r1cs` interprets it rather than
+///   flattening it, so the untaken arm is never evaluated at all.
+/// - **Before it**, a witness `JmpIf` is still real control flow in the IR, so the fact is a true
+///   statement about executions that take the edge. Executions that do not take it never evaluate
+///   the instruction, and Noir owes no rejection for an operation inside an `if` that did not run.
+///   Linearization preserves that: it wraps the arm's instructions in `Guard`, and an inactive
+///   guard around a failable operation yields zero rather than rejecting.
+#[derive(Debug, Clone)]
+struct BranchFact {
+    kind: CmpKind,
+    lhs: ValueId,
+    rhs: ValueId,
+    /// Whether this is the edge on which the comparison held.
+    holds: bool,
+}
+
+impl BranchFact {
+    /// The operand facing `value` across the comparison, or `None` if this fact is not about
+    /// `value` at all.
+    ///
+    /// A comparison of a value with _itself_ says nothing usable: if it decided either way it did
+    /// so without constraining anything.
+    fn opposite(&self, value: ValueId) -> Option<ValueId> {
+        if self.lhs == self.rhs {
+            return None;
+        }
+        if value == self.lhs {
+            Some(self.rhs)
+        } else if value == self.rhs {
+            Some(self.lhs)
+        } else {
+            None
+        }
+    }
+
+    /// The bound this fact puts on `value`, given `other` (the range of the operand facing it).
+    ///
+    /// `None` where the fact implies no bound, either because the comparison is one this does not
+    /// model or because `other` is unbounded on the side that would have supplied the endpoint.
+    fn constraint(&self, value: ValueId, width: Width, other: &ValueRange) -> Option<ValueRange> {
+        let is_lhs = value == self.lhs;
+        match (self.kind, self.holds) {
+            // An equality that held pins both sides to the same set of patterns. A width mismatch
+            // would make that intersection meaningless, and `ValueRange::intersect` rejects one.
+            (CmpKind::Eq, true) => (other.width() == width).then(|| other.clone()),
+            // Inequality leaves a hole rather than an interval, which this domain cannot express.
+            (CmpKind::Eq, false) => None,
+            // The unsigned reading is the raw pattern read as a non-negative integer, which is the
+            // same number whatever width the pattern is held at, so a `<` on it needs no width
+            // agreement to mean something.
+            (CmpKind::ULt, holds) => Some(ValueRange::from_unsigned(
+                width,
+                Self::half_line(other.unsigned(), is_lhs, holds)?,
+            )),
+            // The signed reading is not: it is the two's-complement value at _this range's own_
+            // width, so an endpoint taken from a differently-wide operand bounds a different number
+            // than the one being narrowed. `Eq` above declines a width mismatch for the same reason
+            // and this arm must too -- more so, because narrowing only ever tightens, and these
+            // bounds are what `overflow_provably_impossible` and friends discharge runtime
+            // rejections on. HLSSA does not enforce equal widths on a `Cmp` (`analysis::types`
+            // gives the result `int(1)` without looking at the operands), so this is a real gate
+            // rather than a restatement of an invariant.
+            (CmpKind::SLt, holds) if other.width() == width => Some(ValueRange::from_signed(
+                width,
+                Self::half_line(other.signed(), is_lhs, holds)?,
+            )),
+            (CmpKind::SLt, _) => None,
+        }
+    }
+
+    /// The half-line a decided `<` confines one of its operands to, on whichever reading the
+    /// comparison uses, while `other` is the range of the operand on the far side.
+    fn half_line(other: &Interval, is_lhs: bool, holds: bool) -> Option<Interval> {
+        Some(match (is_lhs, holds) {
+            // `value < other`, so `value` is below the largest `other` can be.
+            (true, true) => Interval::at_most(other.hi()?.clone() - BigInt::one()),
+            // `value >= other`, so `value` is at least the smallest `other` can be.
+            (true, false) => Interval::at_least(other.lo()?.clone()),
+            // `other < value`.
+            (false, true) => Interval::at_least(other.lo()?.clone() + BigInt::one()),
+            // `other >= value`.
+            (false, false) => Interval::at_most(other.hi()?.clone()),
+        })
+    }
+}
+
+/// Narrow `base`, the flow-insensitive range of `value`, by every fact in force.
+///
+/// `flat` reads the *unnarrowed* range of the operand on the far side of each comparison, so that
+/// narrowing `a` in `a < b` can never consult a bound on `b` that was itself derived from `a`.
+fn narrow(
+    value: ValueId,
+    base: ValueRange,
+    facts: &[BranchFact],
+    flat: impl Fn(ValueId) -> ValueRange,
+) -> ValueRange {
+    let mut narrowed = base;
+    for fact in facts {
+        let Some(other) = fact.opposite(value) else {
+            continue;
+        };
+        if let Some(c) = fact.constraint(value, narrowed.width(), &flat(other)) {
+            narrowed = narrowed.intersect(&c);
+        }
+    }
+    narrowed
+}
+
+/// The branch facts in force in each block of `function`.
+///
+/// A fact is attached to a branch target only when that target's **sole** predecessor is the
+/// branching block. Arriving at a block with two predecessors does not say which edge was taken,
+/// and the fact would be false on the other one. From the target it propagates down the dominator
+/// tree, because every path to a dominated block runs through the target and so through the edge
+/// that established it.
+fn collect_branch_facts(function: &HLFunction, cfg: &CFG) -> HashMap<BlockId, Vec<BranchFact>> {
+    let mut comparisons: HashMap<ValueId, (CmpKind, ValueId, ValueId)> = HashMap::default();
+    let mut branches: HashMap<BlockId, (ValueId, BlockId, BlockId)> = HashMap::default();
+    let mut children: HashMap<BlockId, Vec<BlockId>> = HashMap::default();
+
+    for (block_id, block) in function.get_blocks() {
+        for instr in block.get_instructions() {
+            if let OpCode::Cmp {
+                kind,
+                result,
+                lhs,
+                rhs,
+            } = instr
+            {
+                comparisons.insert(*result, (*kind, *lhs, *rhs));
+            }
+        }
+        // A branch whose two targets are the same block decides nothing.
+        if let Some(Terminator::JmpIf(cond, t, f)) = block.get_terminator()
+            && t != f
+        {
+            branches.insert(*block_id, (*cond, *t, *f));
+        }
+        if let Some(idom) = cfg.get_immediate_dominator(*block_id) {
+            children.entry(idom).or_default().push(*block_id);
+        }
+    }
+
+    // The walk below must not depend on the map's iteration order.
+    for kids in children.values_mut() {
+        kids.sort();
+    }
+
+    let mut facts: HashMap<BlockId, Vec<BranchFact>> = HashMap::default();
+    let mut stack = vec![(function.get_entry_id(), Vec::<BranchFact>::new())];
+    while let Some((block_id, active)) = stack.pop() {
+        let branch = branches
+            .get(&block_id)
+            .and_then(|(cond, t, f)| comparisons.get(cond).map(|cmp| (*cmp, *t, *f)));
+
+        for child in children.get(&block_id).into_iter().flatten().copied() {
+            let mut inherited = active.clone();
+            if let Some(((kind, lhs, rhs), t, f)) = branch {
+                let holds = if child == t {
+                    Some(true)
+                } else if child == f {
+                    Some(false)
+                } else {
+                    None
+                };
+
+                // `child == t` already implies `t` is dominated by this block, but not that it is
+                // entered only from here.
+                if let Some(holds) = holds
+                    && cfg.get_predecessors(child).count() == 1
+                {
+                    inherited.push(BranchFact {
+                        kind,
+                        lhs,
+                        rhs,
+                        holds,
+                    });
+                }
+            }
+            stack.push((child, inherited));
+        }
+        facts.insert(block_id, active);
+    }
+    facts
 }
 
 // INTERVAL
@@ -799,6 +1147,64 @@ impl Interval {
                 lo: Some(lo),
                 hi: Some(hi),
             }
+        }
+    }
+
+    /// The widening step: keep every endpoint `refined` left alone, and **drop** every one it moved
+    /// inward.
+    ///
+    /// This is what ensures that the solver terminates. The iteration descends from ⊤ and each round is
+    /// free to shave a bound by as little as one. A chain like `[-31, 3] ⊐ [-30, 3] ⊐ [-29, 3] ⊐ …`
+    /// is a fixed point that exists but is `2^63` rounds away. Widening replaces that descent with
+    /// a single jump: an endpoint that has kept moving is given up on and released to infinity,
+    /// which [`ValueRange::new`]'s reduction then clamps back to the operand width.
+    ///
+    /// Sound because it only ever _loosens_: the result contains `refined`, and `refined` is what
+    /// a sound transfer computed, so the result over-approximates whatever `refined` did.
+    ///
+    /// This terminates because a dropped endpoint cannot be dropped twice: it is already at the
+    /// width's extreme, so the next round widens it to the same place, `changed` stays false, and
+    /// the value is stable. Each endpoint is therefore given up on at most once.
+    ///
+    /// ⊥ is returned untouched. It is already stable as nothing refines an empty interval, so it
+    /// needs no help terminating, and widening it would throw away a proof of unreachability for
+    /// nothing.
+    #[must_use]
+    pub fn widen(&self, refined: &Self) -> Self {
+        if self.is_empty() || refined.is_empty() {
+            return refined.clone();
+        }
+
+        // An endpoint already at ±∞ **stays** there. That is the half that makes this terminate:
+        // releasing an endpoint has to be final, or the next round's refinement pulls it back in,
+        // the round after releases it again, and the operator that was supposed to stop the
+        // oscillation has become the oscillation.
+        let lo = match (&self.lo, &refined.lo) {
+            (None, _) | (_, None) => None,
+            (Some(was), Some(now)) if now > was => None,
+            (Some(_), Some(now)) => Some(now.clone()),
+        };
+        let hi = match (&self.hi, &refined.hi) {
+            (None, _) | (_, None) => None,
+            (Some(was), Some(now)) if now < was => None,
+            (Some(_), Some(now)) => Some(now.clone()),
+        };
+        Self { lo, hi }
+    }
+
+    /// `(−∞, hi]`. Cannot be inverted, so it needs no normalization.
+    pub fn at_most(hi: BigInt) -> Self {
+        Self {
+            lo: None,
+            hi: Some(hi),
+        }
+    }
+
+    /// `[lo, +∞)`. Cannot be inverted, so it needs no normalization.
+    pub fn at_least(lo: BigInt) -> Self {
+        Self {
+            lo: Some(lo),
+            hi: None,
         }
     }
 
@@ -1423,6 +1829,26 @@ impl ValueRange {
         )
     }
 
+    /// [`Interval::widen`] on both readings at once, then reduced.
+    ///
+    /// Both are widened because either one can be the endpoint that keeps moving: a value can have
+    /// a settled unsigned hull and a signed one still creeping, which is exactly what
+    /// `signed_for_range` does. The reduction afterwards is what ensures that a dropped endpoint
+    /// turns back into the width's own extreme, so the result is still a range _of the correct
+    /// width_ rather than an unbounded one.
+    #[must_use]
+    pub fn widen(&self, refined: &Self) -> Self {
+        debug_assert_eq!(
+            self.width, refined.width,
+            "widening ValueRanges of different widths"
+        );
+        Self::new(
+            self.width,
+            self.unsigned.widen(&refined.unsigned),
+            self.signed.widen(&refined.signed),
+        )
+    }
+
     /// Lattice meet, componentwise and then reduced.
     pub fn intersect(&self, other: &Self) -> Self {
         debug_assert_eq!(
@@ -1488,11 +1914,16 @@ fn guard_may_produce_zero(inner: &OpCode, types: &FunctionTypeInfo) -> bool {
 
 pub struct FunctionValueRanges {
     values: HashMap<ValueId, ValueRange>,
+    facts: HashMap<BlockId, Vec<BranchFact>>,
 }
 
 impl FunctionValueRanges {
     /// Get the range for a value, returning an unconstrained non-scalar range if the value isn't
     /// in our map (e.g. fresh values created downstream of this analysis).
+    ///
+    /// This is the **flow-insensitive** answer: true wherever the value is live. A consumer
+    /// deciding something about one particular instruction wants [`Self::get_at`] instead, which
+    /// is never wider and is frequently much narrower for a loop counter.
     pub fn get(&self, v: ValueId) -> ValueRange {
         self.values
             .get(&v)
@@ -1500,8 +1931,17 @@ impl FunctionValueRanges {
             .unwrap_or_else(|| ValueRange::full(Width::NonScalar))
     }
 
-    pub fn try_get(&self, v: ValueId) -> Option<&ValueRange> {
-        self.values.get(&v)
+    /// The range of `v` **as seen from `block`**: [`Self::get`] narrowed by facts the conditional
+    /// branches dominating `block` have already decided about `v`.
+    ///
+    /// Sound for a decision about an instruction that stays in `block`. It is _not_ sound to carry
+    /// the answer to another block, so a pass that hoists or sinks the instruction it asked about
+    /// must re-ask at the destination.
+    pub fn get_at(&self, block: BlockId, v: ValueId) -> ValueRange {
+        let Some(facts) = self.facts.get(&block) else {
+            return self.get(v);
+        };
+        narrow(v, self.get(v), facts, |other| self.get(other))
     }
 }
 
@@ -2411,9 +2851,463 @@ mod tests {
         let types = crate::compiler::analysis::types::Types::new().run(ssa, &flow);
         let ranges = ValueRangeAnalysis::new().run(ssa, &flow, &types);
         let entry = ssa.get_unique_entrypoint_id();
+        let function = ranges.get_function(entry);
         FunctionValueRanges {
-            values: ranges.get_function(entry).values.clone(),
+            values: function.values.clone(),
+            facts: function.facts.clone(),
         }
+    }
+
+    /// The canonical counted loop, as `for i in 0..16 { .. 15 - i .. }` lowers to it:
+    ///
+    /// ```text
+    /// entry:                          jmp header(0)
+    /// header(i):  c = i < 16;         jmp_if c to body, else to exit
+    /// body:       d = 15 - i; e = i + 1;  jmp header(e)
+    /// exit:                           return i
+    /// ```
+    ///
+    /// Returns `(header, body, i, d, e)`.
+    fn counted_loop(ssa: &mut HLSSA) -> (BlockId, BlockId, ValueId, ValueId, ValueId) {
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut sb = HLSSABuilder::new(ssa);
+        sb.modify_function(main_id, |b| {
+            b.function.add_return_type(Type::int(32));
+            let header = b.add_block(|_| {});
+            let body = b.add_block(|_| {});
+            let exit = b.add_block(|_| {});
+
+            let entry = b.function.get_entry_id();
+            {
+                let mut e = b.test_block(entry);
+                let zero = e.int_const(32, 0);
+                e.terminate_jmp(header, vec![zero]);
+            }
+            let counter = {
+                let mut e = b.test_block(header);
+                let i = e.add_parameter(Type::int(32));
+                let limit = e.int_const(32, 16);
+                let c = e.ult(i, limit);
+                e.terminate_jmp_if(c, body, exit);
+                i
+            };
+            let (down, next) = {
+                let mut e = b.test_block(body);
+                let top = e.int_const(32, 15);
+                let down = e.usub(top, counter);
+                let one = e.int_const(32, 1);
+                let next = e.uadd(counter, one);
+                e.terminate_jmp(header, vec![next]);
+                (down, next)
+            };
+            {
+                let mut e = b.test_block(exit);
+                e.terminate_return(vec![counter]);
+            }
+            (header, body, counter, down, next)
+        })
+    }
+
+    #[test]
+    fn a_loop_counter_is_bounded_by_its_own_guard() {
+        // Without the guard this is ⊤ from the first round and stays there: the header parameter
+        // joins its own back-edge argument, which is derived from the parameter. The guard breaks
+        // that circle — the body sees `i < 16`, so the increment is bounded by 16, so the join
+        // closes on `[0, 16]` instead of the full width.
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let (_, _, counter, _, _) = counted_loop(&mut ssa);
+        let ranges = run_analysis(&mut ssa);
+        assert_eq!(ranges.get(counter).unsigned(), &iv(0, 16));
+    }
+
+    #[test]
+    fn the_counter_is_one_tighter_inside_the_body_than_at_the_header() {
+        // 16 is a value the counter really takes — on the round that ends the loop — so the
+        // flow-insensitive answer must keep it. The body is reached only when the guard held, so
+        // there, and only there, it is at most 15. Getting this backwards in either direction is
+        // the whole risk of the feature: `get` too tight is unsound, `get_at` too loose costs the
+        // rows this was written to recover.
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let (header, body, counter, _, _) = counted_loop(&mut ssa);
+        let ranges = run_analysis(&mut ssa);
+
+        assert_eq!(ranges.get_at(header, counter).unsigned(), &iv(0, 16));
+        assert_eq!(ranges.get_at(body, counter).unsigned(), &iv(0, 15));
+    }
+
+    #[test]
+    fn a_value_computed_under_the_guard_keeps_the_narrower_bound_everywhere() {
+        // `15 - i` is what the overflow check is about, and it is computed in the body. Its range
+        // is stored flow-insensitively because SSA dominance puts every _use_ of it inside the
+        // same region, so the bound that held where it was computed holds wherever it is read.
+        // `[0, 15]` rather than `[-1, 15]` is exactly the difference between discharging that
+        // check and emitting it.
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let (_, _, _, down, next) = counted_loop(&mut ssa);
+        let ranges = run_analysis(&mut ssa);
+
+        assert_eq!(ranges.get(down).unsigned(), &iv(0, 15));
+        assert_eq!(ranges.get(next).unsigned(), &iv(1, 16));
+    }
+
+    #[test]
+    fn widening_keeps_a_settled_endpoint_and_drops_a_moving_one() {
+        // The whole operator in one case: `hi` did not move, so it survives; `lo` was shaved by
+        // one, so it is given up on and released to −∞.
+        let was = Interval::closed(-30, 3);
+        let now = Interval::closed(-29, 3);
+        let widened = was.widen(&now);
+        assert_eq!(widened.lo(), None, "a moving endpoint is released");
+        assert_eq!(
+            widened.hi(),
+            Some(&BigInt::from(3)),
+            "a settled one is kept"
+        );
+    }
+
+    #[test]
+    fn widening_only_ever_loosens() {
+        // The soundness property, and the only one that matters: whatever the transfer computed is
+        // still admitted afterwards. A widening that excluded a value the refinement allowed would
+        // hand a consumer a bound too tight and delete a rejection.
+        let cases = [
+            (Interval::closed(-30, 3), Interval::closed(-29, 3)),
+            (Interval::closed(0, 100), Interval::closed(10, 90)),
+            (Interval::closed(0, 100), Interval::closed(0, 100)),
+            (Interval::at_least(BigInt::from(5)), Interval::closed(7, 9)),
+            (Interval::at_most(BigInt::from(5)), Interval::closed(1, 4)),
+        ];
+        for (was, now) in cases {
+            let widened = was.widen(&now);
+            assert_eq!(
+                widened.intersect(&now),
+                now,
+                "widening {was:?} toward {now:?} lost part of the refinement"
+            );
+        }
+    }
+
+    #[test]
+    fn widening_settles_after_one_step() {
+        // Termination: a released endpoint is already at ±∞, so the next round releases it to the
+        // same place and the solver sees no change. Each endpoint is given up on at most once,
+        // which is what bounds the iteration.
+        let was = Interval::closed(-30, 3);
+        let once = was.widen(&Interval::closed(-29, 3));
+        let twice = once.widen(&Interval::closed(-28, 3));
+        assert_eq!(once, twice, "a released endpoint must not move again");
+    }
+
+    #[test]
+    fn widening_leaves_bottom_alone() {
+        // ⊥ is already stable, and it is a proof of unreachability worth keeping.
+        let empty = Interval::empty();
+        assert!(Interval::closed(0, 10).widen(&empty).is_empty());
+        assert!(empty.widen(&empty).is_empty());
+    }
+
+    #[test]
+    fn a_widened_range_is_clamped_back_to_its_width() {
+        // `Interval::widen` releases to ±∞, but a `ValueRange` is a range *of a width*, so the
+        // reduction has to bring it back. Otherwise the solver would start handing out bounds
+        // outside the operand's own domain.
+        let was = ValueRange::from_unsigned(Width::Bits(8), Interval::closed(3, 200));
+        let now = ValueRange::from_unsigned(Width::Bits(8), Interval::closed(4, 199));
+        let widened = was.widen(&now);
+        assert_eq!(
+            widened.unsigned(),
+            &iv(0, 255),
+            "both endpoints moved, so both are released — to the width's own extremes"
+        );
+        assert_eq!(widened.width(), Width::Bits(8));
+    }
+
+    #[test]
+    fn the_solver_terminates_on_a_bound_that_creeps() {
+        // The shape `signed_for_range` produces: a loop whose counter bound tightens by exactly one
+        // per round. The fixed point exists but is 2^63 rounds away, and before widening the solver
+        // was still moving after 2000 rounds. What is asserted here is only that the answer is
+        // *sound* — the counter really is inside its width — because which bound the widening
+        // settles on is the operator's business, not this test's.
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let (_, _, counter, _, _) = counted_loop(&mut ssa);
+        let ranges = run_analysis(&mut ssa);
+        let range = ranges.get(counter);
+        assert!(
+            !range.is_empty(),
+            "the counter must not come back unreachable"
+        );
+        assert!(
+            range.unsigned().lo().is_some() && range.unsigned().hi().is_some(),
+            "a `Bits` range stays bounded by its width however it was reached"
+        );
+    }
+
+    #[test]
+    fn a_width_mismatched_signed_fact_narrows_nothing() {
+        // A `Cmp`'s operands are not required to be the same width: `analysis::types` gives the
+        // result `int(1)` without looking at them, exactly as it did for `BinaryArithOp` before
+        // `assert_int_arith_widths`. So the narrowing has to survive one, and for the signed
+        // reading surviving means declining.
+        //
+        // `other` here is `-1` at 32 bits. Read at 32 bits that is the number -1; taken as an
+        // endpoint for an 8-bit value it would say `value <= -2`, which is a claim about a
+        // different number entirely. And narrowing only ever tightens, so a bogus bound cannot
+        // make a consumer emit a check it would otherwise skip -- only delete one it needs. The
+        // unsigned reading is width-independent and so is left alone; the sibling assertion is
+        // what keeps this from passing on a `constraint` that had simply stopped answering.
+        let (value, other) = (ValueId(1), ValueId(2));
+        let wide_minus_one = ValueRange::from_signed(Width::Bits(32), Interval::closed(-1, -1));
+
+        let signed = BranchFact {
+            kind: CmpKind::SLt,
+            lhs: value,
+            rhs: other,
+            holds: true,
+        };
+        let base = ValueRange::full(Width::Bits(8));
+        let narrowed = narrow(value, base.clone(), &[signed.clone()], |_| {
+            wide_minus_one.clone()
+        });
+        assert_eq!(
+            narrowed, base,
+            "a mismatched-width `SLt` must not bound anything"
+        );
+
+        // At the value's own width the same fact does bound it, so the guard above is not simply
+        // switching the feature off.
+        let matched = ValueRange::from_signed(Width::Bits(8), Interval::closed(-1, -1));
+        let narrowed = narrow(value, base.clone(), &[signed], |_| matched.clone());
+        assert_eq!(narrowed.signed(), &iv(-128, -2));
+
+        // The unsigned reading is the raw pattern as a non-negative integer, which means the same
+        // thing at every width, so a mismatch there is not an obstacle and must not be treated as
+        // one.
+        let unsigned = BranchFact {
+            kind: CmpKind::ULt,
+            lhs: value,
+            rhs: other,
+            holds: true,
+        };
+        let wide_ten = ValueRange::from_unsigned(Width::Bits(32), Interval::closed(10, 10));
+        let narrowed = narrow(value, base, &[unsigned], |_| wide_ten.clone());
+        assert_eq!(narrowed.unsigned(), &iv(0, 9));
+    }
+
+    #[test]
+    fn a_nested_loop_bounds_both_counters() {
+        // Each nesting level needs its own trip round through the fixed point before its counter
+        // stops being ⊤, so this is really a test that `ITER_LIMIT` is generous enough for the
+        // shapes the standard library actually contains. Both counters bounded means the solver
+        // still converged; a `[0, 255]` here would mean it ran out of rounds.
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let (outer_counter, inner_counter, down) = {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(main_id, |b| {
+                b.function.add_return_type(Type::int(8));
+                let outer = b.add_block(|_| {});
+                let inner_pre = b.add_block(|_| {});
+                let inner = b.add_block(|_| {});
+                let body = b.add_block(|_| {});
+                let outer_latch = b.add_block(|_| {});
+                let exit = b.add_block(|_| {});
+
+                let entry = b.function.get_entry_id();
+                {
+                    let mut e = b.test_block(entry);
+                    let zero = e.int_const(8, 0);
+                    e.terminate_jmp(outer, vec![zero]);
+                }
+                let i = {
+                    let mut e = b.test_block(outer);
+                    let i = e.add_parameter(Type::int(8));
+                    let four = e.int_const(8, 4);
+                    let c = e.ult(i, four);
+                    e.terminate_jmp_if(c, inner_pre, exit);
+                    i
+                };
+                {
+                    let mut e = b.test_block(inner_pre);
+                    let zero = e.int_const(8, 0);
+                    e.terminate_jmp(inner, vec![zero]);
+                }
+                let j = {
+                    let mut e = b.test_block(inner);
+                    let j = e.add_parameter(Type::int(8));
+                    let four = e.int_const(8, 4);
+                    let c = e.ult(j, four);
+                    e.terminate_jmp_if(c, body, outer_latch);
+                    j
+                };
+                let down = {
+                    let mut e = b.test_block(body);
+                    let three = e.int_const(8, 3);
+                    let down = e.usub(three, j);
+                    let one = e.int_const(8, 1);
+                    let next = e.uadd(j, one);
+                    e.terminate_jmp(inner, vec![next]);
+                    down
+                };
+                {
+                    let mut e = b.test_block(outer_latch);
+                    let one = e.int_const(8, 1);
+                    let next = e.uadd(i, one);
+                    e.terminate_jmp(outer, vec![next]);
+                }
+                {
+                    let mut e = b.test_block(exit);
+                    e.terminate_return(vec![i]);
+                }
+                (i, j, down)
+            })
+        };
+
+        let ranges = run_analysis(&mut ssa);
+        assert_eq!(ranges.get(outer_counter).unsigned(), &iv(0, 4));
+        assert_eq!(ranges.get(inner_counter).unsigned(), &iv(0, 4));
+        assert_eq!(ranges.get(down).unsigned(), &iv(0, 3));
+    }
+
+    #[test]
+    fn the_untaken_side_of_a_guard_bounds_from_below() {
+        // `i >= 16` on the exit edge. Nothing in the loop lowering reads this, but a `if x < c`
+        // in user code has two sides and the negative one is a bound just as much.
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let (value, then_block, else_block) = {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(main_id, |b| {
+                b.function.add_return_type(Type::int(8));
+                let then_block = b.add_block(|_| {});
+                let else_block = b.add_block(|_| {});
+                let entry = b.function.get_entry_id();
+                let v = {
+                    let mut e = b.test_block(entry);
+                    let v = e.add_parameter(Type::int(8));
+                    let limit = e.int_const(8, 10);
+                    let c = e.ult(v, limit);
+                    e.terminate_jmp_if(c, then_block, else_block);
+                    v
+                };
+                for block in [then_block, else_block] {
+                    let mut e = b.test_block(block);
+                    e.terminate_return(vec![v]);
+                }
+                (v, then_block, else_block)
+            })
+        };
+
+        let ranges = run_analysis(&mut ssa);
+        assert_eq!(ranges.get(value).unsigned(), &iv(0, 255));
+        assert_eq!(ranges.get_at(then_block, value).unsigned(), &iv(0, 9));
+        assert_eq!(ranges.get_at(else_block, value).unsigned(), &iv(10, 255));
+    }
+
+    #[test]
+    fn a_target_with_two_predecessors_learns_nothing() {
+        // Arriving at a block reachable from elsewhere does not say which edge was taken, so the
+        // fact would be false on the other one. Here the entry's `else` and a third block both
+        // jump to the same place.
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let (value, shared) = {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(main_id, |b| {
+                b.function.add_return_type(Type::int(8));
+                let then_block = b.add_block(|_| {});
+                let shared = b.add_block(|_| {});
+                let entry = b.function.get_entry_id();
+                let v = {
+                    let mut e = b.test_block(entry);
+                    let v = e.add_parameter(Type::int(8));
+                    let limit = e.int_const(8, 10);
+                    let c = e.ult(v, limit);
+                    e.terminate_jmp_if(c, then_block, shared);
+                    v
+                };
+                {
+                    // The taken side also falls into `shared`, giving it a second predecessor.
+                    let mut e = b.test_block(then_block);
+                    e.terminate_jmp(shared, vec![]);
+                }
+                {
+                    let mut e = b.test_block(shared);
+                    e.terminate_return(vec![v]);
+                }
+                (v, shared)
+            })
+        };
+
+        let ranges = run_analysis(&mut ssa);
+        assert_eq!(ranges.get_at(shared, value).unsigned(), &iv(0, 255));
+    }
+
+    #[test]
+    fn a_signed_guard_bounds_the_signed_reading() {
+        // `SLt` decides the two's-complement reading, so the bound belongs on that component. Read
+        // as unsigned the surviving patterns are two runs, which is precisely what the reduced
+        // product exists to express.
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let (value, then_block) = {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(main_id, |b| {
+                b.function.add_return_type(Type::int(8));
+                let then_block = b.add_block(|_| {});
+                let else_block = b.add_block(|_| {});
+                let entry = b.function.get_entry_id();
+                let v = {
+                    let mut e = b.test_block(entry);
+                    let v = e.add_parameter(Type::int(8));
+                    let limit = e.int_const(8, 3);
+                    let c = e.slt(v, limit);
+                    e.terminate_jmp_if(c, then_block, else_block);
+                    v
+                };
+                for block in [then_block, else_block] {
+                    let mut e = b.test_block(block);
+                    e.terminate_return(vec![v]);
+                }
+                (v, then_block)
+            })
+        };
+
+        let ranges = run_analysis(&mut ssa);
+        assert_eq!(ranges.get_at(then_block, value).signed(), &iv(-128, 2));
+    }
+
+    #[test]
+    fn comparing_a_value_with_itself_bounds_nothing() {
+        // `x < x` cannot hold, so the branch is unreachable and there is nothing to learn. The two
+        // rules would otherwise each narrow `x` using `x`, which is the one shape where the
+        // "read the far operand flat" discipline has no far operand to read.
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let (value, then_block) = {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(main_id, |b| {
+                b.function.add_return_type(Type::int(8));
+                let then_block = b.add_block(|_| {});
+                let else_block = b.add_block(|_| {});
+                let entry = b.function.get_entry_id();
+                let v = {
+                    let mut e = b.test_block(entry);
+                    let v = e.add_parameter(Type::int(8));
+                    let c = e.ult(v, v);
+                    e.terminate_jmp_if(c, then_block, else_block);
+                    v
+                };
+                for block in [then_block, else_block] {
+                    let mut e = b.test_block(block);
+                    e.terminate_return(vec![v]);
+                }
+                (v, then_block)
+            })
+        };
+
+        let ranges = run_analysis(&mut ssa);
+        assert_eq!(ranges.get_at(then_block, value).unsigned(), &iv(0, 255));
     }
 
     #[test]
@@ -2566,5 +3460,250 @@ mod tests {
         // Without the fix, `known_sign` could read a range that excludes zero and hardcode a sign
         // bit the inactive branch contradicts.
         assert!(!guarded_u8_op(USub, 3, 4).unsigned().is_empty());
+    }
+
+    #[test]
+    fn a_guard_counts_one_refinement_per_round_not_two() {
+        // The `Guard` arm writes each result **twice** per round, and the two writes disagree by
+        // construction: the second is the first joined with zero. So `overwrite` sees a move on
+        // both of them in every round, including every round after the result has settled.
+        //
+        // Left uncorrected that is two refinements per round for a value that is not moving, and
+        // [`WIDEN_AFTER`] would be reached at roughly half the intended budget — releasing the
+        // endpoints of a range that had been stable for eighty rounds. What the counter is meant
+        // to measure is how often the pair moved, which after settling is never.
+        //
+        // The rounds are driven directly rather than through a program that takes enough of them
+        // to widen: the solver reaches its fixed point in three rounds on anything writable here,
+        // so a whole-program test could only assert this by accident.
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let (guard, result, lhs, rhs) = {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(main_id, |b| {
+                b.function.add_return_type(Type::int(8));
+                let entry = b.function.get_entry_id();
+                let mut e = b.test_block(entry);
+                let x = e.add_parameter(Type::field());
+                // A witness condition, which is what leaves a `Guard` standing.
+                let w = e.write_witness(x);
+                let cond = e.eq(w, x);
+                let a = e.int_const(8, 3);
+                let c = e.int_const(8, 4);
+                let result = e.fresh_value();
+                let guard = OpCode::Guard {
+                    condition: cond,
+                    inner: Box::new(OpCode::BinaryArithOp {
+                        kind: BinaryArithOpKind::UAdd,
+                        result,
+                        lhs: a,
+                        rhs: c,
+                    }),
+                };
+                e.emit(guard.clone());
+                e.terminate_return(vec![result]);
+                (guard, result, a, c)
+            })
+        };
+
+        let flow = FlowAnalysis::run(&ssa);
+        let types = crate::compiler::analysis::types::Types::new().run(&ssa, &flow);
+        let function_types = types.get_function(main_id);
+
+        let analysis = ValueRangeAnalysis::new();
+        // The operand bounds the solver would have seeded from the constant pool. They matter:
+        // a computed range that already contains zero makes the second write a no-op, and the
+        // double count this is about would not arise at all.
+        let mut bounds: HashMap<ValueId, ValueRange> = HashMap::default();
+        for (value, n) in [(lhs, 3), (rhs, 4)] {
+            bounds.insert(
+                value,
+                ValueRange::from_unsigned(Width::Bits(8), Interval::closed(n, n)),
+            );
+        }
+        let mut refinements: HashMap<ValueId, usize> = HashMap::default();
+        let round = |bounds: &mut HashMap<ValueId, ValueRange>,
+                     refinements: &mut HashMap<ValueId, usize>| {
+            let mut changed = false;
+            analysis.transfer(
+                &guard,
+                function_types,
+                bounds,
+                refinements,
+                &mut changed,
+                f(),
+                &[],
+            );
+            changed
+        };
+
+        // Two rounds to settle: the first stores the pair, the second reproduces it.
+        round(&mut bounds, &mut refinements);
+        assert!(
+            !round(&mut bounds, &mut refinements),
+            "the guard should reach its fixed point on the second round"
+        );
+        // `3 + 4` is 7, joined with the zero an inactive guard produces.
+        assert_eq!(bounds[&result].unsigned(), &iv(0, 7));
+
+        let settled = refinements.get(&result).copied().unwrap_or(0);
+        for _ in 0..8 {
+            assert!(
+                !round(&mut bounds, &mut refinements),
+                "a settled guard must not report a change"
+            );
+        }
+        assert_eq!(
+            refinements.get(&result).copied().unwrap_or(0),
+            settled,
+            "a settled guarded result kept accruing refinements, so it would be widened for \
+             standing still"
+        );
+    }
+}
+
+/// The range domain's conformance relation to the normative model in `mavros-int-semantics`.
+///
+/// This analysis provides something different from every other evaluator in the batch. It does not
+/// compute a value, so it can neither equal [`eval`](semantics::eval) nor refine it. Instead it has
+/// to be sound, that is that the set of values an execution can actually produce is contained in
+/// the set its answer denotes:
+///
+/// ```text
+/// { v : eval(op, sign, bits, a, bits, b) == Value(v),  a ∈ γ(L),  b ∈ γ(R) }  ⊆  γ(binary_arith(..))
+/// ```
+///
+/// Two things about that statement are important to note.
+///
+/// It quantifies over [`Outcome::Value`] only. A rejected execution produces no value at all,
+/// instead becoming a runtime constraint failure, so the analysis owes nothing on those inputs.
+/// That is exactly the licence `wrap_or_trap` relies on when it returns the *non*-wrapping interval
+/// for an operation that would overflow, and stating the relation this way turns that licence into
+/// something the sweep checks rather than something the comment asserts.
+///
+/// And γ is over **both** readings, because a `ValueRange` denotes the patterns its unsigned and
+/// signed intervals both admit. Checking one reading would pass a range that is unsound in the
+/// other.
+#[cfg(test)]
+mod int_semantics_conformance {
+    use mavros_int_semantics::{self as semantics, IntOp, Outcome, Raw, corners};
+
+    use super::*;
+
+    /// Whether a bit pattern is in γ of a range: admitted by both readings.
+    fn in_gamma(range: &ValueRange, bits: usize, v: Raw) -> bool {
+        range.unsigned().contains(&BigInt::from(v))
+            && range.signed().contains(&signed_const_to_bigint(bits, v))
+    }
+
+    /// Every bit pattern a range denotes, at a width small enough to enumerate.
+    fn gamma(range: &ValueRange, bits: usize) -> Vec<Raw> {
+        assert!(bits <= 8, "γ is enumerated, so the width has to stay small");
+        (0..=semantics::mask(bits))
+            .filter(|v| in_gamma(range, bits, *v))
+            .collect()
+    }
+
+    /// The input ranges each operand is swept over at `bits`.
+    ///
+    /// Chosen for what they straddle rather than for coverage: the whole width, the two singletons
+    /// whose readings disagree most (`0` and all-ones, which is `-1`), a run of small
+    /// non-negatives, and a run sitting astride the sign boundary.
+    fn input_ranges(bits: usize) -> Vec<ValueRange> {
+        let width = Width::Bits(bits);
+        let top = semantics::mask(bits);
+        let half = top / 2;
+        let closed = |lo: Raw, hi: Raw| {
+            ValueRange::from_unsigned(width, Interval::closed(BigInt::from(lo), BigInt::from(hi)))
+        };
+
+        let mut out = vec![
+            ValueRange::full(width),
+            closed(0, 0),
+            closed(top, top),
+            closed(0, top.min(3)),
+            closed(half, top.min(half + 3)),
+        ];
+        // The signed reading as the _known_ one, so the reduction is entered from both sides.
+        out.push(ValueRange::from_signed(
+            width,
+            Interval::closed(BigInt::from(-1i64), BigInt::from(1i64)),
+        ));
+        out
+    }
+
+    /// Every operation the transfer has a rule for, paired with the model operation it means.
+    ///
+    /// Spelled out so that adding a `BinaryArithOpKind` is a compile error in a test that would
+    /// otherwise silently stop covering it.
+    fn operations() -> Vec<(BinaryArithOpKind, IntOp, semantics::Sign)> {
+        use BinaryArithOpKind as K;
+        use semantics::Sign::{Signed, Unsigned};
+
+        vec![
+            (K::UAdd, IntOp::Add, Unsigned),
+            (K::SAdd, IntOp::Add, Signed),
+            (K::USub, IntOp::Sub, Unsigned),
+            (K::SSub, IntOp::Sub, Signed),
+            (K::UMul, IntOp::Mul, Unsigned),
+            (K::SMul, IntOp::Mul, Signed),
+            (K::UDiv, IntOp::Div, Unsigned),
+            (K::SDiv, IntOp::Div, Signed),
+            (K::URem, IntOp::Rem, Unsigned),
+            (K::SRem, IntOp::Rem, Signed),
+            (K::UShl, IntOp::Shl, Unsigned),
+            (K::SShl, IntOp::Shl, Signed),
+            (K::UShr, IntOp::Shr, Unsigned),
+            (K::SShr, IntOp::Shr, Signed),
+            (K::And, IntOp::And, Unsigned),
+            (K::Or, IntOp::Or, Unsigned),
+            (K::Xor, IntOp::Xor, Unsigned),
+        ]
+    }
+
+    #[test]
+    fn the_transfer_is_sound_for_every_accepted_execution() {
+        let mut checked = 0usize;
+
+        for bits in corners::EXHAUSTIVE_WIDTHS {
+            let width = Width::Bits(bits);
+            let ranges = input_ranges(bits);
+
+            for (kind, op, sign) in operations() {
+                for l in &ranges {
+                    for r in &ranges {
+                        // Both operands at the result's width, which is the case every rule here
+                        // is written for; a mismatched width makes the transfer answer TOP, and a
+                        // TOP answer is sound by construction.
+                        let out = ValueRangeAnalysis::binary_arith(kind, width, l, r, true, true);
+
+                        for a in gamma(l, bits) {
+                            for b in gamma(r, bits) {
+                                let Outcome::Value(v) = semantics::eval(op, sign, bits, a, bits, b)
+                                else {
+                                    // A rejected execution produces no value, so there is nothing
+                                    // for the range to have contained.
+                                    continue;
+                                };
+
+                                assert!(
+                                    in_gamma(&out, bits, v),
+                                    "{kind:?} at {bits} bits: {a:#x} ∈ γ({l:?}) and {b:#x} ∈ \
+                                     γ({r:?}) give {v:#x}, which escapes {out:?}"
+                                );
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // An analysis that answered TOP everywhere would be sound and useless, and so would a sweep
+        // whose ranges all turned out empty.
+        assert!(
+            checked > 50_000,
+            "the sweep only reached {checked} accepted executions"
+        );
     }
 }

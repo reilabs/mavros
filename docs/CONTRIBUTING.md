@@ -53,6 +53,29 @@ for Mavros:
   They are most easily run using `make func-test`.
 - The **unit tests** in the codebase can be run simply using `make unit-test`.
 
+## Integer Semantics
+
+Noir is what determines the [semantics](./int-semantics.md) of integer operations in Mavros, so the
+[`mavros-int-semantics`](../int-semantics/) crate provides a unified statement of those semantics.
+Every place in this repository that evaluates an integer either should use that crate directly or
+demonstrate it implements the relevant relation on this crate. The register of those relations is in
+[`register.rs`](../int-semantics/src/register.rs).
+
+Registering a place that implements integer semantics means three things:
+
+1. Add an `Evaluator` entry to `int-semantics/src/register.rs`, naming the relation it owes and the
+   files it lives in. Not every relation is equality: a folder that runs before the guard IR may
+   decline where one that runs after it may not, and an abstract interpreter owes soundness rather
+   than a value.
+2. Write a test that holds it to that relation, and name that test in the register. A relation
+   nothing checks is a belief.
+3. Give it a section in [docs/int-semantics.md](int-semantics.md).
+
+`register.rs` checks all three, and additionally sweeps the workspace for arithmetic that defines an
+out-of-range answer without going through the model. The best outcome is that you don't need any of
+it: delegating to the model, or deleting a second definition in favor of an existing one, is always
+better than keeping two in step.
+
 ## Debugging
 
 This section contains a few debugging tips for working on Mavros.

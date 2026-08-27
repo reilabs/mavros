@@ -20,10 +20,13 @@ fn main(lo: i32, hi: i32, k: i32) {
 
     // Same-width reinterpretation at the boundary. `cast_signed_unsigned`
     // already pins the general rule (`-1i32 as u32 == 4294967295`); this is the
-    // extreme case of it. A round trip through `Field` is deliberately left
-    // out: whether a negative widens by sign-extension or by raw zero-extension
-    // is exactly the question the range-analysis rewrite has to settle, so
-    // pinning an answer here before that work would be pinning a guess.
+    // extreme case of it. A round trip through `Field` is not left out for want
+    // of an answer - the question cannot be written. Noir rejects a signed
+    // source at the cast itself, "Only unsigned integer types may be casted to
+    // Field" (`noirc_frontend/src/hir/type_check/errors.rs`), so `lo as Field`
+    // never reaches code generation in any compiler. Widening a negative into a
+    // *wider integer* is a real question, and `signed_cast_to_u128` answers it:
+    // by sign extension.
     assert_eq(lo as u32, 2147483648);
     assert_eq(hi as u32, 2147483647);
 

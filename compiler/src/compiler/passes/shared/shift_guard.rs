@@ -21,9 +21,20 @@ use crate::compiler::{
 ///
 /// This is the shift's counterpart of [`super::divmod_guard::divmod_can_fail`], and it returns the
 /// width rather than a `bool`: the amount is checked against the shifted value's width.
+///
+/// The width is asserted to be a **power of two**. That is not something this module needs but
+/// something the backends assume. This is currently fine as every width Noir can name is a power
+/// of two and nothing in the compiler mints another.
 pub fn shift_operand_bits(lhs_type: &Type) -> Option<usize> {
     match lhs_type.strip_witness().expr {
-        TypeExpr::Int(bits) => Some(bits),
+        TypeExpr::Int(bits) => {
+            assert!(
+                bits.is_power_of_two(),
+                "a {bits}-bit shift: the amount bound checked here and the `bits - 1` mask the VM \
+                 and the WASM backend apply agree only at a power-of-two width"
+            );
+            Some(bits)
+        }
         _ => None,
     }
 }

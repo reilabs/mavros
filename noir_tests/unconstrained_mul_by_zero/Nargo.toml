@@ -1,0 +1,6 @@
+[package]
+name = "unconstrained_mul_by_zero"
+type = "bin"
+authors = [""]
+
+[dependencies]

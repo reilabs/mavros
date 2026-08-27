@@ -1,0 +1,6 @@
+[package]
+name = "int_semantics_sub_i_overflow_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]
