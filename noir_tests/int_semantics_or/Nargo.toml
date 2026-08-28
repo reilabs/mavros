@@ -1,0 +1,6 @@
+[package]
+name = "int_semantics_or"
+type = "bin"
+authors = [""]
+
+[dependencies]

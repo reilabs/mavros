@@ -1,0 +1,6 @@
+[package]
+name = "int_semantics_div_i_min_over_neg_one_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]

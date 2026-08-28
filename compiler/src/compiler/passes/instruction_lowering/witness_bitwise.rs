@@ -258,7 +258,24 @@ impl LowerWitnessBitwiseOps {
         from_bits: usize,
         to_bits: usize,
     ) {
-        assert_signed_op_width(to_bits, "sign extension");
+        // The bound belongs on the **source**, not on the target. A signed source is capped at
+        // `MAX_SUPPORTED_SIGNED_BITS` for now, but the target is just a wider integer to deposit
+        // the result in, and widening an `i32` into a `u128` is exactly what `x as u128` asks for.
+        assert_signed_op_width(from_bits, "sign extension source");
+        assert!(
+            from_bits < to_bits && to_bits <= MAX_SUPPORTED_UNSIGNED_BITS,
+            "sign extension must widen within the integer type cap: {from_bits} -> {to_bits}"
+        );
+
+        // FIELD-ASSUMPTION: L4-modulus-query. The extension term below is
+        // `two_pow(to_bits) - two_pow(from_bits)`, which is only the value it is meant to be while
+        // `two_pow(to_bits)` has not wrapped. On bn254 the 128-bit cap leaves ample room; on a
+        // narrower field this refuses rather than silently extending by a wrapped constant.
+        assert!(
+            to_bits < b.field().field_bit_size() as usize,
+            "sign extension to {to_bits} bits needs a field wider than {} bits",
+            b.field().field_bit_size()
+        );
 
         // The question is whether bit `from_bits - 1` of the encoding is provably clear, so it is
         // asked of the range record rather than of one chosen reading — `SExt`'s source may be

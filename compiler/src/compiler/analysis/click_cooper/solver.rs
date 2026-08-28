@@ -684,7 +684,7 @@ impl<'f, 'c, 's> FunctionSolver<'f, 'c, 's> {
                 value,
                 offset,
                 width,
-            } => self.eval1(bid, value, |v| eval_bit_range(v, offset, width)),
+            } => self.eval1(bid, value, |v| eval_bit_range(v, offset, width, field)),
             ScalarFold::Not { value } => self.eval1(bid, value, eval_not),
             ScalarFold::Select { cond, if_t, if_f } => self.eval_select(bid, cond, if_t, if_f),
         };

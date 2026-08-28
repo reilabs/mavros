@@ -23,3 +23,26 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+================================================================================
+ECDSA secp256r1 Noir arithmetic
+================================================================================
+
+`mavros_stdlib/vendor/ecdsa_secp256r1.nr` contains adapted subsets of:
+
+- `zkpassport/noir-bignum` v0.10.0-1 at commit
+  `675378b1622a2b125ae6927803c79e6bd7ed2b61`.
+- `AztecProtocol/aztec-packages` at commit
+  `9df414ec0e810d46d44b0357341f8dae0abe82b9`, specifically
+  `noir-projects/fnd/noir-protocol-circuits/crates/bigcurve`.
+
+The ECDSA verification flow is adapted from `zkpassport/noir-ecdsa` v0.4.0 at commit
+`6ec6dc9458211587cb3059a38a1dac2300702273`.
+
+The subset retains only the bignum operations, secp256r1 curve arithmetic, and transcript checks
+reachable from ECDSA verification. It removes tests, benchmarks, unrelated curves and fields, seed
+derivation, square roots, integer division, standalone curve-operation wrappers, upstream API
+documentation, and the upstream bignum debugging assertion. Paths are adjusted so the code can live
+inside Mavros' injected Noir standard-library module.
+
+These sources are licensed under the Apache License 2.0. The full license text is in `LICENSE`.

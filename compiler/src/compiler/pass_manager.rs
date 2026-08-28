@@ -328,19 +328,23 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static> PassM
             return;
         };
         if self.draw_cfg {
-            if let Some(cfg) = self.analyses.try_get::<FlowAnalysis>() {
-                cfg.generate_images(
-                    debug_output_dir.join(format!("before_pass_{}_{}", pass_index, pass_name)),
-                    ssa,
-                    format!("before {}: {}", pass_index, pass_name),
-                );
-                self.write_debug_text(
-                    debug_output_dir
-                        .join(format!("before_pass_{}_{}", pass_index, pass_name))
-                        .join("code.txt"),
-                    format!("{}", ssa.to_string(&DefaultSSAAnnotator)),
-                );
-            }
+            // Computed here rather than read out of the store. Whether the store holds one
+            // depends on what the pass about to run declared in `needs()`, so a pass that
+            // computes its own analyses — every `InstructionLowering` — declares nothing and
+            // used to get no image at all, silently. Recomputing costs one flow analysis per
+            // pass, against writing a rendered graph per pass, and only under `--draw-graphs`.
+            let cfg = FlowAnalysis::run(ssa);
+            cfg.generate_images(
+                debug_output_dir.join(format!("before_pass_{}_{}", pass_index, pass_name)),
+                ssa,
+                format!("before {}: {}", pass_index, pass_name),
+            );
+            self.write_debug_text(
+                debug_output_dir
+                    .join(format!("before_pass_{}_{}", pass_index, pass_name))
+                    .join("code.txt"),
+                format!("{}", ssa.to_string(&DefaultSSAAnnotator)),
+            );
         }
     }
 

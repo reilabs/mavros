@@ -1740,10 +1740,49 @@ fn congruence_dropped_assert_still_copy_propagates_soundly() {
 }
 
 /// The integrated DCE runs in the same pass: dead code (here, an unused instruction) is removed
-/// without a separate cleanup pass. Fold-only would leave the add (it is not constant); the
+/// without a separate cleanup pass. Fold-only would leave the operation (it is not constant); the
 /// full pass sweeps it.
+///
+/// The dead instruction is a bitwise `And` rather than the add this used to use, because an add is
+/// a **partial op**: it can overflow, so DCE keeps a dead one rather than deleting it (see
+/// [`integrated_dce_keeps_a_dead_add_itself`] below). `And` has no failure mode at any width, so it
+/// is swept outright and still shows what this test is about.
 #[test]
 fn integrated_dce_removes_dead_code() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let (x, unused) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    f.get_entry_mut().push_parameter(x, Type::int(32));
+    let entry = f.get_entry_mut();
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::And,
+        result: unused,
+        lhs: x,
+        rhs: c1,
+    });
+    entry.set_terminator(Terminator::Return(vec![x]));
+
+    fold_and_dce(&mut ssa);
+
+    let f = ssa.get_unique_entrypoint();
+    // The unused operation is swept by the integrated DCE.
+    assert!(
+        !f.get_entry()
+            .get_instructions()
+            .any(|i| matches!(i, OpCode::BinaryArithOp { .. })),
+        "the unused bitwise op should be removed by the integrated DCE"
+    );
+}
+
+/// A dead `Add` is **not** simply swept: it can overflow, and Noir rejects an overflowing add
+/// whether or not anything reads it.
+///
+/// The operand is a block parameter, so the range domain knows nothing about it and cannot
+/// discharge the check; if it could, deleting the add outright would be the right answer.
+#[test]
+fn integrated_dce_keeps_a_dead_add_itself() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let c1 = ssa.add_const(Constant::Int(32, 1));
     let (x, unused) = (ssa.fresh_value(), ssa.fresh_value());
@@ -1762,12 +1801,55 @@ fn integrated_dce_removes_dead_code() {
     fold_and_dce(&mut ssa);
 
     let f = ssa.get_unique_entrypoint();
-    // The unused add is swept by the integrated DCE.
+    assert!(
+        f.get_entry()
+            .get_instructions()
+            .any(|i| matches!(i, OpCode::BinaryArithOp { result, .. } if *result == unused)),
+        "a dead add must survive, so that `LowerPureGuards` can plant its overflow check"
+    );
     assert!(
         !f.get_entry()
             .get_instructions()
-            .any(|i| matches!(i, OpCode::BinaryArithOp { .. })),
-        "the unused add should be removed by the integrated DCE"
+            .any(|i| matches!(i, OpCode::AssertCmp { .. })),
+        "the check belongs to `LowerPureGuards`, not to this pass"
+    );
+}
+
+/// A dead `Mul` **is** rewritten, which is the other half of the same decision.
+///
+/// A multiply's overflow test is built from the operands alone, so replacing the instruction with
+/// its check drops the multiply and keeps the rejection.
+#[test]
+fn integrated_dce_rewrites_a_dead_mul_into_its_check() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let c1 = ssa.add_const(Constant::Int(32, 3));
+    let (x, unused) = (ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    f.get_entry_mut().push_parameter(x, Type::int(32));
+    let entry = f.get_entry_mut();
+    entry.push_test_instruction(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::UMul,
+        result: unused,
+        lhs: x,
+        rhs: c1,
+    });
+    entry.set_terminator(Terminator::Return(vec![x]));
+
+    fold_and_dce(&mut ssa);
+
+    let f = ssa.get_unique_entrypoint();
+    assert!(
+        f.get_entry()
+            .get_instructions()
+            .any(|i| matches!(i, OpCode::AssertCmp { .. })),
+        "a dead multiply must leave its overflow check behind"
+    );
+    assert!(
+        !f.get_entry()
+            .get_instructions()
+            .any(|i| matches!(i, OpCode::BinaryArithOp { result, .. } if *result == unused)),
+        "the dead multiply itself must not survive; only its check"
     );
 }
 

@@ -1,0 +1,6 @@
+[package]
+name = "int_semantics_rem"
+type = "bin"
+authors = [""]
+
+[dependencies]

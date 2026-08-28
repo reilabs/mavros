@@ -45,6 +45,14 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
         include_str!("../../mavros_stdlib/replacements/blake3.nr"),
     ),
     (
+        "std/mavros/replacements/derive_pedersen_generators.nr",
+        include_str!("../../mavros_stdlib/replacements/derive_pedersen_generators.nr"),
+    ),
+    (
+        "std/mavros/replacements/ecdsa_secp256r1.nr",
+        include_str!("../../mavros_stdlib/replacements/ecdsa_secp256r1.nr"),
+    ),
+    (
         "std/mavros/replacements/embedded_curve_add.nr",
         include_str!("../../mavros_stdlib/replacements/embedded_curve_add.nr"),
     ),
@@ -60,9 +68,17 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
         "std/mavros/replacements/sha256_compression.nr",
         include_str!("../../mavros_stdlib/replacements/sha256_compression.nr"),
     ),
+    (
+        "std/mavros/vendor.nr",
+        include_str!("../../mavros_stdlib/vendor.nr"),
+    ),
+    (
+        "std/mavros/vendor/ecdsa_secp256r1.nr",
+        include_str!("../../mavros_stdlib/vendor/ecdsa_secp256r1.nr"),
+    ),
 ];
 
-/// Foreign stdlib functions that mavros replaces with pure-Noir implementations from
+/// Stdlib functions that mavros replaces with pure-Noir implementations from
 /// `std::mavros::replacements`. The replacement for `#[foreign(name)]` is the function
 /// `std::mavros::replacements::<name>::<name>`.
 ///
@@ -73,13 +89,15 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
 /// pairing all apply natively, and the mavros pipeline never sees a lowlevel call for it.
 const FOREIGN_REPLACEMENTS: &[&str] = &[
     "blake3",
+    "derive_pedersen_generators",
+    "ecdsa_secp256r1",
     "embedded_curve_add",
     "multi_scalar_mul",
     "poseidon2_permutation",
     "sha256_compression",
 ];
 
-/// Rewrite all registered `#[foreign]` shims in the parsed files to call their replacements.
+/// Rewrite all registered `#[foreign]` and `#[builtin]` shims to call their replacements.
 fn replace_foreign_functions(parsed_files: &mut ParsedFiles) {
     let mut replaced: HashSet<&'static str> = HashSet::default();
     for (module, _) in parsed_files.values_mut() {
@@ -112,8 +130,9 @@ fn replace_foreign_function(function: &mut NoirFunction, replaced: &mut HashSet<
     let Some((attribute, _)) = &function.def.attributes.function else {
         return;
     };
-    let FunctionAttributeKind::Foreign(attribute_name) = &attribute.kind else {
-        return;
+    let attribute_name = match &attribute.kind {
+        FunctionAttributeKind::Foreign(name) | FunctionAttributeKind::Builtin(name) => name,
+        _ => return,
     };
     let Some(foreign_name) = FOREIGN_REPLACEMENTS
         .iter()
@@ -208,7 +227,7 @@ fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
     nargo::insert_all_files_for_workspace_into_file_manager(workspace, &mut file_manager);
     let mut parsed_files = nargo::parse_all(&file_manager);
 
-    // 4. Rewrite replaced foreign functions to call their pure-Noir implementations
+    // 4. Rewrite replaced stdlib functions to call their pure-Noir implementations
     replace_foreign_functions(&mut parsed_files);
     (file_manager, parsed_files)
 }

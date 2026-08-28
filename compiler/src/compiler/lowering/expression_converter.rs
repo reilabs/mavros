@@ -1164,7 +1164,16 @@ impl<'a> ExpressionConverter<'a> {
         };
 
         let (target, target_bits) = match &cast.r#type {
-            AstType::Field => (CastTarget::Field, field_bits),
+            AstType::Field => {
+                // Noir rejects a signed source here before monomorphization so the widening branch
+                // below never sees a `Field` target with `src_signed`. Asserting it ensures that
+                // this expectation is not changed under us.
+                assert!(
+                    !src_signed,
+                    "ICE: a signed `as Field` cast reached lowering; Noir rejects it as a type error"
+                );
+                (CastTarget::Field, field_bits)
+            }
             AstType::Integer(signedness, bit_size) => {
                 checked_int_cast_target(*signedness, *bit_size)
             }

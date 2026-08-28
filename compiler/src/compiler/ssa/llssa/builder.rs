@@ -157,12 +157,6 @@ pub trait LLEmitter {
         r
     }
 
-    fn field_neg(&mut self, src: ValueId) -> ValueId {
-        let r = self.fresh_value();
-        self.emit_ll(LLOp::FieldNeg { result: r, src });
-        r
-    }
-
     fn field_eq(&mut self, a: ValueId, b: ValueId) -> ValueId {
         let r = self.fresh_value();
         self.emit_ll(LLOp::FieldEq { result: r, a, b });
