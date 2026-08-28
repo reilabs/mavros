@@ -1,0 +1,6 @@
+[package]
+name = "int_semantics_rem_i_by_zero_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]

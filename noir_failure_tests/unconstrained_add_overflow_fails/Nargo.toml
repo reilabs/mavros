@@ -1,0 +1,6 @@
+[package]
+name = "unconstrained_add_overflow_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -1,0 +1,6 @@
+[package]
+name = "pure_sub_underflow_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]
