@@ -120,8 +120,8 @@ impl ValueRangeAnalysis {
         // How many times each value has been refined, which is what `overwrite` widens against.
         let mut refinements: HashMap<ValueId, usize> = HashMap::default();
 
-        // Initial state: every value's bound is its declared type's full range.
-        // Iteration only narrows from there.
+        // Initial state: every value's bound is its declared type's full range, and iteration only
+        // narrows from there.
         for (_block_id, block) in function.get_blocks() {
             for (vid, ty) in block.get_parameters() {
                 bounds.insert(*vid, ValueRange::for_type(ty, field));
@@ -572,8 +572,10 @@ impl ValueRangeAnalysis {
 
             // Other opcodes: keep the type-based default bound.
             //
-            // TODO(stage-1): `Rangecheck(v, k)` proves `v.unsigned ⊆ [0, 2^k)`, but harvesting it
-            // needs an assumption pre-pass that skips guard-nested checks, so it stays unmodelled.
+            // While `Rangecheck(v, k)` proves `v.unsigned ⊆ [0, 2^k)` we do not use this fact. Its
+            // use has been measured to provide no movement across the corpus, making it not worth
+            // the added complexity. Unlike the interprocedural range analysis, this may be worth
+            // revisiting in the future if we find consumers that could benefit.
             _ => {
                 for vid in instr.get_results() {
                     let r = ValueRange::for_type(types.get_value_type(*vid), field);
@@ -1816,6 +1818,25 @@ impl ValueRange {
         }
     }
 
+    /// The single raw bit pattern this range admits, or `None` if it admits more than one.
+    ///
+    /// Asked of the unsigned reading for the same reason as [`Self::proves_shift_amount_below`]:
+    /// that reading _is_ the bit pattern so a caller who gets an answer can mint the literal
+    /// straight from it rather than having to undo a width-dependent interpretation first.
+    ///
+    /// ⊥ answers `None`. An unreachable value is not a constant as it has no value at all, and a
+    /// caller reaching for this is about to _replace_ a computation with the literal, which on ⊥
+    /// would mean replacing it with an arbitrary one.
+    pub fn proves_constant(&self) -> Option<&BigInt> {
+        if self.is_empty() {
+            return None;
+        }
+        match (self.unsigned.lo(), self.unsigned.hi()) {
+            (Some(lo), Some(hi)) if lo == hi => Some(lo),
+            _ => None,
+        }
+    }
+
     /// Lattice join, componentwise and then reduced.
     pub fn join(&self, other: &Self) -> Self {
         debug_assert_eq!(
@@ -2668,6 +2689,31 @@ mod tests {
         assert!(!small.proves_shift_amount_below(0));
         let zero = ValueRange::from_unsigned(Width::Bits(1), Interval::closed(0, 0));
         assert!(zero.proves_shift_amount_below(1));
+    }
+
+    #[test]
+    fn a_range_reports_a_constant_only_when_it_admits_exactly_one_pattern() {
+        let pinned = ValueRange::from_unsigned(Width::Bits(8), Interval::closed(3, 3));
+        assert_eq!(pinned.proves_constant(), Some(&BigInt::from(3)));
+
+        // Two patterns is not a constant, however narrow the range is.
+        let pair = ValueRange::from_unsigned(Width::Bits(8), Interval::closed(3, 4));
+        assert_eq!(pair.proves_constant(), None);
+        assert_eq!(ValueRange::full(Width::Bits(8)).proves_constant(), None);
+
+        // The answer is the raw pattern, not the signed reading of it: a caller mints the literal
+        // from this, and the literal is bits.
+        let negative = ValueRange::from_signed(Width::Bits(8), Interval::closed(-1, -1));
+        assert_eq!(negative.proves_constant(), Some(&BigInt::from(255)));
+
+        // An unbounded end is not a constant even when the other one is pinned.
+        let half_open =
+            ValueRange::from_unsigned(Width::NonScalar, Interval::at_least(BigInt::from(7)));
+        assert_eq!(half_open.proves_constant(), None);
+
+        // ⊥ is not a constant: it has no value at all, and the caller is about to substitute one.
+        let bottom = ValueRange::from_unsigned(Width::Bits(8), Interval::empty());
+        assert_eq!(bottom.proves_constant(), None);
     }
 
     #[test]

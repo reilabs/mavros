@@ -76,18 +76,18 @@ impl LookupSpilling {
         consts: &HLSSAConstantsSnapshot,
         field: FieldConfig,
     ) -> Option<HelperKey> {
-        match instr {
-            OpCode::Lookup {
-                target: LookupTarget::DynRangecheck(_),
-                ..
-            } => unreachable!(
+        // Matched in two levels, on the opcode and then _exhaustively_ on the target, so that a
+        // target added later has to state whether it spills. Folding the non-spilling targets into
+        // the opcode-level catch-all would read the same and check nothing.
+        let OpCode::Lookup { target, args, flag } = instr else {
+            return None;
+        };
+
+        match target {
+            LookupTarget::DynRangecheck(_) => unreachable!(
                 "DynRangecheck is lowered to a static 8-bit rangecheck before spilling"
             ),
-            OpCode::Lookup {
-                target: LookupTarget::Rangecheck(bits),
-                args,
-                flag,
-            } => {
+            LookupTarget::Rangecheck(bits) => {
                 let width = *bits;
                 if width == 1 {
                     return None; // 1-bit rangechecks are lowered inline (algebraic), no helper.
@@ -106,11 +106,7 @@ impl LookupSpilling {
                     flag_is_const_one: uncond,
                 })
             }
-            OpCode::Lookup {
-                target: LookupTarget::Spread(bits),
-                args,
-                flag,
-            } => {
+            LookupTarget::Spread(bits) => {
                 let uncond = flag_is_const_one(consts, *flag, field);
                 let plan = sizing.decompose_spread(*bits, !uncond);
                 if is_direct_passthrough(&plan, *bits, TableKind::Spread) {
@@ -125,7 +121,12 @@ impl LookupSpilling {
                     flag_is_const_one: uncond,
                 })
             }
-            _ => None,
+
+            // Neither of these is ever spilled. A `Pow2` table is sized by the shifted operand's
+            // width rather than chosen by `LookupSizing`, and an `Array` table by the array it is
+            // built from, so for both there is no decomposition to plan and no chunk to factor into
+            // a helper.
+            LookupTarget::Pow2(_) | LookupTarget::Array(_) => None,
         }
     }
 
@@ -205,58 +206,54 @@ impl LookupSpilling {
         consts: &HLSSAConstantsSnapshot,
         cache: &HashMap<HelperKey, FunctionId>,
     ) -> bool {
-        match instr {
-            OpCode::Lookup {
-                target: LookupTarget::DynRangecheck(_),
-                ..
-            } => unreachable!(
+        // Two levels, exhaustive on the target, for the reason [`Self::helper_key_for`] gives.
+        let OpCode::Lookup { target, args, flag } = instr else {
+            return false;
+        };
+
+        match target {
+            LookupTarget::DynRangecheck(_) => unreachable!(
                 "DynRangecheck is lowered to a static 8-bit rangecheck before spilling"
             ),
-            OpCode::Lookup {
-                target: LookupTarget::Rangecheck(bits),
-                args,
-                flag,
-            } if *bits == 1 => {
+            LookupTarget::Rangecheck(bits) if *bits == 1 => {
                 let is_witness = types.get_value_type(args[0]).is_witness_of();
                 self.spill_rangecheck_inner(e, sizing, args[0], 1, *flag, is_witness);
                 true
             }
-            OpCode::Lookup {
-                target: LookupTarget::Rangecheck(_),
-                args,
-                flag,
-            } => match self.helper_key_for(instr, types, sizing, consts, e.field()) {
-                Some(key) => {
-                    let helper = cache[&key];
-                    // Unconditional helpers bake `flag = 1` and take no flag parameter.
-                    let call_args = if key.flag_is_const_one {
-                        vec![args[0]]
-                    } else {
-                        vec![args[0], *flag]
-                    };
-                    e.call(helper, call_args, 0);
-                    true
+            LookupTarget::Rangecheck(_) => {
+                match self.helper_key_for(instr, types, sizing, consts, e.field()) {
+                    Some(key) => {
+                        let helper = cache[&key];
+                        // Unconditional helpers bake `flag = 1` and take no flag parameter.
+                        let call_args = if key.flag_is_const_one {
+                            vec![args[0]]
+                        } else {
+                            vec![args[0], *flag]
+                        };
+                        e.call(helper, call_args, 0);
+                        true
+                    }
+                    None => false,
                 }
-                None => false,
-            },
-            OpCode::Lookup {
-                target: LookupTarget::Spread(_),
-                args,
-                flag,
-            } => match self.helper_key_for(instr, types, sizing, consts, e.field()) {
-                Some(key) => {
-                    let helper = cache[&key];
-                    let call_args = if key.flag_is_const_one {
-                        vec![args[0], args[1]]
-                    } else {
-                        vec![args[0], args[1], *flag]
-                    };
-                    e.call(helper, call_args, 0);
-                    true
+            }
+            LookupTarget::Spread(_) => {
+                match self.helper_key_for(instr, types, sizing, consts, e.field()) {
+                    Some(key) => {
+                        let helper = cache[&key];
+                        let call_args = if key.flag_is_const_one {
+                            vec![args[0], args[1]]
+                        } else {
+                            vec![args[0], args[1], *flag]
+                        };
+                        e.call(helper, call_args, 0);
+                        true
+                    }
+                    None => false,
                 }
-                None => false,
-            },
-            _ => false,
+            }
+
+            // Never spilled, so never rewritten here; see [`Self::helper_key_for`].
+            LookupTarget::Pow2(_) | LookupTarget::Array(_) => false,
         }
     }
 }

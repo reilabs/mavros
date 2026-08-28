@@ -538,6 +538,21 @@ pub trait HLEmitter {
         });
     }
 
+    /// Constrain `(amount, factor)` to be a row of the `2^s`-row powers-of-two table, i.e. to
+    /// satisfy `factor == 2^amount` with `amount < 2^s`.
+    ///
+    /// `s` is `log2` of the shifted operand's width, so membership doubles as the shift-amount
+    /// bound and the caller owes no separate check. `flag` gates that exactly as it does for every
+    /// other lookup: a zero flag makes the row vacuous, which is what lets a guarded shift carry an
+    /// out-of-range amount on an inactive path.
+    fn lookup_pow2(&mut self, s: u8, amount: ValueId, factor: ValueId, flag: ValueId) {
+        self.emit(OpCode::Lookup {
+            target: LookupTarget::Pow2(s),
+            args: vec![amount, factor],
+            flag,
+        });
+    }
+
     fn lookup_rngchk(&mut self, target: LookupTarget<ValueId>, value: ValueId, flag: ValueId) {
         self.emit(OpCode::Lookup {
             target,

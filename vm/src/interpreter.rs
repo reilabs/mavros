@@ -10,11 +10,13 @@ use tracing::instrument;
 
 pub use crate::InputValueOrdered;
 
-use crate::bytecode::{ENTRY_AD, ENTRY_WITGEN, parse_program_header, spread_bits};
 use crate::{
     ConstraintsLayout, Field, TableKind, WitnessLayout,
     array::BoxedValue,
-    bytecode::{self, AllocationInstrumenter, AllocationType, Int128, OpCode, TableInfo, VM},
+    bytecode::{
+        self, AllocationInstrumenter, AllocationType, ENTRY_AD, ENTRY_WITGEN, Int128, OpCode,
+        TableInfo, VM, parse_program_header, pow2_rows, spread_bits,
+    },
 };
 
 /// An opcode handler. Returns the `(pc, frame)` to feed into the next
@@ -497,6 +499,22 @@ pub fn run_phase2(
                     }
                 }
             }
+            TableKind::Pow2 => {
+                // One folded constraint per entry, exactly like the spread table above: both
+                // operands (key=n, value=2^n) are constants, so β·2^n folds into the denominator.
+                // 2^n is recomputed here rather than dumped by the VM.
+                let beta = phase1.out_wit_post_comm[1];
+                for (n, pow) in pow2_rows(tbl.length).enumerate() {
+                    let multiplicity = unsafe { *tbl.multiplicities_wit.add(n) };
+                    let denom = alpha - Field::from(n as u64) + beta * pow;
+                    phase1.out_b[base + n] = denom;
+                    phase1.out_c[base + n] = multiplicity;
+                    if multiplicity != Field::ZERO {
+                        phase1.out_a[base + n] = running_prod;
+                        running_prod *= denom;
+                    }
+                }
+            }
             TableKind::Array => {
                 // Two constraints per entry: x_i = -β*v_i, denom_i = α - i - x_i
                 let beta = phase1.out_wit_post_comm[1];
@@ -531,7 +549,10 @@ pub fn run_phase2(
     for tbl in phase1.tables.iter().rev() {
         let base = tbl.elem_inverses_constraint_section_offset;
 
-        if matches!(tbl.kind, TableKind::RangeCheck | TableKind::Spread) {
+        if matches!(
+            tbl.kind,
+            TableKind::RangeCheck | TableKind::Spread | TableKind::Pow2
+        ) {
             // One constraint per entry: y-values live at consecutive offsets.
             for i in (0..tbl.length).rev() {
                 let multiplicity = phase1.out_c[base + i];
@@ -600,11 +621,11 @@ pub fn run_phase2(
             // looked-up key & value are witnesses regardless of how the table
             // is allocated; only the *table's* internal y-slot stride differs —
             // array stores x,y per entry (stride 2, y at the odd slot) while a
-            // folded spread table stores just y per entry (stride 1).
+            // folded spread or powers-of-two table stores just y per entry (stride 1).
             // Entry 1 (x-constraint): out_a=table_id, out_b=result_value, out_c=0
             // Entry 2 (y-constraint): out_a=table_id, out_b=index, out_c=flag
             let entry_stride = match table.kind {
-                TableKind::Spread => 1,
+                TableKind::Spread | TableKind::Pow2 => 1,
                 _ => 2,
             };
             let beta = phase1.out_wit_post_comm[1];
@@ -652,7 +673,10 @@ pub fn run_phase2(
         let base = tbl.elem_inverses_constraint_section_offset;
         let wit_base = tbl.elem_inverses_witness_section_offset;
 
-        if matches!(tbl.kind, TableKind::RangeCheck | TableKind::Spread) {
+        if matches!(
+            tbl.kind,
+            TableKind::RangeCheck | TableKind::Spread | TableKind::Pow2
+        ) {
             // One constraint per entry: y-values at consecutive offsets, sum
             // constraint at offset length, one witness per entry.
             for i in 0..tbl.length {
