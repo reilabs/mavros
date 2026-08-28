@@ -756,6 +756,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
         self.clone()
     }
 
+    fn black_box(&self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
+        panic!("ICE: black_box should be lowered before R1CS generation")
+    }
+
     fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut R1CGen) -> Result<(), AssertionFailure> {
         let a = a.expect_linear_combination();
         let b = b.expect_linear_combination();

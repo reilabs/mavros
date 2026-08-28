@@ -1708,11 +1708,11 @@ impl<'a> ExpressionConverter<'a> {
                     "black_box input and output representations must match"
                 );
 
-                // `std::hint::black_box` is semantically an identity function. Its optimization
-                // barrier is deliberately only a hint, which a compiler may ignore. Mavros lowers
-                // the monomorphized AST directly rather than using Noir's SSA optimizer, so return
-                // the one evaluated argument without introducing a backend operation.
+                // Keep a distinct SSA value until the high-level optimization pipeline has
+                // completed. Noir uses this hint to prevent constant propagation and other SSA
+                // reasoning across the identity edge.
                 self.convert_expression(&call.arguments[0], b)
+                    .map(|value| self.emit_located(b, Some(call.location), |e| e.black_box(value)))
             }
             "assert_constant" => {
                 // Unit-valued expressions have no SSA value and are trivially constant.

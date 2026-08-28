@@ -57,6 +57,7 @@ impl WitnessWriteToFresh {
                             }
                         }
                         OpCode::Cmp { .. }
+                        | OpCode::BlackBox { .. }
                         | OpCode::Cast { .. }
                         | OpCode::MkSeq { .. }
                         | OpCode::MkSeqOfBlob { .. }

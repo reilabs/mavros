@@ -875,6 +875,11 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
+    fn black_box(&self, _tp: &Type, _instrumenter: &mut CostAnalysis) -> SpecSplitValue {
+        // The hint is a runtime identity and contributes no cost in either estimate.
+        self.clone()
+    }
+
     fn bit_range(
         &self,
         offset: usize,

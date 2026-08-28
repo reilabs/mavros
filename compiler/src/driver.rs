@@ -530,6 +530,7 @@ impl Driver {
             "r1cs_phase_1".to_string(),
             self.draw_cfg,
             vec![
+                Box::new(InstructionLowering::black_box()),
                 Box::new(WitnessWriteToFresh::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
                 Box::new(FixDoubleJumps::new()),
@@ -705,6 +706,7 @@ impl Driver {
             "witgen_lowering".to_string(),
             self.draw_cfg,
             vec![
+                Box::new(InstructionLowering::black_box()),
                 Box::new(InstructionLowering::guards()),
                 Box::new(WitnessWriteToVoid::new()),
                 Box::new(StripWitnessOf::new()),

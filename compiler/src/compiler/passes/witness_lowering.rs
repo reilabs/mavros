@@ -469,6 +469,7 @@ impl WitnessLowering {
                             });
                         }
                         OpCode::Not { .. }
+                        | OpCode::BlackBox { .. }
                         | OpCode::Cmp { .. }
                         | OpCode::SExt { .. }
                         | OpCode::BitRange { .. }

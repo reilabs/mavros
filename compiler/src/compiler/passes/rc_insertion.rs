@@ -830,6 +830,9 @@ impl RCInsertion {
                     OpCode::Guard { .. } => {
                         panic!("ICE: Guard should be lowered before RC insertion");
                     }
+                    OpCode::BlackBox { .. } => {
+                        panic!("ICE: BlackBox should be lowered before RC insertion");
+                    }
                     OpCode::MkTuple { .. } => ice_non_elided_tuple(),
                 }
             }

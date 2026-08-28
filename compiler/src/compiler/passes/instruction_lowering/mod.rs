@@ -1,4 +1,5 @@
 mod bit_range;
+mod black_box;
 mod degree_spilling;
 mod guards;
 mod pure_guards;
@@ -35,6 +36,7 @@ use crate::compiler::{
 
 use self::{
     bit_range::LowerBitRangeOps,
+    black_box::LowerBlackBox,
     degree_spilling::LowerDegreeSpillingOps,
     guards::LowerGuards,
     pure_guards::LowerPureGuards,
@@ -166,6 +168,15 @@ pub(super) trait InstructionLoweringRule {
 }
 
 impl InstructionLowering {
+    /// Remove `black_box` only after high-level optimization is complete.
+    pub fn black_box() -> Self {
+        Self::with_lowerers(
+            "instruction_lowering_black_box",
+            vec![Box::new(LowerBlackBox)],
+            false,
+        )
+    }
+
     pub fn witness_integer_ops() -> Self {
         Self::with_lowerers(
             "instruction_lowering_witness_integer_ops",

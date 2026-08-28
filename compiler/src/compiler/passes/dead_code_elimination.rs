@@ -453,6 +453,7 @@ impl DCE {
                 true
             }
             OpCode::AssertR1C { .. }
+            | OpCode::BlackBox { .. }
             | OpCode::Constrain { .. }
             | OpCode::Lookup { .. }
             | OpCode::DLookup { .. }

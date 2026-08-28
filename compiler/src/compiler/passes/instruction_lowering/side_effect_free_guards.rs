@@ -83,6 +83,7 @@ impl LowerSideEffectFreeGuards {
                 false
             }
             OpCode::Store { .. }
+            | OpCode::BlackBox { .. }
             | OpCode::Assert { .. }
             | OpCode::AssertCmp { .. }
             | OpCode::AssertR1C { .. }

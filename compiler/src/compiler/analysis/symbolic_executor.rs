@@ -108,6 +108,8 @@ where
     fn sext(&self, from: usize, to: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn bit_range(&self, offset: usize, width: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn cast(&self, cast_target: &CastTarget, out_type: &Type, ctx: &mut Context) -> Self;
+    /// Preserve an identity edge without carrying symbolic facts across it.
+    fn black_box(&self, out_type: &Type, ctx: &mut Context) -> Self;
     fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut Context) -> Result<(), AssertionFailure>;
     fn to_bits(
         &self,
@@ -330,6 +332,13 @@ impl SymbolicExecutor {
                         scope.insert(
                             *r,
                             a.cast(cast_target, &fn_type_info.get_value_type(*r), ctx),
+                        );
+                    }
+                    OpCode::BlackBox { result, value } => {
+                        let value = &scope[value];
+                        scope.insert(
+                            *result,
+                            value.black_box(&fn_type_info.get_value_type(*result), ctx),
                         );
                     }
                     OpCode::SExt {

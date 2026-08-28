@@ -487,6 +487,13 @@ fn lower_instruction(
                 });
             }
         }
+        OpCode::BlackBox { result, value } => {
+            let values = components(value_map, *value);
+            let results = components(value_map, *result);
+            for (value, result) in values.into_iter().zip(results) {
+                out.push(OpCode::BlackBox { result, value });
+            }
+        }
         OpCode::WriteWitness {
             result,
             value,

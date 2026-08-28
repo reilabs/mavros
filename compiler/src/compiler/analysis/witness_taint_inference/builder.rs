@@ -284,6 +284,7 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             builder.add_taint_to_leaves(builder.value_position(*result), Position::top(), ty);
         }
         OpCode::Not { result, value }
+        | OpCode::BlackBox { result, value }
         | OpCode::Cast { result, value, .. }
         | OpCode::SExt { result, value, .. }
         | OpCode::BitRange { result, value, .. }
@@ -726,6 +727,7 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         OpCode::Cmp { .. }
         | OpCode::BinaryArithOp { .. }
         | OpCode::Not { .. }
+        | OpCode::BlackBox { .. }
         | OpCode::Cast { .. }
         | OpCode::SExt { .. }
         | OpCode::BitRange { .. }

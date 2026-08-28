@@ -474,6 +474,11 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         Self(ctx.cast_to(cast_target.clone(), self.0))
     }
 
+    fn black_box(&self, _out_type: &Type, ctx: &mut SpecializationState) -> Self {
+        // Emit a fresh barrier value and deliberately do not copy the input's lattice fact.
+        Self(ctx.black_box(self.0))
+    }
+
     fn constrain(
         a: &Self,
         b: &Self,

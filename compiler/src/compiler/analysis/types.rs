@@ -602,6 +602,14 @@ impl Types {
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
+            OpCode::BlackBox { result, value } => {
+                let value_type = function_info
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
+                function_info.values.insert(*result, value_type.clone());
+                Ok(())
+            }
             OpCode::SExt {
                 result,
                 value,

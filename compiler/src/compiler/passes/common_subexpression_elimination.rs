@@ -640,6 +640,7 @@ impl CSE {
                     // `Lookup`s are never deduplicated here: that dedup is pre-R1C-only and now
                     // lives in the PRE pass.
                     OpCode::WriteWitness { result: None, .. }
+                    | OpCode::BlackBox { .. }
                     | OpCode::Constrain { .. }
                     | OpCode::NextDCoeff { result: _ }
                     | OpCode::BumpD {
@@ -1017,7 +1018,10 @@ impl ExprInterner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::ssa::{Terminator, hlssa::Type};
+    use crate::compiler::{
+        passes::simplifier::Simplifier,
+        ssa::{Terminator, hlssa::Type},
+    };
 
     /// `main(x, y) { a = x op1 y; b = x op2 y; return (a, b) }`, run through CSE.
     ///
@@ -1058,6 +1062,53 @@ mod tests {
         // that had stopped merging anything at all.
         let (a, b) = cse_two_ops(BinaryArithOpKind::UDiv, BinaryArithOpKind::UDiv);
         assert_eq!(a, b, "two identical divisions should share one value");
+    }
+
+    #[test]
+    fn black_box_outputs_are_opaque_to_expression_deduplication() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let input = ssa.add_const(Constant::Int(64, 7));
+        let (boxed_a, boxed_b) = (ssa.fresh_value(), ssa.fresh_value());
+        let (sum_a, sum_b) = (ssa.fresh_value(), ssa.fresh_value());
+
+        let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
+        entry.push_test_instruction(OpCode::BlackBox {
+            result: boxed_a,
+            value: input,
+        });
+        entry.push_test_instruction(OpCode::BlackBox {
+            result: boxed_b,
+            value: input,
+        });
+        for (result, lhs) in [(sum_a, boxed_a), (sum_b, boxed_b)] {
+            entry.push_test_instruction(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::UAdd,
+                result,
+                lhs,
+                rhs: input,
+            });
+        }
+        entry.set_terminator(Terminator::Return(vec![sum_a, sum_b]));
+
+        let cfg = FlowAnalysis::run(&ssa);
+        Simplifier::new().do_run(&mut ssa, &cfg);
+        let cfg = FlowAnalysis::run(&ssa);
+        CSE::post_r1c().do_run(&mut ssa, &cfg);
+
+        let Some(Terminator::Return(values)) =
+            ssa.get_unique_entrypoint().get_entry().get_terminator()
+        else {
+            panic!("expected return terminator");
+        };
+        assert_ne!(values[0], values[1]);
+        assert_eq!(
+            ssa.get_unique_entrypoint()
+                .get_entry()
+                .get_instructions()
+                .filter(|op| matches!(op, OpCode::BlackBox { .. }))
+                .count(),
+            2
+        );
     }
 
     #[test]

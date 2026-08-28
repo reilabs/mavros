@@ -69,6 +69,14 @@ pub enum OpCode {
         value: ValueId,
         target: CastTarget,
     },
+    /// An identity operation that deliberately hides `value` from optimization passes.
+    ///
+    /// This models Noir's `std::hint::black_box`. It is lowered to a no-op cast only after the
+    /// high-level optimization pipeline has finished.
+    BlackBox {
+        result: ValueId,
+        value: ValueId,
+    },
     SExt {
         result: ValueId,
         value: ValueId,
@@ -349,6 +357,7 @@ impl OpCode {
             OpCode::MkSeq { .. }
             | OpCode::MkSeqOfBlob { .. }
             | OpCode::MkRepeated { .. }
+            | OpCode::BlackBox { .. }
             | OpCode::Alloc { .. }
             | OpCode::Store { .. }
             | OpCode::Load { .. }
@@ -781,6 +790,14 @@ impl Instruction for OpCode {
                     target
                 )
             }
+            OpCode::BlackBox { result, value } => {
+                format!(
+                    "v{}{} = black_box(v{})",
+                    result.0,
+                    annotate_value(*result),
+                    value.0
+                )
+            }
             OpCode::SExt {
                 result,
                 value,
@@ -1075,6 +1092,10 @@ impl Instruction for OpCode {
                 value: c,
                 pinned: _,
             }
+            | Self::BlackBox {
+                result: _,
+                value: c,
+            }
             | Self::Cast {
                 result: _,
                 value: c,
@@ -1224,6 +1245,7 @@ impl Instruction for OpCode {
             | Self::MkSeqOfBlob { result: r, .. }
             | Self::MkRepeated { result: r, .. }
             | Self::Select { result: r, .. }
+            | Self::BlackBox { result: r, .. }
             | Self::Cast { result: r, .. }
             | Self::SExt { result: r, .. }
             | Self::BitRange { result: r, .. }
@@ -1292,6 +1314,7 @@ impl Instruction for OpCode {
             | Self::MkSeqOfBlob { result: r, .. }
             | Self::MkRepeated { result: r, .. }
             | Self::Select { result: r, .. }
+            | Self::BlackBox { result: r, .. }
             | Self::Cast { result: r, .. }
             | Self::SExt { result: r, .. }
             | Self::BitRange { result: r, .. }
@@ -1446,6 +1469,10 @@ impl Instruction for OpCode {
                 result: _,
                 value: c,
                 pinned: _,
+            }
+            | Self::BlackBox {
+                result: _,
+                value: c,
             }
             | Self::Cast {
                 result: _,
@@ -1619,6 +1646,10 @@ impl Instruction for OpCode {
                 result: a,
                 value: b,
                 target: _,
+            }
+            | Self::BlackBox {
+                result: a,
+                value: b,
             } => vec![a, b].into_iter(),
             Self::SExt {
                 result: a,

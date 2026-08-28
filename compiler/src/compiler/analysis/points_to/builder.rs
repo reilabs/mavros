@@ -366,6 +366,7 @@ impl FnBuilder<'_> {
                 self.copy_value(*result, *if_f, &ty);
             }
             OpCode::Not { result, value }
+            | OpCode::BlackBox { result, value }
             | OpCode::Cast { result, value, .. }
             | OpCode::SExt { result, value, .. }
             | OpCode::BitRange { result, value, .. }

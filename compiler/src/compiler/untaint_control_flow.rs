@@ -8,6 +8,7 @@ use crate::{
         analysis::{
             flow_analysis::{CFG, FlowAnalysis},
             types::{FunctionTypeInfo, TypeInfo, Types},
+            value_definitions::{FunctionValueDefinitions, ValueDefinition},
             witness_info::{FunctionWitnessType, WitnessInfo, WitnessShape, WitnessType},
             witness_taint_inference::WitnessTaintInference,
         },
@@ -24,59 +25,6 @@ use crate::{
 };
 
 pub struct UntaintControlFlow {}
-
-/// Aggregate definitions needed to recognize a conditional functional update.
-///
-/// This is captured before control-flow linearization starts. Branch blocks are rebuilt in place
-/// during linearization, so looking definitions up in the live function would otherwise depend on
-/// traversal order.
-#[derive(Clone, Copy, Debug)]
-enum ArrayValueDefinition {
-    Get { array: ValueId, index: ValueId },
-    Set { array: ValueId, index: ValueId, value: ValueId },
-}
-
-fn collect_array_value_definitions(
-    function: &HLFunction,
-) -> HashMap<ValueId, ArrayValueDefinition> {
-    let mut definitions = HashMap::default();
-    for (_, block) in function.get_blocks() {
-        for instruction in block.get_instructions() {
-            match instruction {
-                OpCode::ArrayGet {
-                    result,
-                    array,
-                    index,
-                } => {
-                    definitions.insert(
-                        *result,
-                        ArrayValueDefinition::Get {
-                            array: *array,
-                            index: *index,
-                        },
-                    );
-                }
-                OpCode::ArraySet {
-                    result,
-                    array,
-                    index,
-                    value,
-                } => {
-                    definitions.insert(
-                        *result,
-                        ArrayValueDefinition::Set {
-                            array: *array,
-                            index: *index,
-                            value: *value,
-                        },
-                    );
-                }
-                _ => {}
-            }
-        }
-    }
-    definitions
-}
 
 /// Look up the witness level for a value, defaulting to Pure for values
 /// not present in the witness type map (e.g., values created after type inference).
@@ -397,7 +345,9 @@ impl UntaintControlFlow {
         type_info: Option<&FunctionTypeInfo>,
     ) {
         let cfg = flow_analysis.get_function_cfg(function_id);
-        let array_value_definitions = collect_array_value_definitions(function);
+        // Snapshot before linearization rebuilds branch blocks in place. Reuse the compiler-wide
+        // definition analysis so this recognition cannot drift from other definition consumers.
+        let value_definitions = FunctionValueDefinitions::from_function(function);
 
         let cfg_witness_param = if matches!(function_wt.cfg_witness, WitnessInfo::Witness) {
             let entry_id = function.get_entry_id();
@@ -437,7 +387,7 @@ impl UntaintControlFlow {
                 &block_param_types,
                 return_types.as_slice(),
                 type_info,
-                &array_value_definitions,
+                &value_definitions,
             );
         }
     }
@@ -453,7 +403,7 @@ impl UntaintControlFlow {
         block_param_types: &HashMap<BlockId, Vec<Type>>,
         return_types: &[Type],
         type_info: Option<&FunctionTypeInfo>,
-        array_value_definitions: &HashMap<ValueId, ArrayValueDefinition>,
+        value_definitions: &FunctionValueDefinitions,
     ) {
         let mut block = function.take_block(block_id);
         let block_taint = *block_taint_vars.get(&block_id).unwrap();
@@ -664,7 +614,7 @@ impl UntaintControlFlow {
                                             typ,
                                             &lhs_type,
                                             &rhs_type,
-                                            array_value_definitions,
+                                            value_definitions,
                                             type_info,
                                         );
                                     }
@@ -1092,19 +1042,28 @@ fn nested_update_base_element(
     updated_value: ValueId,
     base: ValueId,
     index: ValueId,
-    definitions: &HashMap<ValueId, ArrayValueDefinition>,
+    definitions: &FunctionValueDefinitions,
 ) -> Option<ValueId> {
-    let ArrayValueDefinition::Set {
-        array: nested_base, ..
-    } = definitions.get(&updated_value)?
+    let ValueDefinition::Instruction(
+        _,
+        _,
+        OpCode::ArraySet {
+            array: nested_base, ..
+        },
+    ) = definitions.get_definition(updated_value)?
     else {
         return None;
     };
-    match definitions.get(nested_base) {
-        Some(ArrayValueDefinition::Get {
-            array: get_array,
-            index: get_index,
-        }) if *get_array == base && *get_index == index => Some(*nested_base),
+    match definitions.get_definition(*nested_base) {
+        Some(ValueDefinition::Instruction(
+            _,
+            _,
+            OpCode::ArrayGet {
+                array: get_array,
+                index: get_index,
+                ..
+            },
+        )) if *get_array == base && *get_index == index => Some(*nested_base),
         _ => None,
     }
 }
@@ -1127,10 +1086,12 @@ fn guarded_array_get(
     result
 }
 
-/// Lower a merge where exactly one arm is a constant-index functional update of the other.
+/// Lower a merge where exactly one arm is a single functional update of the other.
 ///
-///     select(c, ArraySet(a, i, v), a)
-///       => ArraySet(a, i, select(c, v, ArrayGet(a, i)))
+/// ```text
+/// select(c, ArraySet(a, i, v), a)
+///   => ArraySet(a, i, select(c, v, ArrayGet(a, i)))
+/// ```
 ///
 /// The symmetric false-arm form is handled as well. Potentially out-of-bounds operations retain
 /// the updated arm's control-flow guard; this is essential because moving an unguarded `ArraySet`
@@ -1149,7 +1110,7 @@ fn try_emit_sparse_array_merge(
     rhs_type: &Type,
     result_elem_type: &Type,
     size: usize,
-    definitions: &HashMap<ValueId, ArrayValueDefinition>,
+    definitions: &FunctionValueDefinitions,
     type_info: Option<&FunctionTypeInfo>,
 ) -> Option<ValueId> {
     // A sparse ArraySet must start from a value with the exact result representation. The general
@@ -1158,26 +1119,38 @@ fn try_emit_sparse_array_merge(
         return None;
     }
 
-    let (base, index, updated_value, update_is_lhs, update_guard) =
-        match (definitions.get(&lhs), definitions.get(&rhs)) {
-            (
-                Some(ArrayValueDefinition::Set {
+    let (base, index, updated_value, update_is_lhs, update_guard) = match (
+        definitions.get_definition(lhs),
+        definitions.get_definition(rhs),
+    ) {
+        (
+            Some(ValueDefinition::Instruction(
+                _,
+                _,
+                OpCode::ArraySet {
                     array,
                     index,
                     value,
-                }),
+                    ..
+                },
+            )),
+            _,
+        ) if *array == rhs => (rhs, *index, *value, true, lhs_guard),
+        (
+            _,
+            Some(ValueDefinition::Instruction(
                 _,
-            ) if *array == rhs => (rhs, *index, *value, true, lhs_guard),
-            (
                 _,
-                Some(ArrayValueDefinition::Set {
+                OpCode::ArraySet {
                     array,
                     index,
                     value,
-                }),
-            ) if *array == lhs => (lhs, *index, *value, false, rhs_guard),
-            _ => return None,
-        };
+                    ..
+                },
+            )),
+        ) if *array == lhs => (lhs, *index, *value, false, rhs_guard),
+        _ => return None,
+    };
 
     let statically_in_bounds = index_is_statically_in_bounds(builder, index, size);
 
@@ -1261,7 +1234,7 @@ fn emit_merge_select(
     result_type: &Type,
     lhs_type: &Type,
     rhs_type: &Type,
-    array_value_definitions: &HashMap<ValueId, ArrayValueDefinition>,
+    value_definitions: &FunctionValueDefinitions,
     type_info: Option<&FunctionTypeInfo>,
 ) -> ValueId {
     if lhs == rhs && lhs_type == result_type && rhs_type == result_type {
@@ -1293,7 +1266,7 @@ fn emit_merge_select(
                 rhs_type,
                 result_elem_type,
                 *size,
-                array_value_definitions,
+                value_definitions,
                 type_info,
             ) {
                 return result;
@@ -1329,7 +1302,7 @@ fn emit_merge_select(
                     result_elem_type,
                     lhs_elem_type,
                     rhs_elem_type,
-                    array_value_definitions,
+                    value_definitions,
                     type_info,
                 );
                 elems.push(selected);
@@ -1538,7 +1511,7 @@ mod tests {
         };
 
         let mut function = ssa.take_function(main_id);
-        let definitions = collect_array_value_definitions(&function);
+        let definitions = FunctionValueDefinitions::from_function(&function);
         let result = ssa.fresh_value();
         let mut instructions = Vec::new();
         {
@@ -1618,7 +1591,7 @@ mod tests {
         };
 
         let mut function = ssa.take_function(main_id);
-        let definitions = collect_array_value_definitions(&function);
+        let definitions = FunctionValueDefinitions::from_function(&function);
         let mut instructions = Vec::new();
         {
             let mut builder = HLInstrBuilder::new(
@@ -1686,7 +1659,7 @@ mod tests {
         };
 
         let mut function = ssa.take_function(main_id);
-        let definitions = collect_array_value_definitions(&function);
+        let definitions = FunctionValueDefinitions::from_function(&function);
         let mut instructions = Vec::new();
         {
             let mut builder = HLInstrBuilder::new(

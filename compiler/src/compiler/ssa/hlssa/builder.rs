@@ -172,6 +172,13 @@ pub trait HLEmitter {
         r
     }
 
+    /// Preserve an identity edge through high-level optimization.
+    fn black_box(&mut self, value: ValueId) -> ValueId {
+        let result = self.fresh_value();
+        self.emit(OpCode::BlackBox { result, value });
+        result
+    }
+
     fn widen_u(&mut self, value: ValueId, from_bits: usize, to_bits: usize) -> ValueId {
         assert!(
             from_bits <= to_bits,
