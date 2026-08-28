@@ -432,7 +432,7 @@ fn build_plan(ssa: &HLSSA, sel: &Selection) -> Plan {
         .max()
         .unwrap_or(0);
     plan.index_consts = (0..max_n)
-        .map(|k| ssa.add_const(Constant::Int(32, k as u128)))
+        .map(|k| ssa.add_const(Constant::int(32, k as u128)))
         .collect();
 
     // Callee plans (sorted callees; within each, params then return cells).

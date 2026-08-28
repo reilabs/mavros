@@ -196,24 +196,22 @@ impl ConstantPoolInterner {
     }
 }
 
-/// Visit the `u64` words of `constant` in frame order — the order in which both the constant pool
-/// and a `MovConst` spill lay them out.
+/// Visit the `u64` words of `constant` in frame order.
 ///
 /// This is the single source of truth for constant word ordering: [`ConstantPoolInterner`], the
 /// `spill_constant_to_frame` inline path, and `constant_cell_count` (which just counts the visits)
-/// all drive it, so the pooled and inline representations — and the memcpy size — cannot drift out
+/// all use this, so the pooled and inline representations — and the memcpy size — cannot drift out
 /// of sync. Adding a new [`Constant`] variant only requires updating this function.
 pub fn for_each_constant_word(constant: &Constant, visit: &mut impl FnMut(u64)) {
     match constant {
-        // The word count is a question about the width alone.
-        Constant::Int(size, val) => match size {
-            bits if *bits <= 64 => visit(*val as u64),
-            128 => {
-                visit(*val as u64);
-                visit((*val >> 64) as u64);
+        Constant::Int(v) => {
+            // A normalised pattern already _is_ the word sequence, at exactly the length the frame
+            // wants. `int_cell_count` is called anyway, for the width cap it asserts on the way.
+            assert_eq!(int_cell_count(v.bits()), v.limb_count());
+            for &word in v.limbs() {
+                visit(word);
             }
-            bits => panic!("unsupported integer width: {bits}"),
-        },
+        }
         Constant::Field(val) => {
             // FIELD-ASSUMPTION: L3-felt-limbs
             // FIELD-ASSUMPTION: L3-frame
@@ -297,10 +295,8 @@ mod tests {
     #[test]
     fn the_two_frame_size_formulas_agree_at_every_width() {
         // `alloc_value` goes through `type_size` while `alloc_int` goes through `int_cell_count`,
-        // and the same value can be allocated by either. They used to disagree for anything
-        // needing more than one cell -- `type_size` hardcoded `1` for a signed integer, which was
-        // invisible only because a signed type could not be wider than 64 bits. Nothing bounds the
-        // width by sign any more, so the two must agree by construction.
+        // and the same value can be allocated by either, so the two formulas have to agree at every
+        // width.
         let layouter = FrameLayouter::new();
         for bits in [1usize, 8, 32, 63, 64, 65, 127, 128] {
             assert_eq!(
@@ -318,29 +314,33 @@ mod tests {
 
     #[test]
     fn a_constant_occupies_as_many_words_as_its_width_needs() {
-        // The word count follows the width, and `alloc_int` must agree with it -- the two used to
-        // disagree, and a wide constant lost its upper word.
+        // The word count follows the width, and `alloc_int` must agree with it: where they part
+        // company, a wide constant loses its upper word.
         let count = |c: &Constant| {
             let mut n = 0;
             for_each_constant_word(c, &mut |_| n += 1);
             n
         };
         for bits in [1usize, 8, 32, 63, 64] {
-            assert_eq!(count(&Constant::Int(bits, 1)), 1, "at {bits} bits");
+            assert_eq!(count(&Constant::int(bits, 1)), 1, "at {bits} bits");
         }
-        assert_eq!(count(&Constant::Int(128, 1)), 2);
+        assert_eq!(count(&Constant::int(128, 1)), 2);
+
+        for bits in [65usize, 96, 127] {
+            assert_eq!(count(&Constant::int(bits, 1)), 2, "at {bits} bits");
+        }
 
         // The upper word is emitted, not dropped: a payload living entirely above bit 64 must
         // still produce two words, the low one zero.
         let mut words = Vec::new();
-        for_each_constant_word(&Constant::Int(128, 1u128 << 100), &mut |w| words.push(w));
+        for_each_constant_word(&Constant::int(128, 1u128 << 100), &mut |w| words.push(w));
         assert_eq!(words, vec![0u64, 1u64 << 36]);
 
         // And the count agrees with what the frame reserves for the same width, which is the
         // pairing that actually has to hold.
-        for bits in [1usize, 8, 32, 63, 64, 128] {
+        for bits in [1usize, 8, 32, 63, 64, 65, 96, 127, 128] {
             assert_eq!(
-                count(&Constant::Int(bits, 1)),
+                count(&Constant::int(bits, 1)),
                 int_cell_count(bits),
                 "constant words and frame cells disagree at {bits} bits"
             );

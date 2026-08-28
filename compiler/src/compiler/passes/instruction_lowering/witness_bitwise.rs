@@ -335,9 +335,15 @@ impl LowerWitnessBitwiseOps {
         let lhs_signed = kind.is_signed();
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
 
-        // The check below indexes bit `log2(bits)` upwards as "too large", which is only the right
-        // test when `bits` is a power of two. Every Noir integer width is, but the lowering would
+        // The check below indexes bit `log2(bits)` upwards as "too large", and `emit_pow2_factor`'s
+        // table is keyed by `log2(bits)` so that membership is the amount bound. Both are only
+        // right when `bits` is a power of two. Every Noir integer width is, but the lowering would
         // be silently wrong rather than merely unsupported if that ever changed.
+        //
+        // This is the guard IR's own requirement: the _total_ evaluators (the VM, LLVM and the
+        // model) reduce an amount modulo the width and so agree at every width. Admitting a non
+        // power-of-two shift means rebuilding the check as a real `amount < bits` comparison and
+        // splitting the `2^n` factor, not deleting this assert.
         assert!(
             bits.is_power_of_two(),
             "the shift-amount check assumes a power-of-two integer width, got {bits}"
@@ -1273,7 +1279,7 @@ mod tests {
     fn every_table_backed_width_has_exactly_as_many_rows_as_amounts() {
         // The table is keyed by `log2(bits)` so that its row count is `1 << size`, the convention
         // every other width-keyed table follows. That works only because the legal amounts are
-        // `0..bits` and `bits` is a power of two: `shift_operand_bits` asserts the latter. If the
+        // `0..bits` and `bits` is a power of two: `lower_shift` asserts the latter. If the
         // two ever drift, membership stops being the amount bound and the lowering silently accepts
         // or rejects the wrong amounts.
         for bits in [8usize, 16, 32, 64, 128] {

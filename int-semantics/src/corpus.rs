@@ -51,7 +51,7 @@
 //! the discharge that deletes a check outright.
 
 use crate::{
-    IntOp, MAX_BITS, MAX_SIGNED_BITS, Outcome, Raw, Reject, Sign, corners, decode_signed, eval,
+    IntBits, IntOp, MAX_BITS, MAX_SIGNED_BITS, Outcome, Reject, Sign, SignedValue, corners, eval,
     residue,
 };
 
@@ -117,12 +117,16 @@ impl GeneratedTest {
 }
 
 /// Every program whose operations this model _accepts_, one per operation.
-///
-/// One test per [`IntOp`] rather than per `(op, sign, width)`: the cells are cheap but the rows are
-/// not, and an operation is the granularity at which a red row is still self-explaining.
 #[must_use]
 pub fn accepting_tests() -> Vec<GeneratedTest> {
-    IntOp::ALL.iter().map(|&op| accepting_test(op)).collect()
+    let mut groups: Vec<Vec<IntOp>> = Vec::new();
+    for &op in &IntOp::ALL {
+        match groups.iter_mut().find(|g| g[0].name() == op.name()) {
+            Some(group) => group.push(op),
+            None => groups.push(vec![op]),
+        }
+    }
+    groups.iter().map(|ops| accepting_test(ops)).collect()
 }
 
 /// Every program this model _rejects_, one per `(operation, reading, reason)`.
@@ -134,7 +138,7 @@ pub fn accepting_tests() -> Vec<GeneratedTest> {
 pub fn rejecting_tests() -> Vec<GeneratedTest> {
     let mut out = Vec::new();
     for &op in &IntOp::ALL {
-        for sign in readings_for(op) {
+        for sign in renderings(op) {
             for reason in ALL_REASONS {
                 for case in Case::ALL {
                     if let Some(test) = rejecting_test(op, sign, reason, case) {
@@ -203,15 +207,17 @@ impl Case {
 // THE ACCEPTING CORPUS
 // ================================================================================================
 
-fn accepting_test(op: IntOp) -> GeneratedTest {
-    let cells: Vec<Cell> = readings_for(op)
-        .into_iter()
-        .flat_map(|sign| {
+fn accepting_test(ops: &[IntOp]) -> GeneratedTest {
+    let cells: Vec<Cell> = ops
+        .iter()
+        .flat_map(|&op| renderings(op).into_iter().map(move |sign| (op, sign)))
+        .flat_map(|(op, sign)| {
             widths_for(op, sign)
                 .into_iter()
                 .filter_map(move |bits| accepting_cell(op, sign, bits))
         })
         .collect();
+    let op = ops[0];
 
     let mut pool = Pool::default();
     for cell in &cells {
@@ -235,14 +241,14 @@ fn accepting_test(op: IntOp) -> GeneratedTest {
             body.push_str(&format!(
                 "    assert_eq({} {} {}, {});\n",
                 pool.name(cell.sign, cell.bits, lhs),
-                symbol(op),
+                op.symbol(),
                 pool.name(cell.sign, cell.bits, rhs),
                 literal(cell.sign, cell.bits, expected),
             ));
         }
     }
 
-    let name = format!("int_semantics_{}", op_name(op));
+    let name = format!("int_semantics_{}", op.name());
     let main_nr = format!(
         "{}fn main(\n{}) {{{}}}\n",
         accepting_header(op, &cells),
@@ -261,7 +267,7 @@ fn accepting_test(op: IntOp) -> GeneratedTest {
 /// The accepting `(lhs, rhs, expected)` triples for one `(op, sign, width)` cell.
 fn accepting_cell(op: IntOp, sign: Sign, bits: usize) -> Option<Cell> {
     let lhs_values = corners::values(bits);
-    let rhs_values = if is_shift(op) {
+    let rhs_values = if op.is_shift() {
         in_range_amounts(bits)
     } else {
         corners::values(bits)
@@ -270,8 +276,8 @@ fn accepting_cell(op: IntOp, sign: Sign, bits: usize) -> Option<Cell> {
     let mut accepted = Vec::new();
     for &lhs in &lhs_values {
         for &rhs in &rhs_values {
-            if let Outcome::Value(expected) = eval(op, sign, bits, lhs, bits, rhs) {
-                accepted.push((lhs, rhs, expected));
+            if let Outcome::Value(expected) = eval(op, &pattern(bits, lhs), &pattern(bits, rhs)) {
+                accepted.push((lhs, rhs, host(&expected)));
             }
         }
     }
@@ -292,7 +298,7 @@ fn accepting_cell(op: IntOp, sign: Sign, bits: usize) -> Option<Cell> {
 struct Cell {
     sign: Sign,
     bits: usize,
-    pairs: Vec<(Raw, Raw, Raw)>,
+    pairs: Vec<(u128, u128, u128)>,
 }
 
 // THE REJECTING CORPUS
@@ -304,12 +310,12 @@ fn rejecting_test(op: IntOp, sign: Sign, reason: Reject, case: Case) -> Option<G
     // The assertion is written against the answer a _total_ backend produces for this input, so
     // that removing the guard makes the program pass rather than fail. Where `residue` declines to
     // specify the answer there is nothing to assert -- see `sink` below.
-    let (checked, sink) = match residue(op, sign, bits, lhs, bits, rhs) {
+    let (checked, sink) = match residue(op, &pattern(bits, lhs), &pattern(bits, rhs)) {
         Some(expected) => (
             format!(
                 "    assert_eq(a {} b, {});\n",
-                symbol(op),
-                literal(sign, bits, expected)
+                op.symbol(),
+                literal(sign, bits, host(&expected))
             ),
             String::new(),
         ),
@@ -321,7 +327,7 @@ fn rejecting_test(op: IntOp, sign: Sign, reason: Reject, case: Case) -> Option<G
         None => (
             format!(
                 "    let r = a {} b;\n    assert_eq(r * zero, 0);\n",
-                symbol(op)
+                op.symbol()
             ),
             format!(", zero: {}", type_name(sign, bits)),
         ),
@@ -345,7 +351,7 @@ fn rejecting_test(op: IntOp, sign: Sign, reason: Reject, case: Case) -> Option<G
     Some(GeneratedTest {
         name: format!(
             "int_semantics_{}_{}_{}{}_fails",
-            op_name(op),
+            op.name(),
             reading_letter(sign),
             reason_name(reason),
             case.suffix()
@@ -356,8 +362,21 @@ fn rejecting_test(op: IntOp, sign: Sign, reason: Reject, case: Case) -> Option<G
     })
 }
 
+/// A `bits`-wide pattern from the host word this generator carries its values as.
+///
+/// The generator is host-typed throughout — it sorts, deduplicates and formats these as Noir
+/// literals — so an [`IntBits`] exists here only for the length of a call into the model.
+fn pattern(bits: usize, value: u128) -> IntBits {
+    IntBits::from_u128(bits, value)
+}
+
+/// The host word a model answer denotes, the other half of [`pattern`].
+fn host(value: &IntBits) -> u128 {
+    u128::try_from(value).expect("a pattern no wider than MAX_BITS fits a host word")
+}
+
 /// The operands one rejecting program is built from, or `None` where the case has no program.
-fn rejection_for(op: IntOp, sign: Sign, reason: Reject, case: Case) -> Option<(usize, Raw, Raw)> {
+fn rejection_for(op: IntOp, sign: Sign, reason: Reject, case: Case) -> Option<(usize, u128, u128)> {
     match case {
         Case::Narrowest => first_rejection(op, sign, reason),
         Case::Widest => widest_rejection(op, sign, reason),
@@ -371,7 +390,7 @@ fn rejection_for(op: IntOp, sign: Sign, reason: Reject, case: Case) -> Option<(u
 /// one whose check bound the width decides — see [`Case::Widest`] — and the width found has to
 /// differ from the narrowest one, since rendering the same program under two names would cost a
 /// row for nothing.
-fn widest_rejection(op: IntOp, sign: Sign, reason: Reject) -> Option<(usize, Raw, Raw)> {
+fn widest_rejection(op: IntOp, sign: Sign, reason: Reject) -> Option<(usize, u128, u128)> {
     if reason == Reject::DivByZero {
         return None;
     }
@@ -379,7 +398,7 @@ fn widest_rejection(op: IntOp, sign: Sign, reason: Reject) -> Option<(usize, Raw
     let narrowest = first_rejection(op, sign, reason)?.0;
     let mut widths = widths_for(op, sign);
     widths.reverse();
-    let (bits, lhs, rhs) = search_rejection(op, sign, reason, &widths)?;
+    let (bits, lhs, rhs) = search_rejection(op, reason, &widths)?;
     (bits != narrowest).then_some((bits, lhs, rhs))
 }
 
@@ -388,15 +407,15 @@ fn widest_rejection(op: IntOp, sign: Sign, reason: Reject) -> Option<(usize, Raw
 /// Only a signed shift has one: the reading is what makes an amount negative, and the width is
 /// pinned to the widest rather than searched for the reason [`Case::NegativeAmount`] gives. The
 /// amounts are filtered by their _reading_ rather than by magnitude.
-fn negative_amount_rejection(op: IntOp, sign: Sign, reason: Reject) -> Option<(usize, Raw, Raw)> {
-    if !(is_shift(op) && sign == Sign::Signed && reason == Reject::ShiftAmount) {
+fn negative_amount_rejection(op: IntOp, sign: Sign, reason: Reject) -> Option<(usize, u128, u128)> {
+    if !(op.is_shift() && sign == Sign::Signed && reason == Reject::ShiftAmount) {
         return None;
     }
 
     let bits = *widths_for(op, sign).last()?;
-    let amounts: Vec<Raw> = corners::shift_amounts(bits, bits)
+    let amounts: Vec<u128> = corners::shift_amounts(bits, bits)
         .into_iter()
-        .filter(|&a| decode_signed(bits, a) < 0)
+        .filter(|&a| pattern(bits, a).to_signed() < SignedValue::from(0u8))
         .collect();
 
     // Zero last, for the reason `first_rejection` gives.
@@ -405,7 +424,7 @@ fn negative_amount_rejection(op: IntOp, sign: Sign, reason: Reject) -> Option<(u
 
     for &lhs in &lhs_values {
         for &rhs in &amounts {
-            if eval(op, sign, bits, lhs, bits, rhs) == Outcome::Rejected(reason) {
+            if eval(op, &pattern(bits, lhs), &pattern(bits, rhs)) == Outcome::Rejected(reason) {
                 return Some((bits, lhs, rhs));
             }
         }
@@ -418,22 +437,17 @@ fn negative_amount_rejection(op: IntOp, sign: Sign, reason: Reject) -> Option<(u
 /// Searching rather than listing is the point: the corpus states which rejections the model has,
 /// so a `Reject` variant that gains or loses a reachable input changes the set of generated
 /// directories instead of drifting away from a hand-written list.
-fn first_rejection(op: IntOp, sign: Sign, reason: Reject) -> Option<(usize, Raw, Raw)> {
-    search_rejection(op, sign, reason, &widths_for(op, sign))
+fn first_rejection(op: IntOp, sign: Sign, reason: Reject) -> Option<(usize, u128, u128)> {
+    search_rejection(op, reason, &widths_for(op, sign))
 }
 
 /// The first corner pair rejected for `reason`, scanning `widths` in the order given.
 ///
 /// The order is the caller's whole contribution: [`first_rejection`] passes the widths ascending
 /// and [`widest_rejection`] descending, and neither has an opinion about anything else.
-fn search_rejection(
-    op: IntOp,
-    sign: Sign,
-    reason: Reject,
-    widths: &[usize],
-) -> Option<(usize, Raw, Raw)> {
+fn search_rejection(op: IntOp, reason: Reject, widths: &[usize]) -> Option<(usize, u128, u128)> {
     for &bits in widths {
-        let rhs_values = if is_shift(op) {
+        let rhs_values = if op.is_shift() {
             corners::shift_amounts(bits, bits)
         } else {
             corners::values(bits)
@@ -446,7 +460,7 @@ fn search_rejection(
         lhs_values.sort_by_key(|&v| v == 0);
         for &lhs in &lhs_values {
             for &rhs in &rhs_values {
-                if eval(op, sign, bits, lhs, bits, rhs) == Outcome::Rejected(reason) {
+                if eval(op, &pattern(bits, lhs), &pattern(bits, rhs)) == Outcome::Rejected(reason) {
                     return Some((bits, lhs, rhs));
                 }
             }
@@ -464,20 +478,20 @@ fn search_rejection(
 /// same corpus renders byte-identically however the cells that use them are ordered.
 #[derive(Default)]
 struct Pool {
-    used: BTreeSet<(usize, bool, Raw)>,
+    used: BTreeSet<(usize, bool, u128)>,
 }
 
 /// A pool with its parameter names decided, which is what the renderers actually read.
 struct NamedPool {
     /// Every group, in declaration order, as `(reading, width, values in reading order)`.
-    groups: Vec<(Sign, usize, Vec<Raw>)>,
+    groups: Vec<(Sign, usize, Vec<u128>)>,
 
     /// The parameter name each pooled value is declared under, keyed by `(width, signed, value)`.
-    names: BTreeMap<(usize, bool, Raw), String>,
+    names: BTreeMap<(usize, bool, u128), String>,
 }
 
 impl Pool {
-    fn record(&mut self, sign: Sign, bits: usize, value: Raw) {
+    fn record(&mut self, sign: Sign, bits: usize, value: u128) {
         self.used.insert((bits, sign == Sign::Signed, value));
     }
 
@@ -497,7 +511,7 @@ impl Pool {
         let mut names = BTreeMap::new();
         for (signed, bits) in keys {
             let sign = if signed { Sign::Signed } else { Sign::Unsigned };
-            let mut values: Vec<Raw> = self
+            let mut values: Vec<u128> = self
                 .used
                 .iter()
                 .filter(|&&(b, s, _)| b == bits && s == signed)
@@ -506,7 +520,7 @@ impl Pool {
             // Sorting signed values by their _reading_ rather than their pattern keeps the
             // generated `Prover.toml` monotonic, which is what makes it readable.
             if signed {
-                values.sort_by_key(|&v| decode_signed(bits, v));
+                values.sort_by_key(|&v| pattern(bits, v).to_signed());
             } else {
                 values.sort_unstable();
             }
@@ -524,7 +538,7 @@ impl Pool {
 }
 
 impl NamedPool {
-    fn name(&self, sign: Sign, bits: usize, value: Raw) -> &str {
+    fn name(&self, sign: Sign, bits: usize, value: u128) -> &str {
         self.names
             .get(&(bits, sign == Sign::Signed, value))
             .expect("ICE: a pair used a value the pool never recorded")
@@ -560,10 +574,10 @@ impl NamedPool {
 // ================================================================================================
 
 /// A `bits`-wide pattern as a Noir literal, under `sign`'s reading.
-fn literal(sign: Sign, bits: usize, value: Raw) -> String {
+fn literal(sign: Sign, bits: usize, value: u128) -> String {
     match sign {
         Sign::Unsigned => value.to_string(),
-        Sign::Signed => decode_signed(bits, value).to_string(),
+        Sign::Signed => pattern(bits, value).to_signed().to_string(),
     }
 }
 
@@ -586,36 +600,6 @@ const fn reading_word(sign: Sign) -> &'static str {
     }
 }
 
-const fn op_name(op: IntOp) -> &'static str {
-    match op {
-        IntOp::Add => "add",
-        IntOp::Sub => "sub",
-        IntOp::Mul => "mul",
-        IntOp::Div => "div",
-        IntOp::Rem => "rem",
-        IntOp::And => "and",
-        IntOp::Or => "or",
-        IntOp::Xor => "xor",
-        IntOp::Shl => "shl",
-        IntOp::Shr => "shr",
-    }
-}
-
-const fn symbol(op: IntOp) -> &'static str {
-    match op {
-        IntOp::Add => "+",
-        IntOp::Sub => "-",
-        IntOp::Mul => "*",
-        IntOp::Div => "/",
-        IntOp::Rem => "%",
-        IntOp::And => "&",
-        IntOp::Or => "|",
-        IntOp::Xor => "^",
-        IntOp::Shl => "<<",
-        IntOp::Shr => ">>",
-    }
-}
-
 const fn reason_name(reason: Reject) -> &'static str {
     match reason {
         Reject::Overflow => "overflow",
@@ -625,18 +609,21 @@ const fn reason_name(reason: Reject) -> &'static str {
     }
 }
 
-const fn is_shift(op: IntOp) -> bool {
-    matches!(op, IntOp::Shl | IntOp::Shr)
-}
-
-/// The readings worth generating for an operation.
+/// The Noir **types** worth declaring an operation's operands as.
 ///
-/// Both, even where the reading cannot change the answer -- `And`/`Or`/`Xor` -- the signed _type_
-/// takes its own route through the lowering, so it is worth a few pairs; how few is
-/// [`PAIRS_PER_READING_BLIND_CELL`]. A reading that has no rejecting input simply generates no
-/// rejecting test, which `first_rejection` decides rather than this.
-const fn readings_for(_op: IntOp) -> [Sign; 2] {
-    [Sign::Unsigned, Sign::Signed]
+/// A `Sign` here is a fact about the generated _source_, not about the model: it picks `u8` over
+/// `i8` in a signature and how a literal is spelled, which is all `Pool` and [`literal`] use it
+/// for.
+/// An operation names its own reading, so the type and the reading coincide wherever there is one.
+/// Where there is not, both types are worth generating anyway, because a signed _type_ takes its
+/// own route through the lowering even when the operation cannot tell the difference. How many
+/// pairs that is worth is [`PAIRS_PER_READING_BLIND_CELL`].
+///
+/// The result is twenty `(op, sign)` pairs: twelve operations that name a reading, once each, plus
+/// `And`/`Or`/`Xor`/`Shl` twice each.
+fn renderings(op: IntOp) -> Vec<Sign> {
+    op.sign()
+        .map_or_else(|| Sign::ALL.to_vec(), |sign| vec![sign])
 }
 
 /// The widths a generated program may use for `(op, sign)`.
@@ -660,10 +647,10 @@ fn widths_for(op: IntOp, sign: Sign) -> Vec<usize> {
 ///
 /// The corners are where the boundary bugs live: `bits - 1` is the largest legal amount and
 /// `bits / 2` sits where a decomposition changes shape.
-fn in_range_amounts(bits: usize) -> Vec<Raw> {
+fn in_range_amounts(bits: usize) -> Vec<u128> {
     corners::shift_amounts(bits, bits)
         .into_iter()
-        .filter(|&a| a < bits as Raw)
+        .filter(|&a| a < bits as u128)
         .collect()
 }
 
@@ -707,7 +694,7 @@ fn accepting_header(op: IntOp, cells: &[Cell]) -> String {
          // `assert_eq` then makes each answer observable to the R1CS-satisfaction oracle in every lane.\n\
          //\n\
          // Operation: `{}`. Cells, as (reading, width, pairs):\n",
-        symbol(op)
+        op.symbol()
     ));
     for cell in cells {
         out.push_str(&format!(
@@ -725,8 +712,8 @@ fn rejecting_header(
     op: IntOp,
     sign: Sign,
     bits: usize,
-    lhs: Raw,
-    rhs: Raw,
+    lhs: u128,
+    rhs: u128,
     reason: Reject,
     case: Case,
 ) -> String {
@@ -739,7 +726,7 @@ fn rejecting_header(
          // Both operands are witnesses, which is the half the hand-written `noir_failure_tests` do not\n\
          // cover: those put the operands behind a function so the *pure* check is under test, whereas\n\
          // here the check is owed by the witness lowering instead.\n",
-        symbol(op),
+        op.symbol(),
         reading_word(sign),
         bits,
         literal(sign, bits, lhs),
@@ -761,7 +748,7 @@ fn rejecting_header(
              // narrower width because the widening cast ahead of the bound test clears the sign bit.\n",
         );
     }
-    if residue(op, sign, bits, lhs, bits, rhs).is_some() {
+    if residue(op, &pattern(bits, lhs), &pattern(bits, rhs)).is_some() {
         out.push_str(
             "//\n// The assertion is written against the answer a total backend produces anyway, so removing\n\
              // the guard makes this program PASS -- which an expect-failure row reports as a failure.\n",
@@ -792,13 +779,13 @@ mod tests {
     fn every_expected_answer_is_the_models() {
         let mut checked = 0;
         for &op in &IntOp::ALL {
-            for sign in readings_for(op) {
+            for sign in renderings(op) {
                 for bits in widths_for(op, sign) {
                     let Some(cell) = accepting_cell(op, sign, bits) else { continue };
                     for (lhs, rhs, expected) in cell.pairs {
                         assert_eq!(
-                            eval(op, sign, bits, lhs, bits, rhs),
-                            Outcome::Value(expected),
+                            eval(op, &pattern(bits, lhs), &pattern(bits, rhs)),
+                            Outcome::Value(pattern(bits, expected)),
                             "{op:?} {sign:?} at {bits} bits: {lhs:#x} and {rhs:#x}"
                         );
                         checked += 1;
@@ -817,14 +804,14 @@ mod tests {
     #[test]
     fn every_rejecting_program_is_one_the_model_rejects() {
         for &op in &IntOp::ALL {
-            for sign in readings_for(op) {
+            for sign in renderings(op) {
                 for reason in ALL_REASONS {
                     for case in Case::ALL {
                         let Some((bits, lhs, rhs)) = rejection_for(op, sign, reason, case) else {
                             continue;
                         };
                         assert_eq!(
-                            eval(op, sign, bits, lhs, bits, rhs),
+                            eval(op, &pattern(bits, lhs), &pattern(bits, rhs)),
                             Outcome::Rejected(reason)
                         );
                     }
@@ -856,19 +843,22 @@ mod tests {
     /// back to having none with every row still green.
     #[test]
     fn the_negative_shift_amount_case_reaches_the_corpus() {
-        for op in [IntOp::Shl, IntOp::Shr] {
+        for op in [IntOp::Shl, IntOp::SShr] {
             let (bits, _, rhs) = negative_amount_rejection(op, Sign::Signed, Reject::ShiftAmount)
                 .unwrap_or_else(|| panic!("{op:?} generates no negative-amount program"));
             assert_eq!(
                 bits, MAX_SIGNED_BITS,
                 "the conjunct is dead below {MAX_SIGNED_BITS} bits"
             );
-            assert!(decode_signed(bits, rhs) < 0, "the amount is not negative");
+            assert!(
+                pattern(bits, rhs).to_signed() < SignedValue::from(0u8),
+                "the amount is not negative"
+            );
         }
 
         let names: Vec<String> = rejecting_tests().into_iter().map(|t| t.name).collect();
-        for op in [IntOp::Shl, IntOp::Shr] {
-            let want = format!("int_semantics_{}_i_amount_negative_fails", op_name(op));
+        for op in [IntOp::Shl, IntOp::SShr] {
+            let want = format!("int_semantics_{}_i_amount_negative_fails", op.name());
             assert!(names.contains(&want), "{want} was not generated");
         }
     }
@@ -894,7 +884,7 @@ mod tests {
     #[test]
     fn no_program_names_a_width_that_does_not_exist() {
         for &op in &IntOp::ALL {
-            for sign in readings_for(op) {
+            for sign in renderings(op) {
                 for bits in widths_for(op, sign) {
                     assert!(
                         NOIR_WIDTHS.contains(&bits),

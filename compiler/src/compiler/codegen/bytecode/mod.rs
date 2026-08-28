@@ -88,7 +88,7 @@ fn materialize_constants(
         let constant = constants.get(&vid).expect("vid is in constants").as_ref();
         let cells = constant_cell_count(constant);
         let res = match constant {
-            hlssa::Constant::Int(size, _) => layouter.alloc_int(vid, *size),
+            hlssa::Constant::Int(v) => layouter.alloc_int(vid, v.bits()),
             hlssa::Constant::Field(_) => layouter.alloc_field(vid),
             hlssa::Constant::Blob(_) => layouter.alloc_long_data(vid, cells),
             hlssa::Constant::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),

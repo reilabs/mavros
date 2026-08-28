@@ -220,10 +220,10 @@ impl<'a> TotalityOracle<'a> {
         // disjunct from `1 << (bits - 1)` for any `bits` — so an `i8` division by a constant `-1`
         // can still fail, and speculating it moves that failure onto a path that did not have it.
         //
-        // This used to be gated on `bits == 64`, reasoning from the VM instead: `sdiv_int`
-        // sign-extends to i64, where only a 64-bit `MIN / -1` actually overflows. That is a true
-        // statement about `sdiv_int` and the wrong question — the check the speculation has to
-        // respect is the one mavros emits, not the one the interpreter would trap on.
+        // Reasoning from the VM instead would gate this on `bits == 64`: `sdiv_int` sign-extends
+        // to i64, where only a 64-bit `MIN / -1` actually overflows. That is a true statement about
+        // `sdiv_int` and the wrong question — the check the speculation has to respect is the one
+        // mavros emits, not the one the interpreter would trap on.
         let minus_one_hazard = kind.is_signed();
 
         if let Some(c) = self.cc.const_of(self.fid, divisor) {
@@ -256,10 +256,10 @@ impl<'a> TotalityOracle<'a> {
         let Some(c) = self.cc.const_of(self.fid, rhs) else {
             return false;
         };
-        let Some(amount) = constant_as_u128(&c) else {
+        let Some(amount) = constant_as_index(&c) else {
             return false;
         };
-        amount < lhs_ty.get_bit_size(self.ssa.field()) as u128
+        amount < lhs_ty.get_bit_size(self.ssa.field())
     }
 
     /// The index is a constant strictly below a _static_ array length.
@@ -278,10 +278,10 @@ impl<'a> TotalityOracle<'a> {
         let Some(c) = self.cc.const_of(self.fid, index) else {
             return false;
         };
-        let Some(i) = constant_as_u128(&c) else {
+        let Some(i) = constant_as_index(&c) else {
             return false;
         };
-        i < *len as u128
+        i < *len
     }
 }
 
@@ -311,7 +311,7 @@ pub enum WitnessnessSource<'a> {
 /// The zero constant of a scalar type, or `None` for non-scalar types.
 fn zero_constant_of(ty: &Type, field: FieldConfig) -> Option<Constant> {
     match &ty.expr {
-        TypeExpr::Int(bits) => Some(Constant::Int(*bits, 0)),
+        TypeExpr::Int(bits) => Some(Constant::int(*bits, 0)),
         TypeExpr::Field => Some(Constant::Field(field.zero())),
         _ => None,
     }
@@ -320,7 +320,7 @@ fn zero_constant_of(ty: &Type, field: FieldConfig) -> Option<Constant> {
 /// `true` if `c` is the zero of its scalar domain (`FnPtr`/`Blob` constants have none).
 fn constant_is_zero(c: &Constant, field: FieldConfig) -> bool {
     match c {
-        Constant::Int(_, v) => *v == 0,
+        Constant::Int(v) => v.is_zero(),
         Constant::Field(f) => *f == field.zero(),
         Constant::FnPtr(_) | Constant::Blob(_) => false,
     }
@@ -330,22 +330,15 @@ fn constant_is_zero(c: &Constant, field: FieldConfig) -> bool {
 /// signed constant.
 fn constant_is_all_ones(c: &Constant) -> bool {
     match c {
-        Constant::Int(bits, v) => {
-            let mask = if *bits >= 128 {
-                u128::MAX
-            } else {
-                (1u128 << bits) - 1
-            };
-            *v & mask == mask
-        }
+        Constant::Int(v) => v.is_all_ones(),
         Constant::Field(_) | Constant::FnPtr(_) | Constant::Blob(_) => false,
     }
 }
 
-/// The raw bit pattern of an integer constant, or `None` for the non-integer variants.
-fn constant_as_u128(c: &Constant) -> Option<u128> {
+/// An integer constant read as a machine index, or `None` if it is not one it can be.
+fn constant_as_index(c: &Constant) -> Option<usize> {
     match c {
-        Constant::Int(_, v) => Some(*v),
+        Constant::Int(v) => usize::try_from(v).ok(),
         Constant::Field(_) | Constant::FnPtr(_) | Constant::Blob(_) => None,
     }
 }
@@ -369,7 +362,7 @@ fn constant_as_u128(c: &Constant) -> Option<u128> {
 /// `ArithGroup` fails to compile here, and changing the model's rejection set fails the assertion.
 #[cfg(test)]
 mod int_semantics_conformance {
-    use mavros_int_semantics::{IntOp, Sign, corners, eval};
+    use mavros_int_semantics::{IntBits, IntOp, corners, eval};
 
     use super::*;
 
@@ -400,11 +393,20 @@ mod int_semantics_conformance {
 
     /// Whether the model rejects this operation on any corner input at any width.
     fn can_reject(group: ArithGroup) -> bool {
-        let op: IntOp = group.into();
+        // The bitwise groups have one signed form and `Shl` has one model operation, so both signs
+        // land on the same `IntOp` for four of the ten groups; sweeping it twice would double the
+        // work and prove nothing the first pass did not.
+        let mut ops: Vec<IntOp> = Vec::new();
+        for signed in [false, true] {
+            let op: IntOp = BinaryArithOpKind::with_sign(group, signed).into();
+            if !ops.contains(&op) {
+                ops.push(op);
+            }
+        }
 
-        for sign in Sign::ALL {
-            for &bits in corners::widths_for(sign.is_signed()) {
-                let rhs = if matches!(op, IntOp::Shl | IntOp::Shr) {
+        for op in ops {
+            for &bits in corners::widths_for(op.is_signed()) {
+                let rhs = if op.is_shift() {
                     corners::shift_amounts(bits, bits)
                 } else {
                     corners::values(bits)
@@ -412,7 +414,13 @@ mod int_semantics_conformance {
 
                 for a in corners::values(bits) {
                     for b in &rhs {
-                        if eval(op, sign, bits, a, bits, *b).is_rejected() {
+                        if eval(
+                            op,
+                            &IntBits::from_u128(bits, a),
+                            &IntBits::from_u128(bits, *b),
+                        )
+                        .is_rejected()
+                        {
                             return true;
                         }
                     }
