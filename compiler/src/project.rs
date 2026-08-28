@@ -49,6 +49,10 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
         include_str!("../../mavros_stdlib/replacements/derive_pedersen_generators.nr"),
     ),
     (
+        "std/mavros/replacements/ecdsa_secp256r1.nr",
+        include_str!("../../mavros_stdlib/replacements/ecdsa_secp256r1.nr"),
+    ),
+    (
         "std/mavros/replacements/embedded_curve_add.nr",
         include_str!("../../mavros_stdlib/replacements/embedded_curve_add.nr"),
     ),
@@ -64,6 +68,14 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
         "std/mavros/replacements/sha256_compression.nr",
         include_str!("../../mavros_stdlib/replacements/sha256_compression.nr"),
     ),
+    (
+        "std/mavros/vendor.nr",
+        include_str!("../../mavros_stdlib/vendor.nr"),
+    ),
+    (
+        "std/mavros/vendor/ecdsa_secp256r1.nr",
+        include_str!("../../mavros_stdlib/vendor/ecdsa_secp256r1.nr"),
+    ),
 ];
 
 /// Stdlib functions that mavros replaces with pure-Noir implementations from
@@ -78,6 +90,7 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
 const FOREIGN_REPLACEMENTS: &[&str] = &[
     "blake3",
     "derive_pedersen_generators",
+    "ecdsa_secp256r1",
     "embedded_curve_add",
     "multi_scalar_mul",
     "poseidon2_permutation",
