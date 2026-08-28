@@ -334,6 +334,8 @@ pub enum Table {
     Range(u64),
     OfElems(Vec<LC>),
     Spread(u8),
+    /// `(n, 2^n)` for `n` in `0..2^size`, where `size` is `log2` of the shifted operand's width.
+    Pow2(u8),
 }
 
 impl Table {
@@ -342,20 +344,21 @@ impl Table {
             Table::Range(bits) => 1usize << bits,
             Table::OfElems(elements) => elements.len(),
             Table::Spread(bits) => 1usize << bits,
+            Table::Pow2(size) => 1usize << size,
         }
     }
 
     fn width(&self) -> usize {
         match self {
             Table::Range(_) => 1,
-            Table::OfElems(_) | Table::Spread(_) => 2,
+            Table::OfElems(_) | Table::Spread(_) | Table::Pow2(_) => 2,
         }
     }
 
     fn profile_size(&self) -> (u64, u64) {
         let rows = self.row_count() as u64;
         match self {
-            Table::Range(_) | Table::Spread(_) => (rows + 1, 2 * rows),
+            Table::Range(_) | Table::Spread(_) | Table::Pow2(_) => (rows + 1, 2 * rows),
             Table::OfElems(_) => (2 * rows + 1, 3 * rows),
         }
     }
@@ -367,6 +370,9 @@ impl Table {
                 format!("<array table #{table_index}: {} rows>", elements.len())
             }
             Table::Spread(bits) => format!("<spread table: {bits} bits>"),
+            Table::Pow2(size) => {
+                format!("<pow2 table: {}-bit shifts>", 1usize << size)
+            }
         }
     }
 }
@@ -449,6 +455,17 @@ impl symbolic_executor::Context<Value> for R1CGen {
                     idx
                 } else {
                     self.add_table(Table::Spread(bits))
+                }
+            }
+            hlssa::LookupTarget::Pow2(size) => {
+                let existing = self.tables.iter().position(|t| match t {
+                    Table::Pow2(n) => *n == size,
+                    _ => false,
+                });
+                if let Some(idx) = existing {
+                    idx
+                } else {
+                    self.add_table(Table::Pow2(size))
                 }
             }
             hlssa::LookupTarget::Array(arr) => {
@@ -1286,6 +1303,41 @@ impl R1CGen {
                     });
                     table_info.sum_constraint_idx = result.len() - 1;
                 }
+                Table::Pow2(size) => {
+                    // Powers-of-two table: for each entry n in 0..2^size, value = 2^n. Folded
+                    // exactly like the spread table above as both operands are compile-time
+                    // constants, so beta*2^n folds straight into the denominator:
+                    //
+                    // -> y = m_n / (alpha - n + beta*2^n),
+                    //    constraint `y * (alpha - n + beta*2^n) - m_n = 0`
+                    //
+                    // FIELD-ASSUMPTION: L4-decompose. The largest value is 2^(2^size - 1), which is
+                    // 2^127 at the widest size `MAX_POW2_TABLE_SIZE` admits; that ceiling is set so
+                    // the widest row clears the modulus, so no row wraps. `two_pow` would wrap
+                    // silently if it ever did.
+                    let len = 1usize << size;
+                    let mut sum_lhs: LC = vec![];
+                    for n in 0..len {
+                        let y = witness_layout.next_table_data();
+                        let m = table_info.multiplicities_witness_off + n;
+                        result.push(R1C {
+                            a: vec![(y, ark_bn254::Fr::ONE)],
+                            b: vec![
+                                (alpha, ark_bn254::Fr::ONE),
+                                (0, -ark_bn254::Fr::from(n as u64)),
+                                (beta, two_pow(n)),
+                            ],
+                            c: vec![(m, ark_bn254::Fr::ONE)],
+                        });
+                        sum_lhs.push((y, ark_bn254::Fr::ONE));
+                    }
+                    result.push(R1C {
+                        a: sum_lhs,
+                        b: vec![(0, ark_bn254::Fr::ONE)],
+                        c: vec![],
+                    });
+                    table_info.sum_constraint_idx = result.len() - 1;
+                }
             }
         }
 
@@ -1293,10 +1345,6 @@ impl R1CGen {
 
         // lookups init
         for lookup in self.lookups.into_iter() {
-            // if lookup.elements.len() >= 2 {
-            //     todo!("wide tables");
-            // }
-
             let y_wit = match lookup.elements.len() {
                 1 => {
                     let y = witness_layout.next_lookups_data();
@@ -1417,6 +1465,14 @@ mod r1cs_profile_tests {
             vec![spread_key, spread_value],
         );
 
+        let pow2_amount = witness(&mut generator);
+        let pow2_factor = witness(&mut generator);
+        lookup(
+            &mut generator,
+            hlssa::LookupTarget::Pow2(2),
+            vec![pow2_amount, pow2_factor],
+        );
+
         for values in [[10, 20, 30], [40, 50, 60]] {
             let table = array_table(&values);
             let index = witness(&mut generator);
@@ -1442,9 +1498,10 @@ mod r1cs_profile_tests {
         let constraints = profile.constraints.to_folded();
         assert!(constraints.contains("main;<lookup tables>;<range table: 2 bits>"));
         assert!(constraints.contains("main;<lookup tables>;<spread table: 2 bits>"));
-        assert!(constraints.contains("main;<lookup tables>;<array table #2: 3 rows>"));
+        assert!(constraints.contains("main;<lookup tables>;<pow2 table: 4-bit shifts>"));
         assert!(constraints.contains("main;<lookup tables>;<array table #3: 3 rows>"));
-        assert!(constraints.contains("main 7\n"));
+        assert!(constraints.contains("main;<lookup tables>;<array table #4: 3 rows>"));
+        assert!(constraints.contains("main 9\n"));
     }
 }
 

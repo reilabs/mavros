@@ -689,6 +689,7 @@ impl Instruction for OpCode {
                     LookupTarget::DynRangecheck(v) => format!("rngchk(_ < v{})", v.0),
                     LookupTarget::Array(arr) => format!("v{}", arr.0),
                     LookupTarget::Spread(n) => format!("spread({})", n),
+                    LookupTarget::Pow2(s) => format!("pow2({})", s),
                 };
                 format!(
                     "constrain_lookup({}, ({}), flag=v{})",
@@ -717,6 +718,7 @@ impl Instruction for OpCode {
                     LookupTarget::DynRangecheck(v) => format!("rngchk(_ < v{})", v.0),
                     LookupTarget::Array(arr) => format!("v{}", arr.0),
                     LookupTarget::Spread(n) => format!("spread({})", n),
+                    LookupTarget::Pow2(s) => format!("pow2({})", s),
                 };
                 format!("∂lookup({}, ({}), flag=v{})", target_str, args_str, flag.0)
             }
@@ -1164,7 +1166,9 @@ impl Instruction for OpCode {
             Self::Lookup { target, args, flag } | Self::DLookup { target, args, flag } => {
                 let mut ret_vec = vec![];
                 match target {
-                    LookupTarget::Rangecheck(_) | LookupTarget::Spread(_) => {}
+                    LookupTarget::Rangecheck(_)
+                    | LookupTarget::Spread(_)
+                    | LookupTarget::Pow2(_) => {}
                     LookupTarget::DynRangecheck(v) => {
                         ret_vec.push(v);
                     }
@@ -1539,7 +1543,9 @@ impl Instruction for OpCode {
             Self::Lookup { target, args, flag } | Self::DLookup { target, args, flag } => {
                 let mut ret_vec = vec![];
                 match target {
-                    LookupTarget::Rangecheck(_) | LookupTarget::Spread(_) => {}
+                    LookupTarget::Rangecheck(_)
+                    | LookupTarget::Spread(_)
+                    | LookupTarget::Pow2(_) => {}
                     LookupTarget::DynRangecheck(v) => {
                         ret_vec.push(v);
                     }
@@ -1687,7 +1693,9 @@ impl Instruction for OpCode {
             Self::Lookup { target, args, flag } | Self::DLookup { target, args, flag } => {
                 let mut ret_vec = vec![];
                 match target {
-                    LookupTarget::Rangecheck(_) | LookupTarget::Spread(_) => {}
+                    LookupTarget::Rangecheck(_)
+                    | LookupTarget::Spread(_)
+                    | LookupTarget::Pow2(_) => {}
                     LookupTarget::DynRangecheck(v) => {
                         ret_vec.push(v);
                     }
@@ -2441,12 +2449,57 @@ pub enum DMatrix {
 // LOOKUP TARGET
 // ================================================================================================
 
+/// The largest [`LookupTarget::Pow2`] payload any backend will build a table for.
+///
+/// FIELD-ASSUMPTION: L4-decompose. What caps this is the _field_, not any host integer: a size-`s`
+/// table holds the amounts `0..2^s`, so its widest row carries the value `2^(2^s - 1)`, and a row
+/// at or past the modulus wraps. Every evaluator builds its rows by doubling and so wraps the same
+/// way, which is the bad case — the two agree on values that are not powers of two, so `factor ==
+/// 2^amount` quietly stops holding, and with it the `factor <= 2^(bits-1)` premise that
+/// `witness_bitwise::wrap_shifted_product` rests on. Nothing rejects that; it is a wrong answer,
+/// not a failure.
+///
+/// `7` is therefore the largest safe size on bn254 (widest row `2^127`, against a 254-bit modulus)
+/// and, not by coincidence, exactly the size a shift of the widest supported integer needs — see
+/// the assert below. A narrower field admits less: goldilocks reaches `s = 6`. That is the same
+/// `L4-decompose` debt as `two_pow(bits)` in the shift lowering itself, and is discharged with it.
+pub const MAX_POW2_TABLE_SIZE: usize = 7;
+
+/// Every integer width the type system admits must have a table, since
+/// `witness_bitwise::lower_shift` has no other way to build `2^n` for a witness `n`. Raising
+/// [`MAX_SUPPORTED_UNSIGNED_BITS`] past what this covers is the case the ceiling above is a
+/// tripwire for: the widest row would then be one the field cannot hold, so the fix is a limb-wise
+/// factor rather than a larger table.
+const _: () = assert!(
+    MAX_SUPPORTED_UNSIGNED_BITS <= 1 << MAX_POW2_TABLE_SIZE,
+    "an integer width wider than the powers-of-two table can key; see MAX_POW2_TABLE_SIZE",
+);
+
+/// A `Pow2` table is indexed into the backends' fixed-size table caches (`vm::VM::pow2_tables`, and
+/// the per-size helper maps on the WASM side) by its own size, so the cache must have a slot for
+/// every size this ceiling admits. Guarantee it at compile time, as `lookup_sizing::MAX_TABLE_BITS`
+/// does for the rangecheck and spread caches.
+const _: () = assert!(
+    MAX_POW2_TABLE_SIZE < crate::vm::bytecode::NUM_TABLE_SIZE_SLOTS,
+    "MAX_POW2_TABLE_SIZE exceeds the VM's fixed-size table cache; widen pow2_tables",
+);
+
 #[derive(Debug, Clone, Copy)]
 pub enum LookupTarget<V> {
     Rangecheck(u8),
     DynRangecheck(V),
     Array(V),
     Spread(u8),
+    /// `(n, 2^n)` for every `n` a shift of a `2^s`-bit value can legally use.
+    ///
+    /// The payload is `s = log2(bits)`, _not_ the shifted operand's width: the rows are the
+    /// amounts `0..bits`, so the table holds `2^s == bits` of them and matches the `1 << s`
+    /// row-count convention every other width-keyed table here follows.
+    ///
+    /// Membership is therefore the shift-amount bound. A lookup that misses is an amount at or
+    /// past the width, which is exactly the rejection `shift_guard` builds out of a comparison
+    /// on the pure path.
+    Pow2(u8),
 }
 
 impl<V> LookupTarget<V> {
@@ -2457,6 +2510,7 @@ impl<V> LookupTarget<V> {
             LookupTarget::DynRangecheck(bound) => LookupTarget::DynRangecheck(f(bound)),
             LookupTarget::Array(array) => LookupTarget::Array(f(array)),
             LookupTarget::Spread(bits) => LookupTarget::Spread(*bits),
+            LookupTarget::Pow2(s) => LookupTarget::Pow2(*s),
         }
     }
 }

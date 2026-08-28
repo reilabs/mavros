@@ -635,6 +635,7 @@ impl SymbolicExecutor {
                         let target = match target {
                             LookupTarget::Rangecheck(n) => LookupTarget::Rangecheck(*n),
                             LookupTarget::Spread(n) => LookupTarget::Spread(*n),
+                            LookupTarget::Pow2(n) => LookupTarget::Pow2(*n),
                             LookupTarget::DynRangecheck(v) => {
                                 LookupTarget::DynRangecheck(scope[v].clone())
                             }
@@ -648,6 +649,7 @@ impl SymbolicExecutor {
                         let target = match target {
                             LookupTarget::Rangecheck(n) => LookupTarget::Rangecheck(*n),
                             LookupTarget::Spread(n) => LookupTarget::Spread(*n),
+                            LookupTarget::Pow2(n) => LookupTarget::Pow2(*n),
                             LookupTarget::DynRangecheck(v) => {
                                 LookupTarget::DynRangecheck(scope[v].clone())
                             }

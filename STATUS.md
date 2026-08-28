@@ -38,6 +38,8 @@
 | noir_tests/dead_divmod_guard | ✅ | ✅ | 93 | 159 | 16472 | 7543 | 57591 | 223569 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/derive_pedersen_generators | ✅ | ✅ | 0 | 1 | 59512 | 84508 | 79927 | 258701 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/derive_pedersen_generators_uncached | ✅ | ✅ | 0 | 1 | 42376 | 60992 | 65553 | 240131 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/ecdsa_secp256r1_constrained | ✅ | ✅ | 650734 | 1171768 | 1208936 | 817674 | 1821323 | 2247131 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/ecdsa_secp256r1_unconstrained | ✅ | ✅ | 337 | 674 | 12992 | 6453 | 44907 | 212719 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/embedded_curve_add | ✅ | ✅ | 782 | 773 | 93120 | 93271 | 175943 | 355503 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/embedded_curve_add_unconstrained | ✅ | ✅ | 0 | 5 | 1072 | 505 | 25390 | 188648 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/fibonacci | ✅ | ✅ | 1 | 4 | 4352 | 3961 | 28596 | 192904 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -331,11 +333,11 @@
 | noir/test_programs/execution_success/ecdsa_secp256k1_invalid_inputs | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
 | noir/test_programs/execution_success/ecdsa_secp256k1_invalid_pub_key_in_inactive_branch | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
 | noir/test_programs/execution_success/ecdsa_secp256k1_msg_equals_order | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
-| noir/test_programs/execution_success/ecdsa_secp256r1 | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
-| noir/test_programs/execution_success/ecdsa_secp256r1_3x | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
-| noir/test_programs/execution_success/ecdsa_secp256r1_high_s | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
-| noir/test_programs/execution_success/ecdsa_secp256r1_invalid_inputs | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
-| noir/test_programs/execution_success/ecdsa_secp256r1_invalid_pub_key_in_inactive_branch | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/ecdsa_secp256r1 | ✅ | ✅ | 342052 | 619265 | 1199848 | 813789 | 1805798 | 2231059 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir/test_programs/execution_success/ecdsa_secp256r1_3x | ✅ | ✅ | 944783 | 1704770 | 1207832 | 815040 | 1812981 | 2238121 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir/test_programs/execution_success/ecdsa_secp256r1_high_s | ✅ | ✅ | 345289 | 622761 | 1326448 | 831772 | 2037823 | 2469388 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir/test_programs/execution_success/ecdsa_secp256r1_invalid_inputs | ✅ | ✅ | 1237752 | 2229111 | 1204992 | 817682 | 1813362 | 2240613 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir/test_programs/execution_success/ecdsa_secp256r1_invalid_pub_key_in_inactive_branch | ✅ | ✅ | 385460 | 632456 | 1363944 | 979378 | 1830163 | 2262331 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/embedded_curve_ops | ✅ | ✅ | 556661 | 923593 | 301480 | 208314 | 517707 | 731211 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/empty_strings_in_composite_arrays | ✅ | ✅ | 3 | 3 | 4880 | 4726 | 32301 | 197310 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/encrypted_log_regression | ✅ | ✅ | 106 | 166 | 43032 | 17690 | 88647 | 260479 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -455,7 +457,7 @@
 | noir/test_programs/execution_success/regression_10452 | ✅ | ✅ | 0 | 1 | 1576 | 3318 | 25666 | 190025 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_10466 | ✅ | ✅ | 0 | 1 | 472 | 1527 | 24793 | 188309 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_10516 | ✅ | ✅ | 0 | 1 | 208 | 505 | 24793 | 188049 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/regression_10690 | ✅ | ✅ | 0 | 1 | 584 | 1215 | - | - | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 💥 | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/regression_10690 | ✅ | ✅ | 0 | 1 | 584 | 1215 | 27841 | 191581 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_10917 | ✅ | ✅ | 3 | 3 | 6280 | 5910 | 32842 | 197664 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_10923 | ✅ | ✅ | 5 | 5 | 5640 | 3705 | 35183 | 199919 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_10975 | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
@@ -580,7 +582,7 @@
 | noir/test_programs/execution_success/regression_brillig_const_fold_self_dedup | ✅ | ✅ | 3 | 4 | 4848 | 3229 | 32961 | 197757 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_brillig_ref_deref_crash | ✅ | ✅ | 1 | 3 | 8304 | 8931 | 29625 | 196095 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_capacity_tracker | ✅ | ✅ | 572 | 894 | 79648 | 13060 | 183499 | 355013 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/regression_dominated_truncate | ✅ | ✅ | 4 | 6 | 5344 | 3867 | - | - | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 💥 | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/regression_dominated_truncate | ✅ | ✅ | 4 | 6 | 5344 | 3867 | 36256 | 201544 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_field_div_truncate | ✅ | ✅ | 663 | 1206 | 94656 | 37995 | 116348 | 289943 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_inner_if_else_collapse | ✅ | ✅ | 6 | 5 | 6480 | 2888 | 36738 | 201970 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_licm_induction_var | ✅ | ✅ | 1 | 2 | 2496 | 962 | 27672 | 191642 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
