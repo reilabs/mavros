@@ -427,6 +427,10 @@ _independent_ challenges (not powers `α, α², …`, which are invalid for this
 - [ ] `mavros_stdlib/replacements/multi_scalar_mul.nr` — explicitly targets Grumpkin: the curve
       equation uses `-17`, scalar validation uses the Grumpkin scalar modulus, and subgroup
       validation assumes cofactor 1. These must follow the selected field's embedded curve.
+- [ ] `mavros_stdlib/replacements/derive_pedersen_generators.nr` — explicitly targets BN254's scalar
+      field and Grumpkin: Tonelli-Shanks uses the BN254 scalar modulus and two-adicity, the curve
+      equation uses `-17`, and the cached coordinates are Grumpkin points. These must follow the
+      selected field and its embedded curve.
 
 - [ ] **Cargo deps** — root `Cargo.toml:33-34` (`ark-bn254`, `ark-ff` from crates.io; consumed by
       `compiler`, `vm`, `mavros-artifacts`, `wasm-runtime`). Add `crypto-primitives` (git, PR #38)
