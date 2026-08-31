@@ -5,6 +5,7 @@
 
 pub mod blake3;
 pub mod derive_pedersen_generators;
+pub mod ecdsa_secp256k1;
 pub mod ecdsa_secp256r1;
 pub mod embedded_curve_add;
 pub mod multi_scalar_mul;
