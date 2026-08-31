@@ -1036,25 +1036,19 @@ fn index_is_statically_in_bounds(builder: &HLInstrBuilder<'_>, index: ValueId, l
     )
 }
 
-/// If `updated_value` is itself an update of `base[index]`, return the original element value.
-/// Reusing that value lets sparse lowering continue recursively through a nested array update.
 fn nested_update_base_element(
     updated_value: ValueId,
     base: ValueId,
     index: ValueId,
     definitions: &FunctionValueDefinitions,
 ) -> Option<ValueId> {
-    let ValueDefinition::Instruction(
-        _,
-        _,
-        OpCode::ArraySet {
-            array: nested_base, ..
-        },
-    ) = definitions.get_definition(updated_value)?
+    let ValueDefinition::Instruction(_, _, OpCode::ArraySet { array, .. }) =
+        definitions.get_definition(updated_value)?
     else {
         return None;
     };
-    match definitions.get_definition(*nested_base) {
+    matches!(
+        definitions.get_definition(*array),
         Some(ValueDefinition::Instruction(
             _,
             _,
@@ -1062,40 +1056,22 @@ fn nested_update_base_element(
                 array: get_array,
                 index: get_index,
                 ..
-            },
-        )) if *get_array == base && *get_index == index => Some(*nested_base),
-        _ => None,
-    }
+            }
+        )) if *get_array == base && *get_index == index
+    )
+    .then_some(*array)
 }
 
-fn guarded_array_get(
-    builder: &mut HLInstrBuilder<'_>,
-    guard: ValueId,
-    array: ValueId,
-    index: ValueId,
-) -> ValueId {
-    let result = builder.fresh_value();
-    builder.push(OpCode::Guard {
-        condition: guard,
-        inner: Box::new(OpCode::ArrayGet {
-            result,
-            array,
-            index,
-        }),
-    });
-    result
-}
-
-/// Lower a merge where exactly one arm is a single functional update of the other.
+/// Lower a merge where exactly one arm is a safe sparse functional update of the other.
 ///
 /// ```text
 /// select(c, ArraySet(a, i, v), a)
 ///   => ArraySet(a, i, select(c, v, ArrayGet(a, i)))
 /// ```
 ///
-/// The symmetric false-arm form is handled as well. Potentially out-of-bounds operations retain
-/// the updated arm's control-flow guard; this is essential because moving an unguarded `ArraySet`
-/// out of its branch would make an inactive out-of-bounds update fail.
+/// The symmetric false-arm form is handled as well. A dynamic index is accepted only for a nested
+/// update whose existing branch-local `ArrayGet` can be reused, and the moved outer `ArraySet`
+/// retains the branch guard. Other dynamic updates use the existing dense merge.
 #[allow(clippy::too_many_arguments)]
 fn try_emit_sparse_array_merge(
     builder: &mut HLInstrBuilder<'_>,
@@ -1153,15 +1129,12 @@ fn try_emit_sparse_array_merge(
     };
 
     let statically_in_bounds = index_is_statically_in_bounds(builder, index, size);
-
     let existing_base_element = nested_update_base_element(updated_value, base, index, definitions);
-    let base_element = existing_base_element.unwrap_or_else(|| {
-        if statically_in_bounds {
-            builder.array_get(base, index)
-        } else {
-            guarded_array_get(builder, update_guard, base, index)
-        }
-    });
+    if !statically_in_bounds && existing_base_element.is_none() {
+        return None;
+    }
+
+    let base_element = existing_base_element.unwrap_or_else(|| builder.array_get(base, index));
     let updated_value_type = type_info
         .map(|ti| ti.get_value_type(updated_value).clone())
         .unwrap_or_else(|| result_elem_type.clone());
@@ -1208,20 +1181,20 @@ fn try_emit_sparse_array_merge(
         index,
         value: selected_element,
     };
-    if statically_in_bounds {
-        builder.push(array_set);
+    builder.push(if statically_in_bounds {
+        array_set
     } else {
-        builder.push(OpCode::Guard {
+        OpCode::Guard {
             condition: update_guard,
             inner: Box::new(array_set),
-        });
-    }
+        }
+    });
     Some(result)
 }
 
 /// Emit selects for merge point values, handling type conversion between branch values and the
-/// expected merge param type. Single-index array updates are kept sparse (and guarded when their
-/// index may fail); unrelated arrays use the general unrolled element-wise select + cast path.
+/// expected merge param type. Constant-index updates and dynamic nested updates keep their array
+/// sparse; other arrays use the general unrolled element-wise select + cast path.
 #[allow(clippy::too_many_arguments)]
 fn emit_merge_select(
     builder: &mut HLInstrBuilder<'_>,
@@ -1423,7 +1396,6 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::ssa::hlssa::builder::HLSSABuilder;
 
     fn scalar(w: WitnessType) -> WitnessShape {
         WitnessShape::Scalar(w)
@@ -1482,244 +1454,169 @@ mod tests {
         assert_eq!(apply_witness_type(ty, &shape), Type::field().array_of(3));
     }
 
-    /// A nested constant-index update must stay sparse through witness-control-flow merging. The
-    /// old lowering rebuilt every scalar leaf of the outer array, making this cost proportional to
-    /// the entire aggregate for every loop iteration.
-    #[test]
-    fn nested_array_set_merge_selects_only_the_updated_leaf() {
-        let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_unique_entrypoint_id();
-        let nested_type = Type::int(64).array_of(3).array_of(8);
-        let (cond, base, updated, incremented) = {
-            let mut sb = HLSSABuilder::new(&mut ssa);
-            sb.modify_function(main_id, |b| {
-                let entry = b.function.get_entry_id();
-                let mut e = b.test_block(entry);
-                let cond = e.add_parameter(Type::bool());
-                let base = e.add_parameter(nested_type.clone());
-                let outer_index = e.int_const(32, 4);
-                let inner = e.array_get(base, outer_index);
-                let inner_index = e.int_const(32, 0);
-                let old = e.array_get(inner, inner_index);
-                let one = e.int_const(64, 1);
-                let incremented = e.uadd(old, one);
-                let updated_inner = e.array_set(inner, inner_index, incremented);
-                let updated = e.array_set(base, outer_index, updated_inner);
-                e.terminate_return(vec![updated]);
-                (cond, base, updated, incremented)
-            })
-        };
+    struct MergeFixture {
+        instructions: Vec<LocatedOpCode>,
+        base: ValueId,
+        updated_value: ValueId,
+        result: ValueId,
+    }
 
-        let mut function = ssa.take_function(main_id);
-        let definitions = FunctionValueDefinitions::from_function(&function);
+    fn array_set_merge(
+        array_type: Type,
+        constant_index: Option<u128>,
+        nested_index: Option<u128>,
+        update_is_lhs: bool,
+    ) -> MergeFixture {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let function_id = ssa.get_unique_entrypoint_id();
+        let block_id = ssa.get_unique_entrypoint().get_entry_id();
+        let cond = ssa.fresh_value();
+        let base = ssa.fresh_value();
+        let selected_value = ssa.fresh_value();
+        let updated = ssa.fresh_value();
         let result = ssa.fresh_value();
-        let mut instructions = Vec::new();
-        {
-            let mut builder = HLInstrBuilder::new(
-                &mut function,
-                &mut ssa,
-                &mut instructions,
-                SourceLocation::test(),
-            );
-            assert_eq!(
-                emit_merge_select(
-                    &mut builder,
-                    cond,
-                    cond,
-                    cond,
-                    updated,
-                    base,
-                    Some(result),
-                    &nested_type,
-                    &nested_type,
-                    &nested_type,
-                    &definitions,
-                    None,
+        let index = constant_index
+            .map(|value| ssa.add_const(Constant::Int(32, value)))
+            .unwrap_or_else(|| ssa.fresh_value());
+        let mut definitions = FunctionValueDefinitions::new();
+        let updated_value = if let Some(nested_index) = nested_index {
+            let base_element = ssa.fresh_value();
+            let nested_updated = ssa.fresh_value();
+            let nested_index = ssa.add_const(Constant::Int(32, nested_index));
+            definitions.insert(
+                base_element,
+                ValueDefinition::Instruction(
+                    block_id,
+                    0,
+                    OpCode::ArrayGet {
+                        result: base_element,
+                        array: base,
+                        index,
+                    },
                 ),
-                result
             );
-        }
-
-        let select_count = instructions
-            .iter()
-            .filter(|op| matches!(op.as_ref(), OpCode::Select { .. }))
-            .count();
-        let array_set_count = instructions
-            .iter()
-            .filter(|op| matches!(op.as_ref(), OpCode::ArraySet { .. }))
-            .count();
-        let mk_seq_count = instructions
-            .iter()
-            .filter(|op| matches!(op.as_ref(), OpCode::MkSeq { .. }))
-            .count();
-        assert_eq!(select_count, 1, "only the changed scalar leaf is selected");
-        assert_eq!(array_set_count, 2, "the nested update chain is preserved");
-        assert_eq!(mk_seq_count, 0, "neither array level is rebuilt densely");
-        assert!(instructions.iter().any(|op| matches!(
-            op.as_ref(),
-            OpCode::Select { if_t, .. } if *if_t == incremented
-        )));
-        assert!(instructions.iter().any(|op| matches!(
-            op.as_ref(),
-            OpCode::ArraySet { result: r, array, .. } if *r == result && *array == base
-        )));
-    }
-
-    /// The update may be on the false arm; the selected scalar operands must follow the branch
-    /// orientation while retaining the same sparse ArraySet chain.
-    #[test]
-    fn nested_array_set_merge_handles_false_arm_update() {
-        let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_unique_entrypoint_id();
-        let nested_type = Type::int(64).array_of(2).array_of(4);
-        let (cond, base, updated, replacement) = {
-            let mut sb = HLSSABuilder::new(&mut ssa);
-            sb.modify_function(main_id, |b| {
-                let entry = b.function.get_entry_id();
-                let mut e = b.test_block(entry);
-                let cond = e.add_parameter(Type::bool());
-                let base = e.add_parameter(nested_type.clone());
-                let outer_index = e.int_const(32, 2);
-                let inner = e.array_get(base, outer_index);
-                let inner_index = e.int_const(32, 1);
-                let replacement = e.int_const(64, 9);
-                let updated_inner = e.array_set(inner, inner_index, replacement);
-                let updated = e.array_set(base, outer_index, updated_inner);
-                e.terminate_return(vec![updated]);
-                (cond, base, updated, replacement)
-            })
+            definitions.insert(
+                nested_updated,
+                ValueDefinition::Instruction(
+                    block_id,
+                    1,
+                    OpCode::ArraySet {
+                        result: nested_updated,
+                        array: base_element,
+                        index: nested_index,
+                        value: selected_value,
+                    },
+                ),
+            );
+            nested_updated
+        } else {
+            selected_value
         };
+        definitions.insert(
+            updated,
+            ValueDefinition::Instruction(
+                block_id,
+                0,
+                OpCode::ArraySet {
+                    result: updated,
+                    array: base,
+                    index,
+                    value: updated_value,
+                },
+            ),
+        );
 
-        let mut function = ssa.take_function(main_id);
-        let definitions = FunctionValueDefinitions::from_function(&function);
+        let mut function = ssa.take_function(function_id);
         let mut instructions = Vec::new();
-        {
-            let mut builder = HLInstrBuilder::new(
-                &mut function,
-                &mut ssa,
-                &mut instructions,
-                SourceLocation::test(),
-            );
+        let mut builder = HLInstrBuilder::new(
+            &mut function,
+            &mut ssa,
+            &mut instructions,
+            SourceLocation::test(),
+        );
+        let (lhs, rhs) = if update_is_lhs {
+            (updated, base)
+        } else {
+            (base, updated)
+        };
+        assert_eq!(
             emit_merge_select(
                 &mut builder,
                 cond,
                 cond,
                 cond,
-                base,
-                updated,
-                None,
-                &nested_type,
-                &nested_type,
-                &nested_type,
+                lhs,
+                rhs,
+                Some(result),
+                &array_type,
+                &array_type,
+                &array_type,
                 &definitions,
                 None,
-            );
+            ),
+            result
+        );
+        MergeFixture {
+            instructions,
+            base,
+            updated_value: selected_value,
+            result,
         }
+    }
 
-        assert_eq!(
-            instructions
+    #[test]
+    fn dynamic_nested_update_stays_sparse_and_guarded() {
+        let fixture = array_set_merge(Type::int(64).array_of(3).array_of(8), None, Some(0), true);
+        let count = |predicate: fn(&OpCode) -> bool| {
+            fixture
+                .instructions
                 .iter()
-                .filter(|op| matches!(op.as_ref(), OpCode::Select { .. }))
-                .count(),
-            1
-        );
-        assert_eq!(
-            instructions
-                .iter()
-                .filter(|op| matches!(op.as_ref(), OpCode::ArraySet { .. }))
-                .count(),
-            2
-        );
-        assert!(instructions.iter().any(|op| matches!(
+                .filter(|op| predicate(op.as_ref()))
+                .count()
+        };
+        assert_eq!(count(|op| matches!(op, OpCode::Select { .. })), 1);
+        assert_eq!(count(|op| matches!(op, OpCode::MkSeq { .. })), 0);
+        assert_eq!(count(|op| matches!(op, OpCode::ArraySet { .. })), 1);
+        assert!(fixture.instructions.iter().any(|op| matches!(
             op.as_ref(),
-            OpCode::Select { if_f, .. } if *if_f == replacement
+            OpCode::Guard { inner, .. }
+                if matches!(inner.as_ref(), OpCode::ArraySet { result, array, .. }
+                if *result == fixture.result && *array == fixture.base
+                )
         )));
     }
 
-    /// A dynamic index can fail at runtime. Its sparse ArrayGet and ArraySet must remain guarded so
-    /// an inactive out-of-bounds update still passes through the original array.
     #[test]
-    fn dynamic_array_set_index_keeps_failure_guards() {
-        let mut ssa = HLSSA::with_main("main".to_string());
-        let main_id = ssa.get_unique_entrypoint_id();
-        let array_type = Type::field().array_of(4);
-        let (cond, base, updated) = {
-            let mut sb = HLSSABuilder::new(&mut ssa);
-            sb.modify_function(main_id, |b| {
-                let entry = b.function.get_entry_id();
-                let mut e = b.test_block(entry);
-                let cond = e.add_parameter(Type::bool());
-                let base = e.add_parameter(array_type.clone());
-                let dynamic_index = e.add_parameter(Type::int(32));
-                let replacement = e.field_const(e.field().constant(7u64));
-                let updated = e.array_set(base, dynamic_index, replacement);
-                e.terminate_return(vec![updated]);
-                (cond, base, updated)
-            })
-        };
+    fn constant_update_handles_the_false_arm() {
+        let fixture = array_set_merge(Type::field().array_of(4), Some(2), None, false);
+        assert!(fixture.instructions.iter().any(|op| matches!(
+            op.as_ref(),
+            OpCode::Select { if_f, .. } if *if_f == fixture.updated_value
+        )));
+    }
 
-        let mut function = ssa.take_function(main_id);
-        let definitions = FunctionValueDefinitions::from_function(&function);
-        let mut instructions = Vec::new();
-        {
-            let mut builder = HLInstrBuilder::new(
-                &mut function,
-                &mut ssa,
-                &mut instructions,
-                SourceLocation::test(),
-            );
-            emit_merge_select(
-                &mut builder,
-                cond,
-                cond,
-                cond,
-                updated,
-                base,
-                None,
-                &array_type,
-                &array_type,
-                &array_type,
-                &definitions,
-                None,
-            );
-        }
-
+    #[test]
+    fn dynamic_update_uses_the_existing_dense_fallback() {
+        let fixture = array_set_merge(Type::field().array_of(4), None, None, true);
         assert_eq!(
-            instructions
+            fixture
+                .instructions
                 .iter()
                 .filter(|op| matches!(op.as_ref(), OpCode::Select { .. }))
                 .count(),
-            1
+            4
         );
-        assert_eq!(
-            instructions
+        assert!(
+            fixture
+                .instructions
                 .iter()
-                .filter(|op| matches!(op.as_ref(), OpCode::MkSeq { .. }))
-                .count(),
-            0
+                .any(|op| matches!(op.as_ref(), OpCode::MkSeq { .. }))
         );
-        assert_eq!(
-            instructions
+        assert!(
+            fixture
+                .instructions
                 .iter()
-                .filter(|op| matches!(op.as_ref(), OpCode::ArraySet { .. }))
-                .count(),
-            0
+                .all(|op| !matches!(op.as_ref(), OpCode::ArraySet { .. } | OpCode::Guard { .. }))
         );
-        assert_eq!(
-            instructions
-                .iter()
-                .filter(|op| matches!(op.as_ref(), OpCode::Guard { .. }))
-                .count(),
-            2,
-            "the dynamic ArrayGet and ArraySet both retain the branch guard"
-        );
-        assert!(instructions.iter().any(|op| matches!(
-            op.as_ref(),
-            OpCode::Guard { inner, .. } if matches!(inner.as_ref(), OpCode::ArrayGet { .. })
-        )));
-        assert!(instructions.iter().any(|op| matches!(
-            op.as_ref(),
-            OpCode::Guard { inner, .. } if matches!(inner.as_ref(), OpCode::ArraySet { .. })
-        )));
     }
 }
