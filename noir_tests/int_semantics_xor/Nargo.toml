@@ -1,0 +1,6 @@
+[package]
+name = "int_semantics_xor"
+type = "bin"
+authors = [""]
+
+[dependencies]

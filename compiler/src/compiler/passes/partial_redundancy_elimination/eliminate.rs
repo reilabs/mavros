@@ -357,6 +357,7 @@ impl Eliminator<'_> {
                     }
                     LookupTarget::Array(array) => LookupKey::Array(self.operand(*array)),
                     LookupTarget::Spread(bits) => LookupKey::Spread(*bits),
+                    LookupTarget::Pow2(size) => LookupKey::Pow2(*size),
                 };
                 let key = AssertKey::Lookup {
                     target,
@@ -629,6 +630,7 @@ enum LookupKey {
     DynRangecheck(NodeId),
     Array(NodeId),
     Spread(u8),
+    Pow2(u8),
 }
 
 // INTERNAL FUNCTIONALITY

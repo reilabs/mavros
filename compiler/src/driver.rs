@@ -45,7 +45,6 @@ use crate::{
             fix_double_jumps::FixDoubleJumps,
             instruction_lowering::InstructionLowering,
             lookup_spilling::LookupSpilling,
-            lower_guards::LowerGuards,
             lower_map_casts::LowerMapCasts,
             mem2reg::Mem2Reg,
             merge_identical_functions::MergeIdenticalFunctions,
@@ -697,7 +696,7 @@ impl Driver {
             "witgen_lowering".to_string(),
             self.draw_cfg,
             vec![
-                Box::new(LowerGuards::new()),
+                Box::new(InstructionLowering::guards()),
                 Box::new(WitnessWriteToVoid::new()),
                 Box::new(StripWitnessOf::new()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),

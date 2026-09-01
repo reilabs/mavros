@@ -17,9 +17,9 @@ use crate::{
         ssa::{
             BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
-                ArithGroup, CmpKind, Constant, DMatrix, Endianness, HLFunction, HLSSA,
-                HLSSAConstantsSnapshot, MAX_SUPPORTED_UNSIGNED_BITS, SliceOpDir, Type as HLType,
-                TypeExpr as HLTypeExpr, assert_signed_op_width,
+                ArithGroup, BinaryArithOpKind, CmpKind, Constant, DMatrix, Endianness, HLFunction,
+                HLSSA, HLSSAConstantsSnapshot, MAX_POW2_TABLE_SIZE, MAX_SUPPORTED_UNSIGNED_BITS,
+                SliceOpDir, Type as HLType, TypeExpr as HLTypeExpr, assert_signed_op_width,
             },
             llssa::{
                 Blob as LLBlob, Constant as LLConstant, FieldArithOp, IntArithOp, IntCmpOp,
@@ -290,6 +290,10 @@ struct LookupFunctions {
     spread: BTreeMap<u8, FunctionId>,
     /// AD-path spread lookup helpers, keyed by spread input bit-width.
     dspread_call: BTreeMap<u8, FunctionId>,
+    /// Forward-pass powers-of-two lookup helpers, keyed by table size (`log2` of the width).
+    pow2: BTreeMap<u8, FunctionId>,
+    /// AD-path powers-of-two lookup helpers, keyed by table size.
+    dpow2_call: BTreeMap<u8, FunctionId>,
     /// Forward-pass array lookup helpers, keyed by concrete array type.
     array: Vec<ArrayLookupFnEntry<ArrayFn>>,
     /// AD-path array lookup helpers, keyed by concrete array type.
@@ -306,6 +310,12 @@ struct LookupFunctions {
     /// Internal zero-initialized globals storing `inv_cnst_off + 1` for the
     /// AD rangecheck helpers, keyed by bit-width. Zero means unallocated.
     drngchk_inv_cnst_off_globals: BTreeMap<u8, usize>,
+    /// Internal zero-initialized globals storing `table_idx + 1` for forward
+    /// powers-of-two helpers. Zero means unallocated.
+    pow2_table_idx_globals: BTreeMap<u8, usize>,
+    /// Internal zero-initialized globals storing `inv_cnst_off + 1` for AD
+    /// powers-of-two helpers. Zero means unallocated.
+    dpow2_inv_cnst_off_globals: BTreeMap<u8, usize>,
 }
 
 impl LookupFunctions {
@@ -315,12 +325,16 @@ impl LookupFunctions {
             drngchk_call: BTreeMap::new(),
             spread: BTreeMap::new(),
             dspread_call: BTreeMap::new(),
+            pow2: BTreeMap::new(),
+            dpow2_call: BTreeMap::new(),
             array: Vec::new(),
             darray_call: Vec::new(),
             rngchk_table_idx_globals: BTreeMap::new(),
             spread_table_idx_globals: BTreeMap::new(),
             dspread_inv_cnst_off_globals: BTreeMap::new(),
             drngchk_inv_cnst_off_globals: BTreeMap::new(),
+            pow2_table_idx_globals: BTreeMap::new(),
+            dpow2_inv_cnst_off_globals: BTreeMap::new(),
         }
     }
 
@@ -348,6 +362,24 @@ impl LookupFunctions {
         }
         let id = llssa.add_function(format!("__dspread_{}_ad_call", bits));
         self.dspread_call.insert(bits, id);
+        id
+    }
+
+    fn get_pow2_fn(&mut self, size: u8, llssa: &mut LLSSA) -> FunctionId {
+        if let Some(id) = self.pow2.get(&size) {
+            return *id;
+        }
+        let id = llssa.add_function(format!("__pow2_{}_lookup", size));
+        self.pow2.insert(size, id);
+        id
+    }
+
+    fn get_dpow2_call_fn(&mut self, size: u8, llssa: &mut LLSSA) -> FunctionId {
+        if let Some(id) = self.dpow2_call.get(&size) {
+            return *id;
+        }
+        let id = llssa.add_function(format!("__dpow2_{}_ad_call", size));
+        self.dpow2_call.insert(size, id);
         id
     }
 
@@ -390,6 +422,7 @@ impl LookupFunctions {
     fn needs_ad_bump_helpers(&self) -> bool {
         !self.drngchk_call.is_empty()
             || !self.dspread_call.is_empty()
+            || !self.dpow2_call.is_empty()
             || !self.darray_call.is_empty()
     }
 
@@ -416,6 +449,18 @@ impl LookupFunctions {
             if !self.drngchk_inv_cnst_off_globals.contains_key(bits) {
                 let global = add_ll_global(llssa, LLType::i32());
                 self.drngchk_inv_cnst_off_globals.insert(*bits, global);
+            }
+        }
+        for size in self.pow2.keys() {
+            if !self.pow2_table_idx_globals.contains_key(size) {
+                let global = add_ll_global(llssa, LLType::i32());
+                self.pow2_table_idx_globals.insert(*size, global);
+            }
+        }
+        for size in self.dpow2_call.keys() {
+            if !self.dpow2_inv_cnst_off_globals.contains_key(size) {
+                let global = add_ll_global(llssa, LLType::i32());
+                self.dpow2_inv_cnst_off_globals.insert(*size, global);
             }
         }
     }
@@ -796,7 +841,7 @@ fn add_vm_parameter(func: &mut LLFunction, llssa: &mut LLSSA) -> ValueId {
 /// `Shl` has no signed form: a left shift is the same map on the bits either way, which is why
 /// HLSSA still distinguishes `UShl` from `SShl` (they differ in their overflow contract, not in
 /// their result) but LLSSA does not.
-fn int_arith_op(group: ArithGroup, signed: bool) -> IntArithOp {
+pub(crate) fn int_arith_op(group: ArithGroup, signed: bool) -> IntArithOp {
     match group {
         ArithGroup::Add => IntArithOp::Add,
         ArithGroup::Sub => IntArithOp::Sub,
@@ -814,6 +859,28 @@ fn int_arith_op(group: ArithGroup, signed: bool) -> IntArithOp {
         ArithGroup::Div => IntArithOp::UDiv,
         ArithGroup::Rem if signed => IntArithOp::SRem,
         ArithGroup::Rem => IntArithOp::URem,
+    }
+}
+
+/// Check that an integer `BinaryArithOp`'s operands are exactly as wide as its result.
+///
+/// HLSSA intentionally does not enforce this. [`HLType`]'s arithmetic rule makes a result as wide
+/// as the _wider_ operand, so a mismatched pair is representable. LLSSA's `IntArith` carries no
+/// widths of its own, and both backends read them off the operands. The LLVM one would then hand
+/// arithmetic builders differently-typed values, which results in invalid LLVM IR.
+fn assert_int_arith_widths(
+    fn_type_info: &FunctionTypeInfo,
+    kind: &BinaryArithOpKind,
+    result_bits: usize,
+    lhs: ValueId,
+    rhs: ValueId,
+) {
+    for (side, value) in [("lhs", lhs), ("rhs", rhs)] {
+        let ty = fn_type_info.get_value_type(value);
+        assert!(
+            matches!(ty.expr, HLTypeExpr::Int(bits) if bits == result_bits),
+            "{kind:?}'s {side} is {ty}, not the i{result_bits} its result is"
+        );
     }
 }
 
@@ -866,6 +933,7 @@ fn lower_instruction(
                     if signed {
                         assert_signed_op_width(*bits, "arithmetic");
                     }
+                    assert_int_arith_widths(fn_type_info, kind, *bits, *lhs, *rhs);
                     e.int_arith(int_arith_op(kind.group(), signed), ll_lhs, ll_rhs)
                 }
                 HLTypeExpr::WitnessOf(_) => {
@@ -1366,6 +1434,36 @@ fn lower_instruction(
             assert(e, eq);
         }
 
+        // FIELD-ASSUMPTION: L4-decompose
+        OpCode::Rangecheck { value, max_bits } => {
+            let value_type = fn_type_info.get_value_type(*value);
+            assert!(
+                value_type.is_field(),
+                "HLSSA->LLSSA Rangecheck expects a Field, got {value_type}"
+            );
+            assert!(
+                *max_bits < 254,
+                "HLSSA->LLSSA Rangecheck width {max_bits} is outside the bn254 field"
+            );
+
+            // A canonical field value fits in `max_bits` exactly when it is less than 2^max_bits.
+            let mut limbs = Vec::with_capacity(4);
+            let active_limb = max_bits / 64;
+            let active_bit = max_bits % 64;
+            for limb in 0..4 {
+                let value = if limb == active_limb {
+                    1_u64 << active_bit
+                } else {
+                    0
+                };
+                limbs.push(e.emit_int_const(64, value));
+            }
+            let limit_limbs = e.mk_struct(LLStruct::limbs(), limbs);
+            let limit = e.field_from_limbs(limit_limbs);
+            let in_range = e.field_lt(val_map[value], limit);
+            assert(e, in_range);
+        }
+
         OpCode::InitGlobal { global, value } => {
             let ll_value = val_map[value];
             let r = e.fresh_value();
@@ -1496,6 +1594,22 @@ fn lower_instruction(
             let fn_id = lookup_fns.get_spread_fn(*bits, e.ssa);
             e.call(fn_id, vec![key, result, flag_val], 0);
         }
+        OpCode::Lookup {
+            target: crate::compiler::ssa::hlssa::LookupTarget::Pow2(size),
+            args,
+            flag,
+        } => {
+            assert_eq!(
+                args.len(),
+                2,
+                "Pow2 lookup must have exactly one amount and one factor"
+            );
+            let amount = val_map[&args[0]];
+            let factor = val_map[&args[1]];
+            let flag_val = val_map[flag];
+            let fn_id = lookup_fns.get_pow2_fn(*size, e.ssa);
+            e.call(fn_id, vec![amount, factor, flag_val], 0);
+        }
         OpCode::Lookup { .. } => {
             panic!(
                 "Unsupported Lookup variant in HLSSA->LLSSA lowering: {:?}",
@@ -1551,6 +1665,22 @@ fn lower_instruction(
             let flag_val = val_map[flag];
             let fn_id = lookup_fns.get_dspread_call_fn(*bits, e.ssa);
             e.call(fn_id, vec![key, result, flag_val], 0);
+        }
+        OpCode::DLookup {
+            target: crate::compiler::ssa::hlssa::LookupTarget::Pow2(size),
+            args,
+            flag,
+        } => {
+            assert_eq!(
+                args.len(),
+                2,
+                "Pow2 dlookup must have exactly one amount and one factor"
+            );
+            let amount = val_map[&args[0]];
+            let factor = val_map[&args[1]];
+            let flag_val = val_map[flag];
+            let fn_id = lookup_fns.get_dpow2_call_fn(*size, e.ssa);
+            e.call(fn_id, vec![amount, factor, flag_val], 0);
         }
         OpCode::DLookup { .. } => {
             panic!(
@@ -3022,6 +3152,16 @@ fn generate_all_lookup_functions(
         llssa.put_function(*id, func);
     }
 
+    for (size, id) in &lookup_fns.pow2 {
+        let table_idx_global = lookup_fns
+            .pow2_table_idx_globals
+            .get(size)
+            .copied()
+            .expect("pow2 helper registered without internal table-id global");
+        let func = generate_pow2_lookup_function(llssa, *size, table_idx_global);
+        llssa.put_function(*id, func);
+    }
+
     for entry in &lookup_fns.array {
         let func = generate_array_lookup_function(llssa, &entry.ty);
         llssa.put_function(entry.fn_id, func);
@@ -3063,6 +3203,30 @@ fn generate_all_lookup_functions(
         let call_fn = generate_dspread_ad_call(
             llssa,
             *bits,
+            inv_cnst_off_global,
+            witness_layout,
+            constraints_layout,
+            bump_da_id,
+            bump_db_id,
+            bump_dc_id,
+        );
+        llssa.put_function(*call_id, call_fn);
+    }
+
+    for (size, call_id) in &lookup_fns.dpow2_call {
+        let inv_cnst_off_global = lookup_fns
+            .dpow2_inv_cnst_off_globals
+            .get(size)
+            .copied()
+            .expect("AD pow2 helper registered without internal offset global");
+        let (witness_layout, constraints_layout) =
+            layout.expect("R1CS layout required to generate AD pow2 helper");
+        let bump_da_id = ad_fns.get_bump_fn(DMatrix::A, llssa);
+        let bump_db_id = ad_fns.get_bump_fn(DMatrix::B, llssa);
+        let bump_dc_id = ad_fns.get_bump_fn(DMatrix::C, llssa);
+        let call_fn = generate_dpow2_ad_call(
+            llssa,
+            *size,
             inv_cnst_off_global,
             witness_layout,
             constraints_layout,
@@ -3120,6 +3284,7 @@ fn u64_as_field(e: &mut LLBlockEmitter<'_>, lo: ValueId) -> ValueId {
     e.field_from_limbs(limbs)
 }
 
+/// Negate a Field as `0 - value`.
 fn field_neg_via_sub(e: &mut LLBlockEmitter<'_>, value: ValueId) -> ValueId {
     let zero_i64 = e.emit_int_const(64, 0);
     let zero_field = u64_as_field(e, zero_i64);
@@ -3178,6 +3343,7 @@ enum LookupTableColumns {
     KeyOnly,
     KeyValue,
     Spread,
+    Pow2,
 }
 
 #[derive(Clone, Copy)]
@@ -3201,6 +3367,21 @@ impl LookupTableSpec {
         }
     }
 
+    fn pow2(size: u8) -> Self {
+        // The AD init body builds each row by doubling a field accumulator, so no _host_ integer
+        // caps the row value; what does is the field, and [`MAX_POW2_TABLE_SIZE`] is where that
+        // bound is stated. Re-asserted here because this backend must be willing to build every
+        // table the lowering is willing to ask for.
+        assert!(
+            size as usize <= MAX_POW2_TABLE_SIZE,
+            "pow2 lookup table supports sizes up to {MAX_POW2_TABLE_SIZE}, got {size}"
+        );
+        Self {
+            length: 1usize << size,
+            columns: LookupTableColumns::Pow2,
+        }
+    }
+
     fn array(length: usize) -> Self {
         Self {
             length,
@@ -3213,6 +3394,7 @@ impl LookupTableSpec {
             LookupTableColumns::KeyOnly => TableKind::RangeCheck,
             LookupTableColumns::KeyValue => TableKind::Array,
             LookupTableColumns::Spread => TableKind::Spread,
+            LookupTableColumns::Pow2 => TableKind::Pow2,
         }
     }
 
@@ -3221,7 +3403,7 @@ impl LookupTableSpec {
             LookupTableColumns::KeyOnly => self.length,
             LookupTableColumns::KeyValue => 2 * self.length,
             // One folded constraint/witness per entry, like a key-only table.
-            LookupTableColumns::Spread => self.length,
+            LookupTableColumns::Spread | LookupTableColumns::Pow2 => self.length,
         }
     }
 
@@ -3237,7 +3419,9 @@ impl LookupTableSpec {
         assert!(
             matches!(
                 self.columns,
-                LookupTableColumns::KeyValue | LookupTableColumns::Spread
+                LookupTableColumns::KeyValue
+                    | LookupTableColumns::Spread
+                    | LookupTableColumns::Pow2
             ),
             "{} expects a key-value lookup table",
             context
@@ -3423,12 +3607,11 @@ fn emit_forward_key_value_lookup(
 
 fn int_to_field(e: &mut LLBlockEmitter<'_>, value: ValueId, bits: usize) -> ValueId {
     assert!(
-        bits <= 64,
-        "Array lookup only supports integer elements up to 64 bits, got {}",
+        bits <= 128,
+        "Array lookup only supports integer elements up to 128 bits, got {}",
         bits
     );
-    let value64 = if bits == 64 { value } else { e.zext(value, 64) };
-    u64_as_field(e, value64)
+    ensure_field_sized(e, value, &HLType::int(bits))
 }
 
 fn load_pure_lookup_elem_as_field(
@@ -3700,6 +3883,62 @@ fn generate_spread_lookup_function(
     func
 }
 
+/// Generate __pow2_<size>_lookup(amount: FieldElem, factor: FieldElem, flag: FieldElem).
+///
+/// The WASM twin of `pow2_lookup_field` in `vm/src/bytecode.rs`. Like the spread helper it dumps
+/// no per-entry values: each row's `2^n` is a pure function of its index, so Phase 2 recomputes
+/// it when filling the folded `y·(α-n+β·2^n)=m` constraint. Only the table region is reserved.
+fn generate_pow2_lookup_function(
+    llssa: &mut LLSSA,
+    size: u8,
+    table_idx_global: usize,
+) -> LLFunction {
+    let lookup = LookupTableSpec::pow2(size);
+    let mut func = new_ll_function(llssa, format!("__pow2_{}_lookup", size));
+    let entry = func.get_entry_id();
+
+    let mut e = new_helper_block_emitter(&mut func, llssa, entry);
+    let key_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
+    let result_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
+    let flag_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
+
+    let (key_l0, key_l1, key_l2, key_l3) = field_limbs(&mut e, key_field);
+    let (flag_l0, flag_l1, flag_l2, flag_l3) = field_limbs(&mut e, flag_field);
+    let key = key_l0;
+    let flag_u64 = flag_l0;
+
+    let zero_i64 = e.emit_int_const(64, 0);
+    for high in [flag_l1, flag_l2, flag_l3] {
+        let ok = e.int_eq(high, zero_i64);
+        assert(&mut e, ok);
+    }
+
+    let (mults_base, table_idx_i32) = get_or_init_forward_lookup_table(
+        &mut e,
+        ForwardLookupTableState::Global { table_idx_global },
+        lookup,
+        |_, _| {},
+    );
+
+    emit_forward_key_value_lookup(
+        &mut e,
+        mults_base,
+        table_idx_i32,
+        key_field,
+        key,
+        [key_l1, key_l2, key_l3],
+        result_field,
+        flag_u64,
+        zero_i64,
+        lookup,
+    );
+
+    e.terminate_return(vec![]);
+    drop(e);
+
+    func
+}
+
 /// Generate __rngchk_<bits>(val: FieldElem, flag: FieldElem):
 ///
 /// Emits one entry into the LogUp lookup argument for the `bits`-bit rangecheck
@@ -3964,12 +4203,9 @@ fn emit_rngchk_ad_init_body(
         // out_db[logup_challenge_off] += coeff
         e.ad_write_witness(DMatrix::B, logup_challenge_i32, coeff);
 
-        // out_db[0] += (-i_field) * coeff. `field_neg` isn't wired up in LLVM
-        // codegen — express as `0 - i` so it goes through `__field_sub`.
+        // out_db[0] += (-i_field) * coeff.
         let i_field = u64_as_field(e, i_i64);
-        let zero_i64_f = e.emit_int_const(64, 0);
-        let zero_field = u64_as_field(e, zero_i64_f);
-        let neg_i_field = e.field_arith(FieldArithOp::Sub, zero_field, i_field);
+        let neg_i_field = field_neg_via_sub(e, i_field);
         e.ad_write_const(DMatrix::B, neg_i_field, coeff);
 
         // out_dc[mults_wit_off + i] += coeff
@@ -4034,11 +4270,9 @@ fn emit_spread_ad_init_body(
         // B = α - i + β·spread(i):
         //   out_db[α] += coeff
         e.ad_write_witness(DMatrix::B, logup_alpha_i32, coeff);
-        //   out_db[0] += (-i) · coeff  (express `-i` as `0 - i`, no field_neg op)
+        //   out_db[0] += (-i) · coeff
         let i_field = u64_as_field(e, i_i64);
-        let zero_i64_f = e.emit_int_const(64, 0);
-        let zero_field = u64_as_field(e, zero_i64_f);
-        let neg_i_field = e.field_arith(FieldArithOp::Sub, zero_field, i_field);
+        let neg_i_field = field_neg_via_sub(e, i_field);
         e.ad_write_const(DMatrix::B, neg_i_field, coeff);
         //   out_db[β] += spread(i) · coeff
         let i_key = e.truncate(i_i64, bits as u32);
@@ -4060,6 +4294,74 @@ fn emit_spread_ad_init_body(
         e.ad_write_witness(DMatrix::A, da_idx, inv_sum_coeff);
 
         vec![]
+    });
+
+    // After the loop: out_db[0] += inv_sum_coeff (sum constraint B = (1)).
+    let one_i64 = e.emit_int_const(64, 1);
+    let one_field = u64_as_field(e, one_i64);
+    e.ad_write_const(DMatrix::B, one_field, inv_sum_coeff);
+
+    inv_cnst_off
+}
+
+fn emit_pow2_ad_init_body(
+    e: &mut LLBlockEmitter<'_>,
+    size: u8,
+    inv_cnst_off_global: usize,
+    witness_layout: WitnessLayout,
+) -> ValueId {
+    let lookup = LookupTableSpec::pow2(size);
+
+    // Folded allocation, one constraint per entry:
+    //   y · (α - n + β·2^n) = m_n
+    // so this is the spread AD init with `2^n` in the B-term instead of `spread(n)`.
+    let (inv_cnst_off, inv_wit_off, mults_wit_off) = claim_ad_lookup_table_region(e, lookup);
+    store_ad_global_snapshot(e, inv_cnst_off_global, inv_cnst_off);
+
+    let sum_offset_i32 = e.emit_int_const(32, lookup.sum_constraint_offset() as u64);
+    let sum_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, sum_offset_i32);
+    let inv_sum_coeff = ad_read_coeff_at_dyn(e, sum_idx);
+
+    let logup_alpha_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64);
+    let logup_beta_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64 + 1);
+
+    let length = e.emit_int_const(64, lookup.length as u64);
+    // `2^n` is carried rather than recomputed: a `u64` shift would cap the table at 64 rows, and
+    // repeated squaring per row would be quadratic. Doubling one accumulator is exact at every
+    // row and costs one field add.
+    let one_i64_seed = e.emit_int_const(64, 1);
+    let pow_seed = u64_as_field(e, one_i64_seed);
+    let field_ty = LLType::Struct(LLStruct::field_elem());
+    e.build_counted_loop(length, vec![(pow_seed, field_ty)], |e, i_i64, accs| {
+        let pow_field = accs[0];
+        let i_i32 = e.truncate(i_i64, 32);
+        let coeff_idx = e.int_arith(IntArithOp::Add, inv_cnst_off, i_i32);
+        let coeff = ad_read_coeff_at_dyn(e, coeff_idx);
+
+        // A = (y): out_da[inv_wit_off + n] += coeff
+        let da_idx = e.int_arith(IntArithOp::Add, inv_wit_off, i_i32);
+        e.ad_write_witness(DMatrix::A, da_idx, coeff);
+
+        // B = α - n + β·2^n:
+        //   out_db[α] += coeff
+        e.ad_write_witness(DMatrix::B, logup_alpha_i32, coeff);
+        //   out_db[0] += (-n) · coeff
+        let i_field = u64_as_field(e, i_i64);
+        let neg_i_field = field_neg_via_sub(e, i_field);
+        e.ad_write_const(DMatrix::B, neg_i_field, coeff);
+        //   out_db[β] += 2^n · coeff
+        let pow_coeff = e.field_arith(FieldArithOp::Mul, pow_field, coeff);
+        e.ad_write_witness(DMatrix::B, logup_beta_i32, pow_coeff);
+
+        // C = (m): out_dc[mults_wit_off + n] += coeff
+        let dc_idx = e.int_arith(IntArithOp::Add, mults_wit_off, i_i32);
+        e.ad_write_witness(DMatrix::C, dc_idx, coeff);
+
+        // Sum constraint: out_da[inv_wit_off + n] += inv_sum_coeff
+        e.ad_write_witness(DMatrix::A, da_idx, inv_sum_coeff);
+
+        let next_pow = e.field_arith(FieldArithOp::Add, pow_field, pow_field);
+        vec![next_pow]
     });
 
     // After the loop: out_db[0] += inv_sum_coeff (sum constraint B = (1)).
@@ -4180,6 +4482,65 @@ fn generate_darray_ad_call(
 
     e.terminate_return(vec![]);
     // LLBlockEmitter writes its block back and releases the `func` borrow in Drop.
+    drop(e);
+
+    func
+}
+
+fn generate_dpow2_ad_call(
+    llssa: &mut LLSSA,
+    size: u8,
+    inv_cnst_off_global: usize,
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    _bump_da_fn: FunctionId,
+    bump_db_fn: FunctionId,
+    bump_dc_fn: FunctionId,
+) -> LLFunction {
+    let lookup = LookupTableSpec::pow2(size);
+    let mut func = new_ll_function(llssa, format!("__dpow2_{}_ad_call", size));
+    let entry = func.get_entry_id();
+
+    let mut e = new_helper_block_emitter(&mut func, llssa, entry);
+    let key_ptr = e.add_parameter(LLType::Ptr);
+    let result_ptr = e.add_parameter(LLType::Ptr);
+    let flag_ptr = e.add_parameter(LLType::Ptr);
+
+    let snap_slot = e.global_addr(inv_cnst_off_global);
+    let snap = e.ll_load(snap_slot, LLType::i32());
+    let zero_i32 = e.emit_int_const(32, 0);
+    let is_unalloc = e.int_eq(snap, zero_i32);
+    let merge = e.build_if_else(
+        is_unalloc,
+        vec![LLType::Int(32)],
+        |e| {
+            let inv_cnst_off = emit_pow2_ad_init_body(e, size, inv_cnst_off_global, witness_layout);
+            vec![inv_cnst_off]
+        },
+        |e| {
+            let snap_slot = e.global_addr(inv_cnst_off_global);
+            let snap = e.ll_load(snap_slot, LLType::i32());
+            let one_i32 = e.emit_int_const(32, 1);
+            let inv_cnst_off = e.int_arith(IntArithOp::Sub, snap, one_i32);
+            vec![inv_cnst_off]
+        },
+    );
+    let inv_cnst_off = merge[0];
+
+    emit_key_value_ad_lookup_call_body(
+        &mut e,
+        inv_cnst_off,
+        lookup,
+        key_ptr,
+        result_ptr,
+        flag_ptr,
+        witness_layout,
+        constraints_layout,
+        bump_db_fn,
+        bump_dc_fn,
+    );
+
+    e.terminate_return(vec![]);
     drop(e);
 
     func
@@ -4443,6 +4804,38 @@ mod tests {
             "felt constant should not lower to an MkStruct instruction:\n{dump}"
         );
         assert_eq!(val_map.len(), 1, "the felt constant should be mapped");
+    }
+
+    /// A width-mismatched integer arithmetic op is representable in HLSSA — its result takes the
+    /// _wider_ operand's width — and must be caught here rather than in the LLVM builder, which
+    /// would be handed two differently-typed operands. See [`assert_int_arith_widths`].
+    #[test]
+    #[should_panic(expected = "its result is")]
+    fn a_width_mismatched_int_arith_is_rejected_before_llvm() {
+        use crate::compiler::{
+            analysis::types::Types,
+            ssa::hlssa::builder::{HLEmitter, HLSSABuilder},
+        };
+
+        let mut hlssa = HLSSA::with_main("width_mismatch_test".to_string());
+        let main_id = hlssa.get_unique_entrypoint_id();
+        hlssa
+            .get_function_mut(main_id)
+            .add_return_type(HLType::int(16));
+
+        let mut hb = HLSSABuilder::new(&mut hlssa);
+        hb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.test_block(entry);
+            let narrow = e.int_const(8, 1);
+            let wide = e.int_const(16, 1);
+            let sum = e.uadd(narrow, wide);
+            e.terminate_return(vec![sum]);
+        });
+
+        let flow = FlowAnalysis::run(&hlssa);
+        let types = Types::new().run(&hlssa, &flow);
+        lower_inner(&hlssa, &flow, &types, None, CodeGenOptions::default());
     }
 
     #[test]

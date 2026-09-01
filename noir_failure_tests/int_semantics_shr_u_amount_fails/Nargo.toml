@@ -1,0 +1,6 @@
+[package]
+name = "int_semantics_shr_u_amount_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]

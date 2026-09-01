@@ -10,6 +10,7 @@ use std::{cell::RefCell, rc::Rc};
 use ark_ff::{BigInt, BigInteger};
 use itertools::Itertools;
 use mavros_artifacts::FieldConfig;
+use mavros_int_semantics::{self as semantics};
 use tracing::{debug, instrument};
 
 use crate::{
@@ -30,8 +31,8 @@ use crate::{
             },
         },
         util::{
-            bit_mask, decode_signed, encode_signed, ice_non_elided_tuple, sign_extend_bits,
-            spread_bits, unspread_bits,
+            bit_mask, decode_signed, ice_non_elided_tuple, sign_extend_bits, spread_bits,
+            unspread_bits,
         },
     },
 };
@@ -144,39 +145,6 @@ impl Value {
         decode_signed(bits, val & bit_mask(bits))
     }
 
-    /// Store a signed result back as u128 masked to `bits` width.
-    fn from_signed(val: i128, bits: usize) -> u128 {
-        encode_signed(bits, val)
-    }
-
-    /// The count a shift applies, or `None` when the amount is out of range for a `bits`-wide
-    /// value.
-    ///
-    /// One function for both shift directions and both readings, because the two arms below have to
-    /// test the amount and then shift by **the same value**. They did not: each decoded the amount
-    /// at the _value's_ width `bits` rather than at the amount's own, so an amount of `256` against
-    /// an eight-bit value read as an in-range `0`. On `Shr` that returned the value unchanged where
-    /// the answer is an over-shift; on `Shl` the range test was made on the narrowed amount while
-    /// the shift itself used the raw one, which is a width overflow on the host `u128` — a debug
-    /// panic, and `256 & 127 == 0` in release.
-    ///
-    /// The amount's own width is the only one that says what its pattern means, so that is what is
-    /// read here. Noir unifies the two operands of a shift, so `amount_bits == bits` for anything
-    /// the frontend produces and the distinction makes no difference there; it exists so that a
-    /// shift the compiler builds with mismatched widths cannot become a wrong answer.
-    ///
-    /// A signed amount is decoded, so a negative one is negative rather than a large magnitude. An
-    /// unsigned one keeps its full width: `u128 -> i128` wraps a huge amount to a negative, which
-    /// misses the range just as its magnitude would have.
-    fn shift_count(amount: u128, amount_bits: usize, bits: usize, signed: bool) -> Option<u32> {
-        let count = if signed {
-            Self::to_signed(amount, amount_bits)
-        } else {
-            amount as i128
-        };
-        (0..bits as i128).contains(&count).then_some(count as u32)
-    }
-
     fn unwrap_witness(&self) -> &Value {
         match self {
             Value::WitnessOf(inner) => inner.as_ref(),
@@ -247,266 +215,109 @@ impl Value {
 
     /// Interpret one binary arithmetic operation.
     ///
-    /// A `Value::Int` is a raw bit pattern with no reading attached, so every arm below takes its
-    /// reading from the _opcode_: `signed` is what decides between two's complement and magnitude,
-    /// not anything carried by the operands.
+    /// The integer arm is the reference model's [`residue`](semantics::residue): the bit pattern a
+    /// _total_ evaluator must produce. It runs over dummy signature values for cost estimation, so
+    /// it meets operands a real execution would have been rejected for and must still answer
+    /// something. On every input Noir accepts, `residue` _is_ the accepted value, so the estimate
+    /// is exact here for all intents and purposes.
+    ///
+    /// The `unwrap_or(0)` covers the two inputs the model deliberately declines to specify: a zero
+    /// divisor and a signed `INT_MIN / -1`. LLVM calls both undefined while the VM answers zero, so
+    /// there is no agreed answer to hold anyone to, and zero is this interpreter's own local choice
+    /// rather than a disagreement with anything. It needs one because a zero denominator is routine
+    /// here as a gadget's real divisor is constrained nonzero only on honest runs, and these are
+    /// dummy values.
+    ///
+    /// The non-integer arms stay per-group because they genuinely differ: a zero operand
+    /// short-circuits a `Mul` whatever the other side is, a field `Div` is multiplication by a
+    /// modular inverse, and most groups have no field meaning at all.
     fn binary_arith_op(
         &self,
         b: &Value,
         binary_arith_op_kind: &crate::compiler::ssa::hlssa::BinaryArithOpKind,
         instrumenter: &mut dyn OpInstrumenter,
     ) -> Value {
-        let signed = binary_arith_op_kind.is_signed();
-        match binary_arith_op_kind.group() {
-            ArithGroup::Add => match (self, b) {
-                (Value::Int(s, a), Value::Int(_, b)) => Value::Int(
-                    *s,
-                    if signed {
-                        Self::from_signed(
-                            Self::to_signed(*a, *s).wrapping_add(Self::to_signed(*b, *s)),
-                            *s,
-                        )
-                    } else {
-                        a.wrapping_add(*b) & bit_mask(*s)
-                    },
-                ),
-                // FIELD-ASSUMPTION: L4-eval
-                (Value::Field(a), Value::Field(b)) => Value::Field(a + b),
-                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
-                        b.unwrap_witness(),
-                        binary_arith_op_kind,
-                        instrumenter,
-                    )))
-                }
-                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
-                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
-            },
-            ArithGroup::Sub => match (self, b) {
-                (Value::Int(s, a), Value::Int(_, b)) => Value::Int(
-                    *s,
-                    if signed {
-                        Self::from_signed(
-                            Self::to_signed(*a, *s).wrapping_sub(Self::to_signed(*b, *s)),
-                            *s,
-                        )
-                    } else {
-                        a.wrapping_sub(*b) & bit_mask(*s)
-                    },
-                ),
-                (Value::Field(a), Value::Field(b)) => Value::Field(a - b),
-                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
-                        b.unwrap_witness(),
-                        binary_arith_op_kind,
-                        instrumenter,
-                    )))
-                }
-                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
-                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
-            },
-            ArithGroup::Mul => match (self, b) {
-                (Value::Int(s, 0), _) | (_, Value::Int(s, 0)) => Value::Int(*s, 0),
+        let group = binary_arith_op_kind.group();
+
+        // A zero operand makes a product zero whatever the other side is, so this runs ahead of the
+        // dispatch below rather than inside its integer and field arms.
+        if group == ArithGroup::Mul {
+            match (self, b) {
+                (Value::Int(s, 0), _) | (_, Value::Int(s, 0)) => return Value::Int(*s, 0),
                 (Value::Field(f), _) if *f == instrumenter.field().zero() => {
-                    Value::Field(instrumenter.field().zero())
+                    return Value::Field(instrumenter.field().zero());
                 }
                 (_, Value::Field(f)) if *f == instrumenter.field().zero() => {
-                    Value::Field(instrumenter.field().zero())
+                    return Value::Field(instrumenter.field().zero());
                 }
-                (Value::Int(s, a), Value::Int(_, b)) => Value::Int(
-                    *s,
-                    if signed {
-                        Self::from_signed(
-                            Self::to_signed(*a, *s).wrapping_mul(Self::to_signed(*b, *s)),
-                            *s,
-                        )
-                    } else {
-                        a.wrapping_mul(*b) & bit_mask(*s)
-                    },
-                ),
-                (Value::Field(a), Value::Field(b)) => Value::Field(a * b),
-                (Value::WitnessOf(a), Value::WitnessOf(b)) => {
-                    if matches!(
-                        (a.as_ref(), b.as_ref()),
-                        (Value::Unknown(_), Value::Unknown(_))
-                    ) {
-                        instrumenter.record_high_degree_mul();
-                    }
-                    Value::WitnessOf(Box::new(a.binary_arith_op(
-                        b,
-                        binary_arith_op_kind,
-                        instrumenter,
-                    )))
-                }
-                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
-                        b.unwrap_witness(),
-                        binary_arith_op_kind,
-                        instrumenter,
-                    )))
-                }
-                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
-                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
-            },
-            ArithGroup::Div => match (self, b) {
-                // Division by zero yields 0 here (as in the signed arm below): this executor also
-                // runs for cost estimation over dummy signature values, where a zero denominator
-                // is routine — a gadget's real divisor is constrained nonzero on honest runs, but
-                // the estimate must not panic on it.
-                (Value::Int(s, a), Value::Int(_, b)) => Value::Int(
-                    *s,
-                    if signed {
-                        let (sa, sb) = (Self::to_signed(*a, *s), Self::to_signed(*b, *s));
-                        Self::from_signed(if sb == 0 { 0 } else { sa.wrapping_div(sb) }, *s)
-                    } else if *b == 0 {
-                        0
-                    } else {
-                        a / b
-                    },
-                ),
+                _ => {}
+            }
+        }
+
+        match (self, b) {
+            // Each operand is read at _its own_ width. For everything but a shift the two agree, as
+            // the type analysis widens a result to the wider operand; a shift is the case where
+            // they legitimately differ, and an amount's own width is the only thing that says what
+            // its pattern means.
+            (Value::Int(bits, lhs), Value::Int(rhs_bits, rhs)) => Value::Int(
+                *bits,
+                semantics::residue(
+                    group.into(),
+                    binary_arith_op_kind.sign(),
+                    *bits,
+                    *lhs,
+                    *rhs_bits,
+                    *rhs,
+                )
+                .unwrap_or(0),
+            ),
+
+            (Value::Field(x), Value::Field(y)) => match group {
+                // FIELD-ASSUMPTION: L4-eval
+                ArithGroup::Add => Value::Field(x + y),
+                ArithGroup::Sub => Value::Field(x - y),
+                ArithGroup::Mul => Value::Field(x * y),
                 // FIELD-ASSUMPTION: L4-inverse
-                (Value::Field(a), Value::Field(b)) => {
-                    Value::Field(if *b == instrumenter.field().zero() {
-                        instrumenter.field().zero()
-                    } else {
-                        a / b
-                    })
+                ArithGroup::Div => Value::Field(if *y == instrumenter.field().zero() {
+                    instrumenter.field().zero()
+                } else {
+                    x / y
+                }),
+                ArithGroup::And => todo!(),
+                ArithGroup::Rem
+                | ArithGroup::Or
+                | ArithGroup::Xor
+                | ArithGroup::Shl
+                | ArithGroup::Shr => {
+                    panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b)
                 }
-                (_, Value::WitnessOf(b)) => Value::WitnessOf(Box::new(
-                    self.unwrap_witness()
-                        .binary_arith_op(b, binary_arith_op_kind, instrumenter),
-                )),
-                (Value::WitnessOf(a), b) => Value::WitnessOf(Box::new(a.binary_arith_op(
-                    b,
+            },
+
+            // The one witness pair that is not purely structural: two _unknown_ witnesses
+            // multiplied is the shape that costs a degree, and counting those is core to this
+            // analysis.
+            (Value::WitnessOf(x), Value::WitnessOf(y)) if group == ArithGroup::Mul => {
+                if matches!(
+                    (x.as_ref(), y.as_ref()),
+                    (Value::Unknown(_), Value::Unknown(_))
+                ) {
+                    instrumenter.record_high_degree_mul();
+                }
+                Value::WitnessOf(Box::new(x.binary_arith_op(
+                    y,
                     binary_arith_op_kind,
                     instrumenter,
-                ))),
-                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
-                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
-            },
-            ArithGroup::Rem => match (self, b) {
-                // Zero modulus yields 0, as in the signed arm below and the `Div` arms above.
-                (Value::Int(s, a), Value::Int(_, b)) => Value::Int(
-                    *s,
-                    if signed {
-                        let (sa, sb) = (Self::to_signed(*a, *s), Self::to_signed(*b, *s));
-                        Self::from_signed(if sb == 0 { 0 } else { sa.wrapping_rem(sb) }, *s)
-                    } else if *b == 0 {
-                        0
-                    } else {
-                        a % b
-                    },
-                ),
-                (_, Value::WitnessOf(b)) => Value::WitnessOf(Box::new(
-                    self.unwrap_witness()
-                        .binary_arith_op(b, binary_arith_op_kind, instrumenter),
-                )),
-                (Value::WitnessOf(a), b) => Value::WitnessOf(Box::new(a.binary_arith_op(
-                    b,
+                )))
+            }
+            (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
+                Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
+                    b.unwrap_witness(),
                     binary_arith_op_kind,
                     instrumenter,
-                ))),
-                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
-                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
-            },
-            ArithGroup::And => match (self, b) {
-                (Value::Int(s, a), Value::Int(_, b)) => Value::Int(*s, (a & b) & bit_mask(*s)),
-                (Value::Field(_), Value::Field(_)) => todo!(),
-                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
-                        b.unwrap_witness(),
-                        binary_arith_op_kind,
-                        instrumenter,
-                    )))
-                }
-                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
-                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
-            },
-            ArithGroup::Or => match (self, b) {
-                (Value::Int(s, a), Value::Int(_, b)) => Value::Int(*s, (a | b) & bit_mask(*s)),
-                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
-                        b.unwrap_witness(),
-                        binary_arith_op_kind,
-                        instrumenter,
-                    )))
-                }
-                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
-                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
-            },
-            ArithGroup::Xor => match (self, b) {
-                (Value::Int(s, a), Value::Int(_, b)) => Value::Int(*s, (a ^ b) & bit_mask(*s)),
-                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
-                        b.unwrap_witness(),
-                        binary_arith_op_kind,
-                        instrumenter,
-                    )))
-                }
-                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
-                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
-            },
-            ArithGroup::Shl => match (self, b) {
-                // An out-of-range amount is an over-shift, so everything is shifted out.
-                (Value::Int(s, a), Value::Int(amount_bits, b)) => Value::Int(
-                    *s,
-                    match Self::shift_count(*b, *amount_bits, *s, signed) {
-                        Some(n) => (a << n) & bit_mask(*s),
-                        None => 0,
-                    },
-                ),
-                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
-                        b.unwrap_witness(),
-                        binary_arith_op_kind,
-                        instrumenter,
-                    )))
-                }
-                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
-                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
-            },
-            ArithGroup::Shr => match (self, b) {
-                (Value::Int(s, a), Value::Int(amount_bits, b)) => {
-                    // An out-of-range amount **saturates** here — to `0` when zero-filling, to
-                    // `0`/`-1` by sign when sign-filling — rather than masking the count to
-                    // `bits - 1` the way the VM's `ushr_int`/`ashr_int` and LLVM's shifts do. That
-                    // disagreement is deliberate and predates the sign refactor: it is exactly why
-                    // `lattice::eval_binary` refuses to fold an out-of-range shift at all, so no
-                    // constant the backends would read differently is ever manufactured from it.
-                    // Nothing inherits this answer but the cost estimate, for a program Noir
-                    // rejects at runtime anyway.
-                    let count = Self::shift_count(*b, *amount_bits, *s, signed);
-                    if signed {
-                        let sa = Self::to_signed(*a, *s);
-                        Value::Int(
-                            *s,
-                            match count {
-                                Some(n) => Self::from_signed(sa >> n, *s),
-                                // Sign-fill.
-                                None => Self::from_signed(if sa < 0 { -1 } else { 0 }, *s),
-                            },
-                        )
-                    } else {
-                        // Zero-fill.
-                        Value::Int(
-                            *s,
-                            match count {
-                                Some(n) => a >> n,
-                                None => 0,
-                            },
-                        )
-                    }
-                }
-                (Value::WitnessOf(_), _) | (_, Value::WitnessOf(_)) => {
-                    Value::WitnessOf(Box::new(self.unwrap_witness().binary_arith_op(
-                        b.unwrap_witness(),
-                        binary_arith_op_kind,
-                        instrumenter,
-                    )))
-                }
-                (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
-                _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
-            },
+                )))
+            }
+            (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
+            _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
         }
     }
 
@@ -1493,8 +1304,15 @@ struct Instrumenter {
     /// Rangecheck lookup requests by `(width, is_unconditional)` — `true` when the lookup's flag is
     /// the literal constant `1`, which lets its bit chunks spill to the free `b·(b−1)=0` form.
     rangecheck_lookups: HashMap<(u8, bool), usize>,
+
     /// Spread lookup requests by `(width, is_unconditional)`; see `rangecheck_lookups`.
     spread_lookups: HashMap<(u8, bool), usize>,
+
+    /// Powers-of-two lookup requests by table size `s`, i.e. `log2` of the shifted width.
+    ///
+    /// Keyed by `s` alone rather than by `(s, is_unconditional)` like the two above: those spill
+    /// into chunks whose cost depends on the flag, but a `Pow2` lookup never spills.
+    pow2_lookups: HashMap<u8, usize>,
     array_lookups: usize,
 }
 
@@ -1528,6 +1346,9 @@ impl OpInstrumenter for Instrumenter {
                     .entry((*bits, unconditional))
                     .or_insert(0) += 1;
             }
+            LookupTarget::Pow2(size) => {
+                *self.pow2_lookups.entry(*size).or_insert(0) += 1;
+            }
             LookupTarget::Array(_) => self.array_lookups += 1,
         }
     }
@@ -1547,6 +1368,7 @@ impl Instrumenter {
             high_degree_muls: 0,
             rangecheck_lookups: HashMap::default(),
             spread_lookups: HashMap::default(),
+            pow2_lookups: HashMap::default(),
             array_lookups: 0,
         }
     }
@@ -1623,6 +1445,7 @@ impl Instrumenter {
     fn total_table_lookups(&self) -> usize {
         self.final_rangecheck8_lookups()
             + self.final_spread_lookups().values().sum::<usize>()
+            + self.pow2_lookups.values().sum::<usize>()
             + self.array_lookups
     }
 
@@ -1650,13 +1473,28 @@ impl Instrumenter {
             .filter(|bits| **bits >= 2)
             .map(|bits| (1usize << *bits as usize) + 1)
             .sum::<usize>();
-        range_constraints + spread_constraints
+
+        // A `Pow2` entry folds for the same reason a spread one does: both columns are compile-time
+        // constants, so it is `rows + 1` constraints. Costed per-function like spread rather than
+        // skipped like array, because the table is keyed by width, so any function reaching one
+        // implies it.
+        let pow2_constraints = self
+            .pow2_lookups
+            .keys()
+            .map(|size| (1usize << *size as usize) + 1)
+            .sum::<usize>();
+        range_constraints + spread_constraints + pow2_constraints
     }
 
     fn lookup_data_constraints(&self) -> usize {
         self.final_rangecheck8_lookups()
             + self
                 .final_spread_lookups()
+                .values()
+                .map(|count| count * 2)
+                .sum::<usize>()
+            + self
+                .pow2_lookups
                 .values()
                 .map(|count| count * 2)
                 .sum::<usize>()
@@ -1681,13 +1519,21 @@ impl Instrumenter {
         } else {
             0
         };
+
         let spread_rows = self
             .final_spread_lookups()
             .keys()
             .filter(|bits| **bits >= 2)
             .map(|bits| 1usize << *bits as usize)
             .sum::<usize>();
-        range_rows + spread_rows
+
+        let pow2_rows = self
+            .pow2_lookups
+            .keys()
+            .map(|size| 1usize << *size as usize)
+            .sum::<usize>();
+
+        range_rows + spread_rows + pow2_rows
     }
 
     fn detail_line(&self) -> String {
@@ -2021,6 +1867,7 @@ struct AggregatedConstraintCost {
     recurring_constraints: usize,
     rangecheck_lookups: HashMap<u8, usize>,
     final_spread_lookups: HashMap<u8, usize>,
+    pow2_lookups: HashMap<u8, usize>,
 }
 
 impl AggregatedConstraintCost {
@@ -2035,6 +1882,9 @@ impl AggregatedConstraintCost {
         for (bits, count) in cost.final_spread_lookups() {
             *self.final_spread_lookups.entry(bits).or_insert(0) += count * calls;
         }
+        for (&size, &count) in cost.pow2_lookups.iter() {
+            *self.pow2_lookups.entry(size).or_insert(0) += count * calls;
+        }
     }
 
     fn shared_table_constraints(&self) -> usize {
@@ -2043,13 +1893,25 @@ impl AggregatedConstraintCost {
         } else {
             0
         };
+
+        // `rows + 1`, matching `Instrumenter::table_allocation_constraints` and the layout the
+        // codegen actually emits (`Table::profile_size`, `LookupTableSpec::constraint_slots`): a
+        // spread entry folds to a single constraint because both its columns are compile-time
+        // constants.
         let spread_constraints = self
             .final_spread_lookups
             .keys()
             .filter(|bits| **bits >= 2)
-            .map(|bits| 2 * (1usize << *bits as usize) + 1)
+            .map(|bits| (1usize << *bits as usize) + 1)
             .sum::<usize>();
-        range_constraints + spread_constraints
+
+        let pow2_constraints = self
+            .pow2_lookups
+            .keys()
+            .map(|size| (1usize << *size as usize) + 1)
+            .sum::<usize>();
+
+        range_constraints + spread_constraints + pow2_constraints
     }
 
     fn total_constraints(&self) -> usize {
@@ -2348,6 +2210,7 @@ mod tests {
         },
     };
     use mavros_artifacts::FieldConfig;
+    use mavros_int_semantics::{IntOp, Sign, corners, residue};
 
     /// The comparison's reading comes from the opcode, so one pair of operands must compare two
     /// different ways under the two orderings.
@@ -2374,18 +2237,9 @@ mod tests {
         assert!(is(a.cmp_op(&a, CmpKind::Eq, Some(8)), 1));
     }
 
-    /// A shift reads its amount at the amount's own width, and tests and shifts by one count.
-    ///
-    /// The operands below are the ones that used to come apart. Each arm decoded the amount at the
-    /// _value's_ width, so `256` against an eight-bit value read as an in-range `0`: `Shr` returned
-    /// the value unchanged where the answer is an over-shift, and `Shl` tested the narrowed amount
-    /// but shifted by the raw one — `a << 256u32` on a `u128`, a debug panic and `a` unchanged in
-    /// release.
-    ///
-    /// Both directions and both readings are covered, because the point is that all four now agree
-    /// about what "out of range" means.
+    /// An out-of-range shift amount **masks** to `bits - 1` rather than saturating.
     #[test]
-    fn a_shift_amount_is_tested_and_applied_as_one_count() {
+    fn an_out_of_range_shift_amount_masks_rather_than_saturating() {
         use BinaryArithOpKind::{SShl, SShr, UShl, UShr};
 
         let mut dummy = DummyInstrumenter {
@@ -2403,31 +2257,79 @@ mod tests {
             }
         }
 
-        // The amount is wider than the value and its low eight bits are `0`.
+        // An amount wider than the value, whose low three bits are `0`: `256 & 7 == 0`, so every
+        // direction and every reading shifts by nothing and returns the value untouched.
         let value = Value::Int(8, 0x5A);
         let wide = Value::Int(32, 256);
         for kind in [SShl, UShl, SShr, UShr] {
             assert_eq!(
                 shift(&value, &wide, kind, &mut dummy),
-                0,
-                "{kind:?} by 256 at eight bits must be an over-shift"
+                0x5A,
+                "{kind:?} by 256 at eight bits masks to a shift by zero"
             );
         }
 
-        // An in-range amount is unaffected, which is what keeps the assertions above from passing
-        // on a shift that had simply stopped working.
+        // An in-range amount is untouched by any of this, which is what keeps the assertions above
+        // from passing on a shift that had simply stopped working.
         let one = Value::Int(8, 1);
         assert_eq!(shift(&value, &one, UShl, &mut dummy), 0xB4);
         assert_eq!(shift(&value, &one, UShr, &mut dummy), 0x2D);
 
-        // A negative amount is an over-shift too, and `Shr` fills by its reading.
+        // A negative amount is a large magnitude, so it masks to `7` rather than saturating.
         let negative = Value::Int(8, 0xFF);
-        assert_eq!(shift(&value, &negative, SShl, &mut dummy), 0);
+        assert_eq!(shift(&value, &negative, SShl, &mut dummy), 0x00);
+        assert_eq!(shift(&value, &negative, UShr, &mut dummy), 0x00);
         assert_eq!(
             shift(&Value::Int(8, 0xF0), &negative, SShr, &mut dummy),
             0xFF,
-            "an over-shifted negative value sign-fills to -1"
+            "sign-filling a negative value still saturates it at -1, by shifting seven places"
         );
+    }
+
+    /// The integer arm hands the model the operands it was given, in the order it was given them,
+    /// under the reading the _opcode_ names.
+    #[test]
+    fn the_integer_arm_delegates_with_the_operands_and_reading_it_was_given() {
+        use BinaryArithOpKind::{SDiv, SRem, SShr, SSub, UDiv, URem, UShr, USub};
+
+        let mut dummy = DummyInstrumenter {
+            field: FieldConfig::bn254(),
+        };
+
+        for (kind, op, sign) in [
+            (USub, IntOp::Sub, Sign::Unsigned),
+            (SSub, IntOp::Sub, Sign::Signed),
+            (UDiv, IntOp::Div, Sign::Unsigned),
+            (SDiv, IntOp::Div, Sign::Signed),
+            (URem, IntOp::Rem, Sign::Unsigned),
+            (SRem, IntOp::Rem, Sign::Signed),
+            (UShr, IntOp::Shr, Sign::Unsigned),
+            (SShr, IntOp::Shr, Sign::Signed),
+        ] {
+            for bits in [8usize, 32] {
+                for a in corners::values(bits) {
+                    for b in corners::values(bits) {
+                        let got = match Value::Int(bits, a).binary_arith_op(
+                            &Value::Int(bits, b),
+                            &kind,
+                            &mut dummy,
+                        ) {
+                            Value::Int(width, v) => {
+                                assert_eq!(width, bits, "{kind:?} changed the result's width");
+                                v
+                            }
+                            other => panic!("expected an integer result, got {other:?}"),
+                        };
+
+                        assert_eq!(
+                            got,
+                            residue(op, sign, bits, a, bits, b).unwrap_or(0),
+                            "{kind:?} at {bits} bits disagreed on {a:#x}, {b:#x}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// `ToBits` always produces an array, including when the input's concrete value is unknown.

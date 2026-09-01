@@ -166,10 +166,6 @@ pub enum LLOp {
         a: ValueId,
         b: ValueId,
     },
-    FieldNeg {
-        result: ValueId,
-        src: ValueId,
-    },
     FieldEq {
         result: ValueId,
         a: ValueId,
@@ -277,7 +273,6 @@ impl Instruction for LLOp {
 
             // Unary
             LLOp::Not { value, .. }
-            | LLOp::FieldNeg { src: value, .. }
             | LLOp::FieldToLimbs { src: value, .. }
             | LLOp::FieldFromLimbs { limbs: value, .. }
             | LLOp::Spread { value, .. }
@@ -333,7 +328,6 @@ impl Instruction for LLOp {
             | LLOp::Truncate { result, .. }
             | LLOp::ZExt { result, .. }
             | LLOp::FieldArith { result, .. }
-            | LLOp::FieldNeg { result, .. }
             | LLOp::FieldEq { result, .. }
             | LLOp::FieldLt { result, .. }
             | LLOp::FieldToLimbs { result, .. }
@@ -372,7 +366,6 @@ impl Instruction for LLOp {
             | LLOp::Truncate { result, .. }
             | LLOp::ZExt { result, .. }
             | LLOp::FieldArith { result, .. }
-            | LLOp::FieldNeg { result, .. }
             | LLOp::FieldEq { result, .. }
             | LLOp::FieldLt { result, .. }
             | LLOp::FieldToLimbs { result, .. }
@@ -406,7 +399,6 @@ impl Instruction for LLOp {
 
             // Unary
             LLOp::Not { value, .. }
-            | LLOp::FieldNeg { src: value, .. }
             | LLOp::FieldToLimbs { src: value, .. }
             | LLOp::FieldFromLimbs { limbs: value, .. }
             | LLOp::Spread { value, .. }
@@ -463,7 +455,6 @@ impl Instruction for LLOp {
 
             LLOp::Not { result, value }
             | LLOp::Spread { result, value, .. }
-            | LLOp::FieldNeg { result, src: value }
             | LLOp::FieldToLimbs { result, src: value }
             | LLOp::FieldFromLimbs {
                 result,
@@ -610,9 +601,6 @@ impl Instruction for LLOp {
             }
             LLOp::FieldArith { kind, result, a, b } => {
                 format!("{} = {} {}, {}", v(*result), kind, vr(*a), vr(*b))
-            }
-            LLOp::FieldNeg { result, src } => {
-                format!("{} = field.neg {}", v(*result), vr(*src))
             }
             LLOp::FieldEq { result, a, b } => {
                 format!("{} = field.eq {}, {}", v(*result), vr(*a), vr(*b))
@@ -1487,7 +1475,9 @@ mod tests {
             let b = e.mk_struct(field_elem, vec![l0, l1, l2, l3]);
 
             let c = e.field_arith(FieldArithOp::Add, a, b);
-            let d = e.field_neg(c);
+
+            // Negation is a subtraction from zero.
+            let d = e.field_arith(FieldArithOp::Sub, a, c);
             let eq = e.field_eq(c, d);
             let limbs = e.field_to_limbs(d);
             let back = e.field_from_limbs(limbs);
@@ -1496,7 +1486,6 @@ mod tests {
 
         let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("field.add"));
-        assert!(dump.contains("field.neg"));
         assert!(dump.contains("field.eq"));
         assert!(dump.contains("field.to_limbs"));
         assert!(dump.contains("field.from_limbs"));

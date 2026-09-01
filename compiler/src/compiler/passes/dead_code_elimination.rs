@@ -21,6 +21,9 @@ use crate::{
             divmod_guard::{
                 divmod_can_fail, divmod_provably_defined, emit_divmod_is_defined_assert,
             },
+            overflow_guard::{
+                emit_no_overflow_assert, overflow_operand_bits, overflow_provably_impossible,
+            },
             seq_bounds::{SeqBoundsCheck, emit_bounds_assert, failable_bounds},
             shift_guard::{
                 emit_shift_amount_is_valid_assert, shift_amount_provably_in_range,
@@ -110,6 +113,44 @@ fn unguarded_shift_operands(instruction: &OpCode) -> Option<(BinaryArithOpKind, 
         }
         _ => None,
     }
+}
+
+/// The operands of an unguarded `Add`/`Sub`/`Mul`.
+///
+/// This is the fourth instruction, alongside `Div`/`Mod`, `Shl`/`Shr` and the failable sequence
+/// ops, that DCE may not simply delete when its result goes dead: Noir rejects an overflowing one
+/// whether or not anything reads it (`die.rs:456` makes a `Binary` eliminable only when
+/// `!requires_acir_gen_predicate`, which is `true` for a checked `Add`/`Sub`/`Mul`).
+///
+/// Deliberately matches only at the top level, for the reason [`unguarded_divmod_operands`] does: a
+/// `Guard`-wrapped operation inside an inactive branch is required _not_ to fail, and
+/// `lower_overflow_guard` already encodes that.
+///
+/// The result comes back as well as the operands because the two groups are kept by opposite
+/// means; see [`overflow_rewrite_saves_the_operation`].
+fn unguarded_overflow_operands(
+    instruction: &OpCode,
+) -> Option<(BinaryArithOpKind, ValueId, ValueId, ValueId)> {
+    match instruction {
+        OpCode::BinaryArithOp {
+            kind,
+            result,
+            lhs,
+            rhs,
+        } if matches!(
+            kind.group(),
+            ArithGroup::Add | ArithGroup::Sub | ArithGroup::Mul
+        ) =>
+        {
+            Some((*kind, *result, *lhs, *rhs))
+        }
+        _ => None,
+    }
+}
+
+/// Whether replacing a dead operation of this group with its check is worth it.
+fn overflow_rewrite_saves_the_operation(kind: BinaryArithOpKind) -> bool {
+    matches!(kind.group(), ArithGroup::Mul)
 }
 
 pub struct DCE {
@@ -278,6 +319,7 @@ impl DCE {
         &self,
         analyses: Option<(&TypeInfo, &ValueRanges)>,
         function_id: FunctionId,
+        block_id: BlockId,
         kind: BinaryArithOpKind,
         lhs: ValueId,
         rhs: ValueId,
@@ -298,8 +340,8 @@ impl DCE {
         let function_ranges = ranges.get_function(function_id);
 
         !divmod_provably_defined(
-            &function_ranges.get(lhs),
-            &function_ranges.get(rhs),
+            &function_ranges.get_at(block_id, lhs),
+            &function_ranges.get_at(block_id, rhs),
             lhs_type.peel_witness(),
             signed,
         )
@@ -320,13 +362,54 @@ impl DCE {
         &self,
         analyses: Option<(&TypeInfo, &ValueRanges)>,
         function_id: FunctionId,
+        block_id: BlockId,
         lhs: ValueId,
         rhs: ValueId,
     ) -> Option<usize> {
         let (types, ranges) = analyses?;
         let bits = shift_operand_bits(types.get_function(function_id).get_value_type(lhs))?;
-        let amount = ranges.get_function(function_id).get(rhs);
+        let amount = ranges.get_function(function_id).get_at(block_id, rhs);
         (!shift_amount_provably_in_range(&amount, bits)).then_some(bits)
+    }
+
+    /// Whether a dead unguarded `Add`/`Sub`/`Mul` still has to leave its overflow check behind,
+    /// returning the width to build it at.
+    ///
+    /// The overflow counterpart of [`Self::shift_check_survives`], answering the same questions in
+    /// the same order, with one more: **both operands must be pure**. A witness operand's check is
+    /// owned by `LowerWitnessIntegerArithOps`, which encodes it as a range check on the field
+    /// result rather than as a comparison, and this pass has no way to build that. So a dead
+    /// witness `Add`/`Sub`/`Mul` is still deleted with its rejection.
+    ///
+    /// `None` means no check: either [`Config::rewrite_dead_partial_ops`] is off (the ranges are
+    /// only computed when the flag is set, so this cannot silently re-enable itself), an operand is
+    /// a witness, the operand type cannot overflow, or the domain proves it does not.
+    fn overflow_check_survives(
+        &self,
+        analyses: Option<(&TypeInfo, &ValueRanges)>,
+        function_id: FunctionId,
+        block_id: BlockId,
+        kind: BinaryArithOpKind,
+        lhs: ValueId,
+        rhs: ValueId,
+    ) -> Option<usize> {
+        let (types, ranges) = analyses?;
+        let function_types = types.get_function(function_id);
+        let lhs_type = function_types.get_value_type(lhs);
+        if lhs_type.is_witness_of() || function_types.get_value_type(rhs).is_witness_of() {
+            return None;
+        }
+        let bits = overflow_operand_bits(lhs_type)?;
+
+        let function_ranges = ranges.get_function(function_id);
+        let discharged = overflow_provably_impossible(
+            &function_ranges.get_at(block_id, lhs),
+            &function_ranges.get_at(block_id, rhs),
+            kind.group(),
+            bits,
+            kind.is_signed(),
+        );
+        (!discharged).then_some(bits)
     }
 
     /// Whether this run may replace a dead array access with its bounds check.
@@ -526,6 +609,7 @@ impl DCE {
                         && self.divmod_check_survives(
                             partial_op_analyses,
                             *function_id,
+                            *block_id,
                             kind,
                             lhs,
                             rhs,
@@ -540,10 +624,48 @@ impl DCE {
                     // `lhs` and everything feeding it stay dead.
                     if let Some((_, lhs, rhs)) = unguarded_shift_operands(instruction)
                         && self
-                            .shift_check_survives(partial_op_analyses, *function_id, lhs, rhs)
+                            .shift_check_survives(
+                                partial_op_analyses,
+                                *function_id,
+                                *block_id,
+                                lhs,
+                                rhs,
+                            )
                             .is_some()
                     {
                         worklist.push(WorkItem::LiveValue(*function_id, rhs));
+                    }
+
+                    // A dead `Add`/`Sub`/`Mul` is kept in one of two ways.
+                    //
+                    // A multiply is seeded like the shift and division above: its operands are held
+                    // live so the sweep can build the check out of them, and the op itself is left
+                    // dead, which is the signal that it should. Both operands, because unlike a
+                    // shift — whose width comes from a type — an overflow test is a question about
+                    // the two values.
+                    //
+                    // An `Add`/`Sub` instead keeps its *result* live, which keeps the instruction
+                    // verbatim and leaves the check to `LowerPureGuards`. Marking the result rather
+                    // than the operands is what stops the sweep below firing, so the two paths
+                    // cannot both run.
+                    if let Some((kind, result, lhs, rhs)) = unguarded_overflow_operands(instruction)
+                        && self
+                            .overflow_check_survives(
+                                partial_op_analyses,
+                                *function_id,
+                                *block_id,
+                                kind,
+                                lhs,
+                                rhs,
+                            )
+                            .is_some()
+                    {
+                        if overflow_rewrite_saves_the_operation(kind) {
+                            worklist.push(WorkItem::LiveValue(*function_id, lhs));
+                            worklist.push(WorkItem::LiveValue(*function_id, rhs));
+                        } else {
+                            worklist.push(WorkItem::LiveValue(*function_id, result));
+                        }
                     }
 
                     if self.rewrites_dead_partial_ops()
@@ -864,6 +986,7 @@ impl DCE {
                                 if self.divmod_check_survives(
                                     partial_op_analyses,
                                     function_id,
+                                    block_id,
                                     kind,
                                     lhs,
                                     rhs,
@@ -899,6 +1022,7 @@ impl DCE {
                                 if let Some(bits) = self.shift_check_survives(
                                     partial_op_analyses,
                                     function_id,
+                                    block_id,
                                     lhs,
                                     rhs,
                                 ) {
@@ -912,6 +1036,40 @@ impl DCE {
                                         rhs,
                                         bits,
                                         kind.is_signed(),
+                                    );
+                                }
+                            } else if let Some((kind, _, lhs, rhs)) =
+                                unguarded_overflow_operands(&instruction)
+                                && overflow_rewrite_saves_the_operation(kind)
+                            {
+                                // As for the shift above, `overflow_check_survives` carries the
+                                // width as well as the verdict, so the assert is built at the width
+                                // the mark phase decided the check against.
+                                //
+                                // A multiply only, and the arithmetic is not left behind: the test
+                                // is built from the operands, which is why `emit_no_overflow_assert`
+                                // is given `None`. An `Add`/`Sub` never reaches here — the mark
+                                // phase keeps its result live, so it is not dead any more.
+                                if let Some(bits) = self.overflow_check_survives(
+                                    partial_op_analyses,
+                                    function_id,
+                                    block_id,
+                                    kind,
+                                    lhs,
+                                    rhs,
+                                ) {
+                                    let mut emitter = VecEmitter {
+                                        ssa,
+                                        out: &mut new_instructions,
+                                        location: instruction.location().clone(),
+                                    };
+                                    emit_no_overflow_assert(
+                                        &mut emitter,
+                                        kind,
+                                        lhs,
+                                        rhs,
+                                        None,
+                                        bits,
                                     );
                                 }
                             } else if let Some(check) = failable_bounds(&instruction)

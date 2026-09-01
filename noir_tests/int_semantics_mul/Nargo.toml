@@ -1,0 +1,6 @@
+[package]
+name = "int_semantics_mul"
+type = "bin"
+authors = [""]
+
+[dependencies]

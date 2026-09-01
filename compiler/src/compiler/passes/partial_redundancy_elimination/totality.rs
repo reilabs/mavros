@@ -15,28 +15,29 @@
 //! The verdicts encode the engines' actual semantics:
 //!
 //! - **U/I `Add`/`Sub`/`Mul` are Never Speculated** Even though the executable backends wrap
-//!   (`vm/src/bytecode.rs` `add_int`/`add_u128` mask to width): overflow is Noir-semantically an
+//!   (`vm/src/bytecode.rs` `cell_add`/`add_int128` mask to width): overflow is Noir-semantically an
 //!   error — the constant lattice refuses overflow folds as "an erroneous evaluation with a
 //!   backend-specific residue" — and a _witness-typed_ op's gadget lowering emits a rejecting
 //!   overflow `Rangecheck` when the value-range analysis cannot prove fit. Field arithmetic has no
 //!   such predicate and is total.
-//! - **`Div`/`Mod` Trap on a Zero Divisor**: Integer division traps in every engine (raw Rust `/`
-//!   in the VM, `div` instructions in LLVM), while _field_ division is total in the VM (`div_field`
-//!   yields 0) but is rejected by the R1CS generator's constant evaluation (an ICE naming the
-//!   broken invariant — a _compile-time_ failure, strictly worse than a reject), so both domains
-//!   are gated. This is about the _opcode_ since every `Div`/`Mod` also carries a preceding assert
-//!   that the operands are defined, so a bad division fails the program even where the opcode
-//!   itself would not. That assert is a separate instruction this oracle never speculates, which is
-//!   why the gating below is still exactly what keeps a division and its check together. Divisions
-//!   are speculated only where the divisor is provably nonzero: a nonzero constant, or the
-//!   analysis's disequality channel ([`ClickCooper::known_unequal`] against the interned zero of
-//!   the divisor's type) at the insertion block. A **signed** division additionally owes the
+//! - **`Div`/`Mod` are Undefined on a Zero Divisor**: LLVM's `udiv`/`sdiv` make it poison and the
+//!   VM's `cell_udiv` and friends answer zero — an arbitrary choice made so the interpreter stays
+//!   total, not an actual answer. `mavros-int-semantics` records that disagreement by having
+//!   `residue` return `None` for exactly these inputs. Meanwhile _field_ division is total in the
+//!   VM (`div_field` yields 0) but is rejected by the R1CS generator's constant evaluation, so both
+//!   domains are gated. This is about the _opcode_ since every `Div`/`Mod` also carries a preceding
+//!   assert that the operands are defined, so a bad division fails the program even where the
+//!   opcode itself would not. That assert is a separate instruction this oracle never speculates,
+//!   which is why the gating below is still exactly what keeps a division and its check together.
+//!   Divisions are speculated only where the divisor is provably nonzero: a nonzero constant, or
+//!   the analysis's disequality channel ([`ClickCooper::known_unequal`] against the interned zero
+//!   of the divisor's type) at the insertion block. A **signed** division additionally owes the
 //!   `INT_MIN / -1` overflow rejection that `divmod_guard::emit_divmod_failure_cond` emits at every
 //!   width, so it is speculated only where the divisor is a constant other than `-1`.
-//! - **`Shl`/`Shr` Diverge Across Backends:** Once the amount reaches the operand width the
-//!   behaviors differ. The VM and LLVM now agree (both mask the amount to `bits - 1`) but R1CGen
-//!   wraps at 128 bits and `instrumenter` saturates, so only a constant, in-range amount is
-//!   speculated.
+//! - **`Shl`/`Shr` Reject an Out-of-Range Amount:** An amount at or past the operand's width is a
+//!   constraint failure in Noir so `mavros-int-semantics`' `eval` reports `Reject::ShiftAmount` and
+//!   speculating one would turn an accepting run into a rejecting one. PRE thus only speculates on
+//!   a constant, in-range amount.
 //! - **`ArrayGet`/`ArraySet` Trap on OOB:** VM asserts, R1CGen constant evaluation panics; only a
 //!   constant index provably below a static array length is speculated.
 //! - **Comparisons, `Not`, `Select`, `SExt`, `BitRange`, bitwise ops, and Casts are Total:** Their
@@ -346,5 +347,134 @@ fn constant_as_u128(c: &Constant) -> Option<u128> {
     match c {
         Constant::Int(_, v) => Some(*v),
         Constant::Field(_) | Constant::FnPtr(_) | Constant::Blob(_) => None,
+    }
+}
+
+/// The totality oracle's conformance relation to the normative model in `mavros-int-semantics`.
+///
+/// [`TotalityOracle::is_total_at`] answers a question the model also answers from the other side:
+/// the oracle asks whether an operation is safe to evaluate where it was not bound to, and the
+/// model says which operations can be _rejected_ at all. So the relation is
+///
+/// > `is_total_at` may answer an unconditional `true` for an [`ArithGroup`] **iff** no input makes
+/// > [`eval`](mavros_int_semantics::eval) reject it.
+///
+/// One direction keeps the pass sound: speculating an operation that can reject turns an accepting
+/// run into a rejecting one, which is obligation 1 of the accept/reject model. The other keeps it
+/// useful: gating an operation that can never fail costs optimisation for nothing.
+///
+/// The claim table below is written out rather than read off the oracle, because reaching
+/// `is_total_at` needs a whole analysis context and the answer would then be about one program
+/// rather than about the group. The value is in the table being **exhaustive**: adding an
+/// `ArithGroup` fails to compile here, and changing the model's rejection set fails the assertion.
+#[cfg(test)]
+mod int_semantics_conformance {
+    use mavros_int_semantics::{IntOp, Sign, corners, eval};
+
+    use super::*;
+
+    /// What `is_total_at`'s `BinaryArithOp` arm claims about an operation on **integers**.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Claim {
+        /// Speculated freely, with no predicate consulted.
+        Unconditional,
+
+        /// Speculated only where some further condition is discharged: the operand being field
+        /// typed, the divisor provably safe, the shift amount provably in range.
+        Conditional,
+    }
+
+    /// The claim the oracle makes, transcribed from its `match` arms one for one.
+    fn claim(group: ArithGroup) -> Claim {
+        match group {
+            // `And | Or | Xor => true`.
+            ArithGroup::And | ArithGroup::Or | ArithGroup::Xor => Claim::Unconditional,
+            // `Add | Sub | Mul => ..is_field()`, which is false for every integer.
+            ArithGroup::Add | ArithGroup::Sub | ArithGroup::Mul => Claim::Conditional,
+            // `Div | Rem => !is_witness(lhs) && divisor_provably_safe(..)`.
+            ArithGroup::Div | ArithGroup::Rem => Claim::Conditional,
+            // `Shl | Shr => shift_amount_in_range(..)`.
+            ArithGroup::Shl | ArithGroup::Shr => Claim::Conditional,
+        }
+    }
+
+    /// Whether the model rejects this operation on any corner input at any width.
+    fn can_reject(group: ArithGroup) -> bool {
+        let op: IntOp = group.into();
+
+        for sign in Sign::ALL {
+            for &bits in corners::widths_for(sign.is_signed()) {
+                let rhs = if matches!(op, IntOp::Shl | IntOp::Shr) {
+                    corners::shift_amounts(bits, bits)
+                } else {
+                    corners::values(bits)
+                };
+
+                for a in corners::values(bits) {
+                    for b in &rhs {
+                        if eval(op, sign, bits, a, bits, *b).is_rejected() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    #[test]
+    fn an_unconditional_verdict_is_given_exactly_where_nothing_can_reject() {
+        for group in [
+            ArithGroup::Add,
+            ArithGroup::Sub,
+            ArithGroup::Mul,
+            ArithGroup::Div,
+            ArithGroup::Rem,
+            ArithGroup::Shl,
+            ArithGroup::Shr,
+            ArithGroup::And,
+            ArithGroup::Or,
+            ArithGroup::Xor,
+        ] {
+            let expected = if can_reject(group) {
+                Claim::Conditional
+            } else {
+                Claim::Unconditional
+            };
+
+            assert_eq!(
+                claim(group),
+                expected,
+                "{group:?}: the oracle's verdict and the model's rejection set disagree"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bitwise_operations_are_the_only_total_ones() {
+        // The same fact stated positively, so that a model change which made, say, `Shl` total
+        // reads as a deliberate edit here rather than as a mysterious flip above.
+        let total: Vec<_> = [
+            ArithGroup::Add,
+            ArithGroup::Sub,
+            ArithGroup::Mul,
+            ArithGroup::Div,
+            ArithGroup::Rem,
+            ArithGroup::Shl,
+            ArithGroup::Shr,
+            ArithGroup::And,
+            ArithGroup::Or,
+            ArithGroup::Xor,
+        ]
+        .into_iter()
+        .filter(|g| !can_reject(*g))
+        .collect();
+
+        assert_eq!(
+            total,
+            vec![ArithGroup::And, ArithGroup::Or, ArithGroup::Xor],
+            "the set of operations no input can reject has changed"
+        );
     }
 }

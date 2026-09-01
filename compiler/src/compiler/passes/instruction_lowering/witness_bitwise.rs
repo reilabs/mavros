@@ -10,12 +10,18 @@ use crate::compiler::{
         types::FunctionTypeInfo,
         value_range_analysis::{Interval, field_modulus},
     },
-    passes::instruction_lowering::{InstructionLoweringRule, LoweringContext, integer_bits},
+    passes::{
+        instruction_lowering::{
+            InstructionLoweringRule, LoweringContext, integer_bits,
+            witness_integer_arith::guarded_or_zero_field,
+        },
+        shared::shift_guard::shift_amount_pinned_to,
+    },
     ssa::{
         ValueId,
         hlssa::{
-            ArithGroup, BinaryArithOpKind, CastTarget, CmpKind, MAX_SUPPORTED_UNSIGNED_BITS,
-            OpCode, Type, TypeExpr, assert_signed_op_width,
+            ArithGroup, BinaryArithOpKind, CastTarget, CmpKind, MAX_POW2_TABLE_SIZE,
+            MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type, TypeExpr, assert_signed_op_width,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -258,7 +264,24 @@ impl LowerWitnessBitwiseOps {
         from_bits: usize,
         to_bits: usize,
     ) {
-        assert_signed_op_width(to_bits, "sign extension");
+        // The bound belongs on the **source**, not on the target. A signed source is capped at
+        // `MAX_SUPPORTED_SIGNED_BITS` for now, but the target is just a wider integer to deposit
+        // the result in, and widening an `i32` into a `u128` is exactly what `x as u128` asks for.
+        assert_signed_op_width(from_bits, "sign extension source");
+        assert!(
+            from_bits < to_bits && to_bits <= MAX_SUPPORTED_UNSIGNED_BITS,
+            "sign extension must widen within the integer type cap: {from_bits} -> {to_bits}"
+        );
+
+        // FIELD-ASSUMPTION: L4-modulus-query. The extension term below is
+        // `two_pow(to_bits) - two_pow(from_bits)`, which is only the value it is meant to be while
+        // `two_pow(to_bits)` has not wrapped. On bn254 the 128-bit cap leaves ample room; on a
+        // narrower field this refuses rather than silently extending by a wrapped constant.
+        assert!(
+            to_bits < b.field().field_bit_size() as usize,
+            "sign extension to {to_bits} bits needs a field wider than {} bits",
+            b.field().field_bit_size()
+        );
 
         // The question is whether bit `from_bits - 1` of the encoding is provably clear, so it is
         // asked of the range record rather than of one chosen reading — `SExt`'s source may be
@@ -283,19 +306,17 @@ impl LowerWitnessBitwiseOps {
 
     /// Lowers a shift with at least one witness operand.
     ///
-    /// An unsigned left-hand side shifted by a _pure_ amount keeps its own lowering, which folds
-    /// the amount into a constant and is what every shift in the corpus takes today. A signed
-    /// left-hand side or a witness amount goes to [`Self::lower_general_shift`], which pays for a
-    /// runtime shift-amount decomposition.
+    /// An unsigned left-hand side shifted by an amount that is _known_ keeps its own lowering,
+    /// which folds the amount into a constant. Known covers two cases: a pure amount, and a witness
+    /// one the range domain pins to a single legal value. A signed left-hand side, or an amount
+    /// that is genuinely unknown, goes to [`Self::lower_general_shift`], which pays for a runtime
+    /// factor (a table lookup where there is a table, a bit decomposition otherwise).
     ///
-    /// The amount check is emitted **here**, above the split, because it is owed by both of them
-    /// and only one of them used to pay it. [`Self::lower_general_shift`] needs it to bound the
-    /// decomposition it is about to build, which made it easy to read as part of that lowering;
+    /// The amount check is emitted **here**, above the split, rather than inside either lowering,
+    /// because both need to provide it. [`Self::lower_general_shift`] needed it to bound the
+    /// decomposition it built, which made it easy to read as part of that lowering;
     /// [`Self::lower_constant_amount_shift`] hands the raw amount to a backend shift instead, so
-    /// its need for the check is just as real and far less visible. Without it an out-of-range
-    /// amount reached `1 << rhs`, where the VM's `shl_int` masks it to `bits - 1` and the program
-    /// quietly computes a shift Noir rejects. Hoisting it is what makes the check a property of
-    /// "a shift" rather than of one of the two ways to lower one.
+    /// its need for the check is just as real and far less visible.
     #[allow(clippy::too_many_arguments)]
     fn lower_shift(
         &self,
@@ -326,22 +347,77 @@ impl LowerWitnessBitwiseOps {
         }
 
         let widths = shift_amount_bits(context, rhs, bits);
-        emit_shift_amount_check(b, context, guard, rhs, widths);
 
-        if !rhs_witness && !lhs_signed {
-            self.lower_constant_amount_shift(b, context, guard, kind, result, lhs, rhs, bits);
+        // A witness amount the range domain pins to one legal value is lowered as the constant it
+        // provably is. This is where the domain's transparency to `WitnessOf` finally buys
+        // something: a value SCS proved constant keeps its witness type all the way here, so the
+        // type says "runtime amount" long after the analysis stopped believing it.
+        let pinned = if rhs_witness {
+            shift_amount_pinned_to(&context.range(rhs), bits)
+        } else {
+            None
+        };
+
+        // [`Self::lower_constant_amount_shift`] is unsigned-only by construction, so a signed
+        // left-hand side keeps the general lowering however well known its amount is.
+        let constant_amount = !lhs_signed && (!rhs_witness || pinned.is_some());
+
+        // A witness amount narrow enough to have a table takes the lookup, and the lookup _is_ the
+        // bound: its keys are exactly the legal amounts, so membership rejects an amount at or past
+        // the width, and a negative one too. Every other route still performs the explicit check —
+        // where a pinned amount discharges it for free, since the range that pinned it also proves
+        // it in range.
+        //
+        // The width test never fails today and is a tripwire rather than a branch:
+        // `MAX_POW2_TABLE_SIZE` is pinned to cover every width the type system admits, so _every_
+        // witness amount takes the table. It is written as a condition anyway because the
+        // alternative to a table is a real lowering rather than a panic, and the day a width
+        // outgrows the ceiling this falls back to it instead of building a table whose widest row
+        // the field cannot hold.
+        let use_pow2_table =
+            !constant_amount && rhs_witness && widths.amount_bits <= MAX_POW2_TABLE_SIZE;
+        if !use_pow2_table {
+            emit_shift_amount_check(b, context, guard, rhs, widths);
+        }
+
+        if constant_amount {
+            // The literal stands in for `rhs` only where the factor is built. Everything that reads
+            // the amount to _reason_ about it keeps the original value, which is the one the range
+            // domain has an entry for.
+            let amount = match pinned {
+                Some(v) => b.int_const(widths.rhs_bits, v),
+                None => rhs,
+            };
+            self.lower_constant_amount_shift(
+                b, context, guard, kind, result, lhs, rhs, amount, bits,
+            );
         } else {
             self.lower_general_shift(
-                b, context, guard, kind, result, lhs, rhs, bits, lhs_signed, widths,
+                b,
+                context,
+                guard,
+                kind,
+                result,
+                lhs,
+                rhs,
+                bits,
+                lhs_signed,
+                widths,
+                use_pow2_table,
             );
         }
     }
 
-    /// The pre-existing lowering: an unsigned left-hand side shifted by a pure amount.
+    /// The pre-existing lowering: an unsigned left-hand side shifted by an amount that folds.
     ///
-    /// The `1 << rhs` here is a _pure_ `Shl`, which constant-folds later. It has to: `Shl` on a
-    /// `U(bits)` reaches `hlssa_to_r1cs` only with both operands constant, so this shape is viable
-    /// precisely because the amount is not a witness.
+    /// The `1 << amount` is a _pure_ `Shl`, which constant-folds later. `Shl` on a `U(bits)`
+    /// reaches `hlssa_to_r1cs` only with both operands constant, so this shape is viable precisely
+    /// as far as the amount folds.
+    ///
+    /// `amount` and `rhs` are the same value except where the caller has replaced a pinned witness
+    /// amount with the literal it provably equals. The two are kept apart because only the factor
+    /// wants the literal: [`wrap_shifted_product`] reads the amount to size a range check, and the
+    /// range domain has a record for the operand as written, not for a value minted after it ran.
     ///
     /// That `Shl` is emitted **after** `LowerPureGuards` has run, so nothing checks its amount
     /// downstream of here and nothing can: it is the last chance. [`Self::lower_shift`] has already
@@ -359,6 +435,7 @@ impl LowerWitnessBitwiseOps {
         result: ValueId,
         lhs: ValueId,
         rhs: ValueId,
+        amount: ValueId,
         bits: usize,
     ) {
         let one_u = b.int_const(bits, 1);
@@ -367,7 +444,7 @@ impl LowerWitnessBitwiseOps {
             kind: BinaryArithOpKind::UShl,
             result: factor,
             lhs: one_u,
-            rhs,
+            rhs: amount,
         });
 
         match kind.group() {
@@ -403,10 +480,17 @@ impl LowerWitnessBitwiseOps {
     /// Lowers a shift whose amount is not a compile-time constant, whose left-hand side is signed,
     /// or both.
     ///
-    /// The amount is decomposed into bits and `2^amount` rebuilt as a product, because nothing
-    /// below HLSSA can shift by a variable. Noir treats a shift by `bits` or more as a runtime
-    /// error, so the amount's high bits are asserted clear rather than masked — the backends mask
-    /// and the cost model saturates, and neither answer is Noir's.
+    /// `2^amount` cannot be built by shifting, because nothing below HLSSA can shift by a variable.
+    /// A witness amount reads it out of the powers-of-two table in one lookup, which also supplies
+    /// the rejection. Otherwise the amount is decomposed into bits and the factor rebuilt as a
+    /// product of per-bit linear terms, and the caller has already planted the bound as an explicit
+    /// check.
+    ///
+    /// "Otherwise" is narrower than it sounds: since the table covers every width, the only amount
+    /// that reaches the decomposition is a **pure** one, which arrives here when the left-hand side
+    /// is signed. Every bit of that decomposition then constant-folds, so it costs nothing at
+    /// runtime — the per-bit product is the shape, not the price. It is not dead code, but no
+    /// witness amount can take it.
     #[allow(clippy::too_many_arguments)]
     fn lower_general_shift(
         &self,
@@ -420,13 +504,25 @@ impl LowerWitnessBitwiseOps {
         bits: usize,
         lhs_signed: bool,
         widths: ShiftAmountWidths,
+        use_pow2_table: bool,
     ) {
         let ShiftAmountWidths {
             rhs_bits,
             amount_bits,
         } = widths;
-        let amount = extract_amount_bits(b, rhs, rhs_bits, amount_bits);
-        let factor = build_shift_factor(b, &amount);
+
+        // The route that builds the factor is also the route that decides where a cofactor could
+        // come from, so the two are chosen together and travel as one value. Only the signed `>>`
+        // correction ever asks for the cofactor.
+        let (factor, cofactor) = if use_pow2_table {
+            (
+                emit_pow2_factor(b, guard, rhs, bits, amount_bits),
+                CofactorSource::Table,
+            )
+        } else {
+            let amount = extract_amount_bits(b, rhs, rhs_bits, amount_bits);
+            (build_shift_factor(b, &amount), CofactorSource::Bits(amount))
+        };
 
         match (kind.group(), lhs_signed) {
             // `Shl` is the one shift that takes no sign: the shifted product is wrapped and then
@@ -445,7 +541,7 @@ impl LowerWitnessBitwiseOps {
                 result,
                 lhs,
                 factor,
-                &amount,
+                &cofactor,
                 amount_bits,
                 bits,
             ),
@@ -521,7 +617,7 @@ impl LowerWitnessBitwiseOps {
         result: ValueId,
         lhs: ValueId,
         factor: ValueId,
-        amount: &[ValueId],
+        cofactor: &CofactorSource,
         amount_bits: usize,
         bits: usize,
     ) {
@@ -542,7 +638,11 @@ impl LowerWitnessBitwiseOps {
         let value = match sign_bit_of(b, context, lhs, bits) {
             None => quotient_field,
             Some(sign) => {
-                let cofactor = build_shift_cofactor(b, amount, amount_bits);
+                let cofactor = match cofactor {
+                    CofactorSource::Table => emit_pow2_cofactor(b, factor, bits),
+                    CofactorSource::Bits(amount) => build_shift_cofactor(b, amount, amount_bits),
+                };
+
                 // FIELD-ASSUMPTION: L4-decompose
                 let two_pow_bits = b.field_const(b.field().two_pow(bits));
                 let fill = b.usub(two_pow_bits, cofactor);
@@ -559,11 +659,28 @@ impl LowerWitnessBitwiseOps {
     }
 }
 
+/// Where the signed `>>` correction's `2^(bits - n)` comes from.
+///
+/// Not a free choice at the use site: it is fixed by whichever route built the factor, so the two
+/// are produced together in [`LowerWitnessBitwiseOps::lower_general_shift`] and travel as one
+/// value. Carrying the decomposition in the variant that needs it is what keeps a bit list and a
+/// "use the table" flag from disagreeing.
+enum CofactorSource {
+    /// The cofactor is pinned algebraically against the table-supplied factor by
+    /// [`emit_pow2_cofactor`], which never needs the amount's bits.
+    Table,
+
+    /// The cofactor is a second product over the same bits the factor was built from, by
+    /// [`build_shift_cofactor`].
+    Bits(Vec<ValueId>),
+}
+
 /// The two widths a shift-amount check and decomposition are cut against.
 #[derive(Clone, Copy)]
 struct ShiftAmountWidths {
     /// The declared width of the amount operand.
     rhs_bits: usize,
+
     /// `log2(bits)`: how many bits of the amount a valid shift can use.
     amount_bits: usize,
 }
@@ -641,6 +758,83 @@ fn emit_shift_amount_check(
             rhs: zero,
         },
     );
+}
+
+/// `2^amount` for a witness amount, read out of the powers-of-two table.
+///
+/// The lookup is emitted **unguarded**, with the amount neutralized to zero on an inactive path
+/// instead. Gating the lookup itself would be wrong: a vacuous row leaves `factor` unconstrained,
+/// and [`wrap_shifted_product`] depends on the factor being at most `2^(bits - 1)` _on every path_
+/// to keep its two range checks satisfiable.
+///
+/// Neutralizing the amount keeps the row live, so the factor is pinned to `1` where the guard is
+/// off, and an inactive out-of-range shift is vacuous rather than a failure.
+fn emit_pow2_factor(
+    b: &mut HLBlockEmitter<'_>,
+    guard: Option<ValueId>,
+    rhs: ValueId,
+    bits: usize,
+    amount_bits: usize,
+) -> ValueId {
+    let rhs_field = b.cast_to_field(rhs);
+    let amount = guarded_or_zero_field(b, rhs_field, guard);
+
+    // The hint. An out-of-range amount masks here exactly as the backends' shifts do, which is
+    // harmless: the lookup below rejects that amount whatever this computed.
+    let amount_pure = b.value_of(amount);
+    let amount_int = b.cast_to(CastTarget::Int(bits), amount_pure);
+    let one = b.int_const(bits, 1);
+    let factor_int = b.fresh_value();
+    b.emit(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::UShl,
+        result: factor_int,
+        lhs: one,
+        rhs: amount_int,
+    });
+    let factor_hint = b.cast_to_field(factor_int);
+    let factor = b.write_witness(factor_hint);
+
+    let one_flag = b.field_const(b.field().one());
+    b.lookup_pow2(amount_bits as u8, amount, factor, one_flag);
+
+    factor
+}
+
+/// `2^bits / 2^n`, pinned by a single multiplication against the table-supplied factor.
+///
+/// `factor * cofactor == 2^bits` determines `cofactor` uniquely.
+fn emit_pow2_cofactor(b: &mut HLBlockEmitter<'_>, factor: ValueId, bits: usize) -> ValueId {
+    // Only the signed `>>` correction wants a cofactor, and `assert_signed_op_width` caps a signed
+    // operand at 64 bits, so the double-width hint below stays inside the widest unsigned type
+    // there is.
+    assert!(
+        2 * bits <= MAX_SUPPORTED_UNSIGNED_BITS,
+        "a {bits}-bit shift cofactor needs an Int({}) that does not exist",
+        2 * bits
+    );
+
+    // FIELD-ASSUMPTION: L4-decompose
+    let two_pow_bits = b.field_const(b.field().two_pow(bits));
+
+    // The hint is an exact integer division, computed at double width because `2^bits` itself
+    // does not fit the shifted width -- an amount of zero makes the cofactor `2^bits`.
+    let wide_bits = 2 * bits;
+    let factor_pure = b.value_of(factor);
+    let factor_wide = b.cast_to(CastTarget::Int(wide_bits), factor_pure);
+    let two_pow_bits_wide = b.int_const(wide_bits, 1u128 << bits);
+    let cofactor_int = b.fresh_value();
+    b.emit(OpCode::BinaryArithOp {
+        kind: BinaryArithOpKind::UDiv,
+        result: cofactor_int,
+        lhs: two_pow_bits_wide,
+        rhs: factor_wide,
+    });
+    let cofactor_hint = b.cast_to_field(cofactor_int);
+    let cofactor = b.write_witness(cofactor_hint);
+
+    b.constrain(factor, cofactor, two_pow_bits);
+
+    cofactor
 }
 
 /// The low `log2(bits)` bits of the shift amount, as field elements.
@@ -859,11 +1053,17 @@ fn product_fits_field(bits: usize, discarded_bits: usize, field: FieldConfig) ->
 
 /// How many bits of `lhs * 2^n` can be pushed past the top, as a bound on the discarded half.
 ///
-/// `lhs` is below `2^bits` by its own type, so the product is below `2^(bits + n)` and the discarded
-/// half below `2^n`. The amount is capped at `bits - 1` regardless of what the range domain says:
-/// `lower_general_shift` builds its factor from only the low `log2(bits)` bits of the amount, so the
-/// _effective_ shift is always in range even when the declared range is not — and when it is not,
-/// the guarded amount check is what rejects the program.
+/// `lhs` is below `2^bits` by its own type, so the product is below `2^(bits + n)` and the
+/// discarded half below `2^n`. The amount is capped at `bits - 1` regardless of what the range
+/// domain says, and every route that builds a factor holds that cap by a distinct mechanism:
+///
+/// - The **table** route reads `2^n` out of a table whose only rows are the amounts `0..bits`, so
+///   an amount at or past the width has no row and the program is rejected. It is never masked.
+/// - The **decomposition** route builds its factor from only the low `log2(bits)` bits of the
+///   amount, so the _effective_ shift is in range even when the declared range is not. When it is
+///   not, the guarded amount check hoisted above the lowering rejects the program.
+/// - The **constant-amount** route folds `1 << amount` at an amount the same check has already
+///   proved in range.
 ///
 /// ⊥ falls back to the cap rather than measuring as a zero-bit amount. `Interval::empty` is `[1, 0]`,
 /// so its `hi` is a perfectly plausible-looking `0` — and answering `0` here does not merely narrow
@@ -1067,6 +1267,38 @@ mod tests {
         // today, and a statement about this modulus rather than about the lowering.
         assert!(product_fits_field(64, 63, bn254));
         assert!(product_fits_field(128, 0, bn254));
+    }
+
+    #[test]
+    fn every_table_backed_width_has_exactly_as_many_rows_as_amounts() {
+        // The table is keyed by `log2(bits)` so that its row count is `1 << size`, the convention
+        // every other width-keyed table follows. That works only because the legal amounts are
+        // `0..bits` and `bits` is a power of two: `shift_operand_bits` asserts the latter. If the
+        // two ever drift, membership stops being the amount bound and the lowering silently accepts
+        // or rejects the wrong amounts.
+        for bits in [8usize, 16, 32, 64, 128] {
+            let size = bits.trailing_zeros() as usize;
+            assert!(size <= MAX_POW2_TABLE_SIZE, "{bits}-bit shift has no table");
+            assert_eq!(
+                1usize << size,
+                bits,
+                "{bits}-bit shift: rows must be amounts"
+            );
+        }
+
+        // Every width Noir can name is covered, and the ceiling sits exactly at the widest of them
+        // rather than above it. There is deliberately no headroom: the bound is the _field's_, not
+        // the host's — row `n` carries the value `2^n`, so a size-`s` table's widest row is
+        // `2^(2^s - 1)`, and one size further would put that row past the bn254 modulus, where
+        // every evaluator wraps identically and the table stops holding powers of two at all.
+        assert!(128usize.trailing_zeros() as usize <= MAX_POW2_TABLE_SIZE);
+        assert_eq!(1usize << MAX_POW2_TABLE_SIZE, MAX_SUPPORTED_UNSIGNED_BITS);
+
+        // The bound stated as the field question it is, at the ceiling and one past it.
+        let modulus = field_modulus(FieldConfig::bn254());
+        let widest_row = |size: usize| BigInt::one() << ((1usize << size) - 1);
+        assert!(widest_row(MAX_POW2_TABLE_SIZE) < modulus);
+        assert!(widest_row(MAX_POW2_TABLE_SIZE + 1) > modulus);
     }
 
     #[test]

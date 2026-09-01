@@ -1,5 +1,11 @@
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
+use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field, PrimeField};
+use tracing::{instrument, warn};
+
+use mavros_artifacts::FieldConfig;
+use mavros_int_semantics::{self as semantics, CmpOp, Sign};
+
 use crate::compiler::{
     analysis::{
         symbolic_executor::{self, AssertionFailure, SymbolicExecutor},
@@ -14,9 +20,6 @@ use crate::compiler::{
     },
     util::{spread_bits, unspread_bits},
 };
-use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field, PrimeField};
-use mavros_artifacts::FieldConfig;
-use tracing::{instrument, warn};
 
 pub use mavros_artifacts::{
     ConstraintsLayout, FlamegraphProfile, FlamegraphStackId, LC, R1C, R1CS, WitnessLayout,
@@ -72,39 +75,6 @@ pub enum Value {
 }
 
 impl Value {
-    fn bit_mask(bits: usize) -> u128 {
-        assert!(
-            (1..=MAX_SUPPORTED_UNSIGNED_BITS).contains(&bits),
-            "invalid integer width for bit mask: {bits}"
-        );
-        if bits == MAX_SUPPORTED_UNSIGNED_BITS {
-            u128::MAX
-        } else {
-            (1u128 << bits) - 1
-        }
-    }
-
-    fn wrap_unsigned(v: u128, bits: usize) -> u128 {
-        v & Self::bit_mask(bits)
-    }
-
-    fn decode_signed(v: u128, bits: usize) -> i128 {
-        assert!(bits > 0, "cannot decode a zero-width integer");
-        assert_signed_op_width(bits, "two's complement decoding");
-        let masked = Self::wrap_unsigned(v, bits);
-        let sign_bit = 1u128 << (bits - 1);
-        if masked & sign_bit == 0 {
-            masked as i128
-        } else {
-            (masked as i128) - ((1u128 << bits) as i128)
-        }
-    }
-
-    fn encode_signed(v: i128, bits: usize) -> u128 {
-        assert_signed_op_width(bits, "two's complement encoding");
-        Self::wrap_unsigned(v as u128, bits)
-    }
-
     /// Report an undefined `Div`/`Mod` reaching the R1CS constant folds as a compiler bug.
     ///
     /// `LowerPureGuards` asserts every integer `Div`/`Mod` is defined immediately before the op,
@@ -120,18 +90,6 @@ impl Value {
             "ICE: undefined {kind:?} reached the R1CS constant fold on {sign}{bits}; \
              LowerPureGuards should have rejected the program at the preceding assertion"
         )
-    }
-
-    /// Whether `lhs / rhs` (or `lhs % rhs`) on `bits`-wide signed operands is undefined: a zero
-    /// divisor, or `INT_MIN / -1`.
-    ///
-    /// Mirrors `emit_divmod_failure_cond`, which is what makes such a program unsatisfiable before
-    /// this fold ever runs. `checked_div` cannot stand in for the second case here: `lhs` is a
-    /// decoded `i128`, so the narrower type's `INT_MIN / -1` has a perfectly representable `i128`
-    /// quotient and would fold silently, wrapping back to `INT_MIN` on the way through
-    /// [`Value::encode_signed`].
-    fn signed_divmod_undefined(lhs: i128, rhs: i128, bits: usize) -> bool {
-        rhs == 0 || (rhs == -1 && lhs == -(1i128 << (bits - 1)))
     }
 
     // FIELD-ASSUMPTION: L4-eval
@@ -219,60 +177,66 @@ impl Value {
     }
 
     pub fn expect_u1(&self) -> bool {
+        let v = self.expect_in_u128("u1");
+        assert!(v <= 1, "expected u1, but value is {v}");
+        v == 1
+    }
+
+    /// The canonical value of a constant as a `u128`, or `None` if it needs more than 128 bits.
+    ///
+    /// Every `expect_u*` goes through this. They each used to format the constant as a decimal
+    /// string and re-parse it, which is correct but costs an allocation and a base-10 conversion
+    /// per operand — fine at the handful of calls R1CS generation makes, and far too slow to sweep
+    /// a conformance test through.
+    ///
+    /// Both the read and the test that it lost nothing come from the model, which is what makes
+    /// the agreement with `lattice::int_cast_bits` structural rather than a coincidence the two
+    /// have to be kept in. Deriving "which limbs are outside 128 bits" here as well is how a
+    /// caller and its reader come apart; see `field_limbs_fit`.
+    ///
+    /// The limb _count_ is a property of the field, and both entry points take the slice whatever
+    /// its length: a field whose `BigInt` is narrower than this one simply has fewer, where
+    /// `limbs[2]` would have panicked.
+    fn const_u128(&self, what: &str) -> Option<u128> {
         match self {
+            // FIELD-ASSUMPTION: L4-decompose
             Value::Const(c) => {
-                let v: u128 = c.into_bigint().to_string().parse().unwrap_or_else(|e| {
-                    panic!("expected u1, but field value is {}: {e}", c.into_bigint())
-                });
-                assert!(v <= 1, "expected u1, but value is {v}");
-                v == 1
+                let limbs = c.into_bigint().0;
+                semantics::field_limbs_fit(&limbs, semantics::MAX_BITS)
+                    .then(|| semantics::field_limbs_to_int(&limbs, semantics::MAX_BITS))
             }
-            r => panic!("expected u1, got {:?}", r),
+            r => panic!("expected {what}, got {r:?}"),
         }
+    }
+
+    /// The canonical value as a `u128`, panicking with the caller's name if it does not fit.
+    fn expect_in_u128(&self, what: &str) -> u128 {
+        self.const_u128(what).unwrap_or_else(|| {
+            let Value::Const(c) = self else { unreachable!("const_u128 panics on a non-constant") };
+            panic!("expected {what}, but field value is {}", c.into_bigint())
+        })
+    }
+
+    /// Narrow to `T`, panicking with the caller's name if the value does not fit it.
+    fn expect_narrow<T: TryFrom<u128>>(&self, what: &str) -> T {
+        let v = self.expect_in_u128(what);
+        T::try_from(v).unwrap_or_else(|_| panic!("expected {what}, but field value is {v}"))
     }
 
     pub fn expect_u8(&self) -> u8 {
-        match self {
-            Value::Const(c) => {
-                let s = c.into_bigint().to_string();
-                s.parse()
-                    .unwrap_or_else(|e| panic!("expected u8, but field value is {s}: {e}"))
-            }
-            r => panic!("expected u8, got {:?}", r),
-        }
+        self.expect_narrow("u8")
     }
 
     pub fn expect_u32(&self) -> u32 {
-        match self {
-            Value::Const(c) => {
-                let s = c.into_bigint().to_string();
-                s.parse()
-                    .unwrap_or_else(|e| panic!("expected u32, but field value is {s}: {e}"))
-            }
-            r => panic!("expected u32, got {:?}", r),
-        }
+        self.expect_narrow("u32")
     }
 
     pub fn expect_u64(&self) -> u64 {
-        match self {
-            Value::Const(c) => {
-                let s = c.into_bigint().to_string();
-                s.parse()
-                    .unwrap_or_else(|e| panic!("expected u64, but field value is {s}: {e}"))
-            }
-            r => panic!("expected u64, got {:?}", r),
-        }
+        self.expect_narrow("u64")
     }
 
     pub fn expect_u128(&self) -> u128 {
-        match self {
-            Value::Const(c) => {
-                let s = c.into_bigint().to_string();
-                s.parse()
-                    .unwrap_or_else(|e| panic!("expected u128, but field value is {s}: {e}"))
-            }
-            r => panic!("expected u128, got {:?}", r),
-        }
+        self.expect_in_u128("u128")
     }
 
     // FIELD-ASSUMPTION: L4-eval
@@ -370,6 +334,8 @@ pub enum Table {
     Range(u64),
     OfElems(Vec<LC>),
     Spread(u8),
+    /// `(n, 2^n)` for `n` in `0..2^size`, where `size` is `log2` of the shifted operand's width.
+    Pow2(u8),
 }
 
 impl Table {
@@ -378,20 +344,21 @@ impl Table {
             Table::Range(bits) => 1usize << bits,
             Table::OfElems(elements) => elements.len(),
             Table::Spread(bits) => 1usize << bits,
+            Table::Pow2(size) => 1usize << size,
         }
     }
 
     fn width(&self) -> usize {
         match self {
             Table::Range(_) => 1,
-            Table::OfElems(_) | Table::Spread(_) => 2,
+            Table::OfElems(_) | Table::Spread(_) | Table::Pow2(_) => 2,
         }
     }
 
     fn profile_size(&self) -> (u64, u64) {
         let rows = self.row_count() as u64;
         match self {
-            Table::Range(_) | Table::Spread(_) => (rows + 1, 2 * rows),
+            Table::Range(_) | Table::Spread(_) | Table::Pow2(_) => (rows + 1, 2 * rows),
             Table::OfElems(_) => (2 * rows + 1, 3 * rows),
         }
     }
@@ -403,6 +370,9 @@ impl Table {
                 format!("<array table #{table_index}: {} rows>", elements.len())
             }
             Table::Spread(bits) => format!("<spread table: {bits} bits>"),
+            Table::Pow2(size) => {
+                format!("<pow2 table: {}-bit shifts>", 1usize << size)
+            }
         }
     }
 }
@@ -487,6 +457,17 @@ impl symbolic_executor::Context<Value> for R1CGen {
                     self.add_table(Table::Spread(bits))
                 }
             }
+            hlssa::LookupTarget::Pow2(size) => {
+                let existing = self.tables.iter().position(|t| match t {
+                    Table::Pow2(n) => *n == size,
+                    _ => false,
+                });
+                if let Some(idx) = existing {
+                    idx
+                } else {
+                    self.add_table(Table::Pow2(size))
+                }
+            }
             hlssa::LookupTarget::Array(arr) => {
                 let arr = arr.expect_array();
                 if arr.borrow().table_id.is_none() {
@@ -553,17 +534,36 @@ impl symbolic_executor::Value<R1CGen> for Value {
             CmpKind::ULt => self.lt(b),
             CmpKind::SLt => {
                 let bits = bits.expect("ICE: signed comparison without an operand width");
-                let a = Self::decode_signed(self.expect_u128(), bits);
-                let b_val = Self::decode_signed(b.expect_u128(), bits);
-                if a < b_val {
-                    Value::Const(ark_bn254::Fr::ONE)
+                let less = semantics::cmp(
+                    CmpOp::Lt,
+                    Sign::Signed,
+                    bits,
+                    self.expect_u128(),
+                    b.expect_u128(),
+                );
+                Value::Const(if less {
+                    ark_bn254::Fr::ONE
                 } else {
-                    Value::Const(ark_bn254::Fr::ZERO)
-                }
+                    ark_bn254::Fr::ZERO
+                })
             }
         }
     }
 
+    /// Evaluate a binary arithmetic operation on constants.
+    ///
+    /// Unlike the constant folders in `click_cooper::lattice` and the `Specializer`, this is not
+    /// speculative: it is the _final_ evaluation, and it runs **after** the guard IR. So it must
+    /// not decline: an operation reaching here has already had its rejection enforced (or proved
+    /// unnecessary) by the assertion `LowerPureGuards` planted ahead of it, and something has to be
+    /// written. That makes the obligation [`mavros_int_semantics::residue`]'s rather than
+    /// [`mavros_int_semantics::eval`]'s, exactly:
+    ///
+    /// - Accepted inputs produce Noir's value;
+    /// - Rejected ones the model still specifies produce the pattern every other backend produces,
+    ///   so that a program mavros wrongly accepted is at least wrong the same way everywhere;
+    /// - The two the model deliberately leaves unspecified, because there the whole obligation sits
+    ///   on the guard IR and reaching this point means that ordering broke.
     fn arith(
         &self,
         b: &Self,
@@ -571,105 +571,44 @@ impl symbolic_executor::Value<R1CGen> for Value {
         out_type: &Type,
         _ctx: &mut R1CGen,
     ) -> Self {
-        let signed = binary_arith_op_kind.is_signed();
-
         match &out_type.strip_witness().expr {
-            TypeExpr::Int(bits) if !signed => {
-                assert!(
-                    *bits > 0 && *bits <= MAX_SUPPORTED_UNSIGNED_BITS,
-                    "Unsupported integer size in R1CS arith: int{bits}"
-                );
-                assert!(
-                    matches!((self, b), (Value::Const(_), Value::Const(_))),
-                    "Non-constant integer {:?} is not supported in R1CS arith",
-                    binary_arith_op_kind
-                );
-                let a = Self::wrap_unsigned(self.expect_u128(), *bits);
-                let b = Self::wrap_unsigned(b.expect_u128(), *bits);
-                let shift = b as u32;
-                let result = match binary_arith_op_kind.group() {
-                    ArithGroup::Add => a.wrapping_add(b),
-                    ArithGroup::Sub => a.wrapping_sub(b),
-                    ArithGroup::Mul => a.wrapping_mul(b),
-                    ArithGroup::Div => a.checked_div(b).unwrap_or_else(|| {
-                        Self::ice_undefined_divmod(binary_arith_op_kind, *bits, false)
-                    }),
-                    ArithGroup::Rem => a.checked_rem(b).unwrap_or_else(|| {
-                        Self::ice_undefined_divmod(binary_arith_op_kind, *bits, false)
-                    }),
-                    ArithGroup::And => a & b,
-                    ArithGroup::Or => a | b,
-                    ArithGroup::Xor => a ^ b,
-                    ArithGroup::Shl => a.wrapping_shl(shift),
-                    ArithGroup::Shr => a.wrapping_shr(shift),
-                };
-                Value::Const(ark_bn254::Fr::from(Self::wrap_unsigned(result, *bits)))
-            }
             TypeExpr::Int(bits) => {
-                assert_signed_op_width(*bits, "R1CS constant arithmetic");
+                let bits = *bits;
                 assert!(
-                    *bits > 0,
+                    bits > 0 && bits <= MAX_SUPPORTED_UNSIGNED_BITS,
                     "Unsupported integer size in R1CS arith: int{bits}"
                 );
+                if binary_arith_op_kind.is_signed() {
+                    assert_signed_op_width(bits, "R1CS constant arithmetic");
+                }
                 assert!(
                     matches!((self, b), (Value::Const(_), Value::Const(_))),
                     "Non-constant integer {:?} is not supported in R1CS arith",
                     binary_arith_op_kind
                 );
-                let a = Self::decode_signed(self.expect_u128(), *bits);
-                let b = Self::decode_signed(b.expect_u128(), *bits);
-                let b_bits = Self::wrap_unsigned(b as u128, *bits) as u32;
-                let result = match binary_arith_op_kind.group() {
-                    ArithGroup::Add => Self::encode_signed(a.wrapping_add(b), *bits),
-                    ArithGroup::Sub => Self::encode_signed(a.wrapping_sub(b), *bits),
-                    ArithGroup::Mul => Self::encode_signed(a.wrapping_mul(b), *bits),
-                    ArithGroup::And => {
-                        Self::wrap_unsigned(a as u128, *bits)
-                            & Self::wrap_unsigned(b as u128, *bits)
-                    }
-                    ArithGroup::Or => {
-                        Self::wrap_unsigned(a as u128, *bits)
-                            | Self::wrap_unsigned(b as u128, *bits)
-                    }
-                    ArithGroup::Xor => {
-                        Self::wrap_unsigned(a as u128, *bits)
-                            ^ Self::wrap_unsigned(b as u128, *bits)
-                    }
 
-                    // Left shift is the same map on bits whatever the sign, so this stays on the
-                    // raw encoding. Note it does _not_ mask the shift count the way `Shr` below
-                    // does: `wrapping_shl` on a `u128` masks to 127, not to `bits - 1`. Left for
-                    // now as the backends do not agree on behavior here.
-                    ArithGroup::Shl => {
-                        let raw = Self::wrap_unsigned(a as u128, *bits).wrapping_shl(b_bits);
-                        Self::wrap_unsigned(raw, *bits)
-                    }
+                // Both operands are read at `bits`: HLSSA types an `IntArith` result as
+                // `int{max(s1, s2)}` and this evaluator only sees that result type, so a shift
+                // amount narrower than the value is indistinguishable from one declared at the
+                // value's own width. Reading it wider than it was declared is harmless as the extra
+                // bits are zero, and the model masks both patterns itself.
+                let raw = semantics::residue(
+                    binary_arith_op_kind.group().into(),
+                    binary_arith_op_kind.sign(),
+                    bits,
+                    self.expect_u128(),
+                    bits,
+                    b.expect_u128(),
+                )
+                .unwrap_or_else(|| {
+                    Self::ice_undefined_divmod(
+                        binary_arith_op_kind,
+                        bits,
+                        binary_arith_op_kind.is_signed(),
+                    )
+                });
 
-                    // Arithmetic, not logical. `a` is already the decoded signed value, so shifting
-                    // it directly sign-fills; the previous `wrap_unsigned(..)` re-encoded to raw
-                    // bits first and so zero-filled. The shift count is masked to `bits - 1` to
-                    // match the VM's `ashr_int` and LLVM's `AShr` — the right-shift trio does
-                    // agree, unlike `Shl` above.
-                    ArithGroup::Shr => {
-                        Self::encode_signed(a >> (b_bits & (*bits as u32 - 1)), *bits)
-                    }
-
-                    // `INT_MIN / -1` is undefined for the same reason a zero divisor is, and is
-                    // guarded identically by `LowerPureGuards`, so it ICEs identically here.
-                    ArithGroup::Div => {
-                        if Self::signed_divmod_undefined(a, b, *bits) {
-                            Self::ice_undefined_divmod(binary_arith_op_kind, *bits, true);
-                        }
-                        Self::encode_signed(a / b, *bits)
-                    }
-                    ArithGroup::Rem => {
-                        if Self::signed_divmod_undefined(a, b, *bits) {
-                            Self::ice_undefined_divmod(binary_arith_op_kind, *bits, true);
-                        }
-                        Self::encode_signed(a % b, *bits)
-                    }
-                };
-                Value::Const(ark_bn254::Fr::from(result))
+                Value::Const(ark_bn254::Fr::from(raw))
             }
             TypeExpr::Field | TypeExpr::WitnessOf(_) => match binary_arith_op_kind.group() {
                 ArithGroup::Add => self.add(b),
@@ -730,10 +669,16 @@ impl symbolic_executor::Value<R1CGen> for Value {
                 let bits = bits.expect("ICE: signed comparison without an operand width");
                 let a_val = a.expect_constant();
                 let b_val = b.expect_constant();
-                // Interpret both as two's complement, by the same decoding `cmp` uses.
-                if Self::decode_signed(a.expect_u128(), bits)
-                    >= Self::decode_signed(b.expect_u128(), bits)
-                {
+
+                // Read as two's complement, by the same model call above, so an assertion and the
+                // comparison it asserts on cannot disagree.
+                if !semantics::cmp(
+                    CmpOp::Lt,
+                    Sign::Signed,
+                    bits,
+                    a.expect_u128(),
+                    b.expect_u128(),
+                ) {
                     return Err(AssertionFailure::new(format!(
                         "assert_cmp lt (signed) failed: {a_val:?} >= {b_val:?}"
                     )));
@@ -1363,6 +1308,41 @@ impl R1CGen {
                     });
                     table_info.sum_constraint_idx = result.len() - 1;
                 }
+                Table::Pow2(size) => {
+                    // Powers-of-two table: for each entry n in 0..2^size, value = 2^n. Folded
+                    // exactly like the spread table above as both operands are compile-time
+                    // constants, so beta*2^n folds straight into the denominator:
+                    //
+                    // -> y = m_n / (alpha - n + beta*2^n),
+                    //    constraint `y * (alpha - n + beta*2^n) - m_n = 0`
+                    //
+                    // FIELD-ASSUMPTION: L4-decompose. The largest value is 2^(2^size - 1), which is
+                    // 2^127 at the widest size `MAX_POW2_TABLE_SIZE` admits; that ceiling is set so
+                    // the widest row clears the modulus, so no row wraps. `two_pow` would wrap
+                    // silently if it ever did.
+                    let len = 1usize << size;
+                    let mut sum_lhs: LC = vec![];
+                    for n in 0..len {
+                        let y = witness_layout.next_table_data();
+                        let m = table_info.multiplicities_witness_off + n;
+                        result.push(R1C {
+                            a: vec![(y, ark_bn254::Fr::ONE)],
+                            b: vec![
+                                (alpha, ark_bn254::Fr::ONE),
+                                (0, -ark_bn254::Fr::from(n as u64)),
+                                (beta, two_pow(n)),
+                            ],
+                            c: vec![(m, ark_bn254::Fr::ONE)],
+                        });
+                        sum_lhs.push((y, ark_bn254::Fr::ONE));
+                    }
+                    result.push(R1C {
+                        a: sum_lhs,
+                        b: vec![(0, ark_bn254::Fr::ONE)],
+                        c: vec![],
+                    });
+                    table_info.sum_constraint_idx = result.len() - 1;
+                }
             }
         }
 
@@ -1370,10 +1350,6 @@ impl R1CGen {
 
         // lookups init
         for lookup in self.lookups.into_iter() {
-            // if lookup.elements.len() >= 2 {
-            //     todo!("wide tables");
-            // }
-
             let y_wit = match lookup.elements.len() {
                 1 => {
                     let y = witness_layout.next_lookups_data();
@@ -1494,6 +1470,14 @@ mod r1cs_profile_tests {
             vec![spread_key, spread_value],
         );
 
+        let pow2_amount = witness(&mut generator);
+        let pow2_factor = witness(&mut generator);
+        lookup(
+            &mut generator,
+            hlssa::LookupTarget::Pow2(2),
+            vec![pow2_amount, pow2_factor],
+        );
+
         for values in [[10, 20, 30], [40, 50, 60]] {
             let table = array_table(&values);
             let index = witness(&mut generator);
@@ -1519,9 +1503,10 @@ mod r1cs_profile_tests {
         let constraints = profile.constraints.to_folded();
         assert!(constraints.contains("main;<lookup tables>;<range table: 2 bits>"));
         assert!(constraints.contains("main;<lookup tables>;<spread table: 2 bits>"));
-        assert!(constraints.contains("main;<lookup tables>;<array table #2: 3 rows>"));
+        assert!(constraints.contains("main;<lookup tables>;<pow2 table: 4-bit shifts>"));
         assert!(constraints.contains("main;<lookup tables>;<array table #3: 3 rows>"));
-        assert!(constraints.contains("main 7\n"));
+        assert!(constraints.contains("main;<lookup tables>;<array table #4: 3 rows>"));
+        assert!(constraints.contains("main 9\n"));
     }
 }
 
@@ -1824,5 +1809,194 @@ mod comparison_tests {
         assert!(assert_cmp_holds(&a, &b, CmpKind::ULt, None));
         assert!(!assert_cmp_holds(&b, &a, CmpKind::ULt, None));
         assert!(assert_cmp_holds(&a, &a, CmpKind::Eq, None));
+    }
+}
+
+// INT-SEMANTICS CONFORMANCE
+// ================================================================================================
+
+#[cfg(test)]
+mod int_semantics_conformance {
+    use mavros_int_semantics::{IntOp, Raw, Sign, corners, residue};
+
+    use super::{BinaryArithOpKind, FieldConfig, R1CGen, Type, Value, symbolic_executor};
+
+    /// Every operation, spelled out so a new variant cannot quietly skip the sweep.
+    const ALL_ARITH: [BinaryArithOpKind; 17] = [
+        BinaryArithOpKind::UAdd,
+        BinaryArithOpKind::SAdd,
+        BinaryArithOpKind::USub,
+        BinaryArithOpKind::SSub,
+        BinaryArithOpKind::UMul,
+        BinaryArithOpKind::SMul,
+        BinaryArithOpKind::UDiv,
+        BinaryArithOpKind::SDiv,
+        BinaryArithOpKind::URem,
+        BinaryArithOpKind::SRem,
+        BinaryArithOpKind::UShl,
+        BinaryArithOpKind::SShl,
+        BinaryArithOpKind::UShr,
+        BinaryArithOpKind::SShr,
+        BinaryArithOpKind::And,
+        BinaryArithOpKind::Or,
+        BinaryArithOpKind::Xor,
+    ];
+
+    /// Fold one operation the way `R1CGen` does, and read the answer back as a raw pattern.
+    fn fold(op: BinaryArithOpKind, bits: usize, a: Raw, b: Raw) -> Raw {
+        let mut generator = R1CGen::new(FieldConfig::bn254());
+        <Value as symbolic_executor::Value<R1CGen>>::arith(
+            &Value::Const(ark_bn254::Fr::from(a)),
+            &Value::Const(ark_bn254::Fr::from(b)),
+            op,
+            &Type::int(bits),
+            &mut generator,
+        )
+        .expect_u128()
+    }
+
+    /// The widths this evaluator may be asked about, for one reading.
+    ///
+    /// The odd widths are deliberately absent for shifts and present for everything else, which is
+    /// the same restriction the VM and LLVM sweeps carry and for the same reason: the shared
+    /// [`mavros_int_semantics::masked_shift_amount`] is a mask rather than a modulo, so at a width
+    /// that is not a power of two it corrupts even an in-range amount (T10). Nothing builds a shift
+    /// at such a width — `witness_bitwise::lower_shift` asserts against it — so sweeping one here
+    /// would pin a disagreement no program can reach.
+    fn widths(op: BinaryArithOpKind) -> Vec<usize> {
+        let signed = op.is_signed();
+        corners::widths_for(signed)
+            .iter()
+            .copied()
+            .chain(
+                corners::ODD_WIDTHS
+                    .into_iter()
+                    .filter(|_| !matches!(op.group().into(), IntOp::Shl | IntOp::Shr)),
+            )
+            .filter(|bits| !signed || corners::signed_width_ok(*bits))
+            .collect()
+    }
+
+    fn operand_pairs(op: BinaryArithOpKind, bits: usize) -> Vec<(Raw, Raw)> {
+        let rhs = if matches!(op.group().into(), IntOp::Shl | IntOp::Shr) {
+            corners::shift_amounts(bits, bits)
+        } else {
+            corners::values(bits)
+        };
+        corners::values(bits)
+            .into_iter()
+            .flat_map(|a| rhs.iter().map(move |b| (a, *b)))
+            .collect()
+    }
+
+    /// Whether the model declines to specify this input, which is the ICE case rather than a value.
+    fn unspecified(op: BinaryArithOpKind, bits: usize, a: Raw, b: Raw) -> bool {
+        residue(op.group().into(), op.sign(), bits, a, bits, b).is_none()
+    }
+
+    /// The R1CS fold answers exactly what a total backend must answer.
+    ///
+    /// This is the exact relation, not the refinement the speculative folders owe: this evaluator
+    /// runs after the guard IR and cannot decline. See [`Value::arith`] for why that makes the
+    /// obligation `residue`'s rather than `eval`'s.
+    #[test]
+    fn the_r1cs_fold_agrees_with_the_model() {
+        let mut checked = 0usize;
+
+        for op in ALL_ARITH {
+            for bits in widths(op) {
+                for (a, b) in operand_pairs(op, bits) {
+                    let Some(want) = residue(op.group().into(), op.sign(), bits, a, bits, b) else {
+                        continue;
+                    };
+                    let got = fold(op, bits, a, b);
+                    assert_eq!(
+                        got, want,
+                        "{op:?} at {bits} bits: {a:#x} {b:#x} folded to {got:#x}, model says \
+                         {want:#x}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+
+        // An implementation that answered nothing would satisfy the loop above vacuously, so the
+        // count is part of the test rather than a diagnostic.
+        assert!(
+            checked > 25_000,
+            "the sweep only reached {checked} specified points"
+        );
+    }
+
+    /// The two shapes the model leaves unspecified are exactly the two that ICE.
+    ///
+    /// Stated as a sweep rather than as a pair of `#[should_panic]` cases so that it is the model
+    /// that decides which inputs those are. If `residue` ever gains or loses an unspecified shape,
+    /// this fails rather than silently drifting.
+    #[test]
+    fn the_unspecified_inputs_are_exactly_the_divmod_ones() {
+        let mut found = 0usize;
+
+        for op in ALL_ARITH {
+            for bits in widths(op) {
+                for (a, b) in operand_pairs(op, bits) {
+                    if !unspecified(op, bits, a, b) {
+                        continue;
+                    }
+                    found += 1;
+
+                    assert!(
+                        matches!(op.group().into(), IntOp::Div | IntOp::Rem),
+                        "{op:?} at {bits} bits: {a:#x} {b:#x} is unspecified but is not a division"
+                    );
+
+                    let signed = matches!(op.sign(), Sign::Signed);
+                    let min = 1u128 << (bits - 1);
+                    let is_zero_divisor = b & mavros_int_semantics::mask(bits) == 0;
+                    let is_div_overflow = signed
+                        && a & mavros_int_semantics::mask(bits) == min
+                        && b == !0 >> (128 - bits);
+                    assert!(
+                        is_zero_divisor || is_div_overflow,
+                        "{op:?} at {bits} bits: {a:#x} {b:#x} is unspecified for neither reason"
+                    );
+                }
+            }
+        }
+
+        assert!(
+            found > 100,
+            "the sweep only reached {found} unspecified points"
+        );
+    }
+
+    /// An unspecified input is a compiler bug, and says so rather than folding to a plausible value.
+    #[test]
+    #[should_panic(expected = "ICE: undefined")]
+    fn a_zero_divisor_ices() {
+        fold(BinaryArithOpKind::UDiv, 8, 7, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "ICE: undefined")]
+    fn signed_division_overflow_ices() {
+        fold(BinaryArithOpKind::SDiv, 8, 0x80, 0xFF);
+    }
+
+    /// The regression T1 named: the fold used to mask a shift amount to 127 rather than to the
+    /// operand width, so `1u8 << 8` answered `0` here and `1` in the VM and LLVM.
+    ///
+    /// Latent, because a planted amount check dominates every shift, but latent by an argument
+    /// about a different pass, which is exactly the kind of claim that decays. This pins the
+    /// agreement itself.
+    #[test]
+    fn an_out_of_range_shift_amount_masks_to_the_width() {
+        assert_eq!(fold(BinaryArithOpKind::UShl, 8, 1, 8), 1);
+        assert_eq!(fold(BinaryArithOpKind::UShl, 8, 1, 9), 2);
+        assert_eq!(fold(BinaryArithOpKind::UShr, 8, 0x80, 8), 0x80);
+
+        // The signed right shift already masked to `bits - 1`, so it is here as the control: the
+        // trio agreed on `>>` and only `<<` was out of step.
+        assert_eq!(fold(BinaryArithOpKind::SShr, 8, 0xFF, 8), 0xFF);
     }
 }

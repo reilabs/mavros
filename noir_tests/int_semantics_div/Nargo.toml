@@ -1,0 +1,6 @@
+[package]
+name = "int_semantics_div"
+type = "bin"
+authors = [""]
+
+[dependencies]
