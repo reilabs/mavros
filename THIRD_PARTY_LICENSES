@@ -28,8 +28,7 @@ SOFTWARE.
 ECDSA secp256k1 and secp256r1 Noir arithmetic
 ================================================================================
 
-`mavros_stdlib/vendor/ecdsa_secp256r1.nr` and
-`mavros_stdlib/vendor/ecdsa_secp256k1.nr` contain adapted subsets of:
+`mavros_stdlib/vendor/bignum.nr` and `mavros_stdlib/vendor/bigcurve.nr` contain adapted subsets of:
 
 - `zkpassport/noir-bignum` v0.10.0-1 at commit
   `675378b1622a2b125ae6927803c79e6bd7ed2b61`.
