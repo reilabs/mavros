@@ -214,6 +214,9 @@ impl CodeGen {
                         expr: TypeExpr::Blob(_, len),
                     },
                 ] => *len,
+                // A program with no inputs and no declared return gets a zero-length blob.
+                // Since nothing reads it, the blob gets DCE-d away.
+                [] => 0,
                 params => panic!(
                     "ICE: witgen entry must take a single Blob<Field; N> parameter, got {params:?}"
                 ),

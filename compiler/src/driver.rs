@@ -637,6 +637,11 @@ impl Driver {
 
         let codegen = CodeGen::new(options);
         let program = codegen.run(ssa, &flow_analysis, &type_info);
+        assert_eq!(
+            program.entry_blob_field_count,
+            self.entry_point_flattened_io_count(),
+            "ICE: entry blob field count in program header disagrees with the Noir ABI"
+        );
         self.write_debug_text(
             self.get_debug_output_dir().join("program_bytecode.txt"),
             format!("{}", program),
