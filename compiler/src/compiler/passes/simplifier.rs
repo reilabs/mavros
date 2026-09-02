@@ -21,7 +21,6 @@ use crate::{
                 builder::{HLFunctionBuilder, HLSSABuilder},
             },
         },
-        util::bit_mask,
     },
 };
 
@@ -545,7 +544,7 @@ fn materialize_zero(
 ) -> Option<Rewrite> {
     let field = fb.field();
     materialize_const(types, result, fb, move |t| match t {
-        TypeExpr::Int(s) => Some(Constant::Int(*s, 0)),
+        TypeExpr::Int(s) => Some(Constant::int(*s, 0)),
         TypeExpr::Field => Some(Constant::Field(field.zero())),
         _ => None,
     })
@@ -558,7 +557,7 @@ fn materialize_one(
 ) -> Option<Rewrite> {
     let field = fb.field();
     materialize_const(types, result, fb, move |t| match t {
-        TypeExpr::Int(s) => Some(Constant::Int(*s, 1)),
+        TypeExpr::Int(s) => Some(Constant::int(*s, 1)),
         TypeExpr::Field => Some(Constant::Field(field.one())),
         _ => None,
     })
@@ -566,7 +565,7 @@ fn materialize_one(
 
 fn is_zero(ssa: &HLSSA, v: ValueId) -> bool {
     match ssa.get_const(v).as_deref() {
-        Some(Constant::Int(_, 0)) => true,
+        Some(Constant::Int(pattern)) => pattern.is_zero(),
         Some(Constant::Field(f)) => f.is_zero(),
         _ => false,
     }
@@ -574,7 +573,7 @@ fn is_zero(ssa: &HLSSA, v: ValueId) -> bool {
 
 fn is_one(ssa: &HLSSA, v: ValueId) -> bool {
     match ssa.get_const(v).as_deref() {
-        Some(Constant::Int(_, 1)) => true,
+        Some(Constant::Int(pattern)) => pattern.is_one(),
         Some(Constant::Field(f)) => f.is_one(),
         _ => false,
     }
@@ -582,14 +581,14 @@ fn is_one(ssa: &HLSSA, v: ValueId) -> bool {
 
 fn is_all_ones(ssa: &HLSSA, v: ValueId) -> bool {
     match ssa.get_const(v).as_deref() {
-        Some(Constant::Int(bits, value)) => *value == bit_mask(*bits),
+        Some(Constant::Int(pattern)) => pattern.is_all_ones(),
         _ => false,
     }
 }
 
 fn const_as_usize(ssa: &HLSSA, v: ValueId) -> Option<usize> {
     match ssa.get_const(v).as_deref() {
-        Some(Constant::Int(_, value)) => (*value).try_into().ok(),
+        Some(Constant::Int(pattern)) => usize::try_from(pattern).ok(),
         _ => None,
     }
 }

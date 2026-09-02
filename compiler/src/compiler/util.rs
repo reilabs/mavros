@@ -2,11 +2,53 @@
 
 use crate::compiler::ssa::hlssa::MAX_SUPPORTED_UNSIGNED_BITS;
 
-// The bit-pattern helpers are `mavros-int-semantics`', re-exported under the names the compiler has
-// always used for them.
-pub use mavros_int_semantics::{
-    decode_signed, encode_signed, fits_signed, mask as bit_mask, sign_extend as sign_extend_bits,
-};
+pub use mavros_int_semantics::mask as bit_mask;
+
+// The claim `FIELD_LIMB_BITS` is written on, checked rather than stated in prose.
+//
+// `ark_ff::BigInt<N>` is `[u64; N]`, so a canonical field representation's limb _count_ varies from
+// field to field while its limb _width_ does not. The limb _type_ is already pinned at every call
+// site, because `IntBits::from_field_limbs` takes a `&[u64]` and each caller hands it
+// `into_bigint().0`. What nothing else checks is that the model's 64 and arkworks' 64 are the same
+// number: if they ever parted, every field-sourced constant would be recombined with the wrong
+// place values and nothing would say so.
+//
+// It lives here because this is the lowest crate where both are in scope: `mavros-int-semantics`
+// cannot see `BigInt`, and must not, being the crate every evaluator is measured against.
+const _: () = assert!(
+    size_of::<ark_ff::BigInt<1>>() * 8 == mavros_int_semantics::int_bits::FIELD_LIMB_BITS,
+    "a canonical field limb is no longer FIELD_LIMB_BITS wide"
+);
+
+/// The host word an integer pattern carries, panicking above [`MAX_BITS`].
+///
+/// Its **production** callers are enumerated here and nowhere else (tests reach for it too, to read
+/// an answer back as a number):
+///
+/// - the `Int <-> Field` conversions (`hlssa_to_r1cs`'s `expect_in_u128` included, which comes the
+///   other way), which need a limbs-to-field path and so belong with the field-agnosticism work
+///   rather than here;
+/// - `spread_bits` / `unspread_bits`, whose own signatures are `u128`, and which Phase 5
+///   generalises along with the VM's fixed-width spread opcodes;
+/// - one genuine host-word arithmetic site, `instrumenter`'s `Radix::Dyn`, which uses the value as
+///   a `u128` divisor to build the digits of a radix decomposition.
+///
+/// Do not add a caller that could ask its question of the pattern instead: [`IntBits`] answers
+/// `is_zero` / `is_one` / `is_all_ones`, the bitwise and shift operations, `cast` / `bit_range` and
+/// the whole signed reading width-generically, and `usize::try_from` reads an index without the
+/// truncation an `as` cast would hide.
+///
+/// The width cap is 128, so the panic here is unreachable rather than merely unlikely.
+///
+/// [`IntBits`]: mavros_int_semantics::IntBits
+/// [`MAX_BITS`]: mavros_int_semantics::MAX_BITS
+///
+/// TODO Remove by the end of the `big-int-model` branch work
+#[track_caller]
+pub fn host_word(pattern: &mavros_int_semantics::IntBits) -> u128 {
+    u128::try_from(pattern)
+        .unwrap_or_else(|e| panic!("ICE: an integer constant is wider than the host: {e}"))
+}
 
 /// Panic with the canonical ICE for a tuple surviving past the `ElideTuples` pass.
 ///
@@ -96,50 +138,5 @@ pub mod test {
     pub fn falloc(e: &mut impl HLEmitter) -> ValueId {
         let init = e.field_const(fr(0));
         e.alloc(init)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sign_extend_bits_agrees_with_decode_encode() {
-        // The authoritative definition of sign extension is "same integer, wider encoding".
-        // Check the bit-twiddling against it exhaustively for every 4-bit and 8-bit value.
-        for from in [4usize, 8] {
-            for raw in 0..(1u128 << from) {
-                for to in [from, from + 1, 16, 32, 64] {
-                    assert_eq!(
-                        sign_extend_bits(raw, from, to),
-                        encode_signed(to, decode_signed(from, raw)),
-                        "sign_extend_bits({raw}, {from}, {to})"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn sign_extend_bits_is_identity_at_equal_width() {
-        for from in [1usize, 7, 8, 32] {
-            for raw in [0u128, 1, bit_mask(from), bit_mask(from) >> 1] {
-                assert_eq!(sign_extend_bits(raw, from, from), raw & bit_mask(from));
-            }
-        }
-    }
-
-    #[test]
-    fn sign_extend_bits_masks_its_input() {
-        // Bits above `from` are not part of the value and must not survive into the result.
-        assert_eq!(sign_extend_bits(0xFF00 | 0x01, 8, 16), 0x0001);
-        assert_eq!(sign_extend_bits(0xFF00 | 0x80, 8, 16), 0xFF80);
-    }
-
-    #[test]
-    fn sign_extend_bits_handles_full_width() {
-        // `to == 128` must not overflow the shift used to build the mask.
-        assert_eq!(sign_extend_bits(1, 1, 128), u128::MAX);
-        assert_eq!(sign_extend_bits(0, 1, 128), 0);
     }
 }

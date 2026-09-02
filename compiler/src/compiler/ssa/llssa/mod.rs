@@ -7,6 +7,8 @@ use itertools::Itertools;
 use std::fmt::{self, Display, Formatter};
 use std::mem::size_of_val;
 
+use mavros_int_semantics::IntBits;
+
 use crate::compiler::ssa::{
     Block, Function, FunctionId, Instruction, Located, SSA, SSAConstants, ValueId,
 };
@@ -75,8 +77,11 @@ impl Blob {
 /// which pairs a struct layout with one constant value per field.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Constant {
-    /// A scalar integer constant of `bits` bits with the provided `value`.
-    Int { bits: u32, value: u128 },
+    /// A scalar integer constant, carrying its own width.
+    ///
+    /// The width lives inside the [`IntBits`] rather than beside it, so there is no second copy of
+    /// it here that could disagree with the pattern's own normalisation.
+    Int(IntBits),
 
     /// A null pointer constant.
     NullPtr,
@@ -89,13 +94,19 @@ pub enum Constant {
 }
 
 impl Constant {
+    /// A `bits`-wide integer constant carrying `value`, discarding any bits at or above `bits`.
+    #[must_use]
+    pub fn int(bits: u32, value: u128) -> Self {
+        Self::Int(IntBits::from_u128(bits as usize, value))
+    }
+
     /// True if this constant can legally fill a slot of `field` type.
     ///
     /// `InlineArray`/`FlexArray` fields are memory-only and have no constant form,
     /// so they never match; any other mismatched pairing is rejected too.
     pub fn matches_field(&self, field: &LLFieldType) -> bool {
         match (self, field) {
-            (Constant::Int { bits, .. }, LLFieldType::Int(w)) => bits == w,
+            (Constant::Int(v), LLFieldType::Int(w)) => v.bits() == *w as usize,
             (Constant::NullPtr, LLFieldType::Ptr) => true,
             (Constant::Struct { layout, values }, LLFieldType::Inline(inner)) => {
                 layout == inner && layout.accepts(values)
@@ -1221,9 +1232,7 @@ mod tests {
 
     #[test]
     fn accepts_matching_field_elem() {
-        let values: Vec<Constant> = (0..4)
-            .map(|v| Constant::Int { bits: 64, value: v })
-            .collect();
+        let values: Vec<Constant> = (0..4).map(|v| Constant::int(64, v)).collect();
         assert!(LLStruct::field_elem().accepts(&values));
     }
 
@@ -1232,17 +1241,15 @@ mod tests {
         let field_elem = LLStruct::field_elem();
 
         // Wrong arity: only three values for a four-field struct.
-        let three: Vec<Constant> = (0..3)
-            .map(|v| Constant::Int { bits: 64, value: v })
-            .collect();
+        let three: Vec<Constant> = (0..3).map(|v| Constant::int(64, v)).collect();
         assert!(!field_elem.accepts(&three));
 
         // Wrong int width: i32 where i64 is expected.
         let bad_width = vec![
-            Constant::Int { bits: 32, value: 0 },
-            Constant::Int { bits: 64, value: 0 },
-            Constant::Int { bits: 64, value: 0 },
-            Constant::Int { bits: 64, value: 0 },
+            Constant::int(32, 0),
+            Constant::int(64, 0),
+            Constant::int(64, 0),
+            Constant::int(64, 0),
         ];
         assert!(!field_elem.accepts(&bad_width));
 
@@ -1258,18 +1265,18 @@ mod tests {
         let outer = LLStruct::new(vec![LLFieldType::Inline(one_int.clone())]);
         let good_nested = vec![Constant::Struct {
             layout: one_int.clone(),
-            values: vec![Constant::Int { bits: 64, value: 7 }],
+            values: vec![Constant::int(64, 7)],
         }];
         assert!(outer.accepts(&good_nested));
         let bad_nested = vec![Constant::Struct {
             layout: LLStruct::new(vec![LLFieldType::Int(32)]),
-            values: vec![Constant::Int { bits: 32, value: 7 }],
+            values: vec![Constant::int(32, 7)],
         }];
         assert!(!outer.accepts(&bad_nested));
 
         // InlineArray / FlexArray fields have no constant form.
         let arr = LLStruct::new(vec![LLFieldType::InlineArray(one_int, 1)]);
-        assert!(!arr.accepts(&[Constant::Int { bits: 64, value: 0 }]));
+        assert!(!arr.accepts(&[Constant::int(64, 0)]));
     }
 
     #[test]
@@ -1283,9 +1290,9 @@ mod tests {
             let mut e = fb.test_block(entry);
             // Only three values for a four-limb field-element layout.
             let values = vec![
-                Constant::Int { bits: 64, value: 0 },
-                Constant::Int { bits: 64, value: 0 },
-                Constant::Int { bits: 64, value: 0 },
+                Constant::int(64, 0),
+                Constant::int(64, 0),
+                Constant::int(64, 0),
             ];
             e.emit_struct_const(LLStruct::field_elem(), values);
         });
@@ -1348,8 +1355,8 @@ mod tests {
 
         let dump = ssa.to_string(&DefaultSSAAnnotator);
         assert!(dump.contains("constants:"));
-        assert!(dump.contains("Int { bits: 64, value: 42 }"));
-        assert!(dump.contains("Int { bits: 64, value: 7 }"));
+        assert!(dump.contains("Int(64'h2a)"));
+        assert!(dump.contains("Int(64'h7)"));
         assert!(dump.contains("add"));
         assert!(dump.contains("return"));
     }

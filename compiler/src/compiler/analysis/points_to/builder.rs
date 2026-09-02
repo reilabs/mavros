@@ -2,7 +2,7 @@
 //!
 //! For each function it emits the inclusion constraints of every opcode into a [`ConstraintSet`],
 //! plus the value nodes whose points-to set _escapes_ to a true program sink (a global, or — for
-//! `main` — a return). Calls are no longer modeled by blanket escape: a `Call` **instantiates the
+//! `main` — a return). Calls are not modeled by blanket escape: a `Call` **instantiates the
 //! callee's [`PointsToSummary`]** (see [`super::summary`]), so a ref passed to a callee that does
 //! not leak it stays local, and a ref returned from a callee resolves to the callee's actual object
 //! rather than `External`.
@@ -240,7 +240,7 @@ impl FnBuilder<'_> {
     /// The constant value of `index`, if any.
     fn const_index(&self, index: ValueId) -> Option<usize> {
         match &*self.ssa.get_const(index)? {
-            Constant::Int(_, v) => Some(*v as usize),
+            Constant::Int(v) => usize::try_from(v).ok(),
             _ => None,
         }
     }

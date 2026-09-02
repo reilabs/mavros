@@ -890,7 +890,7 @@ fn const_contains_fn_ptr(constant: &Constant) -> bool {
     match constant {
         Constant::FnPtr(_) => true,
         Constant::Blob(blob) => blob.elements.iter().any(const_contains_fn_ptr),
-        Constant::Int(..) | Constant::Field(_) => false,
+        Constant::Int(_) | Constant::Field(_) => false,
     }
 }
 
@@ -1007,16 +1007,9 @@ mod tests {
         }
     }
 
-    /// The ABI keeps a [`Sign`] that the HLSSA type no longer has, so the two sides now disagree
-    /// about how many things an integer type _is_ -- two on one side, one on the other. That is
-    /// only safe while the sign makes no difference to the flattened width, which is what this
-    /// pins.
-    ///
-    /// It cannot fail today: `Type::int` takes no sign, so both rows below build the same value and
-    /// the assertion is a tautology on the HLSSA side. Its job is on the ABI side and in the
-    /// future -- `count_abi_type_elements` matches `AbiType::Integer { .. }` with the sign bound to
-    /// a wildcard, and a later reader who narrows that pattern to consult the sign would silently
-    /// resize the protected column block for exactly half of all integer parameters.
+    /// The ABI keeps a [`Sign`] that the HLSSA type does not have, so the two sides disagree about
+    /// how many things an integer type _is_ -- two on one side, one on the other. That is only safe
+    /// while the sign makes no difference to the flattened width, which is what this ensures.
     #[test]
     fn the_two_signs_flatten_to_the_same_width() {
         for width in [1u32, 8, 32, 64] {

@@ -217,10 +217,10 @@ fn scalar_fold_is_the_single_classifier() {
 #[test]
 fn equal_constants_are_congruent() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c2 = ssa.add_const(Constant::Int(32, 2));
-    let c3 = ssa.add_const(Constant::Int(32, 3));
-    let c4 = ssa.add_const(Constant::Int(32, 4));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c2 = ssa.add_const(Constant::int(32, 2));
+    let c3 = ssa.add_const(Constant::int(32, 3));
+    let c4 = ssa.add_const(Constant::int(32, 4));
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -495,7 +495,7 @@ fn slice_ops_are_value_numbered() {
 #[test]
 fn phi_congruence_excludes_dead_edges() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c_true = ssa.add_const(Constant::Int(1, 1));
+    let c_true = ssa.add_const(Constant::int(1, 1));
     let (x, y, p, q) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -567,9 +567,9 @@ fn phi_distinguished_when_both_edges_live() {
 #[test]
 fn loop_carried_parallel_induction_is_congruent() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (i, j, lt, i2, j2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -770,9 +770,9 @@ fn leader_never_crosses_incomparable_branches() {
 #[test]
 fn leader_of_constant_class_is_the_interned_constant() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c2 = ssa.add_const(Constant::Int(32, 2));
-    let c3 = ssa.add_const(Constant::Int(32, 3));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c2 = ssa.add_const(Constant::int(32, 2));
+    let c3 = ssa.add_const(Constant::int(32, 3));
+    let c5 = ssa.add_const(Constant::int(32, 5));
     let a = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -798,7 +798,7 @@ fn leader_of_constant_class_is_the_interned_constant() {
 #[test]
 fn assert_eq_const_is_conditional_not_unconditional() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c5 = ssa.add_const(Constant::int(32, 5));
     let x = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -825,14 +825,14 @@ fn assert_eq_const_is_conditional_not_unconditional() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(after, 0), x)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     // ... and, at index granularity, in the asserting block itself _after_ the assert (the assert is
     // instruction 0, so the terminator at index 1 sees the pin) ...
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), x)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     // ... but never at the assert's own index, where folding `x` would vacuum the constraint.
     assert_eq!(
@@ -864,14 +864,14 @@ fn assert_bool_is_conditional() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(after, 0), b)
             .as_deref(),
-        Some(&Constant::Int(1, 1))
+        Some(&Constant::int(1, 1))
     );
     // Index granularity: the bool pin also holds after the `Assert` (instruction 0) in its own
     // block, but not at the assert's own index.
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), b)
             .as_deref(),
-        Some(&Constant::Int(1, 1))
+        Some(&Constant::int(1, 1))
     );
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 0), b),
@@ -1129,7 +1129,7 @@ fn asserted_leader_respects_dominance_fanout() {
 #[test]
 fn asserted_leader_none_without_equality() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c5 = ssa.add_const(Constant::int(32, 5));
     let (x, z) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1150,7 +1150,7 @@ fn asserted_leader_none_without_equality() {
     // Sanity: the constant pin is recorded as an `asserted_const`, not an equality.
     assert_eq!(
         cc.asserted_const(fid, p1, x).as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     // So `x` has no asserted-equal leader, and the untouched `z` has none anywhere.
     assert_eq!(cc.asserted_leader(fid, p1, x), None);
@@ -1433,7 +1433,7 @@ fn witness_forward_unions_hint_and_value_of_reads() {
 #[test]
 fn post_dominance_not_propagated_at_block_granularity() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c5 = ssa.add_const(Constant::int(32, 5));
     let x = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1468,12 +1468,12 @@ fn post_dominance_not_propagated_at_block_granularity() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(mid, 0), x)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(entry_id, 0), x)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     // In the asserting block, index granularity still recovers it _after_ the assert (index 0), but
     // not at the assert's own index — in either channel (the assert is `tail`'s first instruction,
@@ -1481,7 +1481,7 @@ fn post_dominance_not_propagated_at_block_granularity() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(tail, 1), x)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     assert_eq!(cc.asserted_const(fid, ProgramPoint::new(tail, 0), x), None);
     assert_eq!(
@@ -1503,10 +1503,10 @@ fn post_dominance_not_propagated_at_block_granularity() {
 #[test]
 fn post_dominating_assert_unsound_for_loop_carried_value() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c5 = ssa.add_const(Constant::int(32, 5));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let s = ssa.fresh_value();
     let (v, lt, v1) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
@@ -1572,7 +1572,7 @@ fn post_dominating_assert_unsound_for_loop_carried_value() {
         assert_eq!(
             cc.anticipated_const(fid, ProgramPoint::new(bid, 0), s)
                 .as_deref(),
-            Some(&Constant::Int(32, 5)),
+            Some(&Constant::int(32, 5)),
             "stable value must be anticipated in loop block {bid:?}"
         );
     }
@@ -1580,7 +1580,7 @@ fn post_dominating_assert_unsound_for_loop_carried_value() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(after, 1), v)
             .as_deref(),
-        Some(&Constant::Int(32, 10))
+        Some(&Constant::int(32, 10))
     );
 }
 
@@ -1589,7 +1589,7 @@ fn post_dominating_assert_unsound_for_loop_carried_value() {
 #[test]
 fn assert_on_one_branch_does_not_post_dominate() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c5 = ssa.add_const(Constant::int(32, 5));
     let cond = ssa.fresh_value();
     let x = ssa.fresh_value();
 
@@ -1637,7 +1637,7 @@ fn assert_on_one_branch_does_not_post_dominate() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(then_b, 1), x)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(then_b, 0), x),
@@ -1652,8 +1652,8 @@ fn assert_on_one_branch_does_not_post_dominate() {
 #[test]
 fn anticipated_fact_gated_on_scope() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c5 = ssa.add_const(Constant::int(32, 5));
     let (x, v) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1686,7 +1686,7 @@ fn anticipated_fact_gated_on_scope() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(mid, 1), v)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     // ...but at `entry` — which `tail` equally post-dominates — `def(v) = mid` does not dominate,
     // so the scope gate withholds it.
@@ -1702,7 +1702,7 @@ fn anticipated_fact_gated_on_scope() {
 #[test]
 fn no_exit_path_assert_contributes_nothing() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c5 = ssa.add_const(Constant::int(32, 5));
     let (p, x) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1745,8 +1745,8 @@ fn no_exit_path_assert_contributes_nothing() {
 #[test]
 fn anticipated_gains_from_constant_branch() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c_true = ssa.add_const(Constant::Int(1, 1));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c_true = ssa.add_const(Constant::int(1, 1));
+    let c5 = ssa.add_const(Constant::int(32, 5));
     let x = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1777,7 +1777,7 @@ fn anticipated_gains_from_constant_branch() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(entry_id, 0), x)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     // The dominance channel is untouched: `then_b` still does not _dominate_ anything here (the
     // static `else` edge into `merge` remains), so the already-ran direction stays empty...
@@ -1808,8 +1808,8 @@ fn anticipated_const_in_gains_from_pinned_branch() {
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let (p, x, x0) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
-    let c_true = ssa.add_const(Constant::Int(1, 1));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c_true = ssa.add_const(Constant::int(1, 1));
+    let c5 = ssa.add_const(Constant::int(32, 5));
 
     let g_entry = {
         let hf = ssa.get_function_mut(g);
@@ -1861,7 +1861,7 @@ fn anticipated_const_in_gains_from_pinned_branch() {
     // — the caller passes its own free parameter).
     assert_eq!(
         cc.anticipated_const_in(g, &ctx, pp, x).as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
 }
 
@@ -1882,8 +1882,8 @@ fn anticipated_gains_from_dead_back_edge() {
         ssa.fresh_value(),
         ssa.fresh_value(),
     );
-    let c_false = ssa.add_const(Constant::Int(1, 0));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c_false = ssa.add_const(Constant::int(1, 0));
+    let c5 = ssa.add_const(Constant::int(32, 5));
 
     // `g(a) = a + fresh_witness`: nondeterministic, so no invariance rule — neither rule-3 form
     // (pure-op or det-call) nor a congruence witness — can admit its result; its stability rides on
@@ -1946,7 +1946,7 @@ fn anticipated_gains_from_dead_back_edge() {
     assert_eq!(
         cc.anticipated_const(main_id, ProgramPoint::new(header, 1), r)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     // The dominance channel still owes nothing before the assert runs.
     assert_eq!(
@@ -1957,7 +1957,7 @@ fn anticipated_gains_from_dead_back_edge() {
     assert_eq!(
         cc.asserted_const(main_id, ProgramPoint::new(after, 1), r)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
 }
 
@@ -1980,7 +1980,7 @@ fn live_back_edge_keeps_call_result_unstable() {
         ssa.fresh_value(),
         ssa.fresh_value(),
     );
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c5 = ssa.add_const(Constant::int(32, 5));
 
     // `g(a) = a + fresh_witness`: nondeterministic, so no invariance rule can admit its result.
     {
@@ -2049,10 +2049,10 @@ fn live_back_edge_keeps_call_result_unstable() {
 fn anticipated_finality_gains_from_pruned_back_path() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
-    let c_false = ssa.add_const(Constant::Int(1, 0));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
+    let c_false = ssa.add_const(Constant::int(1, 0));
     let (v, lt, v1) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -2103,7 +2103,7 @@ fn anticipated_finality_gains_from_pruned_back_path() {
     assert_eq!(
         cc.anticipated_const(main_id, ProgramPoint::new(c_block, 0), v)
             .as_deref(),
-        Some(&Constant::Int(32, 10))
+        Some(&Constant::int(32, 10))
     );
     // Inside the live loop the executable back-reach is real in both views: no fact.
     assert_eq!(
@@ -2125,8 +2125,8 @@ fn anticipated_finality_gains_from_pruned_back_path() {
 #[test]
 fn pruned_build_keeps_static_post_dominance_fact() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c_false = ssa.add_const(Constant::Int(1, 0));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c_false = ssa.add_const(Constant::int(1, 0));
+    let c5 = ssa.add_const(Constant::int(32, 5));
     let (p, x) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -2165,7 +2165,7 @@ fn pruned_build_keeps_static_post_dominance_fact() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(stuck, 0), x)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     // The dominance channel owes nothing: the assert has not run when control is at `stuck`.
     assert_eq!(cc.asserted_const(fid, ProgramPoint::new(stuck, 0), x), None);
@@ -2182,8 +2182,8 @@ fn pruned_build_keeps_static_post_dominance_fact() {
 #[test]
 fn local_anticipated_before_the_assert() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c5 = ssa.add_const(Constant::int(32, 5));
     let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -2209,7 +2209,7 @@ fn local_anticipated_before_the_assert() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(entry_id, 0), x)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 0), x),
@@ -2233,7 +2233,7 @@ fn local_anticipated_before_the_assert() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 2), x)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
 }
 
@@ -2244,10 +2244,10 @@ fn local_anticipated_before_the_assert() {
 #[test]
 fn local_anticipated_needs_no_stability_gate() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c9 = ssa.add_const(Constant::Int(32, 9));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c9 = ssa.add_const(Constant::int(32, 9));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (w, y, lt) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -2286,7 +2286,7 @@ fn local_anticipated_needs_no_stability_gate() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(looping, 0), w)
             .as_deref(),
-        Some(&Constant::Int(32, 9))
+        Some(&Constant::int(32, 9))
     );
     // Cross-block, `w` is withheld (both gates fail: it is loop-carried, hence unstable, and out
     // of scope at `entry`) — `entry` gets nothing even though the loop block post-dominates it.
@@ -2304,7 +2304,7 @@ fn local_anticipated_needs_no_stability_gate() {
 #[test]
 fn anticipated_equalities_and_leaders() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c1 = ssa.add_const(Constant::int(32, 1));
     let (a, b, m) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -2372,7 +2372,7 @@ fn anticipated_equalities_and_leaders() {
 #[test]
 fn anticipated_leader_before_same_block_assert() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c1 = ssa.add_const(Constant::int(32, 1));
     let (a, b, m) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -2426,9 +2426,9 @@ fn anticipated_leader_before_same_block_assert() {
 #[test]
 fn anticipated_leader_before_assert_in_cyclic_block() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (a, w, y, lt) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -2505,8 +2505,8 @@ fn anticipated_leader_before_assert_in_cyclic_block() {
 #[test]
 fn anticipated_leader_threshold_for_block_defined_leader() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c2 = ssa.add_const(Constant::Int(32, 2));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c2 = ssa.add_const(Constant::int(32, 2));
     let (a, b, x, y) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -2571,7 +2571,7 @@ fn anticipated_leader_threshold_for_block_defined_leader() {
 #[test]
 fn anticipated_leader_merges_across_directions() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c1 = ssa.add_const(Constant::int(32, 1));
     // Allocated in order ⇒ x.0 < y.0 < z.0; all entry params, so leaders are by id.
     let (x, y, z, m) = (
         ssa.fresh_value(),
@@ -2655,7 +2655,7 @@ fn anticipated_leader_at_establishing_assert_is_gate3_guarded() {
 #[test]
 fn anticipated_leader_cross_only_block_falls_back() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c1 = ssa.add_const(Constant::int(32, 1));
     let (a, b, m) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -2697,10 +2697,10 @@ fn anticipated_leader_cross_only_block_falls_back() {
 #[test]
 fn anticipated_admits_loop_invariant_pure_chain() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c5 = ssa.add_const(Constant::int(32, 5));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (n, i, t, i2, lt) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -2759,7 +2759,7 @@ fn anticipated_admits_loop_invariant_pure_chain() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(looping, 1), t)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     // The same pure op over the loop-carried `i` stays out — one unstable operand poisons it —
     // and the loop must not collapse around a final-iteration-only fact.
@@ -2783,10 +2783,10 @@ fn anticipated_rejects_unconstrained_call_result_in_loop() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c5 = ssa.add_const(Constant::int(32, 5));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (p, n, i, r, i2, lt) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -2856,9 +2856,9 @@ fn anticipated_rejects_unconstrained_call_result_in_loop() {
 #[test]
 fn anticipated_admits_accumulator_at_post_loop_block() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (v, lt, v1) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -2901,7 +2901,7 @@ fn anticipated_admits_accumulator_at_post_loop_block() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(after, 0), v)
             .as_deref(),
-        Some(&Constant::Int(32, 10))
+        Some(&Constant::int(32, 10))
     );
     // Inside the loop both invariance and finality fail — `header`/`body` re-reach the
     // definition — so mid-loop iterations keep their genuine bindings.
@@ -2921,9 +2921,9 @@ fn anticipated_admits_accumulator_at_post_loop_block() {
 #[test]
 fn anticipated_admits_first_loop_value_inside_second_loop() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (v, lt, v1, lt2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -2977,7 +2977,7 @@ fn anticipated_admits_first_loop_value_inside_second_loop() {
     assert_eq!(
         cc.anticipated_const(fid, ProgramPoint::new(second, 0), v)
             .as_deref(),
-        Some(&Constant::Int(32, 10))
+        Some(&Constant::int(32, 10))
     );
     // Still rejected inside the defining loop.
     assert_eq!(
@@ -2996,9 +2996,9 @@ fn anticipated_admits_first_loop_value_inside_second_loop() {
 #[test]
 fn anticipated_rejects_inner_loop_value_at_outer_block() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (w, lt_i, w2, lt_o) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3075,10 +3075,10 @@ fn anticipated_admits_det_call_via_congruence_tier() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c5 = ssa.add_const(Constant::int(32, 5));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (p, q, n, w, i, r, i2, lt) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3154,7 +3154,7 @@ fn anticipated_admits_det_call_via_congruence_tier() {
         assert_eq!(
             cc.anticipated_const(main_id, ProgramPoint::new(looping, 1), r)
                 .as_deref(),
-            Some(&Constant::Int(32, 5))
+            Some(&Constant::int(32, 5))
         );
         // Scope still bounds it: `r` is not defined at `entry`.
         let entry_id = ssa.get_unique_entrypoint().get_entry_id();
@@ -3181,8 +3181,8 @@ fn anticipated_admits_det_call_directly_in_loop() {
         ssa.fresh_value(),
         ssa.fresh_value(),
     );
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c5 = ssa.add_const(Constant::int(32, 5));
 
     // `g(a) = a + 1`: deterministic but _not_ an identity, and called exactly once, so the
     // symbolic cross-call graft yields no congruent duplicate for `r` — admission is the det-call
@@ -3237,7 +3237,7 @@ fn anticipated_admits_det_call_directly_in_loop() {
     assert_eq!(
         cc.anticipated_const(main_id, ProgramPoint::new(header, 1), r)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
 }
 
@@ -3249,10 +3249,10 @@ fn anticipated_rejects_det_call_over_loop_variant_arg() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c5 = ssa.add_const(Constant::int(32, 5));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (p, q, n, i, r, i2, lt) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3331,9 +3331,9 @@ fn anticipated_det_call_multi_return_per_index_bits() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
-    let c7 = ssa.add_const(Constant::Int(32, 7));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c5 = ssa.add_const(Constant::int(32, 5));
+    let c7 = ssa.add_const(Constant::int(32, 7));
     let (p, q, wit, cond, n, r0, r1) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3402,7 +3402,7 @@ fn anticipated_det_call_multi_return_per_index_bits() {
     assert_eq!(
         cc.anticipated_const(main_id, ProgramPoint::new(header, 1), r0)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     // Return 1 is fresh advice each iteration: withheld.
     assert_eq!(
@@ -3419,7 +3419,7 @@ fn anticipated_det_call_multi_return_per_index_bits() {
 fn anticipated_admits_entry_param_in_cyclic_entry_block() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c5 = ssa.add_const(Constant::int(32, 5));
     let (p, w) = (ssa.fresh_value(), ssa.fresh_value());
 
     let entry_id = {
@@ -3447,7 +3447,7 @@ fn anticipated_admits_entry_param_in_cyclic_entry_block() {
     assert_eq!(
         cc.anticipated_const(main_id, ProgramPoint::new(entry_id, 0), w)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
 }
 
@@ -3461,10 +3461,10 @@ fn anticipated_admits_det_call_via_congruence_over_unstable_arg() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c5 = ssa.add_const(Constant::int(32, 5));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (p, q, cond, v, v2, lt, w, r) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3553,7 +3553,7 @@ fn anticipated_admits_det_call_via_congruence_over_unstable_arg() {
     assert_eq!(
         cc.anticipated_const(main_id, ProgramPoint::new(loop2, 1), r)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
 }
 
@@ -3563,9 +3563,9 @@ fn anticipated_admits_det_call_via_congruence_over_unstable_arg() {
 #[test]
 fn anticipated_eq_pair_mixed_gates() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (n, acc, lt, acc2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3634,7 +3634,7 @@ fn anticipated_eq_pair_mixed_gates() {
 #[test]
 fn local_assert_reaches_terminator_use() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c5 = ssa.add_const(Constant::int(32, 5));
     let (x, doubled) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -3669,12 +3669,12 @@ fn local_assert_reaches_terminator_use() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, term_index), x)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), x)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     // ... but not at the assert's own index.
     assert_eq!(
@@ -3687,8 +3687,8 @@ fn local_assert_reaches_terminator_use() {
 #[test]
 fn multiple_local_asserts_each_recovered_after_its_index() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::Int(32, 5));
-    let c6 = ssa.add_const(Constant::Int(32, 6));
+    let c5 = ssa.add_const(Constant::int(32, 5));
+    let c6 = ssa.add_const(Constant::int(32, 6));
     let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -3715,7 +3715,7 @@ fn multiple_local_asserts_each_recovered_after_its_index() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), x)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), y),
@@ -3725,12 +3725,12 @@ fn multiple_local_asserts_each_recovered_after_its_index() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 2), x)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 2), y)
             .as_deref(),
-        Some(&Constant::Int(32, 6))
+        Some(&Constant::int(32, 6))
     );
 }
 
@@ -3740,8 +3740,8 @@ fn multiple_local_asserts_each_recovered_after_its_index() {
 #[test]
 fn contradictory_local_asserts_first_writer_wins() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::Int(32, 5));
-    let c7 = ssa.add_const(Constant::Int(32, 7));
+    let c5 = ssa.add_const(Constant::int(32, 5));
+    let c7 = ssa.add_const(Constant::int(32, 7));
     let x = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -3772,13 +3772,13 @@ fn contradictory_local_asserts_first_writer_wins() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 1), x)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     // After both, first-writer-wins keeps the earliest establisher.
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 2), x)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
 }
 
@@ -3789,9 +3789,9 @@ fn contradictory_local_asserts_first_writer_wins() {
 #[test]
 fn entry_and_local_assert_facts_layer() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c5 = ssa.add_const(Constant::Int(32, 5));
-    let c6 = ssa.add_const(Constant::Int(32, 6));
-    let c7 = ssa.add_const(Constant::Int(32, 7));
+    let c5 = ssa.add_const(Constant::int(32, 5));
+    let c6 = ssa.add_const(Constant::int(32, 6));
+    let c7 = ssa.add_const(Constant::int(32, 7));
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -3828,19 +3828,19 @@ fn entry_and_local_assert_facts_layer() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(inner, 0), a)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(inner, 2), a)
             .as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     // The local pin on `b` is the before-the-assert gap: absent at index 0, present after index 0.
     assert_eq!(cc.asserted_const(fid, ProgramPoint::new(inner, 0), b), None);
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(inner, 1), b)
             .as_deref(),
-        Some(&Constant::Int(32, 6))
+        Some(&Constant::int(32, 6))
     );
 }
 
@@ -3849,7 +3849,7 @@ fn entry_and_local_assert_facts_layer() {
 #[test]
 fn local_assert_on_value_defined_earlier_in_block() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (p, y) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -3882,7 +3882,7 @@ fn local_assert_on_value_defined_earlier_in_block() {
     assert_eq!(
         cc.asserted_const(fid, ProgramPoint::new(entry_id, 2), y)
             .as_deref(),
-        Some(&Constant::Int(32, 10))
+        Some(&Constant::int(32, 10))
     );
 }
 
@@ -3891,8 +3891,8 @@ fn local_assert_on_value_defined_earlier_in_block() {
 #[test]
 fn local_assert_in_loop_body() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
     let (n, i, lt, next) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -4038,7 +4038,7 @@ fn interproc_writeback_folds_congruent_comparison_return() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
-    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c1 = ssa.add_const(Constant::int(32, 1));
     let (x, a, b, eq) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -4091,7 +4091,7 @@ fn interproc_writeback_folds_congruent_comparison_return() {
     // The summary return-jump is `Const(true)`, so the call result folds in the caller context.
     assert_eq!(
         cc.const_of_in(main_id, &Context::empty(), r).as_deref(),
-        Some(&Constant::Int(1, 1))
+        Some(&Constant::int(1, 1))
     );
     // The intraprocedural view (what SCS reads) never folds a call result.
     assert_eq!(cc.const_of(main_id, r), None);
@@ -4106,7 +4106,7 @@ fn interproc_writeback_folds_congruent_comparison_in_context() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
-    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c1 = ssa.add_const(Constant::int(32, 1));
     let (x, a, b, eq) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -4162,7 +4162,7 @@ fn interproc_writeback_folds_congruent_comparison_in_context() {
     // The internal comparison folds within g's single context.
     assert_eq!(
         cc.const_of_in(g, &ctxs[0], eq).as_deref(),
-        Some(&Constant::Int(1, 1))
+        Some(&Constant::int(1, 1))
     );
     // Intraprocedurally (no context) the call result in main is still not folded.
     assert_eq!(cc.const_of(main_id, r), None);
@@ -4176,7 +4176,7 @@ fn interproc_writeback_terminates_under_recursion() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
-    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c1 = ssa.add_const(Constant::int(32, 1));
     let (x, a, b, eq, t) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -4238,7 +4238,7 @@ fn interproc_writeback_terminates_under_recursion() {
     for ctx in &ctxs {
         assert_eq!(
             cc.const_of_in(g, ctx, eq).as_deref(),
-            Some(&Constant::Int(1, 1))
+            Some(&Constant::int(1, 1))
         );
     }
 }
@@ -4356,7 +4356,7 @@ fn witness_forward_in_prunes_context_dead_forward() {
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let (p, w, r) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
-    let c_true = ssa.add_const(Constant::Int(1, 1));
+    let c_true = ssa.add_const(Constant::int(1, 1));
     let w0 = ssa.fresh_value();
 
     {
@@ -4415,7 +4415,7 @@ fn conditional_queries_parity_under_empty_context() {
     let (x, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let (d, e) = (ssa.fresh_value(), ssa.fresh_value());
     let (eq, r) = (ssa.fresh_value(), ssa.fresh_value());
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c5 = ssa.add_const(Constant::int(32, 5));
 
     let f = ssa.get_unique_entrypoint_mut();
     let then_b = f.add_block();
@@ -4462,7 +4462,7 @@ fn conditional_queries_parity_under_empty_context() {
     // Assert-const channel.
     assert_eq!(
         cc.asserted_const(main_id, pp, x).as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     assert_eq!(
         cc.asserted_const_in(main_id, &ctx, pp, x),
@@ -4496,7 +4496,7 @@ fn anticipated_queries_parity_under_empty_context() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let (x, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c5 = ssa.add_const(Constant::int(32, 5));
 
     let f = ssa.get_unique_entrypoint_mut();
     let mid = f.add_block();
@@ -4528,7 +4528,7 @@ fn anticipated_queries_parity_under_empty_context() {
     // Anticipated-const channel.
     assert_eq!(
         cc.anticipated_const(main_id, pp, x).as_deref(),
-        Some(&Constant::Int(32, 5))
+        Some(&Constant::int(32, 5))
     );
     assert_eq!(
         cc.anticipated_const_in(main_id, &ctx, pp, x),
@@ -4566,7 +4566,7 @@ fn known_unequal_in_gains_from_pruned_predecessor() {
         ssa.fresh_value(),
         ssa.fresh_value(),
     );
-    let c_false = ssa.add_const(Constant::Int(1, 0));
+    let c_false = ssa.add_const(Constant::int(1, 0));
     let (d0, e0) = (ssa.fresh_value(), ssa.fresh_value());
 
     let join = {
@@ -4629,8 +4629,8 @@ fn known_unequal_in_gains_from_pruned_predecessor() {
 fn asserted_const_never_aggregate() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
-    let c0 = ssa.add_const(Constant::Int(32, 10));
-    let c1 = ssa.add_const(Constant::Int(32, 20));
+    let c0 = ssa.add_const(Constant::int(32, 10));
+    let c1 = ssa.add_const(Constant::int(32, 20));
     let (x, s) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -4672,8 +4672,8 @@ fn asserted_const_in_never_aggregate() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 10));
-    let c1 = ssa.add_const(Constant::Int(32, 20));
+    let c0 = ssa.add_const(Constant::int(32, 10));
+    let c1 = ssa.add_const(Constant::int(32, 20));
     let (a, x) = (ssa.fresh_value(), ssa.fresh_value());
     let (s, y) = (ssa.fresh_value(), ssa.fresh_value());
 
@@ -5203,9 +5203,9 @@ fn cross_call_congruence_is_transitive() {
 }
 
 /// A callee that returns a pure transform of an array parameter (`p[0]`) is a deterministic
-/// function of its argument now that sequence ops are value-numbered, so two calls with
-/// congruent array arguments yield congruent results. Before this change the `ArrayGet` tainted
-/// the return as non-deterministic and the calls stayed distinct.
+/// function of its argument, because sequence ops are value-numbered, so two calls with congruent
+/// array arguments yield congruent results. An `ArrayGet` treated as non-deterministic would taint
+/// the return and keep the calls distinct.
 #[test]
 fn cross_call_congruence_for_array_returning_callee() {
     let mut ssa = HLSSA::with_main("main".to_string());
@@ -5213,7 +5213,7 @@ fn cross_call_congruence_for_array_returning_callee() {
     let pick = ssa.add_function("pick".to_string());
     let p = ssa.fresh_value();
     let elem = ssa.fresh_value();
-    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c0 = ssa.add_const(Constant::int(32, 0));
 
     // pick(p) = p[0] — deterministic in its array argument.
     {
@@ -5293,7 +5293,7 @@ fn cross_call_congruence_for_array_returning_callee() {
 #[test]
 fn cmp_eq_of_congruent_operands_folds_and_prunes_dead_edge() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c1 = ssa.add_const(Constant::int(32, 1));
     let (x, a, b, eq) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -5337,7 +5337,7 @@ fn cmp_eq_of_congruent_operands_folds_and_prunes_dead_edge() {
 
     assert!(cc.known_equal(fid, a, b));
     // The comparison is now an unconditional constant `true`.
-    assert_eq!(cc.const_of(fid, eq).as_deref(), Some(&Constant::Int(1, 1)));
+    assert_eq!(cc.const_of(fid, eq).as_deref(), Some(&Constant::int(1, 1)));
     // ...so the branch is decided: only the then-edge is executable.
     assert!(cc.is_executable_edge(fid, entry_id, then_b));
     assert!(!cc.is_executable_edge(fid, entry_id, else_b));
@@ -5351,9 +5351,9 @@ fn cmp_eq_of_congruent_operands_folds_and_prunes_dead_edge() {
 #[test]
 fn writeback_cascades_to_downstream_constant() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
-    let c7 = ssa.add_const(Constant::Int(32, 7));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c5 = ssa.add_const(Constant::int(32, 5));
+    let c7 = ssa.add_const(Constant::int(32, 7));
     let (x, a, b, eq, p) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -5401,7 +5401,7 @@ fn writeback_cascades_to_downstream_constant() {
     let cc = run_in_test(&ssa);
 
     assert!(!cc.is_reachable(fid, else_b));
-    assert_eq!(cc.const_of(fid, p).as_deref(), Some(&Constant::Int(32, 5)));
+    assert_eq!(cc.const_of(fid, p).as_deref(), Some(&Constant::int(32, 5)));
 }
 
 /// Guard: a comparison of values that are _not_ congruent stays unfolded and both branch targets
@@ -5475,7 +5475,7 @@ fn free_witnesses_are_not_congruent_so_comparison_not_folded() {
 #[test]
 fn writeback_is_noop_without_congruent_comparison() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c1 = ssa.add_const(Constant::int(32, 1));
     let (x, a) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -5500,7 +5500,7 @@ fn writeback_is_noop_without_congruent_comparison() {
 #[test]
 fn cmp_lt_of_congruent_operands_folds_false() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c1 = ssa.add_const(Constant::int(32, 1));
     let (x, a, b, lt) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -5535,7 +5535,7 @@ fn cmp_lt_of_congruent_operands_folds_false() {
     let cc = run_in_test(&ssa);
 
     assert!(cc.known_equal(fid, a, b));
-    assert_eq!(cc.const_of(fid, lt).as_deref(), Some(&Constant::Int(1, 0)));
+    assert_eq!(cc.const_of(fid, lt).as_deref(), Some(&Constant::int(1, 0)));
 }
 
 /// A comparison of congruent operands folds to a constant `true` even when it is _witnessed_
@@ -5579,8 +5579,8 @@ fn witnessed_comparison_of_congruent_operands_is_promoted() {
     // too. (SCS then keeps `ww` witness-typed via a cast; the analysis fact is the same.)
     assert!(cc.known_equal(fid, w, w));
     assert!(cc.known_equal(fid, n, n));
-    assert_eq!(cc.const_of(fid, ww).as_deref(), Some(&Constant::Int(1, 1)));
-    assert_eq!(cc.const_of(fid, nn).as_deref(), Some(&Constant::Int(1, 1)));
+    assert_eq!(cc.const_of(fid, ww).as_deref(), Some(&Constant::int(1, 1)));
+    assert_eq!(cc.const_of(fid, nn).as_deref(), Some(&Constant::int(1, 1)));
 }
 
 /// Combined-analysis win unreachable to either factor alone: two loop-carried parallel induction
@@ -5589,9 +5589,9 @@ fn witnessed_comparison_of_congruent_operands_is_promoted() {
 #[test]
 fn loop_carried_congruent_comparison_folds_true() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (i, j, lt, eq, i2, j2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -5645,7 +5645,7 @@ fn loop_carried_congruent_comparison_folds_true() {
     let cc = run_in_test(&ssa);
 
     assert!(cc.known_equal(fid, i, j));
-    assert_eq!(cc.const_of(fid, eq).as_deref(), Some(&Constant::Int(1, 1)));
+    assert_eq!(cc.const_of(fid, eq).as_deref(), Some(&Constant::int(1, 1)));
 }
 
 // AGGREGATE CONSTANT FOLDING
@@ -5657,10 +5657,10 @@ fn loop_carried_congruent_comparison_folds_true() {
 #[test]
 fn const_array_get_folds_to_scalar() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 10));
-    let c1 = ssa.add_const(Constant::Int(32, 20));
-    let c2 = ssa.add_const(Constant::Int(32, 30));
-    let idx = ssa.add_const(Constant::Int(32, 1));
+    let c0 = ssa.add_const(Constant::int(32, 10));
+    let c1 = ssa.add_const(Constant::int(32, 20));
+    let c2 = ssa.add_const(Constant::int(32, 30));
+    let idx = ssa.add_const(Constant::int(32, 1));
     let (seq, got) = (ssa.fresh_value(), ssa.fresh_value());
 
     let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
@@ -5683,12 +5683,12 @@ fn const_array_get_folds_to_scalar() {
     // The projection is a surfaced scalar constant.
     assert_eq!(
         cc.const_of(fid, got).as_deref(),
-        Some(&Constant::Int(32, 20))
+        Some(&Constant::int(32, 20))
     );
     assert!(
         cc.new_const_values(fid)
             .iter()
-            .any(|(v, c)| *v == got && **c == Constant::Int(32, 20))
+            .any(|(v, c)| *v == got && **c == Constant::int(32, 20))
     );
     // The aggregate stays internal: never surfaced as a constant.
     assert_eq!(cc.const_of(fid, seq), None);
@@ -5700,8 +5700,8 @@ fn const_array_get_folds_to_scalar() {
 #[test]
 fn const_repeated_array_get_and_slice_len() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let elem = ssa.add_const(Constant::Int(32, 7));
-    let idx = ssa.add_const(Constant::Int(32, 2));
+    let elem = ssa.add_const(Constant::int(32, 7));
+    let idx = ssa.add_const(Constant::int(32, 2));
     let (seq, got, len) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
@@ -5728,11 +5728,11 @@ fn const_repeated_array_get_and_slice_len() {
 
     assert_eq!(
         cc.const_of(fid, got).as_deref(),
-        Some(&Constant::Int(32, 7))
+        Some(&Constant::int(32, 7))
     );
     assert_eq!(
         cc.const_of(fid, len).as_deref(),
-        Some(&Constant::Int(32, 4))
+        Some(&Constant::int(32, 4))
     );
 }
 
@@ -5741,12 +5741,12 @@ fn const_repeated_array_get_and_slice_len() {
 #[test]
 fn const_array_set_then_get() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 10));
-    let c1 = ssa.add_const(Constant::Int(32, 20));
-    let c2 = ssa.add_const(Constant::Int(32, 30));
-    let new_val = ssa.add_const(Constant::Int(32, 99));
-    let idx0 = ssa.add_const(Constant::Int(32, 0));
-    let idx1 = ssa.add_const(Constant::Int(32, 1));
+    let c0 = ssa.add_const(Constant::int(32, 10));
+    let c1 = ssa.add_const(Constant::int(32, 20));
+    let c2 = ssa.add_const(Constant::int(32, 30));
+    let new_val = ssa.add_const(Constant::int(32, 99));
+    let idx0 = ssa.add_const(Constant::int(32, 0));
+    let idx1 = ssa.add_const(Constant::int(32, 1));
     let (seq, seq2, at_set, at_orig) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -5784,11 +5784,11 @@ fn const_array_set_then_get() {
 
     assert_eq!(
         cc.const_of(fid, at_set).as_deref(),
-        Some(&Constant::Int(32, 99))
+        Some(&Constant::int(32, 99))
     );
     assert_eq!(
         cc.const_of(fid, at_orig).as_deref(),
-        Some(&Constant::Int(32, 10))
+        Some(&Constant::int(32, 10))
     );
 }
 
@@ -5796,11 +5796,11 @@ fn const_array_set_then_get() {
 #[test]
 fn const_slice_push_front_and_back() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let mid = ssa.add_const(Constant::Int(32, 1));
-    let front = ssa.add_const(Constant::Int(32, 0));
-    let back = ssa.add_const(Constant::Int(32, 2));
-    let idx0 = ssa.add_const(Constant::Int(32, 0));
-    let idx1 = ssa.add_const(Constant::Int(32, 1));
+    let mid = ssa.add_const(Constant::int(32, 1));
+    let front = ssa.add_const(Constant::int(32, 0));
+    let back = ssa.add_const(Constant::int(32, 2));
+    let idx0 = ssa.add_const(Constant::int(32, 0));
+    let idx1 = ssa.add_const(Constant::int(32, 1));
     let (base, pushed_front, pushed_back, head, tail) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -5847,11 +5847,11 @@ fn const_slice_push_front_and_back() {
 
     assert_eq!(
         cc.const_of(fid, head).as_deref(),
-        Some(&Constant::Int(32, 0))
+        Some(&Constant::int(32, 0))
     );
     assert_eq!(
         cc.const_of(fid, tail).as_deref(),
-        Some(&Constant::Int(32, 2))
+        Some(&Constant::int(32, 2))
     );
 }
 
@@ -5861,9 +5861,9 @@ fn const_slice_push_front_and_back() {
 #[test]
 fn const_slice_pop_folds_both_results() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 10));
-    let c1 = ssa.add_const(Constant::Int(32, 20));
-    let c2 = ssa.add_const(Constant::Int(32, 30));
+    let c0 = ssa.add_const(Constant::int(32, 10));
+    let c1 = ssa.add_const(Constant::int(32, 20));
+    let c2 = ssa.add_const(Constant::int(32, 30));
     let (seq, rest, last, len) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -5902,15 +5902,15 @@ fn const_slice_pop_folds_both_results() {
 
     assert_eq!(
         cc.const_of(fid, last).as_deref(),
-        Some(&Constant::Int(32, 30))
+        Some(&Constant::int(32, 30))
     );
     assert_eq!(
         cc.const_of(fid, len).as_deref(),
-        Some(&Constant::Int(32, 2))
+        Some(&Constant::int(32, 2))
     );
     assert_eq!(
         cc.const_of(fid, first).as_deref(),
-        Some(&Constant::Int(32, 10))
+        Some(&Constant::int(32, 10))
     );
 }
 
@@ -5919,11 +5919,11 @@ fn const_slice_pop_folds_both_results() {
 #[test]
 fn const_slice_insert_and_remove_fold() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 10));
-    let c2 = ssa.add_const(Constant::Int(32, 30));
-    let mid = ssa.add_const(Constant::Int(32, 20));
-    let idx0 = ssa.add_const(Constant::Int(32, 0));
-    let idx1 = ssa.add_const(Constant::Int(32, 1));
+    let c0 = ssa.add_const(Constant::int(32, 10));
+    let c2 = ssa.add_const(Constant::int(32, 30));
+    let mid = ssa.add_const(Constant::int(32, 20));
+    let idx0 = ssa.add_const(Constant::int(32, 0));
+    let idx1 = ssa.add_const(Constant::int(32, 1));
     let (seq, grown, at_ins, glen) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -5971,19 +5971,19 @@ fn const_slice_insert_and_remove_fold() {
 
     assert_eq!(
         cc.const_of(fid, at_ins).as_deref(),
-        Some(&Constant::Int(32, 20))
+        Some(&Constant::int(32, 20))
     );
     assert_eq!(
         cc.const_of(fid, glen).as_deref(),
-        Some(&Constant::Int(32, 3))
+        Some(&Constant::int(32, 3))
     );
     assert_eq!(
         cc.const_of(fid, removed).as_deref(),
-        Some(&Constant::Int(32, 10))
+        Some(&Constant::int(32, 10))
     );
     assert_eq!(
         cc.const_of(fid, slen).as_deref(),
-        Some(&Constant::Int(32, 2))
+        Some(&Constant::int(32, 2))
     );
 }
 
@@ -5993,9 +5993,9 @@ fn const_mk_seq_of_blob_folds() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let blob = ssa.add_const(Constant::Blob(Blob::new(
         Type::int(32),
-        vec![Constant::Int(32, 100), Constant::Int(32, 200)],
+        vec![Constant::int(32, 100), Constant::int(32, 200)],
     )));
-    let idx = ssa.add_const(Constant::Int(32, 1));
+    let idx = ssa.add_const(Constant::int(32, 1));
     let (seq, got) = (ssa.fresh_value(), ssa.fresh_value());
 
     let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
@@ -6016,7 +6016,7 @@ fn const_mk_seq_of_blob_folds() {
 
     assert_eq!(
         cc.const_of(fid, got).as_deref(),
-        Some(&Constant::Int(32, 200))
+        Some(&Constant::int(32, 200))
     );
     // The aggregate stays internal.
     assert_eq!(cc.const_of(fid, seq), None);
@@ -6027,10 +6027,10 @@ fn const_mk_seq_of_blob_folds() {
 #[test]
 fn aggregate_folding_negative_cases() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 10));
-    let c1 = ssa.add_const(Constant::Int(32, 20));
-    let idx0 = ssa.add_const(Constant::Int(32, 0));
-    let idx_oob = ssa.add_const(Constant::Int(32, 5));
+    let c0 = ssa.add_const(Constant::int(32, 10));
+    let c1 = ssa.add_const(Constant::int(32, 20));
+    let idx0 = ssa.add_const(Constant::int(32, 0));
+    let idx_oob = ssa.add_const(Constant::int(32, 5));
     let p = ssa.fresh_value();
     let (seq, g_oob, seq_nc, g_nc, big, g_big) = (
         ssa.fresh_value(),
@@ -6098,10 +6098,10 @@ fn aggregate_folding_negative_cases() {
 #[test]
 fn aggregate_folding_refuses_oob_set_and_over_cap_constructors() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 10));
-    let c1 = ssa.add_const(Constant::Int(32, 20));
-    let idx0 = ssa.add_const(Constant::Int(32, 0));
-    let idx_oob = ssa.add_const(Constant::Int(32, 5));
+    let c0 = ssa.add_const(Constant::int(32, 10));
+    let c1 = ssa.add_const(Constant::int(32, 20));
+    let idx0 = ssa.add_const(Constant::int(32, 0));
+    let idx_oob = ssa.add_const(Constant::int(32, 5));
     let over_cap = (1usize << 12) + 1; // AGGREGATE_FOLD_CAP + 1
 
     let (base, set_oob, at_set_oob) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
@@ -6177,8 +6177,8 @@ fn aggregate_folding_refuses_oob_set_and_over_cap_constructors() {
 #[test]
 fn slice_pop_insert_remove_refuse_oob() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 10));
-    let idx_oob = ssa.add_const(Constant::Int(32, 5));
+    let c0 = ssa.add_const(Constant::int(32, 10));
+    let idx_oob = ssa.add_const(Constant::int(32, 5));
     let (empty, rest, elem) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let (frest, felem) = (ssa.fresh_value(), ssa.fresh_value());
     let (one, inserted) = (ssa.fresh_value(), ssa.fresh_value());

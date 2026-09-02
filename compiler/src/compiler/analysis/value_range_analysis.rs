@@ -35,6 +35,7 @@
 //! way avoids an `Option<Interval>` that every call site would have to unwrap.
 
 use mavros_artifacts::FieldConfig;
+use mavros_int_semantics::IntBits;
 use num_bigint::{BigInt, Sign};
 use num_traits::{One, Signed, ToPrimitive, Zero};
 use tracing::{Level, instrument, warn};
@@ -361,8 +362,8 @@ impl ValueRangeAnalysis {
             } => {
                 let in_r = range(bounds, *value);
                 // `(v >> offset) & mask(width)`, with the result keeping the _source's_ type. The
-                // mask is exact whenever the shifted value already fits, which subsumes the
-                // identity case a signed source used to need a rule of its own for.
+                // mask is exact whenever the shifted value already fits, which covers a signed
+                // source without needing a rule of its own.
                 let shifted = in_r.unsigned().div_const_pos(&(BigInt::one() << *offset));
                 let masked = if shifted.fits_in_unsigned_bits(*width) {
                     shifted
@@ -387,9 +388,9 @@ impl ValueRangeAnalysis {
             // transfer is sound exactly under the standing invariant that **every hint is pinned by
             // accompanying constraints** — `bit_range.rs::lower_witness_bit_range` and
             // `witness_bitwise.rs::wrap_shifted_product` are the pattern to follow. A hint written
-            // without them leaves the range describing the honest prover only, which is no longer
-            // merely imprecise now that consumers can ELIDE constraints on the strength of what
-            // this domain says.
+            // without them leaves the range describing the honest prover only, which is worse
+            // than imprecise: consumers ELIDE constraints on the strength of what this domain
+            // says.
             OpCode::WriteWitness {
                 result: Some(r),
                 value,
@@ -593,10 +594,9 @@ impl ValueRangeAnalysis {
     /// a count rather than as a bit pattern, so it needs no width agreement. Every other rule here
     /// reasons about the result's bit pattern and gives up if an operand is not a reading of it.
     ///
-    /// `kind` carries the sign as well as the operation, and both are read off it. It used to
-    /// arrive alongside a separate `signed` flag, which meant a caller could spell an `SDiv` with
-    /// `signed: false` — an operation the pipeline cannot produce — and have it silently mean
-    /// something.
+    /// `kind` carries the sign as well as the operation, and both are read off it. A separate
+    /// `signed` flag beside it would let a caller spell an `SDiv` with `signed: false` — an
+    /// operation the pipeline cannot produce — and have it silently mean something.
     #[allow(clippy::too_many_arguments)]
     fn binary_arith(
         kind: BinaryArithOpKind,
@@ -653,7 +653,7 @@ impl ValueRangeAnalysis {
 
                 // Signed division truncates toward zero while `div_const_pos` floors, and the two
                 // agree only for a non-negative dividend. An unsigned reading satisfies that by
-                // construction, so this gate is now vacuous on the unsigned side.
+                // construction, so the gate binds only on the signed side.
                 if !dividend.is_non_negative() {
                     return ValueRange::full(width);
                 }
@@ -683,8 +683,8 @@ impl ValueRangeAnalysis {
                 }
 
                 // Bitwise operations act on the raw pattern, so the unsigned readings bound them
-                // unconditionally. The old rule needed both operands to be non-negative because it
-                // had only the mathematical reading to work with; here the gate is vacuous.
+                // unconditionally — no non-negativity gate is needed, which one reasoning from the
+                // mathematical reading alone could not avoid.
                 let (Some(lh), Some(rh)) = (l.unsigned().hi(), r.unsigned().hi()) else {
                     return ValueRange::full(width);
                 };
@@ -1696,9 +1696,9 @@ impl ValueRange {
     /// Only the **unsigned** reading crosses the width boundary. It is the raw integer, so it means
     /// the same thing at any width; the signed reading is two's complement at the _old_ width and
     /// is a statement about a sign bit that has moved, so it is dropped and recovered by the
-    /// reduction rather than carried over. Carrying it is how a widening used to manufacture ⊥: a
-    /// `Bits(8)` `[200, 255]` has the signed reading `[−56, −1]`, and re-reading that at `Bits(16)`
-    /// asks for a pattern that is both `≥ 200` and `≥ 2^15`, which nothing satisfies.
+    /// reduction rather than carried over. Carrying it across would manufacture ⊥: a `Bits(8)`
+    /// `[200, 255]` has the signed reading `[−56, −1]`, and re-reading that at `Bits(16)` asks for
+    /// a pattern that is both `≥ 200` and `≥ 2^15`, which nothing satisfies.
     pub fn constrain_to(&self, width: Width) -> Self {
         if self.width == width {
             return self.clone();
@@ -2053,15 +2053,9 @@ fn opt_mul(a: Option<&BigInt>, b: Option<&BigInt>) -> Option<BigInt> {
     }
 }
 
-/// Convert a `Constant::Int(bits, encoded)` u128 bit pattern back to a signed `BigInt`.
+/// Convert the `u128` bit pattern a `Constant::Int` carries back to a signed `BigInt`.
 ///
 /// Two's-complement decode for any `bits ∈ [1, 128]`.
-///
-/// Test-only. `compute_constant_bounds` used to call this on the signed half of the constant tag;
-/// with one `Constant::Int` it names a constant by its raw pattern instead and lets the domain's
-/// reduction recover the signed reading. What survives here is the _statement_ of that equivalence
-/// — `the_two_routes_to_one_pattern_agree` is what stops the reduction quietly drifting from the
-/// decode it is supposed to reproduce.
 #[cfg(test)]
 fn signed_const_to_bigint(bits: usize, encoded: u128) -> BigInt {
     if bits == 0 {
@@ -2098,6 +2092,14 @@ fn field_to_bigint(f: &Field) -> BigInt {
     BigInt::from_bytes_le(Sign::Plus, &bytes_le)
 }
 
+/// Convert an integer constant's pattern to a `BigInt`, read as an unsigned magnitude.
+///
+/// Unsigned because the pattern carries no reading; the signed one is recovered by the domain's own
+/// reduction.
+fn pattern_to_bigint(pattern: &IntBits) -> BigInt {
+    BigInt::from(num_bigint::BigUint::from(pattern))
+}
+
 /// Pre-compute the singleton interval for every constant in the SSA's constant storage.
 ///
 /// Constants are module-level singletons shared across functions, so this runs once before the
@@ -2112,9 +2114,10 @@ fn compute_constant_bounds(ssa: &HLSSA) -> HashMap<ValueId, ValueRange> {
                 // domain carries both, and the reduction is canonical, so naming the pattern as an
                 // unsigned singleton recovers exactly the signed reading `from_signed` would have
                 // been handed. `the_two_routes_to_one_pattern_agree` pins that.
-                Constant::Int(bits, v) => {
-                    ValueRange::from_unsigned(Width::Bits(*bits), Interval::singleton(*v))
-                }
+                Constant::Int(v) => ValueRange::from_unsigned(
+                    Width::Bits(v.bits()),
+                    Interval::singleton(pattern_to_bigint(v)),
+                ),
                 Constant::Field(f) => ValueRange::from_unsigned(
                     Width::Field(field),
                     Interval::singleton(field_to_bigint(f)),
@@ -2284,9 +2287,8 @@ mod tests {
 
     #[test]
     fn non_scalar_is_unconstrained_in_both_readings() {
-        // The old domain answered `IntInterval::top()` for every non-numeric value, and the `_`
-        // transfer arm and the `ArrayToSlice`/`Map` cast arm both have to agree on one
-        // representation of "no information" or `changed` never settles.
+        // The `_` transfer arm and the `ArrayToSlice`/`Map` cast arm both have to agree on one
+        // representation of "no information" for a non-numeric value, or `changed` never settles.
         let r = ValueRange::full(Width::NonScalar);
         assert_eq!(r.unsigned(), &Interval::top());
         assert_eq!(r.signed(), &Interval::top());
@@ -2325,9 +2327,9 @@ mod tests {
 
     #[test]
     fn both_readings_of_one_pattern_stay_available() {
-        // The domain keeps both readings of every value and never picks between them by looking at
-        // a type -- there is no longer a type-level sign to look at. Consumers that need one ask
-        // for it by name, and which name they ask for follows their opcode.
+        // The domain keeps both readings of every value and never picks between them by looking
+        // at a type -- there is no type-level sign to look at. Consumers that need one ask for it
+        // by name, and which name they ask for follows their opcode.
         let r = ValueRange::from_unsigned(Width::Bits(8), iv(200, 200));
         assert_eq!(r.unsigned(), &iv(200, 200));
         assert_eq!(r.signed(), &iv(-56, -56));
@@ -2451,7 +2453,7 @@ mod tests {
         // The narrowing half of `constraining_to_a_wider_width_does_not_manufacture_bottom`, and
         // the same mistake: `[128, 255]` is representable at `Bits(8)` -- every one of those
         // patterns is a `u8` -- but read as two's complement _there_ it is negative, so carrying
-        // the old width's signed reading across and intersecting it with `signed_full(8)` used to
+        // the source width's signed reading across and intersecting it with `signed_full(8)` would
         // discard the whole top half of the range. The assertion `constrain_to` models is about
         // representability, which only the unsigned reading decides.
         let wide = ValueRange::from_unsigned(Width::Bits(16), iv(0, 200));
@@ -2487,7 +2489,7 @@ mod tests {
     fn field_arithmetic_wraps_instead_of_emptying() {
         // `MulConst` with a multiplier of `[2, 3]` and a value of `p - 1` produces a raw
         // `[2p - 2, 3p - 3]`. Intersecting that with `[0, p)` — which is what capping to the
-        // declared type used to do — reports a value that definitely exists as unreachable.
+        // declared type amounts to — reports a value that definitely exists as unreachable.
         let p = field_modulus(f());
         let raw = Interval::closed(&p - BigInt::from(1), &p - BigInt::from(1))
             .mul(&Interval::closed(2, 3));
@@ -2782,12 +2784,13 @@ mod tests {
     }
 
     #[test]
-    fn bitwise_operations_no_longer_need_non_negative_operands() {
+    fn bitwise_operations_bound_negative_operands() {
         use BinaryArithOpKind::*;
         let w = Width::Bits(8);
 
-        // Both operands negative as signed, which the old rule refused to bound at all. The raw
-        // patterns are 200..=255 and 254..=255, so the AND is capped by the smaller.
+        // Both operands negative as signed, which a rule reasoning from the mathematical reading
+        // could not bound at all. The raw patterns are 200..=255 and 254..=255, so the AND is
+        // capped by the smaller.
         let and = arith(And, w, &i8r(-56, -1), &i8r(-2, -1));
         assert_eq!(and.unsigned(), &iv(0, 255));
 
@@ -2813,7 +2816,8 @@ mod tests {
         let quot = arith(SDiv, w, &i8r(-8, -1), &i8r(2, 2));
         assert_eq!(quot.signed(), &Interval::signed_full(8));
 
-        // `x % d < d`, and `x % d <= x`: the second term is what the old rule was missing.
+        // `x % d < d`, and `x % d <= x`: both terms are needed, and the second is the one a
+        // divisor-only bound would miss.
         let rem = arith(URem, w, &u8r(0, 3), &u8r(10, 10));
         assert_eq!(rem.unsigned(), &iv(0, 3));
         let rem = arith(URem, w, &u8r(0, 200), &u8r(10, 10));
@@ -3632,18 +3636,18 @@ mod tests {
 /// other.
 #[cfg(test)]
 mod int_semantics_conformance {
-    use mavros_int_semantics::{self as semantics, IntOp, Outcome, Raw, corners};
+    use mavros_int_semantics::{self as semantics, IntBits, IntOp, Outcome, corners};
 
     use super::*;
 
     /// Whether a bit pattern is in γ of a range: admitted by both readings.
-    fn in_gamma(range: &ValueRange, bits: usize, v: Raw) -> bool {
+    fn in_gamma(range: &ValueRange, bits: usize, v: u128) -> bool {
         range.unsigned().contains(&BigInt::from(v))
             && range.signed().contains(&signed_const_to_bigint(bits, v))
     }
 
     /// Every bit pattern a range denotes, at a width small enough to enumerate.
-    fn gamma(range: &ValueRange, bits: usize) -> Vec<Raw> {
+    fn gamma(range: &ValueRange, bits: usize) -> Vec<u128> {
         assert!(bits <= 8, "γ is enumerated, so the width has to stay small");
         (0..=semantics::mask(bits))
             .filter(|v| in_gamma(range, bits, *v))
@@ -3659,7 +3663,7 @@ mod int_semantics_conformance {
         let width = Width::Bits(bits);
         let top = semantics::mask(bits);
         let half = top / 2;
-        let closed = |lo: Raw, hi: Raw| {
+        let closed = |lo: u128, hi: u128| {
             ValueRange::from_unsigned(width, Interval::closed(BigInt::from(lo), BigInt::from(hi)))
         };
 
@@ -3682,28 +3686,29 @@ mod int_semantics_conformance {
     ///
     /// Spelled out so that adding a `BinaryArithOpKind` is a compile error in a test that would
     /// otherwise silently stop covering it.
-    fn operations() -> Vec<(BinaryArithOpKind, IntOp, semantics::Sign)> {
+    fn operations() -> Vec<(BinaryArithOpKind, IntOp)> {
         use BinaryArithOpKind as K;
-        use semantics::Sign::{Signed, Unsigned};
 
         vec![
-            (K::UAdd, IntOp::Add, Unsigned),
-            (K::SAdd, IntOp::Add, Signed),
-            (K::USub, IntOp::Sub, Unsigned),
-            (K::SSub, IntOp::Sub, Signed),
-            (K::UMul, IntOp::Mul, Unsigned),
-            (K::SMul, IntOp::Mul, Signed),
-            (K::UDiv, IntOp::Div, Unsigned),
-            (K::SDiv, IntOp::Div, Signed),
-            (K::URem, IntOp::Rem, Unsigned),
-            (K::SRem, IntOp::Rem, Signed),
-            (K::UShl, IntOp::Shl, Unsigned),
-            (K::SShl, IntOp::Shl, Signed),
-            (K::UShr, IntOp::Shr, Unsigned),
-            (K::SShr, IntOp::Shr, Signed),
-            (K::And, IntOp::And, Unsigned),
-            (K::Or, IntOp::Or, Unsigned),
-            (K::Xor, IntOp::Xor, Unsigned),
+            (K::UAdd, IntOp::UAdd),
+            (K::SAdd, IntOp::SAdd),
+            (K::USub, IntOp::USub),
+            (K::SSub, IntOp::SSub),
+            (K::UMul, IntOp::UMul),
+            (K::SMul, IntOp::SMul),
+            (K::UDiv, IntOp::UDiv),
+            (K::SDiv, IntOp::SDiv),
+            (K::URem, IntOp::URem),
+            (K::SRem, IntOp::SRem),
+            // The one many-to-one pair: a left shift computes the same bits under both readings,
+            // so the model has a single `Shl`. See `From<BinaryArithOpKind> for IntOp`.
+            (K::UShl, IntOp::Shl),
+            (K::SShl, IntOp::Shl),
+            (K::UShr, IntOp::UShr),
+            (K::SShr, IntOp::SShr),
+            (K::And, IntOp::And),
+            (K::Or, IntOp::Or),
+            (K::Xor, IntOp::Xor),
         ]
     }
 
@@ -3715,7 +3720,7 @@ mod int_semantics_conformance {
             let width = Width::Bits(bits);
             let ranges = input_ranges(bits);
 
-            for (kind, op, sign) in operations() {
+            for (kind, op) in operations() {
                 for l in &ranges {
                     for r in &ranges {
                         // Both operands at the result's width, which is the case every rule here
@@ -3725,13 +3730,18 @@ mod int_semantics_conformance {
 
                         for a in gamma(l, bits) {
                             for b in gamma(r, bits) {
-                                let Outcome::Value(v) = semantics::eval(op, sign, bits, a, bits, b)
-                                else {
+                                let Outcome::Value(v) = semantics::eval(
+                                    op,
+                                    &IntBits::from_u128(bits, a),
+                                    &IntBits::from_u128(bits, b),
+                                ) else {
                                     // A rejected execution produces no value, so there is nothing
                                     // for the range to have contained.
                                     continue;
                                 };
 
+                                let v =
+                                    u128::try_from(&v).expect("a narrow answer fits a host word");
                                 assert!(
                                     in_gamma(&out, bits, v),
                                     "{kind:?} at {bits} bits: {a:#x} ∈ γ({l:?}) and {b:#x} ∈ \

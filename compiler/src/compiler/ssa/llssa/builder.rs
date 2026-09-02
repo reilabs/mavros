@@ -23,7 +23,7 @@ pub trait LLEmitter {
     }
 
     fn emit_int_const_u128(&mut self, bits: u32, value: u128) -> ValueId {
-        self.emit_constant(Constant::Int { bits, value })
+        self.emit_constant(Constant::int(bits, value))
     }
 
     fn emit_nullptr_const(&mut self) -> ValueId {

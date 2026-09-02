@@ -230,7 +230,7 @@ pub trait HLEmitter {
     /// There is no signed/unsigned pair here because there is no sign to record: what the bits mean
     /// is decided by the opcode that consumes them.
     fn int_const(&mut self, bits: usize, value: u128) -> ValueId {
-        self.emit_constant(Constant::Int(bits, value))
+        self.emit_constant(Constant::int(bits, value))
     }
 
     // -- Witness --

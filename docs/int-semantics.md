@@ -40,6 +40,10 @@ The rules themselves:
   and is arithmetic for a signed operand and logical for an unsigned one.
 - **A shift's amount is typed as the left operand's own type.** Noir's elaborator unifies the two,
   which is what makes checking the amount against `rhs_type.bit_size()` correct.
+- **An amount the guard IR failed to reject is reduced modulo the width**, not masked. The two
+  coincide at a power-of-two width. `reduced_shift_amount`, `vm::shift_amount` and
+  `llssa_to_llvm::reduce_shift_count` all reduce, which is what lets an integer be shifted at any
+  width rather than only a power of two.
 - **Casts** truncate the low bits when narrowing and sign-extend when widening a signed source.
   `iN as Field` is not a cast at all: the frontend rejects it with "Only unsigned integer types may
   be casted to Field".
@@ -61,8 +65,8 @@ total backend must still produce a bit pattern" are both crucial questions, but 
 potentially different answers.
 
 ```rust
-pub fn eval(op, sign, bits, lhs, rhs_bits, rhs) -> Outcome;      // Value(v) | Rejected(reason)
-pub fn residue(op, sign, bits, lhs, rhs_bits, rhs) -> Option<Raw>;
+pub fn eval(op: IntOp, lhs: &IntBits, rhs: &IntBits) -> Outcome; // Value(v) | Rejected(reason)
+pub fn residue(op: IntOp, lhs: &IntBits, rhs: &IntBits) -> Option<IntBits>;
 ```
 
 `eval` is **the Noir contract**: what an execution of this operation must do. Its four rejection
@@ -80,8 +84,17 @@ an evaluator that reaches such a point is entitled to treat it as a compiler bug
 The two are tied together inside the crate: `eval(p) == Value(v)` implies `residue(p) == Some(v)`.
 So conforming to `residue` on accepted inputs is conforming to Noir.
 
-`rhs_bits` is a separate parameter on purpose. A shift's amount can be declared narrower than the
-value it shifts, and an amount's own width is the only thing that says what its bit pattern means.
+Everything an operation needs is carried by the values it is given, which is why neither function
+takes a width or a signedness beside them. An `IntBits` is a `bits`-wide two's-complement pattern
+that knows its own width, so there is no width parameter for a caller to disagree with; and an
+`IntOp` names its own reading, so `UAdd` and `SAdd` are two operations rather than one operation and
+a flag. The reading is part of the operation because it changes the answer: `eval` rejects
+`200u8 + 100u8` and accepts the same two patterns read as `-56i8 + 100i8`.
+
+What remains is the rule that the operands must agree, and the model enforces it rather than
+assuming it: both operands must be one width for every operation except a shift. A shift's amount
+can legitimately be declared narrower than the value it shifts, and an amount's own width is the
+only thing that says what its bit pattern means.
 
 ## What We Check
 
@@ -160,8 +173,9 @@ Everywhere the intended semantics _has_ an opinion, this agrees with it.
 ### `vm`: the Bytecode Interpreter's Opcodes
 
 `vm/src/bytecode.rs`. This one does **not** delegate because it's a hot dispatch loop over `u64`
-cells with a separate `Int128` lane, while the model computes in `u128` throughout. Delegating would
-mean computing `eval` and discarding it which is not great for performance.
+cells with a separate `Int128` lane, while the model computes over heap-backed limbs. Delegating
+would mean an allocation per opcode to compute an `eval` that is then discarded, which is not great
+for performance.
 
 The relation is thus checked instead of enforced: **total, and equal to `residue` wherever the model
 specifies a pattern**. Total means no panic, no undefined behavior and no process abort — a witness
@@ -266,12 +280,15 @@ currently implement Noir.
 - **Signed integers wider than 64 bits are unsupported.** Noir has `i128`; mavros caps a signed
   reading at 64 bits and rejects the type outright.
 - **`u128 <<` is unsupported**, and panics rather than compiling.
-- **A shift at a non-power-of-two width would corrupt an in-range amount.** The amount mask is
-  `amount & (bits - 1)`, which is a modulo only where the width is a power of two; at `u3` an amount
-  of `1` masks to `0` in the VM and in the WASM backend while `hlssa_to_r1cs` shifts by `1`, so the
-  two halves of a proof would disagree. This is structurally unreachable rather than fixed — Noir
-  has no such width and `BitRange` keeps its source's type — and `shift_guard::shift_operand_bits`,
-  the single funnel both pure shift lowerings take their width from, asserts it stays that way.
+- **A _witness_ shift at a non-power-of-two width does not compile**, and panics rather than being
+  rejected. All three total evaluators reduce the amount modulo the width, so they agree at every
+  width and the gap is not a disagreement between backends; what is missing is the _guard IR_, and
+  only on the witness path. `witness_bitwise::lower_shift` indexes bit `log2(bits)` to test "too
+  large" and keys its `2^n` factor table by the same number, and both are the amount bound only
+  where the width is a power of two, so it asserts rather than emitting a check it cannot express.
+  The _pure_ path has no such limit: `shift_guard::emit_shift_amount_tests` builds a real
+  `amount < bits` comparison, which is width-agnostic, and `shift_guard::shift_operand_bits`
+  accordingly admits any width. Admitting a witness one means rebuilding its check the same way.
 - **A dead _witness_ `Add`/`Sub`/`Mul` loses its rejection.** DCE keeps the overflow check when it
   deletes a dead operation, but only when both operands are pure. The check a live witness operation
   gets is a range check on a field result rather than a comparison, and DCE cannot build that.

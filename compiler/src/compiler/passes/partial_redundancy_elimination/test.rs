@@ -226,7 +226,7 @@ fn integer_wrap_arithmetic_is_not_total() {
         Type::witness_of(Type::int(32)),
     ]);
     let (a, b, wa) = (vals[0], vals[1], vals[2]);
-    let c2 = ssa.add_const(Constant::Int(32, 2));
+    let c2 = ssa.add_const(Constant::int(32, 2));
     let r = ssa.fresh_value();
 
     let (fid, cc, types) = oracle_env(&ssa);
@@ -340,8 +340,8 @@ fn representation_casts_are_total_map_is_not() {
 fn division_requires_a_provably_nonzero_divisor() {
     let (ssa, vals) = main_with_params(&[Type::int(32), Type::int(32)]);
     let (x, d) = (vals[0], vals[1]);
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c2 = ssa.add_const(Constant::Int(32, 2));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c2 = ssa.add_const(Constant::int(32, 2));
     let r = ssa.fresh_value();
 
     let (fid, cc, types) = oracle_env(&ssa);
@@ -363,7 +363,7 @@ fn division_requires_a_provably_nonzero_divisor() {
 fn division_discharged_by_disequality_branch() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (x, d, eq) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
+    let c0 = ssa.add_const(Constant::int(32, 0));
     let r = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -398,14 +398,14 @@ fn division_discharged_by_disequality_branch() {
 /// disequality-only fact is insufficient, and the unsigned forms are unaffected.
 ///
 /// See [`narrow_signed_division_has_the_minus_one_hazard_too`] for why this is not a 64-bit-only
-/// concern, which is what it was originally written as.
+/// concern.
 #[test]
 fn signed_64_bit_division_minus_one_hazard() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (x, d, eq) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::Int(64, 0));
-    let c2 = ssa.add_const(Constant::Int(64, 2));
-    let cm1 = ssa.add_const(Constant::Int(64, u64::MAX as u128));
+    let c0 = ssa.add_const(Constant::int(64, 0));
+    let c2 = ssa.add_const(Constant::int(64, 2));
+    let cm1 = ssa.add_const(Constant::int(64, u64::MAX as u128));
     let r = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -453,8 +453,8 @@ fn signed_64_bit_division_minus_one_hazard() {
 fn narrow_signed_division_has_the_minus_one_hazard_too() {
     let (ssa, vals) = main_with_params(&[Type::int(8)]);
     let x = vals[0];
-    let minus_one = ssa.add_const(Constant::Int(8, 0xFF));
-    let two = ssa.add_const(Constant::Int(8, 2));
+    let minus_one = ssa.add_const(Constant::int(8, 0xFF));
+    let two = ssa.add_const(Constant::int(8, 2));
     let r = ssa.fresh_value();
 
     let (fid, cc, types) = oracle_env(&ssa);
@@ -482,7 +482,7 @@ fn narrow_signed_division_has_the_minus_one_hazard_too() {
 fn unsigned_64_bit_all_ones_divisor_is_fine() {
     let (ssa, vals) = main_with_params(&[Type::int(64)]);
     let x = vals[0];
-    let ones = ssa.add_const(Constant::Int(64, u64::MAX as u128));
+    let ones = ssa.add_const(Constant::int(64, u64::MAX as u128));
     let r = ssa.fresh_value();
 
     let (fid, cc, types) = oracle_env(&ssa);
@@ -496,8 +496,8 @@ fn unsigned_64_bit_all_ones_divisor_is_fine() {
 fn shifts_require_a_constant_in_range_amount() {
     let (ssa, vals) = main_with_params(&[Type::int(32), Type::int(8)]);
     let (a, dyn_amount) = (vals[0], vals[1]);
-    let c5 = ssa.add_const(Constant::Int(8, 5));
-    let c40 = ssa.add_const(Constant::Int(8, 40));
+    let c5 = ssa.add_const(Constant::int(8, 5));
+    let c40 = ssa.add_const(Constant::int(8, 40));
     let r = ssa.fresh_value();
 
     let (fid, cc, types) = oracle_env(&ssa);
@@ -521,8 +521,8 @@ fn array_access_requires_a_constant_in_bounds_index() {
         Type::field(),
     ]);
     let (arr, slice, dyn_idx, elem) = (vals[0], vals[1], vals[2], vals[3]);
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c5 = ssa.add_const(Constant::Int(32, 5));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c5 = ssa.add_const(Constant::int(32, 5));
     let r = ssa.fresh_value();
 
     let (fid, cc, types) = oracle_env(&ssa);
@@ -649,8 +649,8 @@ fn effectful_and_witness_machinery_ops_are_never_total() {
 fn taint_source_gates_witness_ness_pre_untaint() {
     let (mut ssa, vals) = main_with_params(&[Type::int(32), Type::field().array_of(3)]);
     let (x, arr) = (vals[0], vals[1]);
-    let c2 = ssa.add_const(Constant::Int(32, 2));
-    let idx = ssa.add_const(Constant::Int(32, 1));
+    let c2 = ssa.add_const(Constant::int(32, 2));
+    let idx = ssa.add_const(Constant::int(32, 1));
     let (w, r) = (ssa.fresh_value(), ssa.fresh_value());
     ssa.get_unique_entrypoint_mut()
         .get_entry_mut()
@@ -947,9 +947,9 @@ fn mul_const_unifies_with_mul() {
 #[test]
 fn loop_carried_congruent_increments_redirect() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (i, j, cond, i2, j2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -1050,7 +1050,7 @@ fn lookup_dedup_respects_config() {
     let build = || {
         let (mut ssa, vals) = main_with_params(&[Type::field()]);
         let v = vals[0];
-        let flag = ssa.add_const(Constant::Int(1, 1));
+        let flag = ssa.add_const(Constant::int(1, 1));
         let f = ssa.get_unique_entrypoint_mut();
         let entry = f.get_entry_mut();
         for _ in 0..2 {
@@ -1236,7 +1236,7 @@ fn aggregate_constructors_are_untouched() {
 fn array_get_deduplicates() {
     let (mut ssa, vals) = main_with_params(&[Type::field().array_of(3)]);
     let arr = vals[0];
-    let c1 = ssa.add_const(Constant::Int(32, 1));
+    let c1 = ssa.add_const(Constant::int(32, 1));
     let (g1, g2) = (ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
@@ -1353,9 +1353,9 @@ fn invariant_loop(
 ) {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (i, cond, inv, i2, inv2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -1579,7 +1579,7 @@ fn pre_untaint_config_dedups_without_structural_change() {
 }
 
 /// The pre-untaint configuration's motion contract: a down-safe invariant behind a `Jmp`-terminated
-/// entry predecessor is hoisted (the site is no longer elimination-only), and the block/parameter
+/// entry predecessor is hoisted (the site is not elimination-only), and the block/parameter
 /// geometry still survives untouched — composed exactly as `PRE::run` composes transform and the
 /// integrated DCE.
 #[test]
@@ -1640,9 +1640,9 @@ fn tainted_invariant_loop(
 ) {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let c2f = ssa.add_const(Constant::Field(ssa.field().constant(2u64)));
     let (w, i, cond, inv, i2) = (
         ssa.fresh_value(),
@@ -1779,9 +1779,9 @@ fn post_loop_only_shape() -> (
 ) {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (i, cond, i2, post) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -1850,9 +1850,9 @@ fn post_loop_only_occurrence_is_not_hoisted() {
 #[test]
 fn loop_carried_operand_blocks_hoist() {
     let mut ssa = HLSSA::with_main("main".to_string());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let c1f = ssa.add_const(Constant::Field(ssa.field().constant(1u64)));
     let c2f = ssa.add_const(Constant::Field(ssa.field().constant(2u64)));
     let (j, acc, jc, x, k, kc, m1, k2, m2, j2) = (
@@ -1962,11 +1962,11 @@ fn outer_body_operand_shape(
 ) {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let c2 = if wrapping {
-        ssa.add_const(Constant::Int(32, 2))
+        ssa.add_const(Constant::int(32, 2))
     } else {
         ssa.add_const(Constant::Field(ssa.field().constant(2u64)))
     };
@@ -2146,9 +2146,9 @@ fn call_result_operand_shape(
     let g = ssa.add_function("g".to_string());
     let (p, r) = (ssa.fresh_value(), ssa.fresh_value());
     let (a, x) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let c2f = ssa.add_const(Constant::Field(ssa.field().constant(2u64)));
     let (j, jc, k, kc, m1, k2, m2, j2) = (
         ssa.fresh_value(),
@@ -2290,9 +2290,9 @@ fn nondet_call_result_operand_blocks_hoist() {
 fn aggregate_const_phi_operand_hoists_via_congruence_tier() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let idx = ssa.fresh_value();
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let ce1 = ssa.add_const(Constant::Field(ssa.field().constant(7u64)));
     let ce2 = ssa.add_const(Constant::Field(ssa.field().constant(9u64)));
     let (arr0, j, arr, jc, k, kc, x1, k2, x2, j2) = (
@@ -2518,9 +2518,9 @@ fn jmp_if_entry_edge_hoist_is_refused_when_preserving_structure() {
 fn multi_entry_header_is_skipped() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (c, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (i, cond, inv, i2, inv2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3252,9 +3252,9 @@ fn speculation_requires_the_speculate_level() {
 fn wrapping_integer_invariant_is_not_speculated() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (i, s, cond, u, i2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3308,9 +3308,9 @@ fn wrapping_integer_invariant_is_not_speculated() {
 fn guarded_division_is_speculated_where_the_fact_holds() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (x, d) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (eq, i, acc, cond, q, i2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3393,9 +3393,9 @@ fn guarded_division_is_speculated_where_the_fact_holds() {
 fn unguarded_division_is_not_speculated() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (x, d) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (i, acc, cond, q, i2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3489,9 +3489,9 @@ fn mul(
 fn hoisted_copy_carries_the_template_source_location() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
-    let c0 = ssa.add_const(Constant::Int(32, 0));
-    let c1 = ssa.add_const(Constant::Int(32, 1));
-    let c10 = ssa.add_const(Constant::Int(32, 10));
+    let c0 = ssa.add_const(Constant::int(32, 0));
+    let c1 = ssa.add_const(Constant::int(32, 1));
+    let c10 = ssa.add_const(Constant::int(32, 10));
     let (i, cond, inv, i2, inv2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3627,10 +3627,10 @@ fn two_occurrences_of_one_expression_are_deduplicated() {
 
 #[test]
 fn no_operation_merges_with_its_opposite_sign() {
-    // Every group with two forms. `UAdd`/`SAdd` and friends used to merge here on the grounds that
-    // their results agree bit for bit; what that misses is that the survivor's opcode is what
-    // `LowerWitnessIntegerArithOps` reads to pick the overflow check, so the merge deletes one of
-    // the two checks. `noir_failure_tests/signed_unsigned_vn_merge` is the program it broke.
+    // Every group with two forms. `UAdd`/`SAdd` and friends agree bit for bit, which is not a
+    // licence to merge them: the survivor's opcode is what `LowerWitnessIntegerArithOps` reads to
+    // pick the overflow check, so merging deletes one of the two checks.
+    // `noir_failure_tests/signed_unsigned_vn_merge` is the program that catches it.
     use BinaryArithOpKind::*;
     for (unsigned, signed) in [
         (UAdd, SAdd),
