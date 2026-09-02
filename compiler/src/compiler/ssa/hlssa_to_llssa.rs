@@ -4,6 +4,7 @@
 //! MemOp (Bump/Drop) are lowered to explicit memory operations.
 
 use mavros_artifacts::{ConstraintsLayout, TableKind, WitnessLayout};
+use mavros_int_semantics::int_bits::FIELD_LIMB_BITS;
 use std::{collections::BTreeMap, marker::PhantomData};
 
 use crate::{
@@ -1441,15 +1442,15 @@ fn lower_instruction(
 
             // A canonical field value fits in `max_bits` exactly when it is less than 2^max_bits.
             let mut limbs = Vec::with_capacity(4);
-            let active_limb = max_bits / 64;
-            let active_bit = max_bits % 64;
+            let active_limb = max_bits / FIELD_LIMB_BITS;
+            let active_bit = max_bits % FIELD_LIMB_BITS;
             for limb in 0..4 {
                 let value = if limb == active_limb {
                     1_u64 << active_bit
                 } else {
                     0
                 };
-                limbs.push(e.emit_int_const(64, value));
+                limbs.push(e.emit_int_const(FIELD_LIMB_BITS as u32, value));
             }
             let limit_limbs = e.mk_struct(LLStruct::limbs(), limbs);
             let limit = e.field_from_limbs(limit_limbs);
@@ -2044,12 +2045,13 @@ fn lower_to_bits(
             bits_le.push(zero_bit);
             continue;
         }
-        let limb_idx = i / 64;
-        let bit_offset = i % 64;
+        let limb_idx = i / FIELD_LIMB_BITS;
+        let bit_offset = i % FIELD_LIMB_BITS;
         let shifted = if bit_offset == 0 {
             limbs[limb_idx]
         } else {
-            let shift = e.emit_int_const(64, bit_offset as u64);
+            // The shift shares the limb's own width, so it is the field limb.
+            let shift = e.emit_int_const(FIELD_LIMB_BITS as u32, bit_offset as u64);
             e.int_arith(IntArithOp::UShr, limbs[limb_idx], shift)
         };
         bits_le.push(e.truncate(shifted, 1));

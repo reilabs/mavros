@@ -5,7 +5,15 @@ use mavros_artifacts::FieldConfig;
 
 use crate::compiler::{
     analysis::value_range_analysis::{Interval, field_modulus},
-    passes::instruction_lowering::{InstructionLoweringRule, LoweringContext, integer_bits},
+    passes::{
+        instruction_lowering::{InstructionLoweringRule, LoweringContext, integer_bits},
+        shared::{
+            limbs::{
+                WitnessLimbs, split_into_limbs, two_limb_product_packing_fits, witness_limb_bits,
+            },
+            unsupported::unsupported_on_this_field,
+        },
+    },
     ssa::{
         ValueId,
         hlssa::{
@@ -168,11 +176,13 @@ impl LowerWitnessIntegerArithOps {
     }
 
     // FIELD-ASSUMPTION: L6-int-op-strategy
-    // The full product is computed in one field element (guarded by
-    // `range_fits_field_injectively`). The only non-single-field path is the u128 fallback
-    // below, and it still packs `lo + cross*2^64` (~2^193) into one cell — so it assumes ~193
-    // bits of headroom. On a small field u32/u64 mul need a schoolbook multi-limb lowering
-    // with per-limb range checks and carries (see docs/field-agnosticism.md, Layer 6).
+    // The full product is computed in one field element (by `range_fits_field_injectively`). The
+    // only non-single-field path is the u128 fallback below, and it still packs
+    // `lo + cross*2^h` — roughly `2^(3h+1)`, so ~2^193 at the bn254 limb — into one cell. That is a
+    // strictly stronger demand than the limb width itself certifies, which is why the fallback asks
+    // `two_limb_product_packing_fits` rather than inferring it from `h`. On a small field u32/u64
+    // mul need a schoolbook multi-limb lowering with per-limb range checks and carries
+    // (see docs/field-agnosticism.md, Layer 6).
     fn lower_unsigned_mul(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -185,12 +195,25 @@ impl LowerWitnessIntegerArithOps {
     ) {
         let product_range = context.urange(lhs).mul(&context.urange(rhs));
         if bits == 128 && !range_fits_field_injectively(&product_range, b.field()) {
-            let lhs_limbs = split_u128_value(b, lhs);
-            let rhs_limbs = split_u128_value(b, rhs);
-            let lhs_lo = b.cast_to_field(lhs_limbs.lo);
-            let lhs_hi = b.cast_to_field(lhs_limbs.hi);
-            let rhs_lo = b.cast_to_field(rhs_limbs.lo);
-            let rhs_hi = b.cast_to_field(rhs_limbs.hi);
+            // The limb width says a single `a·b` fits; this packing scales a two-product column by
+            // `2^h` on top of that, and no rangecheck on the packed value can tell an honest one
+            // from a wrapped residue. The same question covers the limb _count_, because the code
+            // below reads each split as a pair.
+            if !two_limb_product_packing_fits(b.field(), bits) {
+                unsupported_on_this_field(
+                    format_args!(
+                        "a {bits}-bit unsigned multiplication falls back to a two-limb schoolbook product, which needs the operands to be two witness limbs and needs its `lo + cross * 2^h` packing — about 2^(3h+1) — not to wrap modulo the field"
+                    ),
+                    b.field(),
+                );
+            }
+
+            let (lhs_lo_limb, lhs_hi_limb) = split_u128_value(b, lhs).pair();
+            let (rhs_lo_limb, rhs_hi_limb) = split_u128_value(b, rhs).pair();
+            let lhs_lo = b.cast_to_field(lhs_lo_limb);
+            let lhs_hi = b.cast_to_field(lhs_hi_limb);
+            let rhs_lo = b.cast_to_field(rhs_lo_limb);
+            let rhs_hi = b.cast_to_field(rhs_hi_limb);
 
             let lo_product = b.umul(lhs_lo, rhs_lo);
             let lhs_cross = b.umul(lhs_lo, rhs_hi);
@@ -203,7 +226,7 @@ impl LowerWitnessIntegerArithOps {
             b.constrain(flag, high_product, zero);
 
             let cross = b.uadd(lhs_cross, rhs_cross);
-            let shift = b.field_const(b.field().two_pow(64));
+            let shift = b.field_const(b.field().two_pow(witness_limb_bits(b.field())));
             let shifted_cross = b.umul(cross, shift);
             let value = b.uadd(lo_product, shifted_cross);
             guarded_rangecheck(b, value, bits, guard);
@@ -216,10 +239,14 @@ impl LowerWitnessIntegerArithOps {
             return;
         }
 
-        assert!(
-            range_fits_field_injectively(&product_range, b.field()),
-            "unsigned multiplication product range is too wide for a single-field product"
-        );
+        if !range_fits_field_injectively(&product_range, b.field()) {
+            unsupported_on_this_field(
+                format_args!(
+                    "a {bits}-bit unsigned multiplication whose product spans {product_range:?} needs a schoolbook multi-limb lowering: that span has representatives a single field product cannot tell apart"
+                ),
+                b.field(),
+            );
+        }
 
         let lhs_field = b.cast_to_field(lhs);
         let rhs_field = b.cast_to_field(rhs);
@@ -281,10 +308,14 @@ impl LowerWitnessIntegerArithOps {
             ArithGroup::Sub => lhs_range.sub(&rhs_range),
             _ => unreachable!(),
         };
-        assert!(
-            range_fits_field_injectively(&result_range, b.field()),
-            "signed add/sub result range is too wide for a single-field encoding"
-        );
+        if !range_fits_field_injectively(&result_range, b.field()) {
+            unsupported_on_this_field(
+                format_args!(
+                    "a {bits}-bit {kind:?} whose result spans {result_range:?} needs a multi-limb lowering: that span has representatives a single-field signed encoding cannot tell apart"
+                ),
+                b.field(),
+            );
+        }
 
         // `lhs_signed`/`rhs_signed` are decoded _field_ values, so this is field arithmetic and
         // takes the unsigned forms even though the operands it came from are signed integers.
@@ -336,10 +367,14 @@ impl LowerWitnessIntegerArithOps {
         let lhs_range = context.srange(lhs);
         let rhs_range = context.srange(rhs);
         let product_range = lhs_range.mul(&rhs_range);
-        assert!(
-            range_fits_field_injectively(&product_range, b.field()),
-            "signed multiplication product range is too wide for a single-field product"
-        );
+        if !range_fits_field_injectively(&product_range, b.field()) {
+            unsupported_on_this_field(
+                format_args!(
+                    "a {bits}-bit signed multiplication whose product spans {product_range:?} needs a schoolbook multi-limb lowering: that span has representatives a single field product cannot tell apart"
+                ),
+                b.field(),
+            );
+        }
 
         let lhs_witness = context.types().get_value_type(lhs).is_witness_of();
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
@@ -751,26 +786,19 @@ struct DivModResult {
     r_is_witness: bool,
 }
 
-#[derive(Clone, Copy)]
-struct U128Limbs {
-    lo: ValueId,
-    hi: ValueId,
-}
-
 // FIELD-ASSUMPTION: L6-int-representation
-// A fixed 2x64-bit split of a u128. On a small field the limb width must derive from the
-// field size (h ~= field_bits/2), and wide integers become multi-cell values end-to-end.
-fn split_u128_value(b: &mut impl HLEmitter, value: ValueId) -> U128Limbs {
-    let value = b.cast_to(CastTarget::Int(128), value);
-    U128Limbs {
-        lo: split_u128_limb(b, value, 0),
-        hi: split_u128_limb(b, value, 64),
-    }
-}
-
-fn split_u128_limb(b: &mut impl HLEmitter, value: ValueId, offset: usize) -> ValueId {
-    let limb = b.bit_range(value, offset, 64);
-    b.cast_to(CastTarget::Int(64), limb)
+// The limb width is now the field's, but the _count_ still has to land at two for
+// `lower_unsigned_mul` above, which reads the split as a pair. That caller asks
+// `two_limb_product_packing_fits` — which answers about the count as well as the packing — so a
+// narrower field refuses before reaching here rather than tripping `WitnessLimbs::pair`; making the
+// caller total is Phase 4's multi-cell work, not a wider constant.
+fn split_u128_value(b: &mut impl HLEmitter, value: ValueId) -> WitnessLimbs {
+    // The operand's **type** width, which is what decides how many limbs it takes — the field only
+    // decides how wide each one is.
+    const BITS: usize = 128;
+    let value = b.cast_to(CastTarget::Int(BITS), value);
+    let limb_bits = witness_limb_bits(b.field());
+    split_into_limbs(b, value, limb_bits, BITS.div_ceil(limb_bits))
 }
 
 // FIELD-ASSUMPTION: L6-int-op-strategy

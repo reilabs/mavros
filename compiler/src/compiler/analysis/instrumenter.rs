@@ -10,7 +10,7 @@ use std::{cell::RefCell, rc::Rc};
 use ark_ff::{BigInt, BigInteger};
 use itertools::Itertools;
 use mavros_artifacts::FieldConfig;
-use mavros_int_semantics::{self as semantics, CmpOp, IntBits};
+use mavros_int_semantics::{self as semantics, CmpOp, IntBits, int_bits::FIELD_LIMB_BITS};
 use num_bigint::BigUint;
 use tracing::{debug, instrument};
 
@@ -757,7 +757,7 @@ impl Value {
                     // Divide val by radix_val
                     let mut carry: u128 = 0;
                     for i in (0..val.0.len()).rev() {
-                        let cur = (carry << 64) | (val.0[i] as u128);
+                        let cur = (carry << FIELD_LIMB_BITS) | (val.0[i] as u128);
                         val.0[i] = (cur / radix_val) as u64;
                         carry = cur % radix_val;
                     }
