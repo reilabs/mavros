@@ -56,14 +56,13 @@ pub fn ecdsa_secp256k1(
         0x01, 0x61, 0xe4, 0x9a, 0x71, 0x5f, 0xcd, 0x55,
     ]);
 
-    verify_ecdsa::<Secp256k1_Fq, Secp256k1_Fr, Secp256k1>(
+    verify_ecdsa::<Secp256k1_Fq, Secp256k1_Fr, Secp256k1, 3>(
         Secp256k1_Fq::from_be_bytes(public_key_x),
         Secp256k1_Fq::from_be_bytes(public_key_y),
         Secp256k1_Fr::from_be_bytes(message_hash),
         Secp256k1_Fr::from_be_bytes(signature_r),
         Secp256k1_Fr::from_be_bytes(signature_s),
         predicate,
-        SECP256k1_PARAM.a,
         SECP256k1_PARAM.b,
         half_order,
         safe_public_key_x,

@@ -2,7 +2,7 @@ use crate::mavros::vendor::bigcurve::{BigCurve, ScalarField};
 use crate::mavros::vendor::bignum::BigNum;
 use crate::mavros::vendor::bignum::bignum::conditional_select;
 
-fn verify<Fq, Fr, Curve>(
+fn verify<Fq, Fr, Curve, let N: u32>(
     public_key_x: Fq,
     public_key_y: Fq,
     message_digest: Fr,
@@ -10,16 +10,20 @@ fn verify<Fq, Fr, Curve>(
     s: Fr,
 ) -> bool
 where
-    Fq: BigNum,
-    Fq: crate::cmp::Ord,
-    Fr: BigNum,
+    Fq: BigNum<N = N, MOD_BITS = 256>,
+    Fr: BigNum<N = N, MOD_BITS = 256>,
     Fr: crate::cmp::Ord,
     Curve: BigCurve<Fq>,
 {
     let w = unsafe { s.__invmod() };
     assert(s * w == Fr::one());
-    let u_1: ScalarField<65> = ScalarField::from_bignum(message_digest * w);
-    let u_2: ScalarField<65> = ScalarField::from_bignum(r * w);
+    // `ScalarField::from_bignum` consumes 5 slices from the 16-bit high limb of a 256-bit value,
+    // then 30 slices for every remaining 120-bit limb. The curve parameters must correspondingly
+    // satisfy offset_generator_final = offset_generator * 2^(4 * (NScalarSlices - 1)).
+    let u_1: ScalarField<5 + 30 * (N - 1)> =
+        ScalarField::from_bignum(message_digest * w);
+    let u_2: ScalarField<5 + 30 * (N - 1)> =
+        ScalarField::from_bignum(r * w);
 
     // The caller validates and sanitizes the coordinates before entering the verifier.
     let public_key = Curve::from_coordinates_unsafe(public_key_x, public_key_y, false);
@@ -39,14 +43,13 @@ where
 }
 
 /// Shared ECDSA verification flow for the secp256k1 and secp256r1 replacements.
-pub fn verify_ecdsa<Fq, Fr, Curve>(
+pub fn verify_ecdsa<Fq, Fr, Curve, let N: u32>(
     public_key_x: Fq,
     public_key_y: Fq,
     message_digest: Fr,
     r: Fr,
     s: Fr,
     predicate: bool,
-    curve_a: Fq,
     curve_b: Fq,
     half_order: Fr,
     safe_public_key_x: Fq,
@@ -56,9 +59,10 @@ pub fn verify_ecdsa<Fq, Fr, Curve>(
     safe_s: Fr,
 ) -> bool
 where
-    Fq: BigNum,
+    // Sharing N in both bounds makes mismatched base/scalar limb counts a type error.
+    Fq: BigNum<N = N, MOD_BITS = 256>,
     Fq: crate::cmp::Ord,
-    Fr: BigNum,
+    Fr: BigNum<N = N, MOD_BITS = 256>,
     Fr: crate::cmp::Ord,
     Curve: BigCurve<Fq>,
 {
@@ -72,7 +76,7 @@ where
     let checked_public_key_y =
         conditional_select(public_key_y, safe_public_key_y, point_in_range);
     let point_on_curve = checked_public_key_y * checked_public_key_y
-        == (checked_public_key_x * checked_public_key_x + curve_a)
+        == (checked_public_key_x * checked_public_key_x + Curve::a())
                 * checked_public_key_x
             + curve_b;
     let point_valid = point_in_range & point_on_curve;
@@ -90,7 +94,7 @@ where
     let message_digest = conditional_select(message_digest, safe_message_digest, inputs_valid);
     let r = conditional_select(r, safe_r, inputs_valid);
     let s = conditional_select(s, safe_s, inputs_valid);
-    let verified = verify::<Fq, Fr, Curve>(public_key_x, public_key_y, message_digest, r, s);
+    let verified = verify::<Fq, Fr, Curve, N>(public_key_x, public_key_y, message_digest, r, s);
 
     // ACVM treats a disabled black-box call as successful, irrespective of its input values.
     !predicate | (inputs_valid & verified)

@@ -1,7 +1,6 @@
-// Adapted compatibility subset of zkpassport/noir-bignum v0.10.0-1 and the bigcurve package in
-// AztecProtocol/aztec-packages at commit 9df414ec0e810d46d44b0357341f8dae0abe82b9. Kept inside the
-// injected std crate so low-level foreign replacements follow Mavros' existing pure-Noir path. See
-// the root THIRD_PARTY_LICENSES file.
+// Adapted compatibility subset of zkpassport/noir-bignum v0.10.0-1. Kept inside the injected std
+// crate so low-level foreign replacements follow Mavros' existing pure-Noir path. See the root
+// THIRD_PARTY_LICENSES file.
 
 use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
 pub mod constants {
