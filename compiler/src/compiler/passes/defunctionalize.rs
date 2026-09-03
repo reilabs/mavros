@@ -131,7 +131,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
     fnptr_entries.sort_by_key(|(vid, _)| vid.0);
     let mut fnptr_remap = ValueReplacements::new();
     for (fnptr_vid, fn_id) in &fnptr_entries {
-        let canon = ssa.add_const(Constant::Int(32, fn_id.0 as u128));
+        let canon = ssa.add_const(Constant::int(32, fn_id.0 as u128));
         fnptr_remap.insert(*fnptr_vid, canon);
     }
 
@@ -201,8 +201,8 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         }
     }
 
-    // 3d. Apply the FnPtr → U(32, ...) operand remap globally. This is the operand-rewriting
-    // step that used to be implicit when the FnPtr entry was rebound in place at the same vid.
+    // 3d. Apply the FnPtr → U(32, ...) operand remap globally. The canonical constant is minted
+    // at a fresh vid rather than rebound in place, so every operand has to be rewritten explicitly.
     for (_, func) in ssa.iter_functions_mut() {
         for (_, block) in func.get_blocks_mut() {
             for instr in block.get_instructions_mut() {

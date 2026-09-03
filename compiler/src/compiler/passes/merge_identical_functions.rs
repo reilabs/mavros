@@ -100,7 +100,7 @@ impl MergeIdenticalFunctions {
                 match c {
                     Constant::FnPtr(_) => true,
                     Constant::Blob(blob) => blob.elements.iter().any(contains_fn_ptr),
-                    Constant::Int(..) | Constant::Field(_) => false,
+                    Constant::Int(_) | Constant::Field(_) => false,
                 }
             }
             let mut has_fn_ptr = false;
@@ -540,7 +540,7 @@ mod tests {
                 fb.function.add_return_type(Type::int(32));
                 let entry = fb.function.get_entry_id();
                 let result = fb.fresh_value();
-                let c = fb.emit_const(Constant::Int(32, value));
+                let c = fb.emit_const(Constant::int(32, value));
                 let mut block = fb.test_block(entry);
                 let _x = block.add_parameter(Type::int(32));
                 block.emit_instruction(OpCode::Not { result, value: c });
@@ -811,7 +811,7 @@ mod tests {
                 fb.function.add_return_type(Type::field());
                 let entry = fb.function.get_entry_id();
                 let result = fb.fresh_value();
-                let condition = fb.emit_const(Constant::Int(1, 1));
+                let condition = fb.emit_const(Constant::int(1, 1));
                 let mut block = fb.test_block(entry);
                 let x = block.add_parameter(Type::field());
                 block.emit_instruction(OpCode::Guard {
@@ -863,7 +863,7 @@ mod tests {
         sb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let result = fb.fresh_value();
-            let condition = fb.emit_const(Constant::Int(1, 1));
+            let condition = fb.emit_const(Constant::int(1, 1));
             let arg = fb.emit_const(Constant::Field(fb.field().constant(7u64)));
             let mut block = fb.test_block(entry);
             block.emit_instruction(OpCode::Guard {

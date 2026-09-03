@@ -14,6 +14,7 @@
 
 use crate::compiler::{
     analysis::value_range_analysis::ValueRange,
+    passes::shared::unsupported::unsupported_on_this_field,
     ssa::{
         ValueId,
         hlssa::{
@@ -375,11 +376,14 @@ pub fn abs_as_u(
     // signed cap leaves ample room; on a narrower field this refuses instead. Same construction and
     // same bound as `LowerWitnessBitwiseOps::lower_integer_sext`, which lifts a value into the
     // field the same way.
-    assert!(
-        bits < emitter.field().field_bit_size() as usize,
-        "a {bits}-bit magnitude needs a field wider than {} bits",
-        emitter.field().field_bit_size()
-    );
+    if bits >= emitter.field().field_bit_size() as usize {
+        unsupported_on_this_field(
+            format_args!(
+                "a {bits}-bit magnitude lifts the sign out with `two_pow({bits})`, which has itself wrapped, leaving the magnitude — and every overflow test built on it — silently wrong"
+            ),
+            emitter.field(),
+        );
+    }
 
     let value_field = emitter.cast_to_field(value);
     let sign = emitter.cast_to_field(sign_u1);
@@ -636,19 +640,19 @@ mod tests {
 mod int_semantics_conformance {
     use super::*;
     use crate::compiler::analysis::value_range_analysis::{Interval, Width};
-    use mavros_int_semantics::{self as semantics, IntOp, Outcome, Raw, Sign, corners};
+    use mavros_int_semantics::{self as semantics, IntBits, IntOp, Outcome, corners};
     use num_bigint::BigInt;
 
     /// Whether a bit pattern is in γ of a range: admitted by both readings.
-    fn in_gamma(range: &ValueRange, bits: usize, v: Raw) -> bool {
+    fn in_gamma(range: &ValueRange, bits: usize, v: u128) -> bool {
         range.unsigned().contains(&BigInt::from(v))
             && range
                 .signed()
-                .contains(&BigInt::from(semantics::decode_signed(bits, v)))
+                .contains(&IntBits::from_u128(bits, v).to_signed())
     }
 
     /// Every bit pattern a range denotes, at a width small enough to enumerate.
-    fn gamma(range: &ValueRange, bits: usize) -> Vec<Raw> {
+    fn gamma(range: &ValueRange, bits: usize) -> Vec<u128> {
         (0..=semantics::mask(bits))
             .filter(|v| in_gamma(range, bits, *v))
             .collect()
@@ -664,7 +668,7 @@ mod int_semantics_conformance {
         let width = Width::Bits(bits);
         let top = semantics::mask(bits);
         let half = top / 2;
-        let closed = |lo: Raw, hi: Raw| {
+        let closed = |lo: u128, hi: u128| {
             ValueRange::from_unsigned(width, Interval::closed(BigInt::from(lo), BigInt::from(hi)))
         };
         let signed = |lo: i64, hi: i64| {
@@ -690,13 +694,9 @@ mod int_semantics_conformance {
         let mut discharged = 0usize;
 
         for bits in corners::EXHAUSTIVE_WIDTHS {
-            for (group, op) in [
-                (ArithGroup::Add, IntOp::Add),
-                (ArithGroup::Sub, IntOp::Sub),
-                (ArithGroup::Mul, IntOp::Mul),
-            ] {
-                for sign in Sign::ALL {
-                    let signed = sign.is_signed();
+            for group in [ArithGroup::Add, ArithGroup::Sub, ArithGroup::Mul] {
+                for signed in [false, true] {
+                    let op = IntOp::from(BinaryArithOpKind::with_sign(group, signed));
                     for l in &input_ranges(bits) {
                         for r in &input_ranges(bits) {
                             if !overflow_provably_impossible(l, r, group, bits, signed) {
@@ -706,10 +706,14 @@ mod int_semantics_conformance {
 
                             for a in gamma(l, bits) {
                                 for b in gamma(r, bits) {
-                                    let outcome = semantics::eval(op, sign, bits, a, bits, b);
+                                    let outcome = semantics::eval(
+                                        op,
+                                        &IntBits::from_u128(bits, a),
+                                        &IntBits::from_u128(bits, b),
+                                    );
                                     assert!(
                                         !matches!(outcome, Outcome::Rejected(_)),
-                                        "{group:?}/{sign:?} at {bits} bits discharged the check \
+                                        "{op:?} at {bits} bits discharged the check \
                                          for {l:?} and {r:?}, but {a:#x} {b:#x} is {outcome:?}"
                                     );
                                 }

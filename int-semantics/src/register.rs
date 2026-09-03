@@ -77,7 +77,7 @@ pub const EVALUATORS: &[Evaluator] = &[
             },
             Conformance {
                 path: "compiler/src/compiler/codegen/hlssa_to_r1cs.rs",
-                test: "an_out_of_range_shift_amount_masks_to_the_width",
+                test: "an_out_of_range_shift_amount_reduces_to_the_width",
             },
         ],
     },
@@ -94,7 +94,7 @@ pub const EVALUATORS: &[Evaluator] = &[
             },
             Conformance {
                 path: "compiler/src/compiler/analysis/instrumenter.rs",
-                test: "an_out_of_range_shift_amount_masks_rather_than_saturating",
+                test: "an_out_of_range_shift_amount_reduces_rather_than_saturating",
             },
         ],
     },

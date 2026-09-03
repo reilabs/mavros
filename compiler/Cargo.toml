@@ -11,14 +11,14 @@ mavros-vm.workspace = true
 mavros-wasm-layout.workspace = true
 
 # The Noir crates that the compiler depends on
-acvm = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.22", package = "acvm" }
-fm = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.22", package = "fm" }
-nargo = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.22", package = "nargo" }
-nargo_toml = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.22", package = "nargo_toml" }
-noirc_abi = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.22", package = "noirc_abi" }
-noirc_driver = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.22", package = "noirc_driver" }
-noirc_errors = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.22", package = "noirc_errors" }
-noirc_frontend = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.22", package = "noirc_frontend" }
+acvm = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.26", package = "acvm" }
+fm = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.26", package = "fm" }
+nargo = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.26", package = "nargo" }
+nargo_toml = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.26", package = "nargo_toml" }
+noirc_abi = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.26", package = "noirc_abi" }
+noirc_driver = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.26", package = "noirc_driver" }
+noirc_errors = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.26", package = "noirc_errors" }
+noirc_frontend = { git = "https://github.com/noir-lang/noir.git", tag = "v1.0.0-beta.26", package = "noirc_frontend" }
 
 # The rest of the dependencies
 ark-bn254.workspace = true
@@ -30,7 +30,7 @@ clap = { version = "4.5.17", features = ["unstable-v5", "derive"] }
 fixedbitset = { version = "0.4" } # Keep in lockstep with petgraph's transitive version
 inkwell = { version = "0.10.0", features = ["llvm22-1"] }
 itertools = { version = "0.14.0" }
-num-bigint = { version = "0.4" }
+num-bigint.workspace = true
 num-traits = { version = "0.2" }
 petgraph = { version = "0.6.5" } # Cannot bump as it is currently required to be this version by a dependency
 plotters = { version = "0.3.5" }

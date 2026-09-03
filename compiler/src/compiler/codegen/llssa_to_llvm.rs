@@ -22,6 +22,8 @@ use inkwell::{
     },
 };
 
+use mavros_int_semantics::IntBits;
+
 use crate::{
     collections::HashMap,
     compiler::{
@@ -327,15 +329,26 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
     }
 
+    /// A `bits`-wide LLVM constant carrying `value`, little-endian.
     fn int_mask(&self, bits: u32, value: u128) -> IntValue<'ctx> {
-        let words = [value as u64, (value >> 64) as u64];
+        self.int_pattern(&IntBits::from_u128(bits as usize, value))
+    }
+
+    /// An LLVM constant carrying `pattern`, at the pattern's own width.
+    ///
+    /// The limbs go straight through: a normalised pattern is already exactly the little-endian
+    /// word sequence `const_int_arbitrary_precision` wants, at exactly the length it wants.
+    fn int_pattern(&self, pattern: &IntBits) -> IntValue<'ctx> {
+        let bits = u32::try_from(pattern.bits()).expect("An integer width fits a u32");
         self.context
             .custom_width_int_type(NonZeroU32::new(bits).expect("Cannot have zero-width integer"))
             .expect("A basic integer type can be created")
-            .const_int_arbitrary_precision(&words)
+            .const_int_arbitrary_precision(pattern.limbs())
     }
 
+    /// The low `bits` bits set, as a host `u128`.
     fn low_bits_mask(bits: u32) -> u128 {
+        assert!(bits <= 128, "a {bits}-bit mask does not fit in a u128");
         if bits == 128 {
             u128::MAX
         } else {
@@ -464,7 +477,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// Materialise an LLSSA constant as an LLVM constant value, recursively.
     fn materialize_const(&self, c: &Constant) -> BasicValueEnum<'ctx> {
         match c {
-            Constant::Int { bits, value } => self.int_mask(*bits, *value).into(),
+            Constant::Int(pattern) => self.int_pattern(pattern).into(),
             Constant::NullPtr => self
                 .context
                 .ptr_type(AddressSpace::default())
@@ -960,34 +973,42 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             IntArithOp::Or => self.builder.build_or(lhs, rhs, name).unwrap(),
             IntArithOp::Xor => self.builder.build_xor(lhs, rhs, name).unwrap(),
             IntArithOp::Shl => {
-                let masked_rhs = self.mask_shift_count(lhs, rhs);
+                let reduced_rhs = self.reduce_shift_count(lhs, rhs);
                 self.builder
-                    .build_left_shift(lhs, masked_rhs, name)
+                    .build_left_shift(lhs, reduced_rhs, name)
                     .unwrap()
             }
-            // `sign_extend` is the only difference between the two right shifts; the shift-count
-            // masking is identical and for the same reason as `Shl`.
             IntArithOp::UShr | IntArithOp::AShr => {
-                let masked_rhs = self.mask_shift_count(lhs, rhs);
+                let reduced_rhs = self.reduce_shift_count(lhs, rhs);
                 self.builder
-                    .build_right_shift(lhs, masked_rhs, matches!(kind, IntArithOp::AShr), name)
+                    .build_right_shift(lhs, reduced_rhs, matches!(kind, IntArithOp::AShr), name)
                     .unwrap()
             }
         }
     }
 
-    /// Hold a shift count below the operand width, as `count & (bit_width - 1)`.
+    /// Hold a shift count below the operand width, as `count % bit_width`.
     ///
-    /// LLVM makes a shift by at or past the width **poison**, so a total backend cannot simply pass
-    /// the count through. Masking is what the VM's `shift_amount` does with the same operands, so
-    /// the two backends answer the same thing on an amount neither should have been handed.
+    /// LLVM makes a shift by at or past the width into a **poison value**, so a total backend
+    /// cannot simply pass the count through. Reducing is what the VM's `shift_amount` does with the
+    /// same operands, so the two backends answer the same thing on an amount neither should have
+    /// been handed.
     ///
-    /// The mask is a genuine modulo only where the width is a power of two, which is every width a
-    /// shift is ever built at — `witness_bitwise::lower_shift` asserts exactly that.
-    fn mask_shift_count(&self, lhs: IntValue<'ctx>, rhs: IntValue<'ctx>) -> IntValue<'ctx> {
-        let bw = lhs.get_type().get_bit_width();
-        let mask = lhs.get_type().const_int(u64::from(bw - 1), false);
-        self.builder.build_and(rhs, mask, "shamt").unwrap()
+    /// A mask by `bit_width - 1` is that modulo only where the width is a power of two. At any
+    /// other width it is a submask: it stays below the width, but it corrupts counts that were
+    /// already _in range_, which `hlssa_to_r1cs` applies literally. So the power-of-two case keeps
+    /// the `and` and every other width gets a real `urem`.
+    fn reduce_shift_count(&self, lhs: IntValue<'ctx>, rhs: IntValue<'ctx>) -> IntValue<'ctx> {
+        let ty = lhs.get_type();
+        let bw = ty.get_bit_width();
+        if bw.is_power_of_two() {
+            let mask = ty.const_int(u64::from(bw - 1), false);
+            return self.builder.build_and(rhs, mask, "shamt").unwrap();
+        }
+        let width = ty.const_int(u64::from(bw), false);
+        self.builder
+            .build_int_unsigned_rem(rhs, width, "shamt")
+            .unwrap()
     }
 
     /// Lower one LLSSA instruction.
@@ -1727,6 +1748,26 @@ mod tests {
     };
 
     #[test]
+    fn a_low_bits_mask_is_exact_at_the_host_boundary() {
+        // 127 and 128 are the pair that a `1u128 << bits` gets wrong: the shift is defined only
+        // below 128, so the top of the range has to be answered without one.
+        assert_eq!(LLVMCodeGen::low_bits_mask(0), 0);
+        assert_eq!(LLVMCodeGen::low_bits_mask(1), 1);
+        assert_eq!(LLVMCodeGen::low_bits_mask(64), u64::MAX as u128);
+        assert_eq!(LLVMCodeGen::low_bits_mask(127), u128::MAX >> 1);
+        assert_eq!(LLVMCodeGen::low_bits_mask(128), u128::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "does not fit in a u128")]
+    fn a_mask_wider_than_the_host_is_rejected_rather_than_wrapped() {
+        // Without the assert this is `(1u128 << 129) - 1`, which panics in a debug build but
+        // _masks its shift amount_ in a release one and answers `1` -- a plausible number, and
+        // wrong. The rejection has to be explicit to be present at both optimisation levels.
+        let _ = LLVMCodeGen::low_bits_mask(129);
+    }
+
+    #[test]
     fn wasm_debug_sidecar_has_a_wasm_extension() {
         assert_eq!(
             wasm_debug_info_path(Path::new("target/program.wasm")),
@@ -1751,19 +1792,19 @@ mod tests {
             let one = block.emit_struct_const(
                 field_type.clone(),
                 vec![
-                    Constant::Int { bits: 64, value: 1 },
-                    Constant::Int { bits: 64, value: 0 },
-                    Constant::Int { bits: 64, value: 0 },
-                    Constant::Int { bits: 64, value: 0 },
+                    Constant::int(64, 1),
+                    Constant::int(64, 0),
+                    Constant::int(64, 0),
+                    Constant::int(64, 0),
                 ],
             );
             let two = block.emit_struct_const(
                 field_type,
                 vec![
-                    Constant::Int { bits: 64, value: 2 },
-                    Constant::Int { bits: 64, value: 0 },
-                    Constant::Int { bits: 64, value: 0 },
-                    Constant::Int { bits: 64, value: 0 },
+                    Constant::int(64, 2),
+                    Constant::int(64, 0),
+                    Constant::int(64, 0),
+                    Constant::int(64, 0),
                 ],
             );
             block.field_arith(FieldArithOp::Add, one, two);
@@ -1812,19 +1853,19 @@ mod tests {
 #[cfg(test)]
 mod int_semantics_conformance {
     use inkwell::{context::Context, values::AnyValue};
-    use mavros_int_semantics::{IntOp, Raw, Sign, corners, mask, residue};
+    use mavros_int_semantics::{IntBits, IntOp, corners, mask, residue};
 
     use super::*;
-    use crate::compiler::ssa::{hlssa::ArithGroup, hlssa_to_llssa::int_arith_op};
+    use crate::compiler::ssa::{hlssa::BinaryArithOpKind, hlssa_to_llssa::int_arith_op};
 
-    /// The `IntArithOp` a given model operation lowers to under a given reading.
+    /// The `IntArithOp` a given opcode lowers to.
     ///
     /// Delegates to the compiler's own table rather than restating it, so that this sweep covers
     /// the lowering's instruction choice as well as LLVM's definition of the instruction chosen.
     /// Note there is no `sshl`: a left shift is one map on the bit pattern, which is why
     /// `int_arith_op` ignores the sign for it just as the VM has no signed `cell_shl`.
-    fn lowering(op: IntOp, sign: Sign) -> IntArithOp {
-        int_arith_op(ArithGroup::from(op), sign.is_signed())
+    fn lowering(kind: BinaryArithOpKind) -> IntArithOp {
+        int_arith_op(kind.group(), kind.is_signed())
     }
 
     /// The raw pattern a folded constant holds, or [`None`] if LLVM did not fold it to one.
@@ -1834,7 +1875,7 @@ mod int_semantics_conformance {
     /// printed as `true`/`false` — which is the same corner the model calls out, `bool` being the
     /// one width whose only negative value is `1`. A `poison` matches none of these and yields
     /// [`None`], which is the intended reading of it here.
-    fn folded_pattern(value: IntValue<'_>, bits: usize) -> Option<Raw> {
+    fn folded_pattern(value: IntValue<'_>, bits: usize) -> Option<u128> {
         let printed = value.print_to_string().to_string();
         let literal = printed.rsplit(' ').next()?;
         let signed: i128 = match literal {
@@ -1842,20 +1883,7 @@ mod int_semantics_conformance {
             "false" => 0,
             other => other.parse().ok()?,
         };
-        Some((signed as Raw) & mask(bits))
-    }
-
-    /// Widths a shift is swept at.
-    ///
-    /// Powers of two only, and for exactly the reason `mask_shift_count` documents: `count &
-    /// (bit_width - 1)` is a modulo only there, and at a non-power-of-two width it corrupts
-    /// **in-range** counts as well.
-    fn shift_widths(sign: Sign) -> Vec<usize> {
-        corners::widths_for(sign.is_signed())
-            .iter()
-            .copied()
-            .filter(|bits| bits.is_power_of_two())
-            .collect()
+        Some((signed as u128) & mask(bits))
     }
 
     #[test]
@@ -1876,53 +1904,52 @@ mod int_semantics_conformance {
         let mut checked = 0usize;
         let mut unfolded = Vec::new();
 
-        for sign in Sign::ALL {
-            for op in IntOp::ALL {
-                let widths = if matches!(op, IntOp::Shl | IntOp::Shr) {
-                    shift_widths(sign)
+        // Driven from `BinaryArithOpKind`, the vocabulary being lowered *from*: the two are no
+        // longer in bijection, so sweeping the model's sixteen would cover only one of
+        // `UShl`/`SShl`. Shifts share the one width set, because `reduce_shift_count` emits a real
+        // `urem` off the power-of-two path rather than an `and` that is a modulo only there.
+        for kind in BinaryArithOpKind::ALL {
+            let op = IntOp::from(kind);
+            let sign = kind.sign();
+            for &bits in corners::widths_for(sign.is_signed()) {
+                let ty = context
+                    .custom_width_int_type(NonZeroU32::new(bits as u32).unwrap())
+                    .unwrap();
+                let rhs_values = if op.is_shift() {
+                    corners::shift_amounts(bits, bits)
                 } else {
-                    corners::widths_for(sign.is_signed()).to_vec()
+                    corners::values(bits)
                 };
 
-                for bits in widths {
-                    let ty = context
-                        .custom_width_int_type(NonZeroU32::new(bits as u32).unwrap())
-                        .unwrap();
-                    let rhs_values = if matches!(op, IntOp::Shl | IntOp::Shr) {
-                        corners::shift_amounts(bits, bits)
-                    } else {
-                        corners::values(bits)
-                    };
+                for a in corners::values(bits) {
+                    for b in &rhs_values {
+                        let lhs = ty.const_int_arbitrary_precision(&[a as u64, (a >> 64) as u64]);
+                        let rhs = ty.const_int_arbitrary_precision(&[*b as u64, (*b >> 64) as u64]);
+                        let val = codegen.build_int_arith(&lowering(kind), lhs, rhs, "");
 
-                    for a in corners::values(bits) {
-                        for b in &rhs_values {
-                            let lhs =
-                                ty.const_int_arbitrary_precision(&[a as u64, (a >> 64) as u64]);
-                            let rhs =
-                                ty.const_int_arbitrary_precision(&[*b as u64, (*b >> 64) as u64]);
-                            let val = codegen.build_int_arith(&lowering(op, sign), lhs, rhs, "");
+                        let Some(want) = residue(
+                            op,
+                            &IntBits::from_u128(bits, a),
+                            &IntBits::from_u128(bits, *b),
+                        )
+                        .map(|v| u128::try_from(&v).expect("a narrow answer fits a host word")) else {
+                            // The model declines; LLVM folds to `poison`. Nothing to compare,
+                            // and nothing may crash getting here, which is the whole claim.
+                            continue;
+                        };
 
-                            let Some(want) = residue(op, sign, bits, a, bits, *b) else {
-                                // The model declines; LLVM folds to `poison`. Nothing to compare,
-                                // and nothing may crash getting here, which is the whole claim.
-                                continue;
-                            };
-
-                            match folded_pattern(val, bits) {
-                                Some(got) => {
-                                    assert_eq!(
-                                        got, want,
-                                        "{op:?}/{sign:?} at {bits} bits: {a:#x} {b:#x} folded to \
-                                         {got:#x}, model says {want:#x}"
-                                    );
-                                    checked += 1;
-                                }
-                                // Recorded rather than asserted on the spot so that a folder that
-                                // stopped folding shows up as one summary rather than one failure.
-                                None => {
-                                    unfolded.push(format!("{op:?}/{sign:?} {bits} {a:#x} {b:#x}"))
-                                }
+                        match folded_pattern(val, bits) {
+                            Some(got) => {
+                                assert_eq!(
+                                    got, want,
+                                    "{op:?}/{sign:?} at {bits} bits: {a:#x} {b:#x} folded to \
+                                     {got:#x}, model says {want:#x}"
+                                );
+                                checked += 1;
                             }
+                            // Recorded rather than asserted on the spot so that a folder that
+                            // stopped folding shows up as one summary rather than one failure.
+                            None => unfolded.push(format!("{op:?}/{sign:?} {bits} {a:#x} {b:#x}")),
                         }
                     }
                 }

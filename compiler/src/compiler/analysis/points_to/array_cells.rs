@@ -562,7 +562,7 @@ fn record_index(
 
 fn const_index(ssa: &HLSSA, index: ValueId) -> Option<usize> {
     match &*ssa.get_const(index)? {
-        Constant::Int(_, v) => Some(*v as usize),
+        Constant::Int(v) => usize::try_from(v).ok(),
         _ => None,
     }
 }

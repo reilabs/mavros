@@ -23,7 +23,7 @@ use crate::{
 
 pub fn const_value_type(value: &Constant) -> Type {
     match value {
-        Constant::Int(size, _) => Type::int(*size),
+        Constant::Int(v) => Type::int(v.bits()),
         Constant::Field(_) => Type::field(),
         Constant::FnPtr(_) => Type::function(),
         Constant::Blob(blob) => Type::blob(blob.elem_type.clone(), blob.len()),
@@ -183,7 +183,7 @@ impl Types {
 
             for instruction in block.get_instructions() {
                 self.run_opcode(instruction, &mut function_info, function_types, field)
-                    .unwrap_or_else(|_| panic!("Error running opcode {:?}", instruction));
+                    .unwrap_or_else(|e| panic!("Error running opcode {instruction:?}: {e}"));
             }
         }
 
@@ -605,7 +605,7 @@ impl Types {
             OpCode::SExt {
                 result,
                 value,
-                from_bits: _,
+                from_bits,
                 to_bits,
             } => {
                 let value_type = function_info
@@ -616,7 +616,14 @@ impl Types {
                 // Widen (signed) to the target width, keeping the witness wrapper.
                 let inner = value_type.strip_witness();
                 let widened = match &inner.expr {
-                    TypeExpr::Int(_) => Type::int(*to_bits),
+                    // `from_bits` is a second copy of the operand's own width.
+                    TypeExpr::Int(operand_bits) if operand_bits == from_bits => Type::int(*to_bits),
+                    TypeExpr::Int(operand_bits) => {
+                        return Err(format!(
+                            "SExt declares from_bits {from_bits} \
+                             for a value of type int{operand_bits}"
+                        ));
+                    }
                     _ => panic!("SExt on non-integer type: {:?}", value_type),
                 };
                 let result_type = if value_type.is_witness_of() {
@@ -832,5 +839,45 @@ impl Analysis for TypeInfo {
     fn compute(ssa: &HLSSA, store: &AnalysisStore) -> Self {
         let cfg = store.get::<FlowAnalysis>();
         Types::new().run(ssa, cfg)
+    }
+}
+
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::ssa::hlssa::builder::{HLEmitter, HLSSABuilder};
+
+    /// Type an `SExt` whose operand is an eight-bit constant but which declares `from_bits`.
+    fn sext_declaring(from_bits: usize) {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(main_id, |b| {
+                b.function.add_return_type(Type::int(16));
+                let entry = b.function.get_entry_id();
+                let mut e = b.test_block(entry);
+                let v = e.int_const(8, 0x80);
+                let widened = e.sext(v, from_bits, 16);
+                e.terminate_return(vec![widened]);
+            });
+        }
+        let flow = FlowAnalysis::run(&ssa);
+        let _ = Types::new().run(&ssa, &flow);
+    }
+
+    #[test]
+    fn a_sext_declaring_its_operands_own_width_types_fine() {
+        sext_declaring(8);
+    }
+
+    /// The check that lets every consumer of `SExt` read the width off the operand instead.
+    #[test]
+    #[should_panic(expected = "SExt declares from_bits 16 for a value of type int8")]
+    fn a_sext_declaring_a_width_its_operand_does_not_have_is_rejected() {
+        sext_declaring(16);
     }
 }

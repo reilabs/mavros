@@ -4,6 +4,7 @@
 //! MemOp (Bump/Drop) are lowered to explicit memory operations.
 
 use mavros_artifacts::{ConstraintsLayout, TableKind, WitnessLayout};
+use mavros_int_semantics::int_bits::FIELD_LIMB_BITS;
 use std::{collections::BTreeMap, marker::PhantomData};
 
 use crate::{
@@ -677,19 +678,13 @@ fn lower_constants_llssa(
 fn lower_constant_to_ll_constant(constant: &Constant) -> LLConstant {
     match constant {
         // Both tags hold the same raw pattern, and LLSSA has one `Int`, so one arm serves both.
-        Constant::Int(bits, val) => LLConstant::Int {
-            bits: *bits as u32,
-            value: *val,
-        },
+        Constant::Int(v) => LLConstant::Int(v.clone()),
         // FIELD-ASSUMPTION: L2-lower
         Constant::Field(fr) => {
             let values = fr
                 .montgomery_limbs()
                 .iter()
-                .map(|&limb| LLConstant::Int {
-                    bits: 64,
-                    value: limb as u128,
-                })
+                .map(|&limb| LLConstant::int(64, limb as u128))
                 .collect();
             LLConstant::Struct {
                 layout: LLStruct::field_elem(),
@@ -834,9 +829,8 @@ fn add_vm_parameter(func: &mut LLFunction, llssa: &mut LLSSA) -> ValueId {
 
 /// The LLSSA integer operation for an HLSSA arithmetic group read at a given signedness.
 ///
-/// This is the whole of what `hlssa_to_llssa` used to spell out twice, once per integer type
-/// variant — the two tables were identical apart from the three groups where the sign selects a
-/// different machine operation.
+/// One table rather than one per integer type variant: they differ only in the three groups where
+/// the sign selects a different machine operation, which is what the `signed` parameter carries.
 ///
 /// `Shl` has no signed form: a left shift is the same map on the bits either way, which is why
 /// HLSSA still distinguishes `UShl` from `SShl` (they differ in their overflow contract, not in
@@ -851,8 +845,8 @@ pub(crate) fn int_arith_op(group: ArithGroup, signed: bool) -> IntArithOp {
         ArithGroup::Xor => IntArithOp::Xor,
         ArithGroup::Shl => IntArithOp::Shl,
         // Arithmetic, not logical: Noir specifies sign-fill for a signed `>>`, and the cost
-        // interpreter (`instrumenter.rs`) has always agreed. This used to emit `UShr`, which made
-        // the backends disagree with both.
+        // interpreter (`instrumenter.rs`) agrees. Emitting `UShr` here would make the backends
+        // disagree with both.
         ArithGroup::Shr if signed => IntArithOp::AShr,
         ArithGroup::Shr => IntArithOp::UShr,
         ArithGroup::Div if signed => IntArithOp::SDiv,
@@ -1448,15 +1442,15 @@ fn lower_instruction(
 
             // A canonical field value fits in `max_bits` exactly when it is less than 2^max_bits.
             let mut limbs = Vec::with_capacity(4);
-            let active_limb = max_bits / 64;
-            let active_bit = max_bits % 64;
+            let active_limb = max_bits / FIELD_LIMB_BITS;
+            let active_bit = max_bits % FIELD_LIMB_BITS;
             for limb in 0..4 {
                 let value = if limb == active_limb {
                     1_u64 << active_bit
                 } else {
                     0
                 };
-                limbs.push(e.emit_int_const(64, value));
+                limbs.push(e.emit_int_const(FIELD_LIMB_BITS as u32, value));
             }
             let limit_limbs = e.mk_struct(LLStruct::limbs(), limbs);
             let limit = e.field_from_limbs(limit_limbs);
@@ -2051,12 +2045,13 @@ fn lower_to_bits(
             bits_le.push(zero_bit);
             continue;
         }
-        let limb_idx = i / 64;
-        let bit_offset = i % 64;
+        let limb_idx = i / FIELD_LIMB_BITS;
+        let bit_offset = i % FIELD_LIMB_BITS;
         let shifted = if bit_offset == 0 {
             limbs[limb_idx]
         } else {
-            let shift = e.emit_int_const(64, bit_offset as u64);
+            // The shift shares the limb's own width, so it is the field limb.
+            let shift = e.emit_int_const(FIELD_LIMB_BITS as u32, bit_offset as u64);
             e.int_arith(IntArithOp::UShr, limbs[limb_idx], shift)
         };
         bits_le.push(e.truncate(shifted, 1));
@@ -2453,7 +2448,12 @@ fn lower_rc_drop(
 // =============================================================================
 
 /// Ensure a value is Field-sized ({i64, i64, i64, i64}).
+///
 /// Non-Field integer types are packed into raw little-endian limbs.
+///
+/// The `128` below is **this function's own cap and not the integer type system's**, which is why
+/// it is a literal rather than `MAX_SUPPORTED_UNSIGNED_BITS`: only two of the four limbs are ever
+/// filled here, so 128 bits is what the shape can carry whatever the type cap becomes.
 fn ensure_field_sized(
     e: &mut LLBlockEmitter<'_>,
     ll_val: ValueId,
@@ -2465,7 +2465,7 @@ fn ensure_field_sized(
     let (lo, hi) = match &source_type.expr {
         HLTypeExpr::Int(bits) if *bits < 64 => (e.zext(ll_val, 64), e.emit_int_const(64, 0)),
         HLTypeExpr::Int(64) => (ll_val, e.emit_int_const(64, 0)),
-        HLTypeExpr::Int(bits) if *bits <= MAX_SUPPORTED_UNSIGNED_BITS => {
+        HLTypeExpr::Int(bits) if *bits <= 128 => {
             let lo = e.truncate(ll_val, 64);
             let shift = e.emit_int_const(*bits as u32, 64);
             let hi = e.int_arith(IntArithOp::UShr, ll_val, shift);
@@ -4748,7 +4748,7 @@ mod tests {
         let dump = ssa.to_string(&DefaultSSAAnnotator);
         // The immortal sentinel must be materialized and compared.
         assert!(
-            dump.contains("Int { bits: 64, value: 18446744073709551615 }"),
+            dump.contains("Int(64'hffffffffffffffff)"),
             "expected RC_IMMORTAL_OBJECT sentinel in dump:\n{dump}"
         );
         assert!(
@@ -4795,7 +4795,7 @@ mod tests {
         );
         // ...with four i64 limb values inside it.
         assert!(
-            dump.contains("Int { bits: 64"),
+            dump.contains("Int(64'h"),
             "expected i64 limb values in the struct constant:\n{dump}"
         );
         // ...and is NOT emitted as a runtime MkStruct instruction.
@@ -4861,9 +4861,9 @@ mod tests {
             let blob = e.emit_constant(HLConstant::Blob(HLBlob::new(
                 HLType::int(8),
                 vec![
-                    HLConstant::Int(8, 1),
-                    HLConstant::Int(8, 2),
-                    HLConstant::Int(8, 3),
+                    HLConstant::int(8, 1),
+                    HLConstant::int(8, 2),
+                    HLConstant::int(8, 3),
                 ],
             )));
             let arr = e.mk_seq_of_blob(HLType::int(8), blob);

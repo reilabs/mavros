@@ -2,6 +2,8 @@
 
 pub mod layout;
 
+use mavros_int_semantics::int_bits::HOST_LIMB_BITS;
+
 use crate::{
     collections::HashMap,
     compiler::{
@@ -13,7 +15,7 @@ use crate::{
             CodeGenOptions,
             bytecode::layout::{
                 ConstantPoolInterner, FrameLayouter, GlobalFrameLayouter, StructLayoutInterner,
-                for_each_constant_word,
+                for_each_constant_word, int_cell_count,
             },
         },
         ssa::{
@@ -88,7 +90,7 @@ fn materialize_constants(
         let constant = constants.get(&vid).expect("vid is in constants").as_ref();
         let cells = constant_cell_count(constant);
         let res = match constant {
-            hlssa::Constant::Int(size, _) => layouter.alloc_int(vid, *size),
+            hlssa::Constant::Int(v) => layouter.alloc_int(vid, v.bits()),
             hlssa::Constant::Field(_) => layouter.alloc_field(vid),
             hlssa::Constant::Blob(_) => layouter.alloc_long_data(vid, cells),
             hlssa::Constant::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
@@ -884,8 +886,8 @@ impl CodeGen {
                         (TypeExpr::Int(source_bits), TypeExpr::Int(target_bits))
                             if *source_bits <= 64 && *target_bits <= 64 =>
                         {
-                            let source_cells = source_bits.div_ceil(64);
-                            let target_cells = target_bits.div_ceil(64);
+                            let source_cells = int_cell_count(*source_bits);
+                            let target_cells = int_cell_count(*target_bits);
                             let copied_cells = source_cells.min(target_cells);
                             emitter.push_op(bytecode::OpCode::MovFrame {
                                 target: result,
@@ -909,12 +911,16 @@ impl CodeGen {
                             }
                         }
                         (TypeExpr::Int(128), TypeExpr::Int(target_bits)) if *target_bits <= 64 => {
+                            // The narrowing is a prefix copy, so unlike the arm above it needs no
+                            // `target_bits < source_bits` test: the cells it drops are the ones the
+                            // target does not have.
+                            let target_cells = int_cell_count(*target_bits);
                             emitter.push_op(bytecode::OpCode::MovFrame {
                                 target: result,
                                 source: layouter.get_value(*v),
-                                size: 1,
+                                size: target_cells,
                             });
-                            if *target_bits < 64 {
+                            if *target_bits % HOST_LIMB_BITS != 0 {
                                 emitter.push_op(bytecode::OpCode::TruncateInt {
                                     res: result,
                                     a: result,
@@ -923,15 +929,19 @@ impl CodeGen {
                             }
                         }
                         (TypeExpr::Int(source_bits), TypeExpr::Int(128)) if *source_bits <= 64 => {
+                            let source_cells = int_cell_count(*source_bits);
+                            let target_cells = int_cell_count(128);
                             emitter.push_op(bytecode::OpCode::MovFrame {
                                 target: result,
                                 source: layouter.get_value(*v),
-                                size: 1,
+                                size: source_cells,
                             });
-                            emitter.push_op(bytecode::OpCode::MovConst {
-                                res: result.offset(1),
-                                val: 0,
-                            });
+                            for cell in source_cells..target_cells {
+                                emitter.push_op(bytecode::OpCode::MovConst {
+                                    res: result.offset(cell as isize),
+                                    val: 0,
+                                });
+                            }
                         }
                         (TypeExpr::Field, TypeExpr::Int(bits)) if *bits <= 64 => {
                             emitter.push_op(bytecode::OpCode::CastFieldToInt {

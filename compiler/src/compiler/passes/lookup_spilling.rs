@@ -49,7 +49,7 @@ struct HelperKey {
 fn flag_is_const_one(consts: &HLSSAConstantsSnapshot, flag: ValueId, field: FieldConfig) -> bool {
     match consts.get(&flag).map(|c| &**c) {
         Some(Constant::Field(f)) => *f == field.one(),
-        Some(Constant::Int(_, v)) => *v == 1,
+        Some(Constant::Int(v)) => v.is_one(),
         _ => false,
     }
 }

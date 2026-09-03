@@ -3,9 +3,23 @@ name = "mavros-int-semantics"
 version.workspace = true
 edition.workspace = true
 
-# Deliberately dependency-free. This crate is the normative statement of what an integer operation
-# means, so it has to sit below every evaluator that must conform to it.
+# Two rules govern what may be added here, and "dependency-free" was only ever shorthand for them:
+# nothing may define what a Mavros integer operation answers, and nothing may sit above an evaluator
+# that has to conform to this crate.
+#
+# `thiserror` is derive-only, so it defines nothing at all.
+#
+# `num-bigint` supplies arithmetic on mathematical integers, which is the job the host's `u128` and
+# `i128` already do here. The normative content is the layer on top of that arithmetic — the
+# masking, the width rejection, the two's-complement reading, the shift-amount modulo — and none of
+# it moves into a dependency. Writing the bignum ourselves would instead make the crate every other
+# evaluator is measured against the least-scrutinised bignum in the tree, and would leave the model
+# with no oracle of its own; a widely-used one is an independent check on the arithmetic in a way
+# our own code cannot be. It is a leaf crate that knows nothing of Mavros, so it can be neither an
+# evaluator nor a cycle.
 [dependencies]
+num-bigint.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
