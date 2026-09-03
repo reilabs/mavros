@@ -1,5 +1,7 @@
 //! Tools and utilities for computing layouts when generating bytecode.
 
+use mavros_int_semantics::IntBits;
+
 use crate::{
     collections::HashMap,
     compiler::{
@@ -280,9 +282,10 @@ impl GlobalFrameLayouter {
     }
 }
 
+/// The number of VM frame cells a `bits`-wide integer occupies.
 pub fn int_cell_count(bits: usize) -> usize {
-    assert!(bits > 0 && bits <= MAX_SUPPORTED_UNSIGNED_BITS);
-    bits.div_ceil(64)
+    assert!(bits <= MAX_SUPPORTED_UNSIGNED_BITS);
+    IntBits::limbs_for_bits(bits)
 }
 
 // TESTS

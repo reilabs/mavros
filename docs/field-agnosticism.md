@@ -306,6 +306,8 @@ that gives each field its own implementation. Nothing here is outstanding P3 wor
       `bit_range`/`sext`/`to_bits`/`not`/`rangecheck`/`to_radix`/spread.
 - [ ] `vm/src/bytecode.rs:1767-1815,1242-1252` — `rngchk`/`to_bytes_be|le`/`truncate_f_to_u` (slice
       `into_bigint().0` limbs).
+- [ ] `compiler/src/compiler/passes/shared/limbs.rs` — `combine_limbs`/`derive_low_limb` place
+      values (`two_pow`).
 - [ ] `compiler/src/compiler/passes/instruction_lowering/witness_bitwise.rs` — bitmask/sign-extend
       via `b.field().two_pow(..)`. The helper is gone (see `L4-two-pow`); what remains is the
       _strategy_, which wraps mod p once the shift reaches the field width (see also
@@ -470,15 +472,37 @@ Let `B = floor(log2 p)` (bn254: 253; goldilocks: 63). For standard widths on gol
   technically be made to fit"); bitwise natural-spread (≤ 32 bits) and shl fit. All **fragile** —
   correct standalone, but a fused `q·divisor + r` reconstruction can tip over.
 - `u64 / u128 / i64`: a bare value's range `≥ p` (`2⁶⁴ − 1 > p`) ⇒ it **cannot be held injectively
-  in one cell**; every recombination into one cell (`combine_u64_fields`, `lower_not`'s `2⁶⁴ − 1`,
-  signed `sign·2⁶⁴` packing) wraps.
+  in one cell**; every recombination into one cell (`shared/limbs.rs`'s `combine_limbs`,
+  `lower_not`'s `2⁶⁴ − 1`, signed `sign·2⁶⁴` packing) wraps.
 
 So on goldilocks standard widths collapse to **{single-field for n ≤ 32, multi-cell for n ≥ 64}**;
 the "operation-strategy-only" band is empty for standard widths. `range_fits_field_injectively`
 (`witness_integer_arith.rs`) already flips correctly on a small field — **the debt is the missing
 FALSE-case codegen**, not the predicate. Today the only FALSE-case path is unsigned u128 mul, and it
-still packs `lo + cross·2⁶⁴ ≈ 2¹⁹³` into one cell (assumes ~193-bit headroom); everything else
-`assert!`/`panic!`s.
+still packs `lo + cross·2ʰ ≈ 2³ʰ⁺¹` into one cell (~2¹⁹³ at the bn254 limb); every other _consumer
+of that predicate_ refuses through the funnel below. Lowerings that never ask it are a separate
+matter — see the list under `L6-int-op-strategy`.
+
+### Refusing On a Narrow Field
+
+The FALSE-case codegen does not exist yet, so every lowering whose precondition the configured field
+fails routes through one funnel: `compiler/src/compiler/passes/shared/unsupported.rs`. It appends
+the field's modulus width and witness limb width to the caller's own description of what did not
+fit, so a refusal names both halves of the mismatch, and the set of its call sites **is** the
+machine-readable half of this register.
+
+The call sites: `witness_bitwise`'s `lower_integer_sext`, `lower_word_bitwise` (spread width) and
+`product_headroom_or_bail`; `witness_integer_arith`'s `lower_unsigned_mul` (both the single-field
+product and the two-limb packing, the latter covering the limb _count_ as well as the packing);
+`lower_signed_addsub` and `lower_signed_mul`; `shared/limbs.rs`'s `combine_limbs` (the
+recombination); `witness_field`'s `to_bits` and `to_radix`; and `shared::overflow_guard`'s
+`abs_as_u`.
+
+Two kinds of neighboring check deliberately stay out: an internal invariant no field choice can
+violate (`bit_range`'s "a field `BitRange` cannot exceed a field element"), and a branch whose
+condition is an integer _type_ cap rather than a field width (`wrap_shifted_product`'s trapping
+fallback, which rejects a witness at proving time rather than refusing every 128-bit `<<` at compile
+time).
 
 **P5 target — integers wider than the field must be _supported_, not rejected.** The end state is a
 **multi-cell representation** (Option A): an integer whose type range is `≥ p` (`n > B`) is carried
@@ -486,19 +510,13 @@ as `⌈n/h⌉` field cells end-to-end (witness layout, `Cast`, VM frame, opcode 
 integer type-system caps (`MAX_SUPPORTED_*_BITS` = 128/64) stay **field-independent** — a goldilocks
 `u128` is just a wider cell vector, exactly as bn254 already carries a u128 value in one cell but
 its 256-bit _product_ across two. Paired with a **schoolbook engine** for the FALSE branch (split
-operands into `h`-bit limbs with `h ≈ (field_bits − guard)/2`, byte-aligned — bn254 `h = 64` keeps
-today byte-identical, goldilocks `h = 16`; in-field partial products `< 2^{2h} < p`;
-column-accumulate with a witnessed, range-checked carry chain; keep the low result limbs). Sequence
-within P5: multi-cell representation → mul engine → add/sub-carry → divmod → bitwise → signed.
-**Transitional scaffold, filed under P5:** converge the scattered FALSE-case `assert!`/`panic!`s
-onto one `unimplemented!("multi-limb — P5")` funnel (byte-identical on bn254; on a small field it
-fails loudly until the multi-cell path lands, rather than silently miscompiling). This is a
-scaffold, **not** a width cap — we are not restricting the supported integer widths on any field. It
-was originally pencilled in as near-term P3 work, but it changes nothing on bn254 (every one of
-those branches is unreachable there, which is what the byte-identical corpus shows) and only earns
-its keep next to the multi-cell representation it warns about, so it belongs with P5's first
-sub-piece rather than with the `FieldConfig` threading. **Dominant risk:** every witnessed
-limb/carry must be range-checked or a malicious prover forges the result.
+operands into `h`-bit limbs, `h` derived from the modulus by
+`compiler/src/compiler/passes/shared/limbs.rs`; in-field partial products; column-accumulate with a
+witnessed, range-checked carry chain; keep the low result limbs).
+
+Sequence within P5: multi-cell representation → mul engine → add/sub-carry → divmod → bitwise →
+signed. **Dominant risk:** every witnessed limb/carry must be range-checked or a malicious prover
+can forge the result.
 
 Two tags, distinct from the constant-swap tags:
 
@@ -507,10 +525,29 @@ Two tags, distinct from the constant-swap tags:
 A single-field arithmetic op assumes its exact result span fits one cell (one `b.mul`/`b.add`, or a
 `two_pow`-based packing). Fix = multi-limb schoolbook / carry-chain lowering in the FALSE branch.
 
-- [ ] `witness_integer_arith.rs` — `lower_unsigned_mul` (single-field product + the ~193-bit u128
-      fallback), `lower_signed_mul` (no fallback), `lower_unsigned_addsub`, `lower_signed_addsub`,
-      `signed_value_from_encoded`/`encode_signed_value` (sign packing), `lower_unsigned_divmod`.
+- [ ] `witness_integer_arith.rs` — `lower_unsigned_mul` (single-field product + the `2³ʰ⁺¹` u128
+      fallback packing), `lower_signed_mul` (no fallback), `lower_unsigned_addsub`,
+      `lower_signed_addsub`, `signed_value_from_encoded`/`encode_signed_value` (sign packing),
+      `lower_unsigned_divmod`.
 - [ ] `witness_bitwise.rs` — `lower_not`, `lower_integer_sext`, `lower_word_bitwise` (spread width).
+
+**Five of these refuse** rather than miscompiling when their span does not fit (see the funnel
+above): `lower_unsigned_mul` on both its paths, `lower_signed_mul`, `lower_signed_addsub`,
+`lower_integer_sext` and `lower_word_bitwise`. What remains for P5 at those five is the FALSE-case
+lowering itself.
+
+**The rest still carry the assumption unchecked**, with only a `FIELD-ASSUMPTION` comment on it, and
+are what to fix first if a narrow field is configured before P5's lowerings exist:
+`lower_unsigned_addsub`, `lower_not`, and the `signed_value_from_encoded`/`encode_signed_value` sign
+packing. `lower_unsigned_divmod` is a mixture: its 128-bit path reconstructs `q·divisor + r` by
+emitting `UMul`/`UAdd` **ops**, which this same pass re-lowers, so it inherits the mul's refusal and
+the add's gap; its narrow path multiplies in the field directly and has no check of its own.
+
+Note that the funnel's condition is per-site, because `witness_limb_bits` certifies only that a bare
+`a·b` fits. A lowering that additionally scales a column by a place value asks
+`two_limb_product_packing_fits`, one that spreads asks `spread_sum_fits_field`, and one that
+recombines asks `combined_limbs_fit_field` — all three in `shared/limbs.rs`, alongside the limb rule
+they each strengthen.
 
 ### `L6-int-representation` — Value Range `≥ p` Assumed to Fit One Cell (Representation, P5 multi-cell)
 
@@ -522,9 +559,20 @@ serde). Wide integers are supported, not capped away.
 - [ ] `compiler/src/compiler/ssa/hlssa/type_system.rs:5-6` — `MAX_SUPPORTED_UNSIGNED_BITS` /
       `MAX_SUPPORTED_SIGNED_BITS` stay field-independent (the int-type caps); the multi-cell
       representation carries any width `> B` on a small field.
-- [ ] `witness_integer_arith.rs` — `split_u128_value` (fixed 2×64 layout; limb width becomes `h`).
-- [ ] `witness_bitwise.rs` — `combine_u32_limbs` / `combine_u64_fields` (recombine into one cell;
-      `extract_u128_limbs`/`decompose_u64_input` limb widths must derive from the field size).
+- [ ] `passes/shared/limbs.rs` — `combine_limbs` (recombines `⌈n/h⌉` limbs into **one** cell). The
+      limb _widths_ are done: `witness_limb_bits` derives `h` from the modulus, and every splitter
+      and place value in the tree now asks it — though asking it is not on its own a proof that the
+      _result_ fits, which is why the packing, spread and recombination sites carry their own
+      predicates. `combine_limbs` now refuses through the funnel when `⌈n/h⌉` limbs do not fit one
+      cell, so the wrap is not reachable; what is left is the multi-cell target that would let it
+      **succeed** instead, and the limb count on the way there — a decomposition wider than two
+      limbs has nowhere to go, so `WitnessLimbs::pair` refuses rather than truncates.
+- [ ] `witness_integer_arith.rs` — `split_u128_value`'s caller `lower_unsigned_mul` reads the split
+      as a pair.
+- [ ] `witness_bitwise.rs` — the `bits == 64` / `bits == 128` bitwise dispatch is a **type**-width
+      dispatch, so on a narrower field it routes a `u64` to a lowering that no longer suits it.
+      `decompose_into_half_limbs` asserts on exactly that mismatch, so the miscompile is not
+      reachable, but the dispatch still has to grow a `⌈n/h⌉` arm before a narrow field works.
 
 The `value_range_analysis.rs` interval domain is over `BigInt` and stays correct on any field — it
 already produces the exact spans the FALSE-case codegen consumes (no new marker; only `field_top` /

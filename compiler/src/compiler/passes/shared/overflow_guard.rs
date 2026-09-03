@@ -14,6 +14,7 @@
 
 use crate::compiler::{
     analysis::value_range_analysis::ValueRange,
+    passes::shared::unsupported::unsupported_on_this_field,
     ssa::{
         ValueId,
         hlssa::{
@@ -375,11 +376,14 @@ pub fn abs_as_u(
     // signed cap leaves ample room; on a narrower field this refuses instead. Same construction and
     // same bound as `LowerWitnessBitwiseOps::lower_integer_sext`, which lifts a value into the
     // field the same way.
-    assert!(
-        bits < emitter.field().field_bit_size() as usize,
-        "a {bits}-bit magnitude needs a field wider than {} bits",
-        emitter.field().field_bit_size()
-    );
+    if bits >= emitter.field().field_bit_size() as usize {
+        unsupported_on_this_field(
+            format_args!(
+                "a {bits}-bit magnitude lifts the sign out with `two_pow({bits})`, which has itself wrapped, leaving the magnitude — and every overflow test built on it — silently wrong"
+            ),
+            emitter.field(),
+        );
+    }
 
     let value_field = emitter.cast_to_field(value);
     let sign = emitter.cast_to_field(sign_u1);

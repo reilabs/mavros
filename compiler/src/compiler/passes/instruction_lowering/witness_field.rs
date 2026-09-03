@@ -1,5 +1,8 @@
 use crate::compiler::{
-    passes::instruction_lowering::{InstructionLoweringRule, LoweringContext},
+    passes::{
+        instruction_lowering::{InstructionLoweringRule, LoweringContext},
+        shared::unsupported::unsupported_on_this_field,
+    },
     ssa::{
         ValueId,
         hlssa::{
@@ -273,13 +276,17 @@ impl LowerWitnessFieldOps {
         if !context.types().get_value_type(value).is_witness_of() {
             return false;
         }
-        // This limit is tied to the active field. Supporting wider decompositions will require
-        // deciding how their leading zeroes participate in the field-agnostic lowering contract.
-        assert!(
-            count <= b.field().field_bit_size() as usize,
-            "witness ToBits width {count} exceeds field bit size {}",
-            b.field().field_bit_size()
-        );
+        // Supporting wider decompositions will require deciding how their leading zeroes
+        // participate in the field-agnostic lowering contract, which is why this refuses rather
+        // than padding.
+        if count > b.field().field_bit_size() as usize {
+            unsupported_on_this_field(
+                format_args!(
+                    "a witness `to_bits` of {count} bits asks for more bits than a field element has"
+                ),
+                b.field(),
+            );
+        }
 
         // Compute the decomposition in witgen, then bind each hinted bit to a fresh circuit
         // witness. WitnessWriteToFresh removes this hint chain from the R1CS pipeline later.
@@ -384,13 +391,17 @@ impl LowerWitnessFieldOps {
             return true;
         }
 
-        // Unlike bits, the top byte may be only partially occupied (BN254 therefore needs 32
-        // bytes). Wider zero-padded decompositions need an explicit field-agnostic contract.
+        // Unlike bits, the top byte may be only partially occupied (BN254 needs 32 bytes). Wider
+        // zero-padded decompositions need an explicit field-agnostic contract.
         let max_bytes = (b.field().field_bit_size() as usize).div_ceil(8);
-        assert!(
-            count <= max_bytes,
-            "witness ToRadix byte count {count} exceeds field byte width {max_bytes}"
-        );
+        if count > max_bytes {
+            unsupported_on_this_field(
+                format_args!(
+                    "a witness `to_radix` of {count} bytes asks for more than the {max_bytes} bytes a field element occupies"
+                ),
+                b.field(),
+            );
+        }
 
         let pure_value = b.value_of(value);
         let hint = b.to_radix(pure_value, radix, endianness, count);
