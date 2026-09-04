@@ -886,7 +886,7 @@ fn const_contains_fn_ptr(constant: &Constant) -> bool {
     match constant {
         Constant::FnPtr(_) => true,
         Constant::Blob(blob) => blob.elements.iter().any(const_contains_fn_ptr),
-        Constant::Int(..) | Constant::Field(_) => false,
+        Constant::Int(_) | Constant::Field(_) => false,
     }
 }
 

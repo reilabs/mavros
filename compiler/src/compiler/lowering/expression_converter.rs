@@ -978,7 +978,7 @@ impl<'a> ExpressionConverter<'a> {
                             // Only for the width gate: zero is zero under either reading, and the
                             // negation that consumes it takes its sign from its own opcode.
                             let (_, bits) = checked_int_cast_target(*signedness, *bit_size);
-                            Constant::Int(bits, 0)
+                            Constant::int(bits, 0)
                         }
                         _ => Constant::Field(b.field().constant(0u64)),
                     })
@@ -1260,7 +1260,7 @@ impl<'a> ExpressionConverter<'a> {
                 let elem_type = Type::int(8);
                 let elems = s
                     .iter()
-                    .map(|byte| Constant::Int(8, *byte as u128))
+                    .map(|byte| Constant::int(8, *byte as u128))
                     .collect();
                 let blob = b.emit_const(Constant::Blob(Blob::new(elem_type.clone(), elems)));
                 let location = self.current_source_location.clone();
@@ -1280,7 +1280,7 @@ impl<'a> ExpressionConverter<'a> {
                         FmtStrFragment::Interpolation(name, _) => format!("{{{name}}}"),
                     };
                     for c in text.chars() {
-                        codepoint_constants.push(Constant::Int(32, c as u128));
+                        codepoint_constants.push(Constant::int(32, c as u128));
                     }
                 }
                 let cp_len = codepoint_constants.len();
@@ -1409,7 +1409,7 @@ impl<'a> ExpressionConverter<'a> {
         match lit {
             Literal::Bool(bv) => {
                 let value = if *bv { 1 } else { 0 };
-                Some(Constant::Int(1, value))
+                Some(Constant::int(1, value))
             }
             Literal::Integer(field_element, typ, _location) => match typ {
                 AstType::Field => {
@@ -1425,20 +1425,16 @@ impl<'a> ExpressionConverter<'a> {
                             bits <= MAX_SUPPORTED_SIGNED_BITS,
                             "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
                         );
-                        // The _encoding_ still depends on the declared signedness even though the
-                        // constant no longer records it: a negative literal has to reach the IR as
-                        // its two's-complement pattern, which `to_u128` would not produce.
                         let val = field_element.to_i128();
-                        let twos_complement = (val as u128) & ((1u128 << bits) - 1);
-                        Some(Constant::Int(bits, twos_complement))
+                        Some(Constant::int(bits, val as u128))
                     } else {
                         let value = field_element.to_u128();
-                        Some(Constant::Int(bits, value))
+                        Some(Constant::int(bits, value))
                     }
                 }
                 AstType::Bool => {
                     let value = field_element.to_u128();
-                    Some(Constant::Int(1, value))
+                    Some(Constant::int(1, value))
                 }
                 _ => panic!("Unexpected type for integer literal: {:?}", typ),
             },
@@ -1453,7 +1449,7 @@ impl<'a> ExpressionConverter<'a> {
     fn constant_matches_type(constant: &Constant, typ: &Type) -> bool {
         match (constant, &typ.expr) {
             (Constant::Field(_), TypeExpr::Field) => true,
-            (Constant::Int(bits, _), TypeExpr::Int(type_bits)) => bits == type_bits,
+            (Constant::Int(v), TypeExpr::Int(type_bits)) => v.bits() == *type_bits,
             _ => false,
         }
     }
@@ -1617,7 +1613,7 @@ impl<'a> ExpressionConverter<'a> {
                         // function call that emits constraints), then return the
                         // compile-time-known length.
                         self.convert_expression(&call.arguments[0], b);
-                        let value = b.emit_const(Constant::Int(32, *len as u128));
+                        let value = b.emit_const(Constant::int(32, *len as u128));
                         Some(value)
                     }
                     noirc_frontend::monomorphization::ast::Type::Vector(_) => {
@@ -1684,7 +1680,7 @@ impl<'a> ExpressionConverter<'a> {
             "is_unconstrained" => {
                 let value = b
                     .ssa
-                    .add_const(Constant::Int(1, if self.in_unconstrained { 1 } else { 0 }));
+                    .add_const(Constant::int(1, if self.in_unconstrained { 1 } else { 0 }));
                 Some(value)
             }
             "as_witness" => {
@@ -1933,7 +1929,7 @@ fn checked_int_cast_target(
 
 /// The constant `1` a `for` loop steps by, at the index's width.
 fn index_step_one(bit_size: usize) -> Constant {
-    Constant::Int(bit_size, 1)
+    Constant::int(bit_size, 1)
 }
 
 /// Whether a Noir expression's value is read as two's complement.
@@ -1950,9 +1946,6 @@ fn index_step_one(bit_size: usize) -> Constant {
 ///
 /// That `None` is unreachable for anything this is asked about, and the enumeration above is the
 /// proof: a well-typed Noir program cannot make a statement the operand of an arithmetic operator.
-/// A cross-check between the two operands of a binary expression used to stand behind that claim
-/// as well; it was removed once it had run clean over the whole corpus twice, because it could only
-/// ever have caught input that Noir's own typechecker rejects first.
 fn operand_is_signed(e: &Expression) -> bool {
     matches!(e.return_type().as_deref(), Some(t) if ast_type_is_signed(t))
 }

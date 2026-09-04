@@ -6,6 +6,8 @@ pub mod type_system;
 use itertools::Itertools;
 use std::fmt::Display;
 
+use mavros_int_semantics::IntBits;
+
 use crate::compiler::ssa::{
     Block, Function, FunctionId, Instruction, Located, SSA, SSAConstants, SSAConstantsSnapshot,
     SourceLocation, ValueId,
@@ -1942,48 +1944,77 @@ pub enum ArithGroup {
     Xor,
 }
 
-impl From<ArithGroup> for mavros_int_semantics::IntOp {
-    /// The reference model names the same ten operations, so this is a total renaming.
+impl From<BinaryArithOpKind> for mavros_int_semantics::IntOp {
+    /// The reference model names the same operations, so this is a many-to-one renaming
     ///
-    /// It is spelled out rather than derived so that adding a variant to either side is a compile
-    /// error here, which is the only place the two vocabularies meet.
-    fn from(group: ArithGroup) -> Self {
-        match group {
-            ArithGroup::Add => Self::Add,
-            ArithGroup::Sub => Self::Sub,
-            ArithGroup::Mul => Self::Mul,
-            ArithGroup::Div => Self::Div,
-            ArithGroup::Rem => Self::Rem,
-            ArithGroup::Shl => Self::Shl,
-            ArithGroup::Shr => Self::Shr,
-            ArithGroup::And => Self::And,
-            ArithGroup::Or => Self::Or,
-            ArithGroup::Xor => Self::Xor,
+    /// [`BinaryArithOpKind::UShl`] and [`BinaryArithOpKind::SShl`] both land on `IntOp::Shl`. A
+    /// left shift is one map on the bit pattern under either reading, and its amount is read as an
+    /// unsigned magnitude either way, so the model has a single variant; rejections are handled by
+    /// the guard IR rather than part of `eval`.
+    ///
+    /// We avoid deriving it so that adding a variant to either side is a compile error here.
+    fn from(kind: BinaryArithOpKind) -> Self {
+        use mavros_int_semantics::IntOp;
+        match kind {
+            BinaryArithOpKind::UAdd => IntOp::UAdd,
+            BinaryArithOpKind::SAdd => IntOp::SAdd,
+            BinaryArithOpKind::USub => IntOp::USub,
+            BinaryArithOpKind::SSub => IntOp::SSub,
+            BinaryArithOpKind::UMul => IntOp::UMul,
+            BinaryArithOpKind::SMul => IntOp::SMul,
+            BinaryArithOpKind::UDiv => IntOp::UDiv,
+            BinaryArithOpKind::SDiv => IntOp::SDiv,
+            BinaryArithOpKind::URem => IntOp::URem,
+            BinaryArithOpKind::SRem => IntOp::SRem,
+            BinaryArithOpKind::And => IntOp::And,
+            BinaryArithOpKind::Or => IntOp::Or,
+            BinaryArithOpKind::Xor => IntOp::Xor,
+            BinaryArithOpKind::UShl | BinaryArithOpKind::SShl => IntOp::Shl,
+            BinaryArithOpKind::UShr => IntOp::UShr,
+            BinaryArithOpKind::SShr => IntOp::SShr,
         }
     }
 }
 
-impl From<mavros_int_semantics::IntOp> for ArithGroup {
-    /// The inverse renaming, so that the two vocabularies are pinned to each other in both
-    /// directions.
-    fn from(op: mavros_int_semantics::IntOp) -> Self {
-        use mavros_int_semantics::IntOp;
-        match op {
-            IntOp::Add => Self::Add,
-            IntOp::Sub => Self::Sub,
-            IntOp::Mul => Self::Mul,
-            IntOp::Div => Self::Div,
-            IntOp::Rem => Self::Rem,
-            IntOp::Shl => Self::Shl,
-            IntOp::Shr => Self::Shr,
-            IntOp::And => Self::And,
-            IntOp::Or => Self::Or,
-            IntOp::Xor => Self::Xor,
+impl From<CmpKind> for mavros_int_semantics::CmpOp {
+    /// A true bijection, unlike the arithmetic conversion above: the model's `CmpOp` was given the
+    /// same three variants as [`CmpKind`] precisely so that it would be one.
+    fn from(kind: CmpKind) -> Self {
+        use mavros_int_semantics::CmpOp;
+        match kind {
+            CmpKind::Eq => CmpOp::Eq,
+            CmpKind::ULt => CmpOp::ULt,
+            CmpKind::SLt => CmpOp::SLt,
         }
     }
 }
 
 impl BinaryArithOpKind {
+    /// Every operation, so a new variant cannot be added without appearing here.
+    ///
+    /// The counterpart of `IntOp::ALL`, and the list a conformance sweep must drive from when it
+    /// is checking a *lowering*: the two vocabularies are not in bijection, so sweeping the model's
+    /// sixteen would cover only one of `UShl`/`SShl`.
+    pub const ALL: [BinaryArithOpKind; 17] = [
+        Self::UAdd,
+        Self::SAdd,
+        Self::USub,
+        Self::SSub,
+        Self::UMul,
+        Self::SMul,
+        Self::UDiv,
+        Self::SDiv,
+        Self::URem,
+        Self::SRem,
+        Self::UShl,
+        Self::SShl,
+        Self::UShr,
+        Self::SShr,
+        Self::And,
+        Self::Or,
+        Self::Xor,
+    ];
+
     /// This operation with its sign erased.
     pub fn group(self) -> ArithGroup {
         match self {
@@ -2399,15 +2430,18 @@ impl Blob {
 /// The value type stored in the high-level SSA's constants side-table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Constant {
-    /// `bits` raw two's-complement bits, with **no reading attached**.
+    /// Raw two's-complement bits at a declared width, with **no reading attached**.
     ///
     /// There is no signed/unsigned pair here for the same reason [`TypeExpr::Int`] has no sign:
     /// nothing about a bit pattern says how to read it, and every consumer that cares takes the
     /// reading from the opcode applied to the value. That also makes interning exact — one pattern
     /// is one constant, so `u32 0xFFFFFFFE` and `i32 -2` are the same `ValueId`.
     ///
+    /// The width lives inside the [`IntBits`] rather than beside it, so there is no second copy of
+    /// it here that could disagree with the pattern's own normalisation.
+    ///
     /// [`TypeExpr::Int`]: crate::compiler::ssa::hlssa::TypeExpr::Int
-    Int(usize, u128),
+    Int(IntBits),
     // FIELD-ASSUMPTION: L2-ir-const
     Field(crate::compiler::Field),
     FnPtr(FunctionId),
@@ -2415,10 +2449,16 @@ pub enum Constant {
 }
 
 impl Constant {
+    /// A `bits`-wide integer constant carrying `value`, discarding any bits at or above `bits`.
+    #[must_use]
+    pub fn int(bits: usize, value: u128) -> Self {
+        Self::Int(IntBits::from_u128(bits, value))
+    }
+
     /// `true` if this is a scalar constant (not an aggregate `Blob`).
     pub fn is_scalar(&self) -> bool {
         match self {
-            Self::Int(_, _) | Self::Field(_) | Self::FnPtr(_) => true,
+            Self::Int(_) | Self::Field(_) | Self::FnPtr(_) => true,
             Self::Blob(_) => false,
         }
     }
@@ -2531,33 +2571,12 @@ pub enum Radix<V> {
 mod tests {
     use super::*;
 
-    /// Every operation, so a new variant cannot be added without appearing here.
-    const ALL_ARITH: [BinaryArithOpKind; 17] = [
-        BinaryArithOpKind::UAdd,
-        BinaryArithOpKind::SAdd,
-        BinaryArithOpKind::USub,
-        BinaryArithOpKind::SSub,
-        BinaryArithOpKind::UMul,
-        BinaryArithOpKind::SMul,
-        BinaryArithOpKind::UDiv,
-        BinaryArithOpKind::SDiv,
-        BinaryArithOpKind::URem,
-        BinaryArithOpKind::SRem,
-        BinaryArithOpKind::UShl,
-        BinaryArithOpKind::SShl,
-        BinaryArithOpKind::UShr,
-        BinaryArithOpKind::SShr,
-        BinaryArithOpKind::And,
-        BinaryArithOpKind::Or,
-        BinaryArithOpKind::Xor,
-    ];
-
     #[test]
     fn group_and_sign_reconstruct_the_operation() {
         // `with_sign` is the inverse of `(group, signedness)` on everything that has a sign, which
         // is what lets a consumer decompose an operation, decide on the sign separately, and put
         // it back together -- the shape the whole Stage-2 shim depends on.
-        for op in ALL_ARITH {
+        for op in BinaryArithOpKind::ALL {
             match op.signedness() {
                 Some(signed) => assert_eq!(BinaryArithOpKind::with_sign(op.group(), signed), op),
                 // The bitwise groups have one form, so both signs must land back on it.
@@ -2571,7 +2590,7 @@ mod tests {
 
     #[test]
     fn the_bitwise_operations_are_the_only_sign_free_ones() {
-        for op in ALL_ARITH {
+        for op in BinaryArithOpKind::ALL {
             let sign_free = op.signedness().is_none();
             assert_eq!(
                 sign_free,
@@ -2592,7 +2611,7 @@ mod tests {
         // `(group, signedness)` is the value-numbering key, so it has to be injective over the
         // opcode set: if two distinct operations ever answered the same pair, every value-numbering
         // site would merge them and the survivor's lowering would silently stand in for the other.
-        let mut keys: Vec<_> = ALL_ARITH
+        let mut keys: Vec<_> = BinaryArithOpKind::ALL
             .iter()
             .map(|op| (op.group(), op.signedness()))
             .collect();
@@ -2622,7 +2641,10 @@ mod tests {
         assert_eq!(CmpKind::Eq.symbol(), "==");
 
         // Every symbol is distinct, so a dump can be read back unambiguously.
-        let mut symbols: Vec<_> = ALL_ARITH.iter().map(|op| op.symbol()).collect();
+        let mut symbols: Vec<_> = BinaryArithOpKind::ALL
+            .iter()
+            .map(|op| op.symbol())
+            .collect();
         symbols.extend([CmpKind::ULt, CmpKind::SLt, CmpKind::Eq].map(|k| k.symbol()));
         let count = symbols.len();
         symbols.sort_unstable();

@@ -1181,8 +1181,8 @@ mod tests {
     #[test]
     fn for_each_const_visits_all() {
         let ssa = HLSSA::with_main("main".to_string());
-        let a = ssa.add_const(Constant::Int(8, 1));
-        let b = ssa.add_const(Constant::Int(8, 2));
+        let a = ssa.add_const(Constant::int(8, 1));
+        let b = ssa.add_const(Constant::int(8, 2));
 
         let mut seen = HashMap::default();
         ssa.for_each_const(|vid, cv| {
@@ -1190,8 +1190,8 @@ mod tests {
         });
 
         assert_eq!(seen.len(), 2);
-        assert_eq!(seen.get(&a), Some(&Constant::Int(8, 1)));
-        assert_eq!(seen.get(&b), Some(&Constant::Int(8, 2)));
+        assert_eq!(seen.get(&a), Some(&Constant::int(8, 1)));
+        assert_eq!(seen.get(&b), Some(&Constant::int(8, 2)));
     }
 
     #[test]

@@ -4,6 +4,8 @@
 //! This is a very simple CSE in comparison to PRE, and does elimination only to ensure that the
 //! witness shape remains frozen between the witness generator and AD programs.
 
+use mavros_int_semantics::IntBits;
+
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
@@ -154,7 +156,7 @@ impl CSE {
         let mut exprs: HashMap<ValueId, ExprId> = HashMap::default();
         for (vid, cv) in constants {
             let id = match cv.as_ref() {
-                Constant::Int(bits, value) => interner.int_const(*bits, *value),
+                Constant::Int(v) => interner.int_const(v.clone()),
                 Constant::Field(value) => interner.fconst(*value),
                 Constant::FnPtr(_) | Constant::Blob(_) => continue,
             };
@@ -707,7 +709,12 @@ impl CSE {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct ExprId(u32);
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+// No `Ord` as this is an interning key, only ever hashed and compared for equality.
+//
+// The commutative chains sort their `ExprId`s, but never the nodes. Not having it matters because
+// `IntConst`'s payload deliberately has no ordering as it is an uninterpreted bit pattern with no
+// particular reading.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ExprNode {
     /// The flattened commutative chains, carrying the sign of the operation that built them.
     ///
@@ -738,10 +745,7 @@ enum ExprNode {
         sign: Option<bool>,
     },
     FConst(Field),
-    IntConst {
-        bits: usize,
-        value: u128,
-    },
+    IntConst(IntBits),
     Variable(u64),
     Eq {
         lhs: ExprId,
@@ -841,8 +845,8 @@ impl ExprInterner {
         self.intern(ExprNode::FConst(value))
     }
 
-    fn int_const(&mut self, bits: usize, value: u128) -> ExprId {
-        self.intern(ExprNode::IntConst { bits, value })
+    fn int_const(&mut self, pattern: IntBits) -> ExprId {
+        self.intern(ExprNode::IntConst(pattern))
     }
 
     fn extend_adds(&self, expr: ExprId, signed: bool, out: &mut Vec<ExprId>) {
@@ -1019,6 +1023,21 @@ mod tests {
     use super::*;
     use crate::compiler::ssa::{Terminator, hlssa::Type};
 
+    #[test]
+    fn an_interned_constant_is_keyed_by_its_width_as_well_as_its_value() {
+        // The interner is what decides two expressions are the same expression, so a constant's key
+        // has to be the whole pattern. Keying on the value alone would make `1u8` and `1u32` one
+        // node, and any two expressions differing only there would merge.
+        let mut interner = ExprInterner::default();
+        let narrow = interner.int_const(IntBits::from(1u8));
+        let wide = interner.int_const(IntBits::from(1u32));
+        assert_ne!(narrow, wide);
+
+        // And the same pattern twice is the same node, which is the property that makes it an
+        // interner at all.
+        assert_eq!(narrow, interner.int_const(IntBits::from(1u8)));
+    }
+
     /// `main(x, y) { a = x op1 y; b = x op2 y; return (a, b) }`, run through CSE.
     ///
     /// Returns the two values the terminator carries afterwards. If the pass merged the second
@@ -1075,8 +1094,8 @@ mod tests {
     #[test]
     fn no_operation_merges_with_its_opposite_sign() {
         // Every group with two forms, not just the ones whose forms compute different values.
-        // `UAdd`/`SAdd` agree on every bit and used to merge here on that basis; what that misses
-        // is that the survivor's opcode is what picks the overflow check emitted downstream.
+        // `UAdd`/`SAdd` agree on every bit, but this is not a licence to merge them: the survivor's
+        // opcode is what picks the overflow check emitted downstream.
         use BinaryArithOpKind::*;
         for (unsigned, signed) in [
             (UAdd, SAdd),

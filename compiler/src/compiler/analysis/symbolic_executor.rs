@@ -2,6 +2,7 @@
 //! into by providing their own `Value` and `Context` implementations that specialize it for their
 //! use-case.
 
+use mavros_int_semantics::IntBits;
 use tracing::{Level, instrument};
 
 use crate::{
@@ -125,9 +126,8 @@ where
         ctx: &mut Context,
     ) -> Self;
     fn not(&self, out_type: &Type, ctx: &mut Context) -> Self;
-    /// A constant integer: `s` raw bits, with no reading attached. Every consumer that cares about
-    /// signedness takes it from the operation applied to the value, not from the value.
-    fn of_int(s: usize, v: u128, ctx: &mut Context) -> Self;
+    /// A constant integer, as a pattern with no inherent signedness.
+    fn of_int(v: &IntBits, ctx: &mut Context) -> Self;
     // FIELD-ASSUMPTION: L2-seam
     fn of_field(f: Field, ctx: &mut Context) -> Self;
     fn of_blob(elem_type: Type, elements: Vec<Self>, ctx: &mut Context) -> Self;
@@ -818,7 +818,7 @@ where
     V: Value<Ctx>,
 {
     match constant {
-        Constant::Int(size, val) => V::of_int(*size, *val, ctx),
+        Constant::Int(v) => V::of_int(v, ctx),
         Constant::Field(val) => V::of_field(*val, ctx),
         Constant::FnPtr(_) => {
             todo!("FnPtrConst in symbolic executor");

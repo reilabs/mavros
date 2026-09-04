@@ -464,7 +464,7 @@ fn array_size(ty: &Type) -> usize {
 /// The constant value of an index, if it resolves to an integer constant.
 fn const_index(ssa: &HLSSA, index: ValueId) -> Option<usize> {
     match &*ssa.get_const(index)? {
-        Constant::Int(_, v) => Some(*v as usize),
+        Constant::Int(v) => usize::try_from(v).ok(),
         _ => None,
     }
 }

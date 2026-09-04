@@ -5,7 +5,9 @@
 //! is why this list is the backbone and `proptest` is the layer on top rather than the other way
 //! round.
 
-use crate::{MAX_BITS, MAX_SIGNED_BITS, Raw, mask};
+use std::sync::LazyLock;
+
+use crate::{MAX_BITS, MAX_SIGNED_BITS, mask};
 
 /// The widths every sweep covers.
 ///
@@ -24,25 +26,34 @@ pub const EXHAUSTIVE_WIDTHS: [usize; 3] = [1, 4, 8];
 
 /// Widths that are not powers of two.
 ///
-/// Kept separate because several evaluators quietly assume a power of two.
+/// Kept as a named set because they are the ones that catch a width assumption, and every
+/// evaluator sweep now chains them in: a mask by `bits - 1` passes at every width in [`WIDTHS`]
+/// and fails here.
 pub const ODD_WIDTHS: [usize; 3] = [3, 5, 7];
 
 /// Corner raw patterns for a `bits`-wide operand, deduplicated and masked to the width.
+///
+/// Deliberately host words rather than [`IntBits`](crate::IntBits) as these are a _corpus_, sorted
+/// and deduplicated, and a pattern has no ordering to sort by. The sweeps that use them are
+/// host-level evaluators too, so they build a pattern at the point they call the model and nowhere
+/// else.
 ///
 /// Covers, in both readings: zero and the small values, the unsigned top, the signed boundary pair
 /// and its neighbours, `-1` and `-2`, the powers of two that sit at the width's edges and middle,
 /// the two alternating patterns, and the two operands the existing corpus tests use for the case
 /// where the readings disagree.
 #[must_use]
-pub fn values(bits: usize) -> Vec<Raw> {
+pub fn values(bits: usize) -> Vec<u128> {
     assert!((1..=MAX_BITS).contains(&bits));
     let m = mask(bits);
     let mut out = vec![0, 1, 2, 3, m, m - 1];
 
     if bits >= 2 {
         let sign_bit = 1u128 << (bits - 1);
+
         // `MIN_S`, `MAX_S`, and one step inside each.
         out.extend([sign_bit, sign_bit - 1, sign_bit + 1, sign_bit - 2]);
+
         // `-1` is `m` (already present) and `-2` is one below it.
         out.push(m - 2);
     }
@@ -74,7 +85,7 @@ pub fn values(bits: usize) -> Vec<Raw> {
 /// those two. The host widths (63, 64, 65, 127, 128) are here because several evaluators reach for
 /// a `u64` or `u128` shift internally and inherit *its* masking rather than the operand's.
 #[must_use]
-pub fn shift_amounts(bits: usize, rhs_bits: usize) -> Vec<Raw> {
+pub fn shift_amounts(bits: usize, rhs_bits: usize) -> Vec<u128> {
     assert!((1..=MAX_BITS).contains(&bits) && (1..=MAX_BITS).contains(&rhs_bits));
     let m = mask(rhs_bits);
     let mut out = vec![0, 1, 63, 64, 65, 127, 128, m];
@@ -108,9 +119,8 @@ pub fn shift_amounts(bits: usize, rhs_bits: usize) -> Vec<Raw> {
 /// outright, because `assert_int_arith_widths` would panic on the IR one would have to come from.
 #[must_use]
 pub fn shift_width_pairs(signed: bool) -> Vec<(usize, usize)> {
-    let widths: &[usize] = if signed { &SIGNED_WIDTHS } else { &WIDTHS };
     let mut out = Vec::new();
-    for &bits in widths {
+    for &bits in widths_for(signed) {
         for &rhs_bits in &[bits, 8, 32, 64, MAX_BITS] {
             out.push((bits, rhs_bits));
         }
@@ -121,9 +131,32 @@ pub fn shift_width_pairs(signed: bool) -> Vec<(usize, usize)> {
 }
 
 /// The widths a sweep should use for `sign`.
+///
+/// This is [`WIDTHS`] (or [`SIGNED_WIDTHS`]) **plus [`ODD_WIDTHS`]**. The union lives here rather
+/// than in each sweep on purpose to avoid width assumptions.
+///
+/// Built once per reading rather than per call, and borrowed rather than cloned: every caller is a
+/// sweep that asks for this from inside a loop.
 #[must_use]
 pub fn widths_for(signed: bool) -> &'static [usize] {
-    if signed { &SIGNED_WIDTHS } else { &WIDTHS }
+    static UNSIGNED: LazyLock<Vec<usize>> = LazyLock::new(|| union_with_odd(false));
+    static SIGNED: LazyLock<Vec<usize>> = LazyLock::new(|| union_with_odd(true));
+
+    if signed { &SIGNED } else { &UNSIGNED }
+}
+
+/// The body of [`widths_for`], run once per reading.
+fn union_with_odd(signed: bool) -> Vec<usize> {
+    let base: &[usize] = if signed { &SIGNED_WIDTHS } else { &WIDTHS };
+    let mut out: Vec<usize> = base
+        .iter()
+        .copied()
+        .chain(ODD_WIDTHS)
+        .filter(|bits| !signed || signed_width_ok(*bits))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// Assert a width is one a signed operation may use, mirroring the model's own bound.

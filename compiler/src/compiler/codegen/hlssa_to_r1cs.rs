@@ -4,7 +4,7 @@ use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field, PrimeField};
 use tracing::{instrument, warn};
 
 use mavros_artifacts::FieldConfig;
-use mavros_int_semantics::{self as semantics, CmpOp, Sign};
+use mavros_int_semantics::{self as semantics, CmpOp, IntBits};
 
 use crate::compiler::{
     analysis::{
@@ -18,7 +18,7 @@ use crate::compiler::{
             Radix, RefCountOp, SliceOpDir, Type, TypeExpr, assert_signed_op_width,
         },
     },
-    util::{spread_bits, unspread_bits},
+    util::{host_word, spread_bits, unspread_bits},
 };
 
 pub use mavros_artifacts::{
@@ -202,8 +202,8 @@ impl Value {
             // FIELD-ASSUMPTION: L4-decompose
             Value::Const(c) => {
                 let limbs = c.into_bigint().0;
-                semantics::field_limbs_fit(&limbs, semantics::MAX_BITS)
-                    .then(|| semantics::field_limbs_to_int(&limbs, semantics::MAX_BITS))
+                IntBits::field_limbs_fit(&limbs, semantics::MAX_BITS)
+                    .then(|| host_word(&IntBits::from_field_limbs(&limbs, semantics::MAX_BITS)))
             }
             r => panic!("expected {what}, got {r:?}"),
         }
@@ -237,6 +237,14 @@ impl Value {
 
     pub fn expect_u128(&self) -> u128 {
         self.expect_in_u128("u128")
+    }
+
+    /// The canonical value as a `bits`-wide pattern.
+    ///
+    /// This evaluator carries its integers as field elements and reads them out as host words, so a
+    /// pattern exists only for the length of a call into the model.
+    fn expect_pattern(&self, bits: usize) -> IntBits {
+        IntBits::from_u128(bits, self.expect_u128())
     }
 
     // FIELD-ASSUMPTION: L4-eval
@@ -534,13 +542,9 @@ impl symbolic_executor::Value<R1CGen> for Value {
             CmpKind::ULt => self.lt(b),
             CmpKind::SLt => {
                 let bits = bits.expect("ICE: signed comparison without an operand width");
-                let less = semantics::cmp(
-                    CmpOp::Lt,
-                    Sign::Signed,
-                    bits,
-                    self.expect_u128(),
-                    b.expect_u128(),
-                );
+                let less = self
+                    .expect_pattern(bits)
+                    .compare(CmpOp::SLt, &b.expect_pattern(bits));
                 Value::Const(if less {
                     ark_bn254::Fr::ONE
                 } else {
@@ -591,14 +595,12 @@ impl symbolic_executor::Value<R1CGen> for Value {
                 // `int{max(s1, s2)}` and this evaluator only sees that result type, so a shift
                 // amount narrower than the value is indistinguishable from one declared at the
                 // value's own width. Reading it wider than it was declared is harmless as the extra
-                // bits are zero, and the model masks both patterns itself.
+                // bits are zero, and `expect_pattern` masks to `bits` on the way in as the model
+                // takes its operands already normalized and does no masking of its own.
                 let raw = semantics::residue(
-                    binary_arith_op_kind.group().into(),
-                    binary_arith_op_kind.sign(),
-                    bits,
-                    self.expect_u128(),
-                    bits,
-                    b.expect_u128(),
+                    binary_arith_op_kind.into(),
+                    &self.expect_pattern(bits),
+                    &b.expect_pattern(bits),
                 )
                 .unwrap_or_else(|| {
                     Self::ice_undefined_divmod(
@@ -608,7 +610,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     )
                 });
 
-                Value::Const(ark_bn254::Fr::from(raw))
+                Value::Const(ark_bn254::Fr::from(host_word(&raw)))
             }
             TypeExpr::Field | TypeExpr::WitnessOf(_) => match binary_arith_op_kind.group() {
                 ArithGroup::Add => self.add(b),
@@ -672,13 +674,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
 
                 // Read as two's complement, by the same model call above, so an assertion and the
                 // comparison it asserts on cannot disagree.
-                if !semantics::cmp(
-                    CmpOp::Lt,
-                    Sign::Signed,
-                    bits,
-                    a.expect_u128(),
-                    b.expect_u128(),
-                ) {
+                if !a
+                    .expect_pattern(bits)
+                    .compare(CmpOp::SLt, &b.expect_pattern(bits))
+                {
                     return Err(AssertionFailure::new(format!(
                         "assert_cmp lt (signed) failed: {a_val:?} >= {b_val:?}"
                     )));
@@ -816,8 +815,8 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::Const(ark_bn254::Fr::from_bigint(BigInt::from_bits_le(&negated_bits)).unwrap())
     }
 
-    fn of_int(_s: usize, v: u128, _ctx: &mut R1CGen) -> Self {
-        Value::Const(ark_bn254::Fr::from(v))
+    fn of_int(v: &IntBits, _ctx: &mut R1CGen) -> Self {
+        Value::Const(ark_bn254::Fr::from(host_word(v)))
     }
 
     fn of_field(f: crate::compiler::Field, _ctx: &mut R1CGen) -> Self {
@@ -1798,8 +1797,8 @@ mod comparison_tests {
 
     /// A field element has no width and no sign, and its comparisons say so.
     ///
-    /// This is the case that used to reach `assert_cmp`'s non-integer arm, and it must keep
-    /// reaching the same answers now that the arm is selected by the opcode instead.
+    /// `assert_cmp` selects its arm by the opcode rather than by the operand's kind, so this is
+    /// the case that pins a field comparison to the same answers either way.
     #[test]
     fn a_field_comparison_needs_no_width() {
         let a = constant(2);
@@ -1817,7 +1816,7 @@ mod comparison_tests {
 
 #[cfg(test)]
 mod int_semantics_conformance {
-    use mavros_int_semantics::{IntOp, Raw, Sign, corners, residue};
+    use mavros_int_semantics::{IntBits, IntOp, Sign, corners, residue};
 
     use super::{BinaryArithOpKind, FieldConfig, R1CGen, Type, Value, symbolic_executor};
 
@@ -1842,8 +1841,21 @@ mod int_semantics_conformance {
         BinaryArithOpKind::Xor,
     ];
 
+    /// `residue` on the host words either side of it.
+    ///
+    /// This evaluator holds its integers as field elements and reads them out as host words, so a
+    /// pattern exists only for the length of a call into the model.
+    fn model(op: BinaryArithOpKind, bits: usize, a: u128, b: u128) -> Option<u128> {
+        residue(
+            op.into(),
+            &IntBits::from_u128(bits, a),
+            &IntBits::from_u128(bits, b),
+        )
+        .map(|v| u128::try_from(&v).expect("a narrow answer fits a host word"))
+    }
+
     /// Fold one operation the way `R1CGen` does, and read the answer back as a raw pattern.
-    fn fold(op: BinaryArithOpKind, bits: usize, a: Raw, b: Raw) -> Raw {
+    fn fold(op: BinaryArithOpKind, bits: usize, a: u128, b: u128) -> u128 {
         let mut generator = R1CGen::new(FieldConfig::bn254());
         <Value as symbolic_executor::Value<R1CGen>>::arith(
             &Value::Const(ark_bn254::Fr::from(a)),
@@ -1856,29 +1868,12 @@ mod int_semantics_conformance {
     }
 
     /// The widths this evaluator may be asked about, for one reading.
-    ///
-    /// The odd widths are deliberately absent for shifts and present for everything else, which is
-    /// the same restriction the VM and LLVM sweeps carry and for the same reason: the shared
-    /// [`mavros_int_semantics::masked_shift_amount`] is a mask rather than a modulo, so at a width
-    /// that is not a power of two it corrupts even an in-range amount (T10). Nothing builds a shift
-    /// at such a width — `witness_bitwise::lower_shift` asserts against it — so sweeping one here
-    /// would pin a disagreement no program can reach.
-    fn widths(op: BinaryArithOpKind) -> Vec<usize> {
-        let signed = op.is_signed();
-        corners::widths_for(signed)
-            .iter()
-            .copied()
-            .chain(
-                corners::ODD_WIDTHS
-                    .into_iter()
-                    .filter(|_| !matches!(op.group().into(), IntOp::Shl | IntOp::Shr)),
-            )
-            .filter(|bits| !signed || corners::signed_width_ok(*bits))
-            .collect()
+    fn widths(op: BinaryArithOpKind) -> &'static [usize] {
+        corners::widths_for(op.is_signed())
     }
 
-    fn operand_pairs(op: BinaryArithOpKind, bits: usize) -> Vec<(Raw, Raw)> {
-        let rhs = if matches!(op.group().into(), IntOp::Shl | IntOp::Shr) {
+    fn operand_pairs(op: BinaryArithOpKind, bits: usize) -> Vec<(u128, u128)> {
+        let rhs = if IntOp::from(op).is_shift() {
             corners::shift_amounts(bits, bits)
         } else {
             corners::values(bits)
@@ -1890,8 +1885,8 @@ mod int_semantics_conformance {
     }
 
     /// Whether the model declines to specify this input, which is the ICE case rather than a value.
-    fn unspecified(op: BinaryArithOpKind, bits: usize, a: Raw, b: Raw) -> bool {
-        residue(op.group().into(), op.sign(), bits, a, bits, b).is_none()
+    fn unspecified(op: BinaryArithOpKind, bits: usize, a: u128, b: u128) -> bool {
+        model(op, bits, a, b).is_none()
     }
 
     /// The R1CS fold answers exactly what a total backend must answer.
@@ -1904,9 +1899,9 @@ mod int_semantics_conformance {
         let mut checked = 0usize;
 
         for op in ALL_ARITH {
-            for bits in widths(op) {
+            for &bits in widths(op) {
                 for (a, b) in operand_pairs(op, bits) {
-                    let Some(want) = residue(op.group().into(), op.sign(), bits, a, bits, b) else {
+                    let Some(want) = model(op, bits, a, b) else {
                         continue;
                     };
                     let got = fold(op, bits, a, b);
@@ -1938,7 +1933,7 @@ mod int_semantics_conformance {
         let mut found = 0usize;
 
         for op in ALL_ARITH {
-            for bits in widths(op) {
+            for &bits in widths(op) {
                 for (a, b) in operand_pairs(op, bits) {
                     if !unspecified(op, bits, a, b) {
                         continue;
@@ -1946,7 +1941,10 @@ mod int_semantics_conformance {
                     found += 1;
 
                     assert!(
-                        matches!(op.group().into(), IntOp::Div | IntOp::Rem),
+                        matches!(
+                            IntOp::from(op),
+                            IntOp::UDiv | IntOp::SDiv | IntOp::URem | IntOp::SRem
+                        ),
                         "{op:?} at {bits} bits: {a:#x} {b:#x} is unspecified but is not a division"
                     );
 
@@ -1983,20 +1981,15 @@ mod int_semantics_conformance {
         fold(BinaryArithOpKind::SDiv, 8, 0x80, 0xFF);
     }
 
-    /// The regression T1 named: the fold used to mask a shift amount to 127 rather than to the
-    /// operand width, so `1u8 << 8` answered `0` here and `1` in the VM and LLVM.
-    ///
-    /// Latent, because a planted amount check dominates every shift, but latent by an argument
-    /// about a different pass, which is exactly the kind of claim that decays. This pins the
-    /// agreement itself.
     #[test]
-    fn an_out_of_range_shift_amount_masks_to_the_width() {
+    fn an_out_of_range_shift_amount_reduces_to_the_width() {
         assert_eq!(fold(BinaryArithOpKind::UShl, 8, 1, 8), 1);
         assert_eq!(fold(BinaryArithOpKind::UShl, 8, 1, 9), 2);
         assert_eq!(fold(BinaryArithOpKind::UShr, 8, 0x80, 8), 0x80);
 
-        // The signed right shift already masked to `bits - 1`, so it is here as the control: the
-        // trio agreed on `>>` and only `<<` was out of step.
+        // The signed right shift is here as the control: it reduces by the width like the other
+        // two, so a failure isolated to `<<` points at the shift direction rather than at the
+        // reduction.
         assert_eq!(fold(BinaryArithOpKind::SShr, 8, 0xFF, 8), 0xFF);
     }
 }
