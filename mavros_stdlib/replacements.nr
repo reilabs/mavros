@@ -3,6 +3,7 @@
 //! module (see the replacement registries in the compiler's `project.rs`), so the rest of the
 //! frontend treats them as ordinary functions.
 
+pub mod aes128_encrypt;
 pub mod blake3;
 pub mod derive_pedersen_generators;
 pub mod ecdsa_secp256r1;

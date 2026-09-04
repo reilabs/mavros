@@ -41,6 +41,10 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
         include_str!("../../mavros_stdlib/replacements.nr"),
     ),
     (
+        "std/mavros/replacements/aes128_encrypt.nr",
+        include_str!("../../mavros_stdlib/replacements/aes128_encrypt.nr"),
+    ),
+    (
         "std/mavros/replacements/blake3.nr",
         include_str!("../../mavros_stdlib/replacements/blake3.nr"),
     ),
@@ -88,6 +92,7 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
 /// ordinary function: type checking, generic instantiation and the constrained/unconstrained
 /// pairing all apply natively, and the mavros pipeline never sees a lowlevel call for it.
 const FOREIGN_REPLACEMENTS: &[&str] = &[
+    "aes128_encrypt",
     "blake3",
     "derive_pedersen_generators",
     "ecdsa_secp256r1",
