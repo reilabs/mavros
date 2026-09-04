@@ -931,6 +931,24 @@ pub fn flatten_param_vec(vec: &[InputValueOrdered]) -> Vec<Field> {
     encoded_value
 }
 
+pub fn flattened_param_count(vec: &[InputValueOrdered]) -> usize {
+    vec.iter().map(param_field_count).sum()
+}
+
+fn param_field_count(value: &InputValueOrdered) -> usize {
+    match value {
+        InputValueOrdered::Field(_) => 1,
+        InputValueOrdered::Vec(vec_elements) => vec_elements.iter().map(param_field_count).sum(),
+        InputValueOrdered::Struct(fields) => fields
+            .iter()
+            .map(|(_field_name, field_value)| param_field_count(field_value))
+            .sum(),
+        _ => panic!(
+            "Unsupported input value type."
+        ),
+    }
+}
+
 fn flatten_params(value: &InputValueOrdered) -> Vec<Field> {
     let mut encoded_value = Vec::new();
     match value {

@@ -44,7 +44,7 @@ pub fn ordered_params_from_btreemap(
         }
     }
 
-    let flattened = crate::vm::interpreter::flatten_param_vec(&ordered_params).len();
+    let flattened = crate::vm::interpreter::flattened_param_count(&ordered_params);
     if flattened != flattened_io_count(abi) {
         return Err("ordered params do not flatten to the ABI's io count".to_string());
     }
@@ -54,17 +54,10 @@ pub fn ordered_params_from_btreemap(
 pub fn guard_layout(abi: &noirc_abi::Abi) -> Option<(usize, usize)> {
     abi.return_type.as_ref().map(|ret| {
         (
-            1 + params_field_count(abi),
+            1 + abi.field_count() as usize,
             ret.abi_type.field_count() as usize,
         )
     })
-}
-
-fn params_field_count(abi: &noirc_abi::Abi) -> usize {
-    abi.parameters
-        .iter()
-        .map(|param| param.typ.field_count() as usize)
-        .sum()
 }
 
 pub fn check_return_guard(
@@ -105,7 +98,7 @@ pub fn flattened_io_count(abi: &noirc_abi::Abi) -> usize {
         .return_type
         .as_ref()
         .map_or(0, |ret| 1 + ret.abi_type.field_count() as usize);
-    params_field_count(abi) + returns
+    abi.field_count() as usize + returns
 }
 
 fn field_param(value: u64) -> InputValueOrdered {
