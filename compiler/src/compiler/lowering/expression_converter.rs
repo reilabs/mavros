@@ -1683,6 +1683,13 @@ impl<'a> ExpressionConverter<'a> {
                     .add_const(Constant::int(1, if self.in_unconstrained { 1 } else { 0 }));
                 Some(value)
             }
+            "black_box" => {
+                // `black_box` is semantically an identity; its optimization-barrier behavior is
+                // explicitly only a hint. Mavros does not currently eliminate pass-through
+                // callees, so evaluating the argument once and returning its SSA value preserves
+                // the unconstrained calls this hint was added to protect.
+                self.convert_expression(&call.arguments[0], b)
+            }
             "as_witness" => {
                 // No-op hint, just evaluate the argument and discard
                 self.convert_expression(&call.arguments[0], b);
