@@ -362,6 +362,14 @@ fn run_phase1_impl(
     let mut out_c = vec![Field::ZERO; constraints_layout.size()];
     let mut out_wit_pre_comm = vec![Field::ZERO; witness_layout.pre_commitment_size()];
     let flat_inputs = flatten_param_vec(ordered_inputs);
+    // Main takes its inputs as a single Blob<Field; N> parameter.
+    assert_eq!(
+        flat_inputs.len(),
+        header.entry_blob_field_count,
+        "{} flattened input fields supplied but the entry has {}",
+        flat_inputs.len(),
+        header.entry_blob_field_count,
+    );
     // The program itself writes inputs to the witness tape via pinned WriteWitness instructions.
     let out_wit_post_comm = vec![Field::ZERO; witness_layout.post_commitment_size()];
     let mut global_frame = vec![0u64; global_frame_size];
@@ -399,15 +407,8 @@ fn run_phase1_impl(
 
     let frame = Frame::base_frame(program[entry + 1], &mut vm);
 
-    // Main takes its inputs as a single Blob<Field; N> parameter stored by
-    // value in the frame, starting right after the two return slots.
-    assert_eq!(
-        flat_inputs.len(),
-        header.entry_blob_field_count,
-        "{} flattened input fields supplied but the entry has {}",
-        flat_inputs.len(),
-        header.entry_blob_field_count,
-    );
+    // The input blob is stored by value in the frame, starting right after
+    // the two return slots.
     for (input_index, el) in flat_inputs.iter().enumerate() {
         unsafe {
             *(frame.data.add(2 + (4 * input_index)) as *mut Field) = *el;
@@ -943,9 +944,7 @@ fn param_field_count(value: &InputValueOrdered) -> usize {
             .iter()
             .map(|(_field_name, field_value)| param_field_count(field_value))
             .sum(),
-        _ => panic!(
-            "Unsupported input value type."
-        ),
+        _ => panic!("Unsupported input value type."),
     }
 }
 
