@@ -9,11 +9,17 @@ use thiserror::Error;
 
 use crate::{CmpOp, MAX_BITS, MAX_SIGNED_BITS, SignedValue, check_widths, mask};
 
+// HOST LIMB
+// ================================================================================================
+
+/// The width of one limb of an [`IntBits`] pattern, and of one integer cell in a VM frame.
+pub const HOST_LIMB_BITS: usize = u64::BITS as usize;
+
 // INTEGER BIT PATTERN
 // ================================================================================================
 
 /// A `bits`-wide two's-complement pattern: exactly [`IntBits::limbs_for_bits`] little-endian
-/// 64-bit limbs, with every bit at or above `bits` set to zero.
+/// [`HOST_LIMB_BITS`]-wide limbs, with every bit at or above `bits` set to zero.
 ///
 /// It has no [`Ord`] implementation because it is a raw bit interpretation and there are two valid
 /// readings of ordering for this type. [`IntBits::compare`] should be used to choose a reading.
@@ -56,7 +62,7 @@ impl IntBits {
         let mut limbs = vec![0u64; count];
         limbs[0] = value as u64;
         if count > 1 {
-            limbs[1] = (value >> 64) as u64;
+            limbs[1] = (value >> HOST_LIMB_BITS) as u64;
         }
         Self::normalized(bits, limbs)
     }
@@ -212,11 +218,11 @@ impl IntBits {
         &self.limbs
     }
 
-    /// The number of 64-bit limbs a `bits`-wide pattern occupies.
+    /// The number of [`HOST_LIMB_BITS`]-wide limbs a `bits`-wide pattern occupies.
     ///
-    /// The host limb is 64 bits and that is fixed by the machine, not by the field: this is the
-    /// quantity `int_cell_count` reserves in a VM frame and `for_each_constant_word` emits. The
-    /// _field_ limb is a different and narrower thing, derived from the field's own width.
+    /// [`HOST_LIMB_BITS`] is fixed by the machine and not by the field: this is the quantity
+    /// `int_cell_count` reserves in a VM frame and `for_each_constant_word` emits. The _field_ limb
+    /// is a different and narrower thing, derived from the field's own width.
     ///
     /// # Panics
     ///
@@ -224,7 +230,7 @@ impl IntBits {
     #[must_use]
     pub fn limbs_for_bits(bits: usize) -> usize {
         assert!(bits > 0, "an integer pattern is at least one bit wide");
-        bits.div_ceil(64)
+        bits.div_ceil(HOST_LIMB_BITS)
     }
 
     /// How many limbs this pattern occupies.
@@ -267,7 +273,7 @@ impl IntBits {
         if index >= self.bits {
             return None;
         }
-        Some((self.limbs[index / 64] >> (index % 64)) & 1 == 1)
+        Some((self.limbs[index / HOST_LIMB_BITS] >> (index % HOST_LIMB_BITS)) & 1 == 1)
     }
 }
 
@@ -359,19 +365,19 @@ impl IntBits {
         if amount >= self.bits {
             return Self::zero(self.bits);
         }
-        let (whole, part) = (amount / 64, amount % 64);
+        let (whole, part) = (amount / HOST_LIMB_BITS, amount % HOST_LIMB_BITS);
         let mut out = vec![0u64; self.limbs.len()];
         for (i, &limb) in self.limbs.iter().enumerate() {
             let Some(target) = out.get_mut(i + whole) else {
                 break;
             };
             *target |= limb << part;
-            // A shift by a whole limb is `limb << 64`, which is undefined rather than zero, so the
-            // carry into the next limb is guarded rather than written as `limb >> (64 - part)`.
+            // A shift by a whole limb is `limb << HOST_LIMB_BITS`, which is undefined rather than
+            // zero, so the carry into the next limb is guarded rather than written directly.
             if part > 0
                 && let Some(next) = out.get_mut(i + whole + 1)
             {
-                *next |= limb >> (64 - part);
+                *next |= limb >> (HOST_LIMB_BITS - part);
             }
         }
         Self::normalized(self.bits, out)
@@ -383,7 +389,7 @@ impl IntBits {
         if amount >= self.bits {
             return Self::zero(self.bits);
         }
-        let (whole, part) = (amount / 64, amount % 64);
+        let (whole, part) = (amount / HOST_LIMB_BITS, amount % HOST_LIMB_BITS);
         let mut out = vec![0u64; self.limbs.len()];
         for i in 0..self.limbs.len() {
             let Some(&limb) = self.limbs.get(i + whole) else {
@@ -393,7 +399,7 @@ impl IntBits {
             if part > 0
                 && let Some(&next) = self.limbs.get(i + whole + 1)
             {
-                out[i] |= next << (64 - part);
+                out[i] |= next << (HOST_LIMB_BITS - part);
             }
         }
         Self::normalized(self.bits, out)
@@ -776,7 +782,7 @@ impl IntBits {
         }
         let lo = self.limbs.first().copied().unwrap_or(0);
         let hi = self.limbs.get(1).copied().unwrap_or(0);
-        Ok(u128::from(lo) | (u128::from(hi) << 64))
+        Ok(u128::from(lo) | (u128::from(hi) << HOST_LIMB_BITS))
     }
 }
 
@@ -867,11 +873,8 @@ pub struct DoesNotFit {
 // ================================================================================================
 
 /// The mask the top limb of a `bits`-wide pattern carries.
-///
-/// A width that is a whole number of limbs has a full top limb; `bits % 64 == 0` is that case and
-/// not an empty one, which is why it cannot be written as `(1 << (bits % 64)) - 1`.
 const fn top_limb_mask(bits: usize) -> u64 {
-    match bits % 64 {
+    match bits % HOST_LIMB_BITS {
         0 => u64::MAX,
         rest => (1u64 << rest) - 1,
     }
@@ -890,12 +893,24 @@ mod tests {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
+    #[test]
+    fn the_boundary_widths_straddle_the_top_limb_as_documented() {
+        // `16384` is exactly 256 limbs, so its top limb is full ...
+        assert_eq!(IntBits::limbs_for_bits(16384), 256);
+        assert_eq!(top_limb_mask(16384), u64::MAX);
+
+        // ... and `16383` is the widest width that shares that limb count with a partial top.
+        assert_eq!(IntBits::limbs_for_bits(16383), 256);
+        assert_ne!(top_limb_mask(16383), u64::MAX);
+        assert_eq!(IntBits::limbs_for_bits(16385), 257);
+    }
+
     /// Widths worth constructing at, chosen for their top limbs.
     ///
     /// `16383` and `16384` are the pair that matters most and the reason both are here: `16384` is
-    /// exactly 256 limbs, so its top limb is full and every `bits % 64` special case vanishes,
-    /// while `16383` is the widest width whose top limb is partial. They occupy the same number of
-    /// limbs, so a test that carries only one of them is testing half the boundary.
+    /// exactly 256 limbs, so its top limb is full and every `bits % HOST_LIMB_BITS` special case
+    /// vanishes, while `16383` is the widest width whose top limb is partial. They occupy the same
+    /// number of limbs, so a test that carries only one of them is testing half the boundary.
     const WIDTHS: &[usize] = &[
         1, 2, 3, 7, 8, 63, 64, 65, 96, 127, 128, 129, 191, 192, 193, 1000, 16383, 16384,
     ];

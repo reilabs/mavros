@@ -1,6 +1,8 @@
 //! Lowers canonical `BitRange` operations after the witness integer/bitwise passes have emitted
 //! all bit selections.
 
+use mavros_int_semantics::int_bits::FIELD_LIMB_BITS;
+
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
     ssa::{
@@ -202,14 +204,19 @@ fn decompose_canonical_field_bytes(
     // byte-decomposition below. Read from the configured field (not hardcoded), so no concrete
     // prime is named here; `modulus_lo_m1` is the low half minus one.
     let modulus_limbs = b.field().modulus_limbs();
-    let modulus_hi_u128 = (u128::from(modulus_limbs[3]) << 64) | u128::from(modulus_limbs[2]);
-    let modulus_lo_u128 = (u128::from(modulus_limbs[1]) << 64) | u128::from(modulus_limbs[0]);
+    let modulus_hi_u128 =
+        (u128::from(modulus_limbs[3]) << FIELD_LIMB_BITS) | u128::from(modulus_limbs[2]);
+    let modulus_lo_u128 =
+        (u128::from(modulus_limbs[1]) << FIELD_LIMB_BITS) | u128::from(modulus_limbs[0]);
+
     // `p` is odd, so subtracting one never borrows out of the lowest limb.
     let modulus_lo_m1_u128 = modulus_lo_u128 - 1;
     let modulus_hi = b.field_const(b.field().constant(modulus_hi_u128));
     let modulus_lo_m1 = b.field_const(b.field().constant(modulus_lo_m1_u128));
     let two_to_8 = b.field_const(b.field().constant(256u128));
-    let two_to_64 = b.field_const(b.field().two_pow(64));
+    // One field limb's place value, and one `u128` half's. The `128`s here and below are the
+    // width of the halves the modulus is read in above, not a field limb.
+    let limb_place_value = b.field_const(b.field().two_pow(FIELD_LIMB_BITS));
     let two_to_128 = b.field_const(b.field().two_pow(128));
     let zero = b.field_const(b.field().zero());
 
@@ -243,20 +250,23 @@ fn decompose_canonical_field_bytes(
     let shifted_limb = b.umul(limbs[3], two_to_8);
     limbs[3] = b.uadd(shifted_limb, lsb);
 
-    let hi_upper = b.umul(limbs[0], two_to_64);
+    let hi_upper = b.umul(limbs[0], limb_place_value);
     let hi = b.uadd(hi_upper, limbs[1]);
-    let lo_upper = b.umul(limbs[2], two_to_64);
+    let lo_upper = b.umul(limbs[2], limb_place_value);
     let lo = b.uadd(lo_upper, limbs[3]);
 
     let limb2_pure = b.value_of(limbs[2]);
     let limb3_pure = b.value_of(limbs[3]);
-    let limb2_u64 = b.cast_to(CastTarget::Int(64), limb2_pure);
-    let limb3_u64 = b.cast_to(CastTarget::Int(64), limb3_pure);
+    let limb2_u64 = b.cast_to(CastTarget::Int(FIELD_LIMB_BITS), limb2_pure);
+    let limb3_u64 = b.cast_to(CastTarget::Int(FIELD_LIMB_BITS), limb3_pure);
 
     // The two 64-bit limbs of the low half of `p - 1`, in the same big-endian limb order the byte
     // decomposition above produces; derived from the configured field rather than written out.
-    let mod_limb2 = b.int_const(64, u128::from((modulus_lo_m1_u128 >> 64) as u64));
-    let mod_limb3 = b.int_const(64, u128::from(modulus_lo_m1_u128 as u64));
+    let mod_limb2 = b.int_const(
+        FIELD_LIMB_BITS,
+        u128::from((modulus_lo_m1_u128 >> FIELD_LIMB_BITS) as u64),
+    );
+    let mod_limb3 = b.int_const(FIELD_LIMB_BITS, u128::from(modulus_lo_m1_u128 as u64));
     let hi_lt = b.ult(mod_limb2, limb2_u64);
     let hi_eq = b.eq(mod_limb2, limb2_u64);
     let lo_lt = b.ult(mod_limb3, limb3_u64);
