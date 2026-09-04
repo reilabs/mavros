@@ -16,6 +16,7 @@ export interface ProgramMetadata {
   witnessCount: number;
   constraintCount: number;
   parameters: ParameterInfo[];
+  returnElementCount: number;
 }
 
 /**
@@ -91,6 +92,32 @@ export function parseProverToml(
     }
   }
 
+  if (metadata.returnElementCount > 0) {
+    const returnValue = parsed['return'];
+    if (returnValue === undefined) {
+      console.warn(
+        'Warning: the program declares a return value but Prover.toml does not ' +
+          "supply `return`; the return-value check is disabled (guard = 0)"
+      );
+      allElements.push(parseFieldElement('0'));
+      for (let i = 0; i < metadata.returnElementCount; i++) {
+        allElements.push(parseFieldElement('0'));
+      }
+    } else {
+      const strings = flattenValue(returnValue);
+      if (strings.length !== metadata.returnElementCount) {
+        throw new Error(
+          `Return value has ${strings.length} elements, ` +
+            `but expected ${metadata.returnElementCount}`
+        );
+      }
+      allElements.push(parseFieldElement('1'));
+      for (const str of strings) {
+        allElements.push(parseFieldElement(str));
+      }
+    }
+  }
+
   return allElements;
 }
 
@@ -103,12 +130,14 @@ export function loadMetadata(metadataPath: string): ProgramMetadata {
     witnessCount: number;
     constraintCount: number;
     parameters: { name: string; elementCount: number }[];
+    returnElementCount?: number;
   };
 
   return {
     witnessCount: data.witnessCount,
     constraintCount: data.constraintCount,
     parameters: data.parameters,
+    returnElementCount: data.returnElementCount ?? 0,
   };
 }
 

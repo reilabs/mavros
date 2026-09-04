@@ -862,10 +862,16 @@ impl Driver {
             }));
         }
 
+        let return_element_count = abi
+            .return_type
+            .as_ref()
+            .map_or(0, |ret| ret.abi_type.field_count());
+
         let metadata = serde_json::json!({
             "witnessCount": r1cs.witness_layout.size(),
             "constraintCount": r1cs.constraints.len(),
-            "parameters": parameters
+            "parameters": parameters,
+            "returnElementCount": return_element_count
         });
 
         let metadata_path = format!("{}.meta.json", wasm_path.display());
