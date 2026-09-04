@@ -14,7 +14,7 @@ use cargo_metadata::MetadataCommand;
 use ark_ff::UniformRand as _;
 use mavros_artifacts::Field as RawField;
 use mavros_compiler::{
-    Project, abi_helpers,
+    Project, abi_helpers, api,
     collections::HashMap,
     compiler::codegen::{
         CodeGenOptions,
@@ -40,7 +40,6 @@ use mavros_wasm_layout::{
     WITGEN_TABLES_LEN_OFFSET, WITGEN_TABLES_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE,
     WITGEN_WITNESS_PTR_OFFSET,
 };
-use noirc_abi::input_parser::Format;
 use rand::SeedableRng;
 use wasmtime::{Config, Engine, Linker, Memory, Store, WasmBacktraceDetails};
 
@@ -276,7 +275,8 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     let source_path_root = driver.package_root().to_path_buf();
 
     // Load inputs (needed for witgen run)
-    let ordered_params = load_inputs(&driver.package_root().join("Prover.toml"), &driver);
+    let ordered_params =
+        api::read_prover_inputs(driver.package_root(), driver.abi()).map_err(|e| e.to_string());
 
     // 4. Run witgen  (depends on COMPILE)
     let witgen_result = program_artifact.as_ref().and_then(|artifact| {
@@ -554,40 +554,6 @@ fn check_return_guard(
     abi_helpers::check_return_guard(driver.abi(), &r1cs.witness_layout, params, wit_pre_comm)
         .inspect_err(|reason| eprintln!("return-guard check failed: {reason}"))
         .is_ok()
-}
-
-/// Load and order the entry-point inputs, or explain why witgen cannot run.
-fn load_inputs(
-    file_path: &Path,
-    driver: &Driver,
-) -> Result<Vec<interpreter::InputValueOrdered>, String> {
-    let abi = driver.abi();
-
-    if !file_path.exists() {
-        if abi.parameters.is_empty() {
-            return abi_helpers::ordered_params_from_btreemap(
-                abi,
-                &std::collections::BTreeMap::new(),
-            );
-        }
-        return Err(format!(
-            "the ABI declares {} parameter(s) but {} does not exist",
-            abi.parameters.len(),
-            file_path.display()
-        ));
-    }
-
-    let format = file_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .and_then(Format::from_ext)
-        .ok_or_else(|| format!("unrecognized input file format: {}", file_path.display()))?;
-    let contents =
-        fs::read_to_string(file_path).map_err(|e| format!("cannot read input file: {e}"))?;
-    let params = format
-        .parse(&contents, abi)
-        .map_err(|e| format!("cannot parse {}: {e}", file_path.display()))?;
-    abi_helpers::ordered_params_from_btreemap(abi, &params)
 }
 
 // ── WASM Runner ──────────────────────────────────────────────────────
