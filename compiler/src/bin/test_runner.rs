@@ -665,29 +665,6 @@ fn read_field_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr:
     ark_bn254::Fr::new_unchecked(BigInt::new([l0, l1, l2, l3]))
 }
 
-/// Write a field element to WASM memory (writes Montgomery form)
-/// Flatten an InputValueOrdered into a list of Field elements
-fn flatten_input_value(value: &interpreter::InputValueOrdered) -> Vec<RawField> {
-    let mut result = Vec::new();
-    match value {
-        interpreter::InputValueOrdered::Field(elem) => result.push(*elem),
-        interpreter::InputValueOrdered::Vec(vec_elements) => {
-            for elem in vec_elements {
-                result.extend(flatten_input_value(elem));
-            }
-        }
-        interpreter::InputValueOrdered::Struct(fields) => {
-            for (_field_name, field_value) in fields {
-                result.extend(flatten_input_value(field_value));
-            }
-        }
-        interpreter::InputValueOrdered::String(_) => {
-            panic!("Strings are not supported in WASM runner")
-        }
-    }
-    result
-}
-
 fn run_wasm(
     wasm_path: &Path,
     r1cs: &R1CS,
@@ -696,7 +673,7 @@ fn run_wasm(
 ) -> Result<WasmResult, Box<dyn std::error::Error>> {
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
-    let input_fields: Vec<RawField> = params.iter().flat_map(flatten_input_value).collect();
+    let input_fields: Vec<RawField> = interpreter::flatten_param_vec(params);
     if input_fields.len() != expected_input_field_count {
         return Err("Unexpected number of inputs supplied".into());
     }
