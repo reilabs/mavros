@@ -1,15 +1,14 @@
 //! Lowers canonical `BitRange` operations after the witness integer/bitwise passes have emitted
 //! all bit selections.
 
-use mavros_int_semantics::int_bits::FIELD_LIMB_BITS;
+use mavros_int_semantics::{IntBits, int_bits::FIELD_LIMB_BITS};
 
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, Endianness, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Radix,
-            Type, TypeExpr,
+            BinaryArithOpKind, CastTarget, Endianness, OpCode, Radix, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -193,8 +192,8 @@ impl LowerBitRangeOps {
 }
 
 // FIELD-ASSUMPTION: L3-felt-limbs
-// The modulus value is now read from the configured field (see below); the residual assumption is
-// structural — that the field fits in 4 limbs / 32 bytes for the canonical byte-decomposition.
+// The modulus value is read from the configured field (see below); the residual assumption is
+// structural in that the field fits in 4 limbs / 32 bytes for the canonical byte-decomposition.
 fn decompose_canonical_field_bytes(
     b: &mut HLBlockEmitter<'_>,
     value: ValueId,
@@ -227,7 +226,7 @@ fn decompose_canonical_field_bytes(
     let mut limbs = [zero; 4];
     let mut full_sum = zero;
     for i in 0..31 {
-        let idx = b.int_const(32, i as u128);
+        let idx = b.int_const(IntBits::from_u128(32, i as u128));
         let byte = b.array_get(bytes_arr, idx);
         let byte_field = b.cast_to_field(byte);
         let byte_wit = b.write_witness(byte_field);
@@ -262,11 +261,14 @@ fn decompose_canonical_field_bytes(
 
     // The two 64-bit limbs of the low half of `p - 1`, in the same big-endian limb order the byte
     // decomposition above produces; derived from the configured field rather than written out.
-    let mod_limb2 = b.int_const(
+    let mod_limb2 = b.int_const(IntBits::from_u128(
         FIELD_LIMB_BITS,
         u128::from((modulus_lo_m1_u128 >> FIELD_LIMB_BITS) as u64),
-    );
-    let mod_limb3 = b.int_const(FIELD_LIMB_BITS, u128::from(modulus_lo_m1_u128 as u64));
+    ));
+    let mod_limb3 = b.int_const(IntBits::from_u128(
+        FIELD_LIMB_BITS,
+        u128::from(modulus_lo_m1_u128 as u64),
+    ));
     let hi_lt = b.ult(mod_limb2, limb2_u64);
     let hi_eq = b.eq(mod_limb2, limb2_u64);
     let lo_lt = b.ult(mod_limb3, limb3_u64);
@@ -350,7 +352,7 @@ fn split_partial_field_byte(
 
     let byte_pure = b.value_of(byte_wit);
     let byte_u8 = b.cast_to(CastTarget::Int(8), byte_pure);
-    let divisor = b.int_const(8, 1u128 << lo_size);
+    let divisor = b.int_const(IntBits::from_u128(8, 1u128 << lo_size));
     let hi_hint_u8 = b.udiv(byte_u8, divisor);
     let hi_hint = b.cast_to_field(hi_hint_u8);
     let hi_wit = b.write_witness(hi_hint);
@@ -378,12 +380,8 @@ fn lower_pure_bit_range_value(
 ) -> ValueId {
     match value_type.strip_witness().expr {
         TypeExpr::Int(bits) => {
-            assert!(
-                bits <= MAX_SUPPORTED_UNSIGNED_BITS,
-                "pure integer BitRange lowering only supports up to {MAX_SUPPORTED_UNSIGNED_BITS}-bit integers"
-            );
             let unsigned = b.cast_to(CastTarget::Int(bits), value);
-            let mask = b.int_const(bits, bit_mask(bits, offset, width));
+            let mask = b.int_const(window_mask(bits, offset, width));
             let masked = b.fresh_value();
             b.emit(OpCode::BinaryArithOp {
                 kind: BinaryArithOpKind::And,
@@ -391,7 +389,7 @@ fn lower_pure_bit_range_value(
                 lhs: unsigned,
                 rhs: mask,
             });
-            let divisor = b.int_const(bits, 1u128 << offset);
+            let divisor = b.two_pow_const(bits, offset);
             b.udiv(masked, divisor)
         }
         TypeExpr::Field => lower_pure_field_bit_range_value(b, value, offset, width),
@@ -428,7 +426,7 @@ fn lower_pure_field_low_bits(b: &mut HLBlockEmitter<'_>, value: ValueId, bits: u
     let start = 32 - full_bytes - usize::from(partial_bits > 0);
     let mut result = b.field_const(b.field().zero());
     for i in start..32 {
-        let idx = b.int_const(32, i as u128);
+        let idx = b.int_const(IntBits::from_u128(32, i as u128));
         let byte = b.array_get(bytes_arr, idx);
         let byte = if i == start && partial_bits > 0 {
             lower_pure_byte_low_bits(b, byte, partial_bits)
@@ -447,24 +445,28 @@ fn lower_pure_byte_low_bits(b: &mut HLBlockEmitter<'_>, byte: ValueId, bits: usi
         (1..8).contains(&bits),
         "partial byte width must be non-empty"
     );
-    let divisor = b.int_const(8, 1u128 << bits);
+    let divisor = b.int_const(IntBits::from_u128(8, 1u128 << bits));
     let high = b.udiv(byte, divisor);
     let high_shifted = b.umul(high, divisor);
     b.usub(byte, high_shifted)
 }
 
-fn bit_mask(bits: usize, offset: usize, width: usize) -> u128 {
-    assert!(
-        bits <= MAX_SUPPORTED_UNSIGNED_BITS,
-        "u{MAX_SUPPORTED_UNSIGNED_BITS} mask cannot represent u{bits}"
-    );
+/// The `width` bits starting at `offset` of a `bits`-wide value, as a mask of that width.
+///
+/// A **pattern** rather than a host word, which is what makes the window width-generic: the mask
+/// of a 200-bit window is not a number any host type has, and building it through one is what used
+/// to stop this lowering at [`narrow_int_bits`]. The only bounds left are the window's own — a
+/// window has at least one bit and does not reach past its source.
+///
+/// Named for the window rather than for the mask so as not to collide with [`util::bit_mask`],
+/// which answers the different question "the low `bits` of a host word" and is what the guard
+/// lowerings reach for.
+///
+/// [`util::bit_mask`]: crate::compiler::util::bit_mask
+fn window_mask(bits: usize, offset: usize, width: usize) -> IntBits {
     assert!(width > 0, "BitRange width must be at least 1");
     assert!(offset + width <= bits, "BitRange exceeds source width");
-    if width == MAX_SUPPORTED_UNSIGNED_BITS {
-        u128::MAX
-    } else {
-        ((1u128 << width) - 1) << offset
-    }
+    IntBits::all_ones(width).cast(bits).shifted_left(offset)
 }
 
 fn cast_target_for_scalar_type(ty: &Type) -> CastTarget {
@@ -475,5 +477,56 @@ fn cast_target_for_scalar_type(ty: &Type) -> CastTarget {
         // only "reinterpret at n bits". Sign extension is the separate `SExt` opcode.
         TypeExpr::Int(bits) => CastTarget::Int(bits),
         other => panic!("BitRange result must be scalar, got {:?}", other),
+    }
+}
+
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The mask is a pattern, so a window past every host type is an ordinary one.
+    ///
+    /// This is the whole of what makes the window width-generic: `((1u128 << width) - 1) << offset`
+    /// has no answer at 200 bits, and the bound that used to be written against it is what stopped
+    /// a witnessed narrowing at `narrow_int_bits`.
+    #[test]
+    fn a_window_past_every_host_type_is_an_ordinary_mask() {
+        let mask = window_mask(200, 64, 100);
+
+        assert_eq!(mask.bits(), 200);
+        for bit in [63usize, 164, 199] {
+            assert_eq!(
+                mask.bit(bit),
+                Some(false),
+                "bit {bit} is outside the window"
+            );
+        }
+        for bit in [64usize, 100, 163] {
+            assert_eq!(mask.bit(bit), Some(true), "bit {bit} is inside the window");
+        }
+    }
+
+    /// The window's own bounds, which are the only ones left.
+    #[test]
+    #[should_panic(expected = "BitRange exceeds source width")]
+    fn a_window_reaching_past_its_source_is_refused_before_it_can_truncate() {
+        let _ = window_mask(128, 100, 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "BitRange width must be at least 1")]
+    fn an_empty_window_is_refused() {
+        let _ = window_mask(128, 0, 0);
+    }
+
+    /// A whole-width window is every bit, at a width a host word still reaches and at one it does
+    /// not.
+    #[test]
+    fn a_whole_width_window_is_all_ones() {
+        assert!(window_mask(128, 0, 128).is_all_ones());
+        assert!(window_mask(253, 0, 253).is_all_ones());
     }
 }

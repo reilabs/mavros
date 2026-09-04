@@ -515,6 +515,7 @@ mod tests {
             builder::{HLEmitter, HLSSABuilder},
         },
     };
+    use mavros_int_semantics::IntBits;
 
     fn fr(n: u64) -> Field {
         FieldConfig::bn254().constant(n)
@@ -608,8 +609,8 @@ mod tests {
                 let x = e.field_const(fr(7));
                 let y = e.field_const(fr(9));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
-                let i0 = e.int_const(32, 0);
-                let i1 = e.int_const(32, 1);
+                let i0 = e.int_const(IntBits::zero(32));
+                let i1 = e.int_const(IntBits::one(32));
                 let a = e.array_get(arr, i0);
                 let bb = e.array_get(arr, i1);
                 let s = e.uadd(a, bb);
@@ -637,8 +638,8 @@ mod tests {
                 let y = e.field_const(fr(2));
                 let z = e.field_const(fr(3));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
-                let i0 = e.int_const(32, 0);
-                let i1 = e.int_const(32, 1);
+                let i0 = e.int_const(IntBits::zero(32));
+                let i1 = e.int_const(IntBits::one(32));
                 let arr2 = e.array_set(arr, i0, z); // [z, y]
                 let a = e.array_get(arr2, i0); // z
                 let bb = e.array_get(arr2, i1); // y
@@ -678,8 +679,8 @@ mod tests {
                     |_| vec![arr_t],
                     |_| vec![arr_f],
                 )[0];
-                let i0 = e.int_const(32, 0);
-                let i1 = e.int_const(32, 1);
+                let i0 = e.int_const(IntBits::zero(32));
+                let i1 = e.int_const(IntBits::one(32));
                 let r0 = e.array_get(merged, i0);
                 let r1 = e.array_get(merged, i1);
                 let s = e.uadd(r0, r1);
@@ -737,7 +738,7 @@ mod tests {
                 let y = e.field_const(fr(2));
                 let z = e.field_const(fr(3));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
-                let oob = e.int_const(32, 5); // index 5 into a length-2 array
+                let oob = e.int_const(IntBits::from_u128(32, 5)); // index 5 into a length-2 array
                 let _ = e.array_set(arr, oob, z);
                 e.terminate_return(vec![]);
             });
@@ -762,7 +763,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = e.add_parameter(arr2(Type::field()));
-                let i0 = e.int_const(32, 0);
+                let i0 = e.int_const(IntBits::zero(32));
                 let got = e.array_get(a, i0);
                 e.terminate_return(vec![got]);
             });
@@ -806,7 +807,7 @@ mod tests {
                     ],
                 }));
                 let arr = e.mk_seq_of_blob(Type::field(), blob);
-                let i1 = e.int_const(32, 1);
+                let i1 = e.int_const(IntBits::one(32));
                 let got = e.array_get(arr, i1);
                 e.terminate_return(vec![got]);
             });
@@ -840,8 +841,8 @@ mod tests {
                     SequenceTargetType::Array(2),
                     Type::field().ref_of(),
                 );
-                let i0 = e.int_const(32, 0);
-                let i1 = e.int_const(32, 1);
+                let i0 = e.int_const(IntBits::zero(32));
+                let i1 = e.int_const(IntBits::one(32));
                 let r0 = e.array_get(arr, i0); // ra
                 let r1 = e.array_get(arr, i1); // rb
                 let v0 = e.load(r0);
@@ -879,7 +880,7 @@ mod tests {
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
                 let p = e.alloc(arr); // Ref<Array<Field,2>>, seeded with arr (store folded into the alloc)
                 let loaded = e.load(p); // Array<Field,2>
-                let i0 = e.int_const(32, 0);
+                let i0 = e.int_const(IntBits::zero(32));
                 let got = e.array_get(loaded, i0);
                 e.terminate_return(vec![got]);
             });
@@ -910,9 +911,9 @@ mod tests {
                 let zero = e.field_const(fr(0));
                 let arr = e.mk_repeated(zero, SequenceTargetType::Array(4), 4, Type::field()); // [0;4]
                 let x = e.field_const(fr(7));
-                let i1 = e.int_const(32, 1);
+                let i1 = e.int_const(IntBits::one(32));
                 let updated = e.array_set(arr, i1, x); // [0, 7, 0, 0]
-                let i0 = e.int_const(32, 0);
+                let i0 = e.int_const(IntBits::zero(32));
                 let a = e.array_get(updated, i0); // 0
                 let bb = e.array_get(updated, i1); // 7
                 let s = e.uadd(a, bb);
@@ -942,7 +943,7 @@ mod tests {
                 let c = e.field_const(fr(5));
                 e.store(r, c);
                 let arr = e.mk_repeated(r, SequenceTargetType::Array(3), 3, Type::field().ref_of()); // [r;3]
-                let i0 = e.int_const(32, 0);
+                let i0 = e.int_const(IntBits::zero(32));
                 let got = e.array_get(arr, i0); // r
                 let v = e.load(got);
                 e.terminate_return(vec![v]);
@@ -1008,7 +1009,7 @@ mod tests {
                 let y = e.field_const(fr(9));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
                 let _slice = e.cast_to(CastTarget::ArrayToSlice, arr); // unioned into arr's group
-                let i0 = e.int_const(32, 0);
+                let i0 = e.int_const(IntBits::zero(32));
                 let got = e.array_get(arr, i0);
                 e.terminate_return(vec![got]);
             });

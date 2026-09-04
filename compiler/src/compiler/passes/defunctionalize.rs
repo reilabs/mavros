@@ -23,6 +23,7 @@ use crate::{
         },
     },
 };
+use mavros_int_semantics::IntBits;
 
 pub struct Defunctionalize {}
 
@@ -284,6 +285,65 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
             block.put_instructions(instructions);
         }
     }
+
+    #[cfg(debug_assertions)]
+    if let Some(site) = surviving_function_type(ssa) {
+        panic!("ICE: a function type survived defunctionalization at {site}");
+    }
+}
+
+/// Where a `TypeExpr::Function` still appears.
+#[cfg(debug_assertions)]
+fn surviving_function_type(ssa: &HLSSA) -> Option<String> {
+    fn holds_function(typ: &Type) -> bool {
+        match &typ.expr {
+            TypeExpr::Function(_) => true,
+            TypeExpr::Array(inner, _)
+            | TypeExpr::Slice(inner)
+            | TypeExpr::Ref(inner)
+            | TypeExpr::WitnessOf(inner) => holds_function(inner),
+            TypeExpr::Blob(inner, _) => holds_function(inner),
+            TypeExpr::Tuple(elements) => elements.iter().any(holds_function),
+            TypeExpr::Field | TypeExpr::Int(_) => false,
+        }
+    }
+
+    // The same three places `replace_function_type` reaches, read rather than rewritten.
+    for (fid, function) in ssa.iter_functions() {
+        if function.get_returns().iter().any(holds_function) {
+            return Some(format!("the return types of {fid:?}"));
+        }
+        for (bid, block) in function.get_blocks() {
+            if block.get_parameters().any(|(_, typ)| holds_function(typ)) {
+                return Some(format!("a parameter of {fid:?} {bid:?}"));
+            }
+            for instruction in block.get_instructions() {
+                if instruction_type_annotations(instruction)
+                    .into_iter()
+                    .any(holds_function)
+                {
+                    return Some(format!("an annotation in {fid:?} {bid:?}: {instruction:?}"));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// The types [`replace_function_types_in_instruction`] rewrites, for reading.
+#[cfg(debug_assertions)]
+fn instruction_type_annotations(instr: &OpCode) -> Vec<&Type> {
+    match instr {
+        OpCode::MkSeq { elem_type, .. } => vec![elem_type],
+        OpCode::MkSeqOfBlob { element_type, .. } => vec![element_type],
+        OpCode::MkRepeated { elem_type, .. } => vec![elem_type],
+        OpCode::MkTuple { element_types, .. } => element_types.iter().collect(),
+        OpCode::FreshWitness { result_type, .. } => vec![result_type],
+        OpCode::ReadGlobal { result_type, .. } => vec![result_type],
+        OpCode::Todo { result_types, .. } => result_types.iter().collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Compute callable functions using BFS. If `reaching` overestimates, it will overestimate too.
@@ -443,7 +503,7 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
     // Check if a type contains Function anywhere (for alias-aware propagation)
     fn contains_function(typ: &Type) -> bool {
         match &typ.expr {
-            TypeExpr::Function => true,
+            TypeExpr::Function(_) => true,
             TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) | TypeExpr::Ref(inner) => {
                 contains_function(inner)
             }
@@ -827,7 +887,7 @@ fn build_dispatch_function(
             let mut cb = b
                 .block(current_block)
                 .with_source_location(location.clone());
-            let const_val = cb.int_const(32, variant_id.0 as u128);
+            let const_val = cb.int_const(IntBits::from_u128(32, variant_id.0 as u128));
             cb.assert_eq(fn_id_param, const_val);
             let call_results = cb.call(variant_id, forwarded_params.clone(), return_types.len());
             cb.terminate_jmp(merge_block, call_results);
@@ -839,7 +899,7 @@ fn build_dispatch_function(
                     let mut cb = b
                         .block(current_block)
                         .with_source_location(location.clone());
-                    let const_val = cb.int_const(32, variant_id.0 as u128);
+                    let const_val = cb.int_const(IntBits::from_u128(32, variant_id.0 as u128));
                     cb.assert_eq(fn_id_param, const_val);
                     let call_results =
                         cb.call(variant_id, forwarded_params.clone(), return_types.len());
@@ -852,7 +912,7 @@ fn build_dispatch_function(
                         let mut cb = b
                             .block(current_block)
                             .with_source_location(location.clone());
-                        let const_val = cb.int_const(32, variant_id.0 as u128);
+                        let const_val = cb.int_const(IntBits::from_u128(32, variant_id.0 as u128));
                         let eq_result = cb.eq(fn_id_param, const_val);
                         cb.terminate_jmp_if(eq_result, call_block, next_check_block);
                     }
@@ -874,9 +934,13 @@ fn build_dispatch_function(
 }
 
 /// Recursively replace `TypeExpr::Function` with `TypeExpr::Int(32)` in a type.
+///
+/// The return types it carries are dropped rather than rewritten: after this pass a function value
+/// is an `int32` tag consumed by a dispatcher, and every call through it is `CallTarget::Static`,
+/// so nothing downstream has a dynamic call left to type.
 fn replace_function_type(typ: &mut Type) {
     match &mut typ.expr {
-        TypeExpr::Function => {
+        TypeExpr::Function(_) => {
             typ.expr = TypeExpr::Int(32);
         }
         TypeExpr::Array(inner, _) => replace_function_type(inner),
@@ -1013,11 +1077,11 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let blob = e.emit_constant(Constant::Blob(Blob::new(
-                    Type::function(),
+                    Type::function_returning(vec![]),
                     vec![Constant::FnPtr(f)],
                 )));
-                let arr = e.mk_seq_of_blob(Type::function(), blob);
-                let idx = e.int_const(32, 0);
+                let arr = e.mk_seq_of_blob(Type::function_returning(vec![]), blob);
+                let idx = e.int_const(IntBits::zero(32));
                 let fp = e.array_get(arr, idx);
                 elem = Some(fp);
                 e.call_indirect(fp, vec![], 0);
@@ -1048,7 +1112,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let fp = e.emit_constant(Constant::FnPtr(f));
-                let cond = e.int_const(1, 1);
+                let cond = e.int_const(IntBits::one(1));
                 e.emit(OpCode::Guard {
                     condition: cond,
                     inner: Box::new(OpCode::Call {

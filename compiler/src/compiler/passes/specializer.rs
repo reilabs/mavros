@@ -27,12 +27,12 @@ use crate::{
             BlockId, FunctionId, SourceLocation, ValueId,
             hlssa::{
                 ArithGroup, BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness,
-                HLFunction, HLSSA, LocatedOpCode, LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS,
-                OpCode, Radix, RefCountOp, SequenceTargetType, Type,
+                HLFunction, HLSSA, LocatedOpCode, LookupTarget, OpCode, Radix, RefCountOp,
+                SequenceTargetType, Type,
                 builder::{HLEmitter, HLFunctionBuilder},
             },
         },
-        util::{host_word, spread_bits, unspread_bits},
+        util::{UNSPREAD_INPUT_MAX, field_constant, host_word, spread_bits, unspread_bits},
     },
 };
 
@@ -132,7 +132,7 @@ fn int_pattern(value: Option<&ConstVal>) -> Option<&IntBits> {
 
 fn const_val_as_field(value: &ConstVal, field: FieldConfig) -> Option<Field> {
     match value {
-        ConstVal::Int(v) => Some(field.constant(host_word(v))),
+        ConstVal::Int(v) => field_constant(field, v),
         ConstVal::Field(f) => Some(*f),
         _ => None,
     }
@@ -706,9 +706,10 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
             Some(ConstVal::Int(pattern)) => {
                 let b = pattern.bits();
                 assert!(
-                    b <= MAX_SUPPORTED_UNSIGNED_BITS && b % 2 == 0,
-                    "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got int{b}"
+                    b <= UNSPREAD_INPUT_MAX && b % 2 == 0,
+                    "Unspread expects an even integer width up to {UNSPREAD_INPUT_MAX} bits, got int{b}"
                 );
+
                 let half_bits = b / 2;
                 let (odd, even) = unspread_bits(host_word(pattern), b);
                 (
@@ -936,9 +937,8 @@ impl Specializer {
             body.add_return_type(ret.clone());
         }
 
-        // Build call params and the initial `const_vals` map. Routes through `add_const`
-        // (still `&mut ssa` here) so the constants for `Field`/`U`/`I` signature params are
-        // interned eagerly.
+        // Build call params and the initial `const_vals` map. Routes through `add_const` (still
+        // `&mut ssa` here) so the constants for numeric signature params are interned eagerly.
         let mut call_params: Vec<Val> = vec![];
         let mut const_vals: HashMap<ValueId, ConstVal> = HashMap::default();
         for (param, sig) in original_param_types
@@ -1083,7 +1083,7 @@ impl Specializer {
         let should_call_spec;
         {
             let mut entry = b.block(entry_block).with_source_location(location.clone());
-            let mut cond = entry.int_const(1, 1);
+            let mut cond = entry.int_const(IntBits::one(1));
 
             for (pval, psig) in dispatcher_params.iter().zip(signature.get_params().iter()) {
                 match psig {
@@ -1336,7 +1336,7 @@ mod tests {
         // wider amount would additionally narrow the result -- the type analysis types it as
         // `U(max(s1, s2))` -- but that is a second reason rather than the deciding one.
         //
-        // The narrower-amount direction is refused too, though the *model* does give a shift
+        // The narrower-amount direction is refused too, though the _model_ does give a shift
         // amount a width of its own. That freedom is real for the evaluators that meet one at
         // runtime; it is not a licence for a folder to mint IR the rest of the pipeline rejects.
         assert_eq!(specializer_shl((8, 1), (32, 1)), None);

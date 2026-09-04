@@ -21,6 +21,7 @@ use crate::compiler::{
     },
     util::ice_non_elided_tuple,
 };
+use mavros_int_semantics::IntBits;
 
 use super::{InstructionLoweringRule, LoweringContext};
 
@@ -45,7 +46,7 @@ fn emit_elem_select(
             panic!("LowerSliceSelect: nested slice is not allowed")
         }
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
-        TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
+        TypeExpr::Ref(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {
             panic!("LowerSliceSelect: witness select on element type {typ} is not supported")
         }
     }
@@ -96,8 +97,8 @@ impl InstructionLoweringRule for LowerSliceSelect {
 
         let len_a = b.slice_len(a);
         let len_c = b.slice_len(c);
-        let zero = b.int_const(32, 0);
-        let one = b.int_const(32, 1);
+        let zero = b.int_const(IntBits::zero(32));
+        let one = b.int_const(IntBits::one(32));
         let acc = b.mk_seq(vec![], SequenceTargetType::Slice, elem_ty.clone());
 
         // Prefix `0 .. min(len_a, len_c)`

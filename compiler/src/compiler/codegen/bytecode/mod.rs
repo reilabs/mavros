@@ -14,22 +14,67 @@ use crate::{
         codegen::{
             CodeGenOptions,
             bytecode::layout::{
-                ConstantPoolInterner, FrameLayouter, GlobalFrameLayouter, StructLayoutInterner,
-                for_each_constant_word, int_cell_count,
+                ConstantPoolInterner, DOUBLE_LANE_BITS, FrameLayouter, GlobalFrameLayouter, Lane,
+                SPREAD_MAX_BITS, StructLayoutInterner, for_each_constant_word, int_cell_count,
+                int_lane,
             },
         },
         ssa::{
             BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
                 self, BinaryArithOpKind, CmpKind, DMatrix, Endianness, HLBlock, HLFunction, HLSSA,
-                HLSSAConstantsSnapshot, LookupTarget, MAX_SUPPORTED_SIGNED_BITS, Radix, RefCountOp,
-                Type, TypeExpr,
+                HLSSAConstantsSnapshot, LookupTarget, Radix, RefCountOp, Type, TypeExpr,
             },
         },
         util::ice_non_elided_tuple,
     },
     vm::{self, bytecode},
 };
+
+/// Report an integer width with no bytecode lowering as a compiler bug.
+///
+/// Every shape that reaches one of these is refused by `passes::width_validation` first, with a
+/// source location and a sentence saying which lowering is missing: the signed arms by the
+/// two's-complement frontier, and the lookup element by the tape's own cell-count tags. Reaching
+/// here means a rule stopped covering a lowering it is written against.
+fn unsupported_int_width(operation: &str, bits: usize) -> ! {
+    panic!(
+        "ICE: {operation} on an int{bits} reached bytecode generation with no lowering; width_validation should have refused the program"
+    )
+}
+
+/// Report a binary arithmetic operation whose operands do not cover the cells it will read.
+///
+/// Every integer opcode addresses its operands as [`int_cell_count`] cells of the **result's**
+/// width. An operand declared at a width with a different cell count is therefore read across the
+/// frame slot beside it — as a stray high limb in the double lane, and as a slice overlapping its
+/// neighbour in the wide one. The cell lane cannot meet this, since every width it holds is one
+/// cell, which is why a narrow shift by a narrower amount needs nothing done to it.
+///
+/// A non-shift's two operands are one width by the model's own rule, `int_semantics::check_widths`.
+fn check_operand_extents(
+    kind: BinaryArithOpKind,
+    type_info: &FunctionTypeInfo,
+    result: ValueId,
+    lhs: ValueId,
+    rhs: ValueId,
+) {
+    let TypeExpr::Int(bits) = type_info.get_value_type(result).expr else {
+        return;
+    };
+    let cells = int_cell_count(bits);
+    for (operand, side) in [(lhs, "left"), (rhs, "right")] {
+        let TypeExpr::Int(operand_bits) = type_info.get_value_type(operand).expr else {
+            continue;
+        };
+        assert!(
+            int_cell_count(operand_bits) == cells,
+            "ICE: {kind:?}'s {side} operand is an int{operand_bits}, which does not cover the \
+             {cells} frame cell(s) this opcode reads for an int{bits} result; width_validation \
+             should have refused the program"
+        );
+    }
+}
 
 fn vm_source_location(location: &SourceLocation) -> bytecode::SourceLocation {
     bytecode::SourceLocation::new(
@@ -219,9 +264,14 @@ impl CodeGen {
                 // A program with no inputs and no declared return gets a zero-length blob.
                 // Since nothing reads it, the blob gets DCE-d away.
                 [] => 0,
-                params => panic!(
-                    "ICE: witgen entry must take a single Blob<Field; N> parameter, got {params:?}"
-                ),
+                // An entry that is neither has not been through `PrepareEntryPoint`, so it has no
+                // input blob to state a width for. Codegen still runs — disassembling a hand-built
+                // function is how the width-to-opcode choice is read back — and the program it
+                // produces is inspectable rather than runnable. What says so is the interpreter,
+                // which holds the supplied input count against this field before executing
+                // anything; and for a program compiled from Noir, the driver's own check of this
+                // field against the ABI.
+                _ => 0,
             };
 
         bytecode::Program {
@@ -413,6 +463,16 @@ impl CodeGen {
         for (instruction, source_location) in block.get_instructions_with_source_locations() {
             emitter.set_source_location(vm_source_location(source_location));
 
+            if let hlssa::OpCode::BinaryArithOp {
+                kind,
+                result,
+                lhs,
+                rhs,
+            } = instruction
+            {
+                check_operand_extents(*kind, type_info, *result, *lhs, *rhs);
+            }
+
             match instruction {
                 hlssa::OpCode::BinaryArithOp {
                     kind: BinaryArithOpKind::UAdd | BinaryArithOpKind::SAdd,
@@ -428,22 +488,34 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
-                    TypeExpr::Int(bits) if *bits <= 64 => {
+                    TypeExpr::Int(bits) => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::AddInt {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                            bits: *bits as u64,
-                        });
-                    }
-                    TypeExpr::Int(128) => {
-                        let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::AddInt128 {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
+                        match int_lane(*bits) {
+                            Lane::Cell => {
+                                emitter.push_op(bytecode::OpCode::AddInt {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            Lane::Double => {
+                                emitter.push_op(bytecode::OpCode::AddInt128 {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            Lane::Wide => {
+                                emitter.push_op(bytecode::OpCode::AddIntn {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                        }
                     }
                     TypeExpr::WitnessOf(_) => {
                         let result = layouter.alloc_ptr(*val);
@@ -469,22 +541,34 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
-                    TypeExpr::Int(bits) if *bits <= 64 => {
+                    TypeExpr::Int(bits) => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::SubInt {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                            bits: *bits as u64,
-                        });
-                    }
-                    TypeExpr::Int(128) => {
-                        let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::SubInt128 {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
+                        match int_lane(*bits) {
+                            Lane::Cell => {
+                                emitter.push_op(bytecode::OpCode::SubInt {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            Lane::Double => {
+                                emitter.push_op(bytecode::OpCode::SubInt128 {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            Lane::Wide => {
+                                emitter.push_op(bytecode::OpCode::SubIntn {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                        }
                     }
                     t => panic!("Unsupported type for subtraction: {:?}", t),
                 },
@@ -502,31 +586,49 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
-                    (false, TypeExpr::Int(bits)) if *bits <= 64 => {
+                    (false, TypeExpr::Int(bits)) => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::UdivInt {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
+                        match int_lane(*bits) {
+                            Lane::Cell => {
+                                emitter.push_op(bytecode::OpCode::UdivInt {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                });
+                            }
+                            Lane::Double => {
+                                emitter.push_op(bytecode::OpCode::UdivInt128 {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                });
+                            }
+                            Lane::Wide => {
+                                emitter.push_op(bytecode::OpCode::UdivIntn {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                        }
                     }
-                    (true, TypeExpr::Int(bits)) if *bits <= MAX_SUPPORTED_SIGNED_BITS => {
-                        let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::SdivInt {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                            bits: *bits as u64,
-                        });
-                    }
-                    (false, TypeExpr::Int(128)) => {
-                        let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::UdivInt128 {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
-                    }
+                    (true, TypeExpr::Int(bits)) => match int_lane(*bits) {
+                        Lane::Cell => {
+                            let result = layouter.alloc_int(*val, *bits);
+                            emitter.push_op(bytecode::OpCode::SdivInt {
+                                res: result,
+                                a: layouter.get_value(*op1),
+                                b: layouter.get_value(*op2),
+                                bits: *bits as u64,
+                            });
+                        }
+                        // Signed lowering stops at one host limb, which is exactly the cell
+                        // lane, so no signed value reaches a wider one.
+                        Lane::Double | Lane::Wide => {
+                            unsupported_int_width("a signed division", *bits)
+                        }
+                    },
                     (signed, t) => panic!(
                         "Unsupported type for {} division: {:?}",
                         if signed { "signed" } else { "unsigned" },
@@ -542,31 +644,49 @@ impl CodeGen {
                     (_, TypeExpr::Field) => {
                         panic!("Modulo is not defined on field elements")
                     }
-                    (false, TypeExpr::Int(bits)) if *bits <= 64 => {
+                    (false, TypeExpr::Int(bits)) => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::UremInt {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
+                        match int_lane(*bits) {
+                            Lane::Cell => {
+                                emitter.push_op(bytecode::OpCode::UremInt {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                });
+                            }
+                            Lane::Double => {
+                                emitter.push_op(bytecode::OpCode::UremInt128 {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                });
+                            }
+                            Lane::Wide => {
+                                emitter.push_op(bytecode::OpCode::UremIntn {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                        }
                     }
-                    (true, TypeExpr::Int(bits)) if *bits <= MAX_SUPPORTED_SIGNED_BITS => {
-                        let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::SremInt {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                            bits: *bits as u64,
-                        });
-                    }
-                    (false, TypeExpr::Int(128)) => {
-                        let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::UremInt128 {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
-                    }
+                    (true, TypeExpr::Int(bits)) => match int_lane(*bits) {
+                        Lane::Cell => {
+                            let result = layouter.alloc_int(*val, *bits);
+                            emitter.push_op(bytecode::OpCode::SremInt {
+                                res: result,
+                                a: layouter.get_value(*op1),
+                                b: layouter.get_value(*op2),
+                                bits: *bits as u64,
+                            });
+                        }
+                        // Signed lowering stops at one host limb, which is exactly the cell
+                        // lane, so no signed value reaches a wider one.
+                        Lane::Double | Lane::Wide => {
+                            unsupported_int_width("a signed remainder", *bits)
+                        }
+                    },
                     (signed, t) => panic!(
                         "Unsupported type for {} modulo: {:?}",
                         if signed { "signed" } else { "unsigned" },
@@ -587,22 +707,34 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
-                    TypeExpr::Int(bits) if *bits <= 64 => {
+                    TypeExpr::Int(bits) => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::MulInt {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                            bits: *bits as u64,
-                        });
-                    }
-                    TypeExpr::Int(128) => {
-                        let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::MulInt128 {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
+                        match int_lane(*bits) {
+                            Lane::Cell => {
+                                emitter.push_op(bytecode::OpCode::MulInt {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            Lane::Double => {
+                                emitter.push_op(bytecode::OpCode::MulInt128 {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            Lane::Wide => {
+                                emitter.push_op(bytecode::OpCode::MulIntn {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                        }
                     }
                     t => panic!("Unsupported type for multiplication: {:?}", t),
                 },
@@ -615,21 +747,32 @@ impl CodeGen {
                     TypeExpr::Field => {
                         panic!("Unsupported: field and");
                     }
-                    TypeExpr::Int(bits) if *bits <= 64 => {
+                    TypeExpr::Int(bits) => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::AndInt {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
-                    }
-                    TypeExpr::Int(128) => {
-                        let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::AndInt128 {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
+                        match int_lane(*bits) {
+                            Lane::Cell => {
+                                emitter.push_op(bytecode::OpCode::AndInt {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                });
+                            }
+                            Lane::Double => {
+                                emitter.push_op(bytecode::OpCode::AndInt128 {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                });
+                            }
+                            Lane::Wide => {
+                                emitter.push_op(bytecode::OpCode::AndIntn {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                        }
                     }
                     t => panic!("Unsupported type for bitwise and: {:?}", t),
                 },
@@ -639,21 +782,32 @@ impl CodeGen {
                     lhs: op1,
                     rhs: op2,
                 } => match &type_info.get_value_type(*val).expr {
-                    TypeExpr::Int(bits) if *bits <= 64 => {
+                    TypeExpr::Int(bits) => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::OrInt {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
-                    }
-                    TypeExpr::Int(128) => {
-                        let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::OrInt128 {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
+                        match int_lane(*bits) {
+                            Lane::Cell => {
+                                emitter.push_op(bytecode::OpCode::OrInt {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                });
+                            }
+                            Lane::Double => {
+                                emitter.push_op(bytecode::OpCode::OrInt128 {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                });
+                            }
+                            Lane::Wide => {
+                                emitter.push_op(bytecode::OpCode::OrIntn {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                        }
                     }
                     t => panic!("Unsupported type for bitwise or: {:?}", t),
                 },
@@ -663,21 +817,32 @@ impl CodeGen {
                     lhs: op1,
                     rhs: op2,
                 } => match &type_info.get_value_type(*val).expr {
-                    TypeExpr::Int(bits) if *bits <= 64 => {
+                    TypeExpr::Int(bits) => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::XorInt {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
-                    }
-                    TypeExpr::Int(128) => {
-                        let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::XorInt128 {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
+                        match int_lane(*bits) {
+                            Lane::Cell => {
+                                emitter.push_op(bytecode::OpCode::XorInt {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                });
+                            }
+                            Lane::Double => {
+                                emitter.push_op(bytecode::OpCode::XorInt128 {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                });
+                            }
+                            Lane::Wide => {
+                                emitter.push_op(bytecode::OpCode::XorIntn {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                        }
                     }
                     t => panic!("Unsupported type for bitwise xor: {:?}", t),
                 },
@@ -687,22 +852,34 @@ impl CodeGen {
                     lhs: op1,
                     rhs: op2,
                 } => match &type_info.get_value_type(*val).expr {
-                    TypeExpr::Int(bits) if *bits <= 64 => {
+                    TypeExpr::Int(bits) => {
                         let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::ShlInt {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                            bits: *bits as u64,
-                        });
-                    }
-                    TypeExpr::Int(128) => {
-                        let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::ShlInt128 {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
+                        match int_lane(*bits) {
+                            Lane::Cell => {
+                                emitter.push_op(bytecode::OpCode::ShlInt {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            Lane::Double => {
+                                emitter.push_op(bytecode::OpCode::ShlInt128 {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            Lane::Wide => {
+                                emitter.push_op(bytecode::OpCode::ShlIntn {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                        }
                     }
                     t => panic!("Unsupported type for shift left: {:?}", t),
                 },
@@ -712,39 +889,57 @@ impl CodeGen {
                     lhs: op1,
                     rhs: op2,
                 } => match (kind.is_signed(), &type_info.get_value_type(*val).expr) {
-                    (false, TypeExpr::Int(bits)) if *bits <= 64 => {
+                    (false, TypeExpr::Int(bits)) => {
                         let result = layouter.alloc_int(*val, *bits);
-                        // Zero-fill. Needs `bits` only to mask the shift amount to `bits - 1`, the
-                        // way LLVM does; the result of a logical shift cannot exceed the width, so
-                        // nothing is re-masked.
-                        emitter.push_op(bytecode::OpCode::UshrInt {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                            bits: *bits as u64,
-                        });
+                        match int_lane(*bits) {
+                            Lane::Cell => {
+                                // Zero-fill. Needs `bits` only to mask the shift amount to `bits - 1`, the
+                                // way LLVM does; the result of a logical shift cannot exceed the width, so
+                                // nothing is re-masked.
+                                emitter.push_op(bytecode::OpCode::UshrInt {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            Lane::Double => {
+                                emitter.push_op(bytecode::OpCode::UshrInt128 {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            Lane::Wide => {
+                                emitter.push_op(bytecode::OpCode::UshrIntn {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                        }
                     }
-
-                    // Sign-fill, matching Noir and `IntArithOp::AShr` on the LLVM side. Needs
-                    // `bits` both to mask the amount and because the sign lives at `bits - 1`,
-                    // not at 63.
-                    (true, TypeExpr::Int(bits)) if *bits <= MAX_SUPPORTED_SIGNED_BITS => {
-                        let result = layouter.alloc_int(*val, *bits);
-                        emitter.push_op(bytecode::OpCode::AshrInt {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                            bits: *bits as u64,
-                        });
-                    }
-                    (false, TypeExpr::Int(128)) => {
-                        let result = layouter.alloc_int(*val, 128);
-                        emitter.push_op(bytecode::OpCode::UshrInt128 {
-                            res: result,
-                            a: layouter.get_value(*op1),
-                            b: layouter.get_value(*op2),
-                        });
-                    }
+                    (true, TypeExpr::Int(bits)) => match int_lane(*bits) {
+                        // Sign-fill, matching Noir and `IntArithOp::AShr` on the LLVM side. Needs
+                        // `bits` both to mask the amount and because the sign lives at `bits - 1`,
+                        // not at 63.
+                        Lane::Cell => {
+                            let result = layouter.alloc_int(*val, *bits);
+                            emitter.push_op(bytecode::OpCode::AshrInt {
+                                res: result,
+                                a: layouter.get_value(*op1),
+                                b: layouter.get_value(*op2),
+                                bits: *bits as u64,
+                            });
+                        }
+                        // Signed lowering stops at one host limb, which is exactly the cell
+                        // lane, so no signed value reaches a wider one.
+                        Lane::Double | Lane::Wide => {
+                            unsupported_int_width("a signed right shift", *bits)
+                        }
+                    },
                     (signed, t) => panic!(
                         "Unsupported type for {} shift right: {:?}",
                         if signed { "signed" } else { "unsigned" },
@@ -765,31 +960,48 @@ impl CodeGen {
                     let lhs_type = type_info.get_value_type(*op1);
                     let rhs_type = type_info.get_value_type(*op2);
                     match (kind.is_signed(), &lhs_type.expr, &rhs_type.expr) {
-                        (true, TypeExpr::Int(lhs_bits), TypeExpr::Int(rhs_bits))
-                            if *lhs_bits == *rhs_bits && *lhs_bits <= MAX_SUPPORTED_SIGNED_BITS =>
+                        // Unequal operand widths fall through to the catch-all below, as a
+                        // comparison the elaborator should never have produced.
+                        (signed, TypeExpr::Int(lhs_bits), TypeExpr::Int(rhs_bits))
+                            if *lhs_bits == *rhs_bits =>
                         {
-                            emitter.push_op(bytecode::OpCode::SltInt {
-                                res: result,
-                                a: layouter.get_value(*op1),
-                                b: layouter.get_value(*op2),
-                                bits: *lhs_bits as u64,
-                            });
-                        }
-                        (false, TypeExpr::Int(lhs_bits), TypeExpr::Int(rhs_bits))
-                            if *lhs_bits == *rhs_bits && *lhs_bits <= 64 =>
-                        {
-                            emitter.push_op(bytecode::OpCode::UltInt {
-                                res: result,
-                                a: layouter.get_value(*op1),
-                                b: layouter.get_value(*op2),
-                            });
-                        }
-                        (false, TypeExpr::Int(128), TypeExpr::Int(128)) => {
-                            emitter.push_op(bytecode::OpCode::UltInt128 {
-                                res: result,
-                                a: layouter.get_value(*op1),
-                                b: layouter.get_value(*op2),
-                            });
+                            match (signed, int_lane(*lhs_bits)) {
+                                (true, Lane::Cell) => {
+                                    emitter.push_op(bytecode::OpCode::SltInt {
+                                        res: result,
+                                        a: layouter.get_value(*op1),
+                                        b: layouter.get_value(*op2),
+                                        bits: *lhs_bits as u64,
+                                    });
+                                }
+                                (false, Lane::Cell) => {
+                                    emitter.push_op(bytecode::OpCode::UltInt {
+                                        res: result,
+                                        a: layouter.get_value(*op1),
+                                        b: layouter.get_value(*op2),
+                                    });
+                                }
+                                (false, Lane::Double) => {
+                                    emitter.push_op(bytecode::OpCode::UltInt128 {
+                                        res: result,
+                                        a: layouter.get_value(*op1),
+                                        b: layouter.get_value(*op2),
+                                    });
+                                }
+                                // Signed lowering stops at one host limb, which is exactly the
+                                // cell lane, so no signed value reaches a wider one.
+                                (true, Lane::Double | Lane::Wide) => {
+                                    unsupported_int_width("a signed comparison", *lhs_bits)
+                                }
+                                (false, Lane::Wide) => {
+                                    emitter.push_op(bytecode::OpCode::UltIntn {
+                                        res: result,
+                                        a: layouter.get_value(*op1),
+                                        b: layouter.get_value(*op2),
+                                        bits: *lhs_bits as u64,
+                                    });
+                                }
+                            }
                         }
                         (false, TypeExpr::Field, TypeExpr::Field) => {
                             emitter.push_op(bytecode::OpCode::LtField {
@@ -822,20 +1034,32 @@ impl CodeGen {
                     match (&lhs_type.expr, &rhs_type.expr) {
                         // Equality is a comparison of raw patterns, so one arm serves both readings
                         (TypeExpr::Int(lhs_bits), TypeExpr::Int(rhs_bits))
-                            if *lhs_bits == *rhs_bits && *lhs_bits <= 64 =>
+                            if *lhs_bits == *rhs_bits =>
                         {
-                            emitter.push_op(bytecode::OpCode::EqInt {
-                                res: result,
-                                a: layouter.get_value(*op1),
-                                b: layouter.get_value(*op2),
-                            });
-                        }
-                        (TypeExpr::Int(128), TypeExpr::Int(128)) => {
-                            emitter.push_op(bytecode::OpCode::EqInt128 {
-                                res: result,
-                                a: layouter.get_value(*op1),
-                                b: layouter.get_value(*op2),
-                            });
+                            match int_lane(*lhs_bits) {
+                                Lane::Cell => {
+                                    emitter.push_op(bytecode::OpCode::EqInt {
+                                        res: result,
+                                        a: layouter.get_value(*op1),
+                                        b: layouter.get_value(*op2),
+                                    });
+                                }
+                                Lane::Double => {
+                                    emitter.push_op(bytecode::OpCode::EqInt128 {
+                                        res: result,
+                                        a: layouter.get_value(*op1),
+                                        b: layouter.get_value(*op2),
+                                    });
+                                }
+                                Lane::Wide => {
+                                    emitter.push_op(bytecode::OpCode::EqIntn {
+                                        res: result,
+                                        a: layouter.get_value(*op1),
+                                        b: layouter.get_value(*op2),
+                                        bits: *lhs_bits as u64,
+                                    });
+                                }
+                            }
                         }
                         (TypeExpr::Field, TypeExpr::Field) => {
                             emitter.push_op(bytecode::OpCode::EqField {
@@ -866,18 +1090,27 @@ impl CodeGen {
                         let field_pos = if l_type.expr != TypeExpr::Field {
                             let tmp = layouter.alloc_temp_field();
                             match &l_type.expr {
-                                TypeExpr::Int(bits) if *bits <= 64 => {
-                                    emitter.push_op(bytecode::OpCode::CastIntToField {
-                                        res: tmp,
-                                        a: layouter.get_value(*v),
-                                    });
-                                }
-                                TypeExpr::Int(128) => {
-                                    emitter.push_op(bytecode::OpCode::CastInt128ToField {
-                                        res: tmp,
-                                        a: layouter.get_value(*v),
-                                    });
-                                }
+                                TypeExpr::Int(bits) => match int_lane(*bits) {
+                                    Lane::Cell => {
+                                        emitter.push_op(bytecode::OpCode::CastIntToField {
+                                            res: tmp,
+                                            a: layouter.get_value(*v),
+                                        });
+                                    }
+                                    Lane::Double => {
+                                        emitter.push_op(bytecode::OpCode::CastInt128ToField {
+                                            res: tmp,
+                                            a: layouter.get_value(*v),
+                                        });
+                                    }
+                                    Lane::Wide => {
+                                        emitter.push_op(bytecode::OpCode::CastIntnToField {
+                                            res: tmp,
+                                            a: layouter.get_value(*v),
+                                            bits: *bits as u64,
+                                        });
+                                    }
+                                },
                                 t => panic!("Unsupported witness cast source: {:?}", t),
                             }
                             tmp
@@ -902,97 +1135,144 @@ impl CodeGen {
                     }
                     let result = layouter.alloc_value(*r, &r_type);
                     match (&l_type.expr, &r_type.expr) {
-                        (TypeExpr::Int(source_bits), TypeExpr::Int(target_bits))
-                            if *source_bits <= 64 && *target_bits <= 64 =>
-                        {
-                            let source_cells = int_cell_count(*source_bits);
-                            let target_cells = int_cell_count(*target_bits);
-                            let copied_cells = source_cells.min(target_cells);
-                            emitter.push_op(bytecode::OpCode::MovFrame {
-                                target: result,
-                                source: layouter.get_value(*v),
-                                size: copied_cells,
-                            });
-                            if target_cells > source_cells {
-                                for cell in source_cells..target_cells {
-                                    emitter.push_op(bytecode::OpCode::MovConst {
-                                        res: result.offset(cell as isize),
-                                        val: 0,
+                        (TypeExpr::Int(source_bits), TypeExpr::Int(target_bits)) => {
+                            match (int_lane(*source_bits), int_lane(*target_bits)) {
+                                (Lane::Cell, Lane::Cell) => {
+                                    // Both sides are one cell, so the copy is one cell and there
+                                    // is nothing above it to fill: only the width can narrow.
+                                    emitter.push_op(bytecode::OpCode::MovFrame {
+                                        target: result,
+                                        source: layouter.get_value(*v),
+                                        size: 1,
+                                    });
+                                    if target_bits < source_bits {
+                                        emitter.push_op(bytecode::OpCode::TruncateInt {
+                                            res: result,
+                                            a: result,
+                                            to_bits: *target_bits as u64,
+                                        });
+                                    }
+                                }
+                                (Lane::Double, Lane::Cell) => {
+                                    // The narrowing is a prefix copy, so unlike the arm above it needs no
+                                    // `target_bits < source_bits` test: the cells it drops are the ones the
+                                    // target does not have.
+                                    let target_cells = int_cell_count(*target_bits);
+                                    emitter.push_op(bytecode::OpCode::MovFrame {
+                                        target: result,
+                                        source: layouter.get_value(*v),
+                                        size: target_cells,
+                                    });
+                                    if *target_bits % HOST_LIMB_BITS != 0 {
+                                        emitter.push_op(bytecode::OpCode::TruncateInt {
+                                            res: result,
+                                            a: result,
+                                            to_bits: *target_bits as u64,
+                                        });
+                                    }
+                                }
+                                (Lane::Cell, Lane::Double) => {
+                                    let source_cells = int_cell_count(*source_bits);
+                                    let target_cells = int_cell_count(*target_bits);
+                                    emitter.push_op(bytecode::OpCode::MovFrame {
+                                        target: result,
+                                        source: layouter.get_value(*v),
+                                        size: source_cells,
+                                    });
+                                    for cell in source_cells..target_cells {
+                                        emitter.push_op(bytecode::OpCode::MovConst {
+                                            res: result.offset(cell as isize),
+                                            val: 0,
+                                        });
+                                    }
+                                }
+                                (Lane::Double, Lane::Double) => {
+                                    emitter.push_op(bytecode::OpCode::MovFrame {
+                                        target: result,
+                                        source: layouter.get_value(*v),
+                                        size: int_cell_count(*target_bits),
+                                    });
+                                    if target_bits < source_bits {
+                                        emitter.push_op(bytecode::OpCode::TruncateInt128 {
+                                            res: result,
+                                            a: result,
+                                            to_bits: *target_bits as u64,
+                                        });
+                                    }
+                                }
+
+                                // One opcode covers both widening and narrowing.
+                                (Lane::Wide, _) | (_, Lane::Wide) => {
+                                    emitter.push_op(bytecode::OpCode::CastIntn {
+                                        res: result,
+                                        a: layouter.get_value(*v),
+                                        from_bits: *source_bits as u64,
+                                        to_bits: *target_bits as u64,
                                     });
                                 }
                             }
-                            if target_bits < source_bits {
-                                emitter.push_op(bytecode::OpCode::TruncateInt {
+                        }
+                        (TypeExpr::Field, TypeExpr::Int(bits)) => match int_lane(*bits) {
+                            Lane::Cell => {
+                                emitter.push_op(bytecode::OpCode::CastFieldToInt {
                                     res: result,
-                                    a: result,
-                                    to_bits: *target_bits as u64,
+                                    a: layouter.get_value(*v),
                                 });
+                                if *bits < 64 {
+                                    emitter.push_op(bytecode::OpCode::TruncateInt {
+                                        res: result,
+                                        a: result,
+                                        to_bits: *bits as u64,
+                                    });
+                                }
                             }
-                        }
-                        (TypeExpr::Int(128), TypeExpr::Int(target_bits)) if *target_bits <= 64 => {
-                            // The narrowing is a prefix copy, so unlike the arm above it needs no
-                            // `target_bits < source_bits` test: the cells it drops are the ones the
-                            // target does not have.
-                            let target_cells = int_cell_count(*target_bits);
-                            emitter.push_op(bytecode::OpCode::MovFrame {
-                                target: result,
-                                source: layouter.get_value(*v),
-                                size: target_cells,
-                            });
-                            if *target_bits % HOST_LIMB_BITS != 0 {
-                                emitter.push_op(bytecode::OpCode::TruncateInt {
+                            Lane::Double => {
+                                emitter.push_op(bytecode::OpCode::CastFieldToInt128 {
                                     res: result,
-                                    a: result,
-                                    to_bits: *target_bits as u64,
+                                    a: layouter.get_value(*v),
                                 });
+
+                                // The opcode writes the element's low two cells, so a target
+                                // narrower than the pair needs the bits above it cleared.
+                                if *bits < DOUBLE_LANE_BITS {
+                                    emitter.push_op(bytecode::OpCode::TruncateInt128 {
+                                        res: result,
+                                        a: result,
+                                        to_bits: *bits as u64,
+                                    });
+                                }
                             }
-                        }
-                        (TypeExpr::Int(source_bits), TypeExpr::Int(128)) if *source_bits <= 64 => {
-                            let source_cells = int_cell_count(*source_bits);
-                            let target_cells = int_cell_count(128);
-                            emitter.push_op(bytecode::OpCode::MovFrame {
-                                target: result,
-                                source: layouter.get_value(*v),
-                                size: source_cells,
-                            });
-                            for cell in source_cells..target_cells {
-                                emitter.push_op(bytecode::OpCode::MovConst {
-                                    res: result.offset(cell as isize),
-                                    val: 0,
-                                });
-                            }
-                        }
-                        (TypeExpr::Field, TypeExpr::Int(bits)) if *bits <= 64 => {
-                            emitter.push_op(bytecode::OpCode::CastFieldToInt {
-                                res: result,
-                                a: layouter.get_value(*v),
-                            });
-                            if *bits < 64 {
-                                emitter.push_op(bytecode::OpCode::TruncateInt {
+                            // The opcode takes the width and masks its own top cell, so a target
+                            // that is not a whole number of cells needs no truncation after it.
+                            Lane::Wide => {
+                                emitter.push_op(bytecode::OpCode::CastFieldToIntn {
                                     res: result,
-                                    a: result,
-                                    to_bits: *bits as u64,
+                                    a: layouter.get_value(*v),
+                                    bits: *bits as u64,
                                 });
                             }
-                        }
-                        (TypeExpr::Field, TypeExpr::Int(128)) => {
-                            emitter.push_op(bytecode::OpCode::CastFieldToInt128 {
-                                res: result,
-                                a: layouter.get_value(*v),
-                            });
-                        }
-                        (TypeExpr::Int(bits), TypeExpr::Field) if *bits <= 64 => {
-                            emitter.push_op(bytecode::OpCode::CastIntToField {
-                                res: result,
-                                a: layouter.get_value(*v),
-                            });
-                        }
-                        (TypeExpr::Int(128), TypeExpr::Field) => {
-                            emitter.push_op(bytecode::OpCode::CastInt128ToField {
-                                res: result,
-                                a: layouter.get_value(*v),
-                            });
-                        }
+                        },
+                        (TypeExpr::Int(bits), TypeExpr::Field) => match int_lane(*bits) {
+                            Lane::Cell => {
+                                emitter.push_op(bytecode::OpCode::CastIntToField {
+                                    res: result,
+                                    a: layouter.get_value(*v),
+                                });
+                            }
+                            Lane::Double => {
+                                emitter.push_op(bytecode::OpCode::CastInt128ToField {
+                                    res: result,
+                                    a: layouter.get_value(*v),
+                                });
+                            }
+                            Lane::Wide => {
+                                emitter.push_op(bytecode::OpCode::CastIntnToField {
+                                    res: result,
+                                    a: layouter.get_value(*v),
+                                    bits: *bits as u64,
+                                });
+                            }
+                        },
                         _ => panic!("unsupported args {} {}", l_type, r_type),
                     }
                 }
@@ -1007,19 +1287,27 @@ impl CodeGen {
                 } => {
                     let result_type = type_info.get_value_type(*r);
                     match &result_type.expr {
-                        TypeExpr::Int(bits) if *bits <= 64 => {
+                        TypeExpr::Int(bits) => {
                             let result = layouter.alloc_value(*r, result_type);
-                            emitter.push_op(bytecode::OpCode::NotInt {
-                                res: result,
-                                a: layouter.get_value(*v),
-                                bits: *bits as u64,
-                            });
-                        }
-                        TypeExpr::Int(128) => {
-                            let result = layouter.alloc_value(*r, result_type);
-                            emitter.push_op(bytecode::OpCode::NotInt128 {
-                                res: result,
-                                a: layouter.get_value(*v),
+                            let a = layouter.get_value(*v);
+                            let lane = int_lane(*bits);
+                            let bits = *bits as u64;
+                            emitter.push_op(match lane {
+                                Lane::Cell => bytecode::OpCode::NotInt {
+                                    res: result,
+                                    a,
+                                    bits,
+                                },
+                                Lane::Double => bytecode::OpCode::NotInt128 {
+                                    res: result,
+                                    a,
+                                    bits,
+                                },
+                                Lane::Wide => bytecode::OpCode::NotIntn {
+                                    res: result,
+                                    a,
+                                    bits,
+                                },
                             });
                         }
                         t => panic!("Unsupported type for not: {:?}", t),
@@ -1264,18 +1552,29 @@ impl CodeGen {
                             }
                             // As for `Cmp`/`Eq` above: one arm, raw patterns.
                             (TypeExpr::Int(lhs_bits), TypeExpr::Int(rhs_bits))
-                                if *lhs_bits == *rhs_bits && *lhs_bits <= 64 =>
+                                if *lhs_bits == *rhs_bits =>
                             {
-                                emitter.push_op(bytecode::OpCode::AssertEqInt {
-                                    a: layouter.get_value(*lhs),
-                                    b: layouter.get_value(*rhs),
-                                });
-                            }
-                            (TypeExpr::Int(128), TypeExpr::Int(128)) => {
-                                emitter.push_op(bytecode::OpCode::AssertEqInt128 {
-                                    a: layouter.get_value(*lhs),
-                                    b: layouter.get_value(*rhs),
-                                });
+                                match int_lane(*lhs_bits) {
+                                    Lane::Cell => {
+                                        emitter.push_op(bytecode::OpCode::AssertEqInt {
+                                            a: layouter.get_value(*lhs),
+                                            b: layouter.get_value(*rhs),
+                                        });
+                                    }
+                                    Lane::Double => {
+                                        emitter.push_op(bytecode::OpCode::AssertEqInt128 {
+                                            a: layouter.get_value(*lhs),
+                                            b: layouter.get_value(*rhs),
+                                        });
+                                    }
+                                    Lane::Wide => {
+                                        emitter.push_op(bytecode::OpCode::AssertEqIntn {
+                                            a: layouter.get_value(*lhs),
+                                            b: layouter.get_value(*rhs),
+                                            bits: *lhs_bits as u64,
+                                        });
+                                    }
+                                }
                             }
                             _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
                         }
@@ -1285,32 +1584,44 @@ impl CodeGen {
                         let rhs_type = type_info.get_value_type(*rhs);
                         let cmp_result = layouter.alloc_scratch(1);
                         match (kind.is_signed(), &lhs_type.expr, &rhs_type.expr) {
-                            (true, TypeExpr::Int(lhs_bits), TypeExpr::Int(rhs_bits))
-                                if *lhs_bits == *rhs_bits
-                                    && *lhs_bits <= MAX_SUPPORTED_SIGNED_BITS =>
+                            (signed, TypeExpr::Int(lhs_bits), TypeExpr::Int(rhs_bits))
+                                if *lhs_bits == *rhs_bits =>
                             {
-                                emitter.push_op(bytecode::OpCode::SltInt {
-                                    res: cmp_result,
-                                    a: layouter.get_value(*lhs),
-                                    b: layouter.get_value(*rhs),
-                                    bits: *lhs_bits as u64,
-                                });
-                            }
-                            (false, TypeExpr::Int(lhs_bits), TypeExpr::Int(rhs_bits))
-                                if *lhs_bits == *rhs_bits && *lhs_bits <= 64 =>
-                            {
-                                emitter.push_op(bytecode::OpCode::UltInt {
-                                    res: cmp_result,
-                                    a: layouter.get_value(*lhs),
-                                    b: layouter.get_value(*rhs),
-                                });
-                            }
-                            (false, TypeExpr::Int(128), TypeExpr::Int(128)) => {
-                                emitter.push_op(bytecode::OpCode::UltInt128 {
-                                    res: cmp_result,
-                                    a: layouter.get_value(*lhs),
-                                    b: layouter.get_value(*rhs),
-                                });
+                                match (signed, int_lane(*lhs_bits)) {
+                                    (true, Lane::Cell) => {
+                                        emitter.push_op(bytecode::OpCode::SltInt {
+                                            res: cmp_result,
+                                            a: layouter.get_value(*lhs),
+                                            b: layouter.get_value(*rhs),
+                                            bits: *lhs_bits as u64,
+                                        });
+                                    }
+                                    (false, Lane::Cell) => {
+                                        emitter.push_op(bytecode::OpCode::UltInt {
+                                            res: cmp_result,
+                                            a: layouter.get_value(*lhs),
+                                            b: layouter.get_value(*rhs),
+                                        });
+                                    }
+                                    (false, Lane::Double) => {
+                                        emitter.push_op(bytecode::OpCode::UltInt128 {
+                                            res: cmp_result,
+                                            a: layouter.get_value(*lhs),
+                                            b: layouter.get_value(*rhs),
+                                        });
+                                    }
+                                    (true, Lane::Double | Lane::Wide) => {
+                                        unsupported_int_width("a signed assertion", *lhs_bits)
+                                    }
+                                    (false, Lane::Wide) => {
+                                        emitter.push_op(bytecode::OpCode::UltIntn {
+                                            res: cmp_result,
+                                            a: layouter.get_value(*lhs),
+                                            b: layouter.get_value(*rhs),
+                                            bits: *lhs_bits as u64,
+                                        });
+                                    }
+                                }
                             }
                             (false, TypeExpr::Field, TypeExpr::Field) => {
                                 emitter.push_op(bytecode::OpCode::LtField {
@@ -1435,19 +1746,17 @@ impl CodeGen {
                     let c_type = type_info.get_value_type(*c);
                     let coeff_pos = match &c_type.expr {
                         TypeExpr::Field => layouter.get_value(*c),
-                        TypeExpr::Int(bits) if *bits <= 64 => {
+                        TypeExpr::Int(bits) => {
                             let tmp = layouter.alloc_temp_field();
-                            emitter.push_op(bytecode::OpCode::CastIntToField {
-                                res: tmp,
-                                a: layouter.get_value(*c),
-                            });
-                            tmp
-                        }
-                        TypeExpr::Int(128) => {
-                            let tmp = layouter.alloc_temp_field();
-                            emitter.push_op(bytecode::OpCode::CastInt128ToField {
-                                res: tmp,
-                                a: layouter.get_value(*c),
+                            let a = layouter.get_value(*c);
+                            emitter.push_op(match int_lane(*bits) {
+                                Lane::Cell => bytecode::OpCode::CastIntToField { res: tmp, a },
+                                Lane::Double => bytecode::OpCode::CastInt128ToField { res: tmp, a },
+                                Lane::Wide => bytecode::OpCode::CastIntnToField {
+                                    res: tmp,
+                                    a,
+                                    bits: *bits as u64,
+                                },
                             });
                             tmp
                         }
@@ -1584,14 +1893,17 @@ impl CodeGen {
                 }
                 hlssa::OpCode::Spread { result, value, .. } => {
                     let value_type = type_info.get_value_type(*value);
+
                     // `Spread` interleaves a bit pattern with zeros; there is no signed form of it,
-                    // and the width it actually supports is the `> 32` bound just below.
+                    // and the width it actually supports is `SPREAD_MAX_BITS`.
                     let value_bits = match value_type.strip_witness().expr {
                         TypeExpr::Int(bits) => bits,
                         t => panic!("Unsupported spread value type: {:?}", t),
                     };
-                    if value_bits > 32 {
-                        todo!("Spread bytecode lowering for integer widths > 32 bits");
+                    if value_bits > SPREAD_MAX_BITS {
+                        todo!(
+                            "Spread bytecode lowering for integer widths > {SPREAD_MAX_BITS} bits"
+                        );
                     }
                     let result_type = type_info.get_value_type(*result);
                     let res = match result_type.strip_witness().expr {
@@ -1599,7 +1911,7 @@ impl CodeGen {
                         TypeExpr::Field => layouter.alloc_field(*result),
                         _ => panic!("Unsupported spread result type: {result_type}"),
                     };
-                    emitter.push_op(bytecode::OpCode::SpreadU32 {
+                    emitter.push_op(bytecode::OpCode::SpreadU32ToU64 {
                         res,
                         val: layouter.get_value(*value),
                     });
@@ -1622,7 +1934,7 @@ impl CodeGen {
                         TypeExpr::Field => layouter.alloc_field(*result_even),
                         _ => panic!("Unsupported unspread even result type: {even_type}"),
                     };
-                    emitter.push_op(bytecode::OpCode::UnspreadU64 {
+                    emitter.push_op(bytecode::OpCode::UnspreadU64ToU32 {
                         res_and,
                         res_xor,
                         val: layouter.get_value(*value),
@@ -1804,11 +2116,16 @@ fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {
     match &elem_type.expr {
         // FIELD-ASSUMPTION: L3-felt-limbs
         TypeExpr::Field => (bytecode::FELT_LIMBS, bytecode::ELEM_FIELD),
-        // One `ELEM_WORD` per element -- a property of the lookup table's layout, not of how
-        // anything reads the element.
-        TypeExpr::Int(bits) if *bits <= 64 => (1, bytecode::ELEM_WORD),
-        TypeExpr::Int(128) => (2, bytecode::ELEM_U128),
-        TypeExpr::Int(_) => panic!("Array lookup unsupported for {elem_type}"),
+        TypeExpr::Int(bits) => match int_lane(*bits) {
+            // One `ELEM_WORD` per element.
+            Lane::Cell => (1, bytecode::ELEM_WORD),
+            // The tag names a cell count and a reading, not a width: it makes the tape read two
+            // cells as one unsigned value, which is the right value at any width the lane holds.
+            Lane::Double => (2, bytecode::ELEM_U128),
+            // `ELEM_WORD` and `ELEM_U128` are tags the VM's lookup tape reads, so a wide element
+            // needs a third one rather than the stride alone.
+            Lane::Wide => unsupported_int_width("an array lookup element", *bits),
+        },
         TypeExpr::WitnessOf(inner) => {
             let inner_kind = lookup_elem_kind(inner);
             assert!(

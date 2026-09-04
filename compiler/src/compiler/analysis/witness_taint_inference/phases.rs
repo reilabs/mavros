@@ -915,7 +915,7 @@ fn go_shape_from(
         WitnessType::Pure
     };
     match &ty.expr {
-        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {
             WitnessShape::Scalar(info)
         }
         TypeExpr::Slice(inner) => {

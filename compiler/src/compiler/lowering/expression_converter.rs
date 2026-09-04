@@ -12,6 +12,8 @@ use noirc_frontend::{
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
+use mavros_int_semantics::MAX_LOWERED_SIGNED_BITS;
+
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
@@ -20,8 +22,7 @@ use crate::{
             BlockId, FunctionId, SourceLocation, ValueId,
             hlssa::{
                 ArithGroup, BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness,
-                MAX_SUPPORTED_SIGNED_BITS, Radix, SequenceTargetType, SliceOpDir, Type, TypeExpr,
-                assert_signed_op_width,
+                Radix, SequenceTargetType, SliceOpDir, Type, TypeExpr, assert_signed_op_width,
                 builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder},
             },
         },
@@ -157,6 +158,27 @@ impl<'a> ExpressionConverter<'a> {
         emit(&mut e)
     }
 
+    /// The SSA type of an ident that names a function.
+    fn function_ident_type(&self, ident: &noirc_frontend::monomorphization::ast::Ident) -> Type {
+        use noirc_frontend::monomorphization::ast::Type as AstType;
+
+        // Noir types such an ident as the constrained/unconstrained pair while `convert_ident`
+        // emits one `FnPtr`.
+        let declared: &AstType = &ident.typ;
+        let signature = match declared {
+            AstType::Tuple(pair) => pair.first().unwrap_or(declared),
+            other => other,
+        };
+
+        let AstType::Function(_, ret, _, _) = signature else {
+            panic!(
+                "ICE: the ident `{}` names a function but is typed {declared:?}",
+                ident.name
+            )
+        };
+        Type::function_returning(self.type_converter.call_results(ret))
+    }
+
     /// Turn an optional Noir location into a definite `SourceLocation`.
     fn resolve_location(&self, location: Option<NoirLocation>) -> SourceLocation {
         location
@@ -281,11 +303,7 @@ impl<'a> ExpressionConverter<'a> {
 
     /// Calculate return size for function calls (tuples count as 1, unit as 0)
     fn return_size(&self, typ: &noirc_frontend::monomorphization::ast::Type) -> usize {
-        use noirc_frontend::monomorphization::ast::Type as AstType;
-        match typ {
-            AstType::Unit => 0,
-            _ => 1,
-        }
+        usize::from(TypeConverter::call_returns_a_value(typ))
     }
 
     /// Convert an expression to SSA instructions.
@@ -1422,8 +1440,8 @@ impl<'a> ExpressionConverter<'a> {
                     let bits: usize = bit_size.bit_size() as usize;
                     if *signedness == Signedness::Signed {
                         assert!(
-                            bits <= MAX_SUPPORTED_SIGNED_BITS,
-                            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+                            bits <= MAX_LOWERED_SIGNED_BITS,
+                            "signed integers wider than i{MAX_LOWERED_SIGNED_BITS} are unsupported"
                         );
                         let val = field_element.to_i128();
                         Some(Constant::int(bits, val as u128))
@@ -1477,15 +1495,15 @@ impl<'a> ExpressionConverter<'a> {
         // Get types for each element
         // Note: For Definition::Function idents, the Noir type may be
         // Tuple([Function, Function]) (constrained + unconstrained pair),
-        // but convert_ident produces a single scalar FnPtr value.
-        // Use Type::function() to match the actual value produced.
+        // but convert_ident produces a single scalar FnPtr value, so the pair
+        // is unwrapped rather than converted.
         let types: Vec<_> = exprs
             .iter()
             .map(|e| {
-                if let Expression::Ident(ident) = e {
-                    if matches!(&ident.definition, Definition::Function(_)) {
-                        return Type::function();
-                    }
+                if let Expression::Ident(ident) = e
+                    && matches!(&ident.definition, Definition::Function(_))
+                {
+                    return self.function_ident_type(ident);
                 }
                 let return_type = e.return_type().expect("Tuple element must have a type");
                 self.type_converter.convert_type(&return_type)

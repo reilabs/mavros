@@ -18,6 +18,7 @@ use crate::compiler::{
     },
     util::ice_non_elided_tuple,
 };
+use mavros_int_semantics::IntBits;
 
 pub struct LowerWitnessArrayOps {}
 
@@ -179,7 +180,7 @@ impl LowerWitnessArrayOps {
         // it fails.
         let (_, len_cmp, idx_cmp, _) = seq_bounds_operands(b, arr, pure_idx, arr_type, idx_type);
         let in_bounds = b.ult(idx_cmp, len_cmp);
-        let zero = b.int_const(idx_bits, 0);
+        let zero = b.int_const(IntBits::zero(idx_bits));
         let hint_idx = b.select(in_bounds, pure_idx, zero);
         let hint = self.emit_array_get_hint(b, arr, hint_idx, cond);
         let idx_field = b.cast_to_field(idx);
@@ -281,8 +282,8 @@ impl LowerWitnessArrayOps {
                 rhs: len_cmp,
             },
         );
-        let zero = b.int_const(32, 0);
-        let one = b.int_const(32, 1);
+        let zero = b.int_const(IntBits::zero(32));
+        let one = b.int_const(IntBits::one(32));
         let init = b.default_value(&acc_type);
         let results = b.build_loop(
             vec![(zero, Type::int(32)), (init, acc_type)],
@@ -485,7 +486,7 @@ impl LowerWitnessArrayOps {
                 panic!("multidimensional witness array read: slice element types not supported")
             }
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
-            TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
+            TypeExpr::Ref(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {
                 panic!(
                     "multidimensional witness array read: unsupported element type {}",
                     target_type
@@ -552,7 +553,7 @@ fn leaf_scalar_count(t: &Type) -> usize {
         TypeExpr::Field | TypeExpr::Int(_) => 1,
         TypeExpr::WitnessOf(inner) => leaf_scalar_count(inner),
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
-        TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
+        TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {
             panic!("leaf_scalar_count: unsupported type {}", t)
         }
     }

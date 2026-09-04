@@ -52,7 +52,7 @@
 //! width. With no sign, it's up to the operation to name the reading much like in the SSA, and its
 //! corresponding 2's-complement reading is [`SignedValue`].
 //!
-//! Everything an [`IntBits`] can *do* lives on [`IntBits`], in `int_bits.rs`. What is left here is
+//! Everything an [`IntBits`] can _do_ lives on [`IntBits`], in `int_bits.rs`. What is left here is
 //! the part of the model with **no receiver**: [`eval`] and [`residue`], whose subject is the
 //! _operation_ rather than the left operand, plus the vocabulary they take and the width rule they
 //! enforce.
@@ -93,14 +93,21 @@ use num_bigint::{BigInt, BigUint};
 // ================================================================================================
 
 /// The widest integer any operation may act on.
-pub const MAX_BITS: usize = 128;
-
-/// The widest integer a _signed_ operation may act on.
 ///
-/// A bound on operations, not on types: a 128-bit pattern is perfectly legal, it currently has no
-/// signed reading here, because the signed lowerings and the VM's `sdiv_int`/`slt_int` are 64-bit.
-/// Mirrors `MAX_SUPPORTED_SIGNED_BITS` in `hlssa::type_system`.
-pub const MAX_SIGNED_BITS: usize = 64;
+/// The model's own domain, mirrored by `MAX_SUPPORTED_INT_BITS` in `hlssa::type_system`. Nothing
+/// here is bounded by a host word: every operation runs on [`IntBits`] limbs or on a `BigInt`
+/// reading of them, so this is a policy about what widths are worth admitting rather than a limit
+/// anything ran into. It is emphatically **not** a bound on how wide a value any given _evaluator_
+/// can lower — see [`MAX_LOWERED_SIGNED_BITS`] for the one place that distinction is still live.
+pub const MAX_BITS: usize = 1 << 14;
+
+/// The widest pattern any Mavros lowering currently reads as two's complement.
+///
+/// **Not a bound on this model**, which reads a signed value at any width: [`IntBits::to_signed`]
+/// and its inverse work through [`SignedValue`], and the boundaries [`IntBits::signed_min`] and
+/// [`IntBits::signed_max`] never had a cap at all. It is a bound on the _implementations_ the
+/// sweeps measure.
+pub const MAX_LOWERED_SIGNED_BITS: usize = int_bits::HOST_LIMB_BITS;
 
 // PAYLOAD TYPES
 // ================================================================================================
@@ -382,16 +389,16 @@ impl Outcome {
 /// outruns the host, which is the intended failure. The pattern of the same shape is
 /// [`IntBits::all_ones`].
 ///
-/// The saturation bound is the **host's** width and deliberately not [`MAX_BITS`], even though the
-/// two are the same number today. The claim being made is that a `u128` cannot hold more than 128
-/// bits, which is a fact about the host; writing it as the model's cap would leave `mask` correct
-/// only for as long as that cap stays at 128, and the arm below is `1u128 << bits` — a debug panic
-/// and, worse, a release build that masks the shift amount and answers a plausible wrong number.
+/// The saturation bound is [`HOST_WORD_BITS`] and deliberately not [`MAX_BITS`], which is far above
+/// it. The claim being made is that a `u128` cannot hold more than 128 bits, which is a fact about
+/// the host; written as the model's cap the arm below would be `1u128 << bits` at a width no `u128`
+/// can express: a debug panic and, worse, a release build that masks the shift amount and answers
+/// with a plausible but incorrect result.
 #[must_use]
 pub fn mask(bits: usize) -> u128 {
     if bits == 0 {
         0
-    } else if bits >= u128::BITS as usize {
+    } else if bits >= int_bits::HOST_WORD_BITS {
         u128::MAX
     } else {
         (1u128 << bits) - 1
@@ -402,7 +409,10 @@ pub fn mask(bits: usize) -> u128 {
 // ================================================================================================
 
 /// Check the widths the operands arrived carrying.
-pub(crate) fn check_widths(signed: bool, is_shift: bool, bits: usize, rhs_bits: usize) {
+///
+/// There is deliberately no signed conjunct here. A signed _reading_ is total at every width this
+/// model admits.
+pub(crate) fn check_widths(is_shift: bool, bits: usize, rhs_bits: usize) {
     assert!(
         (1..=MAX_BITS).contains(&bits),
         "operand width {bits} is outside 1..={MAX_BITS}"
@@ -410,10 +420,6 @@ pub(crate) fn check_widths(signed: bool, is_shift: bool, bits: usize, rhs_bits: 
     assert!(
         (1..=MAX_BITS).contains(&rhs_bits),
         "right-operand width {rhs_bits} is outside 1..={MAX_BITS}"
-    );
-    assert!(
-        !signed || bits <= MAX_SIGNED_BITS,
-        "signed operation on a {bits}-bit value exceeds {MAX_SIGNED_BITS}"
     );
     assert!(
         rhs_bits == bits || is_shift,
@@ -425,13 +431,13 @@ pub(crate) fn check_widths(signed: bool, is_shift: bool, bits: usize, rhs_bits: 
 ///
 /// # Panics
 ///
-/// If either width is outside `1..=128`, if a signed operation is asked of a pattern above
-/// [`MAX_SIGNED_BITS`], or if a non-shift is given two operands of different widths. Those are
-/// compiler bugs rather than program errors, so they are not [`Reject`] variants.
+/// If either width is outside `1..=`[`MAX_BITS`], or if a non-shift is given two operands of
+/// different widths. Those are compiler bugs rather than program errors, so they are not
+/// [`Reject`] variants.
 #[must_use]
 pub fn eval(op: IntOp, lhs: &IntBits, rhs: &IntBits) -> Outcome {
     let bits = lhs.bits();
-    check_widths(op.is_signed(), op.is_shift(), bits, rhs.bits());
+    check_widths(op.is_shift(), bits, rhs.bits());
 
     match op {
         // Bitwise operations have no reading and cannot fail, so they answer here. They are also

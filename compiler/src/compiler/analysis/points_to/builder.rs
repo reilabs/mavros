@@ -280,7 +280,7 @@ impl FnBuilder<'_> {
                     prefix.pop();
                 }
             }
-            TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => {}
+            TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {}
             TypeExpr::WitnessOf(_) => unreachable!("peeled above"),
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
         }
@@ -834,7 +834,7 @@ fn collect_ref_levels(ty: &Type, prefix: &mut Path, out: &mut Vec<Path>) {
             collect_ref_levels(inner, prefix, out);
             prefix.pop();
         }
-        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => {}
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {}
         TypeExpr::WitnessOf(_) => unreachable!("peeled above"),
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
     }
