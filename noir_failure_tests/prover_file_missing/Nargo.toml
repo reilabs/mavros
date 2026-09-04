@@ -1,0 +1,6 @@
+[package]
+name = "prover_file_missing"
+type = "bin"
+authors = [""]
+
+[dependencies]

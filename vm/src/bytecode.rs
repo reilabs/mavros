@@ -3126,6 +3126,8 @@ pub struct Program {
     /// Indices into `functions` of the program's entry points, in entry-table order
     /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], ...).
     pub entry_points: Vec<usize>,
+    /// Flattened field count of the witgen entry blob
+    pub entry_blob_field_count: usize,
     pub global_frame_size: usize,
     pub struct_layouts: Vec<StructDescriptor>,
     /// Interned constant pool: a flat word buffer holding each distinct multi-cell constant
@@ -3208,6 +3210,7 @@ impl Program {
         binary.extend_from_slice(&self.constant_pool);
 
         binary.push(self.global_frame_size as u64);
+        binary.push(self.entry_blob_field_count as u64);
 
         // Entry-point table: [num_entries, marker_offset_0, ...]. The offsets are absolute word
         // indices of each entry function's `u64::MAX` marker; they are patched in once function
@@ -3292,6 +3295,8 @@ pub struct ProgramHeader {
     /// Interned constant pool (flat words), read at runtime by `mov_const_pool`.
     pub constant_pool: Vec<u64>,
     pub global_frame_size: usize,
+    /// The exact number of input fields the caller must supply.
+    pub entry_blob_field_count: usize,
     /// Absolute word offsets of each entry point's function marker, in entry-table order
     /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], ...). The entry's frame size lives at `offset + 1` and
     /// its first opcode at `offset + 2`.
@@ -3308,15 +3313,17 @@ pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
     let constant_pool = program[off + 1..off + 1 + pool_len].to_vec();
     let off = off + 1 + pool_len;
     let global_frame_size = program[off] as usize;
-    let num_entries = program[off + 1] as usize;
+    let entry_blob_field_count = program[off + 1] as usize;
+    let num_entries = program[off + 2] as usize;
     let entry_points: Vec<usize> = (0..num_entries)
-        .map(|i| program[off + 2 + i] as usize)
+        .map(|i| program[off + 3 + i] as usize)
         .collect();
-    let code_start = off + 2 + num_entries;
+    let code_start = off + 3 + num_entries;
     ProgramHeader {
         struct_layouts,
         constant_pool,
         global_frame_size,
+        entry_blob_field_count,
         entry_points,
         code_start,
     }
@@ -3395,6 +3402,7 @@ mod tests {
                 },
             ],
             entry_points: vec![0],
+            entry_blob_field_count: 0,
             global_frame_size: 0,
             struct_layouts: Vec::new(),
             constant_pool: Vec::new(),
@@ -3462,11 +3470,12 @@ mod tests {
 
     #[test]
     fn compact_binary_header_parses_without_debug_metadata() {
-        // Empty header: no struct layouts, constants, globals, or entries, then code starts.
-        let binary = [0, 0, 0, 0, u64::MAX, 0];
+        // Empty header: no struct layouts, constants, globals, entry blob fields, or
+        // entries, then code starts.
+        let binary = [0, 0, 0, 0, 0, u64::MAX, 0];
         let header = parse_program_header(&binary);
 
-        assert_eq!(header.code_start, 4);
+        assert_eq!(header.code_start, 5);
         assert!(header.constant_pool.is_empty());
     }
 
@@ -3481,6 +3490,7 @@ mod tests {
                 source_locations: vec![source_location.clone(), source_location],
             }],
             entry_points: vec![0],
+            entry_blob_field_count: 0,
             global_frame_size: 0,
             struct_layouts: Vec::new(),
             constant_pool: Vec::new(),
@@ -3513,6 +3523,7 @@ mod tests {
                 ],
             }],
             entry_points: vec![0],
+            entry_blob_field_count: 0,
             global_frame_size: 0,
             struct_layouts: Vec::new(),
             constant_pool: Vec::new(),

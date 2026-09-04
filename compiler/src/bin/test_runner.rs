@@ -14,7 +14,7 @@ use cargo_metadata::MetadataCommand;
 use ark_ff::UniformRand as _;
 use mavros_artifacts::Field as RawField;
 use mavros_compiler::{
-    Project, abi_helpers,
+    Project, abi_helpers, api,
     collections::HashMap,
     compiler::codegen::{
         CodeGenOptions,
@@ -40,7 +40,6 @@ use mavros_wasm_layout::{
     WITGEN_TABLES_LEN_OFFSET, WITGEN_TABLES_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE,
     WITGEN_WITNESS_PTR_OFFSET,
 };
-use noirc_abi::input_parser::Format;
 use rand::SeedableRng;
 use wasmtime::{Config, Engine, Linker, Memory, Store, WasmBacktraceDetails};
 
@@ -108,18 +107,6 @@ const DEFAULT_IGNORED_TESTS: &[&str] = &[
     // SIGSEGVs fast (alloc returns null → unchecked deref) or thrashes for hours before the OOM
     // killer fires — the latter froze CI for 6h. Skip until the VM gains an execution budget.
     "brillig_mem_layout_regression",
-    // `noir/test_programs/execution_failure/regression_8229`. Its Witgen Run VM lane has been
-    // observed flipping ✅/❌ at roughly 1 run in 10 from *byte-identical* bytecode, so the flake
-    // is in the interpreter rather than in anything the compiler emits, and it predates the work
-    // that keeps tripping over it. A test that changes verdict without the artifact changing
-    // cannot tell a regression from noise, which is the whole job of this table.
-    //
-    // Skipped rather than fixed for now. Note a 10x `--run-single` sweep at the commit this was
-    // added on did *not* reproduce the flip — the VM lane came back `fail` (i.e. the expected
-    // rejection) every time, while Witgen WASM Run consistently *passed* when it should have
-    // failed. So there is a second, deterministic problem in the WASM lane here that ignoring the
-    // test also hides; re-check both when picking this back up.
-    "regression_8229",
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -288,13 +275,21 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     let source_path_root = driver.package_root().to_path_buf();
 
     // Load inputs (needed for witgen run)
-    let ordered_params = load_inputs(&driver.package_root().join("Prover.toml"), &driver);
+    let ordered_params =
+        api::read_prover_inputs(driver.package_root(), driver.abi()).map_err(|e| e.to_string());
 
     // 4. Run witgen  (depends on COMPILE)
     let witgen_result = program_artifact.as_ref().and_then(|artifact| {
         emit("START:WITGEN_RUN");
         let r1cs = r1cs.as_ref().unwrap();
-        let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+        let params = match &ordered_params {
+            Ok(params) => params.as_slice(),
+            Err(reason) => {
+                eprintln!("witgen run error: {reason}");
+                emit("END:WITGEN_RUN:fail");
+                return None;
+            }
+        };
         match interpreter::run(
             &artifact.binary,
             r1cs.witness_layout,
@@ -318,13 +313,14 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     // 5. Check witgen correctness  (depends on WITGEN_RUN)
     if let (Some(result), Some(r1cs)) = (&witgen_result, &r1cs) {
         emit("START:WITGEN_CORRECT");
-        let correct = r1cs.check_witgen_output(
-            &result.out_wit_pre_comm,
-            &result.out_wit_post_comm,
-            &result.out_a,
-            &result.out_b,
-            &result.out_c,
-        );
+        let correct =
+            r1cs.check_witgen_output(
+                &result.out_wit_pre_comm,
+                &result.out_wit_post_comm,
+                &result.out_a,
+                &result.out_b,
+                &result.out_c,
+            ) && check_return_guard(&driver, r1cs, &ordered_params, &result.out_wit_pre_comm);
         emit(if correct {
             "END:WITGEN_CORRECT:ok"
         } else {
@@ -447,8 +443,20 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     let wasm_result = wasm_path.as_ref().and_then(|wasm_path| {
         emit("START:WITGEN_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
-        let params = ordered_params.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-        match run_wasm(wasm_path, r1cs, params) {
+        let params = match &ordered_params {
+            Ok(params) => params.as_slice(),
+            Err(reason) => {
+                eprintln!("WASM run error: {reason}");
+                emit("END:WITGEN_WASM_RUN:fail");
+                return None;
+            }
+        };
+        match run_wasm(
+            wasm_path,
+            r1cs,
+            params,
+            driver.entry_point_flattened_io_count(),
+        ) {
             Ok(result) => {
                 emit("END:WITGEN_WASM_RUN:ok");
                 Some(result)
@@ -465,13 +473,14 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     if let (Some(result), Some(r1cs)) = (&wasm_result, &r1cs) {
         emit("START:WITGEN_WASM_CORRECT");
 
-        let correct = r1cs.check_witgen_output(
-            &result.out_wit_pre_comm,
-            &result.out_wit_post_comm,
-            &result.out_a,
-            &result.out_b,
-            &result.out_c,
-        );
+        let correct =
+            r1cs.check_witgen_output(
+                &result.out_wit_pre_comm,
+                &result.out_wit_post_comm,
+                &result.out_a,
+                &result.out_b,
+                &result.out_c,
+            ) && check_return_guard(&driver, r1cs, &ordered_params, &result.out_wit_pre_comm);
         emit(if correct {
             "END:WITGEN_WASM_CORRECT:ok"
         } else {
@@ -532,15 +541,19 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     }
 }
 
-fn load_inputs(file_path: &Path, driver: &Driver) -> Option<Vec<interpreter::InputValueOrdered>> {
-    let ext = file_path.extension().and_then(|e| e.to_str())?;
-    let format = Format::from_ext(ext)?;
-    let contents = fs::read_to_string(file_path).ok()?;
-    let params = format.parse(&contents, driver.abi()).ok()?;
-    Some(abi_helpers::ordered_params_from_btreemap(
-        driver.abi(),
-        &params,
-    ))
+/// True when the generated witness's return-guard column matches the parsed inputs.
+fn check_return_guard(
+    driver: &Driver,
+    r1cs: &R1CS,
+    ordered_params: &Result<Vec<interpreter::InputValueOrdered>, String>,
+    wit_pre_comm: &[RawField],
+) -> bool {
+    let Ok(params) = ordered_params else {
+        return false;
+    };
+    abi_helpers::check_return_guard(driver.abi(), &r1cs.witness_layout, params, wit_pre_comm)
+        .inspect_err(|reason| eprintln!("return-guard check failed: {reason}"))
+        .is_ok()
 }
 
 // ── WASM Runner ──────────────────────────────────────────────────────
@@ -618,37 +631,18 @@ fn read_field_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr:
     ark_bn254::Fr::new_unchecked(BigInt::new([l0, l1, l2, l3]))
 }
 
-/// Write a field element to WASM memory (writes Montgomery form)
-/// Flatten an InputValueOrdered into a list of Field elements
-fn flatten_input_value(value: &interpreter::InputValueOrdered) -> Vec<RawField> {
-    let mut result = Vec::new();
-    match value {
-        interpreter::InputValueOrdered::Field(elem) => result.push(*elem),
-        interpreter::InputValueOrdered::Vec(vec_elements) => {
-            for elem in vec_elements {
-                result.extend(flatten_input_value(elem));
-            }
-        }
-        interpreter::InputValueOrdered::Struct(fields) => {
-            for (_field_name, field_value) in fields {
-                result.extend(flatten_input_value(field_value));
-            }
-        }
-        interpreter::InputValueOrdered::String(_) => {
-            panic!("Strings are not supported in WASM runner")
-        }
-    }
-    result
-}
-
 fn run_wasm(
     wasm_path: &Path,
     r1cs: &R1CS,
     params: &[interpreter::InputValueOrdered],
+    expected_input_field_count: usize,
 ) -> Result<WasmResult, Box<dyn std::error::Error>> {
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
-    let input_fields: Vec<RawField> = params.iter().flat_map(flatten_input_value).collect();
+    let input_fields: Vec<RawField> = interpreter::flatten_param_vec(params);
+    if input_fields.len() != expected_input_field_count {
+        return Err("Unexpected number of inputs supplied".into());
+    }
 
     let vm_struct_size: u32 = WITGEN_VM_STRUCT_SIZE;
     // FIELD-ASSUMPTION: L3-field-size

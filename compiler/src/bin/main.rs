@@ -322,11 +322,25 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         error
     })?;
 
+    // Every consistency check below accumulates into this; one failure fails the run.
+    let mut checks_passed = true;
+
     let correct = api::check_witgen(&r1cs, &witgen_result);
+    checks_passed &= correct;
     if !correct {
         error!(message = %"Witgen output is incorrect");
     } else {
         info!(message = %"Witgen output is correct");
+    }
+
+    if let Err(reason) = mavros_compiler::abi_helpers::check_return_guard(
+        driver.abi(),
+        &r1cs.witness_layout,
+        &params,
+        &witgen_result.out_wit_pre_comm,
+    ) {
+        error!(message = %"Return-guard public input is inconsistent", reason = %reason);
+        checks_passed = false;
     }
 
     let leftover_memory = plotting::plot_memory_chart(
@@ -410,6 +424,7 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     }
 
     let correct = api::check_ad(&r1cs, &ad_coeffs, &ad_a, &ad_b, &ad_c);
+    checks_passed &= correct;
     if !correct {
         error!(message = %"AD output is incorrect");
     } else {
@@ -498,7 +513,11 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
         }
     }
 
-    Ok(ExitCode::SUCCESS)
+    if checks_passed {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::FAILURE)
+    }
 }
 
 // Copied from: https://github.com/noir-lang/noir/blob/5071093f9b51e111a49a5f78d827774ef8e80c74/tooling/nargo_cli/src/cli/mod.rs#L301

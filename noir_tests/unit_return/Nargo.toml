@@ -1,0 +1,6 @@
+[package]
+name = "unit_return"
+type = "bin"
+authors = [""]
+
+[dependencies]

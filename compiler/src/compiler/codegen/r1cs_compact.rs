@@ -752,6 +752,8 @@ mod tests {
     fn system(cols: usize, rows: Vec<R1C>) -> R1CS {
         R1CS {
             witness_layout: WitnessLayout {
+                guard_index: None,
+                return_len: 0,
                 algebraic_size: cols,
                 multiplicities_size: 0,
                 challenges_size: 0,

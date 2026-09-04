@@ -206,9 +206,28 @@ impl CodeGen {
             cur_fun_off += function.code.len();
         }
 
+        let witgen_entry = *entry_ids
+            .get(bytecode::ENTRY_WITGEN)
+            .expect("SSA has no witgen entry point");
+        let entry_blob_field_count =
+            match ssa.get_function(witgen_entry).get_param_types().as_slice() {
+                [
+                    Type {
+                        expr: TypeExpr::Blob(_, len),
+                    },
+                ] => *len,
+                // A program with no inputs and no declared return gets a zero-length blob.
+                // Since nothing reads it, the blob gets DCE-d away.
+                [] => 0,
+                params => panic!(
+                    "ICE: witgen entry must take a single Blob<Field; N> parameter, got {params:?}"
+                ),
+            };
+
         bytecode::Program {
             functions,
             entry_points: (0..entry_ids.len()).collect(),
+            entry_blob_field_count,
             global_frame_size: global_layouter.total_size,
             struct_layouts: struct_interner.into_table(),
             constant_pool: const_pool.into_pool(),
