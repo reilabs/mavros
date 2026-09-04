@@ -53,13 +53,18 @@ pub fn ordered_params_from_btreemap(
 
 pub fn guard_layout(abi: &noirc_abi::Abi) -> Option<(usize, usize)> {
     abi.return_type.as_ref().map(|ret| {
-        let params: usize = abi
-            .parameters
-            .iter()
-            .map(|param| param.typ.field_count() as usize)
-            .sum();
-        (1 + params, ret.abi_type.field_count() as usize)
+        (
+            1 + params_field_count(abi),
+            ret.abi_type.field_count() as usize,
+        )
     })
+}
+
+fn params_field_count(abi: &noirc_abi::Abi) -> usize {
+    abi.parameters
+        .iter()
+        .map(|param| param.typ.field_count() as usize)
+        .sum()
 }
 
 pub fn check_return_guard(
@@ -96,16 +101,11 @@ pub fn check_return_guard(
 }
 
 pub fn flattened_io_count(abi: &noirc_abi::Abi) -> usize {
-    let params: usize = abi
-        .parameters
-        .iter()
-        .map(|param| param.typ.field_count() as usize)
-        .sum();
     let returns = abi
         .return_type
         .as_ref()
         .map_or(0, |ret| 1 + ret.abi_type.field_count() as usize);
-    params + returns
+    params_field_count(abi) + returns
 }
 
 fn field_param(value: u64) -> InputValueOrdered {
