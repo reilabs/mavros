@@ -1684,10 +1684,10 @@ impl<'a> ExpressionConverter<'a> {
                 Some(value)
             }
             "black_box" => {
-                // `black_box` is semantically an identity; its optimization-barrier behavior is
-                // explicitly only a hint. Mavros does not currently eliminate pass-through
-                // callees, so evaluating the argument once and returning its SSA value preserves
-                // the unconstrained calls this hint was added to protect.
+                // `black_box` is an identity with a best-effort optimization hint, which Mavros
+                // currently ignores. Evaluate the argument exactly once, preserving its side
+                // effects, and return its value (or None for unit). This does not promise an
+                // optimization barrier or depend on whether calls are inlined or eliminated.
                 self.convert_expression(&call.arguments[0], b)
             }
             "as_witness" => {
