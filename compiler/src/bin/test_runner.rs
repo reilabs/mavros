@@ -100,8 +100,6 @@ fn main() {
 const DEFAULT_IGNORED_TESTS: &[&str] = &[
     // This upstream beta.26 test currently causes Mavros' functional-test CI job to fail.
     "large_nested_array_merge_loop",
-    // Beta.26 added `std::hint::black_box` calls to this test, which Mavros does not yet lower.
-    "brillig_identity_function",
     // `func_1` recurses without ever decrementing `ctx_limit`, so it never terminates. The witgen
     // VM has no recursion/step/memory guard (frames are heap-allocated per call in `Frame::push`),
     // so running it grows memory without bound. Depending on the compiled circuit shape it either
