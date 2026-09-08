@@ -91,10 +91,6 @@ that knows its own width, so there is no width parameter for a caller to disagre
 a flag. The reading is part of the operation because it changes the answer: `eval` rejects
 `200u8 + 100u8` and accepts the same two patterns read as `-56i8 + 100i8`.
 
-Patterns up to 128 bits keep their limbs inline; wider patterns use heap storage. Cloning a small
-integer therefore needs no allocation, including when compiler analysis copies arrays of integer
-values. Storage does not change the width, normalization, equality, hashing, or arithmetic rules.
-
 What remains is the rule that the operands must agree, and the model enforces it rather than
 assuming it: both operands must be one width for every operation except a shift. A shift's amount
 can legitimately be declared narrower than the value it shifts, and an amount's own width is the

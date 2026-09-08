@@ -28,6 +28,13 @@ type Limbs = SmallVec<[u64; 2]>;
 ///
 /// It has no [`Ord`] implementation because it is a raw bit interpretation and there are two valid
 /// readings of ordering for this type. [`IntBits::compare`] should be used to choose a reading.
+///
+/// # Performance
+///
+/// Patterns up to 128 bits keep their limbs inline; wider patterns use heap storage. Cloning a
+/// small integer therefore needs no allocation, including when compiler analysis copies arrays
+/// of integer values. Storage does not change the width, normalization, equality, hashing, or
+/// arithmetic rules.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct IntBits {
     /// The width of the integer.
