@@ -59,6 +59,9 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
     // Phase 1: Compute reaching definitions — which FnPtrs can reach each value
     let reaching = compute_reaching_fn_ptrs(ssa);
 
+    let callable = compute_callable_functions(ssa, &reaching);
+    ssa.retain_functions(|id, _| callable.contains(&id));
+
     // Phase 2: For each dynamic call site, build a dispatch function
     // with exactly the reachable targets
     let mut call_site_dispatch: HashMap<(FunctionId, ValueId), FunctionId> = HashMap::default();
@@ -242,6 +245,38 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
             block.put_instructions(instructions);
         }
     }
+}
+
+/// Compute callable functions using BFS. If `reaching` overestimates, it will overestimate too.
+fn compute_callable_functions(ssa: &HLSSA, reaching: &ReachingFns) -> HashSet<FunctionId> {
+    let mut callable: HashSet<FunctionId> = HashSet::default();
+    let mut worklist: Vec<FunctionId> = ssa.get_entry_points().to_vec();
+    worklist.extend(ssa.get_globals_init_fn());
+    worklist.extend(ssa.get_globals_deinit_fn());
+
+    while let Some(fid) = worklist.pop() {
+        if !callable.insert(fid) {
+            continue;
+        }
+        let func = ssa.get_function(fid);
+        for (_bid, block) in func.get_blocks() {
+            for instr in block.get_instructions() {
+                let OpCode::Call { function, .. } = instr else {
+                    continue;
+                };
+                match function {
+                    CallTarget::Static(callee) => worklist.push(*callee),
+                    CallTarget::Dynamic(fn_ptr_val) => {
+                        if let Some(targets) = reaching.get(&(fid, *fn_ptr_val)) {
+                            worklist.extend(targets.iter().copied());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    callable
 }
 
 /// Compute, for each (function, value) pair, the set of FunctionIds that
