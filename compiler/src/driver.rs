@@ -871,7 +871,9 @@ impl Driver {
             "witnessCount": r1cs.witness_layout.size(),
             "constraintCount": r1cs.constraints.len(),
             "parameters": parameters,
-            "returnElementCount": return_element_count
+            "hasReturn": abi.return_type.is_some(),
+            "returnElementCount": return_element_count,
+            "entryBlobFieldCount": self.entry_point_flattened_io_count()
         });
 
         let metadata_path = format!("{}.meta.json", wasm_path.display());

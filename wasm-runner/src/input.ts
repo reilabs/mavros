@@ -16,7 +16,9 @@ export interface ProgramMetadata {
   witnessCount: number;
   constraintCount: number;
   parameters: ParameterInfo[];
+  hasReturn: boolean;
   returnElementCount: number;
+  entryBlobFieldCount: number;
 }
 
 /**
@@ -92,7 +94,7 @@ export function parseProverToml(
     }
   }
 
-  if (metadata.returnElementCount > 0) {
+  if (metadata.hasReturn) {
     const returnValue = parsed['return'];
     if (returnValue === undefined) {
       console.warn(
@@ -118,6 +120,13 @@ export function parseProverToml(
     }
   }
 
+  if (allElements.length !== metadata.entryBlobFieldCount) {
+    throw new Error(
+      `Assembled ${allElements.length} input elements, ` +
+        `but the program expects ${metadata.entryBlobFieldCount}`
+    );
+  }
+
   return allElements;
 }
 
@@ -130,14 +139,18 @@ export function loadMetadata(metadataPath: string): ProgramMetadata {
     witnessCount: number;
     constraintCount: number;
     parameters: { name: string; elementCount: number }[];
-    returnElementCount?: number;
+    hasReturn: boolean;
+    returnElementCount: number;
+    entryBlobFieldCount: number;
   };
 
   return {
     witnessCount: data.witnessCount,
     constraintCount: data.constraintCount,
     parameters: data.parameters,
-    returnElementCount: data.returnElementCount ?? 0,
+    hasReturn: data.hasReturn,
+    returnElementCount: data.returnElementCount,
+    entryBlobFieldCount: data.entryBlobFieldCount,
   };
 }
 
