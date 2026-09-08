@@ -135,7 +135,8 @@ or intern keys. Every **middle-end** cluster now mints through the façade (`b.f
       (see L3-frame). Raw harness, feeds the VM.
 - [ ] `wasm-runtime/src/lib.rs` (1) — `use ark_bn254::Fr` (see L3/L4).
 - [ ] `compiler/src/api.rs` (1) — `Fr::rand` input setup. Raw, feeds the VM.
-- [ ] `compiler/src/abi_helpers.rs` (1) — `Fr::from(byte)` ABI decode. Raw, feeds the VM.
+- [ ] `compiler/src/abi_helpers.rs` (2) — `Fr::from(..)` ABI decode and return-guard synthesis. Raw,
+      feeds the VM.
 
 ### `L1-serde` — artifact/ABI serialization pinned to `[u64;4]` (representation, P5)
 
