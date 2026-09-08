@@ -93,12 +93,13 @@ jobs:
         with:
           path: |
             ~/.cargo/registry
-            target
-          # `flake.lock` pins rustc and LLVM, so it belongs in the part of the key shared with
-          # `restore-keys` -- otherwise the prefix match happily restores a cache built with a
-          # different toolchain.
-          key: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-
+            target/release
+            target/wasm32-unknown-unknown/release
+          # Keep debug and release caches separate: the faster unit-test job must not claim
+          # the immutable cache entry needed by the release jobs. Both release jobs can share it.
+          # Include the profile and pinned rustc/LLVM toolchain in the fallback prefix too.
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-${{ hashFiles('flake.lock') }}-
 
       - name: Build Test Runner
         run: make build-test-runner
@@ -131,12 +132,12 @@ jobs:
         with:
           path: |
             ~/.cargo/registry
-            target
-          # `flake.lock` pins rustc and LLVM, so it belongs in the part of the key shared with
-          # `restore-keys` -- otherwise the prefix match happily restores a cache built with a
-          # different toolchain.
-          key: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-
+            target/debug
+          # Keep debug and release caches separate: the faster unit-test job must not claim
+          # the immutable cache entry needed by the release jobs. Both release jobs can share it.
+          # Include the profile and pinned rustc/LLVM toolchain in the fallback prefix too.
+          key: ${{ runner.os }}-cargo-debug-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-debug-${{ hashFiles('flake.lock') }}-
 
       - name: Run Unit Tests
         run: make unit-test
@@ -175,12 +176,13 @@ jobs:
         with:
           path: |
             ~/.cargo/registry
-            target
-          # `flake.lock` pins rustc and LLVM, so it belongs in the part of the key shared with
-          # `restore-keys` -- otherwise the prefix match happily restores a cache built with a
-          # different toolchain.
-          key: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-
+            target/release
+            target/wasm32-unknown-unknown/release
+          # Keep debug and release caches separate: the faster unit-test job must not claim
+          # the immutable cache entry needed by the release jobs. Both release jobs can share it.
+          # Include the profile and pinned rustc/LLVM toolchain in the fallback prefix too.
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-${{ hashFiles('flake.lock') }}-
 
       - name: Build Test Runner
         run: make build-test-runner
