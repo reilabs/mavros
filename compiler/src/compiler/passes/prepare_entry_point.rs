@@ -4,11 +4,13 @@
 //! It does the following four things:
 //!
 //! 1. **Synthesises a Wrapper for `main`:** The wrapper takes a single `Blob<Field; N>` parameter
-//!    holding every flattened input field (the original main's arguments followed by its declared
-//!    return values), performs global initialization, invokes the original `main` and then uses a
-//!    deep assert to constrain the return value against the declared counterpart in the witness.
-//!    It then deinitializes the globals. The blob keeps the entry point's parameter list (and the
-//!    resulting locals pressure in the generated code) constant regardless of input size.
+//!    holding every flattened input field (the original main's arguments, then — when `main`
+//!    declares a return — a one-field *return guard* followed by the declared return values),
+//!    performs global initialization, invokes the original `main` and then uses a deep assert to
+//!    constrain the return value against the declared counterpart in the witness (see **Return
+//!    Guard** below). It then deinitializes the globals. The blob keeps the entry point's
+//!    parameter list (and the resulting locals pressure in the generated code) constant
+//!    regardless of input size.
 //! 2. **Pinned Witness Writes:** A single counted loop writes every blob element to the witness,
 //!    pinned so that DCE cannot remove the writes downstream, while accumulating the witness
 //!    values into an array.
@@ -18,6 +20,21 @@
 //!    the unconstrained result to the witness. It also handles range-checking of integers, and
 //!    recurses into arrays and tuples. This ensures that we bind the untrusted/unconstrained
 //!    results into the constraint system.
+//!
+//! # Return Guard
+//!
+//! The declared return in the blob is optional: a `u1` guard slot between the flattened
+//! parameters and returns gates the check. Each leaf asserts `guard * (result - declared) == 0`,
+//! so `guard = 0` (missing `return` input, columns zero-filled) disables the check entirely.
+//!
+//! Enforcing the declared return is a verifier obligation: pinning only the parameter and return
+//! columns accepts any return value (the prover picks `guard = 0`), so a verifier must require
+//! `guard == 1` as a public input. Relying on the column being boolean is not sound either: the
+//! booleanity constraint lives in the guard's reconstruct function and survives only as long as
+//! the guarded asserts consuming it do.
+//!
+//! Cost: one witness column, one blob slot, and one booleanity row per program; each leaf check
+//! stays a single R1C (see `assert_eq_deep_guarded`).
 
 use crate::{
     collections::HashMap,
@@ -79,16 +96,17 @@ impl PrepareEntryPoint {
 
         // Reconstruct functions rebuild each typed input value from its
         // flattened field representation, range-checking integers on the way.
+        let has_return = !return_types.is_empty();
+        let guard_type = Type::int(1);
         let mut reconstruct_fns = Vec::new();
         for typ in param_types.iter().chain(return_types.iter()) {
             Self::get_or_create_reconstruct_fn(typ, ssa, &mut reconstruct_fns);
         }
+        if has_return {
+            Self::get_or_create_reconstruct_fn(&guard_type, ssa, &mut reconstruct_fns);
+        }
 
-        let total_fields: usize = param_types
-            .iter()
-            .chain(return_types.iter())
-            .map(Self::flattened_field_count)
-            .sum();
+        let total_fields = Self::entry_blob_field_count(&param_types, &return_types);
 
         let wrapper_id = ssa.add_function("wrapper_main".to_string());
         let mut sb = HLSSABuilder::new(ssa);
@@ -157,6 +175,8 @@ impl PrepareEntryPoint {
                 arg_values.push(input_value(&mut e, typ));
             }
 
+            let return_guard = has_return.then(|| input_value(&mut e, &guard_type));
+
             let mut return_input_values = Vec::new();
             for typ in &return_types {
                 return_input_values.push(input_value(&mut e, typ));
@@ -174,12 +194,20 @@ impl PrepareEntryPoint {
             e.emit_with_location(
                 SourceLocation::synthetic("public return value check"),
                 |e| {
+                    let Some(guard) = return_guard else { return };
+                    let guard_field = e.cast_to_field(guard);
                     for ((result, public_input), return_type) in results
                         .iter()
                         .zip(return_input_values.iter())
                         .zip(return_types.iter())
                     {
-                        Self::assert_eq_deep(e, *result, *public_input, return_type);
+                        Self::assert_eq_deep_guarded(
+                            e,
+                            guard_field,
+                            *result,
+                            *public_input,
+                            return_type,
+                        );
                     }
                 },
             );
@@ -193,33 +221,42 @@ impl PrepareEntryPoint {
         ssa.set_unique_entrypoint(wrapper_id);
     }
 
-    fn assert_eq_deep(
+    fn assert_eq_deep_guarded(
         b: &mut HLBlockEmitter<'_>,
+        guard_field: ValueId,
         result: ValueId,
         public_input: ValueId,
         typ: &Type,
     ) {
         match &typ.expr {
-            TypeExpr::Field | TypeExpr::Int(_) => {
-                b.assert_eq(result, public_input);
-            }
             TypeExpr::Array(inner, size) => {
                 for i in 0..*size {
                     let index = b.int_const(32, i as u128);
                     let result_elem = b.array_get(result, index);
                     let input_elem = b.array_get(public_input, index);
-                    Self::assert_eq_deep(b, result_elem, input_elem, inner);
+                    Self::assert_eq_deep_guarded(b, guard_field, result_elem, input_elem, inner);
                 }
             }
             TypeExpr::Tuple(element_types) => {
                 for (i, elem_type) in element_types.iter().enumerate() {
                     let result_elem = b.tuple_proj(result, i);
                     let input_elem = b.tuple_proj(public_input, i);
-                    Self::assert_eq_deep(b, result_elem, input_elem, elem_type);
+                    Self::assert_eq_deep_guarded(
+                        b,
+                        guard_field,
+                        result_elem,
+                        input_elem,
+                        elem_type,
+                    );
                 }
             }
             _ => {
-                b.assert_eq(result, public_input);
+                let result_field = b.ensure_field(result, typ);
+                let input_field = b.ensure_field(public_input, typ);
+                let diff = b.usub(result_field, input_field);
+                let gated = b.umul(guard_field, diff);
+                let zero = b.field_const(b.field().constant(0u64));
+                b.assert_eq(gated, zero);
             }
         }
     }
@@ -339,6 +376,15 @@ impl PrepareEntryPoint {
 
     fn unique_reconstruct_fn_name(reconstruct_fns: &[ReconstructFnEntry]) -> String {
         format!("reconstruct_{}", reconstruct_fns.len())
+    }
+
+    pub(crate) fn entry_blob_field_count(param_types: &[Type], return_types: &[Type]) -> usize {
+        param_types
+            .iter()
+            .chain(return_types.iter())
+            .map(Self::flattened_field_count)
+            .sum::<usize>()
+            + usize::from(!return_types.is_empty())
     }
 
     pub(crate) fn flattened_field_count(typ: &Type) -> usize {
