@@ -146,7 +146,20 @@ impl LowerWitnessArrayOps {
         let arr_elem_type = function_type_info.get_value_type(arr).get_array_element();
 
         let pure_idx = b.value_of(idx);
-        let hint = self.emit_array_get_hint(b, arr, pure_idx, cond);
+        let idx_bits = int_bits(
+            function_type_info.get_value_type(idx),
+            "witness array get index",
+        );
+        let len = array_len(function_type_info.get_value_type(arr), "witness array get");
+        // Clamp the hint index so the VM never reads out of bounds; the lookup below still
+        // rejects an out-of-range witness index, so this only changes *when* it fails.
+        let cmp_bits = idx_bits.max(32);
+        let idx_cmp = b.widen_u(pure_idx, idx_bits, cmp_bits);
+        let len_cmp = b.int_const(cmp_bits, len as u128);
+        let in_bounds = b.ult(idx_cmp, len_cmp);
+        let zero = b.int_const(idx_bits, 0);
+        let hint_idx = b.select(in_bounds, pure_idx, zero);
+        let hint = self.emit_array_get_hint(b, arr, hint_idx, cond);
         let idx_field = b.cast_to_field(idx);
         let stride = leaf_scalar_count(&result_type);
         let base_key = if stride == 1 {
