@@ -4,7 +4,7 @@
 //! or private), and emits one `FunctionWitnessType` per specialized function (per-value
 //! `WitnessShape`, per-block cfg-witness, parameter/return shapes, function-level cfg_witness).
 //!
-//! It is designed to be run directly before `LowerWitnessControlFlow` which uses the output of this pass
+//! It is designed to be run directly before `UntaintControlFlow` which uses the output of this pass
 //! to bake `WitnessOf<T>` into types, insert casts, guard witness-dependent writes, linearize
 //! witness-dependent control flow and threads a cfg-witness flag argument into constrained calls.
 //!
@@ -50,7 +50,7 @@
 //!   summaries instantiated to concrete edges, producing a concrete `FunctionWitnessType`. Clone
 //!   the function once per distinct context, register its `FunctionWitnessType`, and rewrite
 //!   `Call` targets to the matching clone. The clone-per-context is required because
-//!   `LowerWitnessControlFlow` bakes context-specific `WitnessOf` types and a context-specific cfg-flag
+//!   `UntaintControlFlow` bakes context-specific `WitnessOf` types and a context-specific cfg-flag
 //!   parameter into each body.
 //!
 //! Besides the mutating pipeline entry point ([`WitnessTaintInference`]), the module exposes a
@@ -104,7 +104,7 @@
 //! symmetrically and forever, so a witness write through one original binding taints reads through
 //! the other even though they never alias at runtime.
 //!
-//! This is over-taint only — never unsoundness — and costs at most missed `LowerWitnessControlFlow`
+//! This is over-taint only — never unsoundness — and costs at most missed `UntaintControlFlow`
 //! opportunities on the write-through-original-after-merge pattern. This precision will instead
 //! exist in an aggressive Andersen-based alias-splitting that will use a full points-to analysis.
 //! This will leave only irreducible may-alias refs in the IR, on which the two formulations
@@ -131,7 +131,7 @@
 //!
 //! Pure arithmetic under a witness branch gets no cfg edge. The cfg flag is just another input to
 //! the summary, instantiated at call sites from the caller's block taint—the same value
-//! `LowerWitnessControlFlow` later pushes as the extra constrained-call argument.
+//! `UntaintControlFlow` later pushes as the extra constrained-call argument.
 //!
 //! #### Witness Sources, Calls, Globals, and the Entry Point
 //!
@@ -324,7 +324,7 @@ impl ApproximateWitnessTaint {
 
     /// Whether `vid` in `fid` is witness at its **top level** in some reachable context.
     ///
-    /// This is the faithful mirror of the top-level `TypeExpr::WitnessOf` wrap `LowerWitnessControlFlow`
+    /// This is the faithful mirror of the top-level `TypeExpr::WitnessOf` wrap `UntaintControlFlow`
     /// applies (`apply_witness_type` wraps a level iff that shape level is witness), which is what
     /// post-untaint `Type::is_witness_of` checks read. For witness-*length* slices the mirror
     /// holds only because both sides deliberately report the slice level `Pure` — purification

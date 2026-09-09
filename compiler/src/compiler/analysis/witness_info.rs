@@ -162,7 +162,7 @@ impl FunctionWitnessType {
     ///
     /// Only block parameters and instruction results are recorded; constants are not (they are
     /// always all-Pure). Callers looking up arbitrary operands must treat `None` as Pure rather
-    /// than unwrapping (see `get_witness_or_pure` in `lower_witness_control_flow`).
+    /// than unwrapping (see `get_witness_or_pure` in `untaint_control_flow`).
     pub fn try_get_value_witness_type(&self, value_id: ValueId) -> Option<&WitnessShape> {
         self.value_witness_types.get(&value_id)
     }

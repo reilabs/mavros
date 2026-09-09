@@ -38,7 +38,7 @@ impl InstructionLoweringRule for LowerWitnessMemoryOps {
 
 /// Slice selects must be emitted *bare*.
 ///
-/// This pass is the second producer of witness `Select`s on slices (`lower_witness_control_flow`'s
+/// This pass is the second producer of witness `Select`s on slices (`untaint_control_flow`'s
 /// `emit_merge_select` also), and unlike that it runs *after* `InstructionLowering::pure_guards`.
 /// This means that `LowerSideEffectFreeGuards`, which is what normally strips a `Select`'s guard,
 /// will never see what this emits. `LowerSliceSelect` asserts its input is unguarded, so a guarded

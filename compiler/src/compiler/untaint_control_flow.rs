@@ -33,7 +33,7 @@ mod merge;
 use conversion::{emit_strip_witness, emit_value_conversion};
 use merge::MergeLowering;
 
-pub struct LowerWitnessControlFlow {}
+pub struct UntaintControlFlow {}
 
 /// Look up the witness level for a value, defaulting to Pure for values
 /// not present in the witness type map (e.g., values created after type inference).
@@ -65,7 +65,7 @@ fn maybe_guard(
     instrs.push(instruction.locate(location.clone()));
 }
 
-impl LowerWitnessControlFlow {
+impl UntaintControlFlow {
     pub fn new() -> Self {
         Self {}
     }
@@ -80,7 +80,7 @@ impl LowerWitnessControlFlow {
     // the type info pass can see the WitnessOf types.
     // -----------------------------------------------------------------------
 
-    #[instrument(skip_all, name = "LowerWitnessControlFlow::apply_types")]
+    #[instrument(skip_all, name = "UntaintControlFlow::apply_types")]
     fn apply_types(&self, ssa: HLSSA, witness_inference: &WitnessTaintInference) -> HLSSA {
         let (mut result_ssa, functions, old_global_types) = ssa.prepare_rebuild();
         result_ssa.set_global_types(old_global_types);
@@ -304,7 +304,7 @@ impl LowerWitnessControlFlow {
     //    unconstrained call args via ValueOf.
     // -----------------------------------------------------------------------
 
-    #[instrument(skip_all, name = "LowerWitnessControlFlow::run")]
+    #[instrument(skip_all, name = "UntaintControlFlow::run")]
     pub fn run(&mut self, ssa: HLSSA, witness_inference: &WitnessTaintInference) -> HLSSA {
         // Step 1: bake WitnessOf into SSA types
         let mut ssa = self.apply_types(ssa, witness_inference);
@@ -343,7 +343,7 @@ impl LowerWitnessControlFlow {
         ssa
     }
 
-    #[instrument(skip_all, name = "LowerWitnessControlFlow::run_function", level = Level::DEBUG, fields(function = function.get_name()))]
+    #[instrument(skip_all, name = "UntaintControlFlow::run_function", level = Level::DEBUG, fields(function = function.get_name()))]
     fn run_function(
         &mut self,
         function_id: FunctionId,
@@ -420,7 +420,7 @@ impl LowerWitnessControlFlow {
         let block_source_location = old_instructions
             .last()
             .map(|instruction| instruction.location().clone())
-            .unwrap_or_else(|| SourceLocation::synthetic("lower_witness_control_flow"));
+            .unwrap_or_else(|| SourceLocation::synthetic("untaint_control_flow"));
         let mut new_instructions = Vec::new();
 
         for instruction in old_instructions {
@@ -516,7 +516,7 @@ impl LowerWitnessControlFlow {
                                 else_taint
                             } else {
                                 panic!(
-                                    "lower_witness_cf: block {:?} in if-body is dominated by neither \
+                                    "untaint_cf: block {:?} in if-body is dominated by neither \
                                      then-branch {:?} nor else-branch {:?}",
                                     body_bid, if_true, if_false
                                 );
@@ -757,7 +757,7 @@ impl LowerWitnessControlFlow {
                 function: CallTarget::Dynamic(_),
                 ..
             } => {
-                panic!("Dynamic call targets are not supported in lower_witness_control_flow")
+                panic!("Dynamic call targets are not supported in untaint_control_flow")
             }
             // -- Cast insertion for MkSeq --
             OpCode::MkSeq {

@@ -887,7 +887,7 @@ impl Analysis for ValueRanges {
 /// check cannot fail *on any execution that reaches the instruction*. Both regimes this analysis
 /// runs in support that, for different reasons:
 ///
-/// - **After `LowerWitnessControlFlow`**, every surviving `JmpIf` is on a *pure* condition: witness ones
+/// - **After `UntaintControlFlow`**, every surviving `JmpIf` is on a *pure* condition: witness ones
 ///   have been linearized into `Select`s with their blocks' instructions wrapped in `Guard`. A pure
 ///   branch is real control flow in both backends, and `hlssa_to_r1cs` interprets it rather than
 ///   flattening it, so the untaken arm is never evaluated at all.

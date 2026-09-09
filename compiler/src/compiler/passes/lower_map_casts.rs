@@ -1,7 +1,7 @@
 //! Lowers composite `Cast { target: Map(_) }` instructions into explicit
 //! element-wise conversion loops.
 //!
-//! `Map` casts are emitted at typed-slot boundaries (by `LowerWitnessControlFlow`
+//! `Map` casts are emitted at typed-slot boundaries (by `UntaintControlFlow`
 //! and `WitnessLowering`) so that the mid-pipeline optimization passes see a
 //! single opaque cast instead of spilled loops. This pass runs late, right
 //! before codegen needs the conversions to be explicit:

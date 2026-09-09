@@ -382,7 +382,7 @@ fn propagate(
                 // `folded_bools` — sound, because post-dominance covers all paths from this
                 // defining block, so the pruned edge cannot unreach the justifying assert. The
                 // witness arm records nothing there: a `JmpIf` condition is never `WitnessOf`-typed
-                // in the IR SCS sees (`LowerWitnessControlFlow` linearizes witness-conditioned branches,
+                // in the IR SCS sees (`UntaintControlFlow` linearizes witness-conditioned branches,
                 // and `LowerGuards` reintroduces them only after the last SCS run).
                 if cc.anticipated_equal(fid, point, lhs, rhs) {
                     let bare = ssa.add_const((*bool_constant(true)).clone());
@@ -466,7 +466,7 @@ fn propagate(
             let (cond, t, f) = (*cond, *t, *f);
 
             // The pristine condition is always analysis-known (every function value and interned
-            // input constant is typed), and never `WitnessOf`-typed: `LowerWitnessControlFlow`
+            // input constant is typed), and never `WitnessOf`-typed: `UntaintControlFlow`
             // linearizes witness-conditioned branches, and `LowerGuards` reintroduces them only
             // after the last SCS run. The witness arm of the anticipated fold (step 3b) and the
             // anticipated terminator read below both lean on this invariant.

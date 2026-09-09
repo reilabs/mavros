@@ -646,7 +646,7 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             // Phase 2 discovers and rewires call contexts by matching bare `OpCode::Call` only: a
             // Guard-wrapped constrained call would be analyzed here but never contextualized,
             // cloned, or rewired — silently. Fail loudly instead; nothing emits Guard-wrapped calls
-            // before this pass (Guards are introduced by LowerWitnessControlFlow and later).
+            // before this pass (Guards are introduced by UntaintControlFlow and later).
             assert!(
                 !matches!(
                     **inner,

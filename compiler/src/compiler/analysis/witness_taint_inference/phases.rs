@@ -622,7 +622,7 @@ struct ContextSolution {
 ///
 /// Each distinct context becomes a clone: its per-value shapes are re-keyed onto the clone, a
 /// [`FunctionWitnessType`] is registered for it, and `Call` targets are rewired to the matching
-/// clone. The clone-per-context is required because `LowerWitnessControlFlow` bakes context-specific
+/// clone. The clone-per-context is required because `UntaintControlFlow` bakes context-specific
 /// `WitnessOf` types and a context-specific cfg-flag parameter into each body.
 fn specialize_contexts(
     ssa: &mut HLSSA,

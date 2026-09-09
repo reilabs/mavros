@@ -12,7 +12,7 @@
 //! list of tuple-free "leaf" values, so a single `ValueId` is represented by a `Vec<ValueId>`.
 //! After this pass runs, no [`TypeExpr::Tuple`], `MkTuple`, `TupleProj` or `TupleRefProj` reaches
 //! any subsequent pass: the IR is tuple-free from here through the rest of HLSSA. Several downstream
-//! passes still _contain_ tuple-handling arms (`lower_witness_control_flow`, `witness_lowering`,
+//! passes still _contain_ tuple-handling arms (`untaint_control_flow`, `witness_lowering`,
 //! `rc_insertion`, codegen); those are now dead and can be removed as follow-up.
 //!
 //! This pass is intended to run directly after `PrepareEntryPoint` (which itself synthesizes tuples

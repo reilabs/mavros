@@ -1,6 +1,6 @@
 //! Lowers failable pure Guard instructions into explicit checks.
 //!
-//! After LowerWitnessControlFlow, Guards wrap operations in witness-conditional blocks. Side-effect-free
+//! After UntaintControlFlow, Guards wrap operations in witness-conditional blocks. Side-effect-free
 //! guarded operations are handled by `LowerSideEffectFreeGuards`; this rule keeps only operations whose
 //! inactive branch needs special handling to avoid evaluating a failing operation.
 //!

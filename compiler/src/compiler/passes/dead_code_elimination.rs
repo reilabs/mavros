@@ -176,8 +176,8 @@ pub struct Config {
 
     /// When true, all blocks are marked as live, preventing removal of empty intermediate blocks.
     ///
-    /// This is a workaround for lower_witness_control_flow not handling multiple merge predecessors.
-    /// Remove this option once lower_witness_control_flow properly handles multiple jumps into merge
+    /// This is a workaround for untaint_control_flow not handling multiple merge predecessors.
+    /// Remove this option once untaint_control_flow properly handles multiple jumps into merge
     /// blocks.
     pub preserve_all_blocks: bool,
 
@@ -230,7 +230,7 @@ pub struct Config {
     /// A witness-*conditional* dead write is covered, and needs nothing extra from
     /// `failable_bounds` matching only at the top level. Every run that rewrites is pre-untaint —
     /// each `Config::preserve_blocks()` site is in `make_struct_access_static` or `pre_wti` — while
-    /// `Guard` is introduced by `lower_witness_control_flow`, whose own type-application step panics on
+    /// `Guard` is introduced by `untaint_control_flow`, whose own type-application step panics on
     /// any it meets on input. So a rewriting run never sees a guarded access in the first place: at
     /// that point the condition is still ordinary control flow, the `AssertCmp` lands in the branch
     /// block, and untaint predicates it along with everything else there. That is what keeps the

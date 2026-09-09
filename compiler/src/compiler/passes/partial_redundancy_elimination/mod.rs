@@ -258,7 +258,7 @@ pub struct Config {
     pub motion: MotionLevel,
 
     /// Whether motion must leave the block/parameter geometry untouched — the pre-untaint
-    /// contract (`lower_witness_control_flow` assumes a single jump into each merge from a branch
+    /// contract (`untaint_control_flow` assumes a single jump into each merge from a branch
     /// side).
     ///
     /// When set, the hoist rule refuses headers whose entry predecessor ends in a `JmpIf` (an edge
