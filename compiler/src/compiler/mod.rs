@@ -1,11 +1,11 @@
 pub mod analysis;
 pub mod codegen;
 pub mod located;
+pub mod lower_witness_control_flow;
 pub mod lowering;
 pub mod pass_manager;
 pub mod passes;
 pub mod ssa;
-pub mod untaint_control_flow;
 pub mod util;
 
 // The compiler middle-end's field value type, spelled `Field` everywhere in this crate. This is

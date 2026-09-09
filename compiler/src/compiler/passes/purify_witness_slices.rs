@@ -11,7 +11,7 @@
 //! Cost note: a witnessed push appends to `physical`, then `array_set`s the value. The
 //! witness-indexed set lowers to a rebuild loop, so n pushes cost O(n^2) constraints.
 //!
-//! Must run before `ElideTuples` and `UntaintControlFlow`. Reads the read-only
+//! Must run before `ElideTuples` and `LowerWitnessControlFlow`. Reads the read-only
 //! [`ApproximateWitnessTaint`].
 
 use crate::{
@@ -1889,7 +1889,7 @@ mod tests {
     /// result's `Len`, so the select itself is wl and both arms must materialize tuples — the
     /// single-instruction analogue of `differing_length_merge_without_pushes_purifies_the_merge`.
     ///
-    /// Noir lowers `if` on slices to a cfg diamond, and `untaint_control_flow` (the only producer
+    /// Noir lowers `if` on slices to a cfg diamond, and `lower_witness_control_flow` (the only producer
     /// of slice selects) runs *after* this pass, so — like the `Guard` arm above — this arm is
     /// reachable only from a hand-built program and this test is its only coverage.
     #[test]

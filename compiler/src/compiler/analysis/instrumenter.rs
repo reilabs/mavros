@@ -152,6 +152,14 @@ fn const_index(pattern: &IntBits) -> usize {
     usize::try_from(pattern).expect("ICE: a constant index is wider than the machine")
 }
 
+/// At control-flow boundaries only witness payloads lose their concrete values;
+/// inside a witness payload every concrete leaf must be forgotten.
+#[derive(Clone, Copy)]
+enum Blinding {
+    Witnesses,
+    All,
+}
+
 impl Value {
     /// A `bits`-wide value carrying `value`, discarding any bits at or above `bits`.
     ///
@@ -352,50 +360,52 @@ impl Value {
     }
 
     fn blind(&mut self) {
+        self.apply_blinding(Blinding::Witnesses);
+    }
+
+    fn forget_concrete(&mut self) {
+        self.apply_blinding(Blinding::All);
+    }
+
+    fn apply_blinding(&mut self, mode: Blinding) {
+        if let Some(replacement) = self.blinding_replacement(mode) {
+            *self = replacement;
+        }
+    }
+
+    /// Visit each leaf once and copy an aggregate only when a child changes.
+    /// In particular, repeatedly blinding already-unknown loop arguments preserves
+    /// their shared arrays. Pointer contents still change through all aliases.
+    fn blinding_replacement(&self, mode: Blinding) -> Option<Self> {
         match self {
-            Value::WitnessOf(inner) => {
-                inner.forget_concrete();
+            Value::Int(v) if matches!(mode, Blinding::All) => {
+                Some(Value::Unknown(ScalarKind::Int(v.bits())))
             }
-            Value::Unknown(_) | Value::UnknownSlice => {}
-            Value::Int(_) | Value::Field(_) => {}
-            Value::Array(vals) => {
-                for val in Rc::make_mut(vals).iter_mut() {
-                    val.blind();
-                }
+            Value::Field(_) if matches!(mode, Blinding::All) => {
+                Some(Value::Unknown(ScalarKind::Field))
             }
-            Value::Blob(vals) => {
-                for val in vals {
-                    val.blind();
-                }
-            }
+            Value::Int(_) | Value::Field(_) | Value::Unknown(_) | Value::UnknownSlice => None,
+            Value::WitnessOf(inner) => inner
+                .blinding_replacement(Blinding::All)
+                .map(|v| Value::WitnessOf(Box::new(v))),
+            Value::Array(vals) => Self::blind_elements(vals, mode).map(Value::array),
+            Value::Blob(vals) => Self::blind_elements(vals, mode).map(Value::Blob),
             Value::Pointer(val) => {
-                val.borrow_mut().blind();
+                val.borrow_mut().apply_blinding(mode);
+                None
             }
         }
     }
 
-    fn forget_concrete(&mut self) {
-        match self {
-            Value::Int(v) => *self = Value::Unknown(ScalarKind::Int(v.bits())),
-            Value::Field(_) => *self = Value::Unknown(ScalarKind::Field),
-            Value::Unknown(_) | Value::UnknownSlice => {}
-            Value::WitnessOf(inner) => {
-                inner.forget_concrete();
-            }
-            Value::Array(vals) => {
-                for val in Rc::make_mut(vals).iter_mut() {
-                    val.forget_concrete();
-                }
-            }
-            Value::Blob(vals) => {
-                for val in vals {
-                    val.forget_concrete();
-                }
-            }
-            Value::Pointer(val) => {
-                val.borrow_mut().forget_concrete();
+    fn blind_elements(vals: &[Value], mode: Blinding) -> Option<Vec<Value>> {
+        let mut changed: Option<Vec<Value>> = None;
+        for (i, val) in vals.iter().enumerate() {
+            if let Some(replacement) = val.blinding_replacement(mode) {
+                // Copy the aggregate only when the first changed element is found.
+                changed.get_or_insert_with(|| vals.to_vec())[i] = replacement;
             }
         }
+        changed
     }
 
     fn make_unspecialized_sig(&self) -> ValueSignature {
@@ -2237,6 +2247,133 @@ mod tests {
     use mavros_int_semantics::{IntBits, IntOp, corners, residue};
 
     use crate::compiler::util::host_word;
+
+    #[test]
+    fn blinding_preserves_sharing_after_forgetting_witness_leaves() {
+        use std::rc::Rc;
+        let pure = Value::Int(IntBits::from_u128(64, 7));
+        let witness = Value::WitnessOf(Box::new(pure.clone()));
+        let original = Value::array(vec![Value::array(vec![pure, witness])]);
+        let mut blinded = original.clone();
+        blinded.blind();
+        let Value::Array(rows) = &blinded else { unreachable!() };
+        let Value::Array(row) = &rows[0] else { unreachable!() };
+        assert!(matches!(&row[0], Value::Int(v) if *v == IntBits::from_u128(64, 7)));
+        assert!(matches!(&row[1], Value::WitnessOf(v)
+            if matches!(v.as_ref(), Value::Unknown(ScalarKind::Int(64)))));
+        let Value::Array(original_rows) = &original else { unreachable!() };
+        let Value::Array(original_row) = &original_rows[0] else { unreachable!() };
+        assert!(
+            matches!(&original_row[1], Value::WitnessOf(v) if matches!(v.as_ref(), Value::Int(_)))
+        );
+        let Value::Array(before) = blinded.clone() else { unreachable!() };
+        blinded.blind();
+        let Value::Array(after) = &blinded else { unreachable!() };
+        assert!(Rc::ptr_eq(&before, after));
+
+        blinded.forget_concrete();
+        let Value::Array(before) = blinded.clone() else { unreachable!() };
+        blinded.forget_concrete();
+        let Value::Array(after) = &blinded else { unreachable!() };
+        assert!(Rc::ptr_eq(&before, after));
+    }
+
+    // The original eager transformation is kept here as a semantic oracle. It must
+    // remain independent of the replacement-building implementation above.
+    fn eager_blind(value: &mut Value, all: bool) {
+        use std::rc::Rc;
+        match value {
+            Value::Int(v) if all => *value = Value::Unknown(ScalarKind::Int(v.bits())),
+            Value::Field(_) if all => *value = Value::Unknown(ScalarKind::Field),
+            Value::Int(_) | Value::Field(_) | Value::Unknown(_) | Value::UnknownSlice => {}
+            Value::WitnessOf(inner) => eager_blind(inner, true),
+            Value::Array(values) => {
+                for value in Rc::make_mut(values) {
+                    eager_blind(value, all);
+                }
+            }
+            Value::Blob(values) => {
+                for value in values {
+                    eager_blind(value, all);
+                }
+            }
+            Value::Pointer(value) => eager_blind(&mut value.borrow_mut(), all),
+        }
+    }
+
+    #[test]
+    fn lazy_blinding_matches_eager_semantics_for_nested_values() {
+        let mut cases = vec![
+            ValueSignature::Int(IntBits::from_u128(8, 7)),
+            ValueSignature::Int(IntBits::all_ones(200)),
+            ValueSignature::Field(FieldConfig::bn254().constant(9u64)),
+            ValueSignature::Unknown(ScalarKind::Int(64)),
+            ValueSignature::Unknown(ScalarKind::Field),
+            ValueSignature::UnknownSlice,
+            ValueSignature::Array(vec![]),
+            ValueSignature::Blob(vec![]),
+        ];
+        for _ in 0..3 {
+            let previous = cases.clone();
+            for (i, value) in previous.iter().enumerate() {
+                let other = previous[(i + 1) % previous.len()].clone();
+                cases.push(ValueSignature::WitnessOf(Box::new(value.clone())));
+                cases.push(ValueSignature::Array(vec![value.clone(), other.clone()]));
+                cases.push(ValueSignature::Blob(vec![other, value.clone()]));
+                cases.push(ValueSignature::PointerTo(Box::new(value.clone())));
+            }
+        }
+        for sig in cases {
+            for all in [false, true] {
+                let mut expected = sig.to_value();
+                let mut actual = sig.to_value();
+                eager_blind(&mut expected, all);
+                if all {
+                    actual.forget_concrete();
+                } else {
+                    actual.blind();
+                }
+                assert_eq!(
+                    actual.make_unspecialized_sig(),
+                    expected.make_unspecialized_sig()
+                );
+                let once = actual.make_unspecialized_sig();
+                if all {
+                    actual.forget_concrete();
+                } else {
+                    actual.blind();
+                }
+                assert_eq!(actual.make_unspecialized_sig(), once);
+            }
+        }
+    }
+
+    #[test]
+    fn blinding_updates_shared_pointer_contents_without_replacing_aliases() {
+        use std::{cell::RefCell, rc::Rc};
+        let value = || Value::WitnessOf(Box::new(Value::Int(IntBits::from_u128(32, 17))));
+        let ptr = Rc::new(RefCell::new(value()));
+        let mut array = Value::array(vec![
+            Value::Pointer(ptr.clone()),
+            Value::Pointer(ptr.clone()),
+        ]);
+        let Value::Array(original) = array.clone() else { unreachable!() };
+        for _ in 0..2 {
+            // A pointer can regain a concrete value after an earlier blinding traversal.
+            *ptr.borrow_mut() = value();
+            array.blind();
+            assert_eq!(
+                ptr.borrow().make_unspecialized_sig(),
+                ValueSignature::WitnessOf(Box::new(ValueSignature::Unknown(ScalarKind::Int(32))))
+            );
+            let Value::Array(current) = &array else { unreachable!() };
+            assert!(Rc::ptr_eq(&original, current));
+            for value in current.iter() {
+                let Value::Pointer(alias) = value else { unreachable!() };
+                assert!(Rc::ptr_eq(alias, &ptr));
+            }
+        }
+    }
 
     /// Whether a value is the one-bit pattern `expected`.
     ///

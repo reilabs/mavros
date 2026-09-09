@@ -31,6 +31,7 @@ use crate::{
             hlssa_to_r1cs::{R1CGen, R1CS, R1CSProfile, logup_soundness_report},
             llssa_to_llvm::WasmCompileOpts,
         },
+        lower_witness_control_flow::LowerWitnessControlFlow,
         pass_manager::PassManager,
         passes::{
             arg_promotion::ArgPromotion,
@@ -69,7 +70,6 @@ use crate::{
             DefaultSSAAnnotator, SourceLocation,
             hlssa::{Constant, HLSSA},
         },
-        untaint_control_flow::UntaintControlFlow,
     },
 };
 
@@ -297,7 +297,7 @@ impl Driver {
                 Box::new(RemoveUnreachableFunctions::new()),
                 Box::new(RemoveUnreachableBlocks::new()),
                 // Use preserve_blocks() to keep empty intermediate blocks intact.
-                // TODO: Remove once untaint_control_flow handles multiple jumps into merge blocks.
+                // TODO: Remove once lower_witness_control_flow handles multiple jumps into merge blocks.
                 Box::new(DCE::new(dead_code_elimination::Config::preserve_blocks())),
             ],
         );
@@ -359,7 +359,7 @@ impl Driver {
                 // TrivialPhiElimination does not touch entry-block formals).
                 //
                 // Uses `preserve_blocks()` so it does not collapse empty intermediate blocks into
-                // multiple-predecessor merges that the later untaint_control_flow cannot yet
+                // multiple-predecessor merges that the later lower_witness_control_flow cannot yet
                 // handle.
                 Box::new(DCE::new(dead_code_elimination::Config::preserve_blocks())),
                 // Re-normalize any `Cmp`-fed asserts the structural passes above introduced, then
@@ -436,8 +436,8 @@ impl Driver {
             ssa.to_string(witness_inference.as_ref()),
         );
 
-        let mut untaint_cf = UntaintControlFlow::new();
-        self.monomorphized_ssa = Some(untaint_cf.run(ssa, witness_inference.as_ref()));
+        let mut lower_witness_cf = LowerWitnessControlFlow::new();
+        self.monomorphized_ssa = Some(lower_witness_cf.run(ssa, witness_inference.as_ref()));
 
         self.write_debug_text(
             self.get_debug_output_dir().join("untainted_ssa.txt"),

@@ -1,0 +1,6 @@
+[package]
+name = "sparse_array_merge_inactive_oob"
+type = "bin"
+authors = [""]
+
+[dependencies]

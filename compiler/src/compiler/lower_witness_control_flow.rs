@@ -1,4 +1,8 @@
-//! Linearizes witness-dependent control flow into a form safe to lower into a ZK circuit.
+//! Lower witness-dependent branches to guarded operations and explicit value merges.
+//!
+//! This pass applies inferred witness types, inserts boundary conversions, and
+//! linearizes branches while preserving their active predicates. `merge` owns
+//! value-merge strategies and emission; `conversion` owns witness conversions.
 
 use tracing::{Level, instrument};
 
@@ -14,16 +18,22 @@ use crate::{
         ssa::{
             BlockId, FunctionId, SourceLocation, Terminator, ValueId,
             hlssa::{
-                BinaryArithOpKind, CallTarget, CastTarget, HLBlock, HLFunction, HLSSA,
-                LocatedOpCode, OpCode, SequenceTargetType, Type, TypeExpr,
-                builder::{HLEmitter, HLInstrBuilder},
+                BinaryArithOpKind, CallTarget, HLBlock, HLFunction, HLSSA, LocatedOpCode, OpCode,
+                Type, TypeExpr,
+                builder::{HLFunctionBuilder, HLInstrBuilder},
             },
         },
         util::ice_non_elided_tuple,
     },
 };
 
-pub struct UntaintControlFlow {}
+mod conversion;
+mod merge;
+
+use conversion::{emit_strip_witness, emit_value_conversion};
+use merge::MergeLowering;
+
+pub struct LowerWitnessControlFlow {}
 
 /// Look up the witness level for a value, defaulting to Pure for values
 /// not present in the witness type map (e.g., values created after type inference).
@@ -55,7 +65,7 @@ fn maybe_guard(
     instrs.push(instruction.locate(location.clone()));
 }
 
-impl UntaintControlFlow {
+impl LowerWitnessControlFlow {
     pub fn new() -> Self {
         Self {}
     }
@@ -70,7 +80,7 @@ impl UntaintControlFlow {
     // the type info pass can see the WitnessOf types.
     // -----------------------------------------------------------------------
 
-    #[instrument(skip_all, name = "UntaintControlFlow::apply_types")]
+    #[instrument(skip_all, name = "LowerWitnessControlFlow::apply_types")]
     fn apply_types(&self, ssa: HLSSA, witness_inference: &WitnessTaintInference) -> HLSSA {
         let (mut result_ssa, functions, old_global_types) = ssa.prepare_rebuild();
         result_ssa.set_global_types(old_global_types);
@@ -294,7 +304,7 @@ impl UntaintControlFlow {
     //    unconstrained call args via ValueOf.
     // -----------------------------------------------------------------------
 
-    #[instrument(skip_all, name = "UntaintControlFlow::run")]
+    #[instrument(skip_all, name = "LowerWitnessControlFlow::run")]
     pub fn run(&mut self, ssa: HLSSA, witness_inference: &WitnessTaintInference) -> HLSSA {
         // Step 1: bake WitnessOf into SSA types
         let mut ssa = self.apply_types(ssa, witness_inference);
@@ -333,7 +343,7 @@ impl UntaintControlFlow {
         ssa
     }
 
-    #[instrument(skip_all, name = "UntaintControlFlow::run_function", level = Level::DEBUG, fields(function = function.get_name()))]
+    #[instrument(skip_all, name = "LowerWitnessControlFlow::run_function", level = Level::DEBUG, fields(function = function.get_name()))]
     fn run_function(
         &mut self,
         function_id: FunctionId,
@@ -344,6 +354,7 @@ impl UntaintControlFlow {
         type_info: Option<&FunctionTypeInfo>,
     ) {
         let cfg = flow_analysis.get_function_cfg(function_id);
+        let merge_lowering = MergeLowering::new(function, type_info);
 
         let cfg_witness_param = if matches!(function_wt.cfg_witness, WitnessInfo::Witness) {
             let entry_id = function.get_entry_id();
@@ -383,6 +394,7 @@ impl UntaintControlFlow {
                 &block_param_types,
                 return_types.as_slice(),
                 type_info,
+                &merge_lowering,
             );
         }
     }
@@ -398,6 +410,7 @@ impl UntaintControlFlow {
         block_param_types: &HashMap<BlockId, Vec<Type>>,
         return_types: &[Type],
         type_info: Option<&FunctionTypeInfo>,
+        merge_lowering: &MergeLowering<'_>,
     ) {
         let mut block = function.take_block(block_id);
         let block_taint = *block_taint_vars.get(&block_id).unwrap();
@@ -407,7 +420,7 @@ impl UntaintControlFlow {
         let block_source_location = old_instructions
             .last()
             .map(|instruction| instruction.location().clone())
-            .unwrap_or_else(|| SourceLocation::synthetic("untaint_control_flow"));
+            .unwrap_or_else(|| SourceLocation::synthetic("lower_witness_control_flow"));
         let mut new_instructions = Vec::new();
 
         for instruction in old_instructions {
@@ -503,7 +516,7 @@ impl UntaintControlFlow {
                                 else_taint
                             } else {
                                 panic!(
-                                    "untaint_cf: block {:?} in if-body is dominated by neither \
+                                    "lower_witness_cf: block {:?} in if-body is dominated by neither \
                                      then-branch {:?} nor else-branch {:?}",
                                     body_bid, if_true, if_false
                                 );
@@ -535,7 +548,11 @@ impl UntaintControlFlow {
                             }
                             let out_true_block = jumps[0];
 
-                            let merge_params = function.get_block_mut(merge).take_parameters();
+                            let merge_params: Vec<_> = function
+                                .get_block(merge)
+                                .get_parameters()
+                                .cloned()
+                                .collect();
 
                             let args_passed_from_lhs = match function
                                 .get_block_mut(out_true_block)
@@ -573,46 +590,28 @@ impl UntaintControlFlow {
                             function
                                 .get_block_mut(out_false_block)
                                 .set_terminator(Terminator::Jmp(merger_block, vec![]));
-                            function
-                                .get_block_mut(merger_block)
-                                .set_terminator(Terminator::Jmp(merge, vec![]));
-
-                            if !args_passed_from_lhs.is_empty() {
-                                let mut instrs = Vec::new();
-                                {
-                                    let mut builder = HLInstrBuilder::new(
-                                        function,
-                                        ssa,
-                                        &mut instrs,
-                                        block_source_location.clone(),
-                                    );
-                                    for ((res, typ), (lhs, rhs)) in merge_params.iter().zip(
-                                        args_passed_from_lhs
-                                            .iter()
-                                            .zip(args_passed_from_rhs.iter()),
-                                    ) {
-                                        let lhs_type = type_info
-                                            .map(|ti| ti.get_value_type(*lhs).clone())
-                                            .unwrap_or_else(|| typ.clone());
-                                        let rhs_type = type_info
-                                            .map(|ti| ti.get_value_type(*rhs).clone())
-                                            .unwrap_or_else(|| typ.clone());
-                                        emit_merge_select(
-                                            &mut builder,
-                                            cond,
-                                            *lhs,
-                                            *rhs,
-                                            Some(*res),
-                                            typ,
-                                            &lhs_type,
-                                            &rhs_type,
-                                        );
-                                    }
-                                }
-                                for instr in instrs {
-                                    function.get_block_mut(merger_block).push_instruction(instr);
-                                }
+                            // Array merges introduce loops. Keep the original phi parameters
+                            // and pass results from the emitter's final block after those loops.
+                            let mut fb = HLFunctionBuilder::new(function, ssa);
+                            let mut builder = fb
+                                .block(merger_block)
+                                .with_source_location(block_source_location.clone());
+                            let mut merged_args = Vec::with_capacity(merge_params.len());
+                            for ((_, typ), (lhs, rhs)) in merge_params
+                                .iter()
+                                .zip(args_passed_from_lhs.iter().zip(args_passed_from_rhs.iter()))
+                            {
+                                merged_args.push(merge_lowering.emit(
+                                    &mut builder,
+                                    cond,
+                                    then_taint,
+                                    else_taint,
+                                    *lhs,
+                                    *rhs,
+                                    typ,
+                                ));
                             }
+                            builder.set_terminator(Terminator::Jmp(merge, merged_args));
                         }
                     }
                 }
@@ -758,7 +757,7 @@ impl UntaintControlFlow {
                 function: CallTarget::Dynamic(_),
                 ..
             } => {
-                panic!("Dynamic call targets are not supported in untaint_control_flow")
+                panic!("Dynamic call targets are not supported in lower_witness_control_flow")
             }
             // -- Cast insertion for MkSeq --
             OpCode::MkSeq {
@@ -969,45 +968,6 @@ fn convert_if_needed(
     emit_value_conversion(value, value_type, target_type, builder)
 }
 
-/// Convert a value from source_type to target_type. Scalar witness injections
-/// become a single `WitnessOf` cast; arrays and slices become one composite
-/// `Map` cast, lowered to a loop late by `LowerMapCasts` (and erased entirely
-/// in the witgen pipeline by `StripWitnessOf`). Conversions are pure — the
-/// result is a fresh value — so they are safe to execute unconditionally,
-/// including in guarded (tainted) regions.
-fn emit_value_conversion(
-    value: ValueId,
-    source_type: &Type,
-    target_type: &Type,
-    builder: &mut HLInstrBuilder<'_>,
-) -> ValueId {
-    match CastTarget::conversion(source_type, target_type) {
-        None => value,
-        Some(target) => builder.cast_to(target, value),
-    }
-}
-
-/// Recursively strip WitnessOf from a value (for unconstrained call args).
-fn emit_strip_witness(
-    value: ValueId,
-    source_type: &Type,
-    target_type: &Type,
-    builder: &mut HLInstrBuilder<'_>,
-) -> ValueId {
-    if source_type == target_type {
-        return value;
-    }
-    // Toplevel WitnessOf(X) → X: emit ValueOf, then keep stripping inside.
-    if let TypeExpr::WitnessOf(inner) = &source_type.expr {
-        let unwrapped = builder.value_of(value);
-        return emit_strip_witness(unwrapped, inner, target_type, builder);
-    }
-    match CastTarget::strip_conversion(source_type, target_type) {
-        None => value,
-        Some(target) => builder.cast_to(target, value),
-    }
-}
-
 fn flush_conversion_instrs_located(
     instrs: &mut Vec<LocatedOpCode>,
     taint: Option<ValueId>,
@@ -1016,111 +976,6 @@ fn flush_conversion_instrs_located(
     for instr in cast_instrs {
         let (instr, location) = instr.take();
         maybe_guard(instrs, taint, instr, &location);
-    }
-}
-
-/// Emit selects for merge point values, handling type conversion between
-/// branch values and the expected merge param type. For arrays, does unrolled
-/// element-wise select + cast. For scalars, emits Select with optional cast.
-fn emit_merge_select(
-    builder: &mut HLInstrBuilder<'_>,
-    cond: ValueId,
-    lhs: ValueId,
-    rhs: ValueId,
-    result: Option<ValueId>,
-    result_type: &Type,
-    lhs_type: &Type,
-    rhs_type: &Type,
-) -> ValueId {
-    match &result_type.expr {
-        TypeExpr::Array(result_elem_type, size) => {
-            let lhs_elem_type = match &lhs_type.expr {
-                TypeExpr::Array(e, _) => e.as_ref(),
-                _ => panic!(
-                    "emit_merge_select: expected array for lhs, got {:?}",
-                    lhs_type
-                ),
-            };
-            let rhs_elem_type = match &rhs_type.expr {
-                TypeExpr::Array(e, _) => e.as_ref(),
-                _ => panic!(
-                    "emit_merge_select: expected array for rhs, got {:?}",
-                    rhs_type
-                ),
-            };
-            let mut elems = Vec::with_capacity(*size);
-            for i in 0..*size {
-                let idx = builder.int_const(32, i as u128);
-                let lhs_elem = builder.array_get(lhs, idx);
-                let rhs_elem = builder.array_get(rhs, idx);
-                let selected = emit_merge_select(
-                    builder,
-                    cond,
-                    lhs_elem,
-                    rhs_elem,
-                    None,
-                    result_elem_type,
-                    lhs_elem_type,
-                    rhs_elem_type,
-                );
-                elems.push(selected);
-            }
-            let result = result.unwrap_or_else(|| builder.fresh_value());
-            builder.push(OpCode::MkSeq {
-                result,
-                elems,
-                seq_type: SequenceTargetType::Array(*size),
-                elem_type: *result_elem_type.clone(),
-            });
-            result
-        }
-        TypeExpr::Tuple(_) => ice_non_elided_tuple(),
-        TypeExpr::WitnessOf(_) => {
-            // Cast operands to WitnessOf if they aren't already
-            let lhs = if !lhs_type.is_witness_of() {
-                builder.cast_to_witness_of(lhs)
-            } else {
-                lhs
-            };
-            let rhs = if !rhs_type.is_witness_of() {
-                builder.cast_to_witness_of(rhs)
-            } else {
-                rhs
-            };
-            let result = result.unwrap_or_else(|| builder.fresh_value());
-            builder.push(OpCode::Select {
-                result,
-                cond,
-                if_t: lhs,
-                if_f: rhs,
-            });
-            result
-        }
-        TypeExpr::Field | TypeExpr::Int(_) => {
-            let result = result.unwrap_or_else(|| builder.fresh_value());
-            builder.push(OpCode::Select {
-                result,
-                cond,
-                if_t: lhs,
-                if_f: rhs,
-            });
-            result
-        }
-        TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
-        TypeExpr::Slice(_) => {
-            let lhs = emit_value_conversion(lhs, lhs_type, result_type, builder);
-            let rhs = emit_value_conversion(rhs, rhs_type, result_type, builder);
-            let result = result.unwrap_or_else(|| builder.fresh_value());
-            builder.push(OpCode::Select {
-                result,
-                cond,
-                if_t: lhs,
-                if_f: rhs,
-            });
-            result
-        }
-        TypeExpr::Function => panic!("Witness select on Function type not supported"),
-        TypeExpr::Blob(..) => panic!("Witness select on Blob type not supported"),
     }
 }
 

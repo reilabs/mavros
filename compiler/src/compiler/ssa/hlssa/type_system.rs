@@ -506,7 +506,7 @@ impl Type {
     /// ranges over — but on which no arithmetic is defined — unify elementwise via
     /// [`Self::join`] instead:
     ///
-    /// - **Slices:** `untaint_control_flow`'s `emit_merge_select` merges witness-length physical
+    /// - **Slices:** `lower_witness_control_flow`'s `emit_merge_select` merges witness-length physical
     ///   slices with a `Select`.
     /// - **Tuples:** `purify_witness_slices`'s `Select` arm rewrites both alternatives of a
     ///   witness-length slice select into `(physical, log_len, start)` tuples. That form is
