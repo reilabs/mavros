@@ -122,9 +122,12 @@ It does this by first specializing generic functions based on the taints of thei
 (monomorphization). When a branch condition depends on `Witness` values, this pass transforms the
 code to evaluate both branches and select the result, **converting control flow to data flow**.
 
-Sparse array updates are merged by replaying their writes in source order, selecting only
-changed elements. The private `array_merge` module matches original SSA update chains;
-unsupported shapes retain the general element-wise merge.
+Control-flow linearization records branch-result merges without choosing their implementation.
+A private function driver directly captures original SSA provenance, linearizes control flow,
+and emits the returned merges on the same function. Intermediate state stays local to that
+driver. Merge emission replays sparse writes in source order, selecting changed elements;
+unsupported shapes retain the general element-wise merge. Combined branch predicates preserve
+active failures and make inactive accesses safe.
 
 ### Stage 3: Optimization Passes
 

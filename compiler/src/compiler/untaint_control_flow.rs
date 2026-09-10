@@ -15,16 +15,16 @@ use crate::{
             BlockId, FunctionId, SourceLocation, Terminator, ValueId,
             hlssa::{
                 BinaryArithOpKind, CallTarget, CastTarget, HLBlock, HLFunction, HLSSA,
-                LocatedOpCode, OpCode, SequenceTargetType, Type, TypeExpr,
-                builder::{HLEmitter, HLFunctionBuilder, HLInstrBuilder},
+                LocatedOpCode, OpCode, Type, TypeExpr,
+                builder::{HLEmitter, HLInstrBuilder},
             },
         },
         util::ice_non_elided_tuple,
     },
 };
 
-mod array_merge;
-use array_merge::SparseArrayMerge;
+mod value_merges;
+use value_merges::MergePoint;
 
 pub struct UntaintControlFlow {}
 
@@ -321,7 +321,7 @@ impl UntaintControlFlow {
                     None
                 };
                 let mut function = ssa.take_function(function_id);
-                self.run_function(
+                self.lower_function(
                     function_id,
                     &mut function,
                     &mut ssa,
@@ -336,8 +336,8 @@ impl UntaintControlFlow {
         ssa
     }
 
-    #[instrument(skip_all, name = "UntaintControlFlow::run_function", level = Level::DEBUG, fields(function = function.get_name()))]
-    fn run_function(
+    #[instrument(skip_all, name = "UntaintControlFlow::linearize_function", level = Level::DEBUG, fields(function = function.get_name()))]
+    fn linearize_function(
         &mut self,
         function_id: FunctionId,
         function: &mut HLFunction,
@@ -345,9 +345,9 @@ impl UntaintControlFlow {
         function_wt: &FunctionWitnessType,
         flow_analysis: &FlowAnalysis,
         type_info: Option<&FunctionTypeInfo>,
-    ) {
+    ) -> Vec<MergePoint> {
         let cfg = flow_analysis.get_function_cfg(function_id);
-        let sparse_merge = type_info.map(|types| SparseArrayMerge::new(function, types));
+        let mut merges = Vec::new();
 
         let cfg_witness_param = if matches!(function_wt.cfg_witness, WitnessInfo::Witness) {
             let entry_id = function.get_entry_id();
@@ -377,7 +377,7 @@ impl UntaintControlFlow {
         }
 
         for block_id in cfg.get_blocks_bfs() {
-            self.process_block(
+            if let Some(merge) = self.process_block(
                 block_id,
                 function,
                 ssa,
@@ -387,9 +387,11 @@ impl UntaintControlFlow {
                 &block_param_types,
                 return_types.as_slice(),
                 type_info,
-                &sparse_merge,
-            );
+            ) {
+                merges.push(merge);
+            }
         }
+        merges
     }
 
     fn process_block(
@@ -403,8 +405,8 @@ impl UntaintControlFlow {
         block_param_types: &HashMap<BlockId, Vec<Type>>,
         return_types: &[Type],
         type_info: Option<&FunctionTypeInfo>,
-        sparse_merge: &Option<SparseArrayMerge<'_>>,
-    ) {
+    ) -> Option<MergePoint> {
+        let mut value_merge = None;
         let mut block = function.take_block(block_id);
         let block_taint = *block_taint_vars.get(&block_id).unwrap();
 
@@ -583,50 +585,20 @@ impl UntaintControlFlow {
                             function
                                 .get_block_mut(out_false_block)
                                 .set_terminator(Terminator::Jmp(merger_block, vec![]));
-                            // Preserve phi parameters and pass the merged values explicitly.
-                            let mut fb = HLFunctionBuilder::new(function, ssa);
-                            let mut builder = fb
-                                .block(merger_block)
-                                .with_source_location(block_source_location.clone());
-                            let mut merged_args = Vec::with_capacity(merge_params.len());
-                            for ((_, typ), (lhs, rhs)) in merge_params
-                                .iter()
-                                .zip(args_passed_from_lhs.iter().zip(args_passed_from_rhs.iter()))
-                            {
-                                let selected = sparse_merge
-                                    .as_ref()
-                                    .and_then(|sparse| {
-                                        sparse.try_emit(
-                                            &mut builder,
-                                            cond,
-                                            then_taint,
-                                            else_taint,
-                                            *lhs,
-                                            *rhs,
-                                            typ,
-                                        )
-                                    })
-                                    .unwrap_or_else(|| {
-                                        let lhs_type = type_info
-                                            .map(|ti| ti.get_value_type(*lhs))
-                                            .unwrap_or(typ);
-                                        let rhs_type = type_info
-                                            .map(|ti| ti.get_value_type(*rhs))
-                                            .unwrap_or(typ);
-                                        emit_merge_select(
-                                            &mut builder,
-                                            cond,
-                                            *lhs,
-                                            *rhs,
-                                            None,
-                                            typ,
-                                            lhs_type,
-                                            rhs_type,
-                                        )
-                                    });
-                                merged_args.push(selected);
-                            }
-                            builder.set_terminator(Terminator::Jmp(merge, merged_args));
+                            // Record what must be merged; emission happens after CFG lowering.
+                            value_merge = Some(MergePoint {
+                                block: merger_block,
+                                destination: merge,
+                                condition: cond,
+                                then_active: then_taint,
+                                else_active: else_taint,
+                                location: block_source_location.clone(),
+                                values: merge_params
+                                    .into_iter()
+                                    .zip(args_passed_from_lhs.into_iter().zip(args_passed_from_rhs))
+                                    .map(|((_, typ), (lhs, rhs))| (lhs, rhs, typ))
+                                    .collect(),
+                            });
                         }
                     }
                 }
@@ -688,6 +660,7 @@ impl UntaintControlFlow {
 
         block.put_instructions(new_instructions);
         function.put_block(block_id, block);
+        value_merge
     }
 
     /// Process a single instruction: apply cast insertion, then Guard-wrap if tainted.
@@ -1030,111 +1003,6 @@ fn flush_conversion_instrs_located(
     for instr in cast_instrs {
         let (instr, location) = instr.take();
         maybe_guard(instrs, taint, instr, &location);
-    }
-}
-
-/// Emit selects for merge point values, handling type conversion between
-/// branch values and the expected merge param type. For arrays, does unrolled
-/// element-wise select + cast. For scalars, emits Select with optional cast.
-fn emit_merge_select(
-    builder: &mut impl HLEmitter,
-    cond: ValueId,
-    lhs: ValueId,
-    rhs: ValueId,
-    result: Option<ValueId>,
-    result_type: &Type,
-    lhs_type: &Type,
-    rhs_type: &Type,
-) -> ValueId {
-    match &result_type.expr {
-        TypeExpr::Array(result_elem_type, size) => {
-            let lhs_elem_type = match &lhs_type.expr {
-                TypeExpr::Array(e, _) => e.as_ref(),
-                _ => panic!(
-                    "emit_merge_select: expected array for lhs, got {:?}",
-                    lhs_type
-                ),
-            };
-            let rhs_elem_type = match &rhs_type.expr {
-                TypeExpr::Array(e, _) => e.as_ref(),
-                _ => panic!(
-                    "emit_merge_select: expected array for rhs, got {:?}",
-                    rhs_type
-                ),
-            };
-            let mut elems = Vec::with_capacity(*size);
-            for i in 0..*size {
-                let idx = builder.int_const(32, i as u128);
-                let lhs_elem = builder.array_get(lhs, idx);
-                let rhs_elem = builder.array_get(rhs, idx);
-                let selected = emit_merge_select(
-                    builder,
-                    cond,
-                    lhs_elem,
-                    rhs_elem,
-                    None,
-                    result_elem_type,
-                    lhs_elem_type,
-                    rhs_elem_type,
-                );
-                elems.push(selected);
-            }
-            let result = result.unwrap_or_else(|| builder.fresh_value());
-            builder.emit(OpCode::MkSeq {
-                result,
-                elems,
-                seq_type: SequenceTargetType::Array(*size),
-                elem_type: *result_elem_type.clone(),
-            });
-            result
-        }
-        TypeExpr::Tuple(_) => ice_non_elided_tuple(),
-        TypeExpr::WitnessOf(_) => {
-            // Cast operands to WitnessOf if they aren't already
-            let lhs = if !lhs_type.is_witness_of() {
-                builder.cast_to_witness_of(lhs)
-            } else {
-                lhs
-            };
-            let rhs = if !rhs_type.is_witness_of() {
-                builder.cast_to_witness_of(rhs)
-            } else {
-                rhs
-            };
-            let result = result.unwrap_or_else(|| builder.fresh_value());
-            builder.emit(OpCode::Select {
-                result,
-                cond,
-                if_t: lhs,
-                if_f: rhs,
-            });
-            result
-        }
-        TypeExpr::Field | TypeExpr::Int(_) => {
-            let result = result.unwrap_or_else(|| builder.fresh_value());
-            builder.emit(OpCode::Select {
-                result,
-                cond,
-                if_t: lhs,
-                if_f: rhs,
-            });
-            result
-        }
-        TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
-        TypeExpr::Slice(_) => {
-            let lhs = emit_value_conversion(lhs, lhs_type, result_type, builder);
-            let rhs = emit_value_conversion(rhs, rhs_type, result_type, builder);
-            let result = result.unwrap_or_else(|| builder.fresh_value());
-            builder.emit(OpCode::Select {
-                result,
-                cond,
-                if_t: lhs,
-                if_f: rhs,
-            });
-            result
-        }
-        TypeExpr::Function => panic!("Witness select on Function type not supported"),
-        TypeExpr::Blob(..) => panic!("Witness select on Blob type not supported"),
     }
 }
 
