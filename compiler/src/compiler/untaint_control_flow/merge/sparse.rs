@@ -1,9 +1,32 @@
 //! Merge functional array updates without selecting every unchanged element.
 //!
-//! Only exact SSA bases (or an exact ArrayGet for a nested update) are matched.
-//! Distinct loads are deliberately not treated as equivalent: intervening stores
-//! could have changed the referenced array. Original instructions are left for DCE,
-//! which preserves their failure effects and any other users.
+//! # Correctness contract
+//!
+//! Matching uses the SSA before branch linearization inserts casts and guards.
+//! A plan requires a chain of functional ArraySets rooted at the exact unchanged
+//! SSA value. A nested plan must start at the corresponding ArrayGet of that
+//! write's original array and index. Distinct loads are not interchangeable: an
+//! intervening store may have changed the referenced array. Indices must be pure
+//! integers and every optimized array must have a nonzero, statically known length.
+//!
+//! For a chain A[k+1] = set(A[k], i[k], v[k]), replay maintains this invariant:
+//! when the changed arm is selected, the accumulator equals A[k]; otherwise it
+//! equals A[0]. Selecting v[k] against the accumulator's current cell and writing
+//! it back preserves that invariant. Writes must therefore stay in source order,
+//! including repeated or dynamically aliasing indices. Nested plans apply the
+//! same argument to the cell read from the current accumulator. Values outside
+//! the active enclosing branch are unobservable; their evaluation must still be safe.
+//!
+//! The merge executes unconditionally. An out-of-bounds index is clamped to zero,
+//! while a separate bounds assertion uses the changed arm's *combined* predicate
+//! (including enclosing branches). Thus active invalid writes still fail, and
+//! inactive writes neither trap nor change the unchanged arm. Bounds clamping is
+//! pure, so it does not introduce witness-index scans. If the whole index type
+//! fits, no clamp is needed and the length need not fit in the index's bit width.
+//!
+//! Planning emits nothing until it succeeds. A rejected plan uses the general
+//! merge. Original instructions remain available to other users and ordinary
+//! DCE; replacement bounds assertions preserve failures if original writes die.
 
 use super::{emit_merge_select, emit_value_conversion};
 use crate::{
@@ -13,7 +36,7 @@ use crate::{
         ssa::{
             SourceLocation, ValueId,
             hlssa::{
-                CastTarget, HLFunction, OpCode, Type, TypeExpr,
+                CastTarget, HLFunction, LocatedOpCode, OpCode, Type, TypeExpr,
                 builder::{HLBlockEmitter, HLEmitter},
             },
         },
@@ -21,20 +44,6 @@ use crate::{
 };
 
 const MAX_MERGED_WRITES: usize = 100;
-
-#[derive(Clone)]
-enum Definition {
-    Get {
-        array: ValueId,
-        index: ValueId,
-    },
-    Set {
-        array: ValueId,
-        index: ValueId,
-        value: ValueId,
-        location: SourceLocation,
-    },
-}
 
 #[derive(Clone, Copy)]
 enum Base {
@@ -55,7 +64,7 @@ struct Plan {
 }
 
 pub(super) struct SparseArrayMerge<'a> {
-    definitions: HashMap<ValueId, Definition>,
+    definitions: HashMap<ValueId, LocatedOpCode>,
     types: &'a FunctionTypeInfo,
 }
 
@@ -65,38 +74,11 @@ impl<'a> SparseArrayMerge<'a> {
         let mut definitions = HashMap::default();
         for (_, block) in function.get_blocks() {
             for (instruction, location) in block.get_instructions_with_source_locations() {
-                match instruction {
-                    OpCode::ArrayGet {
-                        result,
-                        array,
-                        index,
-                    } => {
-                        definitions.insert(
-                            *result,
-                            Definition::Get {
-                                array: *array,
-                                index: *index,
-                            },
-                        );
-                    }
-                    OpCode::ArraySet {
-                        result,
-                        array,
-                        index,
-                        value,
-                    } => {
-                        definitions.insert(
-                            *result,
-                            Definition::Set {
-                                array: *array,
-                                index: *index,
-                                value: *value,
-                                location: location.clone(),
-                            },
-                        );
-                    }
-                    _ => {}
-                }
+                let result = match instruction {
+                    OpCode::ArrayGet { result, .. } | OpCode::ArraySet { result, .. } => *result,
+                    _ => continue,
+                };
+                definitions.insert(result, instruction.clone().locate(location.clone()));
             }
         }
         Self { definitions, types }
@@ -105,8 +87,10 @@ impl<'a> SparseArrayMerge<'a> {
     fn is_base(&self, value: ValueId, base: Base) -> bool {
         match base {
             Base::Value(expected) => value == expected,
-            Base::Element { array, index } => matches!(self.definitions.get(&value),
-                Some(Definition::Get { array: a, index: i }) if *a == array && *i == index),
+            Base::Element { array, index } => {
+                matches!(self.definitions.get(&value).map(|op| op.as_ref()),
+                Some(OpCode::ArrayGet { array: a, index: i, .. }) if *a == array && *i == index)
+            }
         }
     }
 
@@ -123,12 +107,13 @@ impl<'a> SparseArrayMerge<'a> {
             if chain.len() >= *budget {
                 return None;
             }
-            let Definition::Set {
+            let definition = self.definitions.get(&current)?;
+            let OpCode::ArraySet {
                 array,
                 index,
                 value,
-                location,
-            } = self.definitions.get(&current)?
+                ..
+            } = definition.as_ref()
             else {
                 return None;
             };
@@ -137,7 +122,7 @@ impl<'a> SparseArrayMerge<'a> {
             if !matches!(self.types.get_value_type(*index).expr, TypeExpr::Int(_)) {
                 return None;
             }
-            chain.push((*array, *index, *value, location.clone()));
+            chain.push((*array, *index, *value, definition.location().clone()));
             current = *array;
         }
         if chain.is_empty() {

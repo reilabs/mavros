@@ -230,3 +230,6 @@ mod tests {
         assert_eq!(nested_merge_instruction_count(0, true), 1);
     }
 }
+
+#[cfg(test)]
+mod differential;
