@@ -208,6 +208,7 @@ impl<'a> SparseArrayMerge<'a> {
                         condition,
                         write.value,
                         old,
+                        None,
                         elem,
                         self.types.get_value_type(write.value),
                         elem,
@@ -301,9 +302,26 @@ mod tests {
     }
 
     #[test]
-    fn plans_only_matching_bases_and_respects_the_write_budget() {
-        for count in [1, MAX_MERGED_WRITES, MAX_MERGED_WRITES + 1] {
-            let f = fixture(1024, count, false, 32);
+    fn planning_requires_a_supported_chain_and_respects_the_budget() {
+        // length, writes, nested, witness index, expected plan
+        for (len, count, nested, witness, accepted) in [
+            (1024, 1, false, false, true),
+            (1024, MAX_MERGED_WRITES, false, false, true),
+            (1024, MAX_MERGED_WRITES + 1, false, false, false),
+            (1024, 2, true, false, true),
+            (3, 1, false, true, false),
+            (0, 1, false, false, false),
+        ] {
+            let mut f = fixture(len, count, nested, 32);
+            if witness {
+                let function = f.ssa.get_function_mut(f.function);
+                let entry = function.get_entry_id();
+                for (id, typ) in function.get_block_mut(entry).get_parameters_mut() {
+                    if *id == f.index {
+                        *typ = Type::witness_of(typ.clone());
+                    }
+                }
+            }
             let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
             let merger = SparseArrayMerge::new(
                 f.ssa.get_function(f.function),
@@ -311,9 +329,20 @@ mod tests {
             );
             let mut budget = MAX_MERGED_WRITES;
             let plan = merger.plan(f.changed, Base::Value(f.base), &f.typ, &mut budget);
-            assert_eq!(plan.is_some(), count <= MAX_MERGED_WRITES);
+            assert_eq!(plan.is_some(), accepted);
             if let Some(plan) = plan {
                 assert_eq!(plan.writes.len(), count);
+                assert_eq!(
+                    budget,
+                    MAX_MERGED_WRITES - count * if nested { 2 } else { 1 }
+                );
+                if nested {
+                    assert!(
+                        plan.writes
+                            .iter()
+                            .all(|w| w.nested.as_ref().unwrap().writes.len() == 1)
+                    );
+                }
             }
             let mut budget = MAX_MERGED_WRITES;
             assert!(
@@ -322,67 +351,6 @@ mod tests {
                     .is_none()
             );
         }
-    }
-
-    #[test]
-    fn witness_indices_use_the_general_merge() {
-        let mut f = fixture(3, 1, false, 32);
-        let function = f.ssa.get_function_mut(f.function);
-        let entry = function.get_entry_id();
-        for (id, typ) in function.get_block_mut(entry).get_parameters_mut() {
-            if *id == f.index {
-                *typ = Type::witness_of(typ.clone());
-            }
-        }
-        let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
-        let merger = SparseArrayMerge::new(
-            f.ssa.get_function(f.function),
-            types.get_function(f.function),
-        );
-        let mut budget = MAX_MERGED_WRITES;
-        assert!(
-            merger
-                .plan(f.changed, Base::Value(f.base), &f.typ, &mut budget)
-                .is_none()
-        );
-        assert_eq!(budget, MAX_MERGED_WRITES);
-    }
-
-    #[test]
-    fn plans_nested_updates_against_the_corresponding_original_read() {
-        let f = fixture(1024, 2, true, 32);
-        let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
-        let merger = SparseArrayMerge::new(
-            f.ssa.get_function(f.function),
-            types.get_function(f.function),
-        );
-        let mut budget = MAX_MERGED_WRITES;
-        let plan = merger
-            .plan(f.changed, Base::Value(f.base), &f.typ, &mut budget)
-            .unwrap();
-        assert_eq!(plan.writes.len(), 2);
-        assert!(
-            plan.writes
-                .iter()
-                .all(|w| w.nested.as_ref().unwrap().writes.len() == 1)
-        );
-        assert_eq!(budget, MAX_MERGED_WRITES - 4);
-    }
-
-    #[test]
-    fn empty_arrays_fall_back_without_emitting_a_safe_access() {
-        let f = fixture(0, 1, false, 32);
-        let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
-        let merger = SparseArrayMerge::new(
-            f.ssa.get_function(f.function),
-            types.get_function(f.function),
-        );
-        let mut budget = MAX_MERGED_WRITES;
-        assert!(
-            merger
-                .plan(f.changed, Base::Value(f.base), &f.typ, &mut budget)
-                .is_none()
-        );
     }
 
     #[test]

@@ -78,4 +78,41 @@ fn main(flag: bool, index: u32) {
     check_pure_indices(!flag);
     check_nested(flag);
     check_nested(!flag);
+    check_model(flag, flag);
+    check_model(flag, !flag);
+    check_model(!flag, flag);
+    check_model(!flag, !flag);
+}
+
+// Compare nested writes against a scalar model, including runtime aliases and
+// a whole-row replacement between writes. Loop indices remain pure.
+fn check_model(enabled: bool, outer: bool) {
+    for i in 0..2 {
+        for j in 0..3 {
+            for k in 0..3 {
+                let original: [[Field; 3]; 2] = [[2, 3, 5], [7, 11, 13]];
+                let replacement: [Field; 3] = [17, 19, 23];
+                let mut arr = original;
+                if outer {
+                    if enabled {
+                        arr[i][j] = arr[i][j] + 3;
+                        arr[i][k] = arr[i][k] * 2;
+                        arr[1] = replacement;
+                        arr[i][j] = arr[i][j] + 5;
+                    }
+                }
+                for r in 0..2 {
+                    for c in 0..3 {
+                        let mut expected = original[r][c];
+                        if (r == i) & (c == j) { expected = expected + 3; }
+                        if (r == i) & (c == k) { expected = expected * 2; }
+                        if r == 1 { expected = replacement[c]; }
+                        if (r == i) & (c == j) { expected = expected + 5; }
+                        let active = (outer & enabled) as Field;
+                        assert_eq(arr[r][c], active * expected + (1 - active) * original[r][c]);
+                    }
+                }
+            }
+        }
+    }
 }

@@ -118,17 +118,13 @@ branch conditions depend only on `Pure` values. This is required because the R1C
 fixed at compile time - different execution paths would require different numbers of constraints,
 which is impossible.
 
-After witness inference and monomorphization, `UntaintControlFlow` applies witness types,
-inserts representation conversions, and replaces witness-dependent branches with guarded
-operations and explicit value merges, **converting control flow to data flow**.
+It does this by first specializing generic functions based on the taints of their arguments
+(monomorphization). When a branch condition depends on `Witness` values, this pass transforms the
+code to evaluate both branches and select the result, **converting control flow to data flow**.
 
-The pass owns branch traversal, active predicates, and CFG rewiring. Its
-[`merge` module](../compiler/src/compiler/untaint_control_flow/merge/mod.rs) owns merge
-strategy selection and emission: sparse updates when their provenance permits it, with counted
-loops as the general array fallback. It snapshots original update chains before linearization
-and can advance the emitter into new loop blocks. The
-[`conversion` module](../compiler/src/compiler/untaint_control_flow/conversion.rs) supplies
-witness representation conversions to both branch and merge lowering.
+Sparse array updates are merged by replaying their writes in source order, selecting only
+changed elements. The private `array_merge` module matches original SSA update chains;
+unsupported shapes retain the general element-wise merge.
 
 ### Stage 3: Optimization Passes
 

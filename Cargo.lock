@@ -2346,7 +2346,6 @@ dependencies = [
  "num-traits",
  "petgraph 0.6.5",
  "plotters",
- "proptest",
  "rand 0.8.6",
  "rustc-hash",
  "serde",

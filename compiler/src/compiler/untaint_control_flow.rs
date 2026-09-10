@@ -1,8 +1,4 @@
-//! Lower witness-dependent branches to guarded operations and explicit value merges.
-//!
-//! This pass applies inferred witness types, inserts boundary conversions, and
-//! linearizes branches while preserving their active predicates. `merge` owns
-//! value-merge strategies and emission; `conversion` owns witness conversions.
+//! Linearizes witness-dependent control flow into a form safe to lower into a ZK circuit.
 
 use tracing::{Level, instrument};
 
@@ -18,20 +14,17 @@ use crate::{
         ssa::{
             BlockId, FunctionId, SourceLocation, Terminator, ValueId,
             hlssa::{
-                BinaryArithOpKind, CallTarget, HLBlock, HLFunction, HLSSA, LocatedOpCode, OpCode,
-                Type, TypeExpr,
-                builder::{HLFunctionBuilder, HLInstrBuilder},
+                BinaryArithOpKind, CallTarget, CastTarget, HLBlock, HLFunction, HLSSA,
+                LocatedOpCode, OpCode, SequenceTargetType, Type, TypeExpr,
+                builder::{HLEmitter, HLFunctionBuilder, HLInstrBuilder},
             },
         },
         util::ice_non_elided_tuple,
     },
 };
 
-mod conversion;
-mod merge;
-
-use conversion::{emit_strip_witness, emit_value_conversion};
-use merge::MergeLowering;
+mod array_merge;
+use array_merge::SparseArrayMerge;
 
 pub struct UntaintControlFlow {}
 
@@ -354,7 +347,7 @@ impl UntaintControlFlow {
         type_info: Option<&FunctionTypeInfo>,
     ) {
         let cfg = flow_analysis.get_function_cfg(function_id);
-        let merge_lowering = MergeLowering::new(function, type_info);
+        let sparse_merge = type_info.map(|types| SparseArrayMerge::new(function, types));
 
         let cfg_witness_param = if matches!(function_wt.cfg_witness, WitnessInfo::Witness) {
             let entry_id = function.get_entry_id();
@@ -394,7 +387,7 @@ impl UntaintControlFlow {
                 &block_param_types,
                 return_types.as_slice(),
                 type_info,
-                &merge_lowering,
+                &sparse_merge,
             );
         }
     }
@@ -410,7 +403,7 @@ impl UntaintControlFlow {
         block_param_types: &HashMap<BlockId, Vec<Type>>,
         return_types: &[Type],
         type_info: Option<&FunctionTypeInfo>,
-        merge_lowering: &MergeLowering<'_>,
+        sparse_merge: &Option<SparseArrayMerge<'_>>,
     ) {
         let mut block = function.take_block(block_id);
         let block_taint = *block_taint_vars.get(&block_id).unwrap();
@@ -590,8 +583,7 @@ impl UntaintControlFlow {
                             function
                                 .get_block_mut(out_false_block)
                                 .set_terminator(Terminator::Jmp(merger_block, vec![]));
-                            // Array merges introduce loops. Keep the original phi parameters
-                            // and pass results from the emitter's final block after those loops.
+                            // Preserve phi parameters and pass the merged values explicitly.
                             let mut fb = HLFunctionBuilder::new(function, ssa);
                             let mut builder = fb
                                 .block(merger_block)
@@ -601,15 +593,38 @@ impl UntaintControlFlow {
                                 .iter()
                                 .zip(args_passed_from_lhs.iter().zip(args_passed_from_rhs.iter()))
                             {
-                                merged_args.push(merge_lowering.emit(
-                                    &mut builder,
-                                    cond,
-                                    then_taint,
-                                    else_taint,
-                                    *lhs,
-                                    *rhs,
-                                    typ,
-                                ));
+                                let selected = sparse_merge
+                                    .as_ref()
+                                    .and_then(|sparse| {
+                                        sparse.try_emit(
+                                            &mut builder,
+                                            cond,
+                                            then_taint,
+                                            else_taint,
+                                            *lhs,
+                                            *rhs,
+                                            typ,
+                                        )
+                                    })
+                                    .unwrap_or_else(|| {
+                                        let lhs_type = type_info
+                                            .map(|ti| ti.get_value_type(*lhs))
+                                            .unwrap_or(typ);
+                                        let rhs_type = type_info
+                                            .map(|ti| ti.get_value_type(*rhs))
+                                            .unwrap_or(typ);
+                                        emit_merge_select(
+                                            &mut builder,
+                                            cond,
+                                            *lhs,
+                                            *rhs,
+                                            None,
+                                            typ,
+                                            lhs_type,
+                                            rhs_type,
+                                        )
+                                    });
+                                merged_args.push(selected);
                             }
                             builder.set_terminator(Terminator::Jmp(merge, merged_args));
                         }
@@ -968,6 +983,45 @@ fn convert_if_needed(
     emit_value_conversion(value, value_type, target_type, builder)
 }
 
+/// Convert a value from source_type to target_type. Scalar witness injections
+/// become a single `WitnessOf` cast; arrays and slices become one composite
+/// `Map` cast, lowered to a loop late by `LowerMapCasts` (and erased entirely
+/// in the witgen pipeline by `StripWitnessOf`). Conversions are pure — the
+/// result is a fresh value — so they are safe to execute unconditionally,
+/// including in guarded (tainted) regions.
+fn emit_value_conversion(
+    value: ValueId,
+    source_type: &Type,
+    target_type: &Type,
+    builder: &mut impl HLEmitter,
+) -> ValueId {
+    match CastTarget::conversion(source_type, target_type) {
+        None => value,
+        Some(target) => builder.cast_to(target, value),
+    }
+}
+
+/// Recursively strip WitnessOf from a value (for unconstrained call args).
+fn emit_strip_witness(
+    value: ValueId,
+    source_type: &Type,
+    target_type: &Type,
+    builder: &mut HLInstrBuilder<'_>,
+) -> ValueId {
+    if source_type == target_type {
+        return value;
+    }
+    // Toplevel WitnessOf(X) → X: emit ValueOf, then keep stripping inside.
+    if let TypeExpr::WitnessOf(inner) = &source_type.expr {
+        let unwrapped = builder.value_of(value);
+        return emit_strip_witness(unwrapped, inner, target_type, builder);
+    }
+    match CastTarget::strip_conversion(source_type, target_type) {
+        None => value,
+        Some(target) => builder.cast_to(target, value),
+    }
+}
+
 fn flush_conversion_instrs_located(
     instrs: &mut Vec<LocatedOpCode>,
     taint: Option<ValueId>,
@@ -976,6 +1030,111 @@ fn flush_conversion_instrs_located(
     for instr in cast_instrs {
         let (instr, location) = instr.take();
         maybe_guard(instrs, taint, instr, &location);
+    }
+}
+
+/// Emit selects for merge point values, handling type conversion between
+/// branch values and the expected merge param type. For arrays, does unrolled
+/// element-wise select + cast. For scalars, emits Select with optional cast.
+fn emit_merge_select(
+    builder: &mut impl HLEmitter,
+    cond: ValueId,
+    lhs: ValueId,
+    rhs: ValueId,
+    result: Option<ValueId>,
+    result_type: &Type,
+    lhs_type: &Type,
+    rhs_type: &Type,
+) -> ValueId {
+    match &result_type.expr {
+        TypeExpr::Array(result_elem_type, size) => {
+            let lhs_elem_type = match &lhs_type.expr {
+                TypeExpr::Array(e, _) => e.as_ref(),
+                _ => panic!(
+                    "emit_merge_select: expected array for lhs, got {:?}",
+                    lhs_type
+                ),
+            };
+            let rhs_elem_type = match &rhs_type.expr {
+                TypeExpr::Array(e, _) => e.as_ref(),
+                _ => panic!(
+                    "emit_merge_select: expected array for rhs, got {:?}",
+                    rhs_type
+                ),
+            };
+            let mut elems = Vec::with_capacity(*size);
+            for i in 0..*size {
+                let idx = builder.int_const(32, i as u128);
+                let lhs_elem = builder.array_get(lhs, idx);
+                let rhs_elem = builder.array_get(rhs, idx);
+                let selected = emit_merge_select(
+                    builder,
+                    cond,
+                    lhs_elem,
+                    rhs_elem,
+                    None,
+                    result_elem_type,
+                    lhs_elem_type,
+                    rhs_elem_type,
+                );
+                elems.push(selected);
+            }
+            let result = result.unwrap_or_else(|| builder.fresh_value());
+            builder.emit(OpCode::MkSeq {
+                result,
+                elems,
+                seq_type: SequenceTargetType::Array(*size),
+                elem_type: *result_elem_type.clone(),
+            });
+            result
+        }
+        TypeExpr::Tuple(_) => ice_non_elided_tuple(),
+        TypeExpr::WitnessOf(_) => {
+            // Cast operands to WitnessOf if they aren't already
+            let lhs = if !lhs_type.is_witness_of() {
+                builder.cast_to_witness_of(lhs)
+            } else {
+                lhs
+            };
+            let rhs = if !rhs_type.is_witness_of() {
+                builder.cast_to_witness_of(rhs)
+            } else {
+                rhs
+            };
+            let result = result.unwrap_or_else(|| builder.fresh_value());
+            builder.emit(OpCode::Select {
+                result,
+                cond,
+                if_t: lhs,
+                if_f: rhs,
+            });
+            result
+        }
+        TypeExpr::Field | TypeExpr::Int(_) => {
+            let result = result.unwrap_or_else(|| builder.fresh_value());
+            builder.emit(OpCode::Select {
+                result,
+                cond,
+                if_t: lhs,
+                if_f: rhs,
+            });
+            result
+        }
+        TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
+        TypeExpr::Slice(_) => {
+            let lhs = emit_value_conversion(lhs, lhs_type, result_type, builder);
+            let rhs = emit_value_conversion(rhs, rhs_type, result_type, builder);
+            let result = result.unwrap_or_else(|| builder.fresh_value());
+            builder.emit(OpCode::Select {
+                result,
+                cond,
+                if_t: lhs,
+                if_f: rhs,
+            });
+            result
+        }
+        TypeExpr::Function => panic!("Witness select on Function type not supported"),
+        TypeExpr::Blob(..) => panic!("Witness select on Blob type not supported"),
     }
 }
 
