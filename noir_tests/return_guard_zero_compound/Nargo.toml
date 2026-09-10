@@ -1,0 +1,6 @@
+[package]
+name = "return_guard_zero_compound"
+type = "bin"
+authors = [""]
+
+[dependencies]
