@@ -1,9 +1,9 @@
 fn main(flag: bool) {
-    let mut arr: [Field; 3] = [2, 5, 9];
-    for i in 0..4 {
+    let mut arr: [Field; 128] = [2; 128];
+    for i in 127..129 {
         if flag {
             arr[i] = 7;
         }
     }
-    assert_eq(arr[0], 7);
+    assert_eq(arr[127], 7);
 }

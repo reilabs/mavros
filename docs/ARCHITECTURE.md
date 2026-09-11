@@ -123,7 +123,7 @@ It does this by first specializing generic functions based on the taints of thei
 code to evaluate both branches and select the result, **converting control flow to data flow**.
 
 Control-flow linearization records branch-result merges without choosing their implementation. A
-private function driver directly captures original SSA provenance, linearizes control flow, and
+private function driver now directly captures original SSA provenance, linearizes control flow, and
 emits the returned merges on the same function. Intermediate state stays local to that driver. Merge
 emission replays sparse writes in source order, selecting changed elements; unsupported shapes
 retain the general element-wise merge. Combined branch predicates preserve active failures and make

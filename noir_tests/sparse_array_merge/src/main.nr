@@ -78,6 +78,8 @@ fn main(flag: bool, index: u32) {
     check_pure_indices(!flag);
     check_nested(flag);
     check_nested(!flag);
+    check_sparse_aliases(flag);
+    check_sparse_aliases(!flag);
     check_model(flag, flag);
     check_model(flag, !flag);
     check_model(!flag, flag);
@@ -112,6 +114,31 @@ fn check_model(enabled: bool, outer: bool) {
                         assert_eq(arr[r][c], active * expected + (1 - active) * original[r][c]);
                     }
                 }
+            }
+        }
+    }
+}
+
+// This stays profitable after the cost gate. Distinct loop values can alias at
+// runtime, so removing original stores must preserve last-write semantics.
+fn check_sparse_aliases(enabled: bool) {
+    for i in 0..3 {
+        for j in 0..3 {
+            let mut arr: [Field; 128] = [2; 128];
+            if enabled {
+                arr[i] = arr[i] + 3;
+                arr[j] = arr[j] * 2;
+                arr[i] = arr[i] + 7;
+            }
+            // Check every possible written cell, one adjacent cell, and the tail.
+            assert_eq(arr[127], 2);
+            for k in 0..4 {
+                let mut expected = 2;
+                if k == i { expected = expected + 3; }
+                if k == j { expected = expected * 2; }
+                if k == i { expected = expected + 7; }
+                let active = enabled as Field;
+                assert_eq(arr[k], active * expected + (1 - active) * 2);
             }
         }
     }

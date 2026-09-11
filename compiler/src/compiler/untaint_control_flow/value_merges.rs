@@ -3,12 +3,15 @@
 //! The CFG phase supplies values, result types, and branch predicates. This phase
 //! owns strategy selection and emission for every value type. The function driver
 //! directly sequences provenance capture, linearization, and merge emission.
+//!
 //! Its intermediate state remains local; there is no callback or capture/finalize API.
 
-use super::{UntaintControlFlow, emit_value_conversion};
+use super::{UntaintControlFlow, emit_value_conversion, get_witness_or_pure};
 use crate::compiler::{
     analysis::{
-        flow_analysis::FlowAnalysis, types::FunctionTypeInfo, witness_info::FunctionWitnessType,
+        flow_analysis::FlowAnalysis,
+        types::FunctionTypeInfo,
+        witness_info::{FunctionWitnessType, WitnessType},
     },
     ssa::{
         BlockId, FunctionId, SourceLocation, Terminator, ValueId,
@@ -28,6 +31,7 @@ pub(super) struct MergePoint {
     pub block: BlockId,
     pub destination: BlockId,
     pub condition: ValueId,
+    pub not_condition: ValueId,
     pub then_active: ValueId,
     pub else_active: ValueId,
     pub location: SourceLocation,
@@ -45,7 +49,13 @@ impl UntaintControlFlow {
         flow_analysis: &FlowAnalysis,
         types: Option<&FunctionTypeInfo>,
     ) {
-        let sparse = types.map(|types| SparseArrayMerge::new(function, types));
+        let has_witness_branch = function.get_blocks().any(|(_, block)| {
+            matches!(block.get_terminator(), Some(Terminator::JmpIf(cond, _, _))
+                if get_witness_or_pure(function_wt, *cond) == WitnessType::Witness)
+        });
+        let mut sparse = types
+            .filter(|_| has_witness_branch)
+            .map(|types| SparseArrayMerge::new(function, types, ssa));
         let merges = self.linearize_function(
             function_id,
             function,
@@ -54,7 +64,10 @@ impl UntaintControlFlow {
             flow_analysis,
             types,
         );
-        emit_merges(function, ssa, types, sparse.as_ref(), merges);
+        emit_merges(function, ssa, types, sparse.as_mut(), merges);
+        if let Some(sparse) = sparse {
+            sparse.remove_redundant_updates(function, ssa);
+        }
     }
 }
 
@@ -62,7 +75,7 @@ fn emit_merges(
     function: &mut HLFunction,
     ssa: &mut HLSSA,
     types: Option<&FunctionTypeInfo>,
-    sparse: Option<&SparseArrayMerge<'_>>,
+    mut sparse: Option<&mut SparseArrayMerge<'_>>,
     merges: Vec<MergePoint>,
 ) {
     for merge in merges {
@@ -70,11 +83,18 @@ fn emit_merges(
         let mut builder = fb.block(merge.block).with_source_location(merge.location);
         let mut args = Vec::with_capacity(merge.values.len());
         for (lhs, rhs, typ) in merge.values {
+            if lhs == rhs {
+                let source_type = types.map(|ti| ti.get_value_type(lhs)).unwrap_or(&typ);
+                args.push(emit_value_conversion(lhs, source_type, &typ, &mut builder));
+                continue;
+            }
             let selected = sparse
+                .as_deref_mut()
                 .and_then(|sparse| {
                     sparse.try_emit(
                         &mut builder,
                         merge.condition,
+                        merge.not_condition,
                         merge.then_active,
                         merge.else_active,
                         lhs,
@@ -204,5 +224,81 @@ fn emit_merge_select(
         }
         TypeExpr::Function => panic!("Witness select on Function type not supported"),
         TypeExpr::Blob(..) => panic!("Witness select on Blob type not supported"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::analysis::types::Types;
+
+    #[test]
+    fn identical_arms_reuse_the_value_and_keep_required_conversion() {
+        for pure in [false, true] {
+            let mut ssa = HLSSA::with_main("merge".into());
+            let fid = ssa.get_unique_entrypoint_id();
+            let mut function = ssa.take_function(fid);
+            let entry = function.get_entry_id();
+            let destination = function.add_block();
+            let target = Type::witness_of(Type::field()).array_of(128);
+            let source = if pure {
+                Type::field().array_of(128)
+            } else {
+                target.clone()
+            };
+            let value = ssa.fresh_value();
+            let condition = ssa.fresh_value();
+            let result = ssa.fresh_value();
+            function.get_block_mut(entry).push_parameter(value, source);
+            function
+                .get_block_mut(entry)
+                .push_parameter(condition, Type::witness_of(Type::int(1)));
+            function
+                .get_block_mut(entry)
+                .set_terminator(Terminator::Jmp(destination, vec![value]));
+            function
+                .get_block_mut(destination)
+                .push_parameter(result, target.clone());
+            function
+                .get_block_mut(destination)
+                .set_terminator(Terminator::Return(vec![result]));
+            function.add_return_type(target.clone());
+            ssa.put_function(fid, function);
+            let types = Types::new().run(&ssa, &FlowAnalysis::run(&ssa));
+            let mut function = ssa.take_function(fid);
+            emit_merges(
+                &mut function,
+                &mut ssa,
+                Some(types.get_function(fid)),
+                None,
+                vec![MergePoint {
+                    block: entry,
+                    destination,
+                    condition,
+                    not_condition: condition,
+                    then_active: condition,
+                    else_active: condition,
+                    location: SourceLocation::synthetic("identical_merge"),
+                    values: vec![(value, value, target.clone())],
+                }],
+            );
+            let instructions: Vec<_> = function.get_block(entry).get_instructions().collect();
+            assert_eq!(instructions.len(), usize::from(pure));
+            assert!(
+                instructions
+                    .iter()
+                    .all(|op| matches!(op, OpCode::Cast { .. }))
+            );
+            let Some(Terminator::Jmp(_, args)) = function.get_block(entry).get_terminator() else {
+                panic!("missing merge jump")
+            };
+            let merged = args[0];
+            if !pure {
+                assert_eq!(merged, value);
+            }
+            ssa.put_function(fid, function);
+            let types = Types::new().run(&ssa, &FlowAnalysis::run(&ssa));
+            assert_eq!(types.get_function(fid).get_value_type(merged), &target);
+        }
     }
 }

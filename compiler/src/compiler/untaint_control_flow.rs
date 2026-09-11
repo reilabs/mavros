@@ -581,7 +581,23 @@ impl UntaintControlFlow {
                                 ),
                             };
 
+                            assert_eq!(
+                                args_passed_from_lhs.len(),
+                                merge_params.len(),
+                                "ICE: then-branch argument count does not match merge parameters"
+                            );
+                            assert_eq!(
+                                args_passed_from_rhs.len(),
+                                merge_params.len(),
+                                "ICE: else-branch argument count does not match merge parameters"
+                            );
                             let merger_block = function.add_block();
+                            function
+                                .get_block_mut(merger_block)
+                                .set_terminator(Terminator::Jmp(
+                                    merge,
+                                    args_passed_from_lhs.clone(),
+                                ));
                             function
                                 .get_block_mut(out_false_block)
                                 .set_terminator(Terminator::Jmp(merger_block, vec![]));
@@ -590,6 +606,7 @@ impl UntaintControlFlow {
                                 block: merger_block,
                                 destination: merge,
                                 condition: cond,
+                                not_condition: not_cond,
                                 then_active: then_taint,
                                 else_active: else_taint,
                                 location: block_source_location.clone(),
