@@ -107,7 +107,7 @@ const DEFAULT_IGNORED_TESTS: &[&str] = &[
     "brillig_mem_layout_regression",
 ];
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TestExpectation {
     ExecutionSuccess,
     ExecutionFailure,
@@ -161,9 +161,13 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
 
     // 1. Compile
     emit("START:COMPILED");
-    let Some(project) = Project::new(root.clone()).ok() else {
-        emit("END:COMPILED:fail");
-        return;
+    let project = match Project::new(root.clone()) {
+        Ok(project) => project,
+        Err(error) => {
+            eprintln!("Project error: {error}");
+            emit("END:COMPILED:fail");
+            return;
+        }
     };
     let mut driver = Driver::new(project, false);
     let compile_result = (|| -> Result<(), DriverError> {
@@ -1221,13 +1225,37 @@ fn collect_test_dirs(base: &Path, prefix: &str, expectation: TestExpectation) ->
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.is_dir() && p.join("Nargo.toml").is_file())
-        .map(|p| {
+        .flat_map(|p| {
             let test_name = p.file_name().unwrap().to_string_lossy().into_owned();
-            TestEntry {
-                path: p,
-                display_name: format!("{prefix}{test_name}"),
-                expectation,
-            }
+            let root = fs::canonicalize(&p).expect("Cannot resolve test directory");
+            // Keep invalid projects in the test set so the child reports their loading error.
+            let packages = Project::binary_package_roots(&root).unwrap_or_else(|error| {
+                eprintln!("Cannot discover packages in {}: {error}", root.display());
+                vec![root.clone()]
+            });
+            packages.into_iter().map(move |path| {
+                let member = path
+                    .strip_prefix(&root)
+                    .expect("Package outside test directory");
+                let display_name = if member.as_os_str().is_empty() {
+                    format!("{prefix}{test_name}")
+                } else {
+                    format!("{prefix}{test_name}/{}", member.display())
+                };
+                // This upstream fixture has mixed outcomes: a asserts 1 == 2, while b
+                // asserts 1 != 0. Its directory-level failure expectation only applies to a.
+                let expectation = match display_name.as_str() {
+                    "noir/test_programs/execution_failure/workspace_fail/crates/b" => {
+                        TestExpectation::ExecutionSuccess
+                    }
+                    _ => expectation,
+                };
+                TestEntry {
+                    path,
+                    display_name,
+                    expectation,
+                }
+            })
         })
         .collect();
     dirs.sort_by(|a, b| a.display_name.cmp(&b.display_name));
@@ -2339,6 +2367,113 @@ mod tests {
 
     fn lines(input: &[&str]) -> Vec<String> {
         input.iter().map(|line| line.to_string()).collect()
+    }
+
+    fn write_discovery_workspace(base: &Path, name: &str) -> PathBuf {
+        let root = base.join(name);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("Nargo.toml"),
+            "[workspace]\nmembers = ['crates/a', 'crates/b', 'lib']\n",
+        )
+        .unwrap();
+        for (member, name, kind) in [
+            ("crates/a", "a", "bin"),
+            ("crates/b", "b", "bin"),
+            ("lib", "shared", "lib"),
+        ] {
+            let dir = root.join(member);
+            fs::create_dir_all(dir.join("src")).unwrap();
+            fs::write(
+                dir.join("Nargo.toml"),
+                format!("[package]\nname = '{name}'\ntype = '{kind}'\nauthors = []\n"),
+            )
+            .unwrap();
+            let source = if kind == "bin" { "main.nr" } else { "lib.nr" };
+            fs::write(dir.join("src").join(source), "fn main() {}\n").unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn workspace_discovery_reports_binary_members_and_honors_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = write_discovery_workspace(tmp.path(), "workspace");
+        let discover =
+            || collect_test_dirs(tmp.path(), "tests/", TestExpectation::ExecutionSuccess);
+        let entries = discover();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["tests/workspace/crates/a", "tests/workspace/crates/b"]
+        );
+        assert_eq!(
+            entries[0].path,
+            fs::canonicalize(root.join("crates/a")).unwrap()
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|e| e.expectation == TestExpectation::ExecutionSuccess)
+        );
+
+        fs::write(
+            root.join("Nargo.toml"),
+            "[workspace]\nmembers = ['crates/a', 'crates/b', 'lib']\ndefault-member = 'crates/b'\n",
+        )
+        .unwrap();
+        let entries = discover();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].display_name, "tests/workspace/crates/b");
+
+        // Ordinary packages keep their existing names; discovery errors must not drop tests.
+        let entries = collect_test_dirs(
+            &root.join("crates"),
+            "tests/",
+            TestExpectation::ExecutionSuccess,
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["tests/a", "tests/b"]
+        );
+        fs::write(root.join("Nargo.toml"), "invalid manifest").unwrap();
+        let entries = discover();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].display_name, "tests/workspace");
+    }
+
+    #[test]
+    fn workspace_discovery_assigns_mixed_member_expectations() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_discovery_workspace(tmp.path(), "workspace_fail");
+        let entries = collect_test_dirs(
+            tmp.path(),
+            "noir/test_programs/execution_failure/",
+            TestExpectation::ExecutionFailure,
+        );
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].display_name,
+            "noir/test_programs/execution_failure/workspace_fail/crates/a"
+        );
+        assert_eq!(entries[0].expectation, TestExpectation::ExecutionFailure);
+        assert_eq!(
+            entries[1].display_name,
+            "noir/test_programs/execution_failure/workspace_fail/crates/b"
+        );
+        assert_eq!(entries[1].expectation, TestExpectation::ExecutionSuccess);
+        // The passing-member exception belongs only to this specific upstream fixture.
+        let entries = collect_test_dirs(tmp.path(), "local/", TestExpectation::ExecutionFailure);
+        assert!(
+            entries
+                .iter()
+                .all(|e| e.expectation == TestExpectation::ExecutionFailure)
+        );
     }
 
     #[test]
