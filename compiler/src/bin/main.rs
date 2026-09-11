@@ -174,6 +174,54 @@ pub fn run_compile(
     absolute_paths: bool,
     logup_soundness: u32,
 ) -> Result<ExitCode, Error> {
+    let roots = Project::binary_package_roots(path)?;
+    let multiple = roots.len() > 1;
+    if multiple
+        && [r1cs_output, binary_output].iter().any(|output| {
+            output.components().any(|component| {
+                !matches!(
+                    component,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            })
+        })
+    {
+        return Err(std::io::Error::other(
+            "For multi-package compilation, output paths must be relative paths within each member directory",
+        ).into());
+    }
+    run_packages(&roots, |root| {
+        let r1cs_output = if multiple {
+            root.join(r1cs_output)
+        } else {
+            r1cs_output.clone()
+        };
+        let binary_output = if multiple {
+            root.join(binary_output)
+        } else {
+            binary_output.clone()
+        };
+        run_compile_package(
+            root,
+            &r1cs_output,
+            &binary_output,
+            draw_graphs,
+            include_debug_info,
+            absolute_paths,
+            logup_soundness,
+        )
+    })
+}
+
+fn run_compile_package(
+    path: &PathBuf,
+    r1cs_output: &PathBuf,
+    binary_output: &PathBuf,
+    draw_graphs: bool,
+    include_debug_info: bool,
+    absolute_paths: bool,
+    logup_soundness: u32,
+) -> Result<ExitCode, Error> {
     info!(message = %"Compiling Noir project", root = ?path, r1cs_output = ?r1cs_output, binary_output = ?binary_output);
 
     let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs, logup_soundness, false)?;
@@ -234,6 +282,41 @@ pub fn run_compile(
 /// The main execution of the CLI utility (full pipeline). Should be called directly from the
 /// `main` function of the application.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
+    let roots = Project::binary_package_roots(&args.root)?;
+    run_packages(&roots, |root| {
+        let mut options = args.clone();
+        options.root = root.clone();
+        run_package(&options)
+    })
+}
+
+/// Visit every selected binary even after one fails, keeping each package's inputs and artifacts
+/// separate. Single-package callers retain their original error behavior.
+fn run_packages(
+    roots: &[PathBuf],
+    mut run: impl FnMut(&PathBuf) -> Result<ExitCode, Error>,
+) -> Result<ExitCode, Error> {
+    if roots.len() == 1 {
+        return run(&roots[0]);
+    }
+    let mut success = true;
+    for root in roots {
+        match run(root) {
+            Ok(status) => success &= status == ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Package {}: {error}", root.display());
+                success = false;
+            }
+        }
+    }
+    Ok(if success {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let (mut driver, r1cs) = compile_to_r1cs(
         args.root.clone(),
         args.draw_graphs,
@@ -537,6 +620,86 @@ fn parse_path(path: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn workspace_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Nargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\n",
+        )
+        .unwrap();
+        for (name, condition, y) in [("a", "x == y", 2), ("b", "x != y", 0)] {
+            let root = dir.path().join(name);
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(
+                root.join("Nargo.toml"),
+                format!("[package]\nname = \"{name}\"\ntype = \"bin\"\nauthors = []\n"),
+            )
+            .unwrap();
+            fs::write(
+                root.join("src/main.nr"),
+                format!("fn main(x: Field, y: pub Field) {{ assert({condition}); }}\n"),
+            )
+            .unwrap();
+            fs::write(
+                root.join("Prover.toml"),
+                format!("x = \"1\"\ny = \"{y}\"\n"),
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn workspace_cli_runs_later_members_after_failure() {
+        let dir = workspace_fixture();
+        let options =
+            ProgramOptions::try_parse_from(["mavros", "--root", dir.path().to_str().unwrap()])
+                .unwrap();
+        assert_eq!(run(&options).unwrap(), ExitCode::FAILURE);
+        // b is compiled and executed despite a's failed assertion, using b's own inputs.
+        assert!(
+            dir.path()
+                .join("b/mavros_debug/program_bytecode.txt")
+                .is_file()
+        );
+        fs::write(dir.path().join("a/Prover.toml"), "x = \"1\"\ny = \"1\"\n").unwrap();
+        assert_eq!(run(&options).unwrap(), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn workspace_compile_keeps_member_artifacts_separate() {
+        let dir = workspace_fixture();
+        let root = dir.path().to_path_buf();
+        let r1cs = PathBuf::from("target/r1cs.bin");
+        let binary = PathBuf::from("target/basic.json");
+        assert!(
+            run_compile(
+                &root,
+                &root.join("shared.bin"),
+                &binary,
+                false,
+                true,
+                false,
+                128
+            )
+            .is_err()
+        );
+        assert!(!root.join("shared.bin").exists());
+        assert_eq!(
+            run_compile(&root, &r1cs, &binary, false, true, false, 128).unwrap(),
+            ExitCode::SUCCESS
+        );
+        for name in ["a", "b"] {
+            for file in ["r1cs.bin", "basic.json", "basic.debug.json"] {
+                assert!(root.join(name).join("target").join(file).is_file());
+            }
+        }
+        assert_ne!(
+            fs::read(root.join("a/target/basic.json")).unwrap(),
+            fs::read(root.join("b/target/basic.json")).unwrap()
+        );
+    }
 
     #[test]
     fn debug_info_is_excluded_by_default_with_path_and_metadata_opt_ins() {
