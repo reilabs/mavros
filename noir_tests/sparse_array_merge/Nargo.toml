@@ -1,0 +1,6 @@
+[package]
+name = "sparse_array_merge"
+type = "bin"
+authors = [""]
+
+[dependencies]
