@@ -4,7 +4,9 @@
 //! registries in the compiler's `project.rs`), so the rest of the frontend treats them as ordinary
 //! functions.
 
+pub mod blake2s;
 pub mod blake3;
+pub mod blake_helper;
 pub mod derive_pedersen_generators;
 pub mod ecdsa;
 pub mod ecdsa_secp256k1;

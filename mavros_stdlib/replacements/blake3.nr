@@ -6,49 +6,13 @@
 // For a single chunk no merkle tree is built: the chunk's last block is
 // compressed with the ROOT flag and the first 8 output words are the digest.
 
-use crate::ops::WrappingAdd;
-
-global IV: [u32; 8] = [
-    0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19,
-];
+use super::blake_helper::{IV, g, le_bytes_from_words};
 
 global MSG_PERMUTATION: [u32; 16] = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
 
 global CHUNK_START: u32 = 1;
 global CHUNK_END: u32 = 2;
 global ROOT: u32 = 8;
-
-// Right rotations as div/mod by constant powers of two: mavros lowers `<<`
-// with a rangecheck on the shifted value rather than wrapping, so
-// `x << (32 - n)` on a full word would fail. rotr(x, n) is
-// (x % 2^n) * 2^(32-n) + (x / 2^n), which never exceeds 32 bits.
-fn rotr16(x: u32) -> u32 {
-    (x % 65536) * 65536 + (x / 65536)
-}
-
-fn rotr12(x: u32) -> u32 {
-    (x % 4096) * 1048576 + (x / 4096)
-}
-
-fn rotr8(x: u32) -> u32 {
-    (x % 256) * 16777216 + (x / 256)
-}
-
-fn rotr7(x: u32) -> u32 {
-    (x % 128) * 33554432 + (x / 128)
-}
-
-fn g(a: u32, b: u32, c: u32, d: u32, mx: u32, my: u32) -> (u32, u32, u32, u32) {
-    let a = a.wrapping_add(b).wrapping_add(mx);
-    let d = rotr16(d ^ a);
-    let c = c.wrapping_add(d);
-    let b = rotr12(b ^ c);
-    let a = a.wrapping_add(b).wrapping_add(my);
-    let d = rotr8(d ^ a);
-    let c = c.wrapping_add(d);
-    let b = rotr7(b ^ c);
-    (a, b, c, d)
-}
 
 fn round_fn(state: [u32; 16], m: [u32; 16]) -> [u32; 16] {
     let mut v = state;
@@ -159,13 +123,6 @@ pub fn blake3<let N: u32>(input: [u8; N]) -> [u8; 32] {
         }
     }
 
-    let mut out = [0 as u8; 32];
-    for i in 0..8 {
-        let w = root_state[i];
-        out[4 * i] = (w % 256) as u8;
-        out[4 * i + 1] = ((w / 256) % 256) as u8;
-        out[4 * i + 2] = ((w / 65536) % 256) as u8;
-        out[4 * i + 3] = (w / 16777216) as u8;
-    }
-    out
+    // `cv` was just set to the first 8 root output words by the final iteration.
+    le_bytes_from_words(cv)
 }
