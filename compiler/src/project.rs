@@ -43,6 +43,8 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
     (
         "std/mavros/replacements/aes128_encrypt.nr",
         include_str!("../../mavros_stdlib/replacements/aes128_encrypt.nr"),
+    ),
+    (
         "std/mavros/replacements/blake2s.nr",
         include_str!("../../mavros_stdlib/replacements/blake2s.nr"),
     ),
