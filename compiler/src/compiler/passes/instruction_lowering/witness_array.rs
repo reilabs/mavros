@@ -5,7 +5,10 @@
 
 use crate::compiler::{
     analysis::types::{FunctionTypeInfo, push_witness_of_to_leaves},
-    passes::instruction_lowering::{InstructionLoweringRule, LoweringContext},
+    passes::{
+        instruction_lowering::{InstructionLoweringRule, LoweringContext},
+        shared::seq_bounds::seq_bounds_operands,
+    },
     ssa::{
         ValueId,
         hlssa::{
@@ -145,8 +148,38 @@ impl LowerWitnessArrayOps {
         let result_type = result_type_full.strip_all_witness();
         let arr_elem_type = function_type_info.get_value_type(arr).get_array_element();
 
+        let arr_type = function_type_info.get_value_type(arr);
+        let idx_type = function_type_info.get_value_type(idx);
+        let idx_bits = int_bits(idx_type, "witness array get index");
+
+        // For an empty array, emit guarded compare that is guaranteed to fail and return a default value
+        if array_len(arr_type, "witness array get") == 0 {
+            let (_, len_cmp, idx_cmp, _) = seq_bounds_operands(b, arr, idx, arr_type, idx_type);
+            b.emit_guarded(
+                cond,
+                OpCode::AssertCmp {
+                    kind: CmpKind::ULt,
+                    lhs: idx_cmp,
+                    rhs: len_cmp,
+                },
+            );
+            let default = b.default_value(&result_type_full);
+            b.emit(OpCode::Cast {
+                result,
+                value: default,
+                target: CastTarget::Nop,
+            });
+            return;
+        }
+
         let pure_idx = b.value_of(idx);
-        let hint = self.emit_array_get_hint(b, arr, pure_idx, cond);
+        // Substitute a safe index (0) for the hint index so the VM never reads out of bounds; the lookup below still
+        // rejects an out-of-range witness index, so this only changes *when* it fails.
+        let (_, len_cmp, idx_cmp, _) = seq_bounds_operands(b, arr, pure_idx, arr_type, idx_type);
+        let in_bounds = b.ult(idx_cmp, len_cmp);
+        let zero = b.int_const(idx_bits, 0);
+        let hint_idx = b.select(in_bounds, pure_idx, zero);
+        let hint = self.emit_array_get_hint(b, arr, hint_idx, cond);
         let idx_field = b.cast_to_field(idx);
         let stride = leaf_scalar_count(&result_type);
         let base_key = if stride == 1 {
