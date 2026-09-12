@@ -151,7 +151,7 @@ impl LowerWitnessArrayOps {
             "witness array get index",
         );
         let len = array_len(function_type_info.get_value_type(arr), "witness array get");
-        // Clamp the hint index so the VM never reads out of bounds; the lookup below still
+        // Substitute a safe index (0) for the hint index so the VM never reads out of bounds; the lookup below still
         // rejects an out-of-range witness index, so this only changes *when* it fails.
         let cmp_bits = idx_bits.max(32);
         let idx_cmp = b.widen_u(pure_idx, idx_bits, cmp_bits);
