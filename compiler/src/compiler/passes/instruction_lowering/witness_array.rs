@@ -5,7 +5,10 @@
 
 use crate::compiler::{
     analysis::types::{FunctionTypeInfo, push_witness_of_to_leaves},
-    passes::instruction_lowering::{InstructionLoweringRule, LoweringContext},
+    passes::{
+        instruction_lowering::{InstructionLoweringRule, LoweringContext},
+        shared::seq_bounds::seq_bounds_operands,
+    },
     ssa::{
         ValueId,
         hlssa::{
@@ -150,12 +153,15 @@ impl LowerWitnessArrayOps {
             function_type_info.get_value_type(idx),
             "witness array get index",
         );
-        let len = array_len(function_type_info.get_value_type(arr), "witness array get");
         // Substitute a safe index (0) for the hint index so the VM never reads out of bounds; the lookup below still
         // rejects an out-of-range witness index, so this only changes *when* it fails.
-        let cmp_bits = idx_bits.max(32);
-        let idx_cmp = b.widen_u(pure_idx, idx_bits, cmp_bits);
-        let len_cmp = b.int_const(cmp_bits, len as u128);
+        let (_, len_cmp, idx_cmp, _) = seq_bounds_operands(
+            b,
+            arr,
+            pure_idx,
+            function_type_info.get_value_type(arr),
+            function_type_info.get_value_type(idx),
+        );
         let in_bounds = b.ult(idx_cmp, len_cmp);
         let zero = b.int_const(idx_bits, 0);
         let hint_idx = b.select(in_bounds, pure_idx, zero);
