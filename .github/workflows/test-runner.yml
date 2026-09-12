@@ -93,12 +93,13 @@ jobs:
         with:
           path: |
             ~/.cargo/registry
-            target
-          # `flake.lock` pins rustc and LLVM, so it belongs in the part of the key shared with
-          # `restore-keys` -- otherwise the prefix match happily restores a cache built with a
-          # different toolchain.
-          key: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-
+            target/release
+            target/wasm32-unknown-unknown/release
+          # Keep debug and release caches separate: the faster unit-test job must not claim
+          # the immutable cache entry needed by the release jobs. Both release jobs can share it.
+          # Include the profile and pinned rustc/LLVM toolchain in the fallback prefix too.
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-${{ hashFiles('flake.lock') }}-
 
       - name: Build Test Runner
         run: make build-test-runner
@@ -131,12 +132,12 @@ jobs:
         with:
           path: |
             ~/.cargo/registry
-            target
-          # `flake.lock` pins rustc and LLVM, so it belongs in the part of the key shared with
-          # `restore-keys` -- otherwise the prefix match happily restores a cache built with a
-          # different toolchain.
-          key: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-
+            target/debug
+          # Keep debug and release caches separate: the faster unit-test job must not claim
+          # the immutable cache entry needed by the release jobs. Both release jobs can share it.
+          # Include the profile and pinned rustc/LLVM toolchain in the fallback prefix too.
+          key: ${{ runner.os }}-cargo-debug-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-debug-${{ hashFiles('flake.lock') }}-
 
       - name: Run Unit Tests
         run: make unit-test
@@ -175,12 +176,13 @@ jobs:
         with:
           path: |
             ~/.cargo/registry
-            target
-          # `flake.lock` pins rustc and LLVM, so it belongs in the part of the key shared with
-          # `restore-keys` -- otherwise the prefix match happily restores a cache built with a
-          # different toolchain.
-          key: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-${{ hashFiles('flake.lock') }}-
+            target/release
+            target/wasm32-unknown-unknown/release
+          # Keep debug and release caches separate: the faster unit-test job must not claim
+          # the immutable cache entry needed by the release jobs. Both release jobs can share it.
+          # Include the profile and pinned rustc/LLVM toolchain in the fallback prefix too.
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-${{ hashFiles('flake.lock') }}-
 
       - name: Build Test Runner
         run: make build-test-runner
@@ -289,13 +291,16 @@ jobs:
       - name: Comment on Constraint/Witness Growth
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true' && !cancelled()
         run: |
-          GROWTH=$(nix develop --command cargo run --release --bin test-runner -- --check-growth baseline-STATUS.md STATUS.md)
-          COMMENT=$(printf '%s\n\n<details>\n<summary>Comparison Base Details</summary>\n\nCompared against: %s\n\n</details>\n' "$GROWTH" "$BASELINE_SOURCE")
-          echo "$COMMENT" >> "$GITHUB_STEP_SUMMARY"
+          nix develop --command cargo run --release --bin test-runner -- --check-growth baseline-STATUS.md STATUS.md > growth-report.md
+          {
+            cat growth-report.md
+            printf '\n\n<details>\n<summary>Comparison Base Details</summary>\n\nCompared against: %s\n\n</details>\n' "$BASELINE_SOURCE"
+          } > growth-comment.md
+          cat growth-comment.md >> "$GITHUB_STEP_SUMMARY"
           # GITHUB_TOKEN is read-only on fork PRs, so commenting would fail there;
           # the report is still visible in the job summary above.
           if [ "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}" ]; then
-            gh pr comment "${{ github.event.pull_request.number }}" --body "$COMMENT"
+            gh pr comment "${{ github.event.pull_request.number }}" --body-file growth-comment.md
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

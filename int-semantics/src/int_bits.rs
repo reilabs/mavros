@@ -5,6 +5,7 @@
 use std::fmt;
 
 use num_bigint::BigUint;
+use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::{CmpOp, MAX_BITS, MAX_SIGNED_BITS, SignedValue, check_widths, mask};
@@ -15,6 +16,10 @@ use crate::{CmpOp, MAX_BITS, MAX_SIGNED_BITS, SignedValue, check_widths, mask};
 /// The width of one limb of an [`IntBits`] pattern, and of one integer cell in a VM frame.
 pub const HOST_LIMB_BITS: usize = u64::BITS as usize;
 
+// All widths evaluated by the integer model fit in two limbs. Wider stored patterns spill to
+// the heap, while cloning the common case (including elements of symbolic arrays) stays inline.
+type Limbs = SmallVec<[u64; 2]>;
+
 // INTEGER BIT PATTERN
 // ================================================================================================
 
@@ -23,13 +28,20 @@ pub const HOST_LIMB_BITS: usize = u64::BITS as usize;
 ///
 /// It has no [`Ord`] implementation because it is a raw bit interpretation and there are two valid
 /// readings of ordering for this type. [`IntBits::compare`] should be used to choose a reading.
+///
+/// # Performance
+///
+/// Patterns up to 128 bits keep their limbs inline; wider patterns use heap storage. Cloning a
+/// small integer therefore needs no allocation, including when compiler analysis copies arrays
+/// of integer values. Storage does not change the width, normalization, equality, hashing, or
+/// arithmetic rules.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct IntBits {
     /// The width of the integer.
     bits: usize,
 
     /// Exactly `IntBits::limbs_for_bits(bits)` of them, little-endian, with the top limb masked.
-    limbs: Box<[u64]>,
+    limbs: Limbs,
 }
 
 // CONSTRUCTORS
@@ -52,14 +64,14 @@ impl IntBits {
     /// Zero at `bits` wide.
     #[must_use]
     pub fn zero(bits: usize) -> Self {
-        Self::normalized(bits, vec![0; Self::limbs_for_bits(bits)])
+        Self::normalized(bits, Limbs::from_elem(0, Self::limbs_for_bits(bits)))
     }
 
     /// A `bits`-wide pattern carrying `value`, discarding any bits at or above `bits`.
     #[must_use]
     pub fn from_u128(bits: usize, value: u128) -> Self {
         let count = Self::limbs_for_bits(bits);
-        let mut limbs = vec![0u64; count];
+        let mut limbs = Limbs::from_elem(0, count);
         limbs[0] = value as u64;
         if count > 1 {
             limbs[1] = (value >> HOST_LIMB_BITS) as u64;
@@ -73,7 +85,7 @@ impl IntBits {
     /// being expressible at a width the host has no corresponding type for.
     #[must_use]
     pub fn all_ones(bits: usize) -> Self {
-        Self::normalized(bits, vec![u64::MAX; Self::limbs_for_bits(bits)])
+        Self::normalized(bits, Limbs::from_elem(u64::MAX, Self::limbs_for_bits(bits)))
     }
 
     /// A `bits`-wide pattern from little-endian limbs, zero-extending a slice too short to fill the
@@ -81,7 +93,7 @@ impl IntBits {
     #[must_use]
     pub fn from_limbs(bits: usize, limbs: &[u64]) -> Self {
         let count = Self::limbs_for_bits(bits);
-        let mut out = vec![0u64; count];
+        let mut out = Limbs::from_elem(0, count);
         let taken = limbs.len().min(count);
         out[..taken].copy_from_slice(&limbs[..taken]);
         Self::normalized(bits, out)
@@ -366,7 +378,7 @@ impl IntBits {
             return Self::zero(self.bits);
         }
         let (whole, part) = (amount / HOST_LIMB_BITS, amount % HOST_LIMB_BITS);
-        let mut out = vec![0u64; self.limbs.len()];
+        let mut out = Limbs::from_elem(0, self.limbs.len());
         for (i, &limb) in self.limbs.iter().enumerate() {
             let Some(target) = out.get_mut(i + whole) else {
                 break;
@@ -390,7 +402,7 @@ impl IntBits {
             return Self::zero(self.bits);
         }
         let (whole, part) = (amount / HOST_LIMB_BITS, amount % HOST_LIMB_BITS);
-        let mut out = vec![0u64; self.limbs.len()];
+        let mut out = Limbs::from_elem(0, self.limbs.len());
         for i in 0..self.limbs.len() {
             let Some(&limb) = self.limbs.get(i + whole) else {
                 break;
@@ -584,7 +596,7 @@ fn two_pow(n: usize) -> SignedValue {
 /// The private machinery that establishes the width/limb agreement.
 impl IntBits {
     /// Establish the invariant: clear every bit at or above `bits` in the top limb.
-    fn normalized(bits: usize, mut limbs: Vec<u64>) -> Self {
+    fn normalized(bits: usize, mut limbs: Limbs) -> Self {
         assert_eq!(
             limbs.len(),
             Self::limbs_for_bits(bits),
@@ -593,10 +605,7 @@ impl IntBits {
         );
         let top = limbs.len() - 1;
         limbs[top] &= top_limb_mask(bits);
-        Self {
-            bits,
-            limbs: limbs.into_boxed_slice(),
-        }
+        Self { bits, limbs }
     }
 }
 
@@ -853,7 +862,7 @@ impl IntBits {
     /// wrapping every total evaluator owes.
     #[must_use]
     pub fn from_biguint(bits: usize, value: &BigUint) -> Self {
-        let digits: Vec<u64> = value.iter_u64_digits().collect();
+        let digits: Limbs = value.iter_u64_digits().collect();
         Self::from_limbs(bits, &digits)
     }
 }
@@ -919,6 +928,57 @@ mod tests {
         let mut hasher = DefaultHasher::new();
         v.hash(&mut hasher);
         hasher.finish()
+    }
+
+    #[test]
+    fn small_patterns_stay_inline_across_construction_and_bit_operations() {
+        for bits in [1, 63, 64, 65, 127, 128] {
+            let ones = IntBits::all_ones(bits);
+            for value in [
+                IntBits::zero(bits),
+                IntBits::from_u128(bits, u128::MAX),
+                IntBits::from_limbs(bits, &[u64::MAX; 2]),
+                IntBits::from_biguint(bits, &BigUint::from(u128::MAX)),
+                ones.clone(),
+                ones.and(&ones),
+                ones.or(&ones),
+                ones.xor(&ones),
+                ones.complement(),
+                ones.shifted_left(1),
+                ones.shifted_right(1),
+                ones.bit_range(1, bits),
+                IntBits::all_ones(129).cast(bits),
+            ] {
+                assert!(
+                    !value.limbs.spilled(),
+                    "{value:?} should use inline storage"
+                );
+                assert_eq!(value.limb_count(), bits.div_ceil(HOST_LIMB_BITS));
+            }
+        }
+    }
+
+    #[test]
+    fn storage_boundary_preserves_values_and_the_slice_hash() {
+        for bits in [127, 128, 129, 192, 256, 16384] {
+            let value = IntBits::all_ones(bits);
+            assert_eq!(value.limbs.spilled(), bits > 128);
+            assert_eq!(value.clone(), value);
+            assert_eq!(value.cast(128), IntBits::all_ones(bits.min(128)).cast(128));
+            assert_eq!(IntBits::from_biguint(bits, &BigUint::from(&value)), value);
+
+            // Keep the same hash input as the original boxed-slice representation. Integer
+            // constants are interned, so storage strategy must not change their identity.
+            let mut hasher = DefaultHasher::new();
+            bits.hash(&mut hasher);
+            value.limbs().hash(&mut hasher);
+            assert_eq!(hash_of(&value), hasher.finish());
+        }
+        let narrow = IntBits::all_ones(128);
+        let wide = narrow.cast(129);
+        assert_eq!(wide.limbs(), &[u64::MAX, u64::MAX, 0]);
+        assert_eq!(wide.cast(128), narrow);
+        assert_ne!(wide, narrow);
     }
 
     /// The reference the round-trip is held to, for the widths a `u128` can express.

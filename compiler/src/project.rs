@@ -43,14 +43,28 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
     (
         "std/mavros/replacements/aes128_encrypt.nr",
         include_str!("../../mavros_stdlib/replacements/aes128_encrypt.nr"),
+        "std/mavros/replacements/blake2s.nr",
+        include_str!("../../mavros_stdlib/replacements/blake2s.nr"),
     ),
     (
         "std/mavros/replacements/blake3.nr",
         include_str!("../../mavros_stdlib/replacements/blake3.nr"),
     ),
     (
+        "std/mavros/replacements/blake_helper.nr",
+        include_str!("../../mavros_stdlib/replacements/blake_helper.nr"),
+    ),
+    (
         "std/mavros/replacements/derive_pedersen_generators.nr",
         include_str!("../../mavros_stdlib/replacements/derive_pedersen_generators.nr"),
+    ),
+    (
+        "std/mavros/replacements/ecdsa.nr",
+        include_str!("../../mavros_stdlib/replacements/ecdsa.nr"),
+    ),
+    (
+        "std/mavros/replacements/ecdsa_secp256k1.nr",
+        include_str!("../../mavros_stdlib/replacements/ecdsa_secp256k1.nr"),
     ),
     (
         "std/mavros/replacements/ecdsa_secp256r1.nr",
@@ -77,8 +91,12 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
         include_str!("../../mavros_stdlib/vendor.nr"),
     ),
     (
-        "std/mavros/vendor/ecdsa_secp256r1.nr",
-        include_str!("../../mavros_stdlib/vendor/ecdsa_secp256r1.nr"),
+        "std/mavros/vendor/bignum.nr",
+        include_str!("../../mavros_stdlib/vendor/bignum.nr"),
+    ),
+    (
+        "std/mavros/vendor/bigcurve.nr",
+        include_str!("../../mavros_stdlib/vendor/bigcurve.nr"),
     ),
 ];
 
@@ -93,8 +111,10 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
 /// pairing all apply natively, and the mavros pipeline never sees a lowlevel call for it.
 const FOREIGN_REPLACEMENTS: &[&str] = &[
     "aes128_encrypt",
+    "blake2s",
     "blake3",
     "derive_pedersen_generators",
+    "ecdsa_secp256k1",
     "ecdsa_secp256r1",
     "embedded_curve_add",
     "multi_scalar_mul",

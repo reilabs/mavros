@@ -1119,12 +1119,15 @@ impl R1CGen {
         result
     }
 
-    pub fn seal(self) -> R1CS {
-        self.seal_impl().0
+    pub fn seal(self, guard: Option<(usize, usize)>) -> R1CS {
+        self.seal_impl(guard).0
     }
 
-    pub fn seal_with_profile(self) -> Result<(R1CS, R1CSProfile), R1CSProfileDisabled> {
-        let (r1cs, profile) = self.seal_impl();
+    pub fn seal_with_profile(
+        self,
+        guard: Option<(usize, usize)>,
+    ) -> Result<(R1CS, R1CSProfile), R1CSProfileDisabled> {
+        let (r1cs, profile) = self.seal_impl(guard);
         match profile {
             Some(profile) => Ok((r1cs, profile)),
             None => Err(R1CSProfileDisabled {
@@ -1133,9 +1136,11 @@ impl R1CGen {
         }
     }
 
-    fn seal_impl(mut self) -> (R1CS, Option<R1CSProfile>) {
+    fn seal_impl(mut self, guard: Option<(usize, usize)>) -> (R1CS, Option<R1CSProfile>) {
         // Algebraic section
         let mut witness_layout = WitnessLayout {
+            guard_index: guard.map(|(index, _)| index),
+            return_len: guard.map_or(0, |(_, len)| len),
             algebraic_size: self.next_witness,
             multiplicities_size: 0,
             challenges_size: 0,
@@ -1484,7 +1489,7 @@ mod r1cs_profile_tests {
         }
         generator.pop_profile_frame();
 
-        let (r1cs, profile) = generator.seal_with_profile().unwrap();
+        let (r1cs, profile) = generator.seal_with_profile(None).unwrap();
         assert_eq!(
             profile.constraints.total_weight(),
             r1cs.constraints_layout.size() as u64

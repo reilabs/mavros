@@ -135,7 +135,8 @@ or intern keys. Every **middle-end** cluster now mints through the façade (`b.f
       (see L3-frame). Raw harness, feeds the VM.
 - [ ] `wasm-runtime/src/lib.rs` (1) — `use ark_bn254::Fr` (see L3/L4).
 - [ ] `compiler/src/api.rs` (1) — `Fr::rand` input setup. Raw, feeds the VM.
-- [ ] `compiler/src/abi_helpers.rs` (1) — `Fr::from(byte)` ABI decode. Raw, feeds the VM.
+- [ ] `compiler/src/abi_helpers.rs` (2) — `Fr::from(..)` ABI decode and return-guard synthesis. Raw,
+      feeds the VM.
 
 ### `L1-serde` — artifact/ABI serialization pinned to `[u64;4]` (representation, P5)
 
@@ -420,6 +421,31 @@ _independent_ challenges (not powers `α, α², …`, which are invalid for this
 ---
 
 ## Layer 5 — Dependency, Header & Field Selection
+
+### `L5-ecdsa` — Non-Native ECDSA Arithmetic (Algorithmic + Representation, P5)
+
+The secp256k1 and secp256r1 replacements share curve-generic code, but their vendored arithmetic
+still assumes the headroom of the current BN254 proving field. The ECDSA base field `Fq` and scalar
+field `Fr` are non-native fields; neither is the Noir `Field` used to constrain their arithmetic.
+
+- [ ] `mavros_stdlib/vendor/bignum.nr` — `constants`, limb range checks, multiplication and
+      reduction gadgets use radix `2^120`, `u128` limbs, and native `Field` accumulators, including
+      the `2^246` borrow shift and `2^126` carry. Moving to a smaller proving field requires new
+      limb widths and a fresh audit of product, sum, carry and range-check bounds; changing the
+      native field alias alone is insufficient (see Layer 6).
+- [ ] `mavros_stdlib/vendor/bigcurve.nr::ScalarField::from_bignum` and
+      `mavros_stdlib/replacements/ecdsa.nr::verify` — scalar reconstruction assumes 120-bit lower
+      limbs and a 16-bit high limb for the 256-bit scalars. The shared verifier requires matching
+      `Fq`/`Fr` limb counts and `MOD_BITS = 256`; both wrappers instantiate `N = 3`, giving
+      `5 + 30 * (N - 1) = 65` scalar slices. A new limb layout must update reconstruction and slice
+      sizing together, preserving the curve-parameter relation
+      `offset_generator_final = offset_generator * 2^(4 * (NScalarSlices - 1))`.
+- [ ] `mavros_stdlib/replacements/ecdsa_secp256k1.nr`,
+      `mavros_stdlib/replacements/ecdsa_secp256r1.nr`, and the corresponding field/curve parameter
+      blocks in `vendor/bignum.nr` and `vendor/bigcurve.nr` — the 32-byte coordinates/digests,
+      64-byte signatures, curve moduli, coefficients, half-orders and safety vectors belong to the
+      named ECDSA curves and stay fixed when selecting another proving field. Their limb encodings
+      and reduction parameters must be regenerated if the non-native representation changes.
 
 ### `L5-embedded-curve` — Embedded-Curve Stdlib Replacements (Algorithmic + Hardcoded, P5)
 
