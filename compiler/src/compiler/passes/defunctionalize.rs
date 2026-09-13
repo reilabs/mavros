@@ -42,9 +42,8 @@ impl Pass for Defunctionalize {
     }
 }
 
-/// For each SSA value that may hold a function pointer, the set of
-/// concrete FunctionIds it can point to.
-type ReachingFns = HashMap<(FunctionId, ValueId), HashSet<FunctionId>>;
+/// For each SSA value that may hold a function pointer, a map from paths to the set of concrete FunctionIds it can point to.
+type ReachingFns = HashMap<(FunctionId, ValueId), Reach>;
 
 fn run_defunctionalize(ssa: &mut HLSSA) {
     // Check if there are any FnPtrs at all
@@ -58,6 +57,9 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
 
     // Phase 1: Compute reaching definitions — which FnPtrs can reach each value
     let reaching = compute_reaching_fn_ptrs(ssa);
+
+    let callable = compute_callable_functions(ssa, &reaching);
+    ssa.retain_functions(|id, _| callable.contains(&id));
 
     // Phase 2: For each dynamic call site, build a dispatch function
     // with exactly the reachable targets
@@ -87,12 +89,13 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         if call_site_dispatch.contains_key(&(*fid, *fn_ptr_val)) {
             continue;
         }
-        let targets: Vec<FunctionId> = reaching
+        let mut targets: Vec<FunctionId> = reaching
             .get(&(*fid, *fn_ptr_val))
             .unwrap_or_else(|| panic!("No reaching FnPtrs for v{} in {:?}", fn_ptr_val.0, fid))
-            .iter()
-            .copied()
+            .flatten()
+            .into_iter()
             .collect();
+        targets.sort_by_key(|f| f.0);
 
         assert!(
             !targets.is_empty(),
@@ -100,11 +103,21 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
             fn_ptr_val.0,
             fid
         );
-
-        // Get param/return types from the first target (all must match)
+        // Get param/return types from the first target
         let representative = ssa.get_function(targets[0]);
         let param_types = representative.get_param_types();
         let return_types = representative.get_returns().to_vec();
+        // All signatures must match
+        for &target in &targets[1..] {
+            let candidate = ssa.get_function(target);
+            assert!(
+                candidate.get_param_types() == param_types
+                    && candidate.get_returns() == return_types.as_slice(),
+                "defunctionalize: signature mismatch between {target:?} and {:?} at v{} in {fid:?}",
+                targets[0],
+                fn_ptr_val.0,
+            );
+        }
 
         let dispatch_fn_id =
             build_dispatch_function(ssa, dispatch_counter, &param_types, &return_types, &targets);
@@ -244,6 +257,101 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
     }
 }
 
+/// Compute callable functions using BFS. If `reaching` overestimates, it will overestimate too.
+fn compute_callable_functions(ssa: &HLSSA, reaching: &ReachingFns) -> HashSet<FunctionId> {
+    let mut callable: HashSet<FunctionId> = HashSet::default();
+    let mut worklist: Vec<FunctionId> = ssa.get_entry_points().to_vec();
+    worklist.extend(ssa.get_globals_init_fn());
+    worklist.extend(ssa.get_globals_deinit_fn());
+
+    while let Some(fid) = worklist.pop() {
+        if !callable.insert(fid) {
+            continue;
+        }
+        let func = ssa.get_function(fid);
+        for (_bid, block) in func.get_blocks() {
+            for instr in block.get_instructions() {
+                if matches!(instr, OpCode::Guard { .. }) {
+                    unreachable!("Guard in {fid:?} before defunctionalization")
+                }
+                let OpCode::Call { function, .. } = instr else {
+                    continue;
+                };
+                match function {
+                    CallTarget::Static(callee) => worklist.push(*callee),
+                    CallTarget::Dynamic(fn_ptr_val) => {
+                        if let Some(targets) = reaching.get(&(fid, *fn_ptr_val)) {
+                            worklist.extend(targets.flatten());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    callable
+}
+
+type Path = Vec<usize>;
+
+#[derive(Clone, Debug, Default)]
+struct Reach(HashMap<Path, HashSet<FunctionId>>);
+
+impl Reach {
+    fn empty() -> Self {
+        Reach::default()
+    }
+
+    fn singleton(target: FunctionId) -> Self {
+        Reach(HashMap::from_iter([(
+            Vec::new(),
+            HashSet::from_iter([target]),
+        )]))
+    }
+
+    fn flatten(&self) -> HashSet<FunctionId> {
+        self.0.values().flatten().copied().collect()
+    }
+
+    fn project(&self, idx: usize) -> Reach {
+        let mut out = Reach::empty();
+        for (path, set) in &self.0 {
+            match path.split_first() {
+                None => out.join_set(Vec::new(), set),
+                Some((first, rest)) if *first == idx => out.join_set(rest.to_vec(), set),
+                Some(_) => false,
+            };
+        }
+        out
+    }
+
+    fn inject(&self, idx: usize) -> Reach {
+        let mut out = Reach::empty();
+        for (path, set) in &self.0 {
+            let mut new_path = Vec::with_capacity(path.len() + 1);
+            new_path.push(idx);
+            new_path.extend_from_slice(path);
+            out.join_set(new_path, set);
+        }
+        out
+    }
+
+    fn join_set(&mut self, path: Path, set: &HashSet<FunctionId>) -> bool {
+        let dest = self.0.entry(path).or_default();
+        let initial_length = dest.len();
+        dest.extend(set.iter().copied());
+        dest.len() > initial_length
+    }
+
+    fn join_into(&mut self, other: &Reach) -> bool {
+        let mut changed = false;
+        for (path, set) in &other.0 {
+            changed |= self.join_set(path.clone(), set);
+        }
+        changed
+    }
+}
+
 /// Compute, for each (function, value) pair, the set of FunctionIds that
 /// the value can point to. Uses fixpoint iteration over:
 ///   - FnPtr constants (seeds)
@@ -305,7 +413,10 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
         .collect();
     for &fid in &func_ids {
         for (vid, target) in &fnptr_constants {
-            reaching.entry((fid, *vid)).or_default().insert(*target);
+            reaching
+                .entry((fid, *vid))
+                .or_default()
+                .join_into(&Reach::singleton(*target));
         }
     }
 
@@ -322,7 +433,7 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
         }
     }
 
-    // Helper: merge src set into dest, return true if anything new was added
+    // Helper: merge src reach into dest, return true if anything new was added
     fn propagate(
         reaching: &mut ReachingFns,
         src: (FunctionId, ValueId),
@@ -331,18 +442,37 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
         let Some(sources) = reaching.get(&src).cloned() else {
             return false;
         };
-        let dest_set = reaching.entry(dest).or_default();
-        let mut did_change = false;
-        for t in sources {
-            if dest_set.insert(t) {
-                did_change = true;
-            }
-        }
-        did_change
+        reaching.entry(dest).or_default().join_into(&sources)
+    }
+
+    fn propagate_with_inject(
+        reaching: &mut ReachingFns,
+        src: (FunctionId, ValueId),
+        dest: (FunctionId, ValueId),
+        index: usize,
+    ) -> bool {
+        let Some(sources) = reaching.get(&src) else {
+            return false;
+        };
+        let injected = sources.inject(index);
+        reaching.entry(dest).or_default().join_into(&injected)
+    }
+
+    fn propagate_with_project(
+        reaching: &mut ReachingFns,
+        src: (FunctionId, ValueId),
+        dest: (FunctionId, ValueId),
+        index: usize,
+    ) -> bool {
+        let Some(sources) = reaching.get(&src) else {
+            return false;
+        };
+        let projected = sources.project(index);
+        reaching.entry(dest).or_default().join_into(&projected)
     }
 
     // Track fn_ptrs stored in global slots (keyed by global offset)
-    let mut global_slots: HashMap<usize, HashSet<FunctionId>> = HashMap::default();
+    let mut global_slots: HashMap<usize, Reach> = HashMap::default();
 
     // Fixpoint: propagate reaching sets through edges
     // Backward propagation only happens when source is_ref_with_fn (pointer aliasing)
@@ -382,7 +512,7 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                                 CallTarget::Static(callee_id) => vec![*callee_id],
                                 CallTarget::Dynamic(fn_ptr_val) => reaching
                                     .get(&(fid, *fn_ptr_val))
-                                    .cloned()
+                                    .map(Reach::flatten)
                                     .unwrap_or_default()
                                     .into_iter()
                                     .collect(),
@@ -424,11 +554,20 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                             }
                         }
                         OpCode::MkTuple { result, elems, .. } => {
-                            for elem in elems {
-                                changed |= propagate(&mut reaching, (fid, *elem), (fid, *result));
+                            for (i, elem) in elems.iter().enumerate() {
+                                changed |= propagate_with_inject(
+                                    &mut reaching,
+                                    (fid, *elem),
+                                    (fid, *result),
+                                    i,
+                                );
                                 if is_ref_with_fn.contains(&(fid, *elem)) {
-                                    changed |=
-                                        propagate(&mut reaching, (fid, *result), (fid, *elem));
+                                    changed |= propagate_with_project(
+                                        &mut reaching,
+                                        (fid, *result),
+                                        (fid, *elem),
+                                        i,
+                                    );
                                 }
                             }
                         }
@@ -469,15 +608,25 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                                 changed |= propagate(&mut reaching, (fid, *result), (fid, *value));
                             }
                         }
-                        OpCode::TupleProj { result, tuple, .. }
+                        OpCode::TupleProj { result, tuple, idx }
                         | OpCode::TupleRefProj {
                             result,
                             tuple_ref: tuple,
-                            ..
+                            idx,
                         } => {
-                            changed |= propagate(&mut reaching, (fid, *tuple), (fid, *result));
+                            changed |= propagate_with_project(
+                                &mut reaching,
+                                (fid, *tuple),
+                                (fid, *result),
+                                *idx,
+                            );
                             if is_ref_with_fn.contains(&(fid, *result)) {
-                                changed |= propagate(&mut reaching, (fid, *result), (fid, *tuple));
+                                changed |= propagate_with_inject(
+                                    &mut reaching,
+                                    (fid, *result),
+                                    (fid, *tuple),
+                                    *idx,
+                                );
                             }
                         }
                         OpCode::Load { result, ptr } => {
@@ -519,23 +668,17 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                             }
                         }
                         OpCode::InitGlobal { global, value } => {
-                            if let Some(targets) = reaching.get(&(fid, *value)).cloned() {
-                                let slot = global_slots.entry(*global).or_default();
-                                for t in targets {
-                                    if slot.insert(t) {
-                                        changed = true;
-                                    }
-                                }
+                            if let Some(targets) = reaching.get(&(fid, *value)) {
+                                changed |=
+                                    global_slots.entry(*global).or_default().join_into(targets);
                             }
                         }
                         OpCode::ReadGlobal { result, offset, .. } => {
-                            if let Some(targets) = global_slots.get(&(*offset as usize)).cloned() {
-                                let dest = reaching.entry((fid, *result)).or_default();
-                                for t in targets {
-                                    if dest.insert(t) {
-                                        changed = true;
-                                    }
-                                }
+                            if let Some(targets) = global_slots.get(&(*offset as usize)) {
+                                changed |= reaching
+                                    .entry((fid, *result))
+                                    .or_default()
+                                    .join_into(targets);
                             }
                         }
                         // TODO Make exhaustive (#175).
@@ -726,5 +869,39 @@ mod tests {
 
         assert!(ssa.get_function_ids().any(|id| id == d1));
         assert!(!ssa.get_function_ids().any(|id| id == d2));
+    }
+
+    #[test]
+    #[should_panic(expected = "Guard")]
+    fn guarded_instruction_is_rejected() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            let f = sb.ssa().add_function("f".to_string());
+            sb.modify_function(f, |b| {
+                let entry = b.function.get_entry_id();
+                let mut e = b.test_block(entry);
+                e.terminate_return(vec![]);
+            });
+            sb.modify_function(main_id, |b| {
+                let entry = b.function.get_entry_id();
+                let mut e = b.test_block(entry);
+                let fp = e.emit_constant(Constant::FnPtr(f));
+                let cond = e.int_const(1, 1);
+                e.emit(OpCode::Guard {
+                    condition: cond,
+                    inner: Box::new(OpCode::Call {
+                        results: vec![],
+                        function: CallTarget::Dynamic(fp),
+                        args: vec![],
+                        unconstrained: false,
+                    }),
+                });
+                e.terminate_return(vec![]);
+            });
+        }
+
+        run_defunctionalize(&mut ssa);
     }
 }
