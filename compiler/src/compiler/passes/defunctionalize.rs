@@ -350,19 +350,30 @@ impl Reach {
     }
 
     fn join_set(&mut self, path: Path, set: &HashSet<FunctionId>) -> bool {
-        let dest = self.0.entry(path).or_default();
-        let initial_length = dest.len();
-        dest.extend(set.iter().copied());
-        dest.len() > initial_length
+        extend_set(self.0.entry(path).or_default(), set)
     }
 
     fn join_into(&mut self, other: &Reach) -> bool {
         let mut changed = false;
         for (path, set) in &other.0 {
-            changed |= self.join_set(path.clone(), set);
+            match self.0.get_mut(path) {
+                Some(dest) => changed |= extend_set(dest, set),
+                None => {
+                    if !set.is_empty() {
+                        self.0.insert(path.clone(), set.clone());
+                        changed = true;
+                    }
+                }
+            }
         }
         changed
     }
+}
+
+fn extend_set(dest: &mut HashSet<FunctionId>, set: &HashSet<FunctionId>) -> bool {
+    let initial_length = dest.len();
+    dest.extend(set.iter().copied());
+    dest.len() > initial_length
 }
 
 /// Compute, for each (function, value) pair, the set of FunctionIds that
