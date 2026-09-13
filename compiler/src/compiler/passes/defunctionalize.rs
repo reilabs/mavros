@@ -57,7 +57,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
 
     // Phase 1: Compute reaching definitions — which FnPtrs can reach each value — and delete the
     // functions nothing can call, to a fixpoint.
-    
+
     let reaching = loop {
         let reaching = compute_reaching_fn_ptrs(ssa);
         let callable = compute_callable_functions(ssa, &reaching);
@@ -452,10 +452,15 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
         src: (FunctionId, ValueId),
         dest: (FunctionId, ValueId),
     ) -> bool {
-        let Some(sources) = reaching.get(&src).cloned() else {
+        if src == dest {
+            return false;
+        }
+        let Some(sources) = reaching.remove(&src) else {
             return false;
         };
-        reaching.entry(dest).or_default().join_into(&sources)
+        let changed = reaching.entry(dest).or_default().join_into(&sources);
+        reaching.insert(src, sources);
+        changed
     }
 
     fn propagate_with_inject(
