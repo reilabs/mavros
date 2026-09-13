@@ -55,11 +55,18 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         return;
     }
 
-    // Phase 1: Compute reaching definitions — which FnPtrs can reach each value
-    let reaching = compute_reaching_fn_ptrs(ssa);
-
-    let callable = compute_callable_functions(ssa, &reaching);
-    ssa.retain_functions(|id, _| callable.contains(&id));
+    // Phase 1: Compute reaching definitions — which FnPtrs can reach each value — and delete the
+    // functions nothing can call, to a fixpoint.
+    
+    let reaching = loop {
+        let reaching = compute_reaching_fn_ptrs(ssa);
+        let callable = compute_callable_functions(ssa, &reaching);
+        let previous_function_count = ssa.get_function_ids().count();
+        ssa.retain_functions(|id, _| callable.contains(&id));
+        if ssa.get_function_ids().count() == previous_function_count {
+            break reaching;
+        }
+    };
 
     // Phase 2: For each dynamic call site, build a dispatch function
     // with exactly the reachable targets
@@ -408,12 +415,12 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
     }
 
     // Seed from FnPtr constants in storage. They are module-level — visible to every function
-    // that references them — so seed under each function id.
+    // that references them — so seed under each function id. Filter out dead functions that got deleted.
     let fnptr_constants: Vec<(ValueId, FunctionId)> = ssa
         .const_snapshot()
         .iter()
         .filter_map(|(vid, cv)| match cv.as_ref() {
-            Constant::FnPtr(fn_id) => Some((*vid, *fn_id)),
+            Constant::FnPtr(fn_id) if func_ids.contains(fn_id) => Some((*vid, *fn_id)),
             _ => None,
         })
         .collect();
