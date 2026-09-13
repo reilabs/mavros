@@ -260,6 +260,9 @@ fn compute_callable_functions(ssa: &HLSSA, reaching: &ReachingFns) -> HashSet<Fu
         let func = ssa.get_function(fid);
         for (_bid, block) in func.get_blocks() {
             for instr in block.get_instructions() {
+                if matches!(instr, OpCode::Guard { .. }) {
+                    unreachable!("Guard in {fid:?} before defunctionalization")
+                }
                 let OpCode::Call { function, .. } = instr else {
                     continue;
                 };
@@ -855,5 +858,39 @@ mod tests {
 
         assert!(ssa.get_function_ids().any(|id| id == d1));
         assert!(!ssa.get_function_ids().any(|id| id == d2));
+    }
+
+    #[test]
+    #[should_panic(expected = "Guard")]
+    fn guarded_instruction_is_rejected() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            let f = sb.ssa().add_function("f".to_string());
+            sb.modify_function(f, |b| {
+                let entry = b.function.get_entry_id();
+                let mut e = b.test_block(entry);
+                e.terminate_return(vec![]);
+            });
+            sb.modify_function(main_id, |b| {
+                let entry = b.function.get_entry_id();
+                let mut e = b.test_block(entry);
+                let fp = e.emit_constant(Constant::FnPtr(f));
+                let cond = e.int_const(1, 1);
+                e.emit(OpCode::Guard {
+                    condition: cond,
+                    inner: Box::new(OpCode::Call {
+                        results: vec![],
+                        function: CallTarget::Dynamic(fp),
+                        args: vec![],
+                        unconstrained: false,
+                    }),
+                });
+                e.terminate_return(vec![]);
+            });
+        }
+
+        run_defunctionalize(&mut ssa);
     }
 }
