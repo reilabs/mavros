@@ -292,6 +292,8 @@ fn compute_callable_functions(ssa: &HLSSA, reaching: &ReachingFns) -> HashSet<Fu
     callable
 }
 
+const MAX_PATH_LEN: usize = 32;
+
 type Path = Vec<usize>;
 
 #[derive(Clone, Debug, Default)]
@@ -328,6 +330,10 @@ impl Reach {
     fn inject(&self, idx: usize) -> Reach {
         let mut out = Reach::empty();
         for (path, set) in &self.0 {
+            assert!(
+                path.len() < MAX_PATH_LEN,
+                "defunctionalize: tuple path {path:?} exceeded MAX_PATH_LEN ({MAX_PATH_LEN})"
+            );
             let mut new_path = Vec::with_capacity(path.len() + 1);
             new_path.push(idx);
             new_path.extend_from_slice(path);
