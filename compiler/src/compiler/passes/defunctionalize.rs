@@ -42,7 +42,8 @@ impl Pass for Defunctionalize {
     }
 }
 
-/// For each SSA value that may hold a function pointer, a map from paths to the set of concrete FunctionIds it can point to.
+/// For each SSA value that may hold a function pointer, a map from paths to the set of concrete
+/// FunctionIds it can point to.
 type ReachingFns = HashMap<(FunctionId, ValueId), Reach>;
 
 fn run_defunctionalize(ssa: &mut HLSSA) {
@@ -55,7 +56,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         return;
     }
 
-    // Phase 1: Compute reaching definitions — which FnPtrs can reach each value — and delete the
+    // Phase 1: Compute reaching definitions (which FnPtrs can reach each value) and delete the
     // functions nothing can call, to a fixpoint.
 
     let reaching = loop {
@@ -299,10 +300,26 @@ fn compute_callable_functions(ssa: &HLSSA, reaching: &ReachingFns) -> HashSet<Fu
     callable
 }
 
+/// A path is bounded by the tuple nesting depth. Exceeding this limit means a cyclic or deeply
+/// nested shape, and `inject` panics rather than let the reaching fixpoint run forever.
 const MAX_PATH_LEN: usize = 32;
 
+/// Tuple field indices from a value's root. The empty path is the root. Containers are erased.
 type Path = Vec<usize>;
 
+/// Correctness rests on the following invariants, which every method and every transfer function
+/// in `compute_reaching_fn_ptrs` must preserve:
+///
+/// - An entry `(p, s)` means every function-typed position at or below `p` may hold any function
+///   in `s`.
+/// - Over-approximating is safe; under-approximating is a miscompile.
+/// - No operation ever drops a function from a set.
+/// - Consumers must never read a single key: `project` keeps root entries alongside the projected
+///   field, and `flatten` unions everything.
+/// - Paths are capped at [`MAX_PATH_LEN`] and the function set is finite, which is what makes the
+///   `while changed` fixpoint terminate.
+/// - `join_set` and `join_into` return `true` iff a function was actually added. The fixpoint
+///   loop stops on `false`, so a spurious `true` would never settle.
 #[derive(Clone, Debug, Default)]
 struct Reach(HashMap<Path, HashSet<FunctionId>>);
 
@@ -311,6 +328,7 @@ impl Reach {
         Reach::default()
     }
 
+    /// `target` at the root.
     fn singleton(target: FunctionId) -> Self {
         Reach(HashMap::from_iter([(
             Vec::new(),
@@ -318,10 +336,13 @@ impl Reach {
         )]))
     }
 
+    /// Every function that may sit anywhere in the value.
     fn flatten(&self) -> HashSet<FunctionId> {
         self.0.values().flatten().copied().collect()
     }
 
+    /// The reach of field `idx` of a tuple with this reach. Entries under `[idx, ..]` lose the
+    /// leading index; root entries survive unchanged.
     fn project(&self, idx: usize) -> Reach {
         let mut out = Reach::empty();
         for (path, set) in &self.0 {
@@ -334,6 +355,7 @@ impl Reach {
         out
     }
 
+    /// Every path gains `idx` in front.
     fn inject(&self, idx: usize) -> Reach {
         let mut out = Reach::empty();
         for (path, set) in &self.0 {
@@ -349,10 +371,12 @@ impl Reach {
         out
     }
 
+    /// Union `set` into the entry at `path`.
     fn join_set(&mut self, path: Path, set: &HashSet<FunctionId>) -> bool {
         extend_set(self.0.entry(path).or_default(), set)
     }
 
+    /// Per-key union of `other` into `self`.
     fn join_into(&mut self, other: &Reach) -> bool {
         let mut changed = false;
         for (path, set) in &other.0 {
@@ -426,7 +450,8 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
     }
 
     // Seed from FnPtr constants in storage. They are module-level — visible to every function
-    // that references them — so seed under each function id. Filter out dead functions that got deleted.
+    // that references them — so seed under each function id. Skip constants whose function a
+    // phase-1 round has already deleted.
     let fnptr_constants: Vec<(ValueId, FunctionId)> = ssa
         .const_snapshot()
         .iter()
