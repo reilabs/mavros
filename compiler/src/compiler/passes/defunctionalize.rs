@@ -102,11 +102,21 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
             fn_ptr_val.0,
             fid
         );
-
-        // Get param/return types from the first target (all must match)
+        // Get param/return types from the first target
         let representative = ssa.get_function(targets[0]);
         let param_types = representative.get_param_types();
         let return_types = representative.get_returns().to_vec();
+        // All signatures must match
+        for &target in &targets[1..] {
+            let candidate = ssa.get_function(target);
+            assert!(
+                candidate.get_param_types() == param_types
+                    && candidate.get_returns() == return_types.as_slice(),
+                "defunctionalize: signature mismatch between {target:?} and {:?} at v{} in {fid:?}",
+                targets[0],
+                fn_ptr_val.0,
+            );
+        }
 
         let dispatch_fn_id =
             build_dispatch_function(ssa, dispatch_counter, &param_types, &return_types, &targets);
