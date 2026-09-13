@@ -89,12 +89,13 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         if call_site_dispatch.contains_key(&(*fid, *fn_ptr_val)) {
             continue;
         }
-        let targets: Vec<FunctionId> = reaching
+        let mut targets: Vec<FunctionId> = reaching
             .get(&(*fid, *fn_ptr_val))
             .unwrap_or_else(|| panic!("No reaching FnPtrs for v{} in {:?}", fn_ptr_val.0, fid))
             .flatten()
             .into_iter()
             .collect();
+        targets.sort_by_key(|f| f.0);
 
         assert!(
             !targets.is_empty(),
