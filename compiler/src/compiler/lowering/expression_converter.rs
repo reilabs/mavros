@@ -5,9 +5,10 @@ use fm::{FileId, FileManager};
 use noirc_errors::Location as NoirLocation;
 use noirc_frontend::{
     ast::BinaryOpKind,
+    hir_def::expr::Constructor,
     monomorphization::ast::{
         Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, GlobalId, Ident, If,
-        Index, LValue, Let, LocalId, Type as AstType, While,
+        Index, LValue, Let, LocalId, Match, MatchCase, Type as AstType, While,
     },
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -67,6 +68,10 @@ pub struct ExpressionConverter<'a> {
     /// Tracks which LocalIds are mutable (their binding is a pointer)
     mutable_locals: HashSet<LocalId>,
 
+    /// The Noir type of the locals a `match` can test: `let`-bound ones (the elaborator hoists
+    /// every scrutinee into a `let`) and case arguments (nested patterns test those).
+    local_types_for_match: HashMap<LocalId, AstType>,
+
     /// Maps AST FuncId to SSA FunctionId
     function_mapper: &'a HashMap<AstFuncId, FunctionId>,
 
@@ -104,6 +109,15 @@ pub struct ExpressionConverter<'a> {
     current_source_location: SourceLocation,
 }
 
+/// A match scrutinee and the tag its cases are tested against. The tag is a field 0 of the enum tuple for
+/// enums, the value itself for everything else.
+struct Scrutinee {
+    value: ValueId,
+    ty: AstType,
+    tag: ValueId,
+    tag_ty: AstType,
+}
+
 impl<'a> ExpressionConverter<'a> {
     pub fn new_with_globals(
         function_mapper: &'a HashMap<AstFuncId, FunctionId>,
@@ -117,6 +131,7 @@ impl<'a> ExpressionConverter<'a> {
         Self {
             bindings: HashMap::default(),
             mutable_locals: HashSet::default(),
+            local_types_for_match: HashMap::default(),
             function_mapper,
             natively_unconstrained,
             type_converter: TypeConverter::new(),
@@ -222,7 +237,17 @@ impl<'a> ExpressionConverter<'a> {
             Expression::Constrain(_, location, _) => Some(*location),
             Expression::Assign(assign) => Self::lvalue_location(&assign.lvalue)
                 .or_else(|| Self::expression_location(&assign.expression)),
-            Expression::Match(_) | Expression::Break | Expression::Continue => None,
+            Expression::Match(m) => {
+                let arm = match m.cases.first() {
+                    Some(case) => &case.branch,
+                    None => match &m.default_case {
+                        Some(default) => default.as_ref(),
+                        None => panic!("ICE: match with no cases and no default"),
+                    },
+                };
+                Self::expression_location(arm)
+            }
+            Expression::Break | Expression::Continue => None,
         }
     }
 
@@ -377,10 +402,7 @@ impl<'a> ExpressionConverter<'a> {
             }
             Expression::While(w) => self.convert_while(w, b),
             Expression::Loop(body) => self.convert_loop(body, b),
-            _ => todo!(
-                "Expression type not yet supported: {:?}",
-                std::mem::discriminant(expr)
-            ),
+            Expression::Match(m) => self.convert_match(m, b),
         }
     }
 
@@ -509,6 +531,9 @@ impl<'a> ExpressionConverter<'a> {
         } else {
             // Immutable - store single materialized value
             self.bindings.insert(let_expr.id, value);
+        }
+        if let Some(typ) = Self::expression_type(&let_expr.expression) {
+            self.local_types_for_match.insert(let_expr.id, typ);
         }
         None
     }
@@ -871,8 +896,6 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn convert_if(&mut self, if_expr: &If, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
-        use noirc_frontend::monomorphization::ast::Type as AstType;
-
         // Fold constant boolean conditions (e.g. if !is_unconstrained())
         // to avoid emitting dead branches that contain unsupported operations.
         if let Some(known) = self.try_eval_const_bool(&if_expr.condition) {
@@ -886,7 +909,28 @@ impl<'a> ExpressionConverter<'a> {
         }
 
         let condition = self.convert_expression(&if_expr.condition, b).unwrap();
+        self.branch(
+            condition,
+            &if_expr.typ,
+            |this, b| this.convert_expression(&if_expr.consequence, b),
+            |this, b| {
+                if_expr
+                    .alternative
+                    .as_ref()
+                    .and_then(|alt| this.convert_expression(alt, b))
+            },
+            b,
+        )
+    }
 
+    fn branch(
+        &mut self,
+        condition: ValueId,
+        typ: &AstType,
+        then: impl FnOnce(&mut Self, &mut HLFunctionBuilder<'_>) -> Option<ValueId>,
+        otherwise: impl FnOnce(&mut Self, &mut HLFunctionBuilder<'_>) -> Option<ValueId>,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
         let then_block = b.add_block(|_| {});
         let else_block = b.add_block(|_| {});
         let merge_block = b.add_block(|_| {});
@@ -894,30 +938,16 @@ impl<'a> ExpressionConverter<'a> {
         b.block(self.current_block)
             .terminate_jmp_if(condition, then_block, else_block);
 
-        let is_unit = matches!(if_expr.typ, AstType::Unit);
+        let is_unit = matches!(typ, AstType::Unit);
 
         // Then branch
         self.current_block = then_block;
-        let then_result = self.convert_expression(&if_expr.consequence, b);
-        let then_value = if is_unit {
-            None
-        } else {
-            Some(then_result.unwrap())
-        };
+        let then_value = then(self, b);
         let then_exit = self.current_block;
 
         // Else branch
         self.current_block = else_block;
-        let else_value = if let Some(alt) = &if_expr.alternative {
-            let else_result = self.convert_expression(alt, b);
-            if is_unit {
-                None
-            } else {
-                Some(else_result.unwrap())
-            }
-        } else {
-            None
-        };
+        let else_value = otherwise(self, b);
         let else_exit = self.current_block;
 
         if is_unit {
@@ -926,7 +956,7 @@ impl<'a> ExpressionConverter<'a> {
             self.current_block = merge_block;
             None
         } else {
-            let result_type = self.type_converter.convert_type(&if_expr.typ);
+            let result_type = self.type_converter.convert_type(typ);
             let merge_param = b.block(merge_block).add_parameter(result_type);
             b.block(then_exit)
                 .terminate_jmp(merge_block, vec![then_value.unwrap()]);
@@ -934,6 +964,199 @@ impl<'a> ExpressionConverter<'a> {
                 .terminate_jmp(merge_block, vec![else_value.unwrap()]);
             self.current_block = merge_block;
             Some(merge_param)
+        }
+    }
+
+    fn convert_match(&mut self, m: &Match, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
+        let (var, var_name) = &m.variable_to_match;
+        let ty = self
+            .local_types_for_match
+            .get(var)
+            .unwrap_or_else(|| {
+                panic!("ICE: no recorded type for match scrutinee `{var_name}` ({var:?})")
+            })
+            .clone();
+        let value = *self
+            .bindings
+            .get(var)
+            .unwrap_or_else(|| panic!("Undefined match scrutinee `{var_name}` ({var:?})"));
+        let value = if self.mutable_locals.contains(var) {
+            self.emit_at_source_location(b, self.current_source_location.clone(), |e| e.load(value))
+        } else {
+            value
+        };
+
+        if let Some(first) = m.cases.first() {
+            let (tag, tag_ty) = match &first.constructor {
+                // An enum is `(tag: Field, payload0, payload1, ...)`; a struct is a plain tuple.
+                c @ Constructor::Variant(..) if !c.is_tuple_or_struct() => {
+                    let location = self.current_source_location.clone();
+                    let tag = self.emit_at_source_location(b, location, |e| e.tuple_proj(value, 0));
+                    (tag, AstType::Field)
+                }
+                _ => (value, ty.clone()),
+            };
+            let scrutinee = Scrutinee {
+                value,
+                ty,
+                tag,
+                tag_ty,
+            };
+            self.convert_cases(&scrutinee, &m.cases, m.default_case.as_deref(), &m.typ, b)
+        } else {
+            let default = m
+                .default_case
+                .as_deref()
+                .expect("ICE: match with no cases and no default");
+            return self.convert_expression(default, b);
+        }
+    }
+
+    fn convert_cases(
+        &mut self,
+        s: &Scrutinee,
+        cases: &[MatchCase],
+        default: Option<&Expression>,
+        typ: &AstType,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
+        match cases {
+            [] => {
+                let default = default.expect("ICE: match with no cases and no default");
+                self.convert_expression(default, b)
+            }
+            [last] if default.is_none() => self.convert_arm(s.value, &s.ty, last, b),
+            [case, rest @ ..] => {
+                let cond = self.case_condition(s, &case.constructor, b);
+                self.branch(
+                    cond,
+                    typ,
+                    |this, b| this.convert_arm(s.value, &s.ty, case, b),
+                    |this, b| this.convert_cases(s, rest, default, typ, b),
+                    b,
+                )
+            }
+        }
+    }
+
+    fn convert_arm(
+        &mut self,
+        value: ValueId,
+        ty: &AstType,
+        case: &MatchCase,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
+        self.bind_case_arguments(value, ty, case, b);
+        self.convert_expression(&case.branch, b)
+    }
+
+    fn case_condition(
+        &mut self,
+        s: &Scrutinee,
+        constructor: &Constructor,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> ValueId {
+        use acvm::FieldElement;
+
+        let (tag, tag_ty) = (s.tag, &s.tag_ty);
+        let location = self.current_source_location.clone();
+        match constructor {
+            Constructor::True => tag,
+            Constructor::False => {
+                let zero = b.emit_const(Constant::int(1, 0));
+                self.emit_at_source_location(b, location, |e| e.eq(tag, zero))
+            }
+            Constructor::Int(value) => {
+                let c = self.tag_constant(*value, tag_ty, b);
+                self.emit_at_source_location(b, location, |e| e.eq(tag, c))
+            }
+            Constructor::Variant(_, idx) => {
+                let c = self.tag_constant(FieldElement::from(*idx as u128), tag_ty, b);
+                self.emit_at_source_location(b, location, |e| e.eq(tag, c))
+            }
+            Constructor::Range(start, end) => {
+                let signed = ast_type_is_signed(tag_ty);
+                let start = self.tag_constant(*start, tag_ty, b);
+                let end = self.tag_constant(*end, tag_ty, b);
+                self.emit_at_source_location(b, location, |e| {
+                    let below_start = e.cmp(tag, start, CmpKind::lt(signed));
+                    let at_or_above_start = e.not(below_start);
+                    let below_end = e.cmp(tag, end, CmpKind::lt(signed));
+                    e.and(at_or_above_start, below_end)
+                })
+            }
+            Constructor::Unit | Constructor::Tuple(_) => {
+                panic!("ICE: {constructor:?} is a single-constructor pattern and is never tested")
+            }
+        }
+    }
+
+    fn tag_constant(
+        &mut self,
+        value: acvm::FieldElement,
+        tag_ty: &AstType,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> ValueId {
+        use noirc_frontend::monomorphization::ast::Literal;
+
+        let literal = Literal::Integer(value, tag_ty.clone(), NoirLocation::dummy());
+        let constant = Self::scalar_literal_to_constant(&literal)
+            .unwrap_or_else(|| panic!("ICE: match tag of type {tag_ty:?} has no constant form"));
+        b.emit_const(constant)
+    }
+
+    fn bind_case_arguments(
+        &mut self,
+        scrutinee: ValueId,
+        scrutinee_ty: &AstType,
+        case: &MatchCase,
+        b: &mut HLFunctionBuilder<'_>,
+    ) {
+        if case.arguments.is_empty() {
+            return;
+        }
+
+        let AstType::Tuple(fields) = scrutinee_ty else {
+            panic!(
+                "ICE: scrutinee should have fields if arguments is empty. Found with type {scrutinee_ty:?}"
+            )
+        };
+        let location = self.current_source_location.clone();
+
+        // A struct pattern is `Variant(struct_type, 0)`, so the constructor's own type decides.
+        let (payload, payload_fields) = match &case.constructor {
+            c if c.is_tuple_or_struct() => (scrutinee, fields),
+            Constructor::Variant(_, idx) => {
+                let AstType::Tuple(variant_fields) = &fields[idx + 1] else {
+                    panic!(
+                        "ICE: enum variant {idx} payload is not a tuple: {:?}",
+                        fields[idx + 1]
+                    )
+                };
+                let payload = self.emit_at_source_location(b, location.clone(), |e| {
+                    e.tuple_proj(scrutinee, idx + 1)
+                });
+                (payload, variant_fields)
+            }
+            other => panic!("ICE: match constructor {other:?} binds no arguments"),
+        };
+
+        assert_eq!(
+            case.arguments.len(),
+            payload_fields.len(),
+            "ICE: match case {:?} binds {} arguments but the value has {} fields",
+            case.constructor,
+            case.arguments.len(),
+            payload_fields.len()
+        );
+        for (i, ((local_id, _name), field_ty)) in
+            case.arguments.iter().zip(payload_fields).enumerate()
+        {
+            let value =
+                self.emit_at_source_location(b, location.clone(), |e| e.tuple_proj(payload, i));
+            self.bind_local(*local_id, value);
+            self.local_types_for_match
+                .insert(*local_id, field_ty.clone());
         }
     }
 
