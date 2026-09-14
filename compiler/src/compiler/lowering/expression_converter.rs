@@ -1008,7 +1008,7 @@ impl<'a> ExpressionConverter<'a> {
                 .default_case
                 .as_deref()
                 .expect("ICE: match with no cases and no default");
-            return self.convert_expression(default, b);
+            self.convert_expression(default, b)
         }
     }
 
