@@ -51,7 +51,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
     let has_fn_ptrs = ssa
         .const_snapshot()
         .values()
-        .any(|cv| matches!(cv.as_ref(), Constant::FnPtr(_)));
+        .any(|cv| cv.as_ref().contains_fn_ptr());
     if !has_fn_ptrs {
         return;
     }
