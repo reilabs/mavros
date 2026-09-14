@@ -2,30 +2,33 @@
 //!
 //! # Correctness Contract
 //!
-//! Consider a branch that starts with array A and builds B by writing a few cells.
-//! Instead of selecting every cell of A and B, we start with A and replay those
-//! writes. For each write, we select its new value when the changed arm is chosen,
-//! or the accumulator's current cell otherwise. After each step the accumulator
-//! therefore equals the corresponding version of B in the changed arm and A in
-//! the unchanged arm. Replaying in source order preserves this invariant even
-//! when indices repeat or alias at runtime.
+//! Consider a branch that starts with array A and builds B by writing a few
+//! cells. Instead of selecting every cell of A and B, we start with A and
+//! replay those writes. For each write, we select its new value when the
+//! changed arm is chosen, or the accumulator's current cell otherwise. After
+//! each step the accumulator therefore equals the corresponding version of B in
+//! the changed arm and A in the unchanged arm. Replaying in source order
+//! preserves this invariant even when indices repeat or alias at runtime.
 //!
 //! This reasoning requires the writes to start at exactly A. We capture their
-//! original SSA provenance before linearization introduces casts and guards. For
-//! nested updates, the same argument applies only when the updated child comes
-//! from a read of that write's original parent and index. Unsupported or costly
-//! plans fall back to the general merge without emitting a partial rewrite.
+//! original SSA provenance before linearization introduces casts and guards.
+//! For nested updates, the same argument applies only when the updated child
+//! comes from a read of that write's original parent and index. Unsupported or
+//! costly plans fall back to the general merge without emitting a partial
+//! rewrite.
 //!
 //! Replay runs outside the original branch, so its accesses must also be safe
-//! when that branch is inactive. We use the shared sequence-bounds comparison to
-//! clamp invalid pure indices to zero, and assert the original bound under the
-//! combined branch predicate. Active invalid writes still fail; an inactive enclosing
-//! branch may compute an unused result but must not trap. Known in-bounds indices need no clamp.
+//! when that branch is inactive. We use the shared sequence-bounds comparison
+//! to clamp invalid pure indices to zero, and assert the original bound under
+//! the original branch predicate. Plans that cross a write's guard boundary are
+//! rejected, so replay cannot weaken an earlier write's bounds check. Active
+//! invalid writes still fail; an inactive enclosing branch may compute an
+//! unused result but must not trap. Known in-bounds indices need no clamp.
 //!
-//! Once replay has preserved those bounds checks, we forward provable reads from
-//! original updates and remove updates that become dead. Other users keep their
-//! original values: cleanup never deletes a live update or assumes that distinct
-//! dynamic indices cannot alias.
+//! Once replay has preserved those bounds checks, we forward provable reads
+//! from original updates and remove updates that become dead. Other users keep
+//! their original values: cleanup never deletes a live update or assumes that
+//! distinct dynamic indices cannot alias.
 
 use super::{emit_merge_select, emit_value_conversion};
 use crate::{
@@ -33,7 +36,7 @@ use crate::{
     compiler::{
         analysis::types::FunctionTypeInfo,
         passes::shared::{
-            seq_bounds::seq_bounds_operands,
+            seq_bounds::{seq_bounds_operands, widen_comparison_operands},
             value_replacements::{ReplaceScope, ValueReplacements},
         },
         ssa::{
@@ -47,6 +50,20 @@ use crate::{
 };
 
 const MAX_MERGED_WRITES: usize = 100;
+
+// Costs count SSA operations, not elapsed time or final circuit constraints.
+// Constants are interned. Conversions reserve one Cast even when it folds away.
+const ARRAY_GET_COST: usize = 1;
+const ARRAY_SET_COST: usize = 1;
+const ARRAY_CONSTRUCTION_COST: usize = 1;
+const CAST_COST: usize = 1;
+const SELECT_COST: usize = 1;
+// One widening, comparison, assertion, boolean cast, and masking multiply.
+const BOUNDS_COST: usize = CAST_COST + 1 + 1 + CAST_COST + 1;
+// Two input widening allowances, a comparison, value conversion, and a pure
+// choice (three terminators plus one merge parameter). The fallback read is
+// charged separately per read. These are conservative upper estimates.
+const FORWARDING_STEP_COST: usize = 2 * CAST_COST + 1 + CAST_COST + 3 + 1;
 
 #[derive(Clone, Copy)]
 enum Base {
@@ -80,6 +97,7 @@ pub(super) struct SparseArrayMerge<'a> {
     constants: HashMap<ValueId, usize>,
     reads: HashMap<ValueId, usize>,
     replayed: HashSet<ValueId>,
+    guards: HashMap<ValueId, Option<ValueId>>,
     types: &'a FunctionTypeInfo,
 }
 
@@ -89,29 +107,37 @@ impl<'a> SparseArrayMerge<'a> {
         let mut definitions = HashMap::default();
         for (_, block) in function.get_blocks() {
             for (instruction, location) in block.get_instructions_with_source_locations() {
-                let (result, array, index, value) = match instruction {
+                let (result, access) = match instruction {
                     OpCode::ArrayGet {
                         result,
                         array,
                         index,
-                    } => (*result, *array, *index, None),
+                    } => (
+                        *result,
+                        ArrayAccess {
+                            array: *array,
+                            index: *index,
+                            value: None,
+                            location: location.clone(),
+                        },
+                    ),
                     OpCode::ArraySet {
                         result,
                         array,
                         index,
                         value,
-                    } => (*result, *array, *index, Some(*value)),
+                    } => (
+                        *result,
+                        ArrayAccess {
+                            array: *array,
+                            index: *index,
+                            value: Some(*value),
+                            location: location.clone(),
+                        },
+                    ),
                     _ => continue,
                 };
-                definitions.insert(
-                    result,
-                    ArrayAccess {
-                        array,
-                        index,
-                        value,
-                        location: location.clone(),
-                    },
-                );
+                definitions.insert(result, access);
             }
         }
         let mut reads = HashMap::default();
@@ -134,6 +160,7 @@ impl<'a> SparseArrayMerge<'a> {
             constants,
             reads,
             replayed: HashSet::default(),
+            guards: HashMap::default(),
         }
     }
 
@@ -148,7 +175,14 @@ impl<'a> SparseArrayMerge<'a> {
 
     /// Plan first so a failed match emits no partial rewrite. The shared budget
     /// bounds both write-chain searches and recursive nested-update expansion.
-    fn plan(&self, changed: ValueId, base: Base, typ: &Type, budget: &mut usize) -> Option<Plan> {
+    fn plan(
+        &self,
+        changed: ValueId,
+        base: Base,
+        typ: &Type,
+        active: Option<ValueId>,
+        budget: &mut usize,
+    ) -> Option<Plan> {
         let TypeExpr::Array(elem, len) = &typ.expr else { return None };
         if *len == 0 {
             return None;
@@ -161,6 +195,9 @@ impl<'a> SparseArrayMerge<'a> {
             }
             let definition = self.definitions.get(&current)?;
             let value = definition.value?;
+            if self.guards.get(&current) != Some(&active) {
+                return None;
+            }
             // Witness-indexed writes already require a scan in later lowering.
             if !matches!(
                 self.types.get_value_type(definition.index).expr,
@@ -180,7 +217,9 @@ impl<'a> SparseArrayMerge<'a> {
             .iter()
             .map(|(result, _, _)| self.reads.get(result).copied().unwrap_or(0))
             .sum();
-        let forwarding_cost = read_count.saturating_mul(chain.len()).saturating_mul(10);
+        let forwarding_cost = read_count.saturating_mul(
+            ARRAY_GET_COST.saturating_add(chain.len().saturating_mul(FORWARDING_STEP_COST)),
+        );
         let writes: Vec<_> = chain
             .into_iter()
             .map(|(original, access, value)| {
@@ -191,6 +230,7 @@ impl<'a> SparseArrayMerge<'a> {
                         index: access.index,
                     },
                     elem,
+                    active,
                     budget,
                 );
                 Write {
@@ -205,22 +245,20 @@ impl<'a> SparseArrayMerge<'a> {
         // Count emitted operations conservatively. The general cost excludes casts,
         // while replay includes bounds work and conversion allowances: at most one
         // extra cast per selected leaf, plus the initial base conversion.
-        let cost = writes
-            .iter()
-            .fold(1usize.saturating_add(forwarding_cost), |cost, write| {
-                let bounds = if self.index_is_safe(write.index, *len) {
-                    0
-                } else {
-                    5
-                };
-                cost.saturating_add(2 + bounds).saturating_add(
-                    write
-                        .nested
-                        .as_ref()
-                        .map(|plan| plan.cost)
-                        .unwrap_or_else(|| merge_cost(elem).saturating_mul(2)),
-                )
-            });
+        let cost =
+            writes
+                .iter()
+                .fold(CAST_COST.saturating_add(forwarding_cost), |cost, write| {
+                    let bounds = if self.index_is_safe(write.index, *len) {
+                        0
+                    } else {
+                        BOUNDS_COST
+                    };
+                    cost.saturating_add(ARRAY_GET_COST + ARRAY_SET_COST + bounds)
+                        .saturating_add(write.nested.as_ref().map(|plan| plan.cost).unwrap_or_else(
+                            || merge_cost(elem).saturating_add(conversion_cost(elem)),
+                        ))
+                });
         (cost < merge_cost(typ)).then(|| Plan {
             typ: typ.clone(),
             writes,
@@ -240,23 +278,19 @@ impl<'a> SparseArrayMerge<'a> {
         typ: &Type,
     ) -> Option<ValueId> {
         let mut budget = MAX_MERGED_WRITES;
-        if let Some(plan) = self.plan(lhs, Base::Value(rhs), typ, &mut budget) {
+        if let Some(plan) = self.plan(lhs, Base::Value(rhs), typ, Some(then_active), &mut budget) {
             let base = emit_value_conversion(rhs, self.types.get_value_type(rhs), typ, b);
             return Some(self.emit_plan(b, condition, then_active, base, &plan));
         }
         let mut budget = MAX_MERGED_WRITES;
-        let plan = self.plan(rhs, Base::Value(lhs), typ, &mut budget)?;
+        let plan = self.plan(rhs, Base::Value(lhs), typ, Some(else_active), &mut budget)?;
         let base = emit_value_conversion(lhs, self.types.get_value_type(lhs), typ, b);
         Some(self.emit_plan(b, not_condition, else_active, base, &plan))
     }
 
-    /// Forward reads through replayed writes before pruning them. Comparisons are
-    /// pure, so possible runtime aliases select the latest value without a scan.
-    pub(super) fn remove_redundant_updates(self, function: &mut HLFunction, ssa: &mut HLSSA) {
-        if self.replayed.is_empty() {
-            return;
-        }
-        let guards: HashMap<_, _> = function
+    /// Capture predicates after linearization, before replay can remove their writes.
+    pub(super) fn capture_guards(&mut self, function: &HLFunction) {
+        self.guards = function
             .get_blocks()
             .flat_map(|(_, block)| {
                 block.get_instructions().filter_map(|op| {
@@ -268,6 +302,14 @@ impl<'a> SparseArrayMerge<'a> {
                 })
             })
             .collect();
+    }
+
+    /// Forward reads through replayed writes before pruning them. Comparisons are
+    /// pure, so possible runtime aliases select the latest value without a scan.
+    pub(super) fn remove_redundant_updates(self, function: &mut HLFunction, ssa: &mut HLSSA) {
+        if self.replayed.is_empty() {
+            return;
+        }
         let mut replacements = ValueReplacements::new();
         let blocks: Vec<_> = function.get_blocks().map(|(id, _)| *id).collect();
         for block in blocks {
@@ -298,7 +340,7 @@ impl<'a> SparseArrayMerge<'a> {
                 let mut array = read.array;
                 let mut pending = Vec::new();
                 let mut value = None;
-                while self.replayed.contains(&array) && guards.get(&array) == Some(&guard) {
+                while self.replayed.contains(&array) && self.guards.get(&array) == Some(&guard) {
                     let write = &self.definitions[&array];
                     if write.index == read.index {
                         value = write.value;
@@ -350,8 +392,8 @@ impl<'a> SparseArrayMerge<'a> {
                     let TypeExpr::Int(c) = self.types.get_value_type(read.index).expr else {
                         unreachable!()
                     };
-                    let lhs = b.widen_u(write.index, a, a.max(c));
-                    let rhs = b.widen_u(read.index, c, a.max(c));
+                    let (lhs, rhs, _) =
+                        widen_comparison_operands(&mut b, write.index, a, read.index, c);
                     let hit = b.cmp(lhs, rhs, CmpKind::Eq);
                     let value = write.value.unwrap();
                     let value = emit_value_conversion(
@@ -388,10 +430,12 @@ impl<'a> SparseArrayMerge<'a> {
                     if_t,
                     if_f,
                 } = inner
-                    && let Some(typ) = selections.get(result)
+                    && let Some(typ) = selections.remove(result)
                 {
                     // Selecting already-computed values is safe even under an inactive
-                    // guard. Use pure control flow: the specialization VM has no Select.
+                    // guard. Pure control flow also keeps array-valued choices type legal:
+                    // array Select is not a lowering input, and pure Select is unsupported
+                    // by the specialization VM. Every staged choice must be consumed here.
                     let (result, cond, if_t, if_f) = (*result, *cond, *if_t, *if_f);
                     b.emit_with_location(instruction.location().clone(), |b| {
                         b.build_if_else_into(
@@ -405,6 +449,10 @@ impl<'a> SparseArrayMerge<'a> {
                     b.emit_located(instruction);
                 }
             }
+            assert!(
+                selections.is_empty(),
+                "ICE: unlowered array-merge cleanup choices"
+            );
             b.set_terminator(terminator);
         }
         replacements.apply_to_function(function, ReplaceScope::Inputs);
@@ -442,6 +490,19 @@ impl<'a> SparseArrayMerge<'a> {
                 None => unreachable!("ICE: merge cleanup requires terminated blocks"),
             }
         }
+        // DCE handles unrelated dead reads and casts. Here we only need the
+        // dependencies of replayed stores: leaving a dead read/cast in that chain
+        // keeps earlier stores live until witness-memory lowering expands them.
+        let mut related = HashSet::default();
+        let mut pending: Vec<_> = self.replayed.iter().copied().collect();
+        while let Some(value) = pending.pop() {
+            if related.insert(value)
+                && let Some(inputs) = removable.get(&value)
+            {
+                pending.extend(inputs.iter().copied());
+            }
+        }
+        removable.retain(|result, _| related.contains(result));
         let mut work: Vec<_> = removable
             .keys()
             .copied()
@@ -531,9 +592,19 @@ impl<'a> SparseArrayMerge<'a> {
 fn merge_cost(typ: &Type) -> usize {
     match &typ.expr {
         TypeExpr::Array(elem, len) => len
-            .saturating_mul(2usize.saturating_add(merge_cost(elem)))
-            .saturating_add(1),
-        _ => 1,
+            .saturating_mul((2 * ARRAY_GET_COST).saturating_add(merge_cost(elem)))
+            .saturating_add(ARRAY_CONSTRUCTION_COST),
+        _ => SELECT_COST,
+    }
+}
+
+// emit_merge_select converts each scalar leaf in an array merge. Unlike its
+// two inputs, replay's old cell already has the target type, so only the new
+// value needs a conversion allowance.
+fn conversion_cost(typ: &Type) -> usize {
+    match &typ.expr {
+        TypeExpr::Array(elem, len) => len.saturating_mul(conversion_cost(elem)),
+        _ => CAST_COST,
     }
 }
 
@@ -617,6 +688,29 @@ mod tests {
         }
     }
 
+    fn guard_accesses(function: &mut HLFunction, condition: ValueId) {
+        for (_, block) in function.get_blocks_mut() {
+            let instructions = block
+                .take_instructions()
+                .into_iter()
+                .map(|op| {
+                    let (op, location) = op.take();
+                    let op = match op {
+                        OpCode::ArrayGet { .. } | OpCode::ArraySet { .. } | OpCode::Cast { .. } => {
+                            OpCode::Guard {
+                                condition,
+                                inner: Box::new(op),
+                            }
+                        }
+                        _ => op,
+                    };
+                    op.locate(location)
+                })
+                .collect();
+            block.put_instructions(instructions);
+        }
+    }
+
     #[test]
     fn planning_requires_a_supported_chain_and_respects_the_budget() {
         // length, writes, nested, witness index, expected plan
@@ -641,13 +735,14 @@ mod tests {
                 }
             }
             let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
-            let merger = SparseArrayMerge::new(
+            let mut merger = SparseArrayMerge::new(
                 f.ssa.get_function(f.function),
                 types.get_function(f.function),
                 &f.ssa,
             );
+            merger.capture_guards(f.ssa.get_function(f.function));
             let mut budget = MAX_MERGED_WRITES;
-            let plan = merger.plan(f.changed, Base::Value(f.base), &f.typ, &mut budget);
+            let plan = merger.plan(f.changed, Base::Value(f.base), &f.typ, None, &mut budget);
             assert_eq!(plan.is_some(), accepted);
             if let Some(plan) = plan {
                 assert_eq!(plan.writes.len(), count);
@@ -666,9 +761,75 @@ mod tests {
             let mut budget = MAX_MERGED_WRITES;
             assert!(
                 merger
-                    .plan(f.changed, Base::Value(f.other), &f.typ, &mut budget)
+                    .plan(f.changed, Base::Value(f.other), &f.typ, None, &mut budget)
                     .is_none()
             );
+        }
+    }
+
+    #[test]
+    fn planning_rejects_writes_from_another_guard_or_without_a_guard() {
+        let f = fixture(128, 2, false, 32);
+        let other_guard = f.ssa.add_const(Constant::int(1, 1));
+        let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
+        let mut merger = SparseArrayMerge::new(
+            f.ssa.get_function(f.function),
+            types.get_function(f.function),
+            &f.ssa,
+        );
+        let first = merger.definitions[&f.changed].array;
+        for original_guard in [Some(f.condition), None, Some(other_guard)] {
+            merger.guards.insert(f.changed, Some(f.condition));
+            merger.guards.insert(first, original_guard);
+            let mut budget = MAX_MERGED_WRITES;
+            let plan = merger.plan(
+                f.changed,
+                Base::Value(f.base),
+                &f.typ,
+                Some(f.condition),
+                &mut budget,
+            );
+            assert_eq!(plan.is_some(), original_guard == Some(f.condition));
+        }
+        merger.guards.remove(&first);
+        let mut budget = MAX_MERGED_WRITES;
+        assert!(
+            merger
+                .plan(
+                    f.changed,
+                    Base::Value(f.base),
+                    &f.typ,
+                    Some(f.condition),
+                    &mut budget,
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn nested_replay_requires_matching_parent_read_and_guard() {
+        let f = fixture(128, 1, true, 32);
+        let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
+        let mut merger = SparseArrayMerge::new(
+            f.ssa.get_function(f.function),
+            types.get_function(f.function),
+            &f.ssa,
+        );
+        merger.capture_guards(f.ssa.get_function(f.function));
+        let child = merger.definitions[&f.changed].value.unwrap();
+        let read = merger.definitions[&child].array;
+        for (parent, child_guard, nested) in [
+            (f.base, None, true),
+            (f.other, None, false),
+            (f.base, Some(f.condition), false),
+        ] {
+            merger.definitions.get_mut(&read).unwrap().array = parent;
+            merger.guards.insert(child, child_guard);
+            let mut budget = MAX_MERGED_WRITES;
+            let plan = merger
+                .plan(f.changed, Base::Value(f.base), &f.typ, None, &mut budget)
+                .unwrap();
+            assert_eq!(plan.writes[0].nested.is_some(), nested);
         }
     }
 
@@ -680,6 +841,8 @@ mod tests {
             let mut function = f.ssa.take_function(f.function);
             let mut merger =
                 SparseArrayMerge::new(&function, types.get_function(f.function), &f.ssa);
+            guard_accesses(&mut function, f.condition);
+            merger.capture_guards(&function);
             let entry = function.get_entry_id();
             function.get_block_mut(entry).take_terminator();
             let result;
@@ -729,20 +892,27 @@ mod tests {
     }
     #[test]
     fn cleanup_removes_replayed_stores_but_preserves_other_users() {
-        for keep_original in [false, true] {
-            let mut f = fixture(128, 1, false, 32);
+        for (keep_original, nested, read_bits) in
+            [(false, false, 32), (true, false, 32), (false, true, 64)]
+        {
+            let mut f = fixture(128, 1, nested, 32);
             let mut function = f.ssa.take_function(f.function);
             let entry = function.get_entry_id();
             let other_index = f.ssa.fresh_value();
             function
                 .get_block_mut(entry)
-                .push_parameter(other_index, Type::int(32));
+                .push_parameter(other_index, Type::int(read_bits));
             let first = f.changed;
+            let unrelated;
             {
                 let mut fb = HLFunctionBuilder::new(&mut function, &mut f.ssa);
                 let mut b = fb.test_block(entry);
                 let read = b.array_get(first, other_index);
                 f.changed = b.array_set(first, other_index, read);
+                unrelated = [
+                    b.array_get(f.other, other_index),
+                    b.cast_to_witness_of(other_index),
+                ];
                 b.set_terminator(Terminator::Return(vec![f.changed]));
             }
             f.ssa.put_function(f.function, function);
@@ -750,6 +920,8 @@ mod tests {
             let mut function = f.ssa.take_function(f.function);
             let mut merger =
                 SparseArrayMerge::new(&function, types.get_function(f.function), &f.ssa);
+            guard_accesses(&mut function, f.condition);
+            merger.capture_guards(&function);
             {
                 let mut fb = HLFunctionBuilder::new(&mut function, &mut f.ssa);
                 let mut b = fb.test_block(entry);
@@ -758,10 +930,10 @@ mod tests {
                 let result = merger
                     .try_emit(
                         &mut b,
-                        f.condition,
                         not_cond,
                         f.condition,
                         not_cond,
+                        f.condition,
                         f.base,
                         f.changed,
                         &f.typ,
@@ -790,17 +962,61 @@ mod tests {
             );
             assert!(
                 !instructions.iter().any(
-                    |op| matches!(op, OpCode::ArraySet { result, .. } if *result == f.changed)
+                    |op| matches!(HLBlockEmitter::unwrap_guard(op).1, OpCode::ArraySet { result, .. } if *result == f.changed)
                 )
             );
             assert_eq!(
                 instructions
                     .iter()
-                    .any(|op| matches!(op, OpCode::ArraySet { result, .. } if *result == first)),
+                    .any(|op| matches!(HLBlockEmitter::unwrap_guard(op).1, OpCode::ArraySet { result, .. } if *result == first)),
                 keep_original
             );
+            assert!(unrelated.iter().all(|id| {
+                instructions
+                    .iter()
+                    .any(|op| op.get_results().any(|r| r == id))
+            }));
             f.ssa.put_function(f.function, function);
-            Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
+            let flow = FlowAnalysis::run(&f.ssa);
+            let types = Types::new().run(&f.ssa, &flow);
+            for (_, block) in f.ssa.get_function(f.function).get_blocks() {
+                assert!(block.get_terminator().is_some());
+                for op in block.get_instructions() {
+                    // Array-valued choices must become typed phi parameters.
+                    if let OpCode::Select { result, .. } = HLBlockEmitter::unwrap_guard(op).1 {
+                        assert!(!matches!(
+                            types.get_function(f.function).get_value_type(*result).expr,
+                            TypeExpr::Array(_, _)
+                        ));
+                    }
+                    if let OpCode::Cmp {
+                        lhs,
+                        rhs,
+                        kind: CmpKind::Eq,
+                        ..
+                    } = HLBlockEmitter::unwrap_guard(op).1
+                    {
+                        assert_eq!(
+                            types.get_function(f.function).get_value_type(*lhs),
+                            &Type::int(read_bits.max(32))
+                        );
+                        assert_eq!(
+                            types.get_function(f.function).get_value_type(*rhs),
+                            &Type::int(read_bits.max(32))
+                        );
+                    }
+                }
+            }
+            use crate::compiler::passes::dead_code_elimination::{Config, DCE};
+            DCE::new(Config::pre_r1c()).do_run(&mut f.ssa, &flow);
+            assert!(
+                f.ssa
+                    .get_function(f.function)
+                    .get_blocks()
+                    .all(|(_, block)| block
+                        .get_instructions()
+                        .all(|op| !op.get_results().any(|id| unrelated.contains(id))))
+            );
         }
     }
 
@@ -823,6 +1039,8 @@ mod tests {
             let mut function = f.ssa.take_function(f.function);
             let mut merger =
                 SparseArrayMerge::new(&function, types.get_function(f.function), &f.ssa);
+            guard_accesses(&mut function, f.condition);
+            merger.capture_guards(&function);
             let entry = function.get_entry_id();
             {
                 let mut fb = HLFunctionBuilder::new(&mut function, &mut f.ssa);
@@ -847,8 +1065,8 @@ mod tests {
                     .get_block(entry)
                     .get_instructions()
                     .any(|op| matches!(
-                        op,
-                        OpCode::Cmp { .. } | OpCode::Guard { .. } | OpCode::BinaryArithOp { .. }
+                        HLBlockEmitter::unwrap_guard(op).1,
+                        OpCode::Cmp { .. } | OpCode::Assert { .. } | OpCode::BinaryArithOp { .. }
                     ))
             );
         }

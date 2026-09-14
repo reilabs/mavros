@@ -20,7 +20,7 @@ pub mod purify_witness_slices;
 pub mod rc_insertion;
 pub mod remove_unreachable_blocks;
 pub mod remove_unreachable_functions;
-pub(crate) mod shared;
+pub mod shared;
 pub mod simplifier;
 pub mod simplify_asserts;
 pub mod sparse_conditional_simplification;

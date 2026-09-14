@@ -25,7 +25,7 @@ fn check_nested(outer: bool, inner: bool, x: u64) {
     let divisor = outer as u64;
     if outer {
         // When the outer arm is inactive, this division must stay guarded even
-        // though the inner array merge introduces its own counted loops.
+        // while the inner array results are merged.
         arr = if inner { [[x / divisor; 2]; 2] } else { [[x + 1; 2]; 2] };
     }
     let o = outer as u64;

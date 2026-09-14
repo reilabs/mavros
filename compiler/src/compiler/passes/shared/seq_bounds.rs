@@ -95,9 +95,8 @@ pub fn seq_bounds_operands(
     };
     match index_ty.strip_witness().expr {
         TypeExpr::Int(idx_bits) => {
-            let cmp_bits = idx_bits.max(32);
-            let idx_cmp = emitter.widen_u(index, idx_bits, cmp_bits);
-            let len_cmp = emitter.widen_u(len, 32, cmp_bits);
+            let (idx_cmp, len_cmp, cmp_bits) =
+                widen_comparison_operands(emitter, index, idx_bits, len, 32);
             (len, len_cmp, idx_cmp, cmp_bits)
         }
         _ => {
@@ -105,6 +104,22 @@ pub fn seq_bounds_operands(
             (len, len, idx_cmp, 32)
         }
     }
+}
+
+/// Bring unsigned operands to a common width without discarding high index bits.
+pub fn widen_comparison_operands(
+    emitter: &mut impl HLEmitter,
+    lhs: ValueId,
+    lhs_bits: usize,
+    rhs: ValueId,
+    rhs_bits: usize,
+) -> (ValueId, ValueId, usize) {
+    let bits = lhs_bits.max(rhs_bits);
+    (
+        emitter.widen_u(lhs, lhs_bits, bits),
+        emitter.widen_u(rhs, rhs_bits, bits),
+        bits,
+    )
 }
 
 /// Returns `(assert, len)`; the caller emits the assert — bare, or under the op's guard.

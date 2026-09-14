@@ -64,6 +64,9 @@ impl UntaintControlFlow {
             flow_analysis,
             types,
         );
+        if let Some(sparse) = sparse.as_mut() {
+            sparse.capture_guards(function);
+        }
         emit_merges(function, ssa, types, sparse.as_mut(), merges);
         if let Some(sparse) = sparse {
             sparse.remove_redundant_updates(function, ssa);

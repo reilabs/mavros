@@ -1,3 +1,6 @@
+// Small arrays exercise the general merge and cost-gated fallbacks. The large
+// array in check_sparse_aliases exercises profitable replay; planner unit tests
+// check which shapes are accepted independently of frontend optimizations.
 fn check_writes(enabled: bool, index: u32) {
     let original: [Field; 3] = [2, 5, 9];
     let mut arr = original;
@@ -28,7 +31,7 @@ fn check_writes(enabled: bool, index: u32) {
     assert_eq(reversed[1], c * 5 + (1 - c) * 10);
     assert_eq(reversed[2], 9);
 
-    // Neither arm is an update of the other: retain the general array merge.
+    // A whole-array replacement must preserve both arms' values.
     let replaced = if enabled { [11, 12, 13] } else { original };
     for j in 0..3 {
         assert_eq(replaced[j], c * (11 + j as Field) + (1 - c) * original[j]);
@@ -119,7 +122,7 @@ fn check_model(enabled: bool, outer: bool) {
     }
 }
 
-// This stays profitable after the cost gate. Distinct loop values can alias at
+// The large array makes sparse replay profitable. Distinct loop values can alias at
 // runtime, so removing original stores must preserve last-write semantics.
 fn check_sparse_aliases(enabled: bool) {
     for i in 0..3 {

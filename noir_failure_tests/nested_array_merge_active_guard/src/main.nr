@@ -1,5 +1,5 @@
 fn main(outer: bool, inner: bool, x: u64, divisor: u64) {
-    // Introducing loops at either merge must not suppress an active arm's error.
+    // Merging either branch must not suppress an active arm's division error.
     let arr = if outer {
         if inner { [[x / divisor; 2]; 2] } else { [[x; 2]; 2] }
     } else {
