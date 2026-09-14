@@ -1,0 +1,6 @@
+[package]
+name = "aes128_encrypt"
+type = "bin"
+authors = [""]
+
+[dependencies]
