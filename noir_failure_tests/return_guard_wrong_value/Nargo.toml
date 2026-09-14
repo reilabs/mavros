@@ -1,0 +1,6 @@
+[package]
+name = "return_guard_wrong_value"
+type = "bin"
+authors = [""]
+
+[dependencies]

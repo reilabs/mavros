@@ -452,6 +452,8 @@ impl TableKind {
 
 #[derive(Clone, Debug, Copy, Serialize, Deserialize)]
 pub struct WitnessLayout {
+    pub guard_index: Option<usize>,
+    pub return_len: usize,
     pub algebraic_size: usize,
     pub multiplicities_size: usize,
 
@@ -701,7 +703,7 @@ impl R1CS {
 // InputValueOrdered – ABI-ordered input representation
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputValueOrdered {
     Field(Field),
     String(String),

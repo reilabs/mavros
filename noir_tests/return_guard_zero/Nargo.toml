@@ -1,0 +1,6 @@
+[package]
+name = "return_guard_zero"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -2365,6 +2365,7 @@ version = "0.1.0"
 dependencies = [
  "num-bigint 0.4.6",
  "proptest",
+ "smallvec",
  "thiserror 2.0.18",
 ]
 

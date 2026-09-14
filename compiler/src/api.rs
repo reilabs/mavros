@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -32,6 +33,19 @@ pub fn read_prover_inputs(
     abi: &noirc_abi::Abi,
 ) -> Result<Vec<InputValueOrdered>, Error> {
     let file_path = root.join("Prover.toml");
+
+    if !file_path.exists() {
+        if abi.parameters.is_empty() {
+            return Ok(ordered_params_from_btreemap(abi, &BTreeMap::new())?);
+        }
+        return Err(format!(
+            "the ABI declares {} parameter(s) but {} does not exist",
+            abi.parameters.len(),
+            file_path.display()
+        )
+        .into());
+    }
+
     let ext = file_path
         .extension()
         .and_then(|e| e.to_str())
@@ -45,7 +59,7 @@ pub fn read_prover_inputs(
     let inputs = format
         .parse(&inputs_src, abi)
         .map_err(|e| format!("failed to parse inputs: {e}"))?;
-    let ordered_params = ordered_params_from_btreemap(abi, &inputs);
+    let ordered_params = ordered_params_from_btreemap(abi, &inputs)?;
 
     Ok(ordered_params)
 }

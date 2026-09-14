@@ -19,6 +19,8 @@ edition.workspace = true
 # evaluator nor a cycle.
 [dependencies]
 num-bigint.workspace = true
+# Storage only: keep the common one- and two-limb patterns inline without defining arithmetic.
+smallvec = { version = "1.15.1", features = ["union"] }
 thiserror.workspace = true
 
 [dev-dependencies]
