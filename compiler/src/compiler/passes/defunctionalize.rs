@@ -59,14 +59,23 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
     // Phase 1: Compute reaching definitions (which FnPtrs can reach each value) and delete the
     // functions nothing can call, to a fixpoint.
 
+    // Termination: `retain_functions` only removes functions. We break when the function count
+    // stays the same. After each iteration, the function count strictly decreases. Thus, the
+    // number of loops can't the initial number of functions plus one times.
+
     let reaching = loop {
         let reaching = compute_reaching_fn_ptrs(ssa);
         let callable = compute_callable_functions(ssa, &reaching);
         let previous_function_count = ssa.get_function_ids().count();
         ssa.retain_functions(|id, _| callable.contains(&id));
-        if ssa.get_function_ids().count() == previous_function_count {
+        let function_count = ssa.get_function_ids().count();
+        if function_count == previous_function_count {
             break reaching;
         }
+        debug_assert!(
+            function_count < previous_function_count,
+            "retain_functions must never add functions"
+        );
     };
 
     // Phase 2: For each dynamic call site, build a dispatch function
