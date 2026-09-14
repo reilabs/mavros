@@ -135,8 +135,9 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
 
     // Phase 3: Transformation
 
-    // 3a. Intern a `U(32, fn_id)` constant for every FnPtr in storage, build a remap from each
-    // FnPtr `ValueId` to its canonical U-typed `ValueId`, and remove the FnPtr entries. The
+    // 3a. Intern a `U(32, fn_id)` constant for every FnPtr in storage and build a remap from each
+    // FnPtr `ValueId` to its canonical U-typed `ValueId`. The FnPtr entries themselves stay in the
+    // constants table. Once the remap leaves them unreferenced, a later DCE removes them. The
     // remap is applied globally in phase 3d below, after `Call::Dynamic` rewriting in 3b has
     // run on the still-original operands.
     let mut fnptr_entries: Vec<(ValueId, FunctionId)> = ssa
