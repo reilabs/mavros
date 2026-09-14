@@ -108,18 +108,23 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         }
         let mut targets: Vec<FunctionId> = reaching
             .get(&(*fid, *fn_ptr_val))
-            .unwrap_or_else(|| panic!("No reaching FnPtrs for v{} in {:?}", fn_ptr_val.0, fid))
+            .unwrap_or_else(|| {
+                panic!(
+                    "ICE: no reaching FnPtrs for v{} in {fid:?} at defunctionalization",
+                    fn_ptr_val.0
+                )
+            })
             .flatten()
             .into_iter()
             .collect();
         targets.sort_by_key(|f| f.0);
 
-        assert!(
-            !targets.is_empty(),
-            "Empty target set for v{} in {:?}",
-            fn_ptr_val.0,
-            fid
-        );
+        if targets.is_empty() {
+            panic!(
+                "ICE: empty target set for v{} in {fid:?} at defunctionalization",
+                fn_ptr_val.0
+            );
+        }
         // Get param/return types from the first target
         let representative = ssa.get_function(targets[0]);
         let param_types = representative.get_param_types();
@@ -127,13 +132,15 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         // All signatures must match
         for &target in &targets[1..] {
             let candidate = ssa.get_function(target);
-            assert!(
-                candidate.get_param_types() == param_types
-                    && candidate.get_returns() == return_types.as_slice(),
-                "defunctionalize: signature mismatch between {target:?} and {:?} at v{} in {fid:?}",
-                targets[0],
-                fn_ptr_val.0,
-            );
+            if candidate.get_param_types() != param_types
+                || candidate.get_returns() != return_types.as_slice()
+            {
+                panic!(
+                    "ICE: signature mismatch between {target:?} and {:?} at v{} in {fid:?} at \
+                     defunctionalization",
+                    targets[0], fn_ptr_val.0,
+                );
+            }
         }
 
         let dispatch_fn_id =
@@ -207,7 +214,11 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
                         let dispatch_fn = *call_site_dispatch
                             .get(&(fid, fn_ptr_val))
                             .unwrap_or_else(|| {
-                                panic!("No dispatch function for v{} in {:?}", fn_ptr_val.0, fid)
+                                panic!(
+                                    "ICE: no dispatch function for v{} in {fid:?} at \
+                                     defunctionalization",
+                                    fn_ptr_val.0
+                                )
                             });
                         let mut new_args = Vec::with_capacity(args.len() + 1);
                         new_args.push(fn_ptr_val);
@@ -290,7 +301,7 @@ fn compute_callable_functions(ssa: &HLSSA, reaching: &ReachingFns) -> HashSet<Fu
         for (_bid, block) in func.get_blocks() {
             for instr in block.get_instructions() {
                 if matches!(instr, OpCode::Guard { .. }) {
-                    unreachable!("Guard in {fid:?} before defunctionalization")
+                    panic!("ICE: Guard encountered in {fid:?} before defunctionalization");
                 }
                 let OpCode::Call { function, .. } = instr else {
                     continue;
