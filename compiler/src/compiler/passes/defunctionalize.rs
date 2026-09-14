@@ -321,14 +321,14 @@ fn compute_callable_functions(ssa: &HLSSA, reaching: &ReachingFns) -> HashSet<Fu
     callable
 }
 
-fn collect_fn_ptrs(constant: &Constant, out: &mut HashSet<FunctionId>) {
+fn collect_fn_ptrs_in_const(constant: &Constant, out: &mut HashSet<FunctionId>) {
     match constant {
         Constant::FnPtr(fn_id) => {
             out.insert(*fn_id);
         }
         Constant::Blob(blob) => {
             for element in &blob.elements {
-                collect_fn_ptrs(element, out);
+                collect_fn_ptrs_in_const(element, out);
             }
         }
         Constant::Int(_) | Constant::Field(_) => {}
@@ -484,7 +484,7 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
         .iter()
         .filter_map(|(vid, cv)| {
             let mut targets = HashSet::default();
-            collect_fn_ptrs(cv.as_ref(), &mut targets);
+            collect_fn_ptrs_in_const(cv.as_ref(), &mut targets);
             targets.retain(|target| func_ids.contains(target));
             (!targets.is_empty()).then_some((*vid, targets))
         })
