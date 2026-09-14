@@ -84,8 +84,6 @@ a member directory to compile just that package with the usual output-path behav
 
 The functional test runner reports each selected binary workspace member as a separate test, with
 its own checks, circuit size, and artifact sizes. Libraries are not separate executable tests.
-Member expectations are explicit for mixed fixtures: upstream `workspace_fail/crates/a` must fail,
-while `workspace_fail/crates/b` must pass.
 
 ### Usage Example
 
