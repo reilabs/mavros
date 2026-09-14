@@ -2462,6 +2462,15 @@ impl Constant {
             Self::Blob(_) => false,
         }
     }
+
+    /// `true` if this constant is, or transitively contains, a function pointer.
+    pub fn contains_fn_ptr(&self) -> bool {
+        match self {
+            Self::FnPtr(_) => true,
+            Self::Blob(blob) => blob.elements.iter().any(Constant::contains_fn_ptr),
+            Self::Int(_) | Self::Field(_) => false,
+        }
+    }
 }
 
 // REFERENCE COUNTING OPS
