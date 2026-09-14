@@ -301,6 +301,20 @@ fn compute_callable_functions(ssa: &HLSSA, reaching: &ReachingFns) -> HashSet<Fu
     callable
 }
 
+fn collect_fn_ptrs(constant: &Constant, out: &mut HashSet<FunctionId>) {
+    match constant {
+        Constant::FnPtr(fn_id) => {
+            out.insert(*fn_id);
+        }
+        Constant::Blob(blob) => {
+            for element in &blob.elements {
+                collect_fn_ptrs(element, out);
+            }
+        }
+        Constant::Int(_) | Constant::Field(_) => {}
+    }
+}
+
 /// A path is bounded by the tuple nesting depth. Exceeding this limit means a cyclic or deeply
 /// nested shape, and `inject` panics rather than let the reaching fixpoint run forever.
 const MAX_PATH_LEN: usize = 32;
@@ -327,14 +341,6 @@ struct Reach(HashMap<Path, HashSet<FunctionId>>);
 impl Reach {
     fn empty() -> Self {
         Reach::default()
-    }
-
-    /// `target` at the root.
-    fn singleton(target: FunctionId) -> Self {
-        Reach(HashMap::from_iter([(
-            Vec::new(),
-            HashSet::from_iter([target]),
-        )]))
     }
 
     /// Every function that may sit anywhere in the value.
@@ -451,22 +457,24 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
     }
 
     // Seed from FnPtr constants in storage. They are module-level — visible to every function
-    // that references them — so seed under each function id. Skip constants whose function a
+    // that references them — so seed under each function id. Skip constants whose functions a
     // phase-1 round has already deleted.
-    let fnptr_constants: Vec<(ValueId, FunctionId)> = ssa
+    let fnptr_constants: Vec<(ValueId, HashSet<FunctionId>)> = ssa
         .const_snapshot()
         .iter()
-        .filter_map(|(vid, cv)| match cv.as_ref() {
-            Constant::FnPtr(fn_id) if func_ids.contains(fn_id) => Some((*vid, *fn_id)),
-            _ => None,
+        .filter_map(|(vid, cv)| {
+            let mut targets = HashSet::default();
+            collect_fn_ptrs(cv.as_ref(), &mut targets);
+            targets.retain(|target| func_ids.contains(target));
+            (!targets.is_empty()).then_some((*vid, targets))
         })
         .collect();
     for &fid in &func_ids {
-        for (vid, target) in &fnptr_constants {
+        for (vid, targets) in &fnptr_constants {
             reaching
                 .entry((fid, *vid))
                 .or_default()
-                .join_into(&Reach::singleton(*target));
+                .join_set(Vec::new(), targets);
         }
     }
 
@@ -634,6 +642,10 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                                         propagate(&mut reaching, (fid, *result), (fid, *elem));
                                 }
                             }
+                        }
+                        // The blob is a constant, never a ref, so there is no back edge.
+                        OpCode::MkSeqOfBlob { result, blob, .. } => {
+                            changed |= propagate(&mut reaching, (fid, *blob), (fid, *result));
                         }
                         OpCode::MkRepeated {
                             result, element, ..
@@ -924,6 +936,47 @@ mod tests {
 
         assert!(ssa.get_function_ids().any(|id| id == d1));
         assert!(!ssa.get_function_ids().any(|id| id == d2));
+    }
+
+    /// A pointer nested inside a `Blob` constant must seed the reaching analysis like a bare one,
+    /// and flow through `MkSeqOfBlob`.
+    #[test]
+    fn fn_ptr_nested_in_blob_constant_reaches_its_call_site() {
+        use crate::compiler::ssa::hlssa::Blob;
+
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let callee;
+        let mut elem = None;
+        {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            let f = sb.ssa().add_function("f".to_string());
+            callee = f;
+            sb.modify_function(f, |b| {
+                let entry = b.function.get_entry_id();
+                let mut e = b.test_block(entry);
+                e.terminate_return(vec![]);
+            });
+            sb.modify_function(main_id, |b| {
+                let entry = b.function.get_entry_id();
+                let mut e = b.test_block(entry);
+                let blob = e.emit_constant(Constant::Blob(Blob::new(
+                    Type::function(),
+                    vec![Constant::FnPtr(f)],
+                )));
+                let arr = e.mk_seq_of_blob(Type::function(), blob);
+                let idx = e.int_const(32, 0);
+                let fp = e.array_get(arr, idx);
+                elem = Some(fp);
+                e.call_indirect(fp, vec![], 0);
+                e.terminate_return(vec![]);
+            });
+        }
+        let (f, fp) = (callee, elem.unwrap());
+
+        let reaching = compute_reaching_fn_ptrs(&ssa);
+        assert!(reaching[&(main_id, fp)].flatten().contains(&f));
+        assert!(compute_callable_functions(&ssa, &reaching).contains(&f));
     }
 
     #[test]
