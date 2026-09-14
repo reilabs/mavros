@@ -336,7 +336,7 @@ fn collect_fn_ptrs_in_const(constant: &Constant, out: &mut HashSet<FunctionId>) 
 }
 
 /// A path is bounded by the tuple nesting depth. Exceeding this limit means a cyclic or deeply
-/// nested shape, and `inject` panics rather than let the reaching fixpoint run forever.
+/// nested shape. Once a path would exceed it, `inject` truncates the path to this length.
 const MAX_PATH_LEN: usize = 32;
 
 /// Tuple field indices from a value's root. The empty path is the root. Containers are erased.
@@ -382,17 +382,19 @@ impl Reach {
         out
     }
 
-    /// Every path gains `idx` in front.
+    /// Every path gains `idx` in front. A path that would exceed [`MAX_PATH_LEN`] is widened by
+    /// dropping its last.
     fn inject(&self, idx: usize) -> Reach {
         let mut out = Reach::empty();
         for (path, set) in &self.0 {
-            assert!(
-                path.len() < MAX_PATH_LEN,
-                "defunctionalize: tuple path {path:?} exceeded MAX_PATH_LEN ({MAX_PATH_LEN})"
-            );
-            let mut new_path = Vec::with_capacity(path.len() + 1);
+            let path_prefix = if path.len() + 1 > MAX_PATH_LEN {
+                &path[..path.len() - 1]
+            } else {
+                path.as_slice()
+            };
+            let mut new_path = Vec::with_capacity(path_prefix.len() + 1);
             new_path.push(idx);
-            new_path.extend_from_slice(path);
+            new_path.extend_from_slice(path_prefix);
             out.join_set(new_path, set);
         }
         out
@@ -914,6 +916,36 @@ fn replace_function_types_in_instruction(instr: &mut OpCode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inject_widens_paths_at_threshold_by_truncation() {
+        let f = FunctionId(0);
+
+        // A path at the widening threshold is truncated to a prefix.
+        let mut long_reach = Reach::empty();
+        let mut long = vec![0; MAX_PATH_LEN - 1];
+        long.push(1);
+        long_reach.join_set(long, &HashSet::from_iter([f]));
+
+        let widened = long_reach.inject(2);
+
+        let mut long_expected = vec![0; MAX_PATH_LEN];
+        long_expected[0] = 2;
+        assert_eq!(widened.0[&long_expected], HashSet::from_iter([f]));
+
+        // Below the threshold the path grows as usual, to the same length.
+        let mut short_reach = Reach::empty();
+        let mut short = vec![0; MAX_PATH_LEN - 2];
+        short.push(1);
+        short_reach.join_set(short, &HashSet::from_iter([f]));
+
+        let grown = short_reach.inject(2);
+
+        let mut short_expected = vec![0; MAX_PATH_LEN];
+        short_expected[0] = 2;
+        short_expected[MAX_PATH_LEN - 1] = 1;
+        assert_eq!(grown.0[&short_expected], HashSet::from_iter([f]));
+    }
 
     /// Dispatch stubs have no user-source anchor: every instruction they contain must carry the
     /// shared synthetic location. It must not embed the per-call-site counter, or byte-identical
