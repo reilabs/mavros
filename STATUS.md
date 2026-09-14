@@ -1,5 +1,6 @@
 | Test | Compiled | R1CS | Rows | Cols | Bytecode Size | VM Debug Sidecar Size | WASM Size | WASM Debug Sidecar Size | Compile | Witgen Run VM | Witgen Correct | Witgen No Leak | AD Run VM | AD Correct | AD No Leak | WASM Compile | Witgen WASM Run | Witgen WASM Correct | Witgen WASM No Leak | AD WASM Run | AD WASM Correct | AD WASM No Leak |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| noir_tests/aes128_encrypt | ✅ | ✅ | 51072 | 79967 | 85704 | 56458 | 154338 | 332163 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/anticipated_fold_orphan_reclaim | ✅ | ✅ | 1 | 3 | 2280 | 1395 | 27363 | 191408 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/anticipated_witness_fold | ✅ | ✅ | 3 | 5 | 3376 | 3080 | 31452 | 195575 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/argpromo_alias_args | ✅ | ✅ | 1 | 3 | 3016 | 3372 | 28257 | 192921 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -229,7 +230,7 @@
 | noir/test_programs/execution_success/a_6_array | ✅ | ✅ | 2884 | 5439 | 66520 | 23703 | 132369 | 304176 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/a_7 | ✅ | ✅ | 43767 | 81029 | 102792 | 71466 | 210069 | 395019 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/a_7_function | ✅ | ✅ | 394 | 593 | 46576 | 31572 | 104346 | 277938 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/aes128_encrypt | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/aes128_encrypt | ✅ | ✅ | 12265 | 19331 | 104416 | 86680 | 164050 | 346172 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/arithmetic_binary_operations | ✅ | ✅ | 160 | 303 | 42840 | 6805 | 106636 | 273757 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/array_dedup_regression | ✅ | ✅ | 21 | 40 | 8072 | 1447 | 39518 | 204089 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/array_dynamic | ✅ | ✅ | 475 | 813 | 70840 | 20307 | 163910 | 336050 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
