@@ -239,13 +239,10 @@ impl<'a> ExpressionConverter<'a> {
                 .or_else(|| Self::expression_location(&assign.expression)),
             Expression::Match(m) => {
                 let arm = match m.cases.first() {
-                    Some(case) => &case.branch,
-                    None => match &m.default_case {
-                        Some(default) => default.as_ref(),
-                        None => panic!("ICE: match with no cases and no default"),
-                    },
+                    Some(case) => Some(&case.branch),
+                    None => m.default_case.as_deref(),
                 };
-                Self::expression_location(arm)
+                arm.and_then(Self::expression_location)
             }
             Expression::Break | Expression::Continue => None,
         }
