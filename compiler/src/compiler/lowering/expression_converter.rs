@@ -988,13 +988,26 @@ impl<'a> ExpressionConverter<'a> {
 
         if let Some(first) = m.cases.first() {
             let (tag, tag_ty) = match &first.constructor {
-                // An enum is `(tag: Field, payload0, payload1, ...)`; a struct is a plain tuple.
-                c @ Constructor::Variant(..) if !c.is_tuple_or_struct() => {
-                    let location = self.current_source_location.clone();
-                    let tag = self.emit_at_source_location(b, location, |e| e.tuple_proj(value, 0));
-                    (tag, AstType::Field)
+                // `Variant` covers both enums and structs. An enum is
+                // `(tag: Field, payload0, payload1, ...)`; a struct is a plain tuple.
+                c @ Constructor::Variant(..) => {
+                    if c.is_enum() {
+                        let location = self.current_source_location.clone();
+                        let tag =
+                            self.emit_at_source_location(b, location, |e| e.tuple_proj(value, 0));
+                        (tag, AstType::Field)
+                    } else {
+                        (value, ty.clone())
+                    }
                 }
-                _ => (value, ty.clone()),
+                Constructor::True
+                | Constructor::False
+                | Constructor::Int(_)
+                | Constructor::Unit
+                | Constructor::Tuple(_) => (value, ty.clone()),
+                Constructor::Range(..) => {
+                    panic!("ICE: range patterns are not produced by the current frontend")
+                }
             };
             let scrutinee = Scrutinee {
                 value,
