@@ -1082,6 +1082,12 @@ impl<'a> ExpressionConverter<'a> {
         let (tag, tag_ty) = (s.tag, &s.tag_ty);
         let location = self.current_source_location.clone();
         match constructor {
+            c if c.is_tuple_or_struct() => {
+                panic!("ICE: {constructor:?} is a single-constructor pattern and is never tested")
+            }
+            Constructor::Unit | Constructor::Tuple(_) => {
+                panic!("ICE: {constructor:?} is a single-constructor pattern and is never tested")
+            }
             Constructor::True => tag,
             Constructor::False => {
                 let zero = b.emit_const(Constant::int(1, 0));
@@ -1091,6 +1097,7 @@ impl<'a> ExpressionConverter<'a> {
                 let c = self.tag_constant(*value, tag_ty, b);
                 self.emit_at_source_location(b, location, |e| e.eq(tag, c))
             }
+            // Guaranteed to be enum since tuple cases are matched above
             Constructor::Variant(_, idx) => {
                 let c = self.tag_constant(FieldElement::from(*idx as u128), tag_ty, b);
                 self.emit_at_source_location(b, location, |e| e.eq(tag, c))
@@ -1105,9 +1112,6 @@ impl<'a> ExpressionConverter<'a> {
                     let below_end = e.cmp(tag, end, CmpKind::lt(signed));
                     e.and(at_or_above_start, below_end)
                 })
-            }
-            Constructor::Unit | Constructor::Tuple(_) => {
-                panic!("ICE: {constructor:?} is a single-constructor pattern and is never tested")
             }
         }
     }
