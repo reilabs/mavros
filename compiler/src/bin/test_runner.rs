@@ -107,7 +107,15 @@ const DEFAULT_IGNORED_TESTS: &[&str] = &[
     "brillig_mem_layout_regression",
 ];
 
-#[derive(Clone, Copy, Debug)]
+const TEST_EXPECTATION_OVERRIDES: &[(&str, TestExpectation)] = &[
+    // This upstream fixture has mixed outcomes: a asserts 1 == 2, while b asserts 1 != 0.
+    (
+        "noir/test_programs/execution_failure/workspace_fail/crates/b",
+        TestExpectation::ExecutionSuccess,
+    ),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TestExpectation {
     ExecutionSuccess,
     ExecutionFailure,
@@ -161,9 +169,13 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
 
     // 1. Compile
     emit("START:COMPILED");
-    let Some(project) = Project::new(root.clone()).ok() else {
-        emit("END:COMPILED:fail");
-        return;
+    let project = match Project::new(root.clone()) {
+        Ok(project) => project,
+        Err(error) => {
+            eprintln!("Project error: {error}");
+            emit("END:COMPILED:fail");
+            return;
+        }
     };
     let mut driver = Driver::new(project, false);
     let compile_result = (|| -> Result<(), DriverError> {
@@ -1206,11 +1218,54 @@ fn find_noir_test_programs_dir() -> Option<PathBuf> {
     }
 }
 
-/// A test entry with its absolute path and display name.
+/// A package test with its fixture name for workspace-level ignores.
 struct TestEntry {
     path: PathBuf,
+    fixture_name: String,
     display_name: String,
     expectation: TestExpectation,
+}
+
+fn discover_test_packages(
+    path: PathBuf,
+    fixture_name: String,
+    expectation: TestExpectation,
+) -> Vec<TestEntry> {
+    let root = match fs::canonicalize(&path) {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("Cannot resolve test directory {}: {error}", path.display());
+            // Let the child report the directory error as a test result.
+            return vec![TestEntry {
+                path,
+                display_name: fixture_name.clone(),
+                fixture_name,
+                expectation,
+            }];
+        }
+    };
+    let packages = Project::binary_package_roots(&root).unwrap_or_else(|error| {
+        eprintln!("Cannot discover packages in {}: {error}", root.display());
+        vec![root.clone()]
+    });
+    packages
+        .into_iter()
+        .map(|path| {
+            // Use full paths to label workspace members outside the test directory.
+            let member = path.strip_prefix(&root).unwrap_or(&path);
+            let display_name = if member.as_os_str().is_empty() {
+                fixture_name.clone()
+            } else {
+                format!("{fixture_name}/{}", member.display())
+            };
+            TestEntry {
+                path,
+                fixture_name: fixture_name.clone(),
+                display_name,
+                expectation,
+            }
+        })
+        .collect()
 }
 
 fn collect_test_dirs(base: &Path, prefix: &str, expectation: TestExpectation) -> Vec<TestEntry> {
@@ -1221,17 +1276,24 @@ fn collect_test_dirs(base: &Path, prefix: &str, expectation: TestExpectation) ->
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.is_dir() && p.join("Nargo.toml").is_file())
-        .map(|p| {
+        .flat_map(|p| {
             let test_name = p.file_name().unwrap().to_string_lossy().into_owned();
-            TestEntry {
-                path: p,
-                display_name: format!("{prefix}{test_name}"),
-                expectation,
-            }
+            discover_test_packages(p, format!("{prefix}{test_name}"), expectation)
         })
         .collect();
     dirs.sort_by(|a, b| a.display_name.cmp(&b.display_name));
     dirs
+}
+
+fn apply_test_expectation_overrides(entries: &mut [TestEntry]) {
+    for entry in entries {
+        if let Some((_, expectation)) = TEST_EXPECTATION_OVERRIDES
+            .iter()
+            .find(|(name, _)| *name == entry.display_name)
+        {
+            entry.expectation = *expectation;
+        }
+    }
 }
 
 fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str], analyze: bool) {
@@ -1283,6 +1345,7 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str], analyze: 
     }
 
     assert!(!entries.is_empty(), "No test directories found");
+    apply_test_expectation_overrides(&mut entries);
 
     // Build the wasm runtime once before spawning workers and hand children the artifact path.
     // If children built it themselves, their `cargo metadata`/`cargo build` invocations would
@@ -1320,10 +1383,8 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str], analyze: 
                         continue;
                     }
 
-                    let abs = fs::canonicalize(&entry.path).unwrap();
-
                     let mut cmd = Command::new(&exe);
-                    cmd.args(["--run-single", abs.to_str().unwrap()]);
+                    cmd.arg("--run-single").arg(&entry.path);
                     if matches!(entry.expectation, TestExpectation::ExecutionFailure) {
                         cmd.arg("--expect-failure");
                     }
@@ -1377,12 +1438,16 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str], analyze: 
 }
 
 fn is_ignored_test(entry: &TestEntry, ignored_tests: &[&str]) -> bool {
-    let test_name = entry.path.file_name().and_then(|name| name.to_str());
     ignored_tests.iter().any(|ignored| {
-        let ignored = ignored.trim_matches('/');
-        entry.display_name == ignored
-            || test_name == Some(ignored)
-            || entry.display_name.ends_with(&format!("/{ignored}"))
+        let ignored = Path::new(ignored.trim_matches('/'));
+        !ignored.as_os_str().is_empty()
+            && [&entry.fixture_name, &entry.display_name]
+                .iter()
+                .any(|name| {
+                    Path::new(name)
+                        .ancestors()
+                        .any(|ancestor| ancestor.ends_with(ignored))
+                })
     })
 }
 
@@ -1678,6 +1743,7 @@ fn check_determinism(tests: &[String], runs: usize, jobs: usize) -> i32 {
             );
             TestEntry {
                 path: fs::canonicalize(&path).unwrap(),
+                fixture_name: name.clone(),
                 display_name: name.clone(),
                 expectation: TestExpectation::ExecutionSuccess,
             }
@@ -2339,6 +2405,188 @@ mod tests {
 
     fn lines(input: &[&str]) -> Vec<String> {
         input.iter().map(|line| line.to_string()).collect()
+    }
+
+    fn write_discovery_workspace(base: &Path, name: &str) -> PathBuf {
+        let root = base.join(name);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("Nargo.toml"),
+            "[workspace]\nmembers = ['crates/a', 'crates/b', 'lib']\n",
+        )
+        .unwrap();
+        for (member, name, kind) in [
+            ("crates/a", "a", "bin"),
+            ("crates/b", "b", "bin"),
+            ("lib", "shared", "lib"),
+        ] {
+            let dir = root.join(member);
+            fs::create_dir_all(dir.join("src")).unwrap();
+            fs::write(
+                dir.join("Nargo.toml"),
+                format!("[package]\nname = '{name}'\ntype = '{kind}'\nauthors = []\n"),
+            )
+            .unwrap();
+            let source = if kind == "bin" { "main.nr" } else { "lib.nr" };
+            fs::write(dir.join("src").join(source), "fn main() {}\n").unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn workspace_discovery_reports_binary_members_and_honors_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = write_discovery_workspace(tmp.path(), "workspace");
+        let discover =
+            || collect_test_dirs(tmp.path(), "tests/", TestExpectation::ExecutionSuccess);
+        let entries = discover();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["tests/workspace/crates/a", "tests/workspace/crates/b"]
+        );
+        assert_eq!(
+            entries[0].path,
+            fs::canonicalize(root.join("crates/a")).unwrap()
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|e| e.expectation == TestExpectation::ExecutionSuccess)
+        );
+
+        fs::write(
+            root.join("Nargo.toml"),
+            "[workspace]\nmembers = ['crates/a', 'crates/b', 'lib']\ndefault-member = 'crates/b'\n",
+        )
+        .unwrap();
+        let entries = discover();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].display_name, "tests/workspace/crates/b");
+
+        // Ordinary packages use their directory names; invalid manifests produce test entries.
+        let entries = collect_test_dirs(
+            &root.join("crates"),
+            "tests/",
+            TestExpectation::ExecutionSuccess,
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["tests/a", "tests/b"]
+        );
+        fs::write(root.join("Nargo.toml"), "invalid manifest").unwrap();
+        let entries = discover();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].display_name, "tests/workspace");
+    }
+
+    #[test]
+    fn workspace_discovery_assigns_mixed_member_expectations() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_discovery_workspace(tmp.path(), "workspace_fail");
+        let mut entries = collect_test_dirs(
+            tmp.path(),
+            "noir/test_programs/execution_failure/",
+            TestExpectation::ExecutionFailure,
+        );
+        // The parent applies suite-specific expectations after discovery.
+        assert!(
+            entries
+                .iter()
+                .all(|e| e.expectation == TestExpectation::ExecutionFailure)
+        );
+        apply_test_expectation_overrides(&mut entries);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].display_name,
+            "noir/test_programs/execution_failure/workspace_fail/crates/a"
+        );
+        assert_eq!(entries[0].expectation, TestExpectation::ExecutionFailure);
+        assert_eq!(
+            entries[1].display_name,
+            "noir/test_programs/execution_failure/workspace_fail/crates/b"
+        );
+        assert_eq!(entries[1].expectation, TestExpectation::ExecutionSuccess);
+        // The passing-member exception belongs only to this specific upstream fixture.
+        let mut entries =
+            collect_test_dirs(tmp.path(), "local/", TestExpectation::ExecutionFailure);
+        apply_test_expectation_overrides(&mut entries);
+        assert!(
+            entries
+                .iter()
+                .all(|e| e.expectation == TestExpectation::ExecutionFailure)
+        );
+    }
+
+    #[test]
+    fn workspace_ignore_matches_whole_fixtures_or_individual_members() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_discovery_workspace(tmp.path(), "workspace");
+        write_discovery_workspace(tmp.path(), "workspace_extra");
+        let entries = collect_test_dirs(tmp.path(), "tests/", TestExpectation::ExecutionSuccess);
+        for ignored in ["workspace", "tests/workspace", "/tests/workspace/"] {
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|e| is_ignored_test(e, &[ignored]))
+                    .count(),
+                2
+            );
+        }
+        for ignored in ["workspace/crates/a", "tests/workspace/crates/a"] {
+            let ignored_entries: Vec<_> = entries
+                .iter()
+                .filter(|e| is_ignored_test(e, &[ignored]))
+                .collect();
+            assert_eq!(ignored_entries.len(), 1);
+            assert_eq!(ignored_entries[0].display_name, "tests/workspace/crates/a");
+        }
+        for ignored in ["work", "space", "", "/"] {
+            assert!(!entries.iter().any(|e| is_ignored_test(e, &[ignored])));
+        }
+    }
+
+    #[test]
+    fn discovery_keeps_tests_whose_directory_cannot_be_resolved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing");
+        let entries = discover_test_packages(
+            missing.clone(),
+            "tests/missing".into(),
+            TestExpectation::ExecutionSuccess,
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, missing);
+        assert_eq!(entries[0].display_name, "tests/missing");
+        assert!(is_ignored_test(&entries[0], &["missing"]));
+    }
+
+    #[test]
+    fn workspace_discovery_accepts_members_outside_the_test_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let external = write_discovery_workspace(tmp.path(), "external");
+        let root = tmp.path().join("suite/workspace");
+        fs::create_dir_all(&root).unwrap();
+        let member = fs::canonicalize(external.join("crates/a")).unwrap();
+        fs::write(
+            root.join("Nargo.toml"),
+            format!("[workspace]\nmembers = ['{}']\n", member.display()),
+        )
+        .unwrap();
+        let entries = collect_test_dirs(
+            &tmp.path().join("suite"),
+            "tests/",
+            TestExpectation::ExecutionSuccess,
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, member);
+        assert!(entries[0].display_name.contains(member.to_str().unwrap()));
+        assert!(is_ignored_test(&entries[0], &["workspace"]));
     }
 
     #[test]

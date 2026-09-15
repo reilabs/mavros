@@ -70,6 +70,22 @@ For advanced usage and the CLI options, run `mavros --help`. To output the witne
 for WASM-capable platforms, please see the [WASM output](./docs/CONTRIBUTING.md#WASM%20Output)
 section in our contributing docs.
 
+### Noir Workspaces
+
+When pointed at a workspace, Mavros honors `default-member`. Without a default, the CLI runs or
+compiles every binary member in manifest order; library members remain available as dependencies.
+Each binary uses its own `Prover.toml` and `mavros_debug` directory. A failed member makes the
+workspace run fail, while the remaining members are still checked.
+
+When `mavros compile` resolves a package root different from the supplied path, relative output
+paths use that package root, including for a single default member. The defaults then produce
+`<member>/target/basic.json` and `<member>/target/r1cs.bin`. Absolute output paths and paths
+containing `..` are rejected for multi-binary compilations. Point Mavros directly at a member
+directory to compile just that package with the usual output-path behavior.
+
+The functional test runner reports each selected binary workspace member as a separate test, with
+its own checks, circuit size, and artifact sizes. Libraries are not separate executable tests.
+
 ### Usage Example
 
 ```bash
