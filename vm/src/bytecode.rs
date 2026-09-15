@@ -1950,46 +1950,47 @@ mod def {
         }
     }
 
-    #[opcode]
+    #[raw_opcode]
     fn array_get(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
         #[out] res: *mut u64,
         #[frame] array: BoxedValue,
         #[frame] index: u64,
         stride: usize,
-        vm: &mut VM,
-    ) {
-        assert!(
-            (index as usize) * stride < array.layout().array_size(),
-            "array_get: index {} out of bounds for array of length {}",
-            index,
-            array.layout().array_size() / stride
-        );
+    ) -> (*const u64, Frame) {
+        // Check the element index before multiplying by stride: a large index can wrap.
+        if stride == 0 || index as usize >= array.layout().array_size() / stride {
+            return trap(pc, frame, vm);
+        }
         let src = array.array_idx(index as usize, stride);
         unsafe {
             ptr::copy_nonoverlapping(src, res, stride);
         }
+        (unsafe { pc.add(5) }, frame)
     }
 
     /// Read an element out of a blob: a raw sequence of `len` elements of
     /// `stride` cells each, stored inline in the frame starting at `source`.
-    #[opcode]
+    #[raw_opcode]
     fn blob_get(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
         #[out] res: *mut u64,
         source: FramePosition,
         #[frame] index: u64,
         stride: usize,
         len: usize,
-        frame: Frame,
-    ) {
-        assert!(
-            (index as usize) < len,
-            "blob_get: index {} out of bounds for blob of length {}",
-            index,
-            len
-        );
+    ) -> (*const u64, Frame) {
+        if index as usize >= len {
+            return trap(pc, frame, vm);
+        }
         unsafe {
             frame.write_to(res, (source.0 + (index as usize) * stride) as isize, stride);
         }
+        (unsafe { pc.add(6) }, frame)
     }
 
     #[opcode]
@@ -2006,23 +2007,21 @@ mod def {
         }
     }
 
-    #[opcode]
+    #[raw_opcode]
     #[inline(never)]
     fn array_set(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
         #[out] res: *mut BoxedValue,
         #[frame] array: BoxedValue,
         #[frame] index: u64,
         source: FramePosition,
         stride: usize,
-        frame: Frame,
-        vm: &mut VM,
-    ) {
-        assert!(
-            (index as usize) * stride < array.layout().array_size(),
-            "array_set: index {} out of bounds for array of length {}",
-            index,
-            array.layout().array_size() / stride
-        );
+    ) -> (*const u64, Frame) {
+        if stride == 0 || index as usize >= array.layout().array_size() / stride {
+            return trap(pc, frame, vm);
+        }
         let new_array = array.copy_if_reused(vm);
         let target = new_array.array_idx(index as usize, stride);
         if new_array.layout().data_type() == DataType::BoxedArray {
@@ -2045,6 +2044,7 @@ mod def {
             frame.write_to(target, source.0 as isize, stride);
             *res = new_array;
         }
+        (unsafe { pc.add(6) }, frame)
     }
 
     #[opcode]
@@ -3373,6 +3373,118 @@ mod tests {
             Vec::new(),
             Vec::new(),
         )
+    }
+
+    #[test]
+    fn indexed_accesses_trap_without_touching_memory_and_advance_on_success() {
+        for stride in [1, 4] {
+            for len in [0, 2] {
+                // 1 << 62 wraps to zero when multiplied by a four-word stride.
+                for index in [0, 1, 2, 3, 1 << 62, u64::MAX] {
+                    for opcode in [
+                        OpCode::ArrayGet {
+                            res: FramePosition(2),
+                            array: FramePosition(6),
+                            index: FramePosition(7),
+                            stride,
+                        },
+                        OpCode::ArraySet {
+                            res: FramePosition(2),
+                            array: FramePosition(6),
+                            index: FramePosition(7),
+                            source: FramePosition(8),
+                            stride,
+                        },
+                        OpCode::BlobGet {
+                            res: FramePosition(2),
+                            source: FramePosition(8),
+                            index: FramePosition(7),
+                            stride,
+                            len,
+                        },
+                    ] {
+                        let mut vm = empty_witgen_vm();
+                        let frame = Frame::base_frame(16, &mut vm);
+                        let array =
+                            BoxedValue::alloc(BoxedLayout::array(len * stride, false), &mut vm);
+                        let initial: Vec<u64> = (0..len * stride).map(|i| i as u64 + 10).collect();
+                        unsafe {
+                            ptr::copy_nonoverlapping(initial.as_ptr(), array.data(), initial.len());
+                            ptr::write_bytes(frame.data, 0, 16);
+                            for i in 0..4 {
+                                *frame.data.add(2 + i) = 99;
+                            }
+                            *frame.data.add(6) = array.0 as u64;
+                            *frame.data.add(7) = index;
+                            for i in 0..8 {
+                                *frame.data.add(8 + i) = 100 + i as u64;
+                            }
+                        }
+                        let mut binary = Vec::new();
+                        opcode.to_binary(&mut binary, &mut Vec::new());
+                        let source = location("index", 12);
+                        let mut debug_info = DebugInfo::default();
+                        debug_info.files.push(source.file.clone());
+                        debug_info.functions.push(DebugFunction {
+                            name: "index".to_string(),
+                            code_offset: 0,
+                            locations: vec![DebugLocation {
+                                code_offset: 0,
+                                file_index: 0,
+                                line: source.line,
+                                column: source.column,
+                            }],
+                        });
+                        vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
+                        let (next_pc, next_frame) =
+                            DISPATCH[binary[0] as usize](binary.as_ptr(), frame, &mut vm);
+                        assert_eq!(next_frame.data, frame.data);
+                        let output = unsafe { std::slice::from_raw_parts(frame.data.add(2), 4) };
+                        let contents =
+                            unsafe { std::slice::from_raw_parts(array.data(), initial.len()) };
+                        if index >= len as u64 {
+                            assert!(vm.trapped, "{opcode}, index={index}, len={len}");
+                            assert!(next_pc.is_null());
+                            assert_eq!(output, &[99; 4]);
+                            assert_eq!(contents, initial);
+                            assert_eq!(
+                                vm.stack_trace,
+                                vec![StackFrame {
+                                    function: "index".to_string(),
+                                    location: source
+                                }]
+                            );
+                        } else {
+                            assert!(!vm.trapped);
+                            assert_eq!(next_pc, unsafe { binary.as_ptr().add(binary.len()) });
+                            let offset = index as usize * stride;
+                            match opcode {
+                                OpCode::ArrayGet { .. } => {
+                                    assert_eq!(&output[..stride], &initial[offset..offset + stride])
+                                }
+                                OpCode::ArraySet { .. } => {
+                                    assert_eq!(output[0], array.0 as u64);
+                                    let mut expected = initial.clone();
+                                    for i in 0..stride {
+                                        expected[offset + i] = 100 + i as u64;
+                                    }
+                                    assert_eq!(contents, expected);
+                                }
+                                OpCode::BlobGet { .. } => {
+                                    let expected: Vec<u64> =
+                                        (offset..offset + stride).map(|i| 100 + i as u64).collect();
+                                    assert_eq!(&output[..stride], expected);
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        array.dec_rc(&mut vm);
+                        frame.pop(&mut vm);
+                        assert_eq!(vm.allocation_instrumenter.final_memory_usage(), 0);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
