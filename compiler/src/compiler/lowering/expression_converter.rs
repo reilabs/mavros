@@ -1038,7 +1038,18 @@ impl<'a> ExpressionConverter<'a> {
                 let default = default.expect("ICE: match with no cases and no default");
                 self.convert_expression(default, b)
             }
-            [last] if default.is_none() => self.convert_arm(s.value, &s.ty, last, b),
+            // With no default the last case is the only constructor left and can run untested.
+            // That relies on the scrutinee having a finite constructor set. `Int` and `Range` do
+            // not, and the elaborator always emits a default for them.
+            [last]
+                if default.is_none()
+                    && !matches!(
+                        last.constructor,
+                        Constructor::Int(_) | Constructor::Range(..)
+                    ) =>
+            {
+                self.convert_arm(s.value, &s.ty, last, b)
+            }
             [case, rest @ ..] => {
                 let cond = self.case_condition(s, &case.constructor, b);
                 self.branch(
