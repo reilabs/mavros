@@ -264,7 +264,7 @@ impl<'a> TotalityOracle<'a> {
 
     /// The index is a constant strictly below a _static_ array length.
     ///
-    /// Slices have no static length and a witness-typed *index* lowers to a constraint-emitting
+    /// Slices have no static length and a witness-typed _index_ lowers to a constraint-emitting
     /// gadget — both refused. The array itself is never consulted for witness-ness: container
     /// tops carry no taint, so it cannot be witness-typed.
     fn const_index_in_bounds(&self, array: ValueId, index: ValueId) -> bool {
@@ -362,6 +362,8 @@ fn constant_as_index(c: &Constant) -> Option<usize> {
 /// `ArithGroup` fails to compile here, and changing the model's rejection set fails the assertion.
 #[cfg(test)]
 mod int_semantics_conformance {
+    use std::sync::LazyLock;
+
     use mavros_int_semantics::{IntBits, IntOp, corners, eval};
 
     use super::*;
@@ -375,6 +377,36 @@ mod int_semantics_conformance {
         /// Speculated only where some further condition is discharged: the operand being field
         /// typed, the divisor provably safe, the shift amount provably in range.
         Conditional,
+    }
+
+    /// Every arithmetic group, written out so that adding one fails to compile here.
+    const ALL_GROUPS: [ArithGroup; 10] = [
+        ArithGroup::Add,
+        ArithGroup::Sub,
+        ArithGroup::Mul,
+        ArithGroup::Div,
+        ArithGroup::Rem,
+        ArithGroup::Shl,
+        ArithGroup::Shr,
+        ArithGroup::And,
+        ArithGroup::Or,
+        ArithGroup::Xor,
+    ];
+
+    /// The groups the model can reject, swept once for the whole test binary.
+    ///
+    /// [`can_reject`] returns early on the first rejection it finds, so the groups that answer
+    /// `false` (the bitwise three) are exactly the ones that pay for the entire corner matrix,
+    /// narrow and wide, to reach that answer.
+    ///
+    /// Both tests below need the same verdict for all ten groups, so computing it twice would spend
+    /// the expensive half of the sweep twice over to learn the same thing.
+    static REJECTING: LazyLock<Vec<ArithGroup>> =
+        LazyLock::new(|| ALL_GROUPS.into_iter().filter(|g| can_reject(*g)).collect());
+
+    /// Whether the model rejects `group` on any corner input, read off [`REJECTING`].
+    fn rejects(group: ArithGroup) -> bool {
+        REJECTING.contains(&group)
     }
 
     /// The claim the oracle makes, transcribed from its `match` arms one for one.
@@ -426,6 +458,19 @@ mod int_semantics_conformance {
                     }
                 }
             }
+
+            // The wide half, whose corners are patterns rather than host words.
+            for bits in corners::wide_widths_for(op.is_signed()) {
+                let (values, rhs) = corners::wide_operands(op, bits);
+
+                for a in &values {
+                    for b in &rhs {
+                        if eval(op, a, b).is_rejected() {
+                            return true;
+                        }
+                    }
+                }
+            }
         }
 
         false
@@ -433,19 +478,8 @@ mod int_semantics_conformance {
 
     #[test]
     fn an_unconditional_verdict_is_given_exactly_where_nothing_can_reject() {
-        for group in [
-            ArithGroup::Add,
-            ArithGroup::Sub,
-            ArithGroup::Mul,
-            ArithGroup::Div,
-            ArithGroup::Rem,
-            ArithGroup::Shl,
-            ArithGroup::Shr,
-            ArithGroup::And,
-            ArithGroup::Or,
-            ArithGroup::Xor,
-        ] {
-            let expected = if can_reject(group) {
+        for group in ALL_GROUPS {
+            let expected = if rejects(group) {
                 Claim::Conditional
             } else {
                 Claim::Unconditional
@@ -463,21 +497,7 @@ mod int_semantics_conformance {
     fn the_bitwise_operations_are_the_only_total_ones() {
         // The same fact stated positively, so that a model change which made, say, `Shl` total
         // reads as a deliberate edit here rather than as a mysterious flip above.
-        let total: Vec<_> = [
-            ArithGroup::Add,
-            ArithGroup::Sub,
-            ArithGroup::Mul,
-            ArithGroup::Div,
-            ArithGroup::Rem,
-            ArithGroup::Shl,
-            ArithGroup::Shr,
-            ArithGroup::And,
-            ArithGroup::Or,
-            ArithGroup::Xor,
-        ]
-        .into_iter()
-        .filter(|g| !can_reject(*g))
-        .collect();
+        let total: Vec<_> = ALL_GROUPS.into_iter().filter(|g| !rejects(*g)).collect();
 
         assert_eq!(
             total,

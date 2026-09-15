@@ -105,7 +105,7 @@ impl SourceLocation {
     /// generator/context and becomes the synthetic source identifier `<origin>`.
     pub fn synthetic(origin: impl AsRef<str>) -> Self {
         Self::new(
-            format!("<{}>", origin.as_ref()),
+            synthetic_file(origin),
             SourcePosition::new(1, 1),
             SourcePosition::new(1, 1),
         )
@@ -172,6 +172,15 @@ impl Display for SourceLocation {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}:{}", self.file, self.start.line, self.start.column)
     }
+}
+
+/// The synthetic source identifier [`SourceLocation::synthetic`] builds for `origin`.
+///
+/// Exposed because a consumer downstream of codegen only ever sees the identifier: the VM's stack
+/// frames carry `<origin>` rather than the origin, so recognizing a particular synthetic site means
+/// rebuilding the identifier rather than comparing origins.
+pub fn synthetic_file(origin: impl AsRef<str>) -> String {
+    format!("<{}>", origin.as_ref())
 }
 
 #[cfg(test)]

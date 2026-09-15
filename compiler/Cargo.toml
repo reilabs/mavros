@@ -27,6 +27,12 @@ bimap = { version = "0.6" }
 bincode = { version = "1.3" }
 cargo_metadata = { version = "0.23.1" }
 clap = { version = "4.5.17", features = ["unstable-v5", "derive"] }
+# Diagnostic rendering. Keep in lockstep with the version the pinned Noir crates resolve, so that
+# there is one copy of it in the graph: `noirc_errors`, `noirc_artifacts` and `fm` all depend on
+# it, and a second copy would be both waste and a second set of drawing defaults to keep in step.
+# Note that the two reporters are still separate -- `Error::NoirCompilerError` does not draw
+# through `compiler::diagnostic`, nor through `noirc_errors::reporter`.
+codespan-reporting = { version = "0.13.1" }
 fixedbitset = { version = "0.4" } # Keep in lockstep with petgraph's transitive version
 inkwell = { version = "0.10.0", features = ["llvm22-1"] }
 itertools = { version = "0.14.0" }

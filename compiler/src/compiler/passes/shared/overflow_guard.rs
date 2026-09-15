@@ -12,6 +12,8 @@
 //! comparison. This module is the pure counterpart of that range check: same contract, different
 //! machinery, because a pure operand reaches no constraint at all.
 
+use mavros_int_semantics::IntBits;
+
 use crate::compiler::{
     analysis::value_range_analysis::ValueRange,
     passes::shared::unsupported::unsupported_on_this_field,
@@ -22,7 +24,6 @@ use crate::compiler::{
             assert_signed_op_width, builder::HLEmitter,
         },
     },
-    util::bit_mask,
 };
 
 /// The width an `Add`/`Sub`/`Mul` is performed at, or `None` for an operand type whose arithmetic
@@ -149,7 +150,7 @@ pub fn emit_no_overflow_assert(
     bits: usize,
 ) {
     let overflow = emit_overflow_cond(emitter, kind, lhs, rhs, wrapped, bits);
-    let zero_u1 = emitter.int_const(1, 0);
+    let zero_u1 = emitter.int_const(IntBits::zero(1));
     emitter.emit(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: overflow,
@@ -208,7 +209,7 @@ fn signed_add_sub_overflow(
 /// The unsigned multiply test, written **flat**: no branch, and one division.
 ///
 /// `MAX / rhs < lhs` is the overflow condition for a nonzero `rhs`, and a multiply by zero cannot
-/// overflow at all. The zero case is handled by *substituting* a safe divisor rather than by
+/// overflow at all. The zero case is handled by _substituting_ a safe divisor rather than by
 /// branching on it, which is why this differs from the guarded lowering: a diamond would give
 /// untaint, DCE and the block simplifiers three more blocks to chew on at every unguarded multiply
 /// in the program for a condition that needs no control flow at all.
@@ -239,7 +240,7 @@ fn unsigned_mul_overflow(
 /// The branch-free stand-in for a divisor that must not be zero. See [`unsigned_mul_overflow`] for
 /// why it is an `Or` rather than a `Select` or an `Add`.
 fn substitute_one_for_zero(emitter: &mut impl HLEmitter, value: ValueId, bits: usize) -> ValueId {
-    let zero = emitter.int_const(bits, 0);
+    let zero = emitter.int_const(IntBits::zero(bits));
     let is_zero = emitter.eq(value, zero);
     let bump = emitter.cast_to(CastTarget::Int(bits), is_zero);
     emitter.or(value, bump)
@@ -256,13 +257,17 @@ fn substitute_one_for_zero(emitter: &mut impl HLEmitter, value: ValueId, bits: u
 ///
 /// The numerator being **`MAX` exactly** is load-bearing beyond this function: it is what lets
 /// [`unsigned_mul_overflow`] substitute `1` for a zero divisor and drop the `rhs != 0` conjunct.
+///
+/// It is stated as [`IntBits::all_ones`] at the operand's own width. Stating it as a host word
+/// instead would bound the _check_ at 128 bits while both pure backends multiply well past that, so
+/// the operation would be refused for want of a constant rather than for want of a lowering.
 pub fn mul_overflows_nonzero(
     emitter: &mut impl HLEmitter,
     lhs: ValueId,
     rhs: ValueId,
     bits: usize,
 ) -> ValueId {
-    let max = emitter.int_const(bits, bit_mask(bits));
+    let max = emitter.int_const(IntBits::all_ones(bits));
     let limit = emitter.udiv(max, rhs);
     emitter.ult(limit, lhs)
 }
@@ -343,10 +348,11 @@ pub fn signed_mul_magnitude_overflows(
     result_sign: ValueId,
     bits: usize,
 ) -> ValueId {
-    let positive_max = emitter.int_const(bits, (1u128 << (bits - 1)) - 1);
+    let positive_max = emitter.int_const(IntBits::from_signed(bits, &IntBits::signed_max(bits)));
     let result_sign = emitter.cast_to(CastTarget::Int(bits), result_sign);
     let max_magnitude = emitter.uadd(positive_max, result_sign);
     let limit = emitter.udiv(max_magnitude, abs_rhs);
+
     emitter.ult(limit, abs_lhs)
 }
 
@@ -590,8 +596,8 @@ mod tests {
         // would resurrect what `DCE` came to remove, so `None` is refused rather than filled in --
         // and `overflow_rewrite_saves_the_operation` is what keeps `DCE` off this path.
         with_emitter(|e| {
-            let a = e.int_const(8, 1);
-            let b = e.int_const(8, 2);
+            let a = e.int_const(IntBits::one(8));
+            let b = e.int_const(IntBits::from_u128(8, 2));
             emit_overflow_cond(e, BinaryArithOpKind::UAdd, a, b, None, 8);
         });
     }
@@ -601,8 +607,8 @@ mod tests {
         // The other half of the same decision: a multiply's test is built from the operands alone,
         // which is exactly why it is the group `DCE` may rewrite a dead operation into.
         with_emitter(|e| {
-            let a = e.int_const(8, 1);
-            let b = e.int_const(8, 2);
+            let a = e.int_const(IntBits::one(8));
+            let b = e.int_const(IntBits::from_u128(8, 2));
             emit_overflow_cond(e, BinaryArithOpKind::UMul, a, b, None, 8);
         });
     }
@@ -612,14 +618,17 @@ mod tests {
         assert_eq!(overflow_operand_bits(&Type::int(32)), Some(32));
         // Field arithmetic wraps rather than failing, so there is nothing to reject.
         assert_eq!(overflow_operand_bits(&Type::field()), None);
-        assert_eq!(overflow_operand_bits(&Type::function()), None);
+        assert_eq!(
+            overflow_operand_bits(&Type::function_returning(vec![Type::field()])),
+            None
+        );
     }
 }
 
 /// The discharge predicate's conformance relation to the normative model in `mavros-int-semantics`.
 ///
 /// [`overflow_provably_impossible`] is the one place in the guard IR that answers a question whose
-/// wrong answer is *silent*: every other function here builds a check, and a mistake in one of them
+/// wrong answer is _silent_: every other function here builds a check, and a mistake in one of them
 /// rejects a program it should not, which a test corpus notices. This one **deletes** a check, and
 /// a mistake in it produces a proof for a program Noir rejects.
 ///
@@ -630,7 +639,7 @@ mod tests {
 ///
 /// Nothing is claimed in the other direction. Declining to discharge is always safe, so a range
 /// pair this refuses is not required to be one that can overflow — that is the difference between
-/// a check being *needed* and a check being *emitted*, and only the first is a correctness
+/// a check being _needed_ and a check being _emitted_, and only the first is a correctness
 /// question.
 ///
 /// γ is over **both** readings, matching `value_range_analysis`'s own sweep: a `ValueRange` denotes
@@ -662,7 +671,7 @@ mod int_semantics_conformance {
     ///
     /// Chosen for what they straddle rather than for coverage, as `value_range_analysis`'s sweep
     /// is: the whole width, the singletons at each end, runs sitting just inside each boundary and
-    /// astride the sign one, and two entered through the *signed* reading so that the reduction is
+    /// astride the sign one, and two entered through the _signed_ reading so that the reduction is
     /// exercised from both sides.
     fn input_ranges(bits: usize) -> Vec<ValueRange> {
         let width = Width::Bits(bits);

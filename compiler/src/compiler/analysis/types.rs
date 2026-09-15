@@ -12,22 +12,50 @@ use crate::{
         analysis::flow_analysis::{CFG, FlowAnalysis},
         pass_manager::{Analysis, AnalysisId, AnalysisStore},
         ssa::{
-            FunctionId, ValueId,
-            hlssa::{
-                CallTarget, Constant, HLFunction, HLSSA, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type,
-                TypeExpr,
-            },
+            FunctionId, SSAConstantsSnapshot, ValueId,
+            hlssa::{CallTarget, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr},
         },
+        util::UNSPREAD_INPUT_MAX,
     },
 };
 
-pub fn const_value_type(value: &Constant) -> Type {
+/// The type of a constant, given the signatures of the program's functions.
+///
+/// `function_returns` answers what a call to each function produces, which is the only part of a
+/// [`Constant::FnPtr`] that has a type: see [`TypeExpr::Function`]. Taking it from the callee's own
+/// SSA signature rather than from the Noir type it was lowered from is deliberate -- that is the
+/// signature `defunctionalize` builds its dispatcher against, so the two cannot drift apart.
+pub fn const_value_type(
+    value: &Constant,
+    function_returns: &dyn Fn(FunctionId) -> Vec<Type>,
+) -> Type {
     match value {
         Constant::Int(v) => Type::int(v.bits()),
         Constant::Field(_) => Type::field(),
-        Constant::FnPtr(_) => Type::function(),
+        Constant::FnPtr(fn_id) => Type::function_returning(function_returns(*fn_id)),
         Constant::Blob(blob) => Type::blob(blob.elem_type.clone(), blob.len()),
     }
+}
+
+/// Types every constant in the module-level pool against the functions the SSA knows about.
+pub(crate) fn pool_constant_types(
+    constants: &SSAConstantsSnapshot<Constant>,
+    function_returns: &dyn Fn(FunctionId) -> Option<Vec<Type>>,
+) -> HashMap<ValueId, Type> {
+    constants
+        .iter()
+        .filter_map(|(vid, cv)| {
+            if let Constant::FnPtr(fn_id) = cv.as_ref()
+                && function_returns(*fn_id).is_none()
+            {
+                return None;
+            }
+            let typ = const_value_type(cv, &|fn_id| {
+                function_returns(fn_id).unwrap_or_else(|| panic!("ICE: no signature for {fn_id:?}"))
+            });
+            Some((*vid, typ))
+        })
+        .collect()
 }
 
 pub(crate) fn push_witness_of_to_leaves(t: Type) -> Type {
@@ -40,7 +68,7 @@ pub(crate) fn push_witness_of_to_leaves(t: Type) -> Type {
             Type::tuple_of(fields.into_iter().map(push_witness_of_to_leaves).collect())
         }
         TypeExpr::Blob(..) => t,
-        TypeExpr::Ref(_) | TypeExpr::Function => Type::witness_of(t),
+        TypeExpr::Ref(_) | TypeExpr::Function(_) => Type::witness_of(t),
     }
 }
 
@@ -75,7 +103,16 @@ pub struct FunctionTypeInfo {
 
 impl FunctionTypeInfo {
     pub fn get_value_type(&self, value_id: ValueId) -> &Type {
-        self.values.get(&value_id).unwrap()
+        self.try_get_value_type(value_id).unwrap()
+    }
+
+    /// The type of `value_id`, or [`None`] where the analysis never reached it.
+    ///
+    /// [`Types::run_function`] walks the dominator tree, so a value defined in a block no edge
+    /// reaches has no entry here. A caller that iterates the block map instead needs the checked
+    /// form.
+    pub fn try_get_value_type(&self, value_id: ValueId) -> Option<&Type> {
+        self.values.get(&value_id)
     }
 }
 
@@ -98,11 +135,11 @@ impl Types {
 
         // The constants side-table is module-level; pre-compute types for every constant
         // `ValueId` so `run_function` can seed `function_info` with them.
-        let constant_types: HashMap<ValueId, Type> = ssa
-            .const_snapshot()
-            .iter()
-            .map(|(vid, cv)| (*vid, const_value_type(cv)))
-            .collect();
+        let constant_types = pool_constant_types(&ssa.const_snapshot(), &|fn_id| {
+            function_types
+                .get(&fn_id)
+                .map(|(_, returns)| returns.to_vec())
+        });
 
         // The configured field, threaded through calls so that the width of a `Field` can be read
         // from it rather than a static.
@@ -121,9 +158,15 @@ impl Types {
         match &value_type.expr {
             TypeExpr::WitnessOf(inner) => Ok(Type::witness_of(Self::spread_result_type(inner)?)),
             TypeExpr::Int(bits) => {
-                if *bits > MAX_SUPPORTED_UNSIGNED_BITS {
+                // The host word the spread ladders run in, rather than the integer type cap.
+                //
+                // Looser than the evaluators: this rule answers `int(2n)`, so the input bound a
+                // host word implies is half of one, which is what `util::spread_bits` and
+                // `specializer::spread` both assert. A `Spread(int(65..=128))` therefore type
+                // checks here and panics in every evaluator.
+                if *bits > UNSPREAD_INPUT_MAX {
                     return Err(format!(
-                        "Spread expects int(n) with n <= {MAX_SUPPORTED_UNSIGNED_BITS}, got {}",
+                        "Spread expects int(n) with n <= {UNSPREAD_INPUT_MAX}, got {}",
                         value_type
                     ));
                 }
@@ -311,10 +354,34 @@ impl Types {
                     }
                     Ok(())
                 }
-                CallTarget::Dynamic(_) => {
-                    panic!(
-                        "Dynamic calls should be eliminated by defunctionalization before type analysis"
-                    );
+
+                // A dynamic call is typed from the callee _value_, because the callee itself is not
+                // known here. The arguments go unchecked, unlike above, because a `Function` type
+                // carries no parameter list to check them against.
+                CallTarget::Dynamic(callee) => {
+                    let callee_type = function_info.values.get(callee).ok_or_else(|| {
+                        format!("Callee value {:?} not found in type assignments", callee)
+                    })?;
+                    let return_types = callee_type
+                        .call_returns()
+                        .ok_or_else(|| {
+                            format!("Indirect call through a {callee_type}, which is not callable")
+                        })?
+                        .to_vec();
+
+                    if result.len() != return_types.len() {
+                        return Err(format!(
+                            "Indirect call through a {} expects {} return values, got {}",
+                            callee_type,
+                            return_types.len(),
+                            result.len()
+                        ));
+                    }
+
+                    for (ret, ret_type) in result.iter().zip(return_types.iter()) {
+                        function_info.values.insert(*ret, ret_type.clone());
+                    }
+                    Ok(())
                 }
             },
             OpCode::ArrayGet {
@@ -849,6 +916,7 @@ impl Analysis for TypeInfo {
 mod tests {
     use super::*;
     use crate::compiler::ssa::hlssa::builder::{HLEmitter, HLSSABuilder};
+    use mavros_int_semantics::IntBits;
 
     /// Type an `SExt` whose operand is an eight-bit constant but which declares `from_bits`.
     fn sext_declaring(from_bits: usize) {
@@ -860,7 +928,7 @@ mod tests {
                 b.function.add_return_type(Type::int(16));
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let v = e.int_const(8, 0x80);
+                let v = e.int_const(IntBits::from_u128(8, 0x80));
                 let widened = e.sext(v, from_bits, 16);
                 e.terminate_return(vec![widened]);
             });
@@ -879,5 +947,107 @@ mod tests {
     #[should_panic(expected = "SExt declares from_bits 16 for a value of type int8")]
     fn a_sext_declaring_a_width_its_operand_does_not_have_is_rejected() {
         sext_declaring(16);
+    }
+
+    /// `main(x: int8) { fn_ptr(x) }` calling `callee(value: int8) -> returns` indirectly.
+    fn program_calling_indirectly(returns: Vec<Type>) -> (HLSSA, Vec<ValueId>) {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut builder = HLSSABuilder::new(&mut ssa);
+
+        let (callee_id, ()) = builder.add_function("callee".to_string(), |b| {
+            for typ in &returns {
+                b.function.add_return_type(typ.clone());
+            }
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let value = e.add_parameter(Type::int(8));
+            let results = returns.iter().map(|_| value).collect();
+            e.terminate_return(results);
+        });
+
+        let results = builder.modify_function(main_id, |b| {
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let value = e.add_parameter(Type::int(8));
+            let fn_ptr = e.emit_constant(Constant::FnPtr(callee_id));
+            let results = e.call_indirect(fn_ptr, vec![value], returns.len());
+            e.terminate_return(vec![]);
+            results
+        });
+
+        (ssa, results)
+    }
+
+    /// The results of a call through a function pointer are typed from the pointer's own type.
+    #[test]
+    fn an_indirect_calls_results_take_the_callees_return_types() {
+        let (ssa, results) = program_calling_indirectly(vec![Type::field()]);
+        let flow = FlowAnalysis::run(&ssa);
+
+        let types = Types::new().run(&ssa, &flow);
+        let main = types.get_function(ssa.get_unique_entrypoint_id());
+
+        assert_eq!(main.get_value_type(results[0]), &Type::field());
+    }
+
+    /// A call returning nothing is the other end of the same rule: `Unit` is no results, not one
+    /// result of some unit type, so there is nothing to name and nothing to type.
+    #[test]
+    fn an_indirect_call_returning_nothing_types_fine() {
+        let (ssa, results) = program_calling_indirectly(Vec::new());
+        assert!(results.is_empty());
+
+        let flow = FlowAnalysis::run(&ssa);
+        let _ = Types::new().run(&ssa, &flow);
+    }
+
+    /// A callable that arrives as a parameter has no constant to read a signature off, so its
+    /// declared type is the answer.
+    #[test]
+    fn a_callable_parameters_declared_type_types_the_call_through_it() {
+        let mut ssa = HLSSA::with_main("apply".to_string());
+        let apply = ssa.get_unique_entrypoint_id();
+        let mut builder = HLSSABuilder::new(&mut ssa);
+
+        let result = builder.modify_function(apply, |b| {
+            b.function.add_return_type(Type::field());
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let callable = e.add_parameter(Type::function_returning(vec![Type::field()]));
+            let value = e.add_parameter(Type::field());
+            let results = e.call_indirect(callable, vec![value], 1);
+            e.terminate_return(results.clone());
+            results[0]
+        });
+
+        let flow = FlowAnalysis::run(&ssa);
+        let types = Types::new().run(&ssa, &flow);
+
+        assert_eq!(
+            types.get_function(apply).get_value_type(result),
+            &Type::field()
+        );
+    }
+
+    /// A function pointer's type is read off the callee's own SSA signature, so a mismatch between
+    /// it and the call's result count is an error rather than a silently mistyped value.
+    #[test]
+    #[should_panic(expected = "expects 1 return values, got 2")]
+    fn an_indirect_call_taking_more_results_than_the_callee_returns_is_rejected() {
+        let (mut ssa, _) = program_calling_indirectly(vec![Type::field()]);
+        let main_id = ssa.get_unique_entrypoint_id();
+        let extra = ssa.fresh_value();
+
+        for (_, block) in ssa.get_function_mut(main_id).get_blocks_mut() {
+            for instruction in block.get_instructions_mut() {
+                if let OpCode::Call { results, .. } = instruction {
+                    results.push(extra);
+                }
+            }
+        }
+
+        let flow = FlowAnalysis::run(&ssa);
+        let _ = Types::new().run(&ssa, &flow);
     }
 }

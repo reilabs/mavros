@@ -8,7 +8,7 @@ use crate::{
     compiler::{
         analysis::{
             flow_analysis::FlowAnalysis,
-            types::{FunctionTypeInfo, Types, const_value_type},
+            types::{FunctionTypeInfo, Types, pool_constant_types},
             value_definitions::{FunctionValueDefinitions, ValueDefinition},
         },
         pass_manager::{AnalysisId, AnalysisStore, Pass},
@@ -83,14 +83,13 @@ impl Simplifier {
             let cfg = flow.get_function_cfg(function_id);
             sb.modify_function(function_id, |fb| {
                 for _ in 0..self.max_iterations {
-                    // Recompute locally so newly emitted opcodes (the Const+Cast
-                    // pair from `materialize_const`) appear with the right types.
-                    let constant_types: HashMap<ValueId, Type> = fb
-                        .ssa
-                        .const_snapshot()
-                        .iter()
-                        .map(|(vid, cv)| (*vid, const_value_type(cv)))
-                        .collect();
+                    // Recompute locally so newly emitted opcodes (the Const+Cast pair from
+                    // `materialize_const`) appear with the right types.
+                    let constant_types = pool_constant_types(&fb.ssa.const_snapshot(), &|fn_id| {
+                        function_types
+                            .get(&fn_id)
+                            .map(|(_, returns)| returns.to_vec())
+                    });
                     let fti = Types::new().run_function(
                         fb.function,
                         &function_types,

@@ -968,7 +968,7 @@ impl RCInsertion {
             TypeExpr::Int(_) => false,
             TypeExpr::WitnessOf(_) => true,
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
-            TypeExpr::Function => false,
+            TypeExpr::Function(_) => false,
             TypeExpr::Blob(..) => false,
         }
     }

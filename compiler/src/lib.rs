@@ -7,6 +7,7 @@ pub mod flamegraph;
 pub mod plotting;
 pub mod project;
 pub mod wasm_debug;
+pub mod wasm_host;
 pub mod wasm_runtime;
 
 pub use mavros_artifacts as artifacts;

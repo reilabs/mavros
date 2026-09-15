@@ -34,6 +34,7 @@ use crate::{
         },
     },
 };
+use mavros_int_semantics::IntBits;
 
 pub struct PurifyWitnessSlices {}
 
@@ -696,7 +697,7 @@ fn materialize_pure_slice_tuple(
     let loc = SourceLocation::synthetic("purify_witness_slices");
     let (ll, start) = {
         let mut b = HLInstrBuilder::new(function, ssa, new_instrs, loc.clone());
-        (b.slice_len(slice), b.int_const(32, 0))
+        (b.slice_len(slice), b.int_const(IntBits::zero(32)))
     };
     mk_slice_tuple(slice, ll, start, phys_ty, function, ssa, new_instrs, loc)
 }
@@ -904,13 +905,13 @@ fn rewrite_instruction(
             let phys_ty = physical_type(result, affected, type_info);
             let (physical, log_len, start) = {
                 let mut b = HLInstrBuilder::new(function, ssa, new_instrs, loc.clone());
-                let bump = b.int_const(32, values.len() as u128);
+                let bump = b.int_const(IntBits::from_u128(32, values.len() as u128));
                 match (replacement_tuple_map.get(&slice).copied(), dir) {
                     (Some(t), SliceOpDir::Back) => {
                         let p = b.tuple_proj(t, 0);
                         let ll = b.tuple_proj(t, 1);
                         let st = b.tuple_proj(t, 2);
-                        let one = b.int_const(32, 1);
+                        let one = b.int_const(IntBits::one(32));
                         let mut physical = p;
                         let mut cursor = b.uadd(st, ll);
                         for value in &values {
@@ -926,7 +927,7 @@ fn rewrite_instruction(
                         let st = b.tuple_proj(t, 2);
                         let mut physical = b.slice_push(p, values.clone(), SliceOpDir::Front);
                         for (k, value) in values.iter().enumerate() {
-                            let k_const = b.int_const(32, k as u128);
+                            let k_const = b.int_const(IntBits::from_u128(32, k as u128));
                             let idx = b.uadd(st, k_const);
                             physical = b.array_set(physical, idx, *value);
                         }
@@ -938,13 +939,13 @@ fn rewrite_instruction(
                         for value in &values {
                             physical = b.slice_push(physical, vec![*value], SliceOpDir::Back);
                         }
-                        let zero = b.int_const(32, 0);
+                        let zero = b.int_const(IntBits::zero(32));
                         (physical, b.uadd(base_len, bump), zero)
                     }
                     (None, SliceOpDir::Front) => {
                         let base_len = b.slice_len(slice);
                         let physical = b.slice_push(slice, values.clone(), SliceOpDir::Front);
-                        let zero = b.int_const(32, 0);
+                        let zero = b.int_const(IntBits::zero(32));
                         (physical, b.uadd(base_len, bump), zero)
                     }
                 }
@@ -967,12 +968,12 @@ fn rewrite_instruction(
                 (b.tuple_proj(t, 0), b.tuple_proj(t, 1), b.tuple_proj(t, 2))
             } else {
                 let ll = b.slice_len(slice);
-                let st = b.int_const(32, 0);
+                let st = b.int_const(IntBits::zero(32));
                 (slice, ll, st)
             };
-            let zero = b.int_const(32, 0);
+            let zero = b.int_const(IntBits::zero(32));
             b.assert_cmp(CmpKind::ULt, zero, ll);
-            let one = b.int_const(32, 1);
+            let one = b.int_const(IntBits::one(32));
             let new_ll = b.usub(ll, one);
             let (elem_index, new_st) = match dir {
                 SliceOpDir::Back => (b.uadd(st, new_ll), st),
@@ -1003,10 +1004,10 @@ fn rewrite_instruction(
                 (b.tuple_proj(t, 0), b.tuple_proj(t, 1), b.tuple_proj(t, 2))
             } else {
                 let ll = b.slice_len(slice);
-                let st = b.int_const(32, 0);
+                let st = b.int_const(IntBits::zero(32));
                 (slice, ll, st)
             };
-            let one = b.int_const(32, 1);
+            let one = b.int_const(IntBits::one(32));
             let new_ll = b.uadd(ll, one);
             b.assert_cmp(CmpKind::ULt, index, new_ll);
             let phys_idx = b.uadd(st, index);
@@ -1030,11 +1031,11 @@ fn rewrite_instruction(
                 (b.tuple_proj(t, 0), b.tuple_proj(t, 1), b.tuple_proj(t, 2))
             } else {
                 let ll = b.slice_len(slice);
-                let st = b.int_const(32, 0);
+                let st = b.int_const(IntBits::zero(32));
                 (slice, ll, st)
             };
             b.assert_cmp(CmpKind::ULt, index, ll);
-            let one = b.int_const(32, 1);
+            let one = b.int_const(IntBits::one(32));
             let new_ll = b.usub(ll, one);
             let phys_idx = b.uadd(st, index);
             let physical = b.fresh_value();

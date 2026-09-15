@@ -47,6 +47,12 @@ The rules themselves:
 - **Casts** truncate the low bits when narrowing and sign-extend when widening a signed source.
   `iN as Field` is not a cast at all: the frontend rejects it with "Only unsigned integer types may
   be casted to Field".
+- **`uN as Field` carries the pattern's magnitude**, which is `BigUint::from(&IntBits)` and the same
+  number an unsigned reading of the same bits gives. There is no separate model operation for it
+  because there is nothing to decide: the cast is a raw-bits conversion. The embedding is partial as
+  the compiler admits integer widths only for which it is total. A magnitude >= `p` cannot be
+  represented injectively in the Field, so the compiler rejects a cast for any integer width that
+  could have a value with such a magnitude statically at compile time.
 - **A failing operation is not dead.** `die.rs` makes a `Binary` eliminable only when it does not
   require an ACIR-gen predicate, and a checked `Add`/`Sub`/`Mul` — or a shift whose amount is
   non-constant or out of range — does.
@@ -172,10 +178,13 @@ Everywhere the intended semantics _has_ an opinion, this agrees with it.
 
 ### `vm`: the Bytecode Interpreter's Opcodes
 
-`vm/src/bytecode.rs`. This one does **not** delegate because it's a hot dispatch loop over `u64`
-cells with a separate `Int128` lane, while the model computes over heap-backed limbs. Delegating
-would mean an allocation per opcode to compute an `eval` that is then discarded, which is not great
-for performance.
+`vm/src/bytecode.rs` and `vm/src/int_limbs.rs`. This one does **not** delegate because it's a hot
+dispatch loop over `u64` cells, while the model computes over heap-backed limbs. Delegating would
+mean an allocation per opcode to compute an `eval` that is then discarded, which is not great for
+performance. That argument holds for the `_intn` lane too as a wide value is a run of frame cells
+computed over in place, so delegating would allocate an `IntBits` for each operand and one more for
+the result, on every opcode, and also prevent optimizing for performance due to `IntBits`' focus on
+readability.
 
 The relation is thus checked instead of enforced: **total, and equal to `residue` wherever the model
 specifies a pattern**. Total means no panic, no undefined behavior and no process abort — a witness
@@ -185,10 +194,16 @@ interpreter relies on.
 
 ### `llvm`: the LLVM Backend
 
-`codegen/llssa_to_llvm.rs`. It emits instructions and never computes a value, so a Rust mirror of
-its choices would only be checking a copy. Instead the lowering itself is called with two constant
-operands and LLVM's own constant folder answers: what comes back is the real lowering composed with
-LLVM's definition of the instruction it chose.
+`codegen/llssa_to_llvm.rs` and `wasm-runtime/src/lib.rs`. It emits instructions and never computes a
+value, so a Rust mirror of its choices would only be checking a copy. Instead the lowering itself is
+called with two constant operands and we use LLVM's constant folder to check the answer.
+
+Above 128 bits LLVM expands a multiply into quadratic straight-line code -- 7.2 MB at 16384 bits,
+and past around 5700 bits a module no WASM engine will load. `urem` and `srem` are built as
+`n - (n / d) * d`, so they contain a multiply of the same width and inherit the whole of that cost;
+`udiv` and `sdiv` expand to a bit-serial loop with no multiply in it and hence stay on LLVM's
+lowering. To that end, we provide `__int_mul` as part of the WASM runtime, which uses a limb-based
+evaluation to be much cheaper, and the three affected operations are emitted around a call to it.
 
 ### `value-range`: the Interval Domain's Arithmetic
 
@@ -277,11 +292,34 @@ semantic change arrives as a reviewable diff of Noir programs.
 These are conformance gaps, not deferred optimizations. Each is a place where mavros does not
 currently implement Noir.
 
-- **Signed integers wider than 64 bits are unsupported.** Noir has `i128`; mavros caps a signed
-  reading at 64 bits and rejects the type outright.
-- **`u128 <<` is unsupported**, and panics rather than compiling.
-- **A _witness_ shift at a non-power-of-two width does not compile**, and panics rather than being
-  rejected. All three total evaluators reduce the amount modulo the width, so they agree at every
+- **Signed integers wider than 64 bits are unsupported _by the lowerings_.** Noir has `i128`, and
+  the type is still rejected outright at the frontend. The _model_ does not cap a signed reading at
+  all, so the normative half of this document reads two's complement at any width. What remains of
+  the divergence is that no evaluator reads a signed pattern wider than one host limb, because the
+  signed lowerings and the VM's `sdiv_int`/`slt_int` are single-cell. That bound is
+  `mavros_int_semantics::MAX_LOWERED_SIGNED_BITS`, asserted at
+  `hlssa::type_system::assert_signed_op_width` and mirrored by `corners::signed_width_ok`, which is
+  why `SIGNED_WIDTHS` is narrower than `WIDTHS`. `passes::width_validation` reads the same constant
+  and refuses a wider signed operation with a diagnostic, so a program meets this divergence as a
+  compile error rather than as a panic.
+- **A _pure_ integer wider than the field carries injectively has no R1CS value.** The boundary
+  itself does not diverge: both lowering backends move an integer across it at every width the
+  modulus admits, filling every limb the element has, and `uN as Field` above that width is refused
+  for every program by `passes::width_validation` under the rule above. What is left is the third
+  lane, and only its pure half. `hlssa_to_r1cs::Value` carries a number as one field element, so
+  `Value::of_int` refuses a magnitude at or above the modulus — which is right for a value that has
+  to become an element, and leaves a _pure_ `int(N)` constant past that width unrepresentable there.
+  The **witnessed** half is closed: `passes::wide_witness_ints` splits such a value into limbs, each
+  of which does have an element, so a constant no element can carry still selects, moves and
+  narrows. Closing the pure half means carrying an integer there as a pattern — a `Value::Int`
+  variant — and becoming an element only at the boundary, where the modulus is the bound. Nothing
+  reaches it today: every operation that would put a pure value that wide into a constraint is
+  either refused by `passes::width_validation` or folded before R1CS generation, which is why
+  `Value::ice_no_element` reports as a **compiler bug** rather than as a refusal. That makes this
+  the one half of the field boundary held by an argument rather than by a rule, and the argument is
+  what the ICE names.
+- **A _witness_ shift at a non-power-of-two width does not compile**, and is refused with a
+  diagnostic. All three total evaluators reduce the amount modulo the width, so they agree at every
   width and the gap is not a disagreement between backends; what is missing is the _guard IR_, and
   only on the witness path. `witness_bitwise::lower_shift` indexes bit `log2(bits)` to test "too
   large" and keys its `2^n` factor table by the same number, and both are the amount bound only
@@ -289,6 +327,10 @@ currently implement Noir.
   The _pure_ path has no such limit: `shift_guard::emit_shift_amount_tests` builds a real
   `amount < bits` comparison, which is width-agnostic, and `shift_guard::shift_operand_bits`
   accordingly admits any width. Admitting a witness one means rebuilding its check the same way.
+- **A _witness_ `<<` at 128 bits compiles only where the program writes its amount, and rejects an
+  overflowing shift rather than wrapping it.** This is a stopgap measure to keep the `passport_*`
+  tests compiling while performing most size-based refusals at compile time, and will be lifted once
+  the shift is computed limb-wise.
 - **A dead _witness_ `Add`/`Sub`/`Mul` loses its rejection.** DCE keeps the overflow check when it
   deletes a dead operation, but only when both operands are pure. The check a live witness operation
   gets is a range check on a field result rather than a comparison, and DCE cannot build that.
