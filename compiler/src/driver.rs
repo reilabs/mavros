@@ -65,10 +65,7 @@ use crate::{
             witness_write_to_fresh::WitnessWriteToFresh,
             witness_write_to_void::WitnessWriteToVoid,
         },
-        ssa::{
-            DefaultSSAAnnotator, SourceLocation,
-            hlssa::{Constant, HLSSA},
-        },
+        ssa::{DefaultSSAAnnotator, SourceLocation, hlssa::HLSSA},
         untaint_control_flow::UntaintControlFlow,
     },
 };
@@ -735,7 +732,7 @@ impl Driver {
         // them all.
         ad_ssa.for_each_const(|_, cv| {
             assert!(
-                !const_contains_fn_ptr(cv),
+                !cv.contains_fn_ptr(),
                 "ICE: FnPtr constant survived until program merge"
             );
         });
@@ -886,15 +883,6 @@ impl Driver {
         info!(message = %"WASM metadata generated", path = %metadata_path);
 
         Ok(())
-    }
-}
-
-/// Whether a constant contains a function pointer anywhere within it.
-fn const_contains_fn_ptr(constant: &Constant) -> bool {
-    match constant {
-        Constant::FnPtr(_) => true,
-        Constant::Blob(blob) => blob.elements.iter().any(const_contains_fn_ptr),
-        Constant::Int(_) | Constant::Field(_) => false,
     }
 }
 
