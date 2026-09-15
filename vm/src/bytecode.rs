@@ -1950,46 +1950,47 @@ mod def {
         }
     }
 
-    #[opcode]
+    #[raw_opcode]
     fn array_get(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
         #[out] res: *mut u64,
         #[frame] array: BoxedValue,
         #[frame] index: u64,
         stride: usize,
-        vm: &mut VM,
-    ) {
-        assert!(
-            (index as usize) * stride < array.layout().array_size(),
-            "array_get: index {} out of bounds for array of length {}",
-            index,
-            array.layout().array_size() / stride
-        );
+    ) -> (*const u64, Frame) {
+        // Check the element index before multiplying by stride: a large index can wrap.
+        if stride == 0 || index as usize >= array.layout().array_size() / stride {
+            return trap(pc, frame, vm);
+        }
         let src = array.array_idx(index as usize, stride);
         unsafe {
             ptr::copy_nonoverlapping(src, res, stride);
         }
+        (unsafe { pc.add(5) }, frame)
     }
 
     /// Read an element out of a blob: a raw sequence of `len` elements of
     /// `stride` cells each, stored inline in the frame starting at `source`.
-    #[opcode]
+    #[raw_opcode]
     fn blob_get(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
         #[out] res: *mut u64,
         source: FramePosition,
         #[frame] index: u64,
         stride: usize,
         len: usize,
-        frame: Frame,
-    ) {
-        assert!(
-            (index as usize) < len,
-            "blob_get: index {} out of bounds for blob of length {}",
-            index,
-            len
-        );
+    ) -> (*const u64, Frame) {
+        if index as usize >= len {
+            return trap(pc, frame, vm);
+        }
         unsafe {
             frame.write_to(res, (source.0 + (index as usize) * stride) as isize, stride);
         }
+        (unsafe { pc.add(6) }, frame)
     }
 
     #[opcode]
@@ -2006,23 +2007,21 @@ mod def {
         }
     }
 
-    #[opcode]
+    #[raw_opcode]
     #[inline(never)]
     fn array_set(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
         #[out] res: *mut BoxedValue,
         #[frame] array: BoxedValue,
         #[frame] index: u64,
         source: FramePosition,
         stride: usize,
-        frame: Frame,
-        vm: &mut VM,
-    ) {
-        assert!(
-            (index as usize) * stride < array.layout().array_size(),
-            "array_set: index {} out of bounds for array of length {}",
-            index,
-            array.layout().array_size() / stride
-        );
+    ) -> (*const u64, Frame) {
+        if stride == 0 || index as usize >= array.layout().array_size() / stride {
+            return trap(pc, frame, vm);
+        }
         let new_array = array.copy_if_reused(vm);
         let target = new_array.array_idx(index as usize, stride);
         if new_array.layout().data_type() == DataType::BoxedArray {
@@ -2045,6 +2044,7 @@ mod def {
             frame.write_to(target, source.0 as isize, stride);
             *res = new_array;
         }
+        (unsafe { pc.add(6) }, frame)
     }
 
     #[opcode]
@@ -3373,6 +3373,71 @@ mod tests {
             Vec::new(),
             Vec::new(),
         )
+    }
+
+    #[test]
+    fn indexed_accesses_trap_or_advance() {
+        // Two four-word elements: index 1 is valid, 2 is out of bounds, and
+        // 1 << 62 would wrap to zero if multiplied by the stride before checking.
+        for index in [1, 2, 1 << 62] {
+            for opcode in [
+                OpCode::ArrayGet {
+                    res: FramePosition(2),
+                    array: FramePosition(6),
+                    index: FramePosition(7),
+                    stride: 4,
+                },
+                OpCode::ArraySet {
+                    res: FramePosition(2),
+                    array: FramePosition(6),
+                    index: FramePosition(7),
+                    source: FramePosition(8),
+                    stride: 4,
+                },
+                OpCode::BlobGet {
+                    res: FramePosition(2),
+                    source: FramePosition(8),
+                    index: FramePosition(7),
+                    stride: 4,
+                    len: 2,
+                },
+            ] {
+                let mut vm = empty_witgen_vm();
+                let frame = Frame::base_frame(16, &mut vm);
+                let array = BoxedValue::alloc(BoxedLayout::array(8, false), &mut vm);
+                let initial = [10, 11, 12, 13, 14, 15, 16, 17];
+                unsafe {
+                    ptr::copy_nonoverlapping(initial.as_ptr(), array.data(), 8);
+                    ptr::write_bytes(frame.data, 0, 16);
+                    *frame.data.add(6) = array.0 as u64;
+                    *frame.data.add(7) = index;
+                    ptr::copy_nonoverlapping(initial.as_ptr(), frame.data.add(8), 8);
+                }
+                let mut binary = Vec::new();
+                opcode.to_binary(&mut binary, &mut Vec::new());
+                let (next_pc, _) = DISPATCH[binary[0] as usize](binary.as_ptr(), frame, &mut vm);
+                let output = unsafe { std::slice::from_raw_parts(frame.data.add(2), 4) };
+                let contents = unsafe { std::slice::from_raw_parts(array.data(), 8) };
+                if index == 1 {
+                    assert!(!vm.trapped, "{opcode}");
+                    assert_eq!(next_pc, unsafe { binary.as_ptr().add(binary.len()) });
+                    match opcode {
+                        OpCode::ArraySet { .. } => {
+                            assert_eq!(output[0], array.0 as u64);
+                            assert_eq!(contents, &[10, 11, 12, 13, 10, 11, 12, 13]);
+                        }
+                        _ => assert_eq!(output, &[14, 15, 16, 17]),
+                    }
+                } else {
+                    assert!(vm.trapped, "{opcode}, index={index}");
+                    assert!(next_pc.is_null());
+                    assert_eq!(output, &[0; 4]);
+                    assert_eq!(contents, initial);
+                }
+                array.dec_rc(&mut vm);
+                frame.pop(&mut vm);
+            }
+        }
     }
 
     #[test]

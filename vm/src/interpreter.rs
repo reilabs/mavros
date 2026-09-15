@@ -239,7 +239,7 @@ pub struct WitgenResult {
     pub instrumenter: AllocationInstrumenter,
 }
 
-/// The program executed a trap: a failed assertion or rangecheck.
+/// The program executed a trap: a failed assertion, rangecheck, or bounds check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrapError {
     stack_trace: Vec<bytecode::StackFrame>,
