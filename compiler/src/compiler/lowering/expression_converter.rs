@@ -1143,7 +1143,7 @@ impl<'a> ExpressionConverter<'a> {
 
         let AstType::Tuple(fields) = scrutinee_ty else {
             panic!(
-                "ICE: scrutinee should have fields if arguments is empty. Found with type {scrutinee_ty:?}"
+                "ICE: a case that binds arguments needs a tuple scrutinee, found {scrutinee_ty:?}"
             )
         };
         let location = self.current_source_location.clone();
