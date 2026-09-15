@@ -174,7 +174,8 @@ pub fn run_compile(
     absolute_paths: bool,
     logup_soundness: u32,
 ) -> Result<ExitCode, Error> {
-    let roots = Project::binary_package_roots(path)?;
+    let requested_root = fs::canonicalize(path)?;
+    let roots = Project::binary_package_roots(&requested_root)?;
     let multiple = roots.len() > 1;
     if multiple
         && [r1cs_output, binary_output].iter().any(|output| {
@@ -191,12 +192,13 @@ pub fn run_compile(
         ).into());
     }
     run_packages(&roots, |root| {
-        let r1cs_output = if multiple {
+        let rebase = root != &requested_root;
+        let r1cs_output = if rebase {
             root.join(r1cs_output)
         } else {
             r1cs_output.clone()
         };
-        let binary_output = if multiple {
+        let binary_output = if rebase {
             root.join(binary_output)
         } else {
             binary_output.clone()
@@ -290,15 +292,12 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     })
 }
 
-/// Visit every selected binary even after one fails, keeping each package's inputs and artifacts
-/// separate. Single-package callers retain their original error behavior.
+/// Run each selected binary with its own inputs and artifacts.
+/// Report package errors and return a combined exit status.
 fn run_packages(
     roots: &[PathBuf],
     mut run: impl FnMut(&PathBuf) -> Result<ExitCode, Error>,
 ) -> Result<ExitCode, Error> {
-    if roots.len() == 1 {
-        return run(&roots[0]);
-    }
     let mut success = true;
     for root in roots {
         match run(root) {
@@ -699,6 +698,76 @@ mod tests {
             fs::read(root.join("a/target/basic.json")).unwrap(),
             fs::read(root.join("b/target/basic.json")).unwrap()
         );
+    }
+
+    #[test]
+    fn workspace_compile_rebases_outputs_for_a_single_selected_member() {
+        let dir = workspace_fixture();
+        for (manifest, member) in [
+            (
+                "[workspace]\nmembers = ['a', 'b']\ndefault-member = 'b'\n",
+                "b",
+            ),
+            ("[workspace]\nmembers = ['a']\n", "a"),
+        ] {
+            fs::write(dir.path().join("Nargo.toml"), manifest).unwrap();
+            assert_eq!(
+                run_compile(
+                    &dir.path().to_path_buf(),
+                    &PathBuf::from("target/r1cs.bin"),
+                    &PathBuf::from("target/basic.json"),
+                    false,
+                    true,
+                    false,
+                    128,
+                )
+                .unwrap(),
+                ExitCode::SUCCESS
+            );
+            for file in ["r1cs.bin", "basic.json", "basic.debug.json"] {
+                assert!(dir.path().join(member).join("target").join(file).is_file());
+            }
+        }
+    }
+
+    #[test]
+    fn direct_package_compile_keeps_explicit_output_paths() {
+        let dir = workspace_fixture();
+        // Direct package compilation resolves relative output paths from the caller's
+        // working directory.
+        let output = tempfile::tempdir_in(".").unwrap();
+        let output_path = Path::new(output.path().file_name().unwrap());
+        let r1cs = output_path.join("r1cs.bin");
+        let binary = output_path.join("basic.json");
+        assert_eq!(
+            run_compile(
+                &dir.path().join("a"),
+                &r1cs,
+                &binary,
+                false,
+                false,
+                false,
+                128
+            )
+            .unwrap(),
+            ExitCode::SUCCESS
+        );
+        assert!(r1cs.is_file());
+        assert!(binary.is_file());
+    }
+
+    #[test]
+    fn package_errors_are_handled_consistently_for_any_member_count() {
+        let roots = [PathBuf::from("a"), PathBuf::from("b")];
+        for count in [1, 2] {
+            let mut visited = Vec::new();
+            let result = run_packages(&roots[..count], |root| {
+                visited.push(root.clone());
+                Err(std::io::Error::other("same package failure").into())
+            });
+            assert_eq!(result.unwrap(), ExitCode::FAILURE);
+            assert_eq!(visited, roots[..count]);
+        }
     }
 
     #[test]
