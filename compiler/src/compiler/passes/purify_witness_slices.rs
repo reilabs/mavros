@@ -1112,8 +1112,8 @@ fn rewrite_instruction(
             let slot_is_window = is_ref_to_wl_slice(result, affected);
             let value = match (replacement_tuple_map.get(&value).copied(), slot_is_window) {
                 (Some(t), true) => t,
-                (Some(_), false) => panic!(
-                    "ICE: purify_witness_slices: slice window initializes an alloc whose joined shapes left the slot pure"
+                (Some(_), false) => ice!(
+                    "purify_witness_slices: slice window initializes an alloc whose joined shapes left the slot pure"
                 ),
                 (None, true) => {
                     assert!(
@@ -1132,8 +1132,8 @@ fn rewrite_instruction(
             let slot_is_window = is_ref_to_wl_slice(ptr, affected);
             let value = match (replacement_tuple_map.get(&value).copied(), slot_is_window) {
                 (Some(t), true) => t,
-                (Some(_), false) => panic!(
-                    "ICE: purify_witness_slices: slice window stored into a slot whose joined shapes left it pure"
+                (Some(_), false) => ice!(
+                    "purify_witness_slices: slice window stored into a slot whose joined shapes left it pure"
                 ),
                 (None, true) => {
                     assert!(
@@ -1172,7 +1172,7 @@ fn rewrite_instruction(
             unconstrained,
         } => {
             let CallTarget::Static(g) = &callee else {
-                panic!("ICE: dynamic call survived to purify_witness_slices")
+                ice!("dynamic call survived to purify_witness_slices")
             };
             let lifted_params = lifts.params.get(g).map(Vec::as_slice).unwrap_or(&[]);
             let args = args
@@ -1190,8 +1190,8 @@ fn rewrite_instruction(
                             );
                             materialize_pure_slice_tuple(a, type_info, function, ssa, new_instrs)
                         }
-                        (Some(_), false) => panic!(
-                            "ICE: purify_witness_slices: wl slice tuple flows into a param the \
+                        (Some(_), false) => ice!(
+                            "purify_witness_slices: wl slice tuple flows into a param the \
                              joined shapes left pure"
                         ),
                         (None, false) => a,
@@ -1293,8 +1293,8 @@ fn rewrite_instruction(
                 result_is_window,
             ) {
                 (Some(t), true) => t,
-                (Some(_), false) => panic!(
-                    "ICE: purify_witness_slices: select arm v{} carries a slice window but the result's shapes left it pure",
+                (Some(_), false) => ice!(
+                    "purify_witness_slices: select arm v{} carries a slice window but the result's shapes left it pure",
                     v.0
                 ),
                 (None, true) => {
@@ -1330,7 +1330,7 @@ fn rewrite_instruction(
         // produce would survive to the next pass. Refuse at the same contract level rather than
         // pretend to handle a shape the pipeline drops on the floor one pass later.
         OpCode::Guard { .. } => {
-            panic!("ICE: purify_witness_slices: Guard encountered before witness typing")
+            ice!("purify_witness_slices: Guard encountered before witness typing")
         }
 
         other => {

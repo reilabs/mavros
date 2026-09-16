@@ -947,7 +947,7 @@ fn go_shape_from(
             path.pop();
             WitnessShape::Ref(info, Box::new(c))
         }
-        TypeExpr::WitnessOf(_) => panic!("ICE: WitnessOf during witness-taint inference"),
+        TypeExpr::WitnessOf(_) => ice!("WitnessOf during witness-taint inference"),
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
     }
 }

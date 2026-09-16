@@ -246,7 +246,7 @@ impl LowerWitnessBitwiseOps {
                 let two_product = b.umul(two, product);
                 b.usub(sum, two_product)
             }
-            _ => unreachable!(),
+            _ => ice_unreachable!(),
         };
 
         b.emit(OpCode::Cast {
@@ -514,7 +514,7 @@ impl LowerWitnessBitwiseOps {
                     },
                 );
             }
-            _ => unreachable!("lower_shift only dispatches Shl and Shr"),
+            _ => ice_unreachable!("lower_shift only dispatches Shl and Shr"),
         }
     }
 
@@ -586,7 +586,7 @@ impl LowerWitnessBitwiseOps {
                 amount_bits,
                 bits,
             ),
-            _ => unreachable!("lower_shift only dispatches Shl and Shr"),
+            _ => ice_unreachable!("lower_shift only dispatches Shl and Shr"),
         }
     }
 
@@ -1234,7 +1234,7 @@ fn lower_word_bitwise(
         BinaryArithOpKind::And => and_word,
         BinaryArithOpKind::Xor => xor_word,
         BinaryArithOpKind::Or => b.uadd(and_word, xor_word),
-        _ => unreachable!(),
+        _ => ice_unreachable!(),
     }
 }
 

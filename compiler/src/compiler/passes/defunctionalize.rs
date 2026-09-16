@@ -110,8 +110,8 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         let mut targets: Vec<FunctionId> = reaching
             .get(&(*fid, *fn_ptr_val))
             .unwrap_or_else(|| {
-                panic!(
-                    "ICE: no reaching FnPtrs for v{} in {fid:?} at defunctionalization",
+                ice!(
+                    "no reaching FnPtrs for v{} in {fid:?} at defunctionalization",
                     fn_ptr_val.0
                 )
             })
@@ -121,8 +121,8 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         targets.sort_by_key(|f| f.0);
 
         if targets.is_empty() {
-            panic!(
-                "ICE: empty target set for v{} in {fid:?} at defunctionalization",
+            ice!(
+                "empty target set for v{} in {fid:?} at defunctionalization",
                 fn_ptr_val.0
             );
         }
@@ -136,10 +136,11 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
             if candidate.get_param_types() != param_types
                 || candidate.get_returns() != return_types.as_slice()
             {
-                panic!(
-                    "ICE: signature mismatch between {target:?} and {:?} at v{} in {fid:?} at \
+                ice!(
+                    "signature mismatch between {target:?} and {:?} at v{} in {fid:?} at \
                      defunctionalization",
-                    targets[0], fn_ptr_val.0,
+                    targets[0],
+                    fn_ptr_val.0,
                 );
             }
         }
@@ -215,8 +216,8 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
                         let dispatch_fn = *call_site_dispatch
                             .get(&(fid, fn_ptr_val))
                             .unwrap_or_else(|| {
-                                panic!(
-                                    "ICE: no dispatch function for v{} in {fid:?} at \
+                                ice!(
+                                    "no dispatch function for v{} in {fid:?} at \
                                      defunctionalization",
                                     fn_ptr_val.0
                                 )
@@ -288,7 +289,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
 
     #[cfg(debug_assertions)]
     if let Some(site) = surviving_function_type(ssa) {
-        panic!("ICE: a function type survived defunctionalization at {site}");
+        ice!("a function type survived defunctionalization at {site}");
     }
 }
 
@@ -361,7 +362,7 @@ fn compute_callable_functions(ssa: &HLSSA, reaching: &ReachingFns) -> HashSet<Fu
         for (_bid, block) in func.get_blocks() {
             for instr in block.get_instructions() {
                 if matches!(instr, OpCode::Guard { .. }) {
-                    panic!("ICE: Guard encountered in {fid:?} before defunctionalization");
+                    ice!("Guard encountered in {fid:?} before defunctionalization");
                 }
                 let OpCode::Call { function, .. } = instr else {
                     continue;

@@ -89,8 +89,8 @@ impl LowerMapCasts {
                                             ..
                                         }
                                     ) {
-                                        panic!(
-                                            "ICE: guarded Map cast reached LowerMapCasts; \
+                                        ice!(
+                                            "guarded Map cast reached LowerMapCasts; \
                                              LowerSideEffectFreeGuards should have unwrapped it"
                                         );
                                     }

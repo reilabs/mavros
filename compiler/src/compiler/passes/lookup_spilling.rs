@@ -85,7 +85,7 @@ impl LookupSpilling {
         };
 
         match target {
-            LookupTarget::DynRangecheck(_) => unreachable!(
+            LookupTarget::DynRangecheck(_) => ice_unreachable!(
                 "DynRangecheck is lowered to a static 8-bit rangecheck before spilling"
             ),
             LookupTarget::Rangecheck(bits) => {
@@ -213,7 +213,7 @@ impl LookupSpilling {
         };
 
         match target {
-            LookupTarget::DynRangecheck(_) => unreachable!(
+            LookupTarget::DynRangecheck(_) => ice_unreachable!(
                 "DynRangecheck is lowered to a static 8-bit rangecheck before spilling"
             ),
             LookupTarget::Rangecheck(bits) if *bits == 1 => {

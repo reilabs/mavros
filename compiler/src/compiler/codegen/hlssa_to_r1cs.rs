@@ -86,8 +86,8 @@ impl Value {
     #[track_caller]
     fn ice_undefined_divmod(kind: BinaryArithOpKind, bits: usize, signed: bool) -> ! {
         let sign = if signed { 'i' } else { 'u' };
-        panic!(
-            "ICE: undefined {kind:?} reached the R1CS constant fold on {sign}{bits}; \
+        ice!(
+            "undefined {kind:?} reached the R1CS constant fold on {sign}{bits}; \
              LowerPureGuards should have rejected the program at the preceding assertion"
         )
     }
@@ -98,8 +98,8 @@ impl Value {
     /// above the modulus has no way of being held.
     #[track_caller]
     fn ice_no_element(what: std::fmt::Arguments<'_>) -> ! {
-        panic!(
-            "ICE: {what} reached R1CS generation carrying a value at or above the modulus, which one field element cannot hold; width_validation should have refused the program, or the fold should have happened before here"
+        ice!(
+            "{what} reached R1CS generation carrying a value at or above the modulus, which one field element cannot hold; width_validation should have refused the program, or the fold should have happened before here"
         )
     }
 
@@ -164,8 +164,8 @@ impl Value {
         if let Value::Const(rhs) = other
             && *rhs == ark_bn254::Fr::ZERO
         {
-            panic!(
-                "ICE: zero divisor reached the R1CS field division fold; \
+            ice!(
+                "zero divisor reached the R1CS field division fold; \
                  LowerPureGuards should have rejected the program at the preceding assertion"
             );
         }
@@ -231,7 +231,9 @@ impl Value {
     /// The canonical value as a `u128`, panicking with the caller's name if it does not fit.
     fn expect_in_u128(&self, what: &str) -> u128 {
         self.const_u128(what).unwrap_or_else(|| {
-            let Value::Const(c) = self else { unreachable!("const_u128 panics on a non-constant") };
+            let Value::Const(c) = self else {
+                ice_unreachable!("const_u128 panics on a non-constant")
+            };
             panic!("expected {what}, but field value is {}", c.into_bigint())
         })
     }
@@ -480,7 +482,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
             hlssa::LookupTarget::DynRangecheck(_) => {
                 // `to_radix` lowers its (asserted radix-256) digit checks to static 8-bit
                 // rangechecks, so no `DynRangecheck` survives to R1CS generation.
-                unreachable!(
+                ice_unreachable!(
                     "DynRangecheck is lowered to a static 8-bit rangecheck before R1CS gen"
                 )
             }
@@ -559,7 +561,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
         _inputs: Vec<&Value>,
         _result_types: Vec<&Type>,
     ) -> Vec<Value> {
-        panic!("ICE: Guard should not appear in R1CS gen (should be lowered before)")
+        ice!("Guard should not appear in R1CS gen (should be lowered before)")
     }
 }
 

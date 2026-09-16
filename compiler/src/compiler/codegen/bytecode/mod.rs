@@ -38,8 +38,8 @@ use crate::{
 /// two's-complement frontier, and the lookup element by the tape's own cell-count tags. Reaching
 /// here means a rule stopped covering a lowering it is written against.
 fn unsupported_int_width(operation: &str, bits: usize) -> ! {
-    panic!(
-        "ICE: {operation} on an int{bits} reached bytecode generation with no lowering; width_validation should have refused the program"
+    ice!(
+        "{operation} on an int{bits} reached bytecode generation with no lowering; width_validation should have refused the program"
     )
 }
 
@@ -1079,8 +1079,8 @@ impl CodeGen {
                     let l_type = type_info.get_value_type(*v);
                     let r_type = type_info.get_value_type(*r);
                     if matches!(tgt, hlssa::CastTarget::Map(_) | hlssa::CastTarget::ValueOf) {
-                        panic!(
-                            "ICE: {} cast should have been lowered before bytecode codegen",
+                        ice!(
+                            "{} cast should have been lowered before bytecode codegen",
                             tgt
                         );
                     }

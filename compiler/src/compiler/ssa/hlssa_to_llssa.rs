@@ -1280,8 +1280,8 @@ fn lower_instruction(
                     val_map.insert(*result, ll_value);
                 }
                 CastTarget::ValueOf | CastTarget::Map(_) => {
-                    panic!(
-                        "ICE: {} cast should have been lowered before HLSSA->LLSSA lowering",
+                    ice!(
+                        "{} cast should have been lowered before HLSSA->LLSSA lowering",
                         target
                     );
                 }

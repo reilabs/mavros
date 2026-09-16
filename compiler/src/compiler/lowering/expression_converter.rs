@@ -171,8 +171,8 @@ impl<'a> ExpressionConverter<'a> {
         };
 
         let AstType::Function(_, ret, _, _) = signature else {
-            panic!(
-                "ICE: the ident `{}` names a function but is typed {declared:?}",
+            ice!(
+                "the ident `{}` names a function but is typed {declared:?}",
                 ident.name
             )
         };
@@ -615,7 +615,7 @@ impl<'a> ExpressionConverter<'a> {
                     },
                 );
             }
-            LValue::Dereference { .. } => unreachable!("dereference lvalues have refs"),
+            LValue::Dereference { .. } => ice_unreachable!("dereference lvalues have refs"),
             LValue::Clone(inner) => self.with_lvalue_ref(inner, b, f),
         }
     }
@@ -1005,7 +1005,7 @@ impl<'a> ExpressionConverter<'a> {
                 };
                 let zero = zero_const.map(|zero_const| b.emit_const(zero_const));
                 let result = self.emit_located(b, Some(unary.location), |e| match unary.operator {
-                    noirc_frontend::ast::UnaryOp::Dereference { .. } => unreachable!(),
+                    noirc_frontend::ast::UnaryOp::Dereference { .. } => ice_unreachable!(),
                     noirc_frontend::ast::UnaryOp::Not => e.not(value),
                     noirc_frontend::ast::UnaryOp::Minus => {
                         // Negation is `0 - x`, and it takes its sign from `x` — the same source
@@ -1020,7 +1020,7 @@ impl<'a> ExpressionConverter<'a> {
                             value,
                         )
                     }
-                    _ => unreachable!(),
+                    _ => ice_unreachable!(),
                 });
                 Some(result)
             }

@@ -625,7 +625,7 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan, index_consts: &[ValueI
             // Snapshot the returned values before mutating the block.
             let values = match block.get_terminator() {
                 Some(Terminator::Return(vals)) => vals.clone(),
-                _ => unreachable!("return_cells recorded only for Return blocks"),
+                _ => ice_unreachable!("return_cells recorded only for Return blocks"),
             };
 
             // Emit per-cell `ArrayGet`s from each expanded returned array (defined earlier in the
@@ -660,7 +660,7 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan, index_consts: &[ValueI
             }
             match block.get_terminator_mut() {
                 Terminator::Return(vals) => *vals = new_vals,
-                _ => unreachable!("snapshot proved this is a Return block"),
+                _ => ice_unreachable!("snapshot proved this is a Return block"),
             }
         }
 
@@ -736,7 +736,7 @@ fn apply_call_rewrite(
         unconstrained,
     } = instr
     else {
-        unreachable!("apply_call_rewrite on a non-Call");
+        ice_unreachable!("apply_call_rewrite on a non-Call");
     };
 
     // 1. Read each expanded argument array's cells before the call.

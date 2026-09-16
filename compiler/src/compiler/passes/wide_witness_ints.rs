@@ -358,7 +358,7 @@ impl Rewriter<'_> {
         );
 
         let bits = int_width(self.types.get_value_type(value))
-            .unwrap_or_else(|| panic!("ICE: a non-integer operand met a wide witnessed integer"));
+            .unwrap_or_else(|| ice!("a non-integer operand met a wide witnessed integer"));
         let widths = limb_widths(bits, self.limb_bits());
         assert_eq!(
             widths.len(),
@@ -718,8 +718,8 @@ impl Rewriter<'_> {
 
             // A wide value reaching anything else is a shape this pass does not represent, which
             // should have been refused by width validation.
-            other => panic!(
-                "ICE: {other:?} reached the multi-cell representation with a wide witnessed operand; width validation should have refused the program"
+            other => ice!(
+                "{other:?} reached the multi-cell representation with a wide witnessed operand; width validation should have refused the program"
             ),
         }
     }
@@ -732,9 +732,7 @@ impl Rewriter<'_> {
         match target {
             CastTarget::Int(to_bits) => {
                 let from_bits = source_bits.unwrap_or_else(|| {
-                    panic!(
-                        "ICE: a width cast of a non-integer reached the multi-cell representation"
-                    )
+                    ice!("a width cast of a non-integer reached the multi-cell representation")
                 });
                 match self.wide_width(result) {
                     // Into the representation, or between two widths inside it.
@@ -827,12 +825,12 @@ impl Rewriter<'_> {
 
             // A value at a width the field cannot carry has no element, so this cast is refused by
             // the language rule long before here.
-            CastTarget::Field => panic!(
-                "ICE: a value wider than the field carries injectively reached a cast to Field"
-            ),
+            CastTarget::Field => {
+                ice!("a value wider than the field carries injectively reached a cast to Field")
+            }
 
-            CastTarget::Map(_) | CastTarget::ArrayToSlice => panic!(
-                "ICE: a wide witnessed integer inside a sequence reached the multi-cell representation; wide array elements are not supported"
+            CastTarget::Map(_) | CastTarget::ArrayToSlice => ice!(
+                "a wide witnessed integer inside a sequence reached the multi-cell representation; wide array elements are not supported"
             ),
         }
     }

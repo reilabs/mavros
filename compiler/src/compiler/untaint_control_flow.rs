@@ -175,7 +175,7 @@ impl UntaintControlFlow {
                     // never before witness inference; a Guard slipping through here would
                     // silently skip the elem_type rewrite of a wrapped Alloc/MkSeq/... below.
                     OpCode::Guard { .. } => {
-                        panic!("ICE: Guard should not be present during witness type application")
+                        ice!("Guard should not be present during witness type application")
                     }
                     OpCode::ReadGlobal {
                         result: r,

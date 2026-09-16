@@ -492,7 +492,7 @@ impl LowerPureGuards {
             ArithGroup::Mul => {
                 self.lower_unsigned_mul_guard(emitter, condition, original_result, lhs, rhs, bits);
             }
-            _ => unreachable!("lower_overflow_guard called for {:?}", kind),
+            _ => ice_unreachable!("lower_overflow_guard called for {:?}", kind),
         }
     }
 
@@ -733,7 +733,7 @@ impl LowerPureGuards {
                 let default_val = match &lhs_type.expr {
                     TypeExpr::Int(b) => e.int_const(IntBits::zero(*b)),
                     TypeExpr::Field => e.field_const(e.field().constant(0u64)),
-                    _ => unreachable!(),
+                    _ => ice_unreachable!(),
                 };
                 vec![default_val]
             },
@@ -842,8 +842,8 @@ impl LowerPureGuards {
             // `analysis::types` admits a field element and nothing else as a `Rangecheck`
             // operand, so an integer one is a compiler bug rather than a width this lowering
             // has yet to reach.
-            TypeExpr::Int(bits) => panic!(
-                "ICE: a pure rangecheck on an int{bits} reached lowering; only field types are \
+            TypeExpr::Int(bits) => ice!(
+                "a pure rangecheck on an int{bits} reached lowering; only field types are \
                  supported for rangecheck"
             ),
             TypeExpr::Field => {

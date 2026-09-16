@@ -51,7 +51,7 @@ pub(crate) fn pool_constant_types(
                 return None;
             }
             let typ = const_value_type(cv, &|fn_id| {
-                function_returns(fn_id).unwrap_or_else(|| panic!("ICE: no signature for {fn_id:?}"))
+                function_returns(fn_id).unwrap_or_else(|| ice!("no signature for {fn_id:?}"))
             });
             Some((*vid, typ))
         })
@@ -637,7 +637,7 @@ impl Types {
                     Some(Type {
                         expr: TypeExpr::Blob(_, len),
                     }) => *len,
-                    other => panic!("ICE: MkSeqOfBlob expected Blob input, got {:?}", other),
+                    other => ice!("MkSeqOfBlob expected Blob input, got {:?}", other),
                 };
                 function_info
                     .values

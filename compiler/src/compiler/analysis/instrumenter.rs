@@ -636,7 +636,7 @@ impl Value {
                 Value::WitnessOf(Box::new(inner.cast_op(target, instrumenter)))
             }
             (Value::Int(_), CastTarget::Int(0)) => {
-                panic!("ICE: a cast to int0 describes a value with no bits")
+                ice!("a cast to int0 describes a value with no bits")
             }
             (Value::Int(v), CastTarget::Int(s2)) => Value::Int(v.cast(*s2)),
             // A pattern the field cannot carry has no element to cost, so we simply answer with
@@ -693,7 +693,7 @@ impl Value {
                             .map(|b| Value::WitnessOf(Box::new(b)))
                             .collect(),
                     ),
-                    _ => unreachable!("to_bits of a WitnessOf expected an Array result"),
+                    _ => ice_unreachable!("to_bits of a WitnessOf expected an Array result"),
                 }
             }
             // Decomposition is a property of the bit pattern, so a signed value decomposes
@@ -741,7 +741,7 @@ impl Value {
                             .map(|d| Value::WitnessOf(Box::new(d)))
                             .collect(),
                     ),
-                    _ => unreachable!("to_radix of a WitnessOf expected an Array result"),
+                    _ => ice_unreachable!("to_radix of a WitnessOf expected an Array result"),
                 }
             }
             Value::Unknown(_) => Value::array(vec![Value::Unknown(ScalarKind::Int(8)); size]),
@@ -1365,7 +1365,7 @@ impl OpInstrumenter for Instrumenter {
             LookupTarget::DynRangecheck(_) => {
                 // `to_radix` lowers its (asserted radix-256) digit checks to static 8-bit
                 // rangechecks, so none survive to cost analysis.
-                unreachable!(
+                ice_unreachable!(
                     "DynRangecheck is lowered to a static 8-bit rangecheck before spilling"
                 )
             }

@@ -511,7 +511,7 @@ impl LowerWitnessArrayOps {
                 id
             }
             TypeExpr::WitnessOf(_) => {
-                unreachable!("strip_all_witness should remove all WitnessOf wrappers")
+                ice_unreachable!("strip_all_witness should remove all WitnessOf wrappers")
             }
         }
     }

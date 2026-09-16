@@ -174,11 +174,11 @@ pub trait Context<V> {
     // TODO it looks odd that this is the only opcode implemented here.
     // This is the _new_ structure, so at some point we should migrate all other opcodes here.
     fn lookup(&mut self, _target: LookupTarget<V>, _args: Vec<V>, _flag: V) {
-        panic!("ICE: backend does not implement lookup");
+        ice!("backend does not implement lookup");
     }
 
     fn dlookup(&mut self, _target: LookupTarget<V>, _args: Vec<V>, _flag: V) {
-        panic!("ICE: backend does not implement dlookup");
+        ice!("backend does not implement dlookup");
     }
 
     fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<V> {
@@ -186,11 +186,11 @@ pub trait Context<V> {
     }
 
     fn slice_push(&mut self, _slice: &V, _values: &[V], _dir: SliceOpDir) -> V {
-        panic!("ICE: backend does not implement slice_push");
+        ice!("backend does not implement slice_push");
     }
 
     fn slice_len(&mut self, _slice: &V) -> V {
-        panic!("ICE: backend does not implement slice_len");
+        ice!("backend does not implement slice_len");
     }
 
     /// Handle a Guard instruction. Receives the inner opcode, the condition value,
@@ -483,13 +483,13 @@ impl SymbolicExecutor {
                         scope.insert(*result, ctx.slice_push(sl, &vals, *dir));
                     }
                     OpCode::SlicePop { .. } => {
-                        panic!("ICE: SlicePop must be lowered before symbolic execution")
+                        ice!("SlicePop must be lowered before symbolic execution")
                     }
                     OpCode::SliceInsert { .. } => {
-                        panic!("ICE: SliceInsert must be lowered before symbolic execution")
+                        ice!("SliceInsert must be lowered before symbolic execution")
                     }
                     OpCode::SliceRemove { .. } => {
-                        panic!("ICE: SliceRemove must be lowered before symbolic execution")
+                        ice!("SliceRemove must be lowered before symbolic execution")
                     }
                     OpCode::SliceLen {
                         result: r,
@@ -755,7 +755,7 @@ impl SymbolicExecutor {
             }
         }
 
-        panic!("ICE: Unreachable, function did not return");
+        ice_unreachable!("function did not return");
     }
 }
 

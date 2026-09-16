@@ -270,7 +270,7 @@ impl AmbientLocation {
         match self {
             AmbientLocation::Location(source_location) => source_location.clone(),
             AmbientLocation::IceOutsideScope(pass) => {
-                panic!("ICE: {pass} emitted an instruction outside an `emit_with_location` scope")
+                ice!("{pass} emitted an instruction outside an `emit_with_location` scope")
             }
         }
     }

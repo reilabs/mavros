@@ -172,9 +172,7 @@ impl RCInsertion {
                             }
                         }
                         if self.needs_rc(type_info, r) && !currently_live.contains(r) {
-                            panic!(
-                                "ICE: Result of BinaryArithOp is immediately dropped. This is a bug."
-                            )
+                            ice!("Result of BinaryArithOp is immediately dropped.")
                         }
                         currently_live.extend(rcd_inputs);
                     }
@@ -193,7 +191,7 @@ impl RCInsertion {
                             );
                         }
                         if !currently_live.contains(r) {
-                            panic!("ICE: Result of MulConst is immediately dropped. This is a bug.")
+                            ice!("Result of MulConst is immediately dropped.")
                         }
                         new_instructions.push(instruction.clone());
                         currently_live.insert(*v);
@@ -213,9 +211,7 @@ impl RCInsertion {
                         // WitnessOf(A) -> WitnessOf(B) casts are also no-ops at runtime.
                         if self.needs_rc(type_info, v) {
                             if !currently_live.contains(r) {
-                                panic!(
-                                    "ICE: Result of aliasing Cast is immediately dropped. This is a bug."
-                                );
+                                ice!("Result of aliasing Cast is immediately dropped.");
                             }
                             if currently_live.contains(v) {
                                 // Both input and output are live — two refs to the same boxed value.
@@ -236,7 +232,7 @@ impl RCInsertion {
                         target: CastTarget::ValueOf,
                         ..
                     } => {
-                        panic!("ICE: ValueOf cast should not appear at this stage");
+                        ice!("ValueOf cast should not appear at this stage");
                     }
                     // These need to mark their inputs as live, but do not need to bump RCs
                     OpCode::Assert { .. }
@@ -377,7 +373,7 @@ impl RCInsertion {
                             }
                         }
                         if !currently_live.contains(result) {
-                            panic!("ICE: Result of MkSeq is immediately dropped. This is a bug.")
+                            ice!("Result of MkSeq is immediately dropped.")
                             // The line below is the temporary solution if we run into this ever.
                             // It should be debugged properly though, we expect DCE to sweep this
                             // entire instruction.
@@ -396,9 +392,7 @@ impl RCInsertion {
                             "MkSeqOfBlob only supports scalar element types"
                         );
                         if !currently_live.contains(result) {
-                            panic!(
-                                "ICE: Result of MkSeqOfBlob is immediately dropped. This is a bug."
-                            )
+                            ice!("Result of MkSeqOfBlob is immediately dropped.")
                         }
                     }
                     OpCode::MkRepeated {
@@ -429,9 +423,7 @@ impl RCInsertion {
                             }
                         }
                         if !currently_live.contains(result) {
-                            panic!(
-                                "ICE: Result of MkRepeated is immediately dropped. This is a bug."
-                            )
+                            ice!("Result of MkRepeated is immediately dropped.")
                         }
                         currently_live.insert(*element);
                     }
@@ -506,9 +498,10 @@ impl RCInsertion {
                                     &instruction_location,
                                 );
                             } else {
-                                panic!(
-                                    "ICE: Result of Load (V{} in block {}) is not live. This is a bug.",
-                                    result.0, block_id.0
+                                ice!(
+                                    "Result of Load (V{} in block {}) is not live.",
+                                    result.0,
+                                    block_id.0
                                 );
                             }
                         }
@@ -591,9 +584,10 @@ impl RCInsertion {
                                     &instruction_location,
                                 );
                             } else {
-                                panic!(
-                                    "ICE: Result of ArrayGet (V{} in block {}) is not live. This is a bug.",
-                                    result.0, block_id.0
+                                ice!(
+                                    "Result of ArrayGet (V{} in block {}) is not live.",
+                                    result.0,
+                                    block_id.0
                                 )
                             }
                         } else {
@@ -629,9 +623,7 @@ impl RCInsertion {
                     } => {
                         if self.needs_rc(type_info, r) {
                             if !currently_live.contains(r) {
-                                panic!(
-                                    "ICE: Result of ReadGlobal is immediately dropped. This is a bug."
-                                )
+                                ice!("Result of ReadGlobal is immediately dropped.")
                             }
                             Self::push_mem_op(
                                 &mut new_instructions,
@@ -673,7 +665,7 @@ impl RCInsertion {
                             )
                         }
                         if !currently_live.contains(result) {
-                            panic!("ICE: Result of ArraySet is immediately dropped. This is a bug.")
+                            ice!("Result of ArraySet is immediately dropped.")
                             // The line below is the temporary solution if we run into this ever.
                             // It should be debugged properly though, we expect DCE to sweep this
                             // entire instruction.
@@ -726,22 +718,20 @@ impl RCInsertion {
                             }
                         }
                         if !currently_live.contains(result) {
-                            panic!(
-                                "ICE: Result of SlicePush is immediately dropped. This is a bug."
-                            )
+                            ice!("Result of SlicePush is immediately dropped.")
                         }
                         let mut live_vals = vec![*slice];
                         live_vals.extend(values.iter().copied());
                         currently_live.extend(live_vals);
                     }
                     OpCode::SlicePop { .. } => {
-                        panic!("ICE: SlicePop must be lowered before rc insertion")
+                        ice!("SlicePop must be lowered before rc insertion")
                     }
                     OpCode::SliceInsert { .. } => {
-                        panic!("ICE: SliceInsert must be lowered before rc insertion")
+                        ice!("SliceInsert must be lowered before rc insertion")
                     }
                     OpCode::SliceRemove { .. } => {
-                        panic!("ICE: SliceRemove must be lowered before rc insertion")
+                        ice!("SliceRemove must be lowered before rc insertion")
                     }
                     OpCode::InitGlobal {
                         global: _,
@@ -828,7 +818,7 @@ impl RCInsertion {
                         new_instructions.push(instruction);
                     }
                     OpCode::Guard { .. } => {
-                        panic!("ICE: Guard should be lowered before RC insertion");
+                        ice!("Guard should be lowered before RC insertion");
                     }
                     OpCode::MkTuple { .. } => ice_non_elided_tuple(),
                 }
@@ -891,12 +881,10 @@ impl RCInsertion {
                             .join(", ")
                     );
                     debug!("Difference: [{}]", diff.iter().map(|v| v.0).join(", "));
-                    panic!(
-                        "ICE: Jmp is not expected - the value should have died in the source block."
-                    );
+                    ice!("Jmp is not expected - the value should have died in the source block.");
                 }
                 Terminator::Return(_) => {
-                    panic!("ICE: Impossible, CFG says there's an edge here.");
+                    ice_unreachable!("the CFG says there is an edge here");
                 }
             }
             let intermediate = function.get_block_mut(intermediate_block);

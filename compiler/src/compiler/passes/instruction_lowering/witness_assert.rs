@@ -167,7 +167,7 @@ impl LowerWitnessAssertOps {
         let signed = kind.is_signed();
 
         let TypeExpr::Int(bits) = rhs_type.strip_witness().expr else {
-            panic!("ICE: AssertCmp Lt rhs is not an integer type");
+            ice!("AssertCmp Lt rhs is not an integer type");
         };
         debug_assert!(
             matches!(lhs_type.strip_witness().expr, TypeExpr::Int(lhs_bits) if lhs_bits == bits),

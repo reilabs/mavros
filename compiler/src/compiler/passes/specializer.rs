@@ -1088,18 +1088,18 @@ impl Specializer {
             for (pval, psig) in dispatcher_params.iter().zip(signature.get_params().iter()) {
                 match psig {
                     ValueSignature::PointerTo(_) => {
-                        unreachable!(
-                            "ICE: pointer specializations are rejected before dispatcher generation"
+                        ice_unreachable!(
+                            "pointer specializations are rejected before dispatcher generation"
                         );
                     }
                     ValueSignature::Array(_) => {
-                        unreachable!(
-                            "ICE: array specializations are rejected before dispatcher generation"
+                        ice_unreachable!(
+                            "array specializations are rejected before dispatcher generation"
                         );
                     }
                     ValueSignature::Blob(_) => {
-                        unreachable!(
-                            "ICE: blob specializations are rejected before dispatcher generation"
+                        ice_unreachable!(
+                            "blob specializations are rejected before dispatcher generation"
                         );
                     }
                     ValueSignature::Unknown(_)

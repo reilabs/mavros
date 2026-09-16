@@ -89,7 +89,7 @@ impl WitnessLowering {
                     emitter.emit_with_location(location, |mut emitter| {
                         match instruction {
                         OpCode::Guard { .. } => {
-                            panic!("ICE: Guard should be lowered before witness lowering");
+                            ice!("Guard should be lowered before witness lowering");
                         }
                         OpCode::Cast {
                             result: r,
@@ -441,13 +441,13 @@ impl WitnessLowering {
                         // opcode nothing downstream (`rc_insertion`, the symbolic executor)
                         // accepts either.
                         OpCode::SlicePop { .. } => {
-                            panic!("ICE: SlicePop must be lowered before witness lowering")
+                            ice!("SlicePop must be lowered before witness lowering")
                         }
                         OpCode::SliceInsert { .. } => {
-                            panic!("ICE: SliceInsert must be lowered before witness lowering")
+                            ice!("SliceInsert must be lowered before witness lowering")
                         }
                         OpCode::SliceRemove { .. } => {
-                            panic!("ICE: SliceRemove must be lowered before witness lowering")
+                            ice!("SliceRemove must be lowered before witness lowering")
                         }
                         OpCode::Select {
                             result: r,

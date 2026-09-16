@@ -1096,7 +1096,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 .builder
                 .build_int_signed_div(lhs, rhs, "wide_rem_quot")
                 .unwrap(),
-            other => unreachable!("{other:?} is not routed through the wide multiply"),
+            other => ice_unreachable!("{other:?} is not routed through the wide multiply"),
         };
         let product = self.build_wide_multiply(quotient, rhs, "wide_rem_prod");
         self.builder.build_int_sub(lhs, product, name).unwrap()
