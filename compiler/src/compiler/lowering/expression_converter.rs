@@ -109,13 +109,11 @@ pub struct ExpressionConverter<'a> {
     current_source_location: SourceLocation,
 }
 
-/// A match scrutinee and the tag its cases are tested against. The tag is a field 0 of the enum tuple for
-/// enums, the value itself for everything else.
+/// A match scrutinee, and an optional tag in case the scrutinee is an enum or a tuple.
 struct Scrutinee {
     value: ValueId,
     ty: AstType,
-    tag: ValueId,
-    tag_ty: AstType,
+    tag: Option<(ValueId, AstType)>,
 }
 
 impl<'a> ExpressionConverter<'a> {
@@ -984,7 +982,7 @@ impl<'a> ExpressionConverter<'a> {
         };
 
         if let Some(first) = m.cases.first() {
-            let (tag, tag_ty) = match &first.constructor {
+            let tag = match &first.constructor {
                 // `Variant` covers both enums and structs. An enum is
                 // `(tag: Field, payload0, payload1, ...)`; a struct is a plain tuple.
                 c @ Constructor::Variant(..) => {
@@ -992,26 +990,21 @@ impl<'a> ExpressionConverter<'a> {
                         let location = self.current_source_location.clone();
                         let tag =
                             self.emit_at_source_location(b, location, |e| e.tuple_proj(value, 0));
-                        (tag, AstType::Field)
+                        Some((tag, AstType::Field))
                     } else {
-                        (value, ty.clone())
+                        None
                     }
                 }
                 Constructor::True
                 | Constructor::False
                 | Constructor::Int(_)
                 | Constructor::Unit
-                | Constructor::Tuple(_) => (value, ty.clone()),
+                | Constructor::Tuple(_) => None,
                 Constructor::Range(..) => {
                     panic!("ICE: range patterns are not produced by the current frontend")
                 }
             };
-            let scrutinee = Scrutinee {
-                value,
-                ty,
-                tag,
-                tag_ty,
-            };
+            let scrutinee = Scrutinee { value, ty, tag };
             self.convert_cases(&scrutinee, &m.cases, m.default_case.as_deref(), &m.typ, b)
         } else {
             let default = m
@@ -1079,7 +1072,10 @@ impl<'a> ExpressionConverter<'a> {
     ) -> ValueId {
         use acvm::FieldElement;
 
-        let (tag, tag_ty) = (s.tag, &s.tag_ty);
+        let (tag, tag_ty) = match &s.tag {
+            Some((tag, tag_ty)) => (*tag, tag_ty),
+            None => (s.value, &s.ty),
+        };
         let location = self.current_source_location.clone();
         match constructor {
             c if c.is_tuple_or_struct() => {
