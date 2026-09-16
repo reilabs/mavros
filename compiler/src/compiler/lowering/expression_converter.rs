@@ -1085,22 +1085,22 @@ impl<'a> ExpressionConverter<'a> {
             }
             Constructor::True => tag,
             Constructor::False => {
-                let zero = self.tag_constant(FieldElement::zero(), tag_ty, b);
+                let zero = Self::tag_constant(FieldElement::zero(), tag_ty, b);
                 self.emit_at_source_location(b, location, |e| e.eq(tag, zero))
             }
             Constructor::Int(value) => {
-                let c = self.tag_constant(*value, tag_ty, b);
+                let c = Self::tag_constant(*value, tag_ty, b);
                 self.emit_at_source_location(b, location, |e| e.eq(tag, c))
             }
             // Guaranteed to be enum since tuple cases are matched above
             Constructor::Variant(_, idx) => {
-                let c = self.tag_constant(FieldElement::from(*idx as u128), tag_ty, b);
+                let c = Self::tag_constant(FieldElement::from(*idx as u128), tag_ty, b);
                 self.emit_at_source_location(b, location, |e| e.eq(tag, c))
             }
             Constructor::Range(start, end) => {
                 let signed = ast_type_is_signed(tag_ty);
-                let start = self.tag_constant(*start, tag_ty, b);
-                let end = self.tag_constant(*end, tag_ty, b);
+                let start = Self::tag_constant(*start, tag_ty, b);
+                let end = Self::tag_constant(*end, tag_ty, b);
                 self.emit_at_source_location(b, location, |e| {
                     let below_start = e.cmp(tag, start, CmpKind::lt(signed));
                     let at_or_above_start = e.not(below_start);
@@ -1112,7 +1112,6 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn tag_constant(
-        &mut self,
         value: acvm::FieldElement,
         tag_ty: &AstType,
         b: &mut HLFunctionBuilder<'_>,
