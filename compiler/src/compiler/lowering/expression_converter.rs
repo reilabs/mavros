@@ -982,14 +982,11 @@ impl<'a> ExpressionConverter<'a> {
         };
 
         if let Some(first) = m.cases.first() {
-            // A lone case with no default runs untested (see `convert_cases`), so its tag is
-            // never read and need not be projected.
-            let tag_needed = m.cases.len() > 1 || m.default_case.is_some();
             let tag = match &first.constructor {
                 // `Variant` covers both enums and structs. An enum is
                 // `(tag: Field, payload0, payload1, ...)`; a struct is a plain tuple.
                 c @ Constructor::Variant(..) => {
-                    if tag_needed && c.is_enum() {
+                    if c.is_enum() {
                         let location = self.current_source_location.clone();
                         let tag =
                             self.emit_at_source_location(b, location, |e| e.tuple_proj(value, 0));
