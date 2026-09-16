@@ -1038,14 +1038,14 @@ impl<'a> ExpressionConverter<'a> {
                         Constructor::Int(_) | Constructor::Range(..)
                     ) =>
             {
-                self.convert_arm(s.value, &s.ty, last, b)
+                self.convert_arm(s, last, b)
             }
             [case, rest @ ..] => {
                 let cond = self.case_condition(s, &case.constructor, b);
                 self.branch(
                     cond,
                     typ,
-                    |this, b| this.convert_arm(s.value, &s.ty, case, b),
+                    |this, b| this.convert_arm(s, case, b),
                     |this, b| this.convert_cases(s, rest, default, typ, b),
                     b,
                 )
@@ -1055,12 +1055,11 @@ impl<'a> ExpressionConverter<'a> {
 
     fn convert_arm(
         &mut self,
-        value: ValueId,
-        ty: &AstType,
+        s: &Scrutinee,
         case: &MatchCase,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        self.bind_case_arguments(value, ty, case, b);
+        self.bind_case_arguments(s, case, b);
         self.convert_expression(&case.branch, b)
     }
 
@@ -1128,8 +1127,7 @@ impl<'a> ExpressionConverter<'a> {
 
     fn bind_case_arguments(
         &mut self,
-        scrutinee: ValueId,
-        scrutinee_ty: &AstType,
+        s: &Scrutinee,
         case: &MatchCase,
         b: &mut HLFunctionBuilder<'_>,
     ) {
@@ -1137,9 +1135,11 @@ impl<'a> ExpressionConverter<'a> {
             return;
         }
 
-        let AstType::Tuple(fields) = scrutinee_ty else {
+        let scrutinee = s.value;
+        let AstType::Tuple(fields) = &s.ty else {
             panic!(
-                "ICE: a case that binds arguments needs a tuple scrutinee, found {scrutinee_ty:?}"
+                "ICE: a case that binds arguments needs a tuple scrutinee, found {:?}",
+                s.ty
             )
         };
         let location = self.current_source_location.clone();
