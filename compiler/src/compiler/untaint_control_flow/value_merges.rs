@@ -66,6 +66,7 @@ impl UntaintControlFlow {
         );
         if let Some(sparse) = sparse.as_mut() {
             sparse.capture_guards(function);
+            sparse.capture_ranges(function_id, function, ssa, &merges);
         }
         emit_merges(function, ssa, types, sparse.as_mut(), merges);
         if let Some(sparse) = sparse {
@@ -113,7 +114,6 @@ fn emit_merges(
                         merge.condition,
                         lhs,
                         rhs,
-                        None,
                         &typ,
                         lhs_type,
                         rhs_type,
@@ -133,13 +133,15 @@ fn emit_merge_select(
     cond: ValueId,
     lhs: ValueId,
     rhs: ValueId,
-    result: Option<ValueId>,
     result_type: &Type,
     lhs_type: &Type,
     rhs_type: &Type,
 ) -> ValueId {
     match &result_type.expr {
         TypeExpr::Array(result_elem_type, size) => {
+            // Match the identical-arm path's conversion contract, including lengths.
+            crate::compiler::ssa::hlssa::CastTarget::conversion(lhs_type, result_type);
+            crate::compiler::ssa::hlssa::CastTarget::conversion(rhs_type, result_type);
             let lhs_elem_type = match &lhs_type.expr {
                 TypeExpr::Array(e, _) => e.as_ref(),
                 _ => panic!(
@@ -164,14 +166,13 @@ fn emit_merge_select(
                     cond,
                     lhs_elem,
                     rhs_elem,
-                    None,
                     result_elem_type,
                     lhs_elem_type,
                     rhs_elem_type,
                 );
                 elems.push(selected);
             }
-            let result = result.unwrap_or_else(|| builder.fresh_value());
+            let result = builder.fresh_value();
             builder.emit(OpCode::MkSeq {
                 result,
                 elems,
@@ -181,50 +182,12 @@ fn emit_merge_select(
             result
         }
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
-        TypeExpr::WitnessOf(_) => {
-            // Cast operands to WitnessOf if they aren't already
-            let lhs = if !lhs_type.is_witness_of() {
-                builder.cast_to_witness_of(lhs)
-            } else {
-                lhs
-            };
-            let rhs = if !rhs_type.is_witness_of() {
-                builder.cast_to_witness_of(rhs)
-            } else {
-                rhs
-            };
-            let result = result.unwrap_or_else(|| builder.fresh_value());
-            builder.emit(OpCode::Select {
-                result,
-                cond,
-                if_t: lhs,
-                if_f: rhs,
-            });
-            result
-        }
-        TypeExpr::Field | TypeExpr::Int(_) => {
-            let result = result.unwrap_or_else(|| builder.fresh_value());
-            builder.emit(OpCode::Select {
-                result,
-                cond,
-                if_t: lhs,
-                if_f: rhs,
-            });
-            result
-        }
-        TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
-        TypeExpr::Slice(_) => {
+        TypeExpr::WitnessOf(_) | TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Slice(_) => {
             let lhs = emit_value_conversion(lhs, lhs_type, result_type, builder);
             let rhs = emit_value_conversion(rhs, rhs_type, result_type, builder);
-            let result = result.unwrap_or_else(|| builder.fresh_value());
-            builder.emit(OpCode::Select {
-                result,
-                cond,
-                if_t: lhs,
-                if_f: rhs,
-            });
-            result
+            builder.select(cond, lhs, rhs)
         }
+        TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
         TypeExpr::Function => panic!("Witness select on Function type not supported"),
         TypeExpr::Blob(..) => panic!("Witness select on Blob type not supported"),
     }
@@ -234,6 +197,57 @@ fn emit_merge_select(
 mod tests {
     use super::*;
     use crate::compiler::analysis::types::Types;
+
+    #[test]
+    fn identical_and_distinct_arms_share_the_conversion_contract() {
+        use crate::compiler::ssa::hlssa::builder::HLInstrBuilder;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        for (source, target, accepted) in [
+            (Type::int(32), Type::int(32), true),
+            (Type::int(32), Type::witness_of(Type::int(32)), true),
+            (
+                Type::int(32).array_of(2),
+                Type::witness_of(Type::int(32)).array_of(2),
+                true,
+            ),
+            (
+                Type::int(32).slice_of(),
+                Type::witness_of(Type::int(32)).slice_of(),
+                true,
+            ),
+            (Type::int(8), Type::int(32), false),
+            (Type::int(32), Type::field(), false),
+            (Type::witness_of(Type::int(32)), Type::int(32), false),
+            (Type::field().array_of(2), Type::field().array_of(3), false),
+        ] {
+            for identical in [false, true] {
+                let mut ssa = HLSSA::with_main("conversion".into());
+                let mut function = ssa.take_function(ssa.get_unique_entrypoint_id());
+                let lhs = ssa.fresh_value();
+                let rhs = ssa.fresh_value();
+                let condition = ssa.fresh_value();
+                let mut instructions = Vec::new();
+                let mut b = HLInstrBuilder::new(
+                    &mut function,
+                    &mut ssa,
+                    &mut instructions,
+                    SourceLocation::synthetic("conversion"),
+                );
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    if identical {
+                        emit_value_conversion(lhs, &source, &target, &mut b)
+                    } else {
+                        emit_merge_select(&mut b, condition, lhs, rhs, &target, &source, &source)
+                    }
+                }));
+                assert_eq!(
+                    result.is_ok(),
+                    accepted,
+                    "{source} -> {target}, identical={identical}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn identical_arms_reuse_the_value_and_keep_required_conversion() {

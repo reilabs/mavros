@@ -313,6 +313,20 @@ impl UntaintControlFlow {
 
         // Step 2: cast insertion + control flow linearization
         let function_ids: Vec<_> = ssa.get_function_ids().collect();
+        // Finalize signatures before rewriting any calls. Per-function analyses
+        // must see the guard parameter even on callees lowered later in the loop.
+        for &function_id in &function_ids {
+            if witness_inference
+                .try_get_function_witness_type(function_id)
+                .is_some_and(|wt| matches!(wt.cfg_witness, WitnessInfo::Witness))
+            {
+                let guard = ssa.fresh_value();
+                let function = ssa.get_function_mut(function_id);
+                function
+                    .get_block_mut(function.get_entry_id())
+                    .push_parameter(guard, Type::witness_of(Type::int(1)));
+            }
+        }
         for function_id in function_ids {
             if let Some(function_wt) = witness_inference.try_get_function_witness_type(function_id)
             {
@@ -351,12 +365,14 @@ impl UntaintControlFlow {
         let mut merges = Vec::new();
 
         let cfg_witness_param = if matches!(function_wt.cfg_witness, WitnessInfo::Witness) {
-            let entry_id = function.get_entry_id();
-            let id = ssa.fresh_value();
-            function
-                .get_block_mut(entry_id)
-                .push_parameter(id, Type::witness_of(Type::int(1)));
-            Some(id)
+            Some(
+                function
+                    .get_block(function.get_entry_id())
+                    .get_parameters()
+                    .last()
+                    .expect("ICE: missing control-flow guard parameter")
+                    .0,
+            )
         } else {
             None
         };

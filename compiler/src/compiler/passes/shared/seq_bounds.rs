@@ -147,9 +147,8 @@ pub fn build_insert_bounds_assert(
     let len = emitter.slice_len(slice);
     let one = emitter.int_const(IntBits::one(32));
     let new_len = emitter.uadd(len, one);
-    let cmp_bits = idx_bits.max(32);
-    let idx_cmp = emitter.widen_u(index, idx_bits, cmp_bits);
-    let new_len_cmp = emitter.widen_u(new_len, 32, cmp_bits);
+    let (idx_cmp, new_len_cmp, cmp_bits) =
+        widen_comparison_operands(emitter, index, idx_bits, new_len, 32);
     let assert = OpCode::AssertCmp {
         kind: CmpKind::ULt,
         lhs: idx_cmp,
@@ -167,9 +166,7 @@ pub fn build_remove_bounds_assert(
 ) -> (OpCode, ValueId, ValueId, usize) {
     let idx_bits = index_bits(index_ty, "slice remove");
     let len = emitter.slice_len(slice);
-    let cmp_bits = idx_bits.max(32);
-    let idx_cmp = emitter.widen_u(index, idx_bits, cmp_bits);
-    let len_cmp = emitter.widen_u(len, 32, cmp_bits);
+    let (idx_cmp, len_cmp, cmp_bits) = widen_comparison_operands(emitter, index, idx_bits, len, 32);
     let assert = OpCode::AssertCmp {
         kind: CmpKind::ULt,
         lhs: idx_cmp,

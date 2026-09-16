@@ -1,6 +1,7 @@
 // Small arrays exercise the general merge and cost-gated fallbacks. The large
-// array in check_sparse_aliases exercises profitable replay; planner unit tests
-// check which shapes are accepted independently of frontend optimizations.
+// arrays in check_sparse_aliases and check_model exercise profitable replay;
+// planner unit tests check shape acceptance, and a compiler integration test
+// verifies that check_model emits nested replay.
 fn check_writes(enabled: bool, index: u32) {
     let original: [Field; 3] = [2, 5, 9];
     let mut arr = original;
@@ -90,12 +91,14 @@ fn main(flag: bool, index: u32) {
 }
 
 // Compare nested writes against a scalar model, including runtime aliases and
-// a whole-row replacement between writes. Loop indices remain pure.
+// a whole-row replacement between writes. The 128-row array makes replay
+// profitable; the loop indices remain pure.
 fn check_model(enabled: bool, outer: bool) {
     for i in 0..2 {
         for j in 0..3 {
             for k in 0..3 {
-                let original: [[Field; 3]; 2] = [[2, 3, 5], [7, 11, 13]];
+                let mut original: [[Field; 3]; 128] = [[2, 3, 5]; 128];
+                original[1] = [7, 11, 13];
                 let replacement: [Field; 3] = [17, 19, 23];
                 let mut arr = original;
                 if outer {
@@ -106,6 +109,10 @@ fn check_model(enabled: bool, outer: bool) {
                         arr[i][j] = arr[i][j] + 5;
                     }
                 }
+                // The first two rows cover every write; verify an adjacent row
+                // and the tail as well without expanding 128 rows of assertions.
+                assert_eq(arr[2], original[2]);
+                assert_eq(arr[127], original[127]);
                 for r in 0..2 {
                     for c in 0..3 {
                         let mut expected = original[r][c];
