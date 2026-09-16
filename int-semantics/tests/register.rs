@@ -35,7 +35,7 @@ const NOT_INTEGER_SEMANTICS: &[(&str, &str, &str)] = &[
         "an LCG step; wrapping is the generator, not an overflow",
     ),
     (
-        "compiler/src/bin/test_runner.rs",
+        "compiler/src/wasm_host.rs",
         "host_witness_base.wrapping_add(mults_off as usize)",
         "host pointer arithmetic over a witness buffer",
     ),

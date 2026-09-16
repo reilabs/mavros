@@ -18,8 +18,9 @@ use crate::compiler::{
         },
         shared::{
             limbs::{
-                WitnessLimbs, combine_limbs, derive_low_limb, extract_limb, split_into_limbs,
-                spread_sum_fits_field, witness_half_limb_bits, witness_limb_bits,
+                WitnessLimbs, combine_limbs, derive_low_limb, extract_limb, max_pow2_table_size,
+                narrow_int_bits, split_into_limbs, spread_sum_fits_field, witness_half_limb_bits,
+                witness_limb_bits,
             },
             shift_guard::shift_amount_pinned_to,
             unsupported::unsupported_on_this_field,
@@ -28,14 +29,15 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            ArithGroup, BinaryArithOpKind, CastTarget, CmpKind, MAX_POW2_TABLE_SIZE,
-            MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type, TypeExpr, assert_signed_op_width,
-            builder::{HLBlockEmitter, HLEmitter},
+            ArithGroup, BinaryArithOpKind, CastTarget, CmpKind, OpCode, Type, TypeExpr,
+            assert_signed_op_width,
+            builder::{HLBlockEmitter, HLEmitter, two_pow_pattern},
         },
     },
 };
 
 use mavros_artifacts::FieldConfig;
+use mavros_int_semantics::IntBits;
 use num_bigint::BigInt;
 use num_traits::{One, ToPrimitive};
 
@@ -161,8 +163,13 @@ impl LowerWitnessBitwiseOps {
     ) {
         let (bits, result_cast) =
             integer_bits_and_cast(function_type_info, result, "bitwise result");
+
+        // The bound is the narrow threshold, not the integer type cap: what this lowering needs
+        // is a value that spreads into a host word and a field cell, which is a representational
+        // question and not a question about what widths the type system admits.
+        let narrow_bits = narrow_int_bits(b.field());
         assert!(
-            bits <= MAX_SUPPORTED_UNSIGNED_BITS,
+            bits <= narrow_bits,
             "bitwise spread width too large for natural-width Spread lowering: {bits}"
         );
 
@@ -284,12 +291,13 @@ impl LowerWitnessBitwiseOps {
         to_bits: usize,
     ) {
         // The bound belongs on the **source**, not on the target. A signed source is capped at
-        // `MAX_SUPPORTED_SIGNED_BITS` for now, but the target is just a wider integer to deposit
-        // the result in, and widening an `i32` into a `u128` is exactly what `x as u128` asks for.
+        // `MAX_LOWERED_SIGNED_BITS` for now, but the target is just a wider integer to deposit the
+        // result in, and widening an `i32` into a `u128` is exactly what `x as u128` asks for.
         assert_signed_op_width(from_bits, "sign extension source");
+        let narrow_bits = narrow_int_bits(b.field());
         assert!(
-            from_bits < to_bits && to_bits <= MAX_SUPPORTED_UNSIGNED_BITS,
-            "sign extension must widen within the integer type cap: {from_bits} -> {to_bits}"
+            from_bits < to_bits && to_bits <= narrow_bits,
+            "sign extension must widen within the narrow integer range: {from_bits} -> {to_bits}"
         );
 
         // FIELD-ASSUMPTION: L4-modulus-query. The extension term below is
@@ -357,10 +365,22 @@ impl LowerWitnessBitwiseOps {
         let lhs_signed = kind.is_signed();
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
 
+        // Everything below packs the value, its `2^n` factor and their product into single field
+        // elements, so a value too wide to live in one is refused.
+        let narrow_bits = narrow_int_bits(b.field());
+        if bits > narrow_bits {
+            unsupported_on_this_field(
+                format_args!(
+                    "a witness shift of a {bits}-bit value, which is wider than the {narrow_bits} \
+                     bits one field element and one host word can carry"
+                ),
+                b.field(),
+            );
+        }
+
         // The check below indexes bit `log2(bits)` upwards as "too large", and `emit_pow2_factor`'s
         // table is keyed by `log2(bits)` so that membership is the amount bound. Both are only
-        // right when `bits` is a power of two. Every Noir integer width is, but the lowering would
-        // be silently wrong rather than merely unsupported if that ever changed.
+        // right when `bits` is a power of two.
         //
         // This is the guard IR's own requirement: the _total_ evaluators (the VM, LLVM and the
         // model) reduce an amount modulo the width and so agree at every width. Admitting a non
@@ -395,15 +415,8 @@ impl LowerWitnessBitwiseOps {
         // the width, and a negative one too. Every other route still performs the explicit check —
         // where a pinned amount discharges it for free, since the range that pinned it also proves
         // it in range.
-        //
-        // The width test never fails today and is a tripwire rather than a branch:
-        // `MAX_POW2_TABLE_SIZE` is pinned to cover every width the type system admits, so _every_
-        // witness amount takes the table. It is written as a condition anyway because the
-        // alternative to a table is a real lowering rather than a panic, and the day a width
-        // outgrows the ceiling this falls back to it instead of building a table whose widest row
-        // the field cannot hold.
         let use_pow2_table =
-            !constant_amount && rhs_witness && widths.amount_bits <= MAX_POW2_TABLE_SIZE;
+            !constant_amount && rhs_witness && widths.amount_bits <= max_pow2_table_size(b.field());
         if !use_pow2_table {
             emit_shift_amount_check(b, context, guard, rhs, widths);
         }
@@ -413,7 +426,7 @@ impl LowerWitnessBitwiseOps {
             // the amount to _reason_ about it keeps the original value, which is the one the range
             // domain has an entry for.
             let amount = match pinned {
-                Some(v) => b.int_const(widths.rhs_bits, v),
+                Some(v) => b.int_const(IntBits::from_u128(widths.rhs_bits, v)),
                 None => rhs,
             };
             self.lower_constant_amount_shift(
@@ -466,7 +479,7 @@ impl LowerWitnessBitwiseOps {
         amount: ValueId,
         bits: usize,
     ) {
-        let one_u = b.int_const(bits, 1);
+        let one_u = b.int_const(IntBits::one(bits));
         let factor = b.fresh_value();
         b.emit(OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::UShl,
@@ -731,8 +744,11 @@ fn shift_amount_bits(
 /// Asserts that the shift amount is smaller than the width being shifted.
 ///
 /// Since the width is a power of two, "too large" is just "some bit at or above `log2(bits)` is
-/// set" — and that one test also catches a _negative_ amount, whose raw encoding always has its
-/// top bit set and so is at least `2^(rhs_bits-1) >= bits`.
+/// set" — and wherever that test is emitted it also catches a _negative_ amount, whose raw
+/// encoding always has its top bit set. The second reading needs `2^(rhs_bits-1) >= bits`, i.e.
+/// `rhs_bits > amount_bits`, which is precisely the condition under which the body emits anything
+/// at all; the branch that skips the check is the branch where a negative amount must instead be
+/// unrepresentable.
 ///
 /// Guarded, so an inactive guard around an out-of-range shift is vacuous rather than a failure.
 fn emit_shift_amount_check(
@@ -746,21 +762,19 @@ fn emit_shift_amount_check(
         rhs_bits,
         amount_bits,
     } = widths;
-    // No bit that high exists, so every amount this type can hold is in range.
-    //
-    // This also drops the negative-amount rejection that the doc above relies on, so it must only
-    // ever fire where a negative amount cannot be represented either. It does: Noir's integer widths
-    // are 1/8/16/32/64/128, and the narrowest of those that can hold a negative number is `i8`,
-    // against `amount_bits <= 7`. The only way in is a one-bit amount, which has no negative reading
-    // a shift could be given.
+
+    // No bit that high exists, so every amount this type can hold is in range. That also drops the
+    // negative-amount rejection, so it may only ever fire where a negative amount cannot be
+    // represented either.
     //
     // Asserted rather than `debug_assert`ed: this is the whole justification for emitting no check,
     // so a release build must not be the one that skips it.
     if rhs_bits <= amount_bits {
         assert!(
             rhs_bits <= 1,
-            "a {rhs_bits}-bit shift amount skipped the range check, so a negative amount would \
-             read as a small positive one"
+            "every value a {rhs_bits}-bit shift amount can hold is already below the width, so no \
+             range check is emitted — but a {rhs_bits}-bit amount also has a negative reading, \
+             which would then go unrejected and read as a small positive one"
         );
         return;
     }
@@ -811,7 +825,7 @@ fn emit_pow2_factor(
     // harmless: the lookup below rejects that amount whatever this computed.
     let amount_pure = b.value_of(amount);
     let amount_int = b.cast_to(CastTarget::Int(bits), amount_pure);
-    let one = b.int_const(bits, 1);
+    let one = b.int_const(IntBits::one(bits));
     let factor_int = b.fresh_value();
     b.emit(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::UShl,
@@ -836,8 +850,8 @@ fn emit_pow2_cofactor(b: &mut HLBlockEmitter<'_>, factor: ValueId, bits: usize) 
     // operand at 64 bits, so the double-width hint below stays inside the widest unsigned type
     // there is.
     assert!(
-        2 * bits <= MAX_SUPPORTED_UNSIGNED_BITS,
-        "a {bits}-bit shift cofactor needs an Int({}) that does not exist",
+        2 * bits <= narrow_int_bits(b.field()),
+        "a {bits}-bit shift cofactor needs an Int({}) this lowering cannot mint",
         2 * bits
     );
 
@@ -849,7 +863,7 @@ fn emit_pow2_cofactor(b: &mut HLBlockEmitter<'_>, factor: ValueId, bits: usize) 
     let wide_bits = 2 * bits;
     let factor_pure = b.value_of(factor);
     let factor_wide = b.cast_to(CastTarget::Int(wide_bits), factor_pure);
-    let two_pow_bits_wide = b.int_const(wide_bits, 1u128 << bits);
+    let two_pow_bits_wide = b.int_const(two_pow_pattern(wide_bits, bits));
     let cofactor_int = b.fresh_value();
     b.emit(OpCode::BinaryArithOp {
         kind: BinaryArithOpKind::UDiv,
@@ -978,9 +992,8 @@ fn sign_bit_of(
 /// [`product_headroom_or_bail`], which is the precondition _both_ paths below are held to — and it
 /// reads the discarded half through a `U(2 * bits)` intermediate. The second requirement fails at
 /// `bits = 128`, where there is no `U(256)` to decompose the product with; that width therefore
-/// keeps the old trapping rangecheck, which rejects a shift Noir would have wrapped and is wrong in
-/// the same way it has always been wrong. Correcting _that_ needs a limb-wise lowering rather than a
-/// single field product.
+/// falls back to a trapping rangecheck, which rejects a shift Noir would have wrapped. Correcting
+/// _that_ needs a limb-wise lowering rather than a single field product.
 fn wrap_shifted_product(
     b: &mut HLBlockEmitter<'_>,
     context: &LoweringContext<'_>,
@@ -994,14 +1007,34 @@ fn wrap_shifted_product(
     let discarded_bits = discarded_width(&context.urange(rhs), bits);
     product_headroom_or_bail(bits, discarded_bits, b.field());
 
-    // This fallback is deliberately **not** an `unsupported_on_this_field` site, though the defect
-    // the doc above describes is real. Its condition is the integer _type_ cap, which no field
-    // change moves, and its effect is a trapping rangecheck: a shift that should have wrapped is
-    // rejected by the circuit at proving time rather than answered wrongly. Routing it through the
-    // funnel would trade a per-witness rejection for a compile-time refusal of every 128-bit
-    // witness `<<`, including the overwhelming majority that never overflow.
+    // This fallback is deliberately **not** an `unsupported_on_this_field` site. Its effect is a
+    // trapping rangecheck rather than a refusal: a shift that should have wrapped is rejected by
+    // the circuit at proving time, and every shift that does not overflow still lowers. The funnel
+    // would trade that for a compile-time refusal of every witness `<<` at the width, including the
+    // overwhelming majority that never overflow.
+    //
+    // Its condition _is_ field-sensitive — the threshold is derived, so a narrower field lowers it
+    // and this fires at more widths — which strengthens the case rather than weakening it: the
+    // narrower the field, the more programs a funnel refusal would reject outright.
+    //
+    // **This branch is live at an existing width and must stay where it is.** At `bits == 128` it
+    // reads `256 > 128` and takes the trapping path. Against the integer type cap it would read
+    // `256 <= 16384` instead and fall through to the truncating path below, minting an `Int(256)`
+    // intermediate and silently changing the circuit for a width the corpus already compiles.
+    //
+    // TODO Remove once an `Int(2 * bits)` intermediate is expressible — at `bits == 128` that is
+    // an `Int(256)`, and with it the rejection below becomes an honest wrapping shift. What blocks
+    // it is measured rather than assumed: forcing the truncating path here fails in
+    // `bit_range::lower_pure_bit_range_value`, whose `bits <= narrow_int_bits` assert is there
+    // because `window_mask` returns a host word and the divisor beside it is `1u128 << offset`.
+    // Both are width-generic constants minted through a host word, so both are expressible as
+    // patterns.
+    //
+    // This is the narrower of the two limits at this width and the only one a wider intermediate
+    // reaches. The other is `product_headroom_or_bail`: past `n >= 126` on this field the product
+    // itself wraps, leaving no honest value to truncate, and no amount of intermediate width helps.
     let wide_bits = 2 * bits;
-    if wide_bits > MAX_SUPPORTED_UNSIGNED_BITS {
+    if wide_bits > narrow_int_bits(b.field()) {
         guarded_rangecheck(b, product, bits, guard);
         return product;
     }
@@ -1016,14 +1049,13 @@ fn wrap_shifted_product(
     let discarded_hint = b.bit_range(wide, bits, bits);
     let discarded_hint = b.cast_to_field(discarded_hint);
     let discarded = b.write_witness(discarded_hint);
+
     // Deliberately _not_ `guarded_rangecheck`. Both halves are bounded structurally rather than by
     // anything the guard controls: `factor` is at most `2^(bits - 1)` however the amount is built,
     // and every guarded failable lowering routes its result through
     // `witness_integer_arith::guarded_or_zero_field`, so `lhs` is inside its declared width even on
-    // an inactive path. `product` is therefore below `2^(bits + discarded_bits)` unconditionally and
-    // both checks are satisfiable whatever the guard does — which is what lets the result be bounded
-    // on every path rather than only on the live one. The `bits = 128` fallback above is the one
-    // lowering that does _not_ bound its result this way.
+    // an inactive path. `product` is therefore below `2^(bits + discarded_bits)` unconditionally.
+    // The trapping fallback above is the one lowering that does _not_ bound its result this way.
     b.rangecheck(discarded, discarded_bits);
 
     // FIELD-ASSUMPTION: L4-decompose
@@ -1277,7 +1309,7 @@ fn decompose_into_half_limbs(
 mod tests {
     use super::*;
 
-    use crate::compiler::ssa::hlssa::{HLSSA, builder::HLSSABuilder};
+    use crate::compiler::ssa::hlssa::{HLSSA, MAX_POW2_TABLE_SIZE, builder::HLSSABuilder};
 
     /// The two routes into [`lower_word_bitwise`], both cleared on bn254.
     ///
@@ -1294,13 +1326,13 @@ mod tests {
         }
 
         // And the refusal is unreachable by a second, independent margin: the `U(bits * 2)` cast is
-        // capped at `MAX_SUPPORTED_UNSIGNED_BITS`, so no width past 64 could have been spread here
-        // at all, while the predicate itself only bites at 128.
-        assert!(2 * 65 > MAX_SUPPORTED_UNSIGNED_BITS);
+        // capped at the narrow threshold, so no width past 64 could have been spread here at all,
+        // while the predicate itself only bites at 128.
+        assert!(2 * 65 > narrow_int_bits(bn254));
         assert!(spread_sum_fits_field(127, bn254));
     }
 
-    /// `lower_limb_bitwise` lowers *every* limb, not the first two.
+    /// `lower_limb_bitwise` lowers _every_ limb, not the first two.
     ///
     /// Both callers hand it a two-limb decomposition today, so the zip past the pair — and the
     /// length check that stops `zip` from silently truncating a mismatched one — has no other
@@ -1314,8 +1346,8 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let lhs = e.int_const(24, 0x00_AB_CD);
-                let rhs = e.int_const(24, 0x00_12_34);
+                let lhs = e.int_const(IntBits::from_u128(24, 0x00_AB_CD));
+                let rhs = e.int_const(IntBits::from_u128(24, 0x00_12_34));
                 let lhs_limbs = split_into_limbs(&mut e, lhs, 8, 3);
                 let rhs_limbs = split_into_limbs(&mut e, rhs, 8, 3);
                 let result =
@@ -1353,8 +1385,8 @@ mod tests {
         sb.modify_function(main_id, |b| {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
-            let lhs = e.int_const(24, 0);
-            let rhs = e.int_const(16, 0);
+            let lhs = e.int_const(IntBits::zero(24));
+            let rhs = e.int_const(IntBits::zero(16));
             let lhs_limbs = split_into_limbs(&mut e, lhs, 8, 3);
             let rhs_limbs = split_into_limbs(&mut e, rhs, 8, 2);
             lower_limb_bitwise(&mut e, BinaryArithOpKind::And, &lhs_limbs, &rhs_limbs);
@@ -1372,7 +1404,7 @@ mod tests {
         assert!(!product_fits_field(128, 126, bn254));
         assert!(!product_fits_field(128, 127, bn254));
 
-        // The truncating path is capped at `bits <= 64` by `2 * bits <= MAX_SUPPORTED_UNSIGNED_BITS`,
+        // The truncating path is capped at `bits <= 64` by `2 * bits <= narrow_int_bits(field)`,
         // and on bn254 its worst case has room to spare — which is why checking it there is free
         // today, and a statement about this modulus rather than about the lowering.
         assert!(product_fits_field(64, 63, bn254));
@@ -1402,7 +1434,10 @@ mod tests {
         // `2^(2^s - 1)`, and one size further would put that row past the bn254 modulus, where
         // every evaluator wraps identically and the table stops holding powers of two at all.
         assert!(128usize.trailing_zeros() as usize <= MAX_POW2_TABLE_SIZE);
-        assert_eq!(1usize << MAX_POW2_TABLE_SIZE, MAX_SUPPORTED_UNSIGNED_BITS);
+        assert_eq!(
+            1usize << MAX_POW2_TABLE_SIZE,
+            narrow_int_bits(FieldConfig::bn254())
+        );
 
         // The bound stated as the field question it is, at the ceiling and one past it.
         let modulus = field_modulus(FieldConfig::bn254());

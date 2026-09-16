@@ -592,6 +592,28 @@ impl R1CS {
         }
     }
 
+    /// The index of the first constraint `witness` does not satisfy, or [`None`] if it satisfies
+    /// them all.
+    ///
+    /// Asks only whether the witness satisfies the system, taking no `a`/`b`/`c` vectors alongside
+    /// it: unlike [`Self::check_witgen_output`] it can judge a witness no witness generator
+    /// produced.
+    ///
+    /// `witness` is the two halves concatenated, pre-commitment first, exactly as
+    /// [`Self::check_witgen_output`] joins them.
+    ///
+    /// # Panics
+    ///
+    /// If `witness` is shorter than the highest column index any constraint names.
+    pub fn unsatisfied_constraint(&self, witness: &[Field]) -> Option<usize> {
+        let evaluate = |terms: &[(usize, Field)]| -> Field {
+            terms.iter().map(|(i, coeff)| *coeff * witness[*i]).sum()
+        };
+        self.constraints
+            .iter()
+            .position(|r1c| evaluate(&r1c.a) * evaluate(&r1c.b) != evaluate(&r1c.c))
+    }
+
     pub fn check_witgen_output(
         &self,
         pre_comm_witness: &[Field],

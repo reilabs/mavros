@@ -27,11 +27,13 @@ use crate::{
             FunctionId,
             hlssa::{
                 ArithGroup, BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLSSA,
-                LookupTarget, MAX_SUPPORTED_UNSIGNED_BITS, Radix, RefCountOp, SequenceTargetType,
-                SliceOpDir, Type, TypeExpr,
+                LookupTarget, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
             },
         },
-        util::{host_word, ice_non_elided_tuple, spread_bits, unspread_bits},
+        util::{
+            UNSPREAD_INPUT_MAX, field_constant, host_word, ice_non_elided_tuple, spread_bits,
+            unspread_bits,
+        },
     },
 };
 
@@ -167,7 +169,7 @@ impl Value {
 
     fn as_field_const(&self, field: FieldConfig) -> Option<Field> {
         match self {
-            Value::Int(v) => Some(field.constant(host_word(v))),
+            Value::Int(v) => field_constant(field, v),
             Value::Field(f) => Some(*f),
             Value::WitnessOf(inner) => inner.as_field_const(field),
             _ => None,
@@ -197,7 +199,7 @@ impl Value {
             TypeExpr::Ref(inner) => {
                 Value::Pointer(Rc::new(RefCell::new(Value::unknown_from_type(inner))))
             }
-            TypeExpr::Function => panic!("Cannot create unknown value for Function type"),
+            TypeExpr::Function(_) => panic!("Cannot create unknown value for Function type"),
             TypeExpr::Blob(elem, n) => {
                 let elem_unknown = Value::unknown_from_type(elem);
                 Value::Blob(vec![elem_unknown; *n])
@@ -571,9 +573,10 @@ impl Value {
             Value::Int(v) => {
                 let bits = v.bits();
                 assert!(
-                    bits <= MAX_SUPPORTED_UNSIGNED_BITS && bits % 2 == 0,
-                    "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got int{bits}"
+                    bits <= UNSPREAD_INPUT_MAX && bits % 2 == 0,
+                    "Unspread expects an even integer width up to {UNSPREAD_INPUT_MAX} bits, got int{bits}"
                 );
+
                 let (odd_val, even_val) = unspread_bits(host_word(v), bits);
                 let half_bits = bits / 2;
                 (
@@ -591,10 +594,11 @@ impl Value {
             }
             Value::Unknown(ScalarKind::Int(bits)) => {
                 assert!(
-                    *bits <= MAX_SUPPORTED_UNSIGNED_BITS && bits % 2 == 0,
-                    "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got int{}",
+                    *bits <= UNSPREAD_INPUT_MAX && bits % 2 == 0,
+                    "Unspread expects an even integer width up to {UNSPREAD_INPUT_MAX} bits, got int{}",
                     bits
                 );
+
                 let half_bits = bits / 2;
                 (
                     Value::Unknown(ScalarKind::Int(half_bits)),
@@ -635,9 +639,10 @@ impl Value {
                 panic!("ICE: a cast to int0 describes a value with no bits")
             }
             (Value::Int(v), CastTarget::Int(s2)) => Value::Int(v.cast(*s2)),
-            (Value::Int(v), CastTarget::Field) => {
-                Value::Field(instrumenter.field().constant(host_word(v)))
-            }
+            // A pattern the field cannot carry has no element to cost, so we simply answer with
+            // `Unknown`.
+            (Value::Int(v), CastTarget::Field) => field_constant(instrumenter.field(), v)
+                .map_or(Value::Unknown(ScalarKind::Field), Value::Field),
             (Value::Field(f), CastTarget::Field) => Value::Field(*f),
             (Value::Field(f), CastTarget::Int(s)) => {
                 Value::Int(IntBits::from_field_limbs(&f.into_bigint().0, *s))
@@ -742,7 +747,11 @@ impl Value {
             Value::Unknown(_) => Value::array(vec![Value::Unknown(ScalarKind::Int(8)); size]),
             Value::Field(f) => {
                 let radix_val = match radix {
-                    Radix::Dyn(Value::Int(r)) => host_word(r),
+                    // Genuine host-word arithmetic: the radix is a `u128` divisor below. The
+                    // guard asks whether this radix _is_ a host word, which is a question about
+                    // the value and not about the width the pattern was declared at: a divisor of
+                    // ten is the same whether it arrives as an `int32` or an `int16384`.
+                    Radix::Dyn(Value::Int(r)) if u128::try_from(r).is_ok() => host_word(r),
                     Radix::Bytes => 256,
                     _ => panic!("Cannot convert {:?} to radix {:?}", self, radix),
                 };
@@ -2290,7 +2299,7 @@ mod tests {
     ///
     /// The width matters even with no value behind it. `ValueSignature::Unknown` keys a
     /// specialization on the kind, and `spread_op` bounds itself by it -- so an unknown left at the
-    /// width it was extended *from* would both key on the wrong thing and pass a `<= 64` check the
+    /// width it was extended _from_ would both key on the wrong thing and pass a `<= 64` check the
     /// width it actually has must fail.
     #[test]
     fn an_unknown_carries_the_width_it_was_extended_to() {
@@ -2515,6 +2524,69 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The same delegation, at the widths only the wide corner set can name.
+    ///
+    /// This interpreter holds a value as an [`IntBits`] and hands the pair straight to the model,
+    /// so nothing in the integer arm is width-specific. What the sweep pins is that this stays
+    /// true: a reading that narrowed the operands on the way in, or the result on the way out,
+    /// would price an operation the program does not perform.
+    ///
+    /// The signed operations run **zero** cases, `wide_widths_for` being filtered by the lowering
+    /// frontier, and turn on when that frontier moves.
+    #[test]
+    fn the_integer_arm_delegates_at_wide_widths_too() {
+        use BinaryArithOpKind::{SDiv, SRem, SShr, SSub, UDiv, URem, UShr, USub};
+
+        let mut dummy = DummyInstrumenter {
+            field: FieldConfig::bn254(),
+        };
+        let mut checked = 0usize;
+
+        for (kind, op) in [
+            (USub, IntOp::USub),
+            (SSub, IntOp::SSub),
+            (UDiv, IntOp::UDiv),
+            (SDiv, IntOp::SDiv),
+            (URem, IntOp::URem),
+            (SRem, IntOp::SRem),
+            (UShr, IntOp::UShr),
+            (SShr, IntOp::SShr),
+        ] {
+            for bits in corners::wide_widths_for(kind.is_signed()) {
+                let (values, rhs) = corners::wide_operands(kind.into(), bits);
+
+                for a in &values {
+                    for b in &rhs {
+                        let got = match Value::Int(a.clone()).binary_arith_op(
+                            &Value::Int(b.clone()),
+                            &kind,
+                            &mut dummy,
+                        ) {
+                            Value::Int(v) => {
+                                assert_eq!(v.bits(), bits, "{kind:?} changed the result's width");
+                                v
+                            }
+                            other => panic!("expected an integer result, got {other:?}"),
+                        };
+
+                        // An input the model declines to specify is priced as zero, which is this
+                        // evaluator's stated relation rather than an answer about the operation.
+                        assert_eq!(
+                            got,
+                            residue(op, a, b).unwrap_or_else(|| IntBits::zero(bits)),
+                            "{kind:?} at {bits} bits disagreed on {a:?}, {b:?}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+
+        // The unsigned half alone is thousands of pairs; a count this size cannot be reached by a
+        // filter that quietly emptied the sweep.
+        assert!(checked > 1_000, "only {checked} wide pairs were checked");
     }
 
     /// `ToBits` always produces an array, including when the input's concrete value is unknown.

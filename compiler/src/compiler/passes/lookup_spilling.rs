@@ -1,4 +1,5 @@
 use mavros_artifacts::FieldConfig;
+use mavros_int_semantics::int_bits::{HOST_LIMB_BITS, HOST_WORD_BITS};
 
 use crate::{
     collections::{HashMap, HashSet},
@@ -9,11 +10,11 @@ use crate::{
             types::{FunctionTypeInfo, Types},
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        passes::shared::limbs::{narrow_int_bits, widest_injective_int_bits},
         ssa::{
             FunctionId, SourceLocation, ValueId,
             hlssa::{
-                CastTarget, Constant, HLSSA, HLSSAConstantsSnapshot, LookupTarget,
-                MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type,
+                CastTarget, Constant, HLSSA, HLSSAConstantsSnapshot, LookupTarget, OpCode, Type,
                 builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
             },
         },
@@ -361,9 +362,11 @@ impl LookupSpilling {
             return;
         }
 
+        let injective_bits = widest_injective_int_bits(b.field());
         assert!(
-            bits <= MAX_SUPPORTED_UNSIGNED_BITS,
-            "rangecheck spilling supports widths up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got {bits}"
+            bits <= injective_bits,
+            "a range check to {bits} bits holds for every element of a field that carries \
+             int{injective_bits} injectively, so there is nothing to decompose"
         );
 
         // `gated` mirrors the per-bit free/witnessed split in `spill_one_bit_rangecheck`: an
@@ -373,13 +376,19 @@ impl LookupSpilling {
         let plan = sizing.decompose_rangecheck(bits as u8, gated);
 
         let pure = if is_witness { b.value_of(value) } else { value };
-        // Chunk extraction works on an unsigned integer; widen to the smallest backend-supported
-        // width that holds the value (bytecode only materializes u-constants of width <= 64 or
-        // exactly 128, so e.g. a 96-bit rangecheck must extract through u128).
-        let extract_bits = if bits <= 64 {
-            64
+
+        // Chunk extraction works on an unsigned integer wide enough to hold the value. The two
+        // narrow widths are kept as the widths they are — a 96-bit check extracts through a `u128`
+        // rather than through a 96-bit integer — because those are the widths the bytecode lanes
+        // are built around, and a check inside them must lower exactly as it always has. Past the
+        // host word there is no such lane to sit inside, so the width is the value's own, rounded
+        // up to whole limbs.
+        let extract_bits = if bits <= HOST_LIMB_BITS {
+            HOST_LIMB_BITS
+        } else if bits <= HOST_WORD_BITS {
+            HOST_WORD_BITS
         } else {
-            MAX_SUPPORTED_UNSIGNED_BITS
+            bits.next_multiple_of(HOST_LIMB_BITS)
         };
         let pure_u = b.cast_to(CastTarget::Int(extract_bits), pure);
 
@@ -478,9 +487,10 @@ impl LookupSpilling {
         key_is_witness: bool,
         key_inner_is_field: bool,
     ) {
+        let narrow_bits = narrow_int_bits(b.field());
         assert!(
-            bits as usize <= MAX_SUPPORTED_UNSIGNED_BITS,
-            "spread spilling supports widths up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got {bits}"
+            bits as usize <= narrow_bits,
+            "spread spilling supports widths up to {narrow_bits} bits, got {bits}"
         );
 
         // `gated` mirrors `spill_one_bit_rangecheck`: an unconditional spread (flag baked to 1)
@@ -515,11 +525,12 @@ impl LookupSpilling {
         }
 
         // Extract chunk to an unsigned integer; widen to a backend-materializable width (see the
-        // rangecheck path for the `<= 64 or == 128` constraint on u-constants).
-        let extract_bits = if (bits as usize) <= 64 {
-            64
+        // rangecheck path for the `<= 64 or == 128` constraint on u-constants, and for why both
+        // widths are the backend's rather than the narrow threshold).
+        let extract_bits = if (bits as usize) <= HOST_LIMB_BITS {
+            HOST_LIMB_BITS
         } else {
-            MAX_SUPPORTED_UNSIGNED_BITS
+            HOST_WORD_BITS
         };
         let pure = if key_is_witness { b.value_of(key) } else { key };
         let pure_u = b.cast_to(CastTarget::Int(extract_bits), pure);
@@ -679,19 +690,10 @@ fn extract_low_chunk(
     let shifted = if offset == 0 {
         value
     } else {
-        let divisor = b.int_const(value_bits, two_pow_u128(offset));
+        let divisor = b.two_pow_const(value_bits, offset);
         b.udiv(value, divisor)
     };
-    let modulus = b.int_const(value_bits, two_pow_u128(chunk_bits));
+    let modulus = b.two_pow_const(value_bits, chunk_bits);
     let chunk = b.urem(shifted, modulus);
     b.cast_to(CastTarget::Int(chunk_bits), chunk)
-}
-
-// FIELD-ASSUMPTION: L4-two-pow
-fn two_pow_u128(exponent: usize) -> u128 {
-    assert!(
-        exponent < MAX_SUPPORTED_UNSIGNED_BITS,
-        "u128 constant shift out of range for exponent {exponent}"
-    );
-    1u128 << exponent
 }

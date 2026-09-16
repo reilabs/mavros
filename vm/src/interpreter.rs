@@ -156,6 +156,50 @@ impl Frame {
         unsafe { *(self.data.offset(offset) as *const Int128) }
     }
 
+    /// The number of frame cells a `bits`-wide integer occupies.
+    #[inline(always)]
+    pub fn int_cells(bits: u64) -> usize {
+        (bits as usize).div_ceil(64)
+    }
+
+    /// The number of frame cells a guest value of type `T` occupies.
+    ///
+    /// Every `read_*` below addresses `T` by casting the cell pointer, so `T`'s own size is what
+    /// the frame gives it. The generated dispatch uses this to say how far an `#[out]` reaches when
+    /// it checks a wide result against it.
+    #[inline(always)]
+    pub const fn cells_of<T>() -> usize {
+        size_of::<T>().div_ceil(size_of::<u64>())
+    }
+
+    /// The `len` consecutive cells at `offset`.
+    ///
+    /// # Safety
+    ///
+    /// The cells must be within the frame, and nothing may write them for as long as the returned
+    /// slice lives, since a write through one while a shared reference covers the same cells is
+    /// undefined behavior however the pointer was obtained. Both are the caller's to guarantee.
+    #[inline(always)]
+    pub unsafe fn read_limbs(&self, offset: isize, len: usize) -> &[u64] {
+        unsafe { std::slice::from_raw_parts(self.data.offset(offset), len) }
+    }
+
+    /// The mutable form of [`Frame::read_limbs`], for a wide integer result.
+    ///
+    /// # Safety
+    ///
+    /// As [`Frame::read_limbs`], and additionally nothing may _read_ these cells either for as
+    /// long as the returned slice lives.
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "the frame is a raw pointer to cells the VM owns, and a handler's result slice \
+                  borrows the frame no more than its operands do"
+    )]
+    #[inline(always)]
+    pub unsafe fn read_limbs_mut(&self, offset: isize, len: usize) -> &mut [u64] {
+        unsafe { std::slice::from_raw_parts_mut(self.data.offset(offset), len) }
+    }
+
     #[inline(always)]
     pub fn read_bool(&self, offset: isize) -> bool {
         let a0 = unsafe { *self.data.offset(offset) };
@@ -214,7 +258,7 @@ impl Frame {
     }
 }
 
-fn prepare_dispatch(program: &mut [u64], code_start: usize) {
+pub(crate) fn prepare_dispatch(program: &mut [u64], code_start: usize) {
     // `code_start` is the index of the first function marker, where the opcode
     // stream begins.
     let mut current_offset = code_start;
@@ -627,7 +671,7 @@ pub fn run_phase2(
         } else {
             // Key-value lookup (array or spread): 2 constraints per lookup. The
             // looked-up key & value are witnesses regardless of how the table
-            // is allocated; only the *table's* internal y-slot stride differs —
+            // is allocated; only the _table's_ internal y-slot stride differs —
             // array stores x,y per entry (stride 2, y at the odd slot) while a
             // folded spread or powers-of-two table stores just y per entry (stride 1).
             // Entry 1 (x-constraint): out_a=table_id, out_b=result_value, out_c=0
@@ -973,6 +1017,45 @@ fn flatten_params(value: &InputValueOrdered) -> Vec<Field> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mavros_int_semantics::IntBits;
+
+    /// The frame's cell count and the compiler's are the same.
+    #[test]
+    fn the_frames_cell_count_is_the_compilers() {
+        for bits in [1usize, 63, 64, 65, 127, 128, 129, 192, 1000, 16383, 16384] {
+            assert_eq!(
+                Frame::int_cells(bits as u64),
+                IntBits::limbs_for_bits(bits),
+                "the frame and the model disagree on the cells an int{bits} occupies"
+            );
+        }
+    }
+
+    #[test]
+    fn a_limb_slice_reads_and_writes_the_cells_the_layout_gives_it() {
+        // A bare cell array rather than a pushed frame, testing the addressing of `data`.
+        let mut cells = vec![0u64; 16];
+        let frame = Frame {
+            data: cells.as_mut_ptr(),
+        };
+
+        // An int192 at cell 4, with a sentinel either side: a slice that ran long or short would
+        // either read one of them or fail to write its own third cell.
+        frame.write_u64(3, 0xdead);
+        for (i, word) in [1u64, 2, 3].into_iter().enumerate() {
+            frame.write_u64(4 + i as isize, word);
+        }
+        frame.write_u64(7, 0xbeef);
+
+        let cells = Frame::int_cells(192);
+        assert_eq!(cells, 3);
+        assert_eq!(unsafe { frame.read_limbs(4, cells) }, &[1, 2, 3]);
+
+        unsafe { frame.read_limbs_mut(4, cells) }.copy_from_slice(&[7, 8, 9]);
+        assert_eq!(unsafe { frame.read_limbs(4, cells) }, &[7, 8, 9]);
+        assert_eq!(frame.read_u64(3), 0xdead, "the write ran off the low end");
+        assert_eq!(frame.read_u64(7), 0xbeef, "the write ran off the high end");
+    }
 
     #[test]
     fn trap_error_source_paths_can_be_made_relative() {

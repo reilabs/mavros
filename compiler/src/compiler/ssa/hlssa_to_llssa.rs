@@ -19,8 +19,8 @@ use crate::{
             BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
                 ArithGroup, BinaryArithOpKind, CmpKind, Constant, DMatrix, Endianness, HLFunction,
-                HLSSA, HLSSAConstantsSnapshot, MAX_POW2_TABLE_SIZE, MAX_SUPPORTED_UNSIGNED_BITS,
-                SliceOpDir, Type as HLType, TypeExpr as HLTypeExpr, assert_signed_op_width,
+                HLSSA, HLSSAConstantsSnapshot, MAX_POW2_TABLE_SIZE, SliceOpDir, Type as HLType,
+                TypeExpr as HLTypeExpr, assert_signed_op_width,
             },
             llssa::{
                 Blob as LLBlob, Constant as LLConstant, FieldArithOp, IntArithOp, IntCmpOp,
@@ -28,7 +28,7 @@ use crate::{
                 builder::{LLBlockEditor, LLBlockEmitter, LLEmitter},
             },
         },
-        util::ice_non_elided_tuple,
+        util::{UNSPREAD_INPUT_MAX, ice_non_elided_tuple},
     },
 };
 
@@ -590,9 +590,9 @@ fn lower_inner(
 
 /// Lower every HLSSA constant `ValueId` referenced by `function` into LLSSA.
 ///
-/// All HLSSA constants are interned into LLSSA's module-level constants table. Scalar `U`/`I`
-/// constants become `LLConstant::Int`; field constants become an aggregate `LLConstant::Struct`
-/// holding the four-limb `field_elem()` layout with one `Int` value per limb.
+/// All HLSSA constants are interned into LLSSA's module-level constants table. `Int` constants
+/// become `LLConstant::Int`; field constants become an aggregate `LLConstant::Struct` holding the
+/// four-limb `field_elem()` layout with one `Int` value per limb.
 ///
 /// Blob constants additionally get a `ConstDataPtr` emitted in the entry block, and the HLSSA
 /// value maps to that pointer. This keeps the runtime representation of blob values uniform:
@@ -1233,22 +1233,8 @@ fn lower_instruction(
                             HLTypeExpr::Int(bits) => *bits,
                             _ => panic!("Cast to Field from unsupported type: {}", source_type),
                         };
-                        let lo = if source_bits < 64 {
-                            e.zext(ll_value, 64)
-                        } else if source_bits == 64 {
-                            ll_value
-                        } else {
-                            e.truncate(ll_value, 64)
-                        };
-                        let hi = if source_bits <= 64 {
-                            e.emit_int_const(64, 0)
-                        } else {
-                            let shift = e.emit_int_const(source_bits as u32, 64);
-                            let shifted = e.int_arith(IntArithOp::UShr, ll_value, shift);
-                            e.truncate(shifted, 64)
-                        };
-                        let zero = e.emit_int_const(64, 0);
-                        let limbs = e.mk_struct(LLStruct::limbs(), vec![lo, hi, zero, zero]);
+                        let limb_values = int_to_raw_limbs(e, ll_value, source_bits);
+                        let limbs = e.mk_struct(LLStruct::limbs(), limb_values);
                         // FIELD-ASSUMPTION: L3-limb-op (6 sites)
                         let field_val = e.field_from_limbs(limbs);
                         val_map.insert(*result, field_val);
@@ -1257,21 +1243,13 @@ fn lower_instruction(
                 CastTarget::Int(target_bits) => {
                     let ll_result = match &source_type.expr {
                         HLTypeExpr::Field => {
-                            // Field → int(n): FieldToLimbs, combine enough raw limbs, truncate.
+                            // Field → int(n): every raw limb the target has room for, combined and
+                            // truncated to its width. The reading is the element's magnitude, so
+                            // this agrees with the constant folders, which read the same limbs
+                            // through `IntBits::from_field_limbs`.
+                            // FIELD-ASSUMPTION: L3-limb-op (6 sites)
                             let limbs = e.field_to_limbs(ll_value);
-                            let limb0 = e.extract_field(limbs, LLStruct::limbs(), 0);
-                            if *target_bits < 64 {
-                                e.truncate(limb0, *target_bits as u32)
-                            } else if *target_bits == 64 {
-                                limb0
-                            } else {
-                                let limb1 = e.extract_field(limbs, LLStruct::limbs(), 1);
-                                let lo = e.zext(limb0, *target_bits as u32);
-                                let hi = e.zext(limb1, *target_bits as u32);
-                                let shift = e.emit_int_const(*target_bits as u32, 64);
-                                let hi_shifted = e.int_arith(IntArithOp::Shl, hi, shift);
-                                e.int_arith(IntArithOp::Or, lo, hi_shifted)
-                            }
+                            int_from_raw_limbs(e, limbs, *target_bits)
                         }
                         HLTypeExpr::Int(source_bits) => {
                             // Integer → integer. A cast is a raw-bit conversion, so widening
@@ -1745,8 +1723,8 @@ fn lower_unspread(
     let even_bits = integer_width(even_type);
     let active_bits = bits as u32;
     assert!(
-        input_bits <= MAX_SUPPORTED_UNSIGNED_BITS as u32 && input_bits % 2 == 0,
-        "Unspread expects an even integer width up to {MAX_SUPPORTED_UNSIGNED_BITS} bits, got {}",
+        input_bits as usize <= UNSPREAD_INPUT_MAX && input_bits % 2 == 0,
+        "Unspread expects an even integer width up to {UNSPREAD_INPUT_MAX} bits, got {}",
         value_type
     );
     assert!(
@@ -2443,17 +2421,80 @@ fn lower_rc_drop(
     e.call(drop_fn_id, vec![ll_arr], 0);
 }
 
-// =============================================================================
-// AD lowering helpers
-// =============================================================================
+// AD LOWERING HELPERS
+// ================================================================================================
 
-/// Ensure a value is Field-sized ({i64, i64, i64, i64}).
+/// The widest integer the raw-limb packing below carries.
 ///
-/// Non-Field integer types are packed into raw little-endian limbs.
+/// This is specifically about how much [`LLStruct::limbs`] holds, not about which integers can be
+/// represented in terms of one or more field elements.
 ///
-/// The `128` below is **this function's own cap and not the integer type system's**, which is why
-/// it is a literal rather than `MAX_SUPPORTED_UNSIGNED_BITS`: only two of the four limbs are ever
-/// filled here, so 128 bits is what the shape can carry whatever the type cap becomes.
+/// The limb it counts is the **field's** and not the host's.
+pub const INT_TO_FIELD_MAX_BITS: usize = LLStruct::FIELD_LIMBS * FIELD_LIMB_BITS;
+
+/// The raw little-endian limbs of a `bits`-wide integer, one per cell of [`LLStruct::limbs`].
+///
+/// A limb the width cannot reach is the zero constant rather than a shift yielding zero, so an
+/// integer narrow enough to sit in one limb packs into exactly one instruction.
+fn int_to_raw_limbs(e: &mut LLBlockEmitter<'_>, value: ValueId, bits: usize) -> Vec<ValueId> {
+    assert!(
+        bits <= INT_TO_FIELD_MAX_BITS,
+        "an integer crosses the field boundary through {} raw limbs, so int{bits} has no packing",
+        LLStruct::FIELD_LIMBS
+    );
+
+    let limb_bits = FIELD_LIMB_BITS as u32;
+    (0..LLStruct::FIELD_LIMBS)
+        .map(|index| {
+            let offset = index * FIELD_LIMB_BITS;
+            if offset >= bits {
+                e.emit_int_const(limb_bits, 0)
+            } else if bits < FIELD_LIMB_BITS {
+                e.zext(value, limb_bits)
+            } else if bits == FIELD_LIMB_BITS {
+                value
+            } else if offset == 0 {
+                e.truncate(value, limb_bits)
+            } else {
+                let shift = e.emit_int_const(bits as u32, offset as u64);
+                let shifted = e.int_arith(IntArithOp::UShr, value, shift);
+                e.truncate(shifted, limb_bits)
+            }
+        })
+        .collect()
+}
+
+/// A `bits`-wide integer read out of the raw little-endian limbs of a field element.
+///
+/// Only the limbs the target has room for are read, and only as many as the element has: a target
+/// wider than [`INT_TO_FIELD_MAX_BITS`] is zero-filled above them, which is the whole value because
+/// an element has no bits up there.
+fn int_from_raw_limbs(e: &mut LLBlockEmitter<'_>, limbs: ValueId, bits: usize) -> ValueId {
+    let used = LLStruct::FIELD_LIMBS.min(bits.div_ceil(FIELD_LIMB_BITS));
+    let raw: Vec<ValueId> = (0..used)
+        .map(|index| e.extract_field(limbs, LLStruct::limbs(), index))
+        .collect();
+
+    if bits < FIELD_LIMB_BITS {
+        return e.truncate(raw[0], bits as u32);
+    }
+    if bits == FIELD_LIMB_BITS {
+        return raw[0];
+    }
+
+    let widened: Vec<ValueId> = raw.iter().map(|limb| e.zext(*limb, bits as u32)).collect();
+    let mut combined = widened[0];
+    for (index, limb) in widened.iter().enumerate().skip(1) {
+        let shift = e.emit_int_const(bits as u32, (index * FIELD_LIMB_BITS) as u64);
+        let shifted = e.int_arith(IntArithOp::Shl, *limb, shift);
+        combined = e.int_arith(IntArithOp::Or, combined, shifted);
+    }
+    combined
+}
+
+/// Ensure a value is Field-sized, with non-field integer types packed into raw little-endian limbs.
+///
+/// Bounded by [`INT_TO_FIELD_MAX_BITS`]; a wider source is refused by [`int_to_raw_limbs`].
 fn ensure_field_sized(
     e: &mut LLBlockEmitter<'_>,
     ll_val: ValueId,
@@ -2462,19 +2503,12 @@ fn ensure_field_sized(
     if source_type.is_field() || source_type.is_witness_of() {
         return ll_val;
     }
-    let (lo, hi) = match &source_type.expr {
-        HLTypeExpr::Int(bits) if *bits < 64 => (e.zext(ll_val, 64), e.emit_int_const(64, 0)),
-        HLTypeExpr::Int(64) => (ll_val, e.emit_int_const(64, 0)),
-        HLTypeExpr::Int(bits) if *bits <= 128 => {
-            let lo = e.truncate(ll_val, 64);
-            let shift = e.emit_int_const(*bits as u32, 64);
-            let hi = e.int_arith(IntArithOp::UShr, ll_val, shift);
-            (lo, e.truncate(hi, 64))
-        }
-        _ => panic!("ensure_field_sized: unsupported type: {}", source_type),
+    let HLTypeExpr::Int(bits) = &source_type.expr else {
+        panic!("ensure_field_sized: unsupported type: {}", source_type)
     };
-    let zero = e.emit_int_const(64, 0);
-    let limbs = e.mk_struct(LLStruct::limbs(), vec![lo, hi, zero, zero]);
+    let limb_values = int_to_raw_limbs(e, ll_val, *bits);
+    // FIELD-ASSUMPTION: L3-limb-op
+    let limbs = e.mk_struct(LLStruct::limbs(), limb_values);
     e.field_from_limbs(limbs)
 }
 
@@ -3606,11 +3640,6 @@ fn emit_forward_key_value_lookup(
 }
 
 fn int_to_field(e: &mut LLBlockEmitter<'_>, value: ValueId, bits: usize) -> ValueId {
-    assert!(
-        bits <= 128,
-        "Array lookup only supports integer elements up to 128 bits, got {}",
-        bits
-    );
     ensure_field_sized(e, value, &HLType::int(bits))
 }
 
@@ -4719,6 +4748,84 @@ mod tests {
         Field,
         ssa::{DefaultSSAAnnotator, llssa::builder::LLSSABuilder},
     };
+    use mavros_int_semantics::IntBits;
+
+    /// The limbs a width reaches, and nothing above them.
+    fn packing_dump(bits: usize, pack: bool) -> String {
+        let mut ssa = LLSSA::with_main("packing".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+
+        let mut sb = LLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.test_block(entry);
+            if pack {
+                let value = e.emit_int_const_u128(bits as u32, 7);
+                let limb_values = int_to_raw_limbs(&mut e, value, bits);
+                let limbs = e.mk_struct(LLStruct::limbs(), limb_values);
+                let _ = e.field_from_limbs(limbs);
+            } else {
+                // An element built from a 64-bit constant, which packs with no shift of its own
+                // and so leaves the `int.shl` count below to the unpacking alone.
+                let seed = e.emit_int_const(64, 7);
+                let seed_limbs = int_to_raw_limbs(&mut e, seed, 64);
+                let packed = e.mk_struct(LLStruct::limbs(), seed_limbs);
+                let element = e.field_from_limbs(packed);
+                let limbs = e.field_to_limbs(element);
+                let _ = int_from_raw_limbs(&mut e, limbs, bits);
+            }
+            e.terminate_return(vec![]);
+        });
+
+        ssa.to_string(&DefaultSSAAnnotator)
+    }
+
+    /// The number of `int.ushr`/`int.shl` sites, which is one per limb above the first.
+    fn shift_offsets(dump: &str, mnemonic: &str) -> usize {
+        dump.matches(mnemonic).count()
+    }
+
+    /// The packing fills exactly the limbs the width reaches.
+    ///
+    /// A limb the width cannot reach is the zero constant, so the instruction count is what says
+    /// how far the value was read. This is the thing an off-by-one limb could get wrong while the
+    /// narrow widths, which the corpus does cover, stay byte-identical.
+    #[test]
+    fn the_packing_reaches_every_limb_the_width_does() {
+        for (bits, shifts) in [(64usize, 0usize), (128, 1), (129, 2), (200, 3), (256, 3)] {
+            let dump = packing_dump(bits, true);
+            assert_eq!(
+                shift_offsets(&dump, "= ushr "),
+                shifts,
+                "int{bits} packed with the wrong number of limb shifts:\n{dump}"
+            );
+        }
+    }
+
+    /// The unpacking reads exactly the limbs the target has room for, and no more than the element
+    /// has.
+    ///
+    /// A target past [`INT_TO_FIELD_MAX_BITS`] stops at the element's own limbs rather than
+    /// shifting in zeros it already has, which is why 256 and 320 agree.
+    #[test]
+    fn the_unpacking_reads_every_limb_the_target_has_room_for() {
+        for (bits, shifts) in [
+            (63usize, 0usize),
+            (64, 0),
+            (128, 1),
+            (129, 2),
+            (200, 3),
+            (256, 3),
+            (320, 3),
+        ] {
+            let dump = packing_dump(bits, false);
+            assert_eq!(
+                shift_offsets(&dump, "= shl "),
+                shifts,
+                "int{bits} unpacked with the wrong number of limb shifts:\n{dump}"
+            );
+        }
+    }
 
     /// A guarded refcount mutation must compare against `RC_IMMORTAL_OBJECT`
     /// before touching the refcount word.
@@ -4827,8 +4934,8 @@ mod tests {
         hb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.test_block(entry);
-            let narrow = e.int_const(8, 1);
-            let wide = e.int_const(16, 1);
+            let narrow = e.int_const(IntBits::one(8));
+            let wide = e.int_const(IntBits::one(16));
             let sum = e.uadd(narrow, wide);
             e.terminate_return(vec![sum]);
         });
@@ -4928,5 +5035,16 @@ mod tests {
             dump.contains("trunc"),
             "expected limb values to be truncated to bits in LLSSA dump:\n{dump}"
         );
+    }
+
+    /// [`INT_TO_FIELD_MAX_BITS`] is the layout's capacity.
+    #[test]
+    fn the_packing_carries_more_than_the_field_does_injectively() {
+        assert_eq!(
+            INT_TO_FIELD_MAX_BITS,
+            LLStruct::limbs().fields.len() * FIELD_LIMB_BITS,
+            "the packing fills every limb the layout has"
+        );
+        assert!(INT_TO_FIELD_MAX_BITS < crate::compiler::ssa::hlssa::MAX_SUPPORTED_INT_BITS);
     }
 }

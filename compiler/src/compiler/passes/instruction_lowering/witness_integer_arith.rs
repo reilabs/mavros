@@ -1,3 +1,4 @@
+use mavros_int_semantics::IntBits;
 use num_bigint::BigInt;
 use num_traits::{One, Signed, Zero};
 
@@ -483,8 +484,11 @@ impl LowerWitnessIntegerArithOps {
         let lhs_known_sign = known_sign(&lhs_range, bits);
         let sign_l_is_witness = lhs_witness && lhs_known_sign.is_none();
         let (sign_l_u1, sign_l) = match lhs_known_sign {
-            Some(false) => (b.int_const(1, 0), b.field_const(b.field().zero())),
-            Some(true) => (b.int_const(1, 1), b.field_const(b.field().one())),
+            Some(false) => (
+                b.int_const(IntBits::zero(1)),
+                b.field_const(b.field().zero()),
+            ),
+            Some(true) => (b.int_const(IntBits::one(1)), b.field_const(b.field().one())),
             None => {
                 let sign_l_bits = b.bit_range(lhs, bits - 1, 1);
                 let sign_l_u1 = b.cast_to(CastTarget::Int(1), sign_l_bits);
@@ -502,8 +506,11 @@ impl LowerWitnessIntegerArithOps {
             (sign_l_u1, sign_l)
         } else {
             match rhs_known_sign {
-                Some(false) => (b.int_const(1, 0), b.field_const(b.field().zero())),
-                Some(true) => (b.int_const(1, 1), b.field_const(b.field().one())),
+                Some(false) => (
+                    b.int_const(IntBits::zero(1)),
+                    b.field_const(b.field().zero()),
+                ),
+                Some(true) => (b.int_const(IntBits::one(1)), b.field_const(b.field().one())),
                 None => {
                     let sign_r_bits = b.bit_range(rhs, bits - 1, 1);
                     let sign_r_u1 = b.cast_to(CastTarget::Int(1), sign_r_bits);
@@ -857,8 +864,8 @@ fn lower_unsigned_divmod(
             } else {
                 condition
             };
-            let zero = b.int_const(128, 0);
-            let one = b.int_const(128, 1);
+            let zero = b.int_const(IntBits::zero(128));
+            let one = b.int_const(IntBits::one(128));
             dividend_hint = b.select(condition, dividend_hint, zero);
             divisor_hint = b.select(condition, divisor_hint, one);
         }
@@ -969,8 +976,8 @@ fn lower_unsigned_divmod(
         } else {
             condition
         };
-        let zero = b.int_const(bits, 0);
-        let one = b.int_const(bits, 1);
+        let zero = b.int_const(IntBits::zero(bits));
+        let one = b.int_const(IntBits::one(bits));
         dividend_hint = b.select(condition, dividend_hint, zero);
         divisor_hint = b.select(condition, divisor_hint, one);
     }

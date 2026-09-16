@@ -14,6 +14,7 @@ use crate::compiler::{
         builder::{HLBlockEmitter, HLEmitter},
     },
 };
+use mavros_int_semantics::IntBits;
 
 #[derive(Default)]
 pub struct LowerSliceInsert;
@@ -49,8 +50,8 @@ impl InstructionLoweringRule for LowerSliceInsert {
             build_insert_bounds_assert(b, *slice, *index, &index_ty);
         b.emit_guarded(guard, assert);
 
-        let zero = b.int_const(32, 0);
-        let one = b.int_const(32, 1);
+        let zero = b.int_const(IntBits::zero(32));
+        let one = b.int_const(IntBits::one(32));
 
         let empty = b.mk_seq(vec![], SequenceTargetType::Slice, sel_elem_ty.clone());
         let value_v = *value;
@@ -127,8 +128,8 @@ impl InstructionLoweringRule for LowerSliceRemove {
             build_remove_bounds_assert(b, *slice, *index, &index_ty);
         b.emit_guarded(guard, assert);
 
-        let zero = b.int_const(32, 0);
-        let one = b.int_const(32, 1);
+        let zero = b.int_const(IntBits::zero(32));
+        let one = b.int_const(IntBits::one(32));
         let nonempty = b.ult(zero, len);
         let nonempty32 = b.cast_to(CastTarget::Int(32), nonempty);
         let new_len = b.usub(len, nonempty32);
