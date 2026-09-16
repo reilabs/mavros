@@ -68,9 +68,9 @@ pub struct ExpressionConverter<'a> {
     /// Tracks which LocalIds are mutable (their binding is a pointer)
     mutable_locals: HashSet<LocalId>,
 
-    /// The Noir type of the locals a `match` can test: `let`-bound ones (the elaborator hoists
-    /// every scrutinee into a `let`) and case arguments (nested patterns test those).
-    local_types_for_match: HashMap<LocalId, AstType>,
+    /// The Noir type of every `let`-bound local whose type `expression_type` can recover, plus
+    /// every match case argument, since nested patterns match on those.
+    local_types: HashMap<LocalId, AstType>,
 
     /// Maps AST FuncId to SSA FunctionId
     function_mapper: &'a HashMap<AstFuncId, FunctionId>,
@@ -131,7 +131,7 @@ impl<'a> ExpressionConverter<'a> {
         Self {
             bindings: HashMap::default(),
             mutable_locals: HashSet::default(),
-            local_types_for_match: HashMap::default(),
+            local_types: HashMap::default(),
             function_mapper,
             natively_unconstrained,
             type_converter: TypeConverter::new(),
@@ -530,7 +530,7 @@ impl<'a> ExpressionConverter<'a> {
             self.bindings.insert(let_expr.id, value);
         }
         if let Some(typ) = Self::expression_type(&let_expr.expression) {
-            self.local_types_for_match.insert(let_expr.id, typ);
+            self.local_types.insert(let_expr.id, typ);
         }
         None
     }
@@ -967,7 +967,7 @@ impl<'a> ExpressionConverter<'a> {
     fn convert_match(&mut self, m: &Match, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
         let (var, var_name) = &m.variable_to_match;
         let ty = self
-            .local_types_for_match
+            .local_types
             .get(var)
             .unwrap_or_else(|| {
                 panic!("ICE: no recorded type for match scrutinee `{var_name}` ({var:?})")
@@ -1180,8 +1180,7 @@ impl<'a> ExpressionConverter<'a> {
             let value =
                 self.emit_at_source_location(b, location.clone(), |e| e.tuple_proj(payload, i));
             self.bind_local(*local_id, value);
-            self.local_types_for_match
-                .insert(*local_id, field_ty.clone());
+            self.local_types.insert(*local_id, field_ty.clone());
         }
     }
 
