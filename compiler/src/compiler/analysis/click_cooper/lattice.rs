@@ -4,14 +4,14 @@ use std::sync::{Arc, OnceLock};
 
 use mavros_artifacts::FieldConfig;
 
-use mavros_int_semantics::{self as semantics, CmpOp, IntBits, Sign};
+use mavros_int_semantics::{self as semantics, CmpOp, IntBits, MAX_LOWERED_SIGNED_BITS, Sign};
 
 use crate::compiler::{
     ssa::hlssa::{
-        ArithGroup, BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant,
-        MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, SliceOpDir, Type,
+        ArithGroup, BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, MAX_SUPPORTED_INT_BITS,
+        SliceOpDir, Type,
     },
-    util::host_word,
+    util::field_constant,
 };
 
 // CONSTNESS
@@ -116,12 +116,12 @@ pub(crate) fn eval_binary(
 
 /// The widest pattern an operation of this reading may act on.
 ///
-/// A signed opcode tops out well below the integer type cap because the signed lowerings and the
-/// VM's `sdiv_int`/`slt_int` are 64-bit for the moment.
+/// The unsigned arm is the integer type cap, so a fold here can mint a pattern wider than any host
+/// type — which is correct, since [`semantics::eval`] runs on [`IntBits`] limbs throughout.
 fn width_cap(sign: Sign) -> usize {
     match sign {
-        Sign::Signed => MAX_SUPPORTED_SIGNED_BITS,
-        Sign::Unsigned => MAX_SUPPORTED_UNSIGNED_BITS,
+        Sign::Signed => MAX_LOWERED_SIGNED_BITS,
+        Sign::Unsigned => MAX_SUPPORTED_INT_BITS,
     }
 }
 
@@ -189,8 +189,8 @@ pub(crate) fn eval_cmp(kind: CmpKind, a: &Constant, b: &Constant) -> Option<Cons
 /// Folds a constant cast operation.
 ///
 /// HLSSA casts are raw-bits conversions (sign extension is the separate `SExt` op). Integers
-/// zero-extend into fields, fields truncate to their low bits, and integer-to-integer casts
-/// zero-extend or truncate.
+/// zero-extend into fields as long as all possible values in the integer type fit into the field,
+/// fields truncate to their low bits, and integer-to-integer casts zero-extend or truncate.
 pub(crate) fn eval_cast(target: &CastTarget, v: &Constant, field: FieldConfig) -> Option<Constant> {
     match target {
         CastTarget::Nop => Some(v.clone()),
@@ -200,7 +200,7 @@ pub(crate) fn eval_cast(target: &CastTarget, v: &Constant, field: FieldConfig) -
         | CastTarget::Map(_) => None,
         CastTarget::Field => match v {
             // FIELD-ASSUMPTION: L4-eval
-            Constant::Int(x) => Some(Constant::Field(field.constant(host_word(x)))),
+            Constant::Int(x) => field_constant(field, x).map(Constant::Field),
             Constant::Field(_) => Some(v.clone()),
             Constant::FnPtr(_) | Constant::Blob(_) => None,
         },
@@ -211,7 +211,7 @@ pub(crate) fn eval_cast(target: &CastTarget, v: &Constant, field: FieldConfig) -
 /// Extracts the low `n` bits of a constant's value as an `n`-bit pattern, or `None` if the
 /// constant is not numeric.
 fn int_cast_bits(v: &Constant, n: usize) -> Option<IntBits> {
-    if !(1..=MAX_SUPPORTED_UNSIGNED_BITS).contains(&n) {
+    if !(1..=MAX_SUPPORTED_INT_BITS).contains(&n) {
         return None;
     }
     match v {
@@ -233,7 +233,7 @@ fn int_cast_bits(v: &Constant, n: usize) -> Option<IntBits> {
 /// asserting keeps this analysis's rule that a shape it cannot account for produces no constant,
 /// and leaves the loud failure at the one site that owns it.
 pub(crate) fn eval_sext(v: &Constant, from_bits: usize, to_bits: usize) -> Option<Constant> {
-    if from_bits == 0 || from_bits > to_bits || to_bits > MAX_SUPPORTED_UNSIGNED_BITS {
+    if from_bits == 0 || from_bits > to_bits || to_bits > MAX_SUPPORTED_INT_BITS {
         return None;
     }
     match v {
@@ -248,13 +248,12 @@ pub(crate) fn eval_sext(v: &Constant, from_bits: usize, to_bits: usize) -> Optio
 /// bits change and a field source folds to a field.
 ///
 /// A **field** source is read through [`IntBits::from_field_limbs`], the same canonical LE
-/// decomposition that `int_cast_bits` uses for the `Field -> Int` cast, and so is bounded
-/// by what that can express: a window reaching past bit [`MAX_SUPPORTED_UNSIGNED_BITS`] declines
-/// rather than answering the low bits of one that does fit.
+/// decomposition that `int_cast_bits` uses for the `Field -> Int` cast, and minted back through
+/// [`field_constant`].
 ///
 /// [`IntBits::bit_range`] is total in its **offset** as a pattern shifted past its own width is
-/// empty, so declining a large one is this analysis avoiding minting a constant in a place it would
-/// be essentially useless.
+/// empty, so declining a large one is this analysis avoiding minting a constant where it would be
+/// useless.
 ///
 /// The **zero** width is different as an empty window is not a pattern and asking for one panics,
 /// so it is refused rather than declined-by-convention. `analysis::types` rejects such a `BitRange`
@@ -265,7 +264,7 @@ pub(crate) fn eval_bit_range(
     width: usize,
     field: FieldConfig,
 ) -> Option<Constant> {
-    if width == 0 || offset >= MAX_SUPPORTED_UNSIGNED_BITS {
+    if width == 0 || offset >= MAX_SUPPORTED_INT_BITS {
         return None;
     }
     match v {
@@ -279,15 +278,23 @@ pub(crate) fn eval_bit_range(
         // FIELD-ASSUMPTION: L4-decompose
         Constant::Field(f) => {
             // Only an upper bound: `width` is at least one by the refusal above, so `read` is too
-            // and a lower bound here would be dead.
+            // and a lower bound here would be dead. The window is read at the integer type cap
+            // because that is the widest pattern this analysis may hold; a source bit past the
+            // field's own width is zero, so a wider read would only ever extend the answer with
+            // zeros.
             let read = offset.checked_add(width)?;
-            if read > MAX_SUPPORTED_UNSIGNED_BITS {
+            if read > MAX_SUPPORTED_INT_BITS {
                 return None;
             }
+
             let limbs = f.into_bigint().0;
             let low = IntBits::from_field_limbs(&limbs, read);
             let extracted = low.bit_range(offset, width);
-            Some(Constant::Field(field.constant(host_word(&extracted))))
+
+            // Total in practice: `low` is `f` truncated and `extracted` is a window of `low`, so
+            // the magnitude only ever shrinks and the element it came from was below the modulus to
+            // begin with. If that ever stops holding we just want to decline to fold.
+            field_constant(field, &extracted).map(Constant::Field)
         }
 
         Constant::FnPtr(_) | Constant::Blob(_) => None,
@@ -459,13 +466,79 @@ pub(crate) fn eval_mk_repeated(
 
 #[cfg(test)]
 mod tests {
-    use mavros_int_semantics::{Outcome, SignedValue, corners};
+    use mavros_int_semantics::{Outcome, SignedValue, corners, int_bits::HOST_WORD_BITS};
 
     use super::*;
 
     /// An `i8` constant, written as the value it denotes rather than its raw bits.
     fn i8c(v: i128) -> Constant {
         Constant::Int(IntBits::from_signed(8, &SignedValue::from(v)))
+    }
+
+    #[test]
+    fn an_unsigned_fold_runs_above_the_old_integer_cap() {
+        // `width_cap`'s unsigned arm is the type cap, so the fold is in reach at every width the
+        // type system admits. Checked at a width that carries a set bit no host word has.
+        let bits = 256;
+        let high = Constant::Int(IntBits::from_u128(bits, 1).shifted_left(200));
+        let one = Constant::Int(IntBits::from_u128(bits, 1));
+        let field = FieldConfig::bn254();
+
+        let sum = eval_binary(BinaryArithOpKind::UAdd, &high, &one, field)
+            .expect("a 256-bit addition folds");
+        let Constant::Int(sum) = sum else {
+            panic!("an integer fold answers an integer");
+        };
+        assert_eq!(sum.bits(), bits);
+        assert!(sum.bit(200) == Some(true) && sum.bit(0) == Some(true));
+
+        // And the signed arm still stops at the frontier, because folding above it would mint a
+        // constant for IR that `assert_signed_op_width` refuses.
+        assert_eq!(
+            eval_binary(BinaryArithOpKind::SAdd, &high, &one, field),
+            None,
+            "a signed fold above the lowering frontier must decline"
+        );
+    }
+
+    /// The other half of the widened unsigned fold: what the rest of this analysis does with one.
+    ///
+    /// A cast to `Field` answers wherever the pattern has an element, which is a question about the
+    /// **value** rather than the width — so the 256-bit patterns the fold above produces are folded
+    /// rather than given up on, and the refusal lands exactly where minting one would answer a
+    /// residue in place of the value.
+    #[test]
+    fn a_cast_to_field_is_bounded_by_the_modulus_and_not_by_a_host_word() {
+        let field = FieldConfig::bn254();
+
+        // The widest pattern a host word holds folds, and folds to the right element.
+        let widest = Constant::Int(IntBits::all_ones(HOST_WORD_BITS));
+        assert_eq!(
+            eval_cast(&CastTarget::Field, &widest, field),
+            Some(Constant::Field(field.constant(u128::MAX)))
+        );
+
+        // So does one far past it, at a width the fold above really produces.
+        let wide = IntBits::from_u128(256, 1).shifted_left(200);
+        let folded = eval_cast(&CastTarget::Field, &Constant::Int(wide.clone()), field);
+        let Some(Constant::Field(element)) = folded else {
+            panic!("a 256-bit pattern below the modulus has a field constant, got {folded:?}");
+        };
+        assert_eq!(
+            IntBits::from_field_limbs(&element.into_bigint().0, 256),
+            wide
+        );
+
+        // At the modulus there is no element to answer, and the residue is not the value.
+        assert_eq!(
+            eval_cast(
+                &CastTarget::Field,
+                &Constant::Int(IntBits::all_ones(256)),
+                field
+            ),
+            None,
+            "a pattern at or above the modulus has no field constant this analysis may mint"
+        );
     }
 
     /// Every arithmetic group, so a new one is a compile error here rather than a silent gap in
@@ -509,35 +582,12 @@ mod tests {
                             // `corners` deals in host words, so the pair is built once and both the
                             // model and the folder are asked about the same two patterns.
                             let (x, y) = (IntBits::from_u128(bits, x), IntBits::from_u128(bits, y));
-                            let want = semantics::eval(kind.into(), &x, &y);
-                            let got = eval_binary(
-                                kind,
-                                &Constant::Int(x.clone()),
-                                &Constant::Int(y.clone()),
-                                field,
-                            );
-
-                            let ctx = format!("{kind:?} {bits} {x:?} {y:?}");
-                            match (want, got) {
-                                (_, None) => {}
-                                (Outcome::Rejected(why), Some(folded)) => panic!(
-                                    "{ctx}: folded to {folded:?} an input the model rejects ({why:?}), deleting a rejection Noir requires"
-                                ),
-                                (Outcome::Value(v), Some(Constant::Int(folded))) => {
-                                    assert_eq!(folded, v, "{ctx}: wrong fold");
-                                    folds += 1;
-                                }
-                                (Outcome::Value(_), Some(other)) => {
-                                    panic!("{ctx}: folded an integer pair to {other:?}")
-                                }
-                            }
+                            folds += check_one_fold(kind, bits, &x, &y, field);
                         }
                     }
 
-                    // A mixed-width pair has no fold at all, shifts included: it is IR that
-                    // `assert_int_arith_widths` would panic on, so there is no answer to give. It
-                    // is checked here rather than left implicit because the model _would_ answer
-                    // for a shift, and following it there is exactly the mistake.
+                    // A mixed-width pair has no fold at all, shifts included: it would cause a
+                    // panic so there is no answer to give.
                     let other = if bits == 8 { 16 } else { 8 };
                     assert!(
                         eval_binary(
@@ -556,6 +606,70 @@ mod tests {
         assert!(
             folds > 10_000,
             "only {folds} folds: the sweep is passing vacuously"
+        );
+    }
+
+    /// One pair, checked against the model; the answer is how many folds it contributed.
+    fn check_one_fold(
+        kind: BinaryArithOpKind,
+        bits: usize,
+        x: &IntBits,
+        y: &IntBits,
+        field: FieldConfig,
+    ) -> usize {
+        let want = semantics::eval(kind.into(), x, y);
+        let got = eval_binary(
+            kind,
+            &Constant::Int(x.clone()),
+            &Constant::Int(y.clone()),
+            field,
+        );
+
+        let ctx = format!("{kind:?} {bits} {x:?} {y:?}");
+        match (want, got) {
+            (_, None) => 0,
+            (Outcome::Rejected(why), Some(folded)) => panic!(
+                "{ctx}: folded to {folded:?} an input the model rejects ({why:?}), deleting a rejection Noir requires"
+            ),
+            (Outcome::Value(v), Some(Constant::Int(folded))) => {
+                assert_eq!(folded, v, "{ctx}: wrong fold");
+                1
+            }
+            (Outcome::Value(_), Some(other)) => {
+                panic!("{ctx}: folded an integer pair to {other:?}")
+            }
+        }
+    }
+
+    /// The same relation, at the widths only the wide corner set can name.
+    ///
+    /// Separate from the sweep above because the corner sets have different element types: a
+    /// 16384-bit corner is not a host word and never can be. What it demonstrates is that this
+    /// folder is width-generic all the way to the cap.
+    #[test]
+    fn folding_refines_the_reference_model_at_wide_widths() {
+        let field = FieldConfig::bn254();
+        let mut folds = 0usize;
+
+        for group in ALL_GROUPS {
+            for signed in [false, true] {
+                let kind = BinaryArithOpKind::with_sign(group, signed);
+
+                for bits in corners::wide_widths_for(kind.is_signed()) {
+                    let (values, rhs) = corners::wide_operands(kind.into(), bits);
+
+                    for x in &values {
+                        for y in &rhs {
+                            folds += check_one_fold(kind, bits, x, y, field);
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            folds > 1_000,
+            "only {folds} wide folds: the sweep is passing vacuously"
         );
     }
 
@@ -667,9 +781,7 @@ mod tests {
     fn one_pair_of_patterns_folds_the_way_the_operation_says() {
         // A `Constant::Int` is a bit pattern with no reading attached, so the _only_ thing that can
         // say how to fold a pair of them is the opcode. This pins that: identical operands, two
-        // opcodes, two different correct answers. It is also what makes the collapse safe -- while
-        // the tag existed, this pair was "mixed" and did not fold at all, which cost the constant
-        // propagation that collapses whole chains.
+        // opcodes, two different correct answers.
         let f = FieldConfig::bn254();
         let pair = |kind| eval_binary(kind, &Constant::int(8, 0xFB), &Constant::int(8, 0x02), f);
         // 0xFB is -5 read as two's complement and 251 read as a magnitude.
@@ -705,7 +817,7 @@ mod tests {
     fn an_empty_bit_range_declines_rather_than_panicking() {
         // An empty window is not a pattern, so `IntBits::bit_range` panics on one rather than
         // answering zero. `analysis::types` rejects such a `BitRange` before this is reached, but
-        // the fold must not be the thing that discovers it -- and the *field* arm is the one that
+        // the fold must not be the thing that discovers it -- and the _field_ arm is the one that
         // would, since its own `1..=MAX` guard is on `offset + width` and a non-zero offset carries
         // a zero width straight past it.
         let f = FieldConfig::bn254();

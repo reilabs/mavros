@@ -1,5 +1,6 @@
 pub mod array;
 pub mod bytecode;
+pub mod int_limbs;
 pub mod interpreter;
 
 // FIELD-ASSUMPTION: L1-alias

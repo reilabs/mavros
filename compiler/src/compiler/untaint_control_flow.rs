@@ -1,5 +1,6 @@
 //! Linearizes witness-dependent control flow into a form safe to lower into a ZK circuit.
 
+use mavros_int_semantics::IntBits;
 use tracing::{Level, instrument};
 
 use crate::{
@@ -1050,7 +1051,7 @@ fn emit_merge_select(
             };
             let mut elems = Vec::with_capacity(*size);
             for i in 0..*size {
-                let idx = builder.int_const(32, i as u128);
+                let idx = builder.int_const(IntBits::from_u128(32, i as u128));
                 let lhs_elem = builder.array_get(lhs, idx);
                 let rhs_elem = builder.array_get(rhs, idx);
                 let selected = emit_merge_select(
@@ -1119,7 +1120,7 @@ fn emit_merge_select(
             });
             result
         }
-        TypeExpr::Function => panic!("Witness select on Function type not supported"),
+        TypeExpr::Function(_) => panic!("Witness select on Function type not supported"),
         TypeExpr::Blob(..) => panic!("Witness select on Blob type not supported"),
     }
 }

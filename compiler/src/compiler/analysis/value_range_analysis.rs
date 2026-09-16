@@ -35,7 +35,7 @@
 //! way avoids an `Option<Interval>` that every call site would have to unwrap.
 
 use mavros_artifacts::FieldConfig;
-use mavros_int_semantics::IntBits;
+use mavros_int_semantics::{IntBits, int_bits::HOST_WORD_BITS};
 use num_bigint::{BigInt, Sign};
 use num_traits::{One, Signed, ToPrimitive, Zero};
 use tracing::{Level, instrument, warn};
@@ -286,6 +286,36 @@ impl ValueRangeAnalysis {
         field: FieldConfig,
         facts: &[BranchFact],
     ) {
+        // Precise tracking stops at a host word: a wider value keeps the full range its own type
+        // seeds, and no transfer refines it.
+        //
+        // **Widening a range is always safe here**, which is what makes this a cost decision rather
+        // than a soundness one. Every consumer of this domain acts only on a proof —
+        // `overflow_provably_impossible`, `shift_amount_provably_in_range`, `divmod_provably_defined`
+        // and `narrow_rangecheck_width` each discharge a check or narrow one, and DCE deletes — so a
+        // range that says less means more checks, wider range checks and less code deleted, never
+        // fewer or narrower.
+        //
+        // The bound is [`HOST_WORD_BITS`] rather than a field-derived width because it has to
+        // dominate `narrow_int_bits` on **every** field, and `narrow_int_bits` is
+        // `min(widest injective, host word)`. Below that threshold a range decides whether a program
+        // _compiles_ — `wrap_shifted_product` and `lower_unsigned_mul` refuse where they cannot
+        // prove headroom — so losing precision there would change which programs are accepted.
+        // Above it the domain only decides how much code is emitted.
+        //
+        // What it costs: a [`ValueRange`] carries [`BigInt`] bounds, so a range on an `int16384` is
+        // arithmetic on 2 KB numbers and an interval multiply is four bignum multiplies. The
+        // instruction count grows with the limb count and the work per instruction grew with the
+        // declared width, and the two multiplied.
+        if instr.get_results().any(|v| {
+            matches!(
+                types.get_value_type(*v).strip_witness().expr,
+                TypeExpr::Int(bits) if bits > HOST_WORD_BITS
+            )
+        }) {
+            return;
+        }
+
         // The flow-insensitive bound: what is true of a value everywhere it is live.
         let flat = |bounds: &HashMap<ValueId, ValueRange>, v: ValueId| -> ValueRange {
             match bounds.get(&v) {
@@ -483,7 +513,7 @@ impl ValueRangeAnalysis {
                 // what makes the `false` below a fact rather than a default: `types.rs` gives
                 // `MulConst` its `var`'s type, and `witness_lowering` — the only thing that builds
                 // one — builds it from `WitnessOf(Field)` operands. Were an integer ever to reach
-                // here, `wrap_or_trap` would intersect the reading the operation does *not* trap
+                // here, `wrap_or_trap` would intersect the reading the operation does _not_ trap
                 // on, so the invariant is asserted rather than left to the comment.
                 debug_assert!(
                     matches!(width, Width::Field(_)),
@@ -884,10 +914,10 @@ impl Analysis for ValueRanges {
 /// standard library that counts down.
 ///
 /// A consumer that discharges a runtime check on the strength of one of these is asserting that the
-/// check cannot fail *on any execution that reaches the instruction*. Both regimes this analysis
+/// check cannot fail _on any execution that reaches the instruction_. Both regimes this analysis
 /// runs in support that, for different reasons:
 ///
-/// - **After `UntaintControlFlow`**, every surviving `JmpIf` is on a *pure* condition: witness ones
+/// - **After `UntaintControlFlow`**, every surviving `JmpIf` is on a _pure_ condition: witness ones
 ///   have been linearized into `Select`s with their blocks' instructions wrapped in `Guard`. A pure
 ///   branch is real control flow in both backends, and `hlssa_to_r1cs` interprets it rather than
 ///   flattening it, so the untaken arm is never evaluated at all.
@@ -977,7 +1007,7 @@ impl BranchFact {
 
 /// Narrow `base`, the flow-insensitive range of `value`, by every fact in force.
 ///
-/// `flat` reads the *unnarrowed* range of the operand on the far side of each comparison, so that
+/// `flat` reads the _unnarrowed_ range of the operand on the far side of each comparison, so that
 /// narrowing `a` in `a < b` can never consult a bound on `b` that was itself derived from `a`.
 fn narrow(
     value: ValueId,
@@ -1809,7 +1839,7 @@ impl ValueRange {
         }
         // Only the upper end is asked about. The lower one carries nothing: the unsigned reading is
         // a raw bit pattern, so it is non-negative at every `Width` by construction, and a
-        // negative amount shows up here as the *large* magnitude its bits spell — which is exactly
+        // negative amount shows up here as the _large_ magnitude its bits spell — which is exactly
         // what the upper test rejects.
         match self.unsigned.hi() {
             Some(hi) => hi < &BigInt::from(bound),
@@ -2657,7 +2687,7 @@ mod tests {
         assert!(small.proves_shift_amount_below(8));
         assert!(small.proves_shift_amount_below(32));
 
-        // At the bound, not below it. A shift *by* the width is the failure being checked for.
+        // At the bound, not below it. A shift _by_ the width is the failure being checked for.
         let at_bound = ValueRange::from_unsigned(Width::Bits(8), Interval::closed(8, 8));
         assert!(!at_bound.proves_shift_amount_below(8));
         assert!(at_bound.proves_shift_amount_below(9));
@@ -2667,7 +2697,7 @@ mod tests {
         assert!(!ValueRange::full(Width::Bits(8)).proves_shift_amount_below(8));
         assert!(!ValueRange::full(Width::Bits(32)).proves_shift_amount_below(32));
 
-        // A *negative* amount is a failure too, and it is caught without asking the signed
+        // A _negative_ amount is a failure too, and it is caught without asking the signed
         // reading: `-1` at eight bits is the pattern `255`, which is not below any width.
         let negative = ValueRange::from_signed(Width::Bits(8), Interval::closed(-1, -1));
         assert!(!negative.proves_shift_amount_below(8));
@@ -2930,22 +2960,22 @@ mod tests {
             let entry = b.function.get_entry_id();
             {
                 let mut e = b.test_block(entry);
-                let zero = e.int_const(32, 0);
+                let zero = e.int_const(IntBits::zero(32));
                 e.terminate_jmp(header, vec![zero]);
             }
             let counter = {
                 let mut e = b.test_block(header);
                 let i = e.add_parameter(Type::int(32));
-                let limit = e.int_const(32, 16);
+                let limit = e.int_const(IntBits::from_u128(32, 16));
                 let c = e.ult(i, limit);
                 e.terminate_jmp_if(c, body, exit);
                 i
             };
             let (down, next) = {
                 let mut e = b.test_block(body);
-                let top = e.int_const(32, 15);
+                let top = e.int_const(IntBits::from_u128(32, 15));
                 let down = e.usub(top, counter);
-                let one = e.int_const(32, 1);
+                let one = e.int_const(IntBits::one(32));
                 let next = e.uadd(counter, one);
                 e.terminate_jmp(header, vec![next]);
                 (down, next)
@@ -3058,7 +3088,7 @@ mod tests {
 
     #[test]
     fn a_widened_range_is_clamped_back_to_its_width() {
-        // `Interval::widen` releases to ±∞, but a `ValueRange` is a range *of a width*, so the
+        // `Interval::widen` releases to ±∞, but a `ValueRange` is a range _of a width_, so the
         // reduction has to bring it back. Otherwise the solver would start handing out bounds
         // outside the operand's own domain.
         let was = ValueRange::from_unsigned(Width::Bits(8), Interval::closed(3, 200));
@@ -3077,7 +3107,7 @@ mod tests {
         // The shape `signed_for_range` produces: a loop whose counter bound tightens by exactly one
         // per round. The fixed point exists but is 2^63 rounds away, and before widening the solver
         // was still moving after 2000 rounds. What is asserted here is only that the answer is
-        // *sound* — the counter really is inside its width — because which bound the widening
+        // _sound_ — the counter really is inside its width — because which bound the widening
         // settles on is the operator's business, not this test's.
         let mut ssa = HLSSA::with_main("main".to_string());
         let (_, _, counter, _, _) = counted_loop(&mut ssa);
@@ -3166,42 +3196,42 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 {
                     let mut e = b.test_block(entry);
-                    let zero = e.int_const(8, 0);
+                    let zero = e.int_const(IntBits::zero(8));
                     e.terminate_jmp(outer, vec![zero]);
                 }
                 let i = {
                     let mut e = b.test_block(outer);
                     let i = e.add_parameter(Type::int(8));
-                    let four = e.int_const(8, 4);
+                    let four = e.int_const(IntBits::from_u128(8, 4));
                     let c = e.ult(i, four);
                     e.terminate_jmp_if(c, inner_pre, exit);
                     i
                 };
                 {
                     let mut e = b.test_block(inner_pre);
-                    let zero = e.int_const(8, 0);
+                    let zero = e.int_const(IntBits::zero(8));
                     e.terminate_jmp(inner, vec![zero]);
                 }
                 let j = {
                     let mut e = b.test_block(inner);
                     let j = e.add_parameter(Type::int(8));
-                    let four = e.int_const(8, 4);
+                    let four = e.int_const(IntBits::from_u128(8, 4));
                     let c = e.ult(j, four);
                     e.terminate_jmp_if(c, body, outer_latch);
                     j
                 };
                 let down = {
                     let mut e = b.test_block(body);
-                    let three = e.int_const(8, 3);
+                    let three = e.int_const(IntBits::from_u128(8, 3));
                     let down = e.usub(three, j);
-                    let one = e.int_const(8, 1);
+                    let one = e.int_const(IntBits::one(8));
                     let next = e.uadd(j, one);
                     e.terminate_jmp(inner, vec![next]);
                     down
                 };
                 {
                     let mut e = b.test_block(outer_latch);
-                    let one = e.int_const(8, 1);
+                    let one = e.int_const(IntBits::one(8));
                     let next = e.uadd(i, one);
                     e.terminate_jmp(outer, vec![next]);
                 }
@@ -3235,7 +3265,7 @@ mod tests {
                 let v = {
                     let mut e = b.test_block(entry);
                     let v = e.add_parameter(Type::int(8));
-                    let limit = e.int_const(8, 10);
+                    let limit = e.int_const(IntBits::from_u128(8, 10));
                     let c = e.ult(v, limit);
                     e.terminate_jmp_if(c, then_block, else_block);
                     v
@@ -3271,7 +3301,7 @@ mod tests {
                 let v = {
                     let mut e = b.test_block(entry);
                     let v = e.add_parameter(Type::int(8));
-                    let limit = e.int_const(8, 10);
+                    let limit = e.int_const(IntBits::from_u128(8, 10));
                     let c = e.ult(v, limit);
                     e.terminate_jmp_if(c, then_block, shared);
                     v
@@ -3310,7 +3340,7 @@ mod tests {
                 let v = {
                     let mut e = b.test_block(entry);
                     let v = e.add_parameter(Type::int(8));
-                    let limit = e.int_const(8, 3);
+                    let limit = e.int_const(IntBits::from_u128(8, 3));
                     let c = e.slt(v, limit);
                     e.terminate_jmp_if(c, then_block, else_block);
                     v
@@ -3383,8 +3413,8 @@ mod tests {
                 // so the moment anyone teaches it to fold a known condition, and the test would
                 // keep passing while testing nothing.
                 let cond = e.add_parameter(Type::int(1));
-                let narrow = e.int_const(8, 200);
-                let wide = e.int_const(16, 1000);
+                let narrow = e.int_const(IntBits::from_u128(8, 200));
+                let wide = e.int_const(IntBits::from_u128(16, 1000));
                 let r = e.select(cond, narrow, wide);
                 e.terminate_return(vec![r]);
                 r
@@ -3425,17 +3455,17 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 {
                     let mut e = b.test_block(entry);
-                    let cond = e.int_const(1, 1);
+                    let cond = e.int_const(IntBits::one(1));
                     e.terminate_jmp_if(cond, then_block, else_block);
                 }
                 {
                     let mut e = b.test_block(then_block);
-                    let small = e.int_const(8, 3);
+                    let small = e.int_const(IntBits::from_u128(8, 3));
                     e.terminate_jmp(merge, vec![small]);
                 }
                 {
                     let mut e = b.test_block(else_block);
-                    let large = e.int_const(8, 200);
+                    let large = e.int_const(IntBits::from_u128(8, 200));
                     e.terminate_jmp(merge, vec![large]);
                 }
                 param
@@ -3468,8 +3498,8 @@ mod tests {
                 // A witness condition, which is what leaves a `Guard` standing.
                 let w = e.write_witness(x);
                 let cond = e.eq(w, x);
-                let a = e.int_const(8, lhs);
-                let b_ = e.int_const(8, rhs);
+                let a = e.int_const(IntBits::from_u128(8, lhs));
+                let b_ = e.int_const(IntBits::from_u128(8, rhs));
                 let result = e.fresh_value();
                 e.emit(OpCode::Guard {
                     condition: cond,
@@ -3538,8 +3568,8 @@ mod tests {
                 // A witness condition, which is what leaves a `Guard` standing.
                 let w = e.write_witness(x);
                 let cond = e.eq(w, x);
-                let a = e.int_const(8, 3);
-                let c = e.int_const(8, 4);
+                let a = e.int_const(IntBits::from_u128(8, 3));
+                let c = e.int_const(IntBits::from_u128(8, 4));
                 let result = e.fresh_value();
                 let guard = OpCode::Guard {
                     condition: cond,
@@ -3627,7 +3657,7 @@ mod tests {
 ///
 /// It quantifies over [`Outcome::Value`] only. A rejected execution produces no value at all,
 /// instead becoming a runtime constraint failure, so the analysis owes nothing on those inputs.
-/// That is exactly the licence `wrap_or_trap` relies on when it returns the *non*-wrapping interval
+/// That is exactly the licence `wrap_or_trap` relies on when it returns the _non_-wrapping interval
 /// for an operation that would overflow, and stating the relation this way turns that licence into
 /// something the sweep checks rather than something the comment asserts.
 ///
@@ -3712,6 +3742,11 @@ mod int_semantics_conformance {
         ]
     }
 
+    /// Soundness at every width this sweep can enumerate, which is every **narrow** width.
+    ///
+    /// The other pure evaluators each grew a `corners::wide_operands` sweep, and this one cannot.
+    /// The relation being checked is `γ`-wise — every concrete pair inside the input ranges is run
+    /// through the model and the answer looked for inside the output range.
     #[test]
     fn the_transfer_is_sound_for_every_accepted_execution() {
         let mut checked = 0usize;

@@ -6,6 +6,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     rc::Rc,
+    sync::Arc,
 };
 
 use ark_ff::AdditiveGroup as _;
@@ -31,6 +32,7 @@ use crate::{
             hlssa_to_r1cs::{R1CGen, R1CS, R1CSProfile, logup_soundness_report},
             llssa_to_llvm::WasmCompileOpts,
         },
+        diagnostic::{self, Diagnostic},
         pass_manager::PassManager,
         passes::{
             arg_promotion::ArgPromotion,
@@ -61,6 +63,8 @@ use crate::{
             specializer::Specializer,
             strip_witness_of::StripWitnessOf,
             trivial_phi_elimination::TrivialPhiElimination,
+            wide_witness_ints::WideWitnessInts,
+            width_validation,
             witness_lowering::WitnessLowering,
             witness_write_to_fresh::WitnessWriteToFresh,
             witness_write_to_void::WitnessWriteToVoid,
@@ -82,7 +86,13 @@ pub struct BytecodeArtifact {
 pub const DEFAULT_LOGUP_SOUNDNESS_BITS: u32 = 128;
 
 pub struct Driver {
-    project: Project,
+    /// The Noir package being compiled, or `None` for a driver seeded with a hand-built
+    /// [`HLSSA`] (see [`Driver::from_ssa`]). Only the frontend stage and the source-path
+    /// normalization of the debug dumps need it.
+    project: Option<Project>,
+    /// Where the per-stage debug dumps go. Derived from the package root for a project-backed
+    /// driver; supplied by the caller for a seeded one.
+    debug_output_dir: PathBuf,
     initial_ssa: Option<HLSSA>,
     static_struct_access_ssa: Option<HLSSA>,
     monomorphized_ssa: Option<HLSSA>,
@@ -103,19 +113,26 @@ pub struct Driver {
 
 #[derive(Debug)]
 pub enum Error {
+    /// The Noir compiler driver returned errors.
     NoirCompilerError(Vec<noirc_errors::reporter::CustomDiagnostic>),
+
     /// The program contains an assertion (or range/equality constraint) that can never be
     /// satisfied, discovered while symbolically executing the program to generate R1CS. Such a
     /// program will never execute, so it is rejected rather than compiled into constraints.
     UnsatisfiableProgram(String),
+
     /// The requested `--logup-soundness` target needs more than one LogUp challenge on this
     /// field, but multi-challenge LogUp is not yet implemented (see `docs/field-agnosticism.md`,
     /// `L4-logup-challenges`). Rejected rather than silently emitting an under-provisioned circuit.
     LogupSoundnessUnsupported(String),
+
     /// One or more Noir `assert_constant` operands are dynamic in a reachable calling context.
     ///
     /// Carries every failing assertion so a single compile reports them all.
     AssertConstantFailed(Vec<SourceLocation>),
+
+    /// The program uses a shape this compiler cannot represent soundly.
+    Refused(Vec<Diagnostic>),
 }
 
 impl std::fmt::Display for Error {
@@ -140,6 +157,7 @@ impl std::fmt::Display for Error {
                 }
                 Ok(())
             }
+            Error::Refused(diagnostics) => write!(f, "{}", diagnostic::render_all(diagnostics)),
         }
     }
 }
@@ -149,12 +167,10 @@ impl std::error::Error for Error {}
 impl Driver {
     pub fn new(project: Project, draw_cfg: bool) -> Self {
         let dir = project.get_only_crate().root_dir.join("mavros_debug");
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap();
-        }
-        fs::create_dir(&dir).unwrap();
+        Self::fresh_debug_dir(&dir);
         Self {
-            project,
+            project: Some(project),
+            debug_output_dir: dir,
             initial_ssa: None,
             static_struct_access_ssa: None,
             monomorphized_ssa: None,
@@ -170,6 +186,49 @@ impl Driver {
         }
     }
 
+    /// Builds a driver around an already-constructed [`HLSSA`], bypassing the Noir frontend.
+    ///
+    /// [`Driver::new`] can only reach a program through a Noir `Project`, which bounds it to what
+    /// Noir's surface syntax can express. This entry point thus provides a means to prototype new
+    /// features without needing to add support in the front-end.
+    ///
+    /// The result is a driver whose `initial_ssa` is already populated, so the caller starts at
+    /// [`Self::make_struct_access_static`] and skips [`Self::run_noir_compiler`]. Everything from
+    /// there on is the production pipeline. Two capabilities do not survive the bypass, both
+    /// because they are properties of the Noir package rather than of the program: there is no
+    /// [`Self::abi`] (so [`Self::entry_point_flattened_io_count`] and the WASM metadata sidecar are
+    /// unavailable) and no [`Self::package_root`].
+    ///
+    /// `debug_output_dir` is created, and emptied if it already exists, exactly as [`Self::new`]
+    /// does with the package's `mavros_debug`.
+    pub fn from_ssa(ssa: HLSSA, debug_output_dir: PathBuf, draw_cfg: bool) -> Self {
+        Self::fresh_debug_dir(&debug_output_dir);
+        Self {
+            project: None,
+            debug_output_dir,
+            initial_ssa: Some(ssa),
+            static_struct_access_ssa: None,
+            monomorphized_ssa: None,
+            witness_spilled_ssa: None,
+            r1cs_ssa: None,
+            r1cs_profile: None,
+            r1cs_profiling: false,
+            program_ssa: None,
+            abi: None,
+            draw_cfg,
+            main_is_unconstrained: false,
+            logup_soundness: DEFAULT_LOGUP_SOUNDNESS_BITS,
+        }
+    }
+
+    /// Create the debug dump directory, discarding anything a previous run left in it.
+    fn fresh_debug_dir(dir: &Path) {
+        if dir.exists() {
+            fs::remove_dir_all(dir).unwrap();
+        }
+        fs::create_dir_all(dir).unwrap();
+    }
+
     /// Override the LogUp bits-of-security target (defaults to
     /// [`DEFAULT_LOGUP_SOUNDNESS_BITS`]). Only the CLI sets this; library/test callers keep
     /// the default, which is a no-op on bn254.
@@ -182,13 +241,22 @@ impl Driver {
     }
 
     pub fn get_debug_output_dir(&self) -> PathBuf {
-        self.project.package_root().join("mavros_debug")
+        self.debug_output_dir.clone()
     }
 
     /// Root directory of the package being compiled (the workspace member's
     /// directory, not the workspace root). `Prover.toml` is read from here.
+    ///
+    /// Panics on a driver seeded with [`Self::from_ssa`], which has no package.
     pub fn package_root(&self) -> &std::path::Path {
-        self.project.package_root()
+        self.project().package_root()
+    }
+
+    /// The Noir package being compiled. Panics on a driver seeded with [`Self::from_ssa`].
+    fn project(&self) -> &Project {
+        self.project
+            .as_ref()
+            .expect("this driver was seeded with an HLSSA and has no Noir package")
     }
 
     pub fn r1cs_profile(&self) -> Option<&R1CSProfile> {
@@ -200,10 +268,15 @@ impl Driver {
     }
 
     fn normalize_debug_text(&self, mut contents: String) -> String {
-        let root = self.project.package_root();
+        // A seeded driver has no package root, and a hand-built SSA carries no source paths to
+        // normalize away in the first place.
+        let Some(project) = self.project.as_ref() else {
+            return contents;
+        };
+        let root = project.package_root();
         let root = root.to_string_lossy();
         contents = contents.replace(root.as_ref(), "$PROJECT_ROOT");
-        if let Ok(canonical_root) = fs::canonicalize(self.project.package_root()) {
+        if let Ok(canonical_root) = fs::canonicalize(project.package_root()) {
             let canonical_root = canonical_root.to_string_lossy();
             contents = contents.replace(canonical_root.as_ref(), "$PROJECT_ROOT");
         }
@@ -213,9 +286,9 @@ impl Driver {
     #[tracing::instrument(skip_all)]
     pub fn run_noir_compiler(&mut self) -> Result<(), Error> {
         let (mut context, crate_id) = nargo::prepare_package(
-            self.project.file_manager(),
-            self.project.parsed_files(),
-            self.project.get_only_crate(),
+            self.project().file_manager(),
+            self.project().parsed_files(),
+            self.project().get_only_crate(),
         );
         noirc_driver::check_crate(
             &mut context,
@@ -229,7 +302,7 @@ impl Driver {
             DebugTypeTracker::build_from_debug_instrumenter(&DebugInstrumenter::default());
         let mut monomorphizer = Monomorphizer::new(
             &mut context.def_interner,
-            self.project.file_manager().as_file_map(),
+            self.project().file_manager().as_file_map(),
             debug_type_tracker,
             None,
             false,
@@ -247,7 +320,7 @@ impl Driver {
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
         let (ssa, main_is_unconstrained) =
-            HLSSA::from_program_with_file_manager(&program, Some(self.project.file_manager()));
+            HLSSA::from_program_with_file_manager(&program, Some(self.project().file_manager()));
         self.initial_ssa = Some(ssa);
         self.main_is_unconstrained = main_is_unconstrained;
 
@@ -264,6 +337,11 @@ impl Driver {
 
     #[tracing::instrument(skip_all)]
     pub fn make_struct_access_static(&mut self) -> Result<(), Error> {
+        let mut ssa = self.initial_ssa.clone().unwrap();
+
+        // We initially validate all integer widths for sound usage under the configured field.
+        self.check_widths(&ssa)?;
+
         let mut pass_manager = PassManager::new(
             "make_struct_access_static".to_string(),
             self.draw_cfg,
@@ -300,10 +378,57 @@ impl Driver {
         );
 
         pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
-        let mut ssa = self.initial_ssa.clone().unwrap();
         pass_manager.run(&mut ssa);
         self.static_struct_access_ssa = Some(ssa);
         Ok(())
+    }
+
+    /// Refuse the program where it uses an integer width this compiler cannot represent soundly
+    /// under the configured field.
+    fn check_widths(&self, ssa: &HLSSA) -> Result<(), Error> {
+        let flow = FlowAnalysis::run(ssa);
+        let types = Types::new().run(ssa, &flow);
+
+        self.refuse(width_validation::language_refusals(ssa, &types))
+    }
+
+    /// Refuse the program where it reaches an integer lowering this compiler does not support.
+    fn check_lowering_widths(&self, ssa: &HLSSA) -> Result<(), Error> {
+        let flow = FlowAnalysis::run(ssa);
+        let types = Types::new().run(ssa, &flow);
+
+        self.refuse(width_validation::capability_refusals(ssa, &types))
+    }
+
+    /// Report `refusals` as an error.
+    fn refuse(&self, refusals: Vec<Diagnostic>) -> Result<(), Error> {
+        let refusals: Vec<Diagnostic> = refusals
+            .into_iter()
+            .map(|refusal| self.attach_compiled_source(refusal))
+            .collect();
+
+        if refusals.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Refused(refusals))
+        }
+    }
+
+    /// Attach the source text the compiler read for `diagnostic`'s file, where there is one.
+    ///
+    /// The file manager holds the text every source location was measured against, including for
+    /// the embedded standard library. Handing it over keeps the rendered snippet showing as the
+    /// code that was compiled rather than whatever the path resolves to at the moment the error is
+    /// printed.
+    fn attach_compiled_source(&self, diagnostic: Diagnostic) -> Diagnostic {
+        let Some(project) = self.project.as_ref() else {
+            return diagnostic;
+        };
+
+        match compiled_source(project.file_manager(), &diagnostic.location().file) {
+            Some(source) => diagnostic.with_source(source),
+            None => diagnostic,
+        }
     }
 
     /// Performs comprehensive monomorphization on the SSA.
@@ -449,6 +574,12 @@ impl Driver {
 
     #[tracing::instrument(skip_all)]
     pub fn spill_witness(&mut self) -> Result<(), Error> {
+        let mut ssa = self.monomorphized_ssa.clone().unwrap();
+
+        // The lowerings below are the ones that turn an integer operation into constraints, so this
+        // is the last point at which a width they cannot build can be refused rather than met.
+        self.check_lowering_widths(&ssa)?;
+
         let mut pass_manager = PassManager::new(
             "witness_spilling".to_string(),
             self.draw_cfg,
@@ -487,6 +618,13 @@ impl Driver {
                 Box::new(DCE::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(InstructionLowering::witness_array_access()),
                 Box::new(InstructionLowering::slice_select()),
+                // Immediately before the lowerings that read an integer's width: a witnessed value
+                // too wide for one field element becomes its limbs here, and every lowering below
+                // this sees limbs it can work with.
+                Box::new(WideWitnessInts::new()),
+                // After the representation, so a value it carries as limbs has already had its
+                // narrowing rewritten into a recombination.
+                Box::new(InstructionLowering::witness_narrowing_casts()),
                 Box::new(InstructionLowering::witness_integer_ops()),
                 // After the last pre-spilling lowering, run cleanup twice
                 // back-to-back. The first round exposes folds/dedup opportunities
@@ -496,8 +634,8 @@ impl Driver {
                 Box::new(Simplifier::new()),
                 Box::new(PRE::pre_r1c()),
                 Box::new(Specializer::new(5.0)),
-                // Specialization exposes fresh constants (folded call arguments and branch
-                // conditions); propagate them before the post-specialization cleanup.
+                // Specialization exposes fresh constants (folded call arguments and branch conds);
+                // propagate them before the post-specialization cleanup.
                 Box::new(SCS::new(dead_code_elimination::Config::pre_r1c())),
                 Box::new(Simplifier::new()),
                 Box::new(PRE::pre_r1c()),
@@ -513,7 +651,6 @@ impl Driver {
         );
 
         pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
-        let mut ssa = self.monomorphized_ssa.clone().unwrap();
         pass_manager.run(&mut ssa);
         self.witness_spilled_ssa = Some(ssa);
         Ok(())
@@ -550,7 +687,12 @@ impl Driver {
         // Captured before `r1cs_ssa` is stored away; sizes the LogUp per-challenge soundness.
         let field = r1cs_ssa.field();
         let (r1cs, profile) =
-            match r1cs_gen.seal_with_profile(crate::abi_helpers::guard_layout(self.abi())) {
+            // The guard's position is ABI-derived metadata on the layout, read only by the
+            // return-guard check the test runner performs; a driver seeded with [`Self::from_ssa`]
+            // has no ABI to state it from, and nothing asks it for that check.
+            match r1cs_gen.seal_with_profile(
+                self.abi.as_ref().and_then(crate::abi_helpers::guard_layout),
+            ) {
                 Ok((r1cs, profile)) => (r1cs, Some(profile)),
                 Err(error) => (error.into_r1cs(), None),
             };
@@ -634,11 +776,16 @@ impl Driver {
 
         let codegen = CodeGen::new(options);
         let program = codegen.run(ssa, &flow_analysis, &type_info);
-        assert_eq!(
-            program.entry_blob_field_count,
-            self.entry_point_flattened_io_count(),
-            "ICE: entry blob field count in program header disagrees with the Noir ABI"
-        );
+        // Only a project-backed driver has an ABI to cross-check the header against; one seeded
+        // with [`Self::from_ssa`] states the entry's shape in the HLSSA it was handed and has no
+        // second account of it to disagree with.
+        if self.abi.is_some() {
+            assert_eq!(
+                program.entry_blob_field_count,
+                self.entry_point_flattened_io_count(),
+                "ICE: entry blob field count in program header disagrees with the Noir ABI"
+            );
+        }
         self.write_debug_text(
             self.get_debug_output_dir().join("program_bytecode.txt"),
             format!("{}", program),
@@ -748,10 +895,10 @@ impl Driver {
             "program_tail".to_string(),
             self.draw_cfg,
             vec![
-                // The merge above put two near-copies of the whole program into one SSA;
-                // fold the byte-identical functions (notably `globals_init`) before anything
-                // downstream pays for them. Both codegen backends emit every function in the
-                // SSA, so this is where program size is won.
+                // The merge above put two near-copies of the whole program into one SSA; fold the
+                // byte-identical functions (notably `globals_init`) before anything downstream pays
+                // for them. Both codegen backends emit every function in the SSA, so this is where
+                // program size is won.
                 Box::new(MergeIdenticalFunctions::new()),
                 Box::new(RCInsertion::new()),
                 Box::new(FixDoubleJumps::new()),
@@ -845,9 +992,15 @@ impl Driver {
         Ok(llvm_ir)
     }
 
-    /// Write WASM metadata JSON file
+    /// Write WASM metadata JSON file.
+    ///
+    /// The sidecar names the entry point's parameters, so it exists only for a project-backed
+    /// driver. A driver seeded with [`Self::from_ssa`] has no ABI and writes none.
     fn write_wasm_metadata(&self, wasm_path: &Path, r1cs: &R1CS) -> Result<(), Error> {
-        let abi = self.abi.as_ref().unwrap();
+        let Some(abi) = self.abi.as_ref() else {
+            info!(message = %"WASM metadata skipped: driver has no ABI");
+            return Ok(());
+        };
 
         // Build parameter info
         let mut parameters = Vec::new();
@@ -886,6 +1039,12 @@ impl Driver {
     }
 }
 
+/// The text `file_manager` holds for `path`, which is how a [`SourceLocation`] names its file.
+fn compiled_source(file_manager: &fm::FileManager, path: &str) -> Option<Arc<str>> {
+    let id = file_manager.name_to_id(PathBuf::from(path))?;
+    file_manager.fetch_file(id).map(Arc::from)
+}
+
 // TESTS
 // ================================================================================================
 
@@ -893,6 +1052,7 @@ impl Driver {
 mod tests {
     use noirc_abi::{Abi, AbiParameter, AbiReturnType, AbiType, AbiVisibility, Sign};
 
+    use super::{Diagnostic, Error, SourceLocation};
     use crate::abi_helpers::flattened_io_count;
     use crate::compiler::{passes::prepare_entry_point::PrepareEntryPoint, ssa::hlssa::Type};
 
@@ -1078,5 +1238,43 @@ mod tests {
                 "signed ABI integer disagrees with the sign-free HLSSA type at {width} bits",
             );
         }
+    }
+
+    /// The stdlib is the case the source hand-off exists for: `Project` registers those files under
+    /// relative `std/...` paths that name nothing on disk, so a renderer that read the path would
+    /// have no snippet to draw.
+    #[test]
+    fn the_compiled_source_of_an_embedded_file_is_found_by_its_path() {
+        let mut file_manager = fm::FileManager::new(std::path::Path::new("/no/such/root"));
+        let id = file_manager
+            .add_file_with_source_canonical_path(
+                std::path::Path::new("std/lib.nr"),
+                "fn embedded() {}\n".to_string(),
+            )
+            .expect("the embedded file is registered");
+        let path = file_manager.path(id).unwrap().to_string_lossy().to_string();
+
+        assert_eq!(
+            super::compiled_source(&file_manager, &path).as_deref(),
+            Some("fn embedded() {}\n")
+        );
+        assert!(super::compiled_source(&file_manager, "std/absent.nr").is_none());
+    }
+
+    /// The error's own `Display` has to be the rendered diagnostics rather than a summary of them:
+    /// every caller here prints an `Error` and nothing asks it for a renderer.
+    #[test]
+    fn a_refusal_displays_as_its_rendered_diagnostics() {
+        let refusal = Error::Refused(vec![
+            Diagnostic::error("first refusal", SourceLocation::synthetic("a_pass"))
+                .with_note("a standing fact"),
+            Diagnostic::error("second refusal", SourceLocation::synthetic("a_pass")),
+        ]);
+
+        assert_eq!(
+            refusal.to_string(),
+            "error: first refusal\n  --> <a_pass>:1:1\n  = note: a standing fact\n\n\
+             error: second refusal\n  --> <a_pass>:1:1\n"
+        );
     }
 }

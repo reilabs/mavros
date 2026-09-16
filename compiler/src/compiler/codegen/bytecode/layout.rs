@@ -1,6 +1,6 @@
 //! Tools and utilities for computing layouts when generating bytecode.
 
-use mavros_int_semantics::IntBits;
+use mavros_int_semantics::{IntBits, int_bits::HOST_LIMB_BITS};
 
 use crate::{
     collections::HashMap,
@@ -8,7 +8,7 @@ use crate::{
         codegen::constants,
         ssa::{
             ValueId,
-            hlssa::{Constant, HLSSA, MAX_SUPPORTED_UNSIGNED_BITS, Type, TypeExpr},
+            hlssa::{Constant, HLSSA, MAX_SUPPORTED_INT_BITS, Type, TypeExpr},
         },
         util::ice_non_elided_tuple,
     },
@@ -44,7 +44,7 @@ impl FrameLayouter {
     }
 
     pub fn alloc_int(&mut self, value: ValueId, size: usize) -> bytecode::FramePosition {
-        assert!(size > 0 && size <= MAX_SUPPORTED_UNSIGNED_BITS);
+        assert!(size > 0 && size <= MAX_SUPPORTED_INT_BITS);
         self.variables.insert(value, self.next_free);
         let r = self.next_free;
         self.next_free += int_cell_count(size);
@@ -89,7 +89,7 @@ impl FrameLayouter {
             // `int_cell_count`, so a second formula here would silently disagree with it for any
             // width needing more than one cell.
             TypeExpr::Int(bits) => {
-                assert!(bits <= MAX_SUPPORTED_UNSIGNED_BITS);
+                assert!(bits <= MAX_SUPPORTED_INT_BITS);
                 int_cell_count(bits)
             }
             TypeExpr::Array(_, _) => constants::POINTER_SIZE_CELLS,
@@ -265,7 +265,7 @@ impl GlobalFrameLayouter {
             TypeExpr::Field => bytecode::FELT_LIMBS,
             // Width-driven; see `FrameLayouter::type_size`.
             TypeExpr::Int(bits) => {
-                assert!(*bits <= MAX_SUPPORTED_UNSIGNED_BITS);
+                assert!(*bits <= MAX_SUPPORTED_INT_BITS);
                 int_cell_count(*bits)
             }
             // Heap-allocated types are pointers (1 word)
@@ -284,8 +284,49 @@ impl GlobalFrameLayouter {
 
 /// The number of VM frame cells a `bits`-wide integer occupies.
 pub fn int_cell_count(bits: usize) -> usize {
-    assert!(bits <= MAX_SUPPORTED_UNSIGNED_BITS);
+    assert!(bits <= MAX_SUPPORTED_INT_BITS);
     IntBits::limbs_for_bits(bits)
+}
+
+/// The widest value the `SpreadU32ToU64` opcode interleaves.
+pub const SPREAD_MAX_BITS: usize = 32;
+
+/// The widest integer the cell lane holds: one frame cell, which is one host `u64`.
+const CELL_LANE_BITS: usize = HOST_LIMB_BITS;
+
+/// The widest integer the double lane holds: two cells, which is one host `u128`.
+pub const DOUBLE_LANE_BITS: usize = 2 * HOST_LIMB_BITS;
+
+/// Which of the interpreter's three integer lanes a width is lowered to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Lane {
+    /// One cell, holding `1..=64` bits, computed using a host `u64` for efficiency.
+    Cell,
+
+    /// Two cells, holding `65..=128` bits, computed using a host `u128` for efficiency.
+    Double,
+
+    /// [`int_cell_count`] cells, computed limb by limb.
+    Wide,
+}
+
+/// The lane a `bits`-wide integer is lowered to.
+///
+/// # Panics
+///
+/// If `bits` is zero or above [`MAX_SUPPORTED_INT_BITS`]. [`FrameLayouter::alloc_int`] refuses both
+/// where a value of one is allocated.
+pub fn int_lane(bits: usize) -> Lane {
+    assert!(
+        bits <= MAX_SUPPORTED_INT_BITS,
+        "ICE: an int{bits} is wider than the {MAX_SUPPORTED_INT_BITS}-bit maximum"
+    );
+    match bits {
+        0 => panic!("ICE: Encountered a query for a zero-width integer lane"),
+        1..=CELL_LANE_BITS => Lane::Cell,
+        ..=DOUBLE_LANE_BITS => Lane::Double,
+        _ => Lane::Wide,
+    }
 }
 
 // TESTS
@@ -296,12 +337,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_width_past_the_old_cap_is_laid_out_rather_than_refused() {
+        // The corpus gate is silent on widths this wide, no corpus program naming one, so these
+        // three asserts pin the layout to them. `int_cell_count` delegates to
+        // `IntBits::limbs_for_bits`, which is width-generic; what is checked here is that the bound
+        // above it admits the width at all.
+        assert_eq!(int_cell_count(200), 4, "200 bits is four 64-bit cells");
+        assert_eq!(int_cell_count(MAX_SUPPORTED_INT_BITS), 256);
+        assert_eq!(
+            FrameLayouter::new().type_size(&Type::int(MAX_SUPPORTED_INT_BITS)),
+            256
+        );
+    }
+
+    #[test]
     fn the_two_frame_size_formulas_agree_at_every_width() {
         // `alloc_value` goes through `type_size` while `alloc_int` goes through `int_cell_count`,
         // and the same value can be allocated by either, so the two formulas have to agree at every
         // width.
         let layouter = FrameLayouter::new();
-        for bits in [1usize, 8, 32, 63, 64, 65, 127, 128] {
+        for bits in [
+            1usize,
+            8,
+            32,
+            63,
+            64,
+            65,
+            127,
+            128,
+            129,
+            192,
+            1000,
+            MAX_SUPPORTED_INT_BITS - 1,
+            MAX_SUPPORTED_INT_BITS,
+        ] {
             assert_eq!(
                 layouter.type_size(&Type::int(bits)),
                 int_cell_count(bits),
@@ -340,8 +409,9 @@ mod tests {
         assert_eq!(words, vec![0u64, 1u64 << 36]);
 
         // And the count agrees with what the frame reserves for the same width, which is the
-        // pairing that actually has to hold.
-        for bits in [1usize, 8, 32, 63, 64, 65, 96, 127, 128] {
+        // pairing that actually has to hold — at the wide widths too, where a constant emitter
+        // that had stayed host-word-shaped would write two words into a four-cell slot.
+        for bits in [1usize, 8, 32, 63, 64, 65, 96, 127, 128, 200, 1000] {
             assert_eq!(
                 count(&Constant::int(bits, 1)),
                 int_cell_count(bits),

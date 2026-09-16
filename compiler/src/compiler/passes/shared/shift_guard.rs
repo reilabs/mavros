@@ -25,6 +25,7 @@
 //! they work the same: `noir_failure_tests/pure_shift_amount_oob_fails` and
 //! `witness_shift_amount_oob_fails`.
 
+use mavros_int_semantics::IntBits;
 use num_traits::ToPrimitive;
 
 use crate::compiler::{
@@ -119,7 +120,7 @@ fn emit_shift_amount_tests(
     // The cast is the same under either reading (it widens by zero-extending raw bits) so it takes
     // no sign. `signed` still decides the two comparisons below.
     let rhs_cmp = emitter.cast_to(CastTarget::Int(cmp_bits), rhs);
-    let rhs_bound = emitter.int_const(cmp_bits, bits as u128);
+    let rhs_bound = emitter.int_const(IntBits::from_u128(cmp_bits, bits as u128));
     let lt = CmpKind::lt(signed);
     let below_width = emitter.cmp(rhs_cmp, rhs_bound, lt);
 
@@ -135,7 +136,7 @@ fn emit_shift_amount_tests(
         // (`Cast` masks, sign extension is the separate `SExt`) and so clears the sign bit at
         // `cmp_bits`. That is a fact about the narrow widths only and cannot be generalized into a
         // deletion of this check for now.
-        let zero = emitter.int_const(cmp_bits, 0);
+        let zero = emitter.int_const(IntBits::zero(cmp_bits));
         emitter.cmp(rhs_cmp, zero, lt)
     });
 
@@ -195,7 +196,7 @@ pub fn emit_shift_amount_is_valid_assert(
     signed: bool,
 ) {
     let valid = emit_valid_shift_cond(emitter, rhs, bits, signed);
-    let one_u1 = emitter.int_const(1, 1);
+    let one_u1 = emitter.int_const(IntBits::one(1));
     emitter.emit(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: valid,

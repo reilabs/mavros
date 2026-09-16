@@ -10,6 +10,7 @@ use crate::compiler::{
         builder::{HLBlockEmitter, HLEmitter},
     },
 };
+use mavros_int_semantics::IntBits;
 
 #[derive(Default)]
 pub struct LowerSlicePop;
@@ -38,8 +39,8 @@ impl InstructionLoweringRule for LowerSlicePop {
         let (assert, len) = build_pop_bounds_assert(b, *slice);
         b.emit_guarded(guard, assert);
 
-        let zero = b.int_const(32, 0);
-        let one = b.int_const(32, 1);
+        let zero = b.int_const(IntBits::zero(32));
+        let one = b.int_const(IntBits::one(32));
         let nonempty = b.ult(zero, len);
         let nonempty32 = b.cast_to(CastTarget::Int(32), nonempty);
         let new_len = b.usub(len, nonempty32);

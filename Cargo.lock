@@ -2328,6 +2328,7 @@ dependencies = [
  "bincode",
  "cargo_metadata",
  "clap",
+ "codespan-reporting",
  "fixedbitset 0.4.2",
  "fm",
  "inkwell",
@@ -2402,6 +2403,8 @@ version = "0.1.0"
 dependencies = [
  "ark-bn254",
  "ark-ff",
+ "mavros-int-semantics",
+ "num-bigint 0.4.6",
 ]
 
 [[package]]

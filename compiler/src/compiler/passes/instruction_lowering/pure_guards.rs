@@ -52,12 +52,12 @@ use crate::compiler::{
     ssa::{
         Instruction, ValueId,
         hlssa::{
-            ArithGroup, BinaryArithOpKind, CmpKind, MAX_SUPPORTED_UNSIGNED_BITS, OpCode, Type,
-            TypeExpr, assert_signed_op_width,
+            ArithGroup, BinaryArithOpKind, CmpKind, OpCode, Type, TypeExpr, assert_signed_op_width,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
 };
+use mavros_int_semantics::IntBits;
 
 pub struct LowerPureGuards {}
 
@@ -506,7 +506,7 @@ impl LowerPureGuards {
         bits: usize,
     ) {
         let result_type = Type::int(bits);
-        let zero = emitter.int_const(bits, 0);
+        let zero = emitter.int_const(IntBits::zero(bits));
         let rhs_zero = emitter.eq(rhs, zero);
         emitter.build_if_else_into(
             rhs_zero,
@@ -538,7 +538,7 @@ impl LowerPureGuards {
     ) {
         let result_type = Type::int(bits);
         let operands = signed_mul_operands(emitter, lhs, rhs, bits);
-        let zero = emitter.int_const(bits, 0);
+        let zero = emitter.int_const(IntBits::zero(bits));
         let abs_r_zero = emitter.eq(operands.abs_rhs, zero);
         emitter.build_if_else_into(
             abs_r_zero,
@@ -724,14 +724,14 @@ impl LowerPureGuards {
             vec![(original_result, lhs_type.clone())],
             // Divisor is zero: assert condition is false, produce default
             |e| {
-                let zero_u1 = e.int_const(1, 0);
+                let zero_u1 = e.int_const(IntBits::zero(1));
                 e.emit(OpCode::AssertCmp {
                     kind: CmpKind::Eq,
                     lhs: condition,
                     rhs: zero_u1,
                 });
                 let default_val = match &lhs_type.expr {
-                    TypeExpr::Int(b) => e.int_const(*b, 0),
+                    TypeExpr::Int(b) => e.int_const(IntBits::zero(*b)),
                     TypeExpr::Field => e.field_const(e.field().constant(0u64)),
                     _ => unreachable!(),
                 };
@@ -774,7 +774,7 @@ impl LowerPureGuards {
             vec![(original_result, array_type)],
             // OOB: assert condition is false, pass through original array
             |e| {
-                let zero = e.int_const(1, 0);
+                let zero = e.int_const(IntBits::zero(1));
                 e.emit(OpCode::AssertCmp {
                     kind: CmpKind::Eq,
                     lhs: condition,
@@ -812,7 +812,7 @@ impl LowerPureGuards {
             vec![(original_result, elem_type.clone())],
             // OOB: assert condition is false, produce default value
             |e| {
-                let zero = e.int_const(1, 0);
+                let zero = e.int_const(IntBits::zero(1));
                 e.emit(OpCode::AssertCmp {
                     kind: CmpKind::Eq,
                     lhs: condition,
@@ -839,38 +839,13 @@ impl LowerPureGuards {
     ) {
         let val_type = type_info.get_value_type(value);
         match &val_type.expr {
-            TypeExpr::Int(n) => {
-                let val_bits = *n;
-                if val_bits <= max_bits {
-                    return;
-                }
-                assert!(
-                    val_bits <= MAX_SUPPORTED_UNSIGNED_BITS
-                        && max_bits < MAX_SUPPORTED_UNSIGNED_BITS,
-                    "LowerPureGuards: pure rangecheck on {val_type} with max_bits = \
-                     {max_bits} needs wider-than-u128 comparison; not yet supported"
-                );
-                let cmp_bits = val_bits.max(max_bits + 1);
-                let v_cmp = emitter.widen_u(value, val_bits, cmp_bits);
-                let bound = emitter.int_const(cmp_bits, 1u128 << max_bits);
-                let in_range = emitter.ult(v_cmp, bound);
-                let oob = emitter.not(in_range);
-
-                emitter.build_if_else_into(
-                    oob,
-                    vec![],
-                    |e| {
-                        let zero = e.int_const(1, 0);
-                        e.emit(OpCode::AssertCmp {
-                            kind: CmpKind::Eq,
-                            lhs: condition,
-                            rhs: zero,
-                        });
-                        vec![]
-                    },
-                    |_| vec![],
-                );
-            }
+            // `analysis::types` admits a field element and nothing else as a `Rangecheck`
+            // operand, so an integer one is a compiler bug rather than a width this lowering
+            // has yet to reach.
+            TypeExpr::Int(bits) => panic!(
+                "ICE: a pure rangecheck on an int{bits} reached lowering; only field types are \
+                 supported for rangecheck"
+            ),
             TypeExpr::Field => {
                 if max_bits >= emitter.field().field_bit_size() as usize {
                     return;
@@ -884,7 +859,7 @@ impl LowerPureGuards {
                     oob,
                     vec![],
                     |e| {
-                        let zero = e.int_const(1, 0);
+                        let zero = e.int_const(IntBits::zero(1));
                         e.emit(OpCode::AssertCmp {
                             kind: CmpKind::Eq,
                             lhs: condition,
@@ -896,8 +871,7 @@ impl LowerPureGuards {
                 );
             }
             other => panic!(
-                "LowerPureGuards: pure rangecheck on unsupported type {:?}; \
-                 add a comparison strategy for this type",
+                "LowerPureGuards: pure rangecheck on unsupported type {:?}; add a comparison strategy for this type",
                 other
             ),
         }
@@ -908,7 +882,7 @@ impl LowerPureGuards {
     ///
     /// The length lookup and the widening rule come from [`seq_bounds_operands`], which is also
     /// what DCE's dead-access rewrite builds its `AssertCmp` from. This rule needs the condition as
-    /// a *value* to branch on rather than as an assert, but the comparison itself must be the same
+    /// a _value_ to branch on rather than as an assert, but the comparison itself must be the same
     /// one or the two disagree about what "out of bounds" means.
     fn emit_oob_cond(
         &self,
@@ -951,22 +925,183 @@ impl LowerPureGuards {
 
     /// The value a failed guarded operation yields: assert the guard is inactive, then produce the
     /// result type's zero.
-    ///
-    /// The zero takes no sign, so neither does this. It used to be chosen between `i_const` and
-    /// `u_const`, which is why every caller still resolves a signedness of its own — that one
-    /// selects the lowering, and never reached anything here but the tag on a zero.
     fn emit_guard_failure_default(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
         condition: ValueId,
         bits: usize,
     ) -> ValueId {
-        let zero = emitter.int_const(1, 0);
+        let zero = emitter.int_const(IntBits::zero(1));
         emitter.emit(OpCode::AssertCmp {
             kind: CmpKind::Eq,
             lhs: condition,
             rhs: zero,
         });
-        emitter.int_const(bits, 0)
+        emitter.int_const(IntBits::zero(bits))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::{
+        pass_manager::{AnalysisStore, Pass},
+        passes::instruction_lowering::InstructionLowering,
+        ssa::{
+            Terminator,
+            hlssa::{Constant, HLSSA, type_system::MAX_SUPPORTED_INT_BITS},
+        },
+    };
+    use mavros_int_semantics::{MAX_LOWERED_SIGNED_BITS, int_bits::HOST_WORD_BITS};
+
+    /// `main(lhs: int(bits), rhs: int(bits)) -> int(bits) { lhs op rhs }`, lowered by this pass.
+    ///
+    /// The operands are **pure** entry-point parameters, which is the lane this pass builds a check
+    /// for: a witnessed one belongs to `LowerWitnessIntegerArithOps`, which rejects the same
+    /// executions by range-checking a field result instead.
+    ///
+    /// `guarded` wraps the operation in a `Guard` on a witness condition, which is the shape
+    /// `UntaintControlFlow` leaves behind and the second of the two paths that reach
+    /// [`mul_overflows_nonzero`].
+    fn lowered_pure_op(kind: BinaryArithOpKind, bits: usize, guarded: bool) -> HLSSA {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let lhs = ssa.fresh_value();
+        let rhs = ssa.fresh_value();
+        let condition = guarded.then(|| ssa.fresh_value());
+        let result = ssa.fresh_value();
+        let function = ssa.get_unique_entrypoint_mut();
+        function.add_return_type(Type::int(bits));
+        let entry = function.get_entry_mut();
+        entry.push_parameter(lhs, Type::int(bits));
+        entry.push_parameter(rhs, Type::int(bits));
+        if let Some(condition) = condition {
+            entry.push_parameter(condition, Type::witness_of(Type::int(1)));
+        }
+        let operation = OpCode::BinaryArithOp {
+            kind,
+            result,
+            lhs,
+            rhs,
+        };
+        entry.push_test_instruction(match condition {
+            Some(condition) => OpCode::Guard {
+                condition,
+                inner: Box::new(operation),
+            },
+            None => operation,
+        });
+        entry.set_terminator(Terminator::Return(vec![result]));
+
+        InstructionLowering::pure_guards().run(&mut ssa, &AnalysisStore::new());
+
+        // The checks above are stated in bit windows and comparisons, and the windows are lowered
+        // one phase later, so a width one of them cannot build is not visible here without it.
+        InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
+        ssa
+    }
+
+    /// The numerator of the sole division a lowered multiply's overflow check divides by, as the
+    /// constant pattern it was minted from.
+    ///
+    /// Both paths through the check state it as `MAX / rhs < lhs`, so there is exactly one division
+    /// and its left operand is the bound.
+    fn overflow_bound(ssa: &HLSSA) -> Option<IntBits> {
+        let function = ssa.get_unique_entrypoint();
+        let divisions: Vec<ValueId> = function
+            .get_blocks()
+            .flat_map(|(_, block)| block.get_instructions())
+            .filter_map(|op| match op {
+                OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::UDiv,
+                    lhs,
+                    ..
+                } => Some(*lhs),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(divisions.len(), 1, "the check divides exactly once");
+
+        match ssa.get_const(divisions[0]).as_deref() {
+            Some(Constant::Int(pattern)) => Some(pattern.clone()),
+            _ => None,
+        }
+    }
+
+    /// The bound a pure multiply is checked against is the operand width's own `2^bits - 1`, at
+    /// every width the type system admits.
+    ///
+    /// Minting it through a host word bounded the _check_ at 128 bits, and so the operation: both
+    /// pure backends multiply at any width, so a refusal there had no backend behind it. It is the
+    /// only guard in this module that mints a constant of the operand's width rather than a zero,
+    /// which is why it is the only one that ran out.
+    #[test]
+    fn a_pure_multiply_is_checked_against_its_own_width() {
+        for bits in [
+            HOST_WORD_BITS,
+            HOST_WORD_BITS + 1,
+            200,
+            MAX_SUPPORTED_INT_BITS,
+        ] {
+            for guarded in [false, true] {
+                let ssa = lowered_pure_op(BinaryArithOpKind::UMul, bits, guarded);
+                assert_eq!(
+                    overflow_bound(&ssa),
+                    Some(IntBits::all_ones(bits)),
+                    "an int{bits} multiply, guarded={guarded}, is checked against the wrong bound"
+                );
+            }
+        }
+    }
+
+    /// Every failable pure operation builds its check at every width `width_validation` admits.
+    ///
+    /// The companion of that pass's `the_same_operation_outside_the_witness_domain_is_not_bounded`
+    /// and `a_signed_reading_stops_at_the_frontier`, from the lowering's side. The funnel refuses no
+    /// _unsigned_ operation on this lane at all, so a constant minted here in a host word would be a
+    /// panic several passes past the only point that could have named the width — which is what a
+    /// pure multiply above 128 bits was. Sweeping the kinds is what says the rest are not.
+    ///
+    /// The signed half stops at [`MAX_LOWERED_SIGNED_BITS`] because the funnel does: each of these
+    /// checks reads a sign bit, and `overflow_guard` and `divmod_guard` state that in one integer
+    /// cell.
+    #[test]
+    fn every_pure_guard_is_built_at_every_width() {
+        let unsigned = [
+            BinaryArithOpKind::UAdd,
+            BinaryArithOpKind::USub,
+            BinaryArithOpKind::UMul,
+            BinaryArithOpKind::UDiv,
+            BinaryArithOpKind::URem,
+            BinaryArithOpKind::UShl,
+            BinaryArithOpKind::UShr,
+        ];
+        let signed = [
+            BinaryArithOpKind::SAdd,
+            BinaryArithOpKind::SSub,
+            BinaryArithOpKind::SMul,
+            BinaryArithOpKind::SDiv,
+            BinaryArithOpKind::SRem,
+            BinaryArithOpKind::SShl,
+            BinaryArithOpKind::SShr,
+        ];
+
+        let widths = [
+            HOST_WORD_BITS,
+            HOST_WORD_BITS + 1,
+            200,
+            MAX_SUPPORTED_INT_BITS,
+        ];
+        for (kinds, widths) in [
+            (unsigned.as_slice(), widths.as_slice()),
+            (signed.as_slice(), [MAX_LOWERED_SIGNED_BITS].as_slice()),
+        ] {
+            for kind in kinds {
+                for bits in widths {
+                    for guarded in [false, true] {
+                        let _ = lowered_pure_op(*kind, *bits, guarded);
+                    }
+                }
+            }
+        }
     }
 }

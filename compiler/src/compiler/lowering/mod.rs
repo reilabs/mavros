@@ -357,11 +357,7 @@ impl SSAConverter {
         let entry_block = function.get_entry_id();
 
         // Add return types
-        let return_type = self.type_converter.convert_type(&ast_func.return_type);
-        if !matches!(
-            ast_func.return_type,
-            noirc_frontend::monomorphization::ast::Type::Unit
-        ) {
+        for return_type in self.type_converter.call_results(&ast_func.return_type) {
             function.add_return_type(return_type);
         }
 

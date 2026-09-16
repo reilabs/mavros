@@ -3,7 +3,9 @@
 use noirc_frontend::monomorphization::ast::Type as NoirType;
 use noirc_frontend::shared::Signedness;
 
-use crate::compiler::ssa::hlssa::{MAX_SUPPORTED_SIGNED_BITS, Type};
+use mavros_int_semantics::MAX_LOWERED_SIGNED_BITS;
+
+use crate::compiler::ssa::hlssa::Type;
 
 /// Converts AST types to SSA types.
 pub struct TypeConverter;
@@ -11,6 +13,20 @@ pub struct TypeConverter;
 impl TypeConverter {
     pub fn new() -> Self {
         Self
+    }
+
+    /// Whether a call returning `ret` produces a value at all, with `Unit` as the sole exception.
+    pub fn call_returns_a_value(ret: &NoirType) -> bool {
+        !matches!(ret, NoirType::Unit)
+    }
+
+    /// The values a call returning `ret` produces: none for `Unit`, and one otherwise.
+    pub fn call_results(&self, ret: &NoirType) -> Vec<Type> {
+        if Self::call_returns_a_value(ret) {
+            vec![self.convert_type(ret)]
+        } else {
+            Vec::new()
+        }
     }
 
     /// Convert a monomorphized AST type to an SSA type.
@@ -23,8 +39,8 @@ impl TypeConverter {
                 Signedness::Signed => {
                     let bits = bit_size.bit_size() as usize;
                     assert!(
-                        bits <= MAX_SUPPORTED_SIGNED_BITS,
-                        "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+                        bits <= MAX_LOWERED_SIGNED_BITS,
+                        "signed integers wider than i{MAX_LOWERED_SIGNED_BITS} are unsupported"
                     );
                     Type::int(bits)
                 }
@@ -49,8 +65,12 @@ impl TypeConverter {
                 let inner_type = self.convert_type(inner);
                 inner_type.ref_of()
             }
-            // We defunctionalize as soon as possible, so we can simply throw this information away.
-            NoirType::Function(_, _, _, _) => Type::function(),
+            // Only the results survive. The parameter list is dropped because a closure's lifted
+            // function takes its captured environment as an extra leading parameter, so `args` is
+            // not the arity of the call this value appears in -- see [`TypeExpr::Function`]. The
+            // results are the same either way, and they are what lets an indirect call be typed
+            // before defunctionalization has run.
+            NoirType::Function(_, ret, _, _) => Type::function_returning(self.call_results(ret)),
             NoirType::String(len) => {
                 // str<N>: N is UTF-8 byte count, represented as Array(U(8), N)
                 Type::int(8).array_of(*len as usize)
@@ -72,5 +92,54 @@ impl TypeConverter {
                 Type::tuple_of(all_fields)
             }
         }
+    }
+}
+
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::rc::Rc;
+
+    fn function_type(ret: NoirType) -> NoirType {
+        NoirType::Function(
+            vec![NoirType::Field],
+            Rc::new(ret),
+            Rc::new(NoirType::Unit),
+            false,
+        )
+    }
+
+    #[test]
+    fn a_function_type_converts_to_its_results() {
+        let converter = TypeConverter::new();
+
+        assert_eq!(
+            converter.convert_type(&function_type(NoirType::Field)),
+            Type::function_returning(vec![Type::field()])
+        );
+        assert_eq!(
+            converter.convert_type(&function_type(NoirType::Unit)),
+            Type::function_returning(Vec::new())
+        );
+    }
+
+    #[test]
+    fn two_function_types_differing_only_in_their_parameters_convert_alike() {
+        let converter = TypeConverter::new();
+        let no_arguments = NoirType::Function(
+            vec![],
+            Rc::new(NoirType::Field),
+            Rc::new(NoirType::Unit),
+            false,
+        );
+
+        assert_eq!(
+            converter.convert_type(&function_type(NoirType::Field)),
+            converter.convert_type(&no_arguments)
+        );
     }
 }

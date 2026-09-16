@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod codegen;
+pub mod diagnostic;
 pub mod located;
 pub mod lowering;
 pub mod pass_manager;
