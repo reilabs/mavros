@@ -30,13 +30,13 @@
 //! their original values: cleanup never deletes a live update or assumes that
 //! distinct dynamic indices cannot alias.
 
-use super::{MergePoint, emit_merge_select, emit_value_conversion};
+use super::{emit_merge_select, emit_value_conversion};
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
         analysis::{
             flow_analysis::FlowAnalysis,
-            types::{FunctionTypeInfo, Types, const_value_type},
+            types::{FunctionTypeInfo, Types},
             value_range_analysis::{FunctionValueRanges, ValueRangeAnalysis},
         },
         passes::shared::{
@@ -109,43 +109,55 @@ pub(super) struct SparseArrayMerge<'a> {
     types: &'a FunctionTypeInfo,
 }
 
+fn count_uses(function: &HLFunction) -> HashMap<ValueId, usize> {
+    let mut uses = HashMap::default();
+    for (_, block) in function.get_blocks() {
+        for op in block.get_instructions() {
+            for input in op.get_inputs() {
+                *uses.entry(*input).or_insert(0) += 1;
+            }
+        }
+        let args = match block.get_terminator() {
+            Some(Terminator::Jmp(_, args) | Terminator::Return(args)) => args.as_slice(),
+            Some(Terminator::JmpIf(condition, _, _)) => std::slice::from_ref(condition),
+            None => &[],
+        };
+        for input in args {
+            *uses.entry(*input).or_insert(0) += 1;
+        }
+    }
+    uses
+}
+
 impl<'a> SparseArrayMerge<'a> {
     /// Snapshot before linearization changes operands and wraps instructions in guards.
     pub(super) fn new(function: &HLFunction, types: &'a FunctionTypeInfo, ssa: &HLSSA) -> Self {
         let mut definitions = HashMap::default();
         for (_, block) in function.get_blocks() {
             for (instruction, location) in block.get_instructions_with_source_locations() {
-                let (result, access) = match instruction {
+                let (result, array, index, value) = match instruction {
                     OpCode::ArrayGet {
                         result,
                         array,
                         index,
-                    } => (
-                        *result,
-                        ArrayAccess {
-                            array: *array,
-                            index: *index,
-                            value: None,
-                            location: location.clone(),
-                        },
-                    ),
+                    } => (result, array, index, None),
                     OpCode::ArraySet {
                         result,
                         array,
                         index,
                         value,
-                    } => (
-                        *result,
-                        ArrayAccess {
-                            array: *array,
-                            index: *index,
-                            value: Some(*value),
-                            location: location.clone(),
-                        },
-                    ),
+                    } => (result, array, index, Some(*value)),
                     _ => continue,
                 };
-                definitions.insert(result, access);
+                definitions.insert(
+                    *result,
+                    ArrayAccess {
+                        array: *array,
+                        index: *index,
+                        value,
+                        location: location.clone(),
+                    },
+                );
             }
         }
         let mut reads = HashMap::default();
@@ -158,22 +170,7 @@ impl<'a> SparseArrayMerge<'a> {
                 .or_insert_with(Vec::new)
                 .push(*result);
         }
-        let mut uses = HashMap::default();
-        for (_, block) in function.get_blocks() {
-            for op in block.get_instructions() {
-                for input in op.get_inputs() {
-                    *uses.entry(*input).or_insert(0) += 1;
-                }
-            }
-            let args = match block.get_terminator() {
-                Some(Terminator::Jmp(_, args) | Terminator::Return(args)) => args.as_slice(),
-                Some(Terminator::JmpIf(condition, _, _)) => std::slice::from_ref(condition),
-                None => &[],
-            };
-            for input in args {
-                *uses.entry(*input).or_insert(0) += 1;
-            }
-        }
+        let uses = count_uses(function);
         let constants = definitions
             .values()
             .filter_map(|access| {
@@ -381,7 +378,7 @@ impl<'a> SparseArrayMerge<'a> {
         id: FunctionId,
         function: &HLFunction,
         ssa: &HLSSA,
-        merges: &[MergePoint],
+        unknown: &HashSet<ValueId>,
     ) {
         if !self.definitions.values().any(|access| {
             access.value.is_some()
@@ -393,30 +390,17 @@ impl<'a> SparseArrayMerge<'a> {
             return;
         }
         let cfg = FlowAnalysis::run_function(function);
-        let mut signatures: HashMap<_, _> = ssa
-            .iter_functions()
-            .map(|(id, f)| (*id, (f.get_param_types(), f.get_returns())))
-            .collect();
+        let mut signatures = Types::function_types(ssa);
         signatures.insert(id, (function.get_param_types(), function.get_returns()));
-        let constants = ssa
-            .const_snapshot()
-            .iter()
-            .map(|(id, value)| (*id, const_value_type(value)))
-            .collect();
-        let types = Types::new().run_function(function, &signatures, &constants, &cfg, ssa.field());
-        // Merger blocks still carry a placeholder argument from one arm. Never
-        // infer a range from that incomplete choice, including through its users.
-        let unknown = merges
-            .iter()
-            .flat_map(|merge| {
-                function
-                    .get_block(merge.destination)
-                    .get_parameters()
-                    .map(|(id, _)| *id)
-            })
-            .collect();
+        let types = Types::new().run_function(
+            function,
+            &signatures,
+            &Types::constant_types(ssa, &signatures),
+            &cfg,
+            ssa.field(),
+        );
         self.ranges =
-            Some(ValueRangeAnalysis::new().run_on_function(function, &cfg, &types, ssa, &unknown));
+            Some(ValueRangeAnalysis::new().run_on_function(function, &cfg, &types, ssa, unknown));
     }
 
     /// Forward reads through replayed writes before pruning them. Comparisons are
@@ -574,13 +558,10 @@ impl<'a> SparseArrayMerge<'a> {
 
         // A worklist removes the now-dead update chains and their casts/reads.
         // Only replayed stores are eligible: their failure checks were emitted above.
-        let mut uses: HashMap<ValueId, usize> = HashMap::default();
+        let mut uses = count_uses(function);
         let mut removable = HashMap::default();
         for (_, block) in function.get_blocks() {
             for op in block.get_instructions() {
-                for input in op.get_inputs() {
-                    *uses.entry(*input).or_default() += 1;
-                }
                 let (_, inner) = HLBlockEmitter::unwrap_guard(op);
                 let result = match inner {
                     OpCode::ArrayGet { result, .. } | OpCode::Cast { result, .. } => Some(*result),
@@ -592,17 +573,6 @@ impl<'a> SparseArrayMerge<'a> {
                 if let Some(result) = result {
                     removable.insert(result, op.get_inputs().copied().collect::<Vec<_>>());
                 }
-            }
-            match block.get_terminator() {
-                Some(Terminator::Jmp(_, args) | Terminator::Return(args)) => {
-                    for value in args {
-                        *uses.entry(*value).or_default() += 1;
-                    }
-                }
-                Some(Terminator::JmpIf(cond, _, _)) => {
-                    *uses.entry(*cond).or_default() += 1;
-                }
-                None => unreachable!("ICE: merge cleanup requires terminated blocks"),
             }
         }
         // DCE handles unrelated dead reads and casts. Here we only need the
@@ -737,12 +707,16 @@ fn conversion_cost(typ: &Type) -> usize {
 mod tests {
     use super::*;
     use crate::compiler::{
-        analysis::{flow_analysis::FlowAnalysis, types::Types},
+        analysis::{
+            flow_analysis::FlowAnalysis,
+            types::{TypeInfo, Types},
+        },
         ssa::{
             FunctionId, Terminator,
             hlssa::{HLSSA, builder::HLFunctionBuilder},
         },
     };
+    use mavros_int_semantics::IntBits;
 
     struct Fixture {
         ssa: HLSSA,
@@ -753,6 +727,25 @@ mod tests {
         index: ValueId,
         condition: ValueId,
         typ: Type,
+    }
+
+    impl Fixture {
+        fn merger<'a>(&mut self, types: &'a TypeInfo) -> SparseArrayMerge<'a> {
+            let mut function = self.ssa.take_function(self.function);
+            let merger = guarded_merger(self, &mut function, types);
+            self.ssa.put_function(self.function, function);
+            merger
+        }
+
+        fn plan(&self, merger: &SparseArrayMerge, budget: &mut usize) -> Option<Plan> {
+            merger.plan(
+                self.changed,
+                Base::Value(self.base),
+                &self.typ,
+                self.condition,
+                budget,
+            )
+        }
     }
 
     fn fixture(len: usize, count: usize, nested: bool, index_bits: usize) -> Fixture {
@@ -790,7 +783,7 @@ mod tests {
             for _ in 0..count {
                 let val = if nested {
                     let row = b.array_get(array, index);
-                    let zero = b.int_const(32, 0);
+                    let zero = b.int_const(IntBits::from_u128(32, 0));
                     b.array_set(row, zero, value)
                 } else {
                     value
@@ -811,6 +804,17 @@ mod tests {
             condition,
             typ,
         }
+    }
+
+    fn guarded_merger<'a>(
+        f: &Fixture,
+        function: &mut HLFunction,
+        types: &'a TypeInfo,
+    ) -> SparseArrayMerge<'a> {
+        let mut merger = SparseArrayMerge::new(function, types.get_function(f.function), &f.ssa);
+        guard_accesses(function, f.condition);
+        merger.capture_guards(function);
+        merger
     }
 
     fn guard_accesses(function: &mut HLFunction, condition: ValueId) {
@@ -860,21 +864,9 @@ mod tests {
                 }
             }
             let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
-            let mut merger = SparseArrayMerge::new(
-                f.ssa.get_function(f.function),
-                types.get_function(f.function),
-                &f.ssa,
-            );
-            guard_accesses(f.ssa.get_function_mut(f.function), f.condition);
-            merger.capture_guards(f.ssa.get_function(f.function));
+            let merger = f.merger(&types);
             let mut budget = MAX_MERGED_WRITES;
-            let plan = merger.plan(
-                f.changed,
-                Base::Value(f.base),
-                &f.typ,
-                f.condition,
-                &mut budget,
-            );
+            let plan = f.plan(&merger, &mut budget);
             assert_eq!(plan.is_some(), accepted);
             if let Some(plan) = plan {
                 assert_eq!(plan.writes.len(), count);
@@ -920,41 +912,19 @@ mod tests {
             merger.guards.insert(f.changed, Some(f.condition));
             merger.guards.insert(first, original_guard);
             let mut budget = MAX_MERGED_WRITES;
-            let plan = merger.plan(
-                f.changed,
-                Base::Value(f.base),
-                &f.typ,
-                f.condition,
-                &mut budget,
-            );
+            let plan = f.plan(&merger, &mut budget);
             assert_eq!(plan.is_some(), original_guard == Some(f.condition));
         }
         merger.guards.remove(&first);
         let mut budget = MAX_MERGED_WRITES;
-        assert!(
-            merger
-                .plan(
-                    f.changed,
-                    Base::Value(f.base),
-                    &f.typ,
-                    f.condition,
-                    &mut budget,
-                )
-                .is_none()
-        );
+        assert!(f.plan(&merger, &mut budget).is_none());
     }
 
     #[test]
     fn nested_replay_requires_matching_parent_read_and_guard() {
         let mut f = fixture(128, 1, true, 32);
         let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
-        let mut merger = SparseArrayMerge::new(
-            f.ssa.get_function(f.function),
-            types.get_function(f.function),
-            &f.ssa,
-        );
-        guard_accesses(f.ssa.get_function_mut(f.function), f.condition);
-        merger.capture_guards(f.ssa.get_function(f.function));
+        let mut merger = f.merger(&types);
         let child = merger.definitions[&f.changed].value.unwrap();
         let read = merger.definitions[&child].array;
         for (parent, child_guard, nested) in [
@@ -965,15 +935,7 @@ mod tests {
             merger.definitions.get_mut(&read).unwrap().array = parent;
             merger.guards.insert(child, child_guard);
             let mut budget = MAX_MERGED_WRITES;
-            let plan = merger
-                .plan(
-                    f.changed,
-                    Base::Value(f.base),
-                    &f.typ,
-                    f.condition,
-                    &mut budget,
-                )
-                .unwrap();
+            let plan = f.plan(&merger, &mut budget).unwrap();
             assert_eq!(plan.writes[0].nested.is_some(), nested);
         }
     }
@@ -999,21 +961,9 @@ mod tests {
                 function.add_return_type(f.typ.clone());
             }
             let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
-            let mut merger = SparseArrayMerge::new(
-                f.ssa.get_function(f.function),
-                types.get_function(f.function),
-                &f.ssa,
-            );
-            guard_accesses(f.ssa.get_function_mut(f.function), f.condition);
-            merger.capture_guards(f.ssa.get_function(f.function));
+            let merger = f.merger(&types);
             let mut budget = MAX_MERGED_WRITES;
-            let plan = merger.plan(
-                f.changed,
-                Base::Value(f.base),
-                &f.typ,
-                f.condition,
-                &mut budget,
-            );
+            let plan = f.plan(&merger, &mut budget);
             assert_eq!(plan.is_some(), !retained);
         }
     }
@@ -1038,7 +988,7 @@ mod tests {
                 let mut fb = HLFunctionBuilder::new(&mut function, &mut f.ssa);
                 let mut b = fb.test_block(entry);
                 if bounded {
-                    let len = b.int_const(32, 128);
+                    let len = b.int_const(IntBits::from_u128(32, 128));
                     let condition = b.ult(f.index, len);
                     b.set_terminator(Terminator::JmpIf(condition, body, exit));
                 } else {
@@ -1048,11 +998,8 @@ mod tests {
             f.ssa.put_function(f.function, function);
             let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
             let mut function = f.ssa.take_function(f.function);
-            let mut merger =
-                SparseArrayMerge::new(&function, types.get_function(f.function), &f.ssa);
-            guard_accesses(&mut function, f.condition);
-            merger.capture_guards(&function);
-            merger.capture_ranges(f.function, &function, &f.ssa, &[]);
+            let mut merger = guarded_merger(&f, &mut function, &types);
+            merger.capture_ranges(f.function, &function, &f.ssa, &HashSet::default());
             merger.merge_block = Some(body);
             assert_eq!(merger.index_is_safe(f.index, 128), bounded);
             // A fact inside the loop/branch body must not be used at its entry.
@@ -1068,30 +1015,21 @@ mod tests {
             let mut function = f.ssa.take_function(f.function);
             let entry = function.get_entry_id();
             let merge = function.add_block();
-            let mut params = function.get_block_mut(entry).take_parameters();
-            params.retain(|(id, _)| *id != f.index);
-            function.get_block_mut(entry).put_parameters(params);
+            let parameter = f.ssa.fresh_value();
             function
                 .get_block_mut(merge)
-                .push_parameter(f.index, Type::int(32));
-            let mut instructions = function.get_block_mut(entry).take_instructions();
+                .push_parameter(parameter, Type::int(32));
+            let instructions = function.get_block_mut(entry).take_instructions();
             let index;
             {
                 let mut fb = HLFunctionBuilder::new(&mut function, &mut f.ssa);
                 let mut b = fb.test_block(entry);
-                let zero = b.int_const(32, 0);
+                let zero = b.int_const(IntBits::from_u128(32, 0));
                 b.set_terminator(Terminator::Jmp(merge, vec![zero]));
                 drop(b);
                 let mut b = fb.test_block(merge);
-                let one = b.int_const(32, 1);
-                index = b.uadd(f.index, one);
-                for instruction in &mut instructions {
-                    for input in instruction.get_inputs_mut() {
-                        if *input == f.index {
-                            *input = index;
-                        }
-                    }
-                }
+                let one = b.int_const(IntBits::from_u128(32, 1));
+                index = b.uadd(parameter, one);
                 for instruction in instructions {
                     b.emit_located(instruction);
                 }
@@ -1102,21 +1040,12 @@ mod tests {
             let function = f.ssa.get_function(f.function);
             let mut merger =
                 SparseArrayMerge::new(function, types.get_function(f.function), &f.ssa);
-            let merges = if pending {
-                vec![MergePoint {
-                    block: entry,
-                    destination: merge,
-                    condition: f.condition,
-                    not_condition: f.condition,
-                    then_active: f.condition,
-                    else_active: f.condition,
-                    location: SourceLocation::synthetic("pending_merge"),
-                    values: vec![],
-                }]
+            let unknown = if pending {
+                HashSet::from_iter([parameter])
             } else {
-                vec![]
+                HashSet::default()
             };
-            merger.capture_ranges(f.function, function, &f.ssa, &merges);
+            merger.capture_ranges(f.function, function, &f.ssa, &unknown);
             merger.merge_block = Some(merge);
             assert_eq!(merger.index_is_safe(index, 128), !pending);
         }
@@ -1128,10 +1057,7 @@ mod tests {
             let mut f = fixture(128, 1, false, bits);
             let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
             let mut function = f.ssa.take_function(f.function);
-            let mut merger =
-                SparseArrayMerge::new(&function, types.get_function(f.function), &f.ssa);
-            guard_accesses(&mut function, f.condition);
-            merger.capture_guards(&function);
+            let mut merger = guarded_merger(&f, &mut function, &types);
             let entry = function.get_entry_id();
             function.get_block_mut(entry).take_terminator();
             let result;
@@ -1207,10 +1133,7 @@ mod tests {
             f.ssa.put_function(f.function, function);
             let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
             let mut function = f.ssa.take_function(f.function);
-            let mut merger =
-                SparseArrayMerge::new(&function, types.get_function(f.function), &f.ssa);
-            guard_accesses(&mut function, f.condition);
-            merger.capture_guards(&function);
+            let mut merger = guarded_merger(&f, &mut function, &types);
             {
                 let mut fb = HLFunctionBuilder::new(&mut function, &mut f.ssa);
                 let mut b = fb.test_block(entry);
@@ -1326,10 +1249,7 @@ mod tests {
             }
             let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
             let mut function = f.ssa.take_function(f.function);
-            let mut merger =
-                SparseArrayMerge::new(&function, types.get_function(f.function), &f.ssa);
-            guard_accesses(&mut function, f.condition);
-            merger.capture_guards(&function);
+            let mut merger = guarded_merger(&f, &mut function, &types);
             let entry = function.get_entry_id();
             {
                 let mut fb = HLFunctionBuilder::new(&mut function, &mut f.ssa);

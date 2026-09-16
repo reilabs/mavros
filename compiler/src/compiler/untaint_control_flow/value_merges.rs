@@ -6,6 +6,8 @@
 //!
 //! Its intermediate state remains local; there is no callback or capture/finalize API.
 
+use mavros_int_semantics::IntBits;
+
 use super::{UntaintControlFlow, emit_value_conversion, get_witness_or_pure};
 use crate::compiler::{
     analysis::{
@@ -66,7 +68,18 @@ impl UntaintControlFlow {
         );
         if let Some(sparse) = sparse.as_mut() {
             sparse.capture_guards(function);
-            sparse.capture_ranges(function_id, function, ssa, &merges);
+            // Pending merges still carry one arm's placeholder arguments. Keep
+            // their parameters unknown until the complete choices are emitted.
+            let unknown = merges
+                .iter()
+                .flat_map(|merge| {
+                    function
+                        .get_block(merge.destination)
+                        .get_parameters()
+                        .map(|(id, _)| *id)
+                })
+                .collect();
+            sparse.capture_ranges(function_id, function, ssa, &unknown);
         }
         emit_merges(function, ssa, types, sparse.as_mut(), merges);
         if let Some(sparse) = sparse {
@@ -158,7 +171,7 @@ fn emit_merge_select(
             };
             let mut elems = Vec::with_capacity(*size);
             for i in 0..*size {
-                let idx = builder.int_const(32, i as u128);
+                let idx = builder.int_const(IntBits::from_u128(32, i as u128));
                 let lhs_elem = builder.array_get(lhs, idx);
                 let rhs_elem = builder.array_get(rhs, idx);
                 let selected = emit_merge_select(
@@ -188,7 +201,7 @@ fn emit_merge_select(
             builder.select(cond, lhs, rhs)
         }
         TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
-        TypeExpr::Function => panic!("Witness select on Function type not supported"),
+        TypeExpr::Function(_) => panic!("Witness select on Function type not supported"),
         TypeExpr::Blob(..) => panic!("Witness select on Blob type not supported"),
     }
 }
