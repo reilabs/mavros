@@ -13,7 +13,7 @@ use crate::{
     collections::HashSet,
     compiler::{
         analysis::types::{FunctionTypeInfo, TypeInfo},
-        codegen::bytecode::layout::{DOUBLE_LANE_BITS, SPREAD_MAX_BITS, int_cell_count},
+        codegen::bytecode::layout::{SPREAD_MAX_BITS, int_cell_count},
         diagnostic::Diagnostic,
         passes::shared::limbs::{
             narrow_int_bits, two_limb_product_packing_fits, widest_injective_int_bits,
@@ -126,9 +126,6 @@ struct Funnel {
     /// The widest integer the field carries injectively.
     injective: usize,
 
-    /// The widest integer a sequence element is read at.
-    element: usize,
-
     /// The configured field, for the one bound that is a predicate rather than a width.
     field: FieldConfig,
 }
@@ -140,11 +137,6 @@ impl Funnel {
             narrow: narrow_int_bits(field),
             signed: MAX_LOWERED_SIGNED_BITS,
             injective,
-            // Two bounds meet on an element and the narrower of them binds. It has to become a
-            // field element, which is the field's question; and the VM's lookup tape addresses it
-            // by a tag naming a cell count, of which it has one for a cell and one for a pair, so
-            // the widest element it can name is the double lane's. On bn254 the tape binds.
-            element: injective.min(DOUBLE_LANE_BITS),
             field,
         }
     }
@@ -186,12 +178,6 @@ impl Funnel {
             }
             OpCode::Rangecheck { value, max_bits } => {
                 self.check_rangecheck(*value, *max_bits, types, location, refusals);
-            }
-            OpCode::MkSeq { elem_type, .. } | OpCode::MkRepeated { elem_type, .. } => {
-                self.check_element(elem_type, location, refusals);
-            }
-            OpCode::MkSeqOfBlob { element_type, .. } => {
-                self.check_element(element_type, location, refusals);
             }
             // Every other opcode either carries no integer width of its own, or reaches a lowering
             // that is generic in one, or reaches a bound this pass deliberately does not state.
@@ -389,46 +375,6 @@ impl Funnel {
                 )),
             );
         }
-    }
-
-    /// A sequence element, which is read off the lookup tape by a tag naming its cell count.
-    ///
-    /// Two things bound it and [`Funnel::element`] is the narrower. Both backends materialise an
-    /// array-lookup element as a single `Field`, so an element whose magnitude the modulus cannot
-    /// carry has nothing to be read as; and the VM's tape names an element's extent with a tag —
-    /// `ELEM_WORD` for one cell and `ELEM_U128` for two — so an element spanning more cells than
-    /// there are tags cannot be addressed at all. The multi-cell representation deliberately does
-    /// not reach inside a sequence, and widening the tape is unit 7's work.
-    fn check_element(
-        &self,
-        elem_type: &Type,
-        location: &SourceLocation,
-        refusals: &mut Vec<Diagnostic>,
-    ) {
-        let Some(bits) = int_width(elem_type) else {
-            return;
-        };
-        if bits <= self.element {
-            return;
-        }
-
-        let label = if bits > self.injective {
-            format!("int{bits} does not fit one field element")
-        } else {
-            format!("int{bits} spans more cells than the lookup tape can name")
-        };
-
-        refusals.push(
-            Diagnostic::error(
-                format!("an int{bits} sequence element is not supported"),
-                location.clone(),
-            )
-            .with_label(label)
-            .with_note(format!(
-                "an element is read off the lookup tape as a single field element addressed by a cell count, so the widest element this field holds is int{}",
-                self.element
-            )),
-        );
     }
 
     /// A range check, which is bounded in the witness domain and unbounded outside it.
@@ -789,10 +735,7 @@ mod tests {
 
     use crate::compiler::{
         analysis::{flow_analysis::FlowAnalysis, types::Types},
-        ssa::{
-            SourcePosition, Terminator,
-            hlssa::{MAX_SUPPORTED_INT_BITS, SequenceTargetType},
-        },
+        ssa::{SourcePosition, Terminator, hlssa::MAX_SUPPORTED_INT_BITS},
     };
 
     /// The widest width the bn254 modulus carries injectively.
@@ -1483,68 +1426,6 @@ mod tests {
         assert!(refuses(&window(Type::witness_of(Type::int(
             injective() + 1
         )))));
-    }
-
-    /// A sequence element is bounded by the **lookup tape**, which is narrower than the field.
-    ///
-    /// Two bounds meet here and the tape's is the one that binds on bn254: an element has to become
-    /// a field element, and it has to be addressed by a tag naming its cell count, of which the VM
-    /// has one for a cell and one for a pair.
-    #[test]
-    fn a_sequence_element_is_bounded_by_the_tape_rather_than_by_the_field() {
-        let element = |bits: usize| {
-            program_with(&[Type::int(bits)], |values, result| OpCode::MkSeq {
-                result,
-                elems: vec![values[0]],
-                seq_type: SequenceTargetType::Array(1),
-                elem_type: Type::int(bits),
-            })
-        };
-        let tape = 2 * HOST_LIMB_BITS;
-
-        assert!(!refuses(&element(tape)));
-        assert!(refuses(&element(tape + 1)), "the tape has no third tag");
-
-        // And the bound really is the narrower of the two, which is what a field-only bound would
-        // have got wrong: this width is one the modulus carries perfectly well.
-        assert!(tape < injective());
-        assert!(refuses(&element(injective())));
-    }
-
-    /// **Three** opcodes make a sequence and each names its element type differently, so the rule
-    /// has to meet all three.
-    #[test]
-    fn every_sequence_constructor_is_checked() {
-        let wide = 2 * HOST_LIMB_BITS + 1;
-
-        let from_elements = program_with(&[Type::int(wide)], |values, result| OpCode::MkSeq {
-            result,
-            elems: vec![values[0]],
-            seq_type: SequenceTargetType::Array(1),
-            elem_type: Type::int(wide),
-        });
-        let repeated = program_with(&[Type::int(wide)], |values, result| OpCode::MkRepeated {
-            result,
-            element: values[0],
-            seq_type: SequenceTargetType::Array(2),
-            count: 2,
-            elem_type: Type::int(wide),
-        });
-        let from_blob = program_with(&[Type::blob(Type::int(wide), 2)], |values, result| {
-            OpCode::MkSeqOfBlob {
-                result,
-                element_type: Type::int(wide),
-                blob: values[0],
-            }
-        });
-
-        for (what, ssa) in [
-            ("MkSeq", from_elements),
-            ("MkRepeated", repeated),
-            ("MkSeqOfBlob", from_blob),
-        ] {
-            assert!(refuses(&ssa), "{what} passed a wide element through");
-        }
     }
 
     /// The source of a sign extension is read as two's complement and its target is deposited in
