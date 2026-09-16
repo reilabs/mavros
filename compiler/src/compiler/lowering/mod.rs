@@ -210,6 +210,15 @@ impl SSAConverter {
             Expression::ExtractTupleField(tuple_expr, _) => {
                 Self::collect_global_deps(tuple_expr, deps);
             }
+            // The scrutinee is a local bound by an enclosing `let`, which is visited on its own.
+            Expression::Match(m) => {
+                for case in &m.cases {
+                    Self::collect_global_deps(&case.branch, deps);
+                }
+                if let Some(default) = &m.default_case {
+                    Self::collect_global_deps(default, deps);
+                }
+            }
             _ => {}
         }
     }
