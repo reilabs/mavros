@@ -401,23 +401,27 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
+    /// The current value of a local. Mutable locals are bound to a pointer, so read through it.
+    fn local_value(
+        &mut self,
+        local_id: LocalId,
+        location: Option<NoirLocation>,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> ValueId {
+        let value = *self
+            .bindings
+            .get(&local_id)
+            .unwrap_or_else(|| panic!("Undefined local variable: {:?}", local_id));
+        if self.mutable_locals.contains(&local_id) {
+            self.emit_located(b, location, |e| e.load(value))
+        } else {
+            value
+        }
+    }
+
     fn convert_ident(&mut self, ident: &Ident, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
         match &ident.definition {
-            Definition::Local(local_id) => {
-                let value = *self
-                    .bindings
-                    .get(local_id)
-                    .unwrap_or_else(|| panic!("Undefined local variable: {:?}", local_id));
-
-                // For mutable variables, we need to load from the pointer
-                let value = if self.mutable_locals.contains(local_id) {
-                    self.emit_located(b, ident.location, |e| e.load(value))
-                } else {
-                    value
-                };
-
-                Some(value)
-            }
+            Definition::Local(local_id) => Some(self.local_value(*local_id, ident.location, b)),
             Definition::Function(func_id) => {
                 let ssa_func_id = self
                     .function_mapper
@@ -971,48 +975,31 @@ impl<'a> ExpressionConverter<'a> {
                 panic!("ICE: no recorded type for match scrutinee `{var_name}` ({var:?})")
             })
             .clone();
-        let value = *self
-            .bindings
-            .get(var)
-            .unwrap_or_else(|| panic!("Undefined match scrutinee `{var_name}` ({var:?})"));
-        let value = if self.mutable_locals.contains(var) {
-            self.emit_at_source_location(b, self.current_source_location.clone(), |e| e.load(value))
-        } else {
-            value
-        };
+        let value = self.local_value(*var, None, b);
 
-        if let Some(first) = m.cases.first() {
-            let tag = match &first.constructor {
-                // `Variant` covers both enums and structs. An enum is
-                // `(tag: Field, payload0, payload1, ...)`; a struct is a plain tuple.
-                c @ Constructor::Variant(..) => {
-                    if c.is_enum() {
-                        let location = self.current_source_location.clone();
-                        let tag =
-                            self.emit_at_source_location(b, location, |e| e.tuple_proj(value, 0));
-                        Some((tag, AstType::Field))
-                    } else {
-                        None
-                    }
-                }
-                Constructor::True
+        // `Variant` covers both enums and structs. An enum is `(tag: Field, payload0, ...)`;
+        // a struct is a plain tuple.
+        let tag = match m.cases.first().map(|first| &first.constructor) {
+            Some(c @ Constructor::Variant(..)) if c.is_enum() => {
+                let location = self.current_source_location.clone();
+                let tag = self.emit_at_source_location(b, location, |e| e.tuple_proj(value, 0));
+                Some((tag, AstType::Field))
+            }
+            Some(
+                Constructor::Variant(..)
+                | Constructor::True
                 | Constructor::False
                 | Constructor::Int(_)
                 | Constructor::Unit
-                | Constructor::Tuple(_) => None,
-                Constructor::Range(..) => {
-                    panic!("ICE: range patterns are not produced by the current frontend")
-                }
-            };
-            let scrutinee = Scrutinee { value, ty, tag };
-            self.convert_cases(&scrutinee, &m.cases, m.default_case.as_deref(), &m.typ, b)
-        } else {
-            let default = m
-                .default_case
-                .as_deref()
-                .expect("ICE: match with no cases and no default");
-            self.convert_expression(default, b)
-        }
+                | Constructor::Tuple(_),
+            )
+            | None => None,
+            Some(Constructor::Range(..)) => {
+                panic!("ICE: range patterns are not produced by the current frontend")
+            }
+        };
+        let scrutinee = Scrutinee { value, ty, tag };
+        self.convert_cases(&scrutinee, &m.cases, m.default_case.as_deref(), &m.typ, b)
     }
 
     fn convert_cases(
