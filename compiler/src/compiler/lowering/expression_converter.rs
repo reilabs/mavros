@@ -1099,16 +1099,8 @@ impl<'a> ExpressionConverter<'a> {
                 let c = Self::tag_constant(FieldElement::from(*idx as u128), tag_ty, b);
                 self.emit_at_source_location(b, location, |e| e.eq(tag, c))
             }
-            Constructor::Range(start, end) => {
-                let signed = ast_type_is_signed(tag_ty);
-                let start = Self::tag_constant(*start, tag_ty, b);
-                let end = Self::tag_constant(*end, tag_ty, b);
-                self.emit_at_source_location(b, location, |e| {
-                    let below_start = e.cmp(tag, start, CmpKind::lt(signed));
-                    let at_or_above_start = e.not(below_start);
-                    let below_end = e.cmp(tag, end, CmpKind::lt(signed));
-                    e.and(at_or_above_start, below_end)
-                })
+            Constructor::Range(..) => {
+                panic!("ICE: range patterns are not produced by the current frontend")
             }
         }
     }
