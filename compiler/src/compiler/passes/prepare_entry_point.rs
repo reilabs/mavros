@@ -49,6 +49,10 @@ use crate::{
         },
     },
 };
+use mavros_int_semantics::IntBits;
+
+/// Origin of the synthetic source location the wrapper's return-value assertion carries.
+pub const RETURN_CHECK_ORIGIN: &str = "public return value check";
 
 pub struct PrepareEntryPoint {
     main_is_unconstrained: bool,
@@ -151,7 +155,7 @@ impl PrepareEntryPoint {
                 let width = Self::flattened_field_count(typ);
                 let value = match &typ.expr {
                     TypeExpr::Field => {
-                        let index = e.int_const(32, offset as u128);
+                        let index = e.int_const(IntBits::from_u128(32, offset as u128));
                         e.array_get(witness_inputs, index)
                     }
                     TypeExpr::Int(_) | TypeExpr::Array(_, _) | TypeExpr::Tuple(_) => {
@@ -191,26 +195,23 @@ impl PrepareEntryPoint {
             } else {
                 e.call(original_main_id, arg_values, return_types.len())
             };
-            e.emit_with_location(
-                SourceLocation::synthetic("public return value check"),
-                |e| {
-                    let Some(guard) = return_guard else { return };
-                    let guard_field = e.cast_to_field(guard);
-                    for ((result, public_input), return_type) in results
-                        .iter()
-                        .zip(return_input_values.iter())
-                        .zip(return_types.iter())
-                    {
-                        Self::assert_eq_deep_guarded(
-                            e,
-                            guard_field,
-                            *result,
-                            *public_input,
-                            return_type,
-                        );
-                    }
-                },
-            );
+            e.emit_with_location(SourceLocation::synthetic(RETURN_CHECK_ORIGIN), |e| {
+                let Some(guard) = return_guard else { return };
+                let guard_field = e.cast_to_field(guard);
+                for ((result, public_input), return_type) in results
+                    .iter()
+                    .zip(return_input_values.iter())
+                    .zip(return_types.iter())
+                {
+                    Self::assert_eq_deep_guarded(
+                        e,
+                        guard_field,
+                        *result,
+                        *public_input,
+                        return_type,
+                    );
+                }
+            });
 
             if let Some(deinit_fn) = globals_deinit_fn {
                 e.call(deinit_fn, vec![], 0);
@@ -231,7 +232,7 @@ impl PrepareEntryPoint {
         match &typ.expr {
             TypeExpr::Array(inner, size) => {
                 for i in 0..*size {
-                    let index = b.int_const(32, i as u128);
+                    let index = b.int_const(IntBits::from_u128(32, i as u128));
                     let result_elem = b.array_get(result, index);
                     let input_elem = b.array_get(public_input, index);
                     Self::assert_eq_deep_guarded(b, guard_field, result_elem, input_elem, inner);
@@ -387,7 +388,16 @@ impl PrepareEntryPoint {
             + usize::from(!return_types.is_empty())
     }
 
-    pub(crate) fn flattened_field_count(typ: &Type) -> usize {
+    /// How many elements of the entry point's input blob a value of `typ` occupies.
+    ///
+    /// An integer takes one for the moment. A parameter is written to a single witness column and
+    /// range-checked to its own width there, and a range check bounds a _field element_. As a
+    /// result the widest integer one slot carries is `widest_injective_int_bits`, and below that
+    /// there is no width at which one slot is not enough.
+    ///
+    /// A wider parameter would need a slot per limb here, and a reconstruction that combines them —
+    /// which is a witnessed wide addition and shift. Supporting this is future work.
+    pub fn flattened_field_count(typ: &Type) -> usize {
         match &typ.expr {
             TypeExpr::Field | TypeExpr::Int(_) => 1,
             TypeExpr::Array(inner, size) => Self::flattened_field_count(inner) * size,
@@ -562,11 +572,11 @@ impl PrepareEntryPoint {
     ) -> ValueId {
         match &typ.expr {
             TypeExpr::Field => {
-                let zero = e.int_const(32, 0);
+                let zero = e.int_const(IntBits::zero(32));
                 e.array_get(input_array, zero)
             }
             TypeExpr::Int(size) => {
-                let zero = e.int_const(32, 0);
+                let zero = e.int_const(IntBits::zero(32));
                 let field_param = e.array_get(input_array, zero);
                 if *size == 1 {
                     let zero = e.field_const(e.field().constant(0));
@@ -642,7 +652,7 @@ impl PrepareEntryPoint {
                 e.cast_to_witness_of(zero)
             }
             TypeExpr::Int(size) => {
-                let zero = e.int_const(*size, 0);
+                let zero = e.int_const(IntBits::zero(*size));
                 e.cast_to_witness_of(zero)
             }
             TypeExpr::Array(inner, size) => Self::emit_default_witness_array(e, inner, *size),
@@ -681,7 +691,7 @@ impl PrepareEntryPoint {
         start: usize,
         len: usize,
     ) -> ValueId {
-        let start = e.int_const(32, start as u128);
+        let start = e.int_const(IntBits::from_u128(32, start as u128));
         Self::emit_reconstruct_child_input_array_from(e, input_array, start, len)
     }
 
@@ -694,7 +704,7 @@ impl PrepareEntryPoint {
         let start = if width == 1 {
             index
         } else {
-            let width_value = e.int_const(32, width as u128);
+            let width_value = e.int_const(IntBits::from_u128(32, width as u128));
             e.umul(index, width_value)
         };
         Self::emit_reconstruct_child_input_array_from(e, input_array, start, width)

@@ -1,5 +1,6 @@
 //! Linearizes witness-dependent control flow into a form safe to lower into a ZK circuit.
 
+use mavros_int_semantics::IntBits;
 use tracing::{Level, instrument};
 
 use crate::{
@@ -1020,6 +1021,111 @@ fn flush_conversion_instrs_located(
     for instr in cast_instrs {
         let (instr, location) = instr.take();
         maybe_guard(instrs, taint, instr, &location);
+    }
+}
+
+/// Emit selects for merge point values, handling type conversion between
+/// branch values and the expected merge param type. For arrays, does unrolled
+/// element-wise select + cast. For scalars, emits Select with optional cast.
+fn emit_merge_select(
+    builder: &mut HLInstrBuilder<'_>,
+    cond: ValueId,
+    lhs: ValueId,
+    rhs: ValueId,
+    result: Option<ValueId>,
+    result_type: &Type,
+    lhs_type: &Type,
+    rhs_type: &Type,
+) -> ValueId {
+    match &result_type.expr {
+        TypeExpr::Array(result_elem_type, size) => {
+            let lhs_elem_type = match &lhs_type.expr {
+                TypeExpr::Array(e, _) => e.as_ref(),
+                _ => panic!(
+                    "emit_merge_select: expected array for lhs, got {:?}",
+                    lhs_type
+                ),
+            };
+            let rhs_elem_type = match &rhs_type.expr {
+                TypeExpr::Array(e, _) => e.as_ref(),
+                _ => panic!(
+                    "emit_merge_select: expected array for rhs, got {:?}",
+                    rhs_type
+                ),
+            };
+            let mut elems = Vec::with_capacity(*size);
+            for i in 0..*size {
+                let idx = builder.int_const(IntBits::from_u128(32, i as u128));
+                let lhs_elem = builder.array_get(lhs, idx);
+                let rhs_elem = builder.array_get(rhs, idx);
+                let selected = emit_merge_select(
+                    builder,
+                    cond,
+                    lhs_elem,
+                    rhs_elem,
+                    None,
+                    result_elem_type,
+                    lhs_elem_type,
+                    rhs_elem_type,
+                );
+                elems.push(selected);
+            }
+            let result = result.unwrap_or_else(|| builder.fresh_value());
+            builder.push(OpCode::MkSeq {
+                result,
+                elems,
+                seq_type: SequenceTargetType::Array(*size),
+                elem_type: *result_elem_type.clone(),
+            });
+            result
+        }
+        TypeExpr::Tuple(_) => ice_non_elided_tuple(),
+        TypeExpr::WitnessOf(_) => {
+            // Cast operands to WitnessOf if they aren't already
+            let lhs = if !lhs_type.is_witness_of() {
+                builder.cast_to_witness_of(lhs)
+            } else {
+                lhs
+            };
+            let rhs = if !rhs_type.is_witness_of() {
+                builder.cast_to_witness_of(rhs)
+            } else {
+                rhs
+            };
+            let result = result.unwrap_or_else(|| builder.fresh_value());
+            builder.push(OpCode::Select {
+                result,
+                cond,
+                if_t: lhs,
+                if_f: rhs,
+            });
+            result
+        }
+        TypeExpr::Field | TypeExpr::Int(_) => {
+            let result = result.unwrap_or_else(|| builder.fresh_value());
+            builder.push(OpCode::Select {
+                result,
+                cond,
+                if_t: lhs,
+                if_f: rhs,
+            });
+            result
+        }
+        TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
+        TypeExpr::Slice(_) => {
+            let lhs = emit_value_conversion(lhs, lhs_type, result_type, builder);
+            let rhs = emit_value_conversion(rhs, rhs_type, result_type, builder);
+            let result = result.unwrap_or_else(|| builder.fresh_value());
+            builder.push(OpCode::Select {
+                result,
+                cond,
+                if_t: lhs,
+                if_f: rhs,
+            });
+            result
+        }
+        TypeExpr::Function(_) => panic!("Witness select on Function type not supported"),
+        TypeExpr::Blob(..) => panic!("Witness select on Blob type not supported"),
     }
 }
 

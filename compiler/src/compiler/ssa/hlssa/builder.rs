@@ -1,4 +1,5 @@
 use mavros_artifacts::FieldConfig;
+use mavros_int_semantics::IntBits;
 
 use crate::compiler::ssa::{
     ValueId,
@@ -8,6 +9,22 @@ use crate::compiler::ssa::{
         LookupTarget, OpCode, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
     },
 };
+
+/// The `bits`-wide pattern carrying `2^exponent`.
+///
+/// [`IntBits`] reaches a power of two by shifting rather than by a constructor of its own, so
+/// this gives the composition and its bound — an exponent at or above the width names no pattern,
+/// and shifting past it would answer zero — one home rather than one per caller. A caller that
+/// cannot reach [`HLEmitter::two_pow_const`], because it mints constants without an emitter, takes
+/// this instead.
+#[track_caller]
+pub fn two_pow_pattern(bits: usize, exponent: usize) -> IntBits {
+    assert!(
+        exponent < bits,
+        "2^{exponent} does not fit an int{bits} constant"
+    );
+    IntBits::from_u128(bits, 1).shifted_left(exponent)
+}
 
 // ---------------------------------------------------------------------------
 // HLEmitter — unified trait for emitting HL SSA instructions
@@ -225,12 +242,17 @@ pub trait HLEmitter {
         self.emit_constant(Constant::Field(value.into()))
     }
 
-    /// A constant integer of `bits` raw two's-complement bits.
+    /// A constant integer carrying `pattern`, at the width the pattern itself declares.
     ///
     /// There is no signed/unsigned pair here because there is no sign to record: what the bits mean
     /// is decided by the opcode that consumes them.
-    fn int_const(&mut self, bits: usize, value: u128) -> ValueId {
-        self.emit_constant(Constant::int(bits, value))
+    fn int_const(&mut self, pattern: IntBits) -> ValueId {
+        self.emit_constant(Constant::Int(pattern))
+    }
+
+    /// A constant integer of `bits` raw bits carrying `2^exponent`. See [`two_pow_pattern`].
+    fn two_pow_const(&mut self, bits: usize, exponent: usize) -> ValueId {
+        self.int_const(two_pow_pattern(bits, exponent))
     }
 
     // -- Witness --
@@ -740,7 +762,7 @@ impl HLBlockEmitter<'_> {
     pub(crate) fn default_value(&mut self, typ: &Type) -> ValueId {
         match &typ.expr {
             TypeExpr::Field => self.field_const(0u64),
-            TypeExpr::Int(size) => self.int_const(*size, 0),
+            TypeExpr::Int(size) => self.int_const(IntBits::zero(*size)),
             TypeExpr::WitnessOf(inner) => {
                 let inner_default = self.default_value(inner);
                 self.cast_to_witness_of(inner_default)
@@ -753,7 +775,7 @@ impl HLBlockEmitter<'_> {
                     .collect();
                 self.mk_tuple(elems, element_types.clone())
             }
-            TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
+            TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {
                 panic!("cannot build a default value for type {}", typ)
             }
         }
@@ -836,9 +858,9 @@ impl HLBlockEmitter<'_> {
         body: impl FnOnce(&mut Self, ValueId, &[ValueId]) -> Vec<ValueId>,
     ) -> Vec<ValueId> {
         // Emit constants into current block (before the loop)
-        let const_0 = self.int_const(32, 0);
-        let const_1 = self.int_const(32, 1);
-        let const_len = self.int_const(32, len as u128);
+        let const_0 = self.int_const(IntBits::zero(32));
+        let const_1 = self.int_const(IntBits::one(32));
+        let const_len = self.int_const(IntBits::from_u128(32, len as u128));
 
         // Loop params: [index, ...accumulators]
         let mut params = vec![(const_0, Type::int(32))];
@@ -872,7 +894,7 @@ impl HLBlockEmitter<'_> {
     ) -> ValueId {
         let (acc_init, acc_type) = acc;
         let start = self.slice_len(acc_init);
-        let const_1 = self.int_const(32, 1);
+        let const_1 = self.int_const(IntBits::one(32));
         let results = self.build_loop(
             vec![(start, Type::int(32)), (acc_init, acc_type)],
             |b, params| b.ult(params[0], end),
@@ -917,6 +939,57 @@ mod tests {
         (w, v, instrs)
     }
 
+    /// Mint a constant through `build`, and return the pattern it interned.
+    fn minted(build: impl FnOnce(&mut HLInstrBuilder<'_>) -> ValueId) -> IntBits {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let fid = ssa.get_unique_entrypoint_id();
+        let mut function = ssa.take_function(fid);
+        let mut instrs = Vec::new();
+        let id = {
+            let mut b = HLInstrBuilder::new(
+                &mut function,
+                &mut ssa,
+                &mut instrs,
+                SourceLocation::synthetic("test"),
+            );
+            build(&mut b)
+        };
+        match &*ssa.get_const(id).expect("a constant was interned") {
+            Constant::Int(pattern) => pattern.clone(),
+            other => panic!("expected an integer constant, got {other:?}"),
+        }
+    }
+
+    /// A power of two past the host word is a constant like any other.
+    ///
+    /// `int_const`'s payload is a `u128`, so `2^128` cannot be written through it at all.
+    #[test]
+    fn a_two_power_past_the_host_word_is_representable() {
+        let pattern = minted(|b| b.two_pow_const(256, 200));
+
+        assert_eq!(pattern.bits(), 256);
+        assert_eq!(pattern.bit(200), Some(true));
+        assert_eq!(pattern.bit(199), Some(false));
+        assert_eq!(pattern.bit(201), Some(false));
+    }
+
+    /// The bound is the declared width, which is the only thing a pattern cannot carry.
+    #[test]
+    #[should_panic(expected = "2^64 does not fit an int64 constant")]
+    fn a_two_power_at_its_own_width_is_refused() {
+        let _ = minted(|b| b.two_pow_const(64, 64));
+    }
+
+    /// The emitter carries whatever pattern it is handed, so a constant the host has no type for
+    /// needs no route of its own.
+    #[test]
+    fn a_constant_past_the_host_word_is_emitted_as_it_is_built() {
+        let pattern = minted(|b| b.int_const(IntBits::all_ones(200)));
+
+        assert_eq!(pattern.bits(), 200);
+        assert!(pattern.is_all_ones());
+    }
+
     /// The truncation-fix invariant: a narrow comparison operand is brought up with a single
     /// widening cast (never the wide operand brought down, which truncates and aliases).
     #[test]
@@ -951,8 +1024,8 @@ mod tests {
         let _ = widen(32, 8);
     }
 
-    /// Run `build_array_loop_with_acc` over `len` slots, storing the index at each one and
-    /// counting the slots visited. Returns `(array, accumulator, saw_indices)`.
+    /// Run `build_array_loop_with_acc` over `len` slots, storing the index at each one and counting
+    /// the slots visited. Returns `(array, accumulator, saw_indices)`.
     fn array_loop_with_acc(len: usize) -> (ValueId, ValueId, Vec<ValueId>) {
         let mut ssa = HLSSA::with_main("main".to_string());
         let fid = ssa.get_unique_entrypoint_id();
@@ -961,12 +1034,12 @@ mod tests {
         let mut builder = HLFunctionBuilder::new(&mut function, &mut ssa);
         let mut b = builder.test_block(entry);
 
-        let zero = b.int_const(32, 0);
+        let zero = b.int_const(IntBits::zero(32));
         let mut seen = Vec::new();
         let (array, acc) =
             b.build_array_loop_with_acc(len, Type::int(32), (zero, Type::int(32)), |b, i, acc| {
                 seen.push(i);
-                let one = b.int_const(32, 1);
+                let one = b.int_const(IntBits::one(32));
                 (i, b.uadd(acc, one))
             });
         (array, acc, seen)
@@ -993,7 +1066,7 @@ mod tests {
         let mut builder = HLFunctionBuilder::new(&mut function, &mut ssa);
         let mut b = builder.test_block(entry);
 
-        let init = b.int_const(32, 7);
+        let init = b.int_const(IntBits::from_u128(32, 7));
         let mut ran = false;
         let (_, acc) =
             b.build_array_loop_with_acc(0, Type::int(32), (init, Type::int(32)), |_, i, acc| {

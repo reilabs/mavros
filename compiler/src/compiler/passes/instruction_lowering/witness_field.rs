@@ -12,6 +12,7 @@ use crate::compiler::{
         },
     },
 };
+use mavros_int_semantics::IntBits;
 
 pub struct LowerWitnessFieldOps {}
 
@@ -308,7 +309,7 @@ impl LowerWitnessFieldOps {
             Endianness::Big => Box::new(0..count),
         };
         for i in visit_order {
-            let idx = b.int_const(32, i as u128);
+            let idx = b.int_const(IntBits::from_u128(32, i as u128));
             let bit = b.array_get(hint, idx);
             let bit_field = b.cast_to_field(bit);
             let bit_witness = b.write_witness(bit_field);
@@ -359,7 +360,7 @@ impl LowerWitnessFieldOps {
     ) -> bool {
         let radix = match radix {
             Radix::Dyn(rv) => {
-                let const_256 = b.int_const(32, 256);
+                let const_256 = b.int_const(IntBits::from_u128(32, 256));
                 if let Some(condition) = guard {
                     b.emit(OpCode::Guard {
                         condition,
@@ -419,7 +420,7 @@ impl LowerWitnessFieldOps {
             Endianness::Big => Box::new(0..count),
         };
         for i in visit_order {
-            let idx = b.int_const(32, i as u128);
+            let idx = b.int_const(IntBits::from_u128(32, i as u128));
             let byte = b.array_get(hint, idx);
             let byte_field = b.cast_to_field(byte);
             let byte_wit = b.write_witness(byte_field);

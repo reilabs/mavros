@@ -1,47 +1,33 @@
 use std::fmt::{Debug, Display, Formatter};
 
 use mavros_artifacts::FieldConfig;
+use mavros_int_semantics::MAX_LOWERED_SIGNED_BITS;
 
 use crate::compiler::ssa::SSAType;
 
 // FIELD-ASSUMPTION: L6-int-representation
 //
-// These bound the integer _type system_ (the widest int a Noir program may use); they are
-// field-independent and stay fixed regardless of field size. Integers wider than can fit into the
-// field natively must still be supported. A value whose type range is >= p cannot be held
-// natively in one field cell, so must be carried as multi-cell (limb-based) values end-to-end.
-pub const MAX_SUPPORTED_UNSIGNED_BITS: usize = 128;
+// This bounds the integer _type system_ (the widest int a program may name); it is independent of
+// the underlying field. Integers wider than fit in the field natively are carried by limb-based
+// encodings rather than refused by the type system.
+pub const MAX_SUPPORTED_INT_BITS: usize = 1 << 14;
 
-/// The widest integer a _signed_ operation may act on.
-///
-/// This is a bound on operations, not on types: [`TypeExpr::Int`] is just "an `n`-bit integer" and
-/// tops out at [`MAX_SUPPORTED_UNSIGNED_BITS`] like any other. What is unsupported is asking a
-/// signed opcode to read a pattern wider than this, because the signed lowerings and the VM's
-/// `sdiv_int`/`slt_int` are 64-bit. Enforce it with [`assert_signed_op_width`] at the point the
-/// signed operation is chosen, never by inspecting a type.
-pub const MAX_SUPPORTED_SIGNED_BITS: usize = 64;
-
-// The reference model bounds its own operations by the same two numbers, and a conformance test
-// that swept a width the type system forbids (or missed one it allows) would be quietly checking
-// the wrong thing. Neither constant is derived from the other -- they mean different things, one a
-// type-system rule and one the model's domain -- so this asserts they agree rather than aliasing
-// them together.
+// The reference model bounds its own operations by the same number, though neither constant is
+// derived from the other as they mean different things, so we just assert that they agree.
 const _: () = assert!(
-    MAX_SUPPORTED_UNSIGNED_BITS == mavros_int_semantics::MAX_BITS
-        && MAX_SUPPORTED_SIGNED_BITS == mavros_int_semantics::MAX_SIGNED_BITS,
-    "the integer type caps and `mavros-int-semantics`'s width bounds have drifted apart"
+    MAX_SUPPORTED_INT_BITS == mavros_int_semantics::MAX_BITS,
+    "the integer type cap and `mavros-int-semantics`'s width bound have drifted apart"
 );
 
-/// Reject a signed _operation_ on a pattern wider than [`MAX_SUPPORTED_SIGNED_BITS`].
+/// Reject a signed _operation_ on a pattern no lowering can read as two's complement.
 ///
 /// `what` names the operation for the panic, e.g. `"division"`. Call this from the arm that has
 /// already decided the operation is signed — the width alone is never the problem, and an
 /// `int128` that no signed opcode touches is perfectly legal.
 pub fn assert_signed_op_width(bits: usize, what: &str) {
     assert!(
-        bits <= MAX_SUPPORTED_SIGNED_BITS,
-        "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported: \
-         {what} on a {bits}-bit value"
+        bits <= MAX_LOWERED_SIGNED_BITS,
+        "signed integers wider than i{MAX_LOWERED_SIGNED_BITS} are unsupported: {what} on a {bits}-bit value"
     );
 }
 
@@ -63,7 +49,9 @@ pub enum TypeExpr {
     Slice(Box<Type>),
     Ref(Box<Type>),
     Tuple(Vec<Type>),
-    Function,
+    /// A callable value, described by **the types a call through it produces**, or an empty vector
+    /// for a `Unit` return.
+    Function(Vec<Type>),
     Blob(Box<Type>, usize),
 }
 
@@ -90,7 +78,19 @@ impl Display for Type {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            TypeExpr::Function => write!(f, "Function"),
+            TypeExpr::Function(returns) => match returns.split_first() {
+                None => write!(f, "Function -> ()"),
+                Some((only, [])) => write!(f, "Function -> {only}"),
+                Some(_) => write!(
+                    f,
+                    "Function -> ({})",
+                    returns
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            },
             TypeExpr::Blob(inner, len) => write!(f, "Blob<{}; {}>", inner, len),
         }
     }
@@ -120,9 +120,11 @@ impl Type {
         Type::int(32)
     }
 
-    pub fn function() -> Self {
+    /// A callable value whose calls produce `returns`. See [`TypeExpr::Function`] for why there
+    /// is no parameter list to give.
+    pub fn function_returning(returns: Vec<Type>) -> Self {
         Type {
-            expr: TypeExpr::Function,
+            expr: TypeExpr::Function(returns),
         }
     }
 
@@ -230,7 +232,15 @@ impl Type {
     }
 
     pub fn is_function(&self) -> bool {
-        matches!(self.expr, TypeExpr::Function)
+        matches!(self.expr, TypeExpr::Function(_))
+    }
+
+    /// The types a call through this value produces, if it is callable.
+    pub fn call_returns(&self) -> Option<&[Type]> {
+        match &self.expr {
+            TypeExpr::Function(returns) => Some(returns),
+            _ => None,
+        }
     }
 
     pub fn is_blob(&self) -> bool {
@@ -404,7 +414,9 @@ impl Type {
                 xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| x.is_subtype_of(y))
             }
             (TypeExpr::Ref(x), TypeExpr::Ref(y)) => x == y, // invariant
-            (TypeExpr::Function, TypeExpr::Function) => true,
+            (TypeExpr::Function(xs), TypeExpr::Function(ys)) => {
+                xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| x.is_subtype_of(y))
+            }
             (TypeExpr::Blob(x, n), TypeExpr::Blob(y, m)) => n == m && x == y,
             _ => false,
         }
@@ -460,7 +472,21 @@ impl Type {
                 )
             }
             (TypeExpr::Ref(x), TypeExpr::Ref(y)) => Type::join(x, y).ref_of(),
-            (TypeExpr::Function, TypeExpr::Function) => Type::function(),
+            (TypeExpr::Function(xs), TypeExpr::Function(ys)) => {
+                assert_eq!(
+                    xs.len(),
+                    ys.len(),
+                    "Cannot join functions returning {} and {} values",
+                    xs.len(),
+                    ys.len()
+                );
+                Type::function_returning(
+                    xs.iter()
+                        .zip(ys.iter())
+                        .map(|(x, y)| Type::join(x, y))
+                        .collect(),
+                )
+            }
             (TypeExpr::Blob(x, n), TypeExpr::Blob(y, m)) => {
                 assert_eq!(n, m, "Cannot join Blob({}) and Blob({})", n, m);
                 assert_eq!(x, y, "Cannot join blobs with different element types");
@@ -535,7 +561,7 @@ impl Type {
             TypeExpr::WitnessOf(inner) => inner.contains_ptrs(),
             TypeExpr::Field => false,
             TypeExpr::Int(_) => false,
-            TypeExpr::Function => false,
+            TypeExpr::Function(_) => false,
             TypeExpr::Blob(inner, _) => inner.contains_ptrs(),
             TypeExpr::Tuple(elements) => elements.iter().any(|e| e.contains_ptrs()),
         }
@@ -548,7 +574,7 @@ impl Type {
             TypeExpr::Tuple(inner_types) => {
                 inner_types.iter().map(|t| t.calculate_type_size()).sum()
             }
-            TypeExpr::Function => 1,
+            TypeExpr::Function(_) => 1,
             // Blobs are by-value sequences, not pointers to heap data.
             TypeExpr::Blob(inner, n) => inner.calculate_type_size() * n,
             TypeExpr::Int(_) => 1,
@@ -581,6 +607,26 @@ mod tests {
         assert_signed_op_width(128, "division");
     }
 
+    /// The tripwire on [`assert_signed_op_width`] pointing at a support frontier.
+    ///
+    /// Strict, not `<=`: the two constants answer different questions, and the day someone
+    /// re-points the funnel at the type cap to "simplify" it, this is what says no. See
+    /// [`assert_signed_op_width`]'s doc for the argument. The unit that widens the signed
+    /// lowerings retires the funnel and this test together.
+    #[test]
+    fn the_signed_frontier_sits_strictly_below_the_type_cap() {
+        assert!(MAX_LOWERED_SIGNED_BITS < MAX_SUPPORTED_INT_BITS);
+    }
+
+    /// A width past the signed frontier is an ordinary type carrying its own bit size.
+    #[test]
+    fn a_width_far_above_the_signed_frontier_is_still_an_ordinary_type() {
+        assert_eq!(
+            Type::int(MAX_SUPPORTED_INT_BITS).get_bit_size(FieldConfig::bn254()),
+            MAX_SUPPORTED_INT_BITS
+        );
+    }
+
     // --- get_bit_size ---
 
     #[test]
@@ -608,7 +654,8 @@ mod tests {
     fn subtype_reflexive() {
         assert!(Type::field().is_subtype_of(&Type::field()));
         assert!(Type::int(32).is_subtype_of(&Type::int(32)));
-        assert!(Type::function().is_subtype_of(&Type::function()));
+        let callable = Type::function_returning(vec![Type::field()]);
+        assert!(callable.is_subtype_of(&callable));
         let wf = Type::witness_of(Type::field());
         assert!(wf.is_subtype_of(&wf));
     }

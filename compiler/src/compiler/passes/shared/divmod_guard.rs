@@ -25,13 +25,14 @@
 use num_bigint::BigInt;
 use num_traits::{One, Zero};
 
+use mavros_int_semantics::IntBits;
+
 use crate::compiler::{
     analysis::value_range_analysis::ValueRange,
     ssa::{
         ValueId,
         hlssa::{CmpKind, OpCode, Type, TypeExpr, builder::HLEmitter},
     },
-    util::bit_mask,
 };
 
 /// Whether a `Div`/`Mod` on this operand type can fail, and so needs a check.
@@ -61,8 +62,8 @@ pub fn divmod_can_fail(ty: &Type) -> bool {
 /// `lhs_type` must already be stripped of any `WitnessOf` wrapper and satisfy [`divmod_can_fail`];
 /// anything else answers `false`, since a check that is not understood must not be dropped.
 ///
-/// `signed` comes from the caller's opcode, **not** from `lhs_type` — which no longer carries a
-/// sign to read. It has to: [`emit_divmod_failure_cond`] builds the disjunction from the same flag,
+/// `signed` comes from the caller's opcode, **not** from `lhs_type`, which carries no sign to
+/// read. It has to: [`emit_divmod_failure_cond`] builds the disjunction from the same flag,
 /// and the division the caller re-plants alongside it takes its lowering from the same operation.
 /// If this predicate answered differently from that lowering, a check could be discharged here that
 /// the lowering still needs — so the three are given one source, and the opcode is it. The width
@@ -129,7 +130,7 @@ pub fn emit_divmod_failure_cond(
     signed: bool,
 ) -> ValueId {
     let zero_val = match &lhs_type.expr {
-        TypeExpr::Int(b) => emitter.int_const(*b, 0),
+        TypeExpr::Int(b) => emitter.int_const(IntBits::zero(*b)),
         TypeExpr::Field => emitter.field_const(emitter.field().constant(0u64)),
         other => unreachable!("divmod failure condition on a non-numeric operand type: {other:?}"),
     };
@@ -137,8 +138,9 @@ pub fn emit_divmod_failure_cond(
     match &lhs_type.expr {
         TypeExpr::Int(bits) if signed => {
             let bits = *bits;
-            let min_val = emitter.int_const(bits, 1u128 << (bits - 1));
-            let minus_one = emitter.int_const(bits, bit_mask(bits));
+
+            let min_val = emitter.int_const(IntBits::from_signed(bits, &IntBits::signed_min(bits)));
+            let minus_one = emitter.int_const(IntBits::all_ones(bits));
             let lhs_is_min = emitter.eq(lhs, min_val);
             let rhs_is_minus_one = emitter.eq(rhs, minus_one);
             let signed_overflow = emitter.and(lhs_is_min, rhs_is_minus_one);
@@ -160,7 +162,7 @@ pub fn emit_divmod_is_defined_assert(
     signed: bool,
 ) {
     let failure = emit_divmod_failure_cond(emitter, lhs, rhs, lhs_type, signed);
-    let zero_u1 = emitter.int_const(1, 0);
+    let zero_u1 = emitter.int_const(IntBits::zero(1));
     emitter.emit(OpCode::AssertCmp {
         kind: CmpKind::Eq,
         lhs: failure,
@@ -289,18 +291,16 @@ mod tests {
         assert!(!divmod_provably_defined(
             &ValueRange::full(Width::NonScalar),
             &u8_range(1, 255),
-            &Type::function(),
+            &Type::function_returning(vec![Type::field()]),
             false
         ));
-        assert!(!divmod_can_fail(&Type::function()));
+        assert!(!divmod_can_fail(&Type::function_returning(vec![
+            Type::field()
+        ])));
     }
 
     #[test]
     fn the_sign_parameter_decides_the_overflow_half_not_the_type() {
-        // The whole point of taking `signed` rather than reading it off `lhs_type`: the type has no
-        // sign in it any more, so flipping the flag against a fixed type must flip the answer. If
-        // it did not, this predicate would be answering from something other than the opcode the
-        // caller is about to emit.
         let anything = ValueRange::full(Width::Bits(8));
         let nonzero_but_reaches_minus_one = i8_range(-128, -1);
 

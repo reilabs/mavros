@@ -806,6 +806,7 @@ mod tests {
         },
         ssa::hlssa::builder::{HLEmitter, HLSSABuilder},
     };
+    use mavros_int_semantics::IntBits;
 
     fn fr(n: u64) -> Field {
         FieldConfig::bn254().constant(n)
@@ -889,8 +890,8 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = e.add_parameter(Type::field().array_of(2));
-                let i0 = e.int_const(32, 0);
-                let i1 = e.int_const(32, 1);
+                let i0 = e.int_const(IntBits::zero(32));
+                let i1 = e.int_const(IntBits::one(32));
                 let x = e.array_get(a, i0);
                 let y = e.array_get(a, i1);
                 let s = e.uadd(x, y);
@@ -959,8 +960,8 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = e.call(make, vec![], 1)[0];
-                let i0 = e.int_const(32, 0);
-                let i1 = e.int_const(32, 1);
+                let i0 = e.int_const(IntBits::zero(32));
+                let i1 = e.int_const(IntBits::one(32));
                 let x = e.array_get(a, i0);
                 let y = e.array_get(a, i1);
                 let s = e.uadd(x, y);
@@ -1004,7 +1005,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = e.add_parameter(Type::field().array_of(2));
-                let i0 = e.int_const(32, 0);
+                let i0 = e.int_const(IntBits::zero(32));
                 let x = e.array_get(a, i0);
                 e.terminate_return(vec![x]);
             });
@@ -1065,7 +1066,7 @@ mod tests {
                 let c3 = e.field_const(fr(3));
                 let c4 = e.field_const(fr(4));
                 let arr = e.mk_seq(vec![c3, c4], SequenceTargetType::Array(2), Type::field());
-                let i0 = e.int_const(32, 0);
+                let i0 = e.int_const(IntBits::zero(32));
                 let r = e.call(sink, vec![arr, i0], 1)[0];
                 e.terminate_return(vec![r]);
             });

@@ -135,7 +135,7 @@ fn collect_paths(ty: &Type, prefix: &mut Vec<Descent>, out: &mut Vec<Vec<Descent
     let ty = ty.peel_witness();
     out.push(prefix.clone());
     match &ty.expr {
-        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => {}
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {}
         TypeExpr::Slice(inner) => {
             prefix.push(Descent::Len);
             out.push(prefix.clone());

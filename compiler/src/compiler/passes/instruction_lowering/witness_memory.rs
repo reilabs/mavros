@@ -66,7 +66,7 @@ fn emit_select(
         TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::WitnessOf(_) => b.select(cond, lhs, rhs),
         TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
         TypeExpr::Slice(_) => b.select(cond, lhs, rhs),
-        TypeExpr::Function => panic!("Witness select on Function type not supported"),
+        TypeExpr::Function(_) => panic!("Witness select on Function type not supported"),
         TypeExpr::Blob(..) => panic!("Witness select on Blob type not supported"),
     }
 }
