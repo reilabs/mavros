@@ -1044,7 +1044,8 @@ impl<'a> ExpressionConverter<'a> {
                 self.convert_arm(s, last, b)
             }
             [case, rest @ ..] => {
-                let cond = self.case_condition(s, &case.constructor, b);
+                let location = self.expression_source_location(&case.branch);
+                let cond = self.case_condition(s, &case.constructor, location, b);
                 self.branch(
                     cond,
                     typ,
@@ -1062,7 +1063,8 @@ impl<'a> ExpressionConverter<'a> {
         case: &MatchCase,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        self.bind_case_arguments(s, case, b);
+        let location = self.expression_source_location(&case.branch);
+        self.bind_case_arguments(s, case, location, b);
         self.convert_expression(&case.branch, b)
     }
 
@@ -1070,6 +1072,7 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         s: &Scrutinee,
         constructor: &Constructor,
+        location: SourceLocation,
         b: &mut HLFunctionBuilder<'_>,
     ) -> ValueId {
         use acvm::FieldElement;
@@ -1078,7 +1081,6 @@ impl<'a> ExpressionConverter<'a> {
             Some((tag, tag_ty)) => (*tag, tag_ty),
             None => (s.value, &s.ty),
         };
-        let location = self.current_source_location.clone();
         match constructor {
             c if c.is_tuple_or_struct() => {
                 panic!("ICE: {constructor:?} is a single-constructor pattern and is never tested")
@@ -1131,6 +1133,7 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         s: &Scrutinee,
         case: &MatchCase,
+        location: SourceLocation,
         b: &mut HLFunctionBuilder<'_>,
     ) {
         if case.arguments.is_empty() {
@@ -1144,7 +1147,6 @@ impl<'a> ExpressionConverter<'a> {
                 s.ty
             )
         };
-        let location = self.current_source_location.clone();
 
         // A struct pattern is `Variant(struct_type, 0)`, so the constructor's own type decides.
         let (payload, payload_fields) = match &case.constructor {
