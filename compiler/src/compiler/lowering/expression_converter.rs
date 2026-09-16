@@ -1089,10 +1089,7 @@ impl<'a> ExpressionConverter<'a> {
                 panic!("ICE: {constructor:?} is a single-constructor pattern and is never tested")
             }
             Constructor::True => tag,
-            Constructor::False => {
-                let zero = Self::tag_constant(FieldElement::zero(), tag_ty, b);
-                self.emit_at_source_location(b, location, |e| e.eq(tag, zero))
-            }
+            Constructor::False => self.emit_at_source_location(b, location, |e| e.not(tag)),
             Constructor::Int(value) => {
                 let c = Self::tag_constant(*value, tag_ty, b);
                 self.emit_at_source_location(b, location, |e| e.eq(tag, c))
