@@ -30,7 +30,7 @@ fn classify_field(v: Field) -> Field {
     }
 }
 
-// A lone binding pattern is a match with no cases: only the default runs.
+// A lone binding pattern compiles straight to its body; no switch is emitted.
 fn identity(v: u32) -> u32 {
     match v {
         other => other + 1,
