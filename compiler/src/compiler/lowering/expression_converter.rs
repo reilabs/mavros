@@ -1058,44 +1058,31 @@ impl<'a> ExpressionConverter<'a> {
         location: SourceLocation,
         b: &mut HLFunctionBuilder<'_>,
     ) -> ValueId {
-        use acvm::FieldElement;
-
-        let tag = s.tag.unwrap_or(s.value);
+        let value = s.value;
         match constructor {
-            c if c.is_tuple_or_struct() => {
-                panic!("ICE: {constructor:?} is a single-constructor pattern and is never tested")
-            }
             Constructor::Unit | Constructor::Tuple(_) => {
                 panic!("ICE: {constructor:?} is a single-constructor pattern and is never tested")
             }
-            Constructor::True => tag,
-            Constructor::False => self.emit_at_source_location(b, location, |e| e.not(tag)),
-            Constructor::Int(value) => {
-                let c = Self::tag_constant(*value, &s.ty, b);
-                self.emit_at_source_location(b, location, |e| e.eq(tag, c))
+            Constructor::True => value,
+            Constructor::False => self.emit_at_source_location(b, location, |e| e.not(value)),
+            Constructor::Int(int) => {
+                let c = b.emit_const(Self::integer_constant(int, &s.ty));
+                self.emit_at_source_location(b, location, |e| e.eq(value, c))
             }
-            // Guaranteed to be enum since tuple cases are matched above
+            // Only an enum scrutinee carries a tag; a struct pattern is single-constructor too.
             Constructor::Variant(_, idx) => {
-                let c = Self::tag_constant(FieldElement::from(*idx as u128), &AstType::Field, b);
+                let tag = s.tag.unwrap_or_else(|| {
+                    panic!(
+                        "ICE: {constructor:?} is a single-constructor pattern and is never tested"
+                    )
+                });
+                let c = b.emit_const(Constant::Field((*idx as u128).into()));
                 self.emit_at_source_location(b, location, |e| e.eq(tag, c))
             }
             Constructor::Range(..) => {
                 panic!("ICE: range patterns are not produced by the current frontend")
             }
         }
-    }
-
-    fn tag_constant(
-        value: acvm::FieldElement,
-        tag_ty: &AstType,
-        b: &mut HLFunctionBuilder<'_>,
-    ) -> ValueId {
-        use noirc_frontend::monomorphization::ast::Literal;
-
-        let literal = Literal::Integer(value, tag_ty.clone(), NoirLocation::dummy());
-        let constant = Self::scalar_literal_to_constant(&literal)
-            .unwrap_or_else(|| panic!("ICE: match tag of type {tag_ty:?} has no constant form"));
-        b.emit_const(constant)
     }
 
     fn bind_case_arguments(
@@ -1620,41 +1607,41 @@ impl<'a> ExpressionConverter<'a> {
     fn scalar_literal_to_constant(
         lit: &noirc_frontend::monomorphization::ast::Literal,
     ) -> Option<Constant> {
-        use noirc_frontend::monomorphization::ast::{Literal, Type as AstType};
+        use noirc_frontend::monomorphization::ast::Literal;
 
         match lit {
             Literal::Bool(bv) => {
                 let value = if *bv { 1 } else { 0 };
                 Some(Constant::int(1, value))
             }
-            Literal::Integer(field_element, typ, _location) => match typ {
-                AstType::Field => {
-                    // Boundary: the Noir frontend hands us a raw `ark_bn254::Fr`.
-                    let field_val = field_element.into_repr();
-                    Some(Constant::Field(field_val.into()))
-                }
-                AstType::Integer(signedness, bit_size) => {
-                    use noirc_frontend::shared::Signedness;
-                    let bits: usize = bit_size.bit_size() as usize;
-                    if *signedness == Signedness::Signed {
-                        assert!(
-                            bits <= MAX_SUPPORTED_SIGNED_BITS,
-                            "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
-                        );
-                        let val = field_element.to_i128();
-                        Some(Constant::int(bits, val as u128))
-                    } else {
-                        let value = field_element.to_u128();
-                        Some(Constant::int(bits, value))
-                    }
-                }
-                AstType::Bool => {
-                    let value = field_element.to_u128();
-                    Some(Constant::int(1, value))
-                }
-                _ => panic!("Unexpected type for integer literal: {:?}", typ),
-            },
+            Literal::Integer(field_element, typ, _location) => {
+                Some(Self::integer_constant(field_element, typ))
+            }
             _ => None,
+        }
+    }
+
+    fn integer_constant(value: &acvm::FieldElement, typ: &AstType) -> Constant {
+        match typ {
+            AstType::Field => {
+                // Boundary: the Noir frontend hands us a raw `ark_bn254::Fr`.
+                Constant::Field(value.into_repr().into())
+            }
+            AstType::Integer(signedness, bit_size) => {
+                use noirc_frontend::shared::Signedness;
+                let bits: usize = bit_size.bit_size() as usize;
+                if *signedness == Signedness::Signed {
+                    assert!(
+                        bits <= MAX_SUPPORTED_SIGNED_BITS,
+                        "signed integers wider than i{MAX_SUPPORTED_SIGNED_BITS} are unsupported"
+                    );
+                    Constant::int(bits, value.to_i128() as u128)
+                } else {
+                    Constant::int(bits, value.to_u128())
+                }
+            }
+            AstType::Bool => Constant::int(1, value.to_u128()),
+            _ => panic!("Unexpected type for integer literal: {:?}", typ),
         }
     }
 
