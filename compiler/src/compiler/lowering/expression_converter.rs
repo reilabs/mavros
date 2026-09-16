@@ -1086,7 +1086,7 @@ impl<'a> ExpressionConverter<'a> {
             }
             Constructor::True => tag,
             Constructor::False => {
-                let zero = b.emit_const(Constant::int(1, 0));
+                let zero = self.tag_constant(FieldElement::zero(), tag_ty, b);
                 self.emit_at_source_location(b, location, |e| e.eq(tag, zero))
             }
             Constructor::Int(value) => {
