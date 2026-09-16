@@ -725,6 +725,7 @@ mod tests {
         },
         util::test::{falloc, fr},
     };
+    use mavros_int_semantics::IntBits;
 
     /// Build the analyses on the current IR and run only ArgPromotion (mirrors the pass-manager).
     fn run_argpromo(ssa: &mut HLSSA) {
@@ -850,7 +851,7 @@ mod tests {
                     let mut e = b.test_block(entry);
                     let p = e.add_parameter(arr_ty.ref_of());
                     let arr = e.load(p);
-                    let i0 = e.int_const(32, 0);
+                    let i0 = e.int_const(IntBits::zero(32));
                     let x = e.field_const(fr(7));
                     let updated = e.array_set(arr, i0, x);
                     e.store(p, updated);

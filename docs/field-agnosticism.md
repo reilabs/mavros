@@ -190,6 +190,9 @@ or intern keys. Every **middle-end** cluster now mints through the façade (`b.f
       `decompose_canonical_field_bytes` assumes 32 bytes / four 64-bit limbs / a 2×128-bit modulus
       split. Its modulus _values_ are now read from `FieldConfig` (see `L4-modulus-literal`); only
       this shape is left, and it needs a per-field-width canonicalization.
+- [ ] `compiler/src/compiler/util.rs` — `field_constant` builds a `[u64; 4]` because
+      `FieldConfig::from_bigint` takes an `ark_ff::BigInt<4>`. The count moves with that signature,
+      and the width bound it computes then becomes the per-value question it already asks.
 
 ### `L3-field-size` — 32-byte Field Size in the Test Harness (Representation, P5)
 
@@ -208,8 +211,9 @@ or intern keys. Every **middle-end** cluster now mints through the façade (`b.f
 
 ### `L3-llstruct` — LLVM/WASM Field Struct (Representation, P5)
 
-- [ ] `compiler/src/compiler/ssa/llssa/mod.rs:788-806` — `LLStruct::field_elem()` / `limbs()` =
-      4×`Int(64)` ("BN254 field element in Montgomery form"). Becomes per-field width.
+- [ ] `compiler/src/compiler/ssa/llssa/mod.rs` — `LLStruct::FIELD_LIMBS`, the count both
+      `field_elem()` and `limbs()` are built from and the one every packing reads. Becomes per-field
+      width; it is the single place that has to change for `L3-limb-op` to follow.
 - [ ] `compiler/src/compiler/codegen/llssa_to_llvm.rs:585-592` —
       `field_llvm_type()`/`limbs_llvm_type()`.
 
@@ -225,8 +229,12 @@ A first-class LLSSA instruction that round-trips a field value through its **can
 - [ ] `compiler/src/compiler/codegen/llssa_to_llvm.rs:120-121,652-664,1236-1263` — declares and
       calls the `__field_to_limbs`/`__field_from_limbs` externs (`[4 x i64]` ↔ Montgomery). Runtime
       impls at `wasm-runtime/src/lib.rs:123-152` (see `L4-inverse`/`L3-llstruct`).
-- [ ] `compiler/src/compiler/ssa/hlssa_to_llssa.rs:1217,1230,1871,2324,3071,3096` (6 sites) —
-      emitters that round-trip through the op to lower bit/byte/bitwise ops.
+- [x] `compiler/src/compiler/ssa/hlssa_to_llssa.rs` — emitters that round-trip through the op to
+      lower bit/byte/bitwise ops. The integer packing is `int_to_raw_limbs` / `int_from_raw_limbs`,
+      which fill and read `LLStruct::FIELD_LIMBS` limbs rather than a count of their own, so these
+      sites follow the layout. `INT_TO_FIELD_MAX_BITS` derives from the same constant and states the
+      layout's capacity rather than a width cap. The residual is that constant, which is
+      `L3-llstruct`.
 
 ### `L3-width254` — The 254-bit Field-Width Literal (Hardcoded, P3 — done)
 
@@ -526,17 +534,18 @@ recombination); `witness_field`'s `to_bits` and `to_radix`; and `shared::overflo
 
 Two kinds of neighboring check deliberately stay out: an internal invariant no field choice can
 violate (`bit_range`'s "a field `BitRange` cannot exceed a field element"), and a branch whose
-condition is an integer _type_ cap rather than a field width (`wrap_shifted_product`'s trapping
-fallback, which rejects a witness at proving time rather than refusing every 128-bit `<<` at compile
-time).
+condition is a representational threshold rather than a field width (`wrap_shifted_product`'s
+trapping fallback, which rejects a witness at proving time rather than refusing every 128-bit `<<`
+at compile time — its threshold is field-derived, which strengthens the case rather than weakening
+it, since a narrower field would make a funnel refusal reject more programs outright).
 
 **P5 target — integers wider than the field must be _supported_, not rejected.** The end state is a
 **multi-cell representation** (Option A): an integer whose type range is `≥ p` (`n > B`) is carried
 as `⌈n/h⌉` field cells end-to-end (witness layout, `Cast`, VM frame, opcode stride, serde). The
-integer type-system caps (`MAX_SUPPORTED_*_BITS` = 128/64) stay **field-independent** — a goldilocks
-`u128` is just a wider cell vector, exactly as bn254 already carries a u128 value in one cell but
-its 256-bit _product_ across two. Paired with a **schoolbook engine** for the FALSE branch (split
-operands into `h`-bit limbs, `h` derived from the modulus by
+integer type-system cap (`MAX_SUPPORTED_INT_BITS` = 16384) stays **field-independent** — a
+goldilocks `u128` is just a wider cell vector, exactly as bn254 already carries a u128 value in one
+cell but its 256-bit _product_ across two. Paired with a **schoolbook engine** for the FALSE branch
+(split operands into `h`-bit limbs, `h` derived from the modulus by
 `compiler/src/compiler/passes/shared/limbs.rs`; in-field partial products; column-accumulate with a
 witnessed, range-checked carry chain; keep the low result limbs).
 
@@ -582,9 +591,11 @@ one cell. Fix = a **multi-cell (per-limb) representation** carrying the integer 
 cells (the largest P5 sub-piece; touches witness layout, `Cast`, the VM frame, opcode stride,
 serde). Wide integers are supported, not capped away.
 
-- [ ] `compiler/src/compiler/ssa/hlssa/type_system.rs:5-6` — `MAX_SUPPORTED_UNSIGNED_BITS` /
-      `MAX_SUPPORTED_SIGNED_BITS` stay field-independent (the int-type caps); the multi-cell
-      representation carries any width `> B` on a small field.
+- [ ] `compiler/src/compiler/ssa/hlssa/type_system.rs` — `MAX_SUPPORTED_INT_BITS` stays
+      field-independent (there is one int-type cap, and signedness is not a property of a type); the
+      multi-cell representation carries any width `> B` on a small field. What _is_ field-derived is
+      the narrow/wide dispatch threshold, `passes::shared::limbs::narrow_int_bits` — one field cell
+      and one host word, whichever binds first.
 - [ ] `passes/shared/limbs.rs` — `combine_limbs` (recombines `⌈n/h⌉` limbs into **one** cell). The
       limb _widths_ are done: `witness_limb_bits` derives `h` from the modulus, and every splitter
       and place value in the tree now asks it — though asking it is not on its own a proof that the

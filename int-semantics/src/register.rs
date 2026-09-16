@@ -44,10 +44,16 @@ pub const EVALUATORS: &[Evaluator] = &[
         relation: "refinement: never a value the model does not give, and never a fold of an \
                    input the model rejects",
         files: &["compiler/src/compiler/analysis/click_cooper/lattice.rs"],
-        conformance: &[Conformance {
-            path: "compiler/src/compiler/analysis/click_cooper/lattice.rs",
-            test: "folding_refines_the_reference_model",
-        }],
+        conformance: &[
+            Conformance {
+                path: "compiler/src/compiler/analysis/click_cooper/lattice.rs",
+                test: "folding_refines_the_reference_model",
+            },
+            Conformance {
+                path: "compiler/src/compiler/analysis/click_cooper/lattice.rs",
+                test: "folding_refines_the_reference_model_at_wide_widths",
+            },
+        ],
     },
     Evaluator {
         tag: "specializer",
@@ -79,6 +85,18 @@ pub const EVALUATORS: &[Evaluator] = &[
                 path: "compiler/src/compiler/codegen/hlssa_to_r1cs.rs",
                 test: "an_out_of_range_shift_amount_reduces_to_the_width",
             },
+            Conformance {
+                path: "compiler/src/compiler/codegen/hlssa_to_r1cs.rs",
+                test: "the_r1cs_fold_agrees_with_the_model_at_wide_widths",
+            },
+            Conformance {
+                path: "compiler/src/compiler/codegen/hlssa_to_r1cs.rs",
+                test: "the_widest_type_folds_when_its_value_fits",
+            },
+            Conformance {
+                path: "compiler/src/compiler/codegen/hlssa_to_r1cs.rs",
+                test: "an_answer_above_the_modulus_is_an_ice_though_its_operands_fit",
+            },
         ],
     },
     Evaluator {
@@ -96,6 +114,10 @@ pub const EVALUATORS: &[Evaluator] = &[
                 path: "compiler/src/compiler/analysis/instrumenter.rs",
                 test: "an_out_of_range_shift_amount_reduces_rather_than_saturating",
             },
+            Conformance {
+                path: "compiler/src/compiler/analysis/instrumenter.rs",
+                test: "the_integer_arm_delegates_at_wide_widths_too",
+            },
         ],
     },
     Evaluator {
@@ -103,7 +125,7 @@ pub const EVALUATORS: &[Evaluator] = &[
         what: "the bytecode interpreter's integer opcodes",
         relation: "total, and equal to `residue` wherever the model specifies a pattern: no \
                    panic, no process abort, and every answer inside the operand width",
-        files: &["vm/src/bytecode.rs"],
+        files: &["vm/src/bytecode.rs", "vm/src/int_limbs.rs"],
         conformance: &[
             Conformance {
                 path: "vm/src/bytecode.rs",
@@ -121,18 +143,54 @@ pub const EVALUATORS: &[Evaluator] = &[
                 path: "vm/src/bytecode.rs",
                 test: "the_complement_opcode_agrees_with_the_model",
             },
+            Conformance {
+                path: "vm/src/int_limbs.rs",
+                test: "the_intn_lane_agrees_with_the_model",
+            },
+            Conformance {
+                path: "vm/src/int_limbs.rs",
+                test: "the_intn_comparisons_agree_with_the_model",
+            },
+            Conformance {
+                path: "vm/src/int_limbs.rs",
+                test: "the_intn_complement_agrees_with_the_model",
+            },
+            Conformance {
+                path: "vm/src/int_limbs.rs",
+                test: "the_intn_width_casts_agree_with_the_model",
+            },
         ],
     },
     Evaluator {
         tag: "llvm",
-        what: "the LLVM backend, which reaches WASM",
-        relation: "the VM's, read back through LLVM's own constant folder rather than through a \
-                   Rust mirror of the lowering's choices",
-        files: &["compiler/src/compiler/codegen/llssa_to_llvm.rs"],
-        conformance: &[Conformance {
-            path: "compiler/src/compiler/codegen/llssa_to_llvm.rs",
-            test: "the_emitted_instructions_agree_with_the_model",
-        }],
+        what: "the LLVM backend, used for WASM",
+        relation: "the VM's, read three ways because no one reading reaches the whole backend: \
+                   LLVM's own constant folder for the instructions it emits, the runtime helper's \
+                   body directly for the wide multiply the folder cannot see through a call, and a \
+                   wasm engine for the lowering built around that call, which is the one shape the \
+                   folder is deliberately never handed",
+        files: &[
+            "compiler/src/compiler/codegen/llssa_to_llvm.rs",
+            "wasm-runtime/src/lib.rs",
+        ],
+        conformance: &[
+            Conformance {
+                path: "compiler/src/compiler/codegen/llssa_to_llvm.rs",
+                test: "the_emitted_instructions_agree_with_the_model",
+            },
+            Conformance {
+                path: "compiler/src/compiler/codegen/llssa_to_llvm.rs",
+                test: "the_emitted_instructions_agree_with_the_model_at_wide_widths",
+            },
+            Conformance {
+                path: "compiler/src/compiler/codegen/llssa_to_llvm.rs",
+                test: "the_routed_lowering_agrees_with_the_model_through_wasm",
+            },
+            Conformance {
+                path: "wasm-runtime/src/lib.rs",
+                test: "the_helper_multiply_agrees_with_the_model",
+            },
+        ],
     },
     Evaluator {
         tag: "value-range",
@@ -177,7 +235,7 @@ pub const EVALUATORS: &[Evaluator] = &[
             "compiler/src/compiler/passes/instruction_lowering/witness_integer_arith.rs",
         ],
         conformance: &[
-            // The one predicate here that *deletes* a check rather than building one, and so the
+            // The one predicate here that _deletes_ a check rather than building one, and so the
             // one whose wrong answer the corpus below cannot see: a discharged check leaves no
             // program to reject.
             Conformance {

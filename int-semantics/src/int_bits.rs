@@ -8,7 +8,7 @@ use num_bigint::BigUint;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::{CmpOp, MAX_BITS, MAX_SIGNED_BITS, SignedValue, check_widths, mask};
+use crate::{CmpOp, MAX_BITS, SignedValue, check_widths, mask};
 
 // HOST LIMB
 // ================================================================================================
@@ -16,8 +16,22 @@ use crate::{CmpOp, MAX_BITS, MAX_SIGNED_BITS, SignedValue, check_widths, mask};
 /// The width of one limb of an [`IntBits`] pattern, and of one integer cell in a VM frame.
 pub const HOST_LIMB_BITS: usize = u64::BITS as usize;
 
-// All widths evaluated by the integer model fit in two limbs. Wider stored patterns spill to
-// the heap, while cloning the common case (including elements of symbolic arrays) stays inline.
+/// The width of the widest integer the host has a type for.
+///
+/// The single definition of a number that a dozen sites across this workspace each have their own
+/// reason to name: a mask ladder that runs in a `u128`, a constant minted with `1u128 << n`, a
+/// generator whose return type is `Vec<u128>`, the last reading [`crate::mask`] can express. Each
+/// of those states its own reason where it uses this, but there is one number and it is a fact
+/// about the machine, so there is one place it is written down.
+///
+/// **Not** [`MAX_BITS`], which is far above it: a bound written as the model's cap would take a
+/// `1u128 << bits` arm at a width no `u128` can hold, resulting in a debug panic and, worse, a
+/// release build that masks the shift amount and provides a plausible but incorrect answer.
+pub const HOST_WORD_BITS: usize = u128::BITS as usize;
+
+// Two limbs inline, which covers every width the host has a type for and every width the Noir
+// surface can name. A wider pattern spills to the heap, so cloning the common case — including
+// elements of the symbolic arrays compiler analysis copies — needs no allocation.
 type Limbs = SmallVec<[u64; 2]>;
 
 // INTEGER BIT PATTERN
@@ -65,6 +79,12 @@ impl IntBits {
     #[must_use]
     pub fn zero(bits: usize) -> Self {
         Self::normalized(bits, Limbs::from_elem(0, Self::limbs_for_bits(bits)))
+    }
+
+    /// The pattern `1` at `bits` wide, and the companion of [`IntBits::is_one`].
+    #[must_use]
+    pub fn one(bits: usize) -> Self {
+        Self::from_u128(bits, 1)
     }
 
     /// A `bits`-wide pattern carrying `value`, discarding any bits at or above `bits`.
@@ -449,16 +469,10 @@ impl IntBits {
 impl IntBits {
     /// Read this pattern as two's complement.
     ///
-    /// # Panics
-    ///
-    /// If the pattern is wider than [`MAX_SIGNED_BITS`].
+    /// Total at every width an [`IntBits`] can have: the magnitude is a [`BigUint`] and the
+    /// correction is a two-power, so there is no host type to fall out of.
     #[must_use]
     pub fn to_signed(&self) -> SignedValue {
-        let bits = self.bits();
-        assert!(
-            (1..=MAX_SIGNED_BITS).contains(&bits),
-            "a signed reading of a {bits}-bit pattern is outside 1..={MAX_SIGNED_BITS}"
-        );
         let magnitude = SignedValue::from(BigUint::from(self));
         if self.bit(self.bits() - 1) == Some(true) {
             magnitude - two_pow(self.bits())
@@ -484,13 +498,9 @@ impl IntBits {
     ///
     /// # Panics
     ///
-    /// If `bits` is above [`MAX_SIGNED_BITS`].
+    /// On a width of zero, through the boundaries it compares against.
     #[must_use]
     pub fn fits_signed(bits: usize, v: &SignedValue) -> bool {
-        assert!(
-            (1..=MAX_SIGNED_BITS).contains(&bits),
-            "a signed reading at {bits} bits is outside 1..={MAX_SIGNED_BITS}"
-        );
         *v >= Self::signed_min(bits) && *v <= Self::signed_max(bits)
     }
 
@@ -574,7 +584,7 @@ impl IntBits {
     /// As [`eval`](crate::eval) does, on invalid or unequal widths.
     #[must_use]
     pub fn compare(&self, op: CmpOp, rhs: &Self) -> bool {
-        check_widths(matches!(op, CmpOp::SLt), false, self.bits(), rhs.bits());
+        check_widths(false, self.bits(), rhs.bits());
         match op {
             // Equality is the one comparison a pattern answers on its own: two patterns of one
             // width are equal under either reading exactly when their bits are.
@@ -832,6 +842,9 @@ impl fmt::Debug for IntBits {
 /// Unlike the host conversions above this one cannot fail, and unlike them it is not a reading: a
 /// [`BigUint`] is the unsigned magnitude of the bits, which is what they are before anyone decides
 /// what they mean.
+///
+/// This crate cannot answer whether a given number has a conversion, as it depends on the field
+/// modulus which this model is independent of.
 impl From<&IntBits> for BigUint {
     fn from(value: &IntBits) -> Self {
         let bytes: Vec<u8> = value
@@ -1305,7 +1318,7 @@ mod tests {
         limbs[3] = 1;
         assert!(u128::try_from(&IntBits::from_limbs(256, &limbs)).is_err());
 
-        // A wide *width* with a narrow *value* still fits, because the question is about the
+        // A wide _width_ with a narrow _value_ still fits, because the question is about the
         // value and not about how much room it was given.
         assert_eq!(u128::try_from(&IntBits::from_u128(16384, 5)), Ok(5));
         assert_eq!(u128::try_from(&IntBits::zero(16384)), Ok(0));
@@ -1503,11 +1516,24 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "is outside 1..=64")]
-    fn a_signed_reading_refuses_a_pattern_above_the_signed_cap() {
-        // A caller that reaches here has skipped `assert_signed_op_width`, and answering would
-        // be worse than stopping.
-        let _ = IntBits::from_u128(128, 1).to_signed();
+    fn a_signed_reading_is_total_above_every_lowering() {
+        // A signed reading is total: this model caps nothing, so the support frontier is enforced
+        // in one place only, the compiler's own funnel.
+        assert_eq!(
+            IntBits::from_u128(128, 1).to_signed(),
+            SignedValue::from(1u8)
+        );
+        assert_eq!(
+            IntBits::from_u128(128, u128::MAX).to_signed(),
+            SignedValue::from(-1i8),
+            "the top bit is the sign at 128 bits, not a large magnitude"
+        );
+
+        // Past any host type, where only the `BigInt` reading can answer: `2^999` set alone is
+        // `INT_MIN` at 1000 bits.
+        let min = IntBits::from_signed(1000, &IntBits::signed_min(1000));
+        assert_eq!(min.to_signed(), IntBits::signed_min(1000));
+        assert!(min.to_signed() < SignedValue::from(0u8));
     }
 
     #[test]

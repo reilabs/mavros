@@ -576,6 +576,7 @@ mod tests {
         },
         util::test::{falloc, fr},
     };
+    use mavros_int_semantics::IntBits;
 
     fn idx_set(ks: &[usize]) -> HashSet<usize> {
         ks.iter().copied().collect()
@@ -985,8 +986,8 @@ mod tests {
                     SequenceTargetType::Array(2),
                     Type::field().ref_of(),
                 );
-                let i0 = e.int_const(32, 0);
-                let i1 = e.int_const(32, 1);
+                let i0 = e.int_const(IntBits::zero(32));
+                let i1 = e.int_const(IntBits::one(32));
                 let r0 = e.array_get(arr, i0);
                 let r1 = e.array_get(arr, i1);
                 let v = e.load(r0);
@@ -1030,7 +1031,7 @@ mod tests {
                 let c0 = e.field_const(fr(7));
                 let c1 = e.field_const(fr(9));
                 let arr = e.mk_seq(vec![c0, c1], SequenceTargetType::Array(2), Type::field());
-                let i1 = e.int_const(32, 1);
+                let i1 = e.int_const(IntBits::one(32));
                 let got = e.array_get(arr, i1);
                 e.terminate_return(vec![got]);
                 captured = Some(arr);
@@ -1118,7 +1119,7 @@ mod tests {
                     |_| vec![arr_t],
                     |_| vec![arr_f],
                 )[0];
-                let i0 = e.int_const(32, 0);
+                let i0 = e.int_const(IntBits::zero(32));
                 let r0 = e.array_get(merged, i0);
                 let v = e.load(r0);
                 e.terminate_return(vec![v]);
@@ -1189,7 +1190,7 @@ mod tests {
                 let mut e = b.test_block(entry);
                 let c = e.field_const(fr(3));
                 let arr = e.mk_repeated(c, SequenceTargetType::Array(4), 4, Type::field());
-                let i0 = e.int_const(32, 0);
+                let i0 = e.int_const(IntBits::zero(32));
                 let got = e.array_get(arr, i0);
                 e.terminate_return(vec![got]);
                 captured = Some(arr);
@@ -1220,7 +1221,7 @@ mod tests {
                 let c = e.field_const(fr(3));
                 e.store(r, c);
                 let arr = e.mk_repeated(r, SequenceTargetType::Array(4), 4, Type::field().ref_of());
-                let i0 = e.int_const(32, 0);
+                let i0 = e.int_const(IntBits::zero(32));
                 let got = e.array_get(arr, i0);
                 let v = e.load(got);
                 e.terminate_return(vec![v]);
@@ -1254,7 +1255,7 @@ mod tests {
                     ],
                 }));
                 let arr = e.mk_seq_of_blob(Type::field(), blob);
-                let i1 = e.int_const(32, 1);
+                let i1 = e.int_const(IntBits::one(32));
                 let got = e.array_get(arr, i1);
                 e.terminate_return(vec![got]);
                 captured = Some(arr);

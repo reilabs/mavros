@@ -14,6 +14,21 @@ enum GuestType {
     BoxedValue,
 }
 
+impl GuestType {
+    /// How many frame cells a value of this type covers.
+    fn to_cells_tokens(&self) -> proc_macro2::TokenStream {
+        match self {
+            GuestType::Field => quote! { Frame::cells_of::<Field>() },
+            GuestType::Int128 => quote! { Frame::cells_of::<Int128>() },
+            GuestType::BoxedValue => quote! { Frame::cells_of::<BoxedValue>() },
+            GuestType::U64 => quote! { Frame::cells_of::<u64>() },
+            // A pointer is read out of one cell whatever it points at, so there is no type here
+            // whose size would answer the question.
+            GuestType::Ptr => quote! { 1usize },
+        }
+    }
+}
+
 #[derive(Debug)]
 enum HostType {
     U64,
@@ -279,10 +294,29 @@ impl HostType {
     }
 }
 
+/// A run of consecutive frame cells, addressed by one encoded [`FramePosition`], with its length
+/// taken from an integer width the same opcode carries.
+///
+/// This is used to implement wide integer operands: the frame layouter gives an `int(N)` value a
+/// set of contiguous cells, so the position alone cannot say how many to read. We thus take the
+/// width from the immediate.
+#[derive(Debug)]
+struct SliceInput {
+    /// The name of the host parameter holding the operand width in bits.
+    ///
+    /// It must be declared ahead of the slice, because getters consume the instruction stream in
+    /// declaration order.
+    width: String,
+
+    /// Whether the handler receives `&mut [u64]` rather than `&[u64]`.
+    mutable: bool,
+}
+
 #[derive(Debug)]
 enum StructInputType {
     Frame(GuestType),
     Out(GuestType),
+    Slice(SliceInput),
     Host(HostType),
 }
 
@@ -317,10 +351,12 @@ impl StructInput {
             StructInputType::Frame(_) => quote! {
                 #fields_ident = format!("{} %{}", #fields_ident, #ident.0);
             },
-            StructInputType::Out(_) => quote! {
+            StructInputType::Out(_) | StructInputType::Slice(_) => quote! {
                 #fields_ident = format!("{} %{}", #fields_ident, #ident.0);
             },
-            _ => quote! {
+            StructInputType::Host(
+                HostType::Slice(_) | HostType::Tuple(_) | HostType::BoxedLayout,
+            ) => quote! {
                 #fields_ident = format!("{} _", #fields_ident);
             },
         }
@@ -465,10 +501,35 @@ fn parse_signature(is_raw: bool, sig: &syn::Signature) -> OpCodeDef {
             }
         }
     }
-    OpCodeDef {
+    let def = OpCodeDef {
         name: sig.ident.to_string(),
         is_raw,
         inputs,
+    };
+    check_slice_widths(&def);
+    def
+}
+
+/// Every frame slice names a width parameter that is a host `u64` declared ahead of it.
+///
+/// Getters consume the instruction stream with a running offset in declaration order, so a width
+/// declared after the slice that reads it has no value yet, and the generated code would not
+/// compile.
+fn check_slice_widths(def: &OpCodeDef) {
+    let mut seen: Vec<&str> = Vec::new();
+    for input in def.struct_args() {
+        if let StructInputType::Slice(slice) = &input.val {
+            assert!(
+                seen.contains(&slice.width.as_str()),
+                "opcode `{}`: frame slice `{}` takes its length from `{}`, which must be a host parameter declared before it",
+                def.name,
+                input.name,
+                slice.width
+            );
+        }
+        if matches!(input.val, StructInputType::Host(HostType::U64)) {
+            seen.push(&input.name);
+        }
     }
 }
 
@@ -485,6 +546,8 @@ fn parse_pat_type(pat: &syn::PatType) -> Input {
         parse_out(expect_ident(&pat.pat), pat.ty.as_ref())
     } else if pat.attrs[0].path().is_ident("frame") {
         parse_frame(expect_ident(&pat.pat), pat.ty.as_ref())
+    } else if pat.attrs[0].path().is_ident("frame_slice") {
+        parse_frame_slice(expect_ident(&pat.pat), pat.ty.as_ref(), &pat.attrs[0])
     } else {
         panic!("unknown attribute");
     }
@@ -547,6 +610,39 @@ fn parse_frame(ident: Ident, ty: &syn::Type) -> Input {
     Input::Struct(StructInput {
         name: ident.to_string(),
         val: StructInputType::Frame(parse_guest_type(ty)),
+    })
+}
+
+/// Parse `#[frame_slice(width)] name: &[u64]`, or `&mut [u64]` for a result.
+///
+/// One attribute covers both directions, keyed off the reference's own mutability, because the two
+/// encode identically as a single [`FramePosition`], and differ only in what the handler may do
+/// with the cells.
+fn parse_frame_slice(ident: Ident, ty: &syn::Type, attr: &syn::Attribute) -> Input {
+    let width: Ident = attr
+        .parse_args()
+        .expect("frame_slice must name the width parameter, as #[frame_slice(bits)]");
+
+    let syn::Type::Reference(reference) = ty else {
+        panic!("a frame_slice must be a reference to a slice of u64, as &[u64] or &mut [u64]");
+    };
+    let syn::Type::Slice(slice) = reference.elem.as_ref() else {
+        panic!("a frame_slice must be a slice, as &[u64] or &mut [u64]");
+    };
+    let syn::Type::Path(element) = slice.elem.as_ref() else {
+        panic!("a frame_slice must hold u64, the frame's own cell");
+    };
+    assert!(
+        element.path.is_ident("u64"),
+        "a frame_slice must hold u64, the frame's own cell"
+    );
+
+    Input::Struct(StructInput {
+        name: ident.to_string(),
+        val: StructInputType::Slice(SliceInput {
+            width: width.to_string(),
+            mutable: reference.mutability.is_some(),
+        }),
     })
 }
 
@@ -642,11 +738,30 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
                     GuestType::Ptr => format_ident!("read_ptr_mut"),
                     GuestType::BoxedValue => format_ident!("read_array_mut"),
                 };
+                // The position is bound rather than read inline so that `gen_slice_bindings` can
+                // check a wide result against it. A raw pointer is not a borrow, so the pointer
+                // itself may exist before that check; what must not is a write through it while a
+                // slice covers the same cells, and the check runs before any slice is built.
+                let pos = format_ident!("__out_pos_{}", name);
                 getters.extend(quote! {
-                    let #i = unsafe {
-                        frame.#getter(*pc.offset(current_field_offset) as isize)
-                    };
+                    let #pos = unsafe { *pc.offset(current_field_offset) as isize };
+                    let #i = unsafe { frame.#getter(#pos) };
                     current_field_offset += 1;
+                });
+            }
+            Input::Struct(StructInput {
+                name,
+                val: StructInputType::Slice(slice),
+            }) => {
+                // A slice's position and length are bound here, in stream order, but the slice
+                // itself is not built until every position is known — see `slice_bindings`.
+                let pos = format_ident!("__slice_pos_{}", name);
+                let len = format_ident!("__slice_len_{}", name);
+                let width = format_ident!("{}", slice.width);
+                getters.extend(quote! {
+                    let #pos = unsafe { *pc.offset(current_field_offset) as isize };
+                    current_field_offset += 1;
+                    let #len = Frame::int_cells(#width);
                 });
             }
             Input::Struct(StructInput {
@@ -665,6 +780,8 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
         }
     }
 
+    let slice_bindings = gen_slice_bindings(def);
+
     let mut call_params = if def.is_raw {
         vec![quote! {pc}, quote! {frame}, quote! {vm}]
     } else {
@@ -675,26 +792,11 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
         def.inputs
             .iter()
             .map(|input| match input {
-                Input::Struct(StructInput {
-                    name,
-                    val: StructInputType::Frame(_),
-                }) => {
+                // Every operand kind is bound to its own name above, so the call passes that name
+                // whatever the kind was.
+                Input::Struct(StructInput { name, .. }) => {
                     let i = format_ident!("{}", name);
                     quote! { #i }
-                }
-                Input::Struct(StructInput {
-                    name,
-                    val: StructInputType::Out(_),
-                }) => {
-                    let i = format_ident!("{}", name);
-                    quote! { #i }
-                }
-                Input::Struct(StructInput {
-                    name,
-                    val: StructInputType::Host(_),
-                }) => {
-                    let i = format_ident!("{}", name);
-                    quote! {#i}
                 }
                 Input::VM => quote! { vm },
                 Input::Frame => quote! { frame },
@@ -739,6 +841,7 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
             }
             let mut current_field_offset = 1isize;
             #getters
+            #slice_bindings
             #call_and_finish
 
             let __prof_ret = { #return_call };
@@ -753,6 +856,98 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
     }
 }
 
+/// Build every frame slice a handler takes, after the assertion that nothing else it writes
+/// overlaps said frame slice.
+///
+/// A `&mut [u64]` and a `&[u64]` over the same cells is undefined behavior the moment both exist,
+/// so the check has to run while there are only positions and lengths.
+///
+/// Every operand the handler **writes** is checked against every slice: a result slice against the
+/// other slices, and an `#[out]` against all of them, its extent coming from
+/// [`GuestType::to_cells_tokens`]. An `#[out]` is a raw pointer rather than a reference, so its
+/// mere existence alongside a slice is fine; the write through it is not, and that happens in the
+/// handler body once every binding below is live.
+fn gen_slice_bindings(def: &OpCodeDef) -> proc_macro2::TokenStream {
+    let slices = def
+        .struct_args()
+        .filter_map(|input| match &input.val {
+            StructInputType::Slice(slice) => Some((input.name.as_str(), slice)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    // Each `#[out]` as the pair of expressions the overlap test needs: where it starts and how far
+    // it reaches.
+    let outs = def
+        .struct_args()
+        .filter_map(|input| match &input.val {
+            StructInputType::Out(tp) => {
+                let pos = format_ident!("__out_pos_{}", input.name);
+                Some((input.name.as_str(), quote! { #pos }, tp.to_cells_tokens()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let extents = slices
+        .iter()
+        .map(|(name, slice)| {
+            let (pos, len) = (
+                format_ident!("__slice_pos_{}", name),
+                format_ident!("__slice_len_{}", name),
+            );
+            (*name, slice.mutable, quote! { #pos }, quote! { #len })
+        })
+        .collect::<Vec<_>>();
+
+    // A result slice is checked against every slice; an `#[out]` against every slice too, but not
+    // against another `#[out]`, which is the pair this attribute has no bearing on.
+    let writers = extents
+        .iter()
+        .filter(|(_, mutable, _, _)| *mutable)
+        .map(|(name, _, pos, len)| (*name, pos.clone(), len.clone()))
+        .chain(outs)
+        .collect::<Vec<_>>();
+
+    let mut result = proc_macro2::TokenStream::new();
+    for (name, pos, len) in &writers {
+        for (other, _, other_pos, other_len) in &extents {
+            if other == name {
+                continue;
+            }
+            let message = format!(
+                "frame operands `{name}` and `{other}` overlap, so writing one would corrupt the \
+                 other"
+            );
+            result.extend(quote! {
+                debug_assert!(
+                    #pos + (#len as isize) <= #other_pos
+                        || #other_pos + (#other_len as isize) <= #pos,
+                    #message
+                );
+            });
+        }
+    }
+
+    for (name, slice) in &slices {
+        let i = format_ident!("{}", name);
+        let (pos, len) = (
+            format_ident!("__slice_pos_{}", name),
+            format_ident!("__slice_len_{}", name),
+        );
+        let reader = if slice.mutable {
+            format_ident!("read_limbs_mut")
+        } else {
+            format_ident!("read_limbs")
+        };
+        result.extend(quote! {
+            let #i = unsafe { frame.#reader(#pos, #len) };
+        });
+    }
+
+    result
+}
+
 fn gen_opcode_enum(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
     let codes = codes.iter().map(|code| {
         let params = code
@@ -763,6 +958,7 @@ fn gen_opcode_enum(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
                     // StructInputType::Const(_) => todo!(),
                     StructInputType::Frame(_) => Some(quote! {#i: FramePosition}),
                     StructInputType::Out(_) => Some(quote! {#i: FramePosition}),
+                    StructInputType::Slice(_) => Some(quote! {#i: FramePosition}),
                     StructInputType::Host(ty) => {
                         let ty = ty.to_def_tokens();
                         Some(quote! {#i: #ty})
@@ -806,7 +1002,7 @@ fn gen_opcode_helpers(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
                             };
                             r
                         }
-                        StructInputType::Out(_) => {
+                        StructInputType::Out(_) | StructInputType::Slice(_) => {
                             let r = quote! {
                                 binary.push(#i.0 as u64);
                                 init_offset -= 1;
@@ -848,7 +1044,7 @@ fn gen_opcode_helpers(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
                         ix += 1;
                     });
                 }
-                StructInputType::Out(_) => {
+                StructInputType::Out(_) | StructInputType::Slice(_) => {
                     result.extend(quote! {
                         ix += 1;
                     });

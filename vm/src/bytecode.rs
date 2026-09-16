@@ -9,6 +9,7 @@ use std::{collections::BTreeMap, fmt::Display, ptr};
 use crate::{
     ConstraintsLayout, Field, FlamegraphProfile, FlamegraphStackId, TableKind, WitnessLayout,
     array::{BoxedLayout, BoxedValue, DataType, StructDescriptor},
+    int_limbs,
     interpreter::{Frame, Handler},
 };
 
@@ -335,7 +336,7 @@ fn cell_mask(bits: u64) -> u64 {
 /// Reduced modulo `bits`. It matches the LLVM backend, which reduces by the LLVM type's own width
 /// (`llssa_to_llvm.rs::reduce_shift_count`) because LLVM treats a shift at or past the width as
 /// poison. It also keeps the count in range for Rust's shift operators, which panic on an
-/// over-shift in a debug build and mask to the *host* width (`b & 63`) in release, a divergence
+/// over-shift in a debug build and mask to the _host_ width (`b & 63`) in release, a divergence
 /// that is wrong for any `bits < 64`.
 ///
 /// It is a **modulo, not a mask**. At a power-of-two width the two coincide, so at every width Noir
@@ -368,20 +369,68 @@ fn shift_amount(b: u64, bits: u64) -> u32 {
     }
 }
 
-/// The amount a 128-bit shift actually applies, given a requested amount of `b`.
+/// The amount a double-lane shift actually applies, given a requested amount of `b`.
 ///
-/// The `_int` lane's [`shift_amount`] takes its width as a parameter because a cell is wider than
-/// the value in it; here the width _is_ the lane, so the reduction is the constant `127`. `128` is
-/// a power of two, so masking by `127` _is_ the `b % 128` that [`shift_amount`] would compute, and
-/// this lane needs no modulo arm of its own.
+/// The reduction is modulo the operand width, as it is in the other two lanes and as
+/// `reduce_shift_count` is on the LLVM side.
 ///
-/// Only `b.lo` is read, and the high limb is not a lost check: LLVM masks the whole 128-bit amount
-/// with `bit_width - 1 == 127` (`llssa_to_llvm.rs`, both shift arms), and the low seven bits of a
-/// 128-bit pattern are the low seven bits of its low limb. Discarding `b.hi` is therefore what
-/// _keeps_ the two backends equal. Rejecting such an amount is guard IR's job.
+/// At a power-of-two width the mask reaches only the low limb, and reading `b.lo` alone is then
+/// exact rather than a discarded check: LLVM masks the whole amount with `bit_width - 1`, and the
+/// low bits of a two-limb pattern are the low bits of its low limb. At any other width the whole
+/// pattern is needed — the high limb of a 96-bit amount carries bits 64 to 95, and dropping them
+/// would answer a different modulus.
 #[inline(always)]
-fn shift_amount_128(b: Int128) -> u32 {
-    (b.lo & 127) as u32
+fn shift_amount_128(b: Int128, bits: u64) -> u32 {
+    if bits == 0 {
+        return 0;
+    }
+    if bits.is_power_of_two() {
+        return (b.lo & (bits - 1)) as u32;
+    }
+    (b.to_u128() % u128::from(bits)) as u32
+}
+
+/// `a + b`, wrapping at the operand width, the body of `add_int128`.
+///
+/// Wrapping for the reason [`cell_add`] gives: the opcode is total because the rejection Noir owes
+/// an overflowing addition is emitted ahead of it.
+#[inline(always)]
+fn double_add(a: Int128, b: Int128, bits: u64) -> Int128 {
+    a.wrapping_add(b).truncate(bits)
+}
+
+/// `a - b`, wrapping at the operand width. Wrapping as [`double_add`] is.
+#[inline(always)]
+fn double_sub(a: Int128, b: Int128, bits: u64) -> Int128 {
+    a.wrapping_sub(b).truncate(bits)
+}
+
+/// `a * b`, wrapping at the operand width. Wrapping as [`double_add`] is.
+#[inline(always)]
+fn double_mul(a: Int128, b: Int128, bits: u64) -> Int128 {
+    a.wrapping_mul(b).truncate(bits)
+}
+
+/// `a << b`, wrapping at the operand width, with the amount reduced against that width.
+#[inline(always)]
+fn double_shl(a: Int128, b: Int128, bits: u64) -> Int128 {
+    a.wrapping_shl(shift_amount_128(b, bits)).truncate(bits)
+}
+
+/// `a >> b`, zero-filling, with the amount reduced against the operand width.
+///
+/// Takes `bits` only to reduce the amount: a zero-filling shift of an operand already held to the
+/// width cannot leave it, so there is nothing to re-mask. [`double_complement`] below needs its
+/// width for the other reason.
+#[inline(always)]
+fn double_ushr(a: Int128, b: Int128, bits: u64) -> Int128 {
+    a.wrapping_shr(shift_amount_128(b, bits))
+}
+
+/// `!a`, masked back into the operand width.
+#[inline(always)]
+fn double_complement(a: Int128, bits: u64) -> Int128 {
+    (!a).truncate(bits)
 }
 
 /// Read a `bits`-wide cell as two's complement, in the `i64` the host can compute with.
@@ -520,7 +569,7 @@ fn cell_srem(a: u64, b: u64, bits: u64) -> u64 {
 ///
 /// `Eq`/`PartialEq` are derived because bit-pattern equality is the same question under either
 /// reading — which is why there is one `eq_int128` opcode and not a pair. The operations that
-/// *do* depend on the reading are the `unsigned_*` methods below.
+/// _do_ depend on the reading are the `unsigned_*` methods below.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Int128 {
@@ -580,10 +629,10 @@ impl Int128 {
 
     /// Order the pattern as an unsigned 128-bit integer.
     ///
-    /// This and the two below are deliberately inherent methods rather than `Ord`/`Div`/`Rem`:
-    /// they are exactly the operations whose answer depends on how the bits are read, so each
-    /// caller has to name the reading. An operator would have let `a < b` mean "unsigned" by
-    /// default, which is the same lie the old `_u128` opcode names told.
+    /// This and the two below are deliberately inherent methods rather than `Ord`/`Div`/`Rem`: they
+    /// are the operations whose answer depends on how the bits are read, so each caller has to name
+    /// the reading. An operator would let `a < b` mean "unsigned" by default, which is
+    /// mistake-prone.
     #[inline(always)]
     pub fn unsigned_lt(self, rhs: Self) -> bool {
         self.to_u128() < rhs.to_u128()
@@ -1311,37 +1360,29 @@ unsafe fn ad_kv_lookup_emit(
 
 /// The VM's opcode set.
 ///
-/// # Reading the bits, and the width they sit in
-///
 /// An integer frame cell holds a value **masked to its declared width**: an `i8 -1` and a `u8 255`
 /// are the same cell, `0x00000000000000FF`. Nothing about that pattern says how to read it, which
 /// is the same position HLSSA's `TypeExpr::Int(bits)` and LLSSA's `Type::Int` take. So:
 ///
-/// - **The reading is in the opcode's name.** Where signed and unsigned disagree on the answer,
-///   there are two opcodes and each names its reading: `udiv_int`/`sdiv_int`,
-///   `urem_int`/`srem_int`, `ult_int`/`slt_int`, and `ushr_int`/`ashr_int` — the one pair that
-///   spells the reading as `u`/`a` (logical against arithmetic) rather than `u`/`s`, because that
-///   is what LLVM's `lshr`/`ashr` and LLSSA's `UShr`/`AShr` already call them. Where they agree —
-///   `add`, `sub`, `mul`, `shl`, `and`, `or`, `xor`, `eq` — there is one opcode and no prefix. (The
-///   pairs HLSSA keeps distinct for `Add`/`Sub`/`Mul`/`Shl` differ only in *when they trap*, and
-///   the VM does not trap: overflow rejection is guard IR emitted before codegen. See
-///   `BinaryArithOpKind`'s doc.)
-/// - **The suffix is the lane, not a reading**: `_int` is one 64-bit cell (widths 1..=64),
-///   `_int128` is two, `_field` is four. Naming the host storage instead (`_u64`/`_u128`) would
-///   lie about the reading — most loudly for `ashr_int`, the *signed* right shift.
-/// - **`bits` is the width and nothing else.** It is never a signedness marker. An opcode takes it
-///   exactly when its *result* depends on it: to re-mask an output that can exceed the width
-///   (`add_int`, `sub_int`, `mul_int`, `shl_int`, `not_int`), to mask a shift amount, or to locate
-///   the sign bit at `bits - 1` (`sdiv_int`, `srem_int`, `slt_int`, `ashr_int`). Operations that
-///   are correct on any two already-masked operands — `and_int`, `or_int`, `xor_int`, `eq_int`,
-///   `ult_int`, `udiv_int`, `urem_int` — take no width and must not grow one.
-///
-/// That last rule is what keeps `bits` from reading as a signedness flag: `sdiv_int` carries it
-/// and `udiv_int` does not, but the reason is that the signed form needs to know where the sign
-/// bit *is*, which is a fact about the encoding rather than a fact about the operation.
-///
-/// The `_int128` lane has no signed member at all, which is what
-/// `hlssa::type_system::MAX_SUPPORTED_SIGNED_BITS = 64` exists to enforce.
+/// - **Reading from Opcode Name:** Where signed and unsigned disagree on the answer, there are two
+///   opcodes and each names its reading: `udiv_int`/`sdiv_int`, `urem_int`/`srem_int`,
+///   `ult_int`/`slt_int`, and `ushr_int`/`ashr_int`. Where they agree there is a single opcode and
+///   no prefix. The pairs HLSSA keeps distinct for `Add`/`Sub`/`Mul`/`Shl` differ only in _when
+///   they trap_, and the VM does not trap: overflow rejection is guard IR emitted before codegen.
+///   See `BinaryArithOpKind`'s doc.
+/// - **Suffix is the Lane**: `_int` is one 64-bit cell (widths 1..=64), `_int128` is two (widths
+///   65..=128), `_intn` is `ceil(bits/64)` (every wider width), and `_field` is four.
+/// - **`bits` is the Width:** It is never a signedness marker. There are two reasons an opcode
+///   takes one:
+///   - _Semantic_, where the answer depends on it: to re-mask an output that can exceed the width
+///     (`add_int`, `sub_int`, `mul_int`, `shl_int`, `not_int`), to reduce a shift amount, or to
+///     locate the sign bit at `bits - 1` (`sdiv_int`, `srem_int`, `slt_int`, `ashr_int`).
+///     Operations correct on any two already-masked operands (`and_int`, `or_int`, `xor_int`,
+///     `eq_int`, `ult_int`, `udiv_int`, `urem_int`, and their `_int128` counterparts) take no
+///     width.
+///   - _Structural_, where the operand's extent is not otherwise known. A cell-lane operand is one
+///     cell and an `_int128` operand is two, so neither lane needs this; a wide operand is as many
+///     cells as its width says, which is why `and_intn` carries a width it never reads.
 #[interpreter]
 mod def {
     #[raw_opcode]
@@ -1502,18 +1543,18 @@ mod def {
     }
 
     #[opcode]
-    fn add_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128) {
-        unsafe { *res = a.wrapping_add(b) };
+    fn add_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128, bits: u64) {
+        unsafe { *res = double_add(a, b, bits) };
     }
 
     #[opcode]
-    fn sub_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128) {
-        unsafe { *res = a.wrapping_sub(b) };
+    fn sub_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128, bits: u64) {
+        unsafe { *res = double_sub(a, b, bits) };
     }
 
     #[opcode]
-    fn mul_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128) {
-        unsafe { *res = a.wrapping_mul(b) };
+    fn mul_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128, bits: u64) {
+        unsafe { *res = double_mul(a, b, bits) };
     }
 
     /// Divide, reading both cells as unsigned. Total.
@@ -1601,7 +1642,7 @@ mod def {
     /// Left shift, wrapping at the operand width.
     ///
     /// A left shift is one map on the bit pattern, so there is no signed form: what the signed
-    /// HLSSA `SShl` additionally rejects is a *negative amount*, and that rejection is guard IR
+    /// HLSSA `SShl` additionally rejects is a _negative amount_, and that rejection is guard IR
     /// (`pure_guards::emit_invalid_shift_cond`), not something this opcode can see.
     #[opcode]
     fn shl_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
@@ -1642,17 +1683,14 @@ mod def {
     ///
     /// The amount is masked by [`shift_amount_128`].
     #[opcode]
-    fn shl_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128) {
-        unsafe { *res = a.wrapping_shl(shift_amount_128(b)) };
+    fn shl_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128, bits: u64) {
+        unsafe { *res = double_shl(a, b, bits) };
     }
 
     /// Logical right shift in the 128-bit lane; zero-fill, masked as `shl_int128` is.
-    ///
-    /// There is no `ashr_int128` beside it: `MAX_SUPPORTED_SIGNED_BITS` is 64, so no signed opcode
-    /// reads a pattern this wide.
     #[opcode]
-    fn ushr_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128) {
-        unsafe { *res = a.wrapping_shr(shift_amount_128(b)) };
+    fn ushr_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128, bits: u64) {
+        unsafe { *res = double_ushr(a, b, bits) };
     }
 
     /// Bitwise complement, re-masked to the operand width.
@@ -1663,7 +1701,7 @@ mod def {
     /// exact-width `iN`, so the mask is also what keeps the three implementations in agreement.
     ///
     /// **Currently unreachable**, and the mask is defence for when it stops being so:
-    /// `LowerWitnessBitwiseOps::lower_not` rewrites *every* `Not` — pure ones as well as witness
+    /// `LowerWitnessBitwiseOps::lower_not` rewrites _every_ `Not` — pure ones as well as witness
     /// ones, unlike the `And`/`Or`/`Xor` arm beside it — into `(2^bits - 1) - value` before
     /// codegen, so nothing emits this opcode today. Lowering a pure `Not` to it instead is the
     /// obvious optimisation, and that is the moment an unmasked `!a` would start returning wrong
@@ -1675,14 +1713,17 @@ mod def {
         }
     }
 
-    /// Bitwise complement of a 128-bit cell.
+    /// Bitwise complement of a double-lane cell pair, re-masked to the operand width.
     ///
-    /// No `bits`, and that is the contract rather than an oversight: this lane's declared width is
-    /// exactly 128, so the complement cannot set a bit above it. Unreachable today for the same
-    /// reason as `not_int`.
+    /// Takes `bits` for the reason `not_int` does: the lane holds `65..=128`, so `!a` sets every
+    /// bit of the pair including the ones above the declared width, and leaving them set would
+    /// break the masked-cell invariant for every later reader. At the lane's widest width the mask
+    /// is a no-op, which is why an unmasked complement passes a sweep that stops at 128 —
+    /// `the_complement_opcode_agrees_with_the_model` covers both lanes at four narrower widths for
+    /// that reason. Unreachable today for the same reason as `not_int`.
     #[opcode]
-    fn not_int128(#[out] res: *mut Int128, #[frame] a: Int128) {
-        unsafe { *res = !a };
+    fn not_int128(#[out] res: *mut Int128, #[frame] a: Int128, bits: u64) {
+        unsafe { *res = double_complement(a, bits) };
     }
 
     #[opcode]
@@ -1752,6 +1793,174 @@ mod def {
         unsafe { *res = a.truncate(to_bits) };
     }
 
+    // THE WIDE LANE
+    // --------------------------------------------------------------------------------------
+    //
+    // One opcode per operation over a value of `ceil(bits/64)` frame cells, each body a call into
+    // [`int_limbs`]. Every operand is one encoded word, a frame position, as in the narrow lanes,
+    // while the width immediate is what says how many cells that position covers.
+    //
+    // That is also why nearly every opcode here carries a width where its narrower cousins do
+    // not: this is the lane where the _structural_ reason in the opcode set's own doc applies, and
+    // it is why `and_intn` takes a width its body never reads.
+
+    #[opcode]
+    fn add_intn(
+        bits: u64,
+        #[frame_slice(bits)] res: &mut [u64],
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) {
+        int_limbs::add(res, a, b, bits);
+    }
+
+    #[opcode]
+    fn sub_intn(
+        bits: u64,
+        #[frame_slice(bits)] res: &mut [u64],
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) {
+        int_limbs::sub(res, a, b, bits);
+    }
+
+    #[opcode]
+    fn mul_intn(
+        bits: u64,
+        #[frame_slice(bits)] res: &mut [u64],
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) {
+        int_limbs::mul(res, a, b, bits);
+    }
+
+    /// Divide, reading both operands as unsigned. Total, as the narrow lane's `cell_udiv` is.
+    ///
+    /// The scratch buffer is the remainder, which one long division produces alongside the
+    /// quotient whether or not the opcode wants it. Allocating per division is a cost the narrow
+    /// lanes do not pay; it is small beside the division itself, which is quadratic in limbs.
+    #[opcode]
+    fn udiv_intn(
+        bits: u64,
+        #[frame_slice(bits)] res: &mut [u64],
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) {
+        let mut discarded = vec![0u64; res.len()];
+        int_limbs::udivrem(res, &mut discarded, a, b, bits);
+    }
+
+    /// Remainder, reading both operands as unsigned. Total, as [`udiv_intn`] is.
+    #[opcode]
+    fn urem_intn(
+        bits: u64,
+        #[frame_slice(bits)] res: &mut [u64],
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) {
+        let mut discarded = vec![0u64; res.len()];
+        int_limbs::udivrem(&mut discarded, res, a, b, bits);
+    }
+
+    #[opcode]
+    fn and_intn(
+        bits: u64,
+        #[frame_slice(bits)] res: &mut [u64],
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) {
+        int_limbs::and(res, a, b);
+    }
+
+    #[opcode]
+    fn or_intn(
+        bits: u64,
+        #[frame_slice(bits)] res: &mut [u64],
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) {
+        int_limbs::or(res, a, b);
+    }
+
+    #[opcode]
+    fn xor_intn(
+        bits: u64,
+        #[frame_slice(bits)] res: &mut [u64],
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) {
+        int_limbs::xor(res, a, b);
+    }
+
+    #[opcode]
+    fn not_intn(bits: u64, #[frame_slice(bits)] res: &mut [u64], #[frame_slice(bits)] a: &[u64]) {
+        int_limbs::not(res, a, bits);
+    }
+
+    /// Left shift, wrapping at the operand width, with the amount reduced modulo that width.
+    ///
+    /// The amount is a value of the same width as the operand, as it is in the narrow lanes: the
+    /// elaborator unifies the two operands of an infix operator.
+    #[opcode]
+    fn shl_intn(
+        bits: u64,
+        #[frame_slice(bits)] res: &mut [u64],
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) {
+        int_limbs::shl_by(res, a, int_limbs::shift_amount(b, bits), bits);
+    }
+
+    /// Logical right shift: zero-fill, the lowering for an unsigned `>>`.
+    #[opcode]
+    fn ushr_intn(
+        bits: u64,
+        #[frame_slice(bits)] res: &mut [u64],
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) {
+        int_limbs::ushr_by(res, a, int_limbs::shift_amount(b, bits), bits);
+    }
+
+    #[opcode]
+    fn eq_intn(
+        bits: u64,
+        #[out] res: *mut u64,
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) {
+        unsafe {
+            *res = u64::from(int_limbs::eq(a, b));
+        }
+    }
+
+    #[opcode]
+    fn ult_intn(
+        bits: u64,
+        #[out] res: *mut u64,
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) {
+        unsafe {
+            *res = u64::from(int_limbs::ult(a, b));
+        }
+    }
+
+    /// Move a value between two integer widths, zero-filling above the source.
+    ///
+    /// One opcode for both directions: narrowing keeps the low `to_bits` bits and widening fills
+    /// with the source's unsigned high bits, which are zero. There is no sign-extending form
+    /// because bytecode never sees an `SExt`.
+    #[opcode]
+    fn cast_intn(
+        from_bits: u64,
+        to_bits: u64,
+        #[frame_slice(to_bits)] res: &mut [u64],
+        #[frame_slice(from_bits)] a: &[u64],
+    ) {
+        int_limbs::zero_extend(res, a, from_bits, to_bits);
+    }
+
     #[opcode]
     fn add_field(#[out] res: *mut Field, #[frame] a: Field, #[frame] b: Field) {
         unsafe {
@@ -1811,6 +2020,40 @@ mod def {
     fn cast_int128_to_field(#[out] res: *mut Field, #[frame] a: Int128) {
         unsafe {
             *res = Field::from(a.to_u128());
+        }
+    }
+
+    /// The element's canonical limbs, read as a `bits`-wide integer.
+    ///
+    /// Total at every width: an element has no bits above the ones [`FELT_LIMBS`] carries, so a
+    /// wider target is zero-filled and a narrower one keeps its low `bits`, which is the
+    /// truncating reading `docs/int-semantics.md` gives the `Field -> uN` cast. It masks its own
+    /// top cell, unlike its cell-lane sibling, because it has the width to mask to.
+    #[opcode]
+    fn cast_field_to_intn(bits: u64, #[frame_slice(bits)] res: &mut [u64], #[frame] a: Field) {
+        let limbs = ark_ff::PrimeField::into_bigint(a).0;
+        int_limbs::zero_extend(res, &limbs, (FELT_LIMBS * 64) as u64, bits);
+    }
+
+    /// A `bits`-wide integer moved into a field element.
+    ///
+    /// The limbs are the element's, so this needs every one of them to be a limb the element has:
+    /// past that there is nowhere for the value to go. The compiler never asks for one, because
+    /// width validation refuses a cast to `Field` above the widest width the modulus carries
+    /// injectively, which is narrower still — so both the assertion and the `expect` below are
+    /// backstops on that rule rather than reachable refusals.
+    #[opcode]
+    fn cast_intn_to_field(bits: u64, #[out] res: *mut Field, #[frame_slice(bits)] a: &[u64]) {
+        assert!(
+            a.len() <= FELT_LIMBS,
+            "an integer crosses the field boundary through {FELT_LIMBS} limbs, \
+             so an int{bits} has no element"
+        );
+        let mut limbs = [0u64; FELT_LIMBS];
+        limbs[..a.len()].copy_from_slice(a);
+        unsafe {
+            *res = <Field as ark_ff::PrimeField>::from_bigint(ark_ff::BigInt(limbs))
+                .expect("a width the modulus carries injectively has an element for every value");
         }
     }
 
@@ -2227,6 +2470,25 @@ mod def {
         (unsafe { pc.offset(3) }, frame)
     }
 
+    /// Assert two wide integers are equal, trapping if they are not.
+    ///
+    /// Raw, as the other assert-family opcodes are: a failing check has to return a null `pc` to
+    /// halt dispatch rather than fall through to the next instruction.
+    #[raw_opcode]
+    fn assert_eq_intn(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
+        bits: u64,
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) -> (*const u64, Frame) {
+        if !int_limbs::eq(a, b) {
+            return trap(pc, frame, vm);
+        }
+        (unsafe { pc.offset(4) }, frame)
+    }
+
     #[raw_opcode]
     fn assert_eq_field(
         pc: *const u64,
@@ -2358,19 +2620,17 @@ mod def {
     }
 
     /// Interleave the low 32 bits of `val` with zeros, giving a 64-bit spread pattern.
-    ///
-    /// The `u32`/`u64` in this pair's names are the *input* widths of a bit-layout transform, not
-    /// a claimed reading, which is why they survived the `_u64` -> `_int` rename.
     #[opcode]
-    fn spread_u32(#[out] res: *mut u64, #[frame] val: u64) {
+    fn spread_u32_to_u64(#[out] res: *mut u64, #[frame] val: u64) {
         let result = spread_bits(val as u32);
         unsafe {
             *res = result;
         }
     }
 
+    /// Split a 64-bit spread pattern into its two 32-bit bit streams, odd-indexed and even.
     #[opcode]
-    fn unspread_u64(#[out] res_and: *mut u64, #[out] res_xor: *mut u64, #[frame] val: u64) {
+    fn unspread_u64_to_u32(#[out] res_and: *mut u64, #[out] res_xor: *mut u64, #[frame] val: u64) {
         let (and_val, xor_val) = unspread_bits(val);
         unsafe {
             *res_and = and_val as u64;
@@ -2390,12 +2650,10 @@ mod def {
     ) -> (*const u64, Frame) {
         // Initialize spread table for this bit-width on first call.
         //
-        // Spread tables use the folded single-constraint allocation
-        // (`TableKind::Spread`): both operands of each entry (key=i,
-        // value=spread(i)) are constants, so each entry is just one
-        // `y·(α-i+β·spread(i))=m` constraint/witness instead of the generic
-        // two-constraint key-value form. Phase 2 recomputes `spread(i)` itself,
-        // so there is nothing to dump here.
+        // Spread tables use the folded single-constraint allocation (`TableKind::Spread`): both
+        // operands of each entry (key=i, value=spread(i)) are constants, so each entry is just one
+        // `y·(α-i+β·spread(i))=m` constraint/witness instead of the generic two-constraint
+        // key-value form. Phase 2 recomputes `spread(i)` itself, so there is nothing to dump here.
         if vm.spread_tables[bits].is_none() {
             let length = 1usize << bits;
             let table_info = TableInfo {
@@ -3349,6 +3607,19 @@ pub fn parse_struct_layouts(program: &[u64]) -> (Vec<StructDescriptor>, usize) {
     (layouts, off)
 }
 
+/// Every width the `_int128` lane holds that is worth sweeping, narrowest first.
+///
+/// The interior widths are the range's corners: two non-powers of two, where masking an amount by
+/// `bits - 1` and reducing it modulo `bits` stop agreeing, and one below the top.
+#[cfg(test)]
+fn double_lane_widths() -> Vec<u64> {
+    use mavros_int_semantics::int_bits::{HOST_LIMB_BITS, HOST_WORD_BITS};
+
+    let narrowest = HOST_LIMB_BITS as u64 + 1;
+    let widest = HOST_WORD_BITS as u64;
+    vec![narrowest, 96, 100, widest - 1, widest]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3373,6 +3644,316 @@ mod tests {
             Vec::new(),
             Vec::new(),
         )
+    }
+
+    /// Run the wide lane through real dispatch.
+    ///
+    /// The conformance sweeps in `int_limbs` call the bodies directly, so they say nothing about
+    /// whether an operand survives being written to the binary and read back: a slice takes its
+    /// length from a width immediate the same instruction carries, and a writer and a reader that
+    /// disagreed about the operand order would still compute the right answer on the wrong cells.
+    ///
+    /// The program ends in `trap` rather than `ret` because `ret` deallocates the base frame, and
+    /// the results are read out of that frame afterwards.
+    #[test]
+    fn the_wide_lane_survives_the_round_trip_through_dispatch() {
+        const BITS: u64 = 192;
+        let (a, b, sum, product, less, narrowed) = (2usize, 5, 8, 11, 14, 15);
+
+        let code = vec![
+            OpCode::AddIntn {
+                bits: BITS,
+                res: FramePosition(sum),
+                a: FramePosition(a),
+                b: FramePosition(b),
+            },
+            OpCode::MulIntn {
+                bits: BITS,
+                res: FramePosition(product),
+                a: FramePosition(a),
+                b: FramePosition(b),
+            },
+            OpCode::UltIntn {
+                bits: BITS,
+                res: FramePosition(less),
+                a: FramePosition(a),
+                b: FramePosition(b),
+            },
+            OpCode::CastIntn {
+                from_bits: BITS,
+                to_bits: 64,
+                res: FramePosition(narrowed),
+                a: FramePosition(a),
+            },
+            OpCode::Trap {},
+        ];
+        let locations = vec![location("main", 1); code.len()];
+        let program = Program {
+            functions: vec![Function {
+                name: "main".to_string(),
+                frame_size: 20,
+                code,
+                source_locations: locations,
+            }],
+            entry_points: vec![0],
+            entry_blob_field_count: 0,
+            global_frame_size: 0,
+            struct_layouts: Vec::new(),
+            constant_pool: Vec::new(),
+        };
+
+        let (mut binary, debug_info) = program.to_binary_and_debug_info();
+        let header = parse_program_header(&binary);
+        crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
+
+        let mut vm = empty_witgen_vm();
+        vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
+        let frame = Frame::base_frame(20, &mut vm);
+
+        // Every cell either operand covers is written below, which a pushed frame requires: it is
+        // `alloc`ated rather than zeroed.
+        //
+        // `a` is the largest value one limb holds, so every answer below crosses a limb boundary.
+        for (i, word) in [u64::MAX, 0, 0].into_iter().enumerate() {
+            frame.write_u64((a + i) as isize, word);
+        }
+        for (i, word) in [3u64, 0, 0].into_iter().enumerate() {
+            frame.write_u64((b + i) as isize, word);
+        }
+
+        let entry = header.entry_points[0];
+        unsafe { crate::interpreter::dispatch(binary.as_ptr().add(entry + 2), frame, &mut vm) };
+
+        let cells =
+            |at: usize| -> Vec<u64> { (0..3).map(|i| frame.read_u64((at + i) as isize)).collect() };
+        // (2^64 - 1) + 3 carries into the second limb.
+        assert_eq!(cells(sum), vec![2, 1, 0], "add_intn");
+        // 3 * (2^64 - 1) is 2*2^64 + (2^64 - 3).
+        assert_eq!(cells(product), vec![u64::MAX - 2, 2, 0], "mul_intn");
+        assert_eq!(
+            frame.read_u64(less as isize),
+            0,
+            "ult_intn: 2^64 - 1 is not below 3"
+        );
+        assert_eq!(
+            frame.read_u64(narrowed as isize),
+            u64::MAX,
+            "cast_intn to 64 bits"
+        );
+
+        frame.pop(&mut vm);
+    }
+
+    /// The other half of the overlap check: a scalar result inside a wide operand.
+    ///
+    /// `eq_intn` has no result _slice_, so the slice-against-slice check never runs for it. What
+    /// would corrupt it is a write through its `#[out]` into cells one of its operands is reading,
+    /// which is undefined behavior for the shared slice however the pointer was obtained.
+    #[test]
+    #[should_panic(expected = "overlap")]
+    fn a_scalar_result_inside_a_wide_operand_is_caught() {
+        let program = Program {
+            functions: vec![Function {
+                name: "main".to_string(),
+                frame_size: 12,
+                // `res` is one cell at 1, inside `a`'s three cells at 0.
+                code: vec![
+                    OpCode::EqIntn {
+                        bits: 192,
+                        res: FramePosition(1),
+                        a: FramePosition(0),
+                        b: FramePosition(4),
+                    },
+                    OpCode::Trap {},
+                ],
+                source_locations: vec![location("main", 1); 2],
+            }],
+            entry_points: vec![0],
+            entry_blob_field_count: 0,
+            global_frame_size: 0,
+            struct_layouts: Vec::new(),
+            constant_pool: Vec::new(),
+        };
+        let (mut binary, debug_info) = program.to_binary_and_debug_info();
+        let header = parse_program_header(&binary);
+        crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
+        let mut vm = empty_witgen_vm();
+        vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
+        let frame = Frame::base_frame(12, &mut vm);
+        let entry = header.entry_points[0];
+        unsafe { crate::interpreter::dispatch(binary.as_ptr().add(entry + 2), frame, &mut vm) };
+    }
+
+    /// The two wide shapes the round trip above does not reach.
+    ///
+    /// `not_intn` is the only `_intn` opcode with one operand, and `assert_eq_intn` is the only one
+    /// whose instruction length is written by hand rather than derived by the macro — its
+    /// `pc.offset(4)`. A wrong length there does not compute a wrong answer, it resumes dispatch on
+    /// an operand word, so the check is that the instruction _after_ the assertion runs at all.
+    #[test]
+    fn the_remaining_wide_shapes_survive_dispatch() {
+        const BITS: u64 = 192;
+        let (a, b, complement) = (0usize, 3, 6);
+
+        let code = vec![
+            OpCode::AssertEqIntn {
+                bits: BITS,
+                a: FramePosition(a),
+                b: FramePosition(b),
+            },
+            OpCode::NotIntn {
+                bits: BITS,
+                res: FramePosition(complement),
+                a: FramePosition(a),
+            },
+            OpCode::Trap {},
+        ];
+        let program = Program {
+            functions: vec![Function {
+                name: "main".to_string(),
+                frame_size: 12,
+                source_locations: vec![location("main", 1); code.len()],
+                code,
+            }],
+            entry_points: vec![0],
+            entry_blob_field_count: 0,
+            global_frame_size: 0,
+            struct_layouts: Vec::new(),
+            constant_pool: Vec::new(),
+        };
+
+        let (mut binary, debug_info) = program.to_binary_and_debug_info();
+        let header = parse_program_header(&binary);
+        crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
+
+        let mut vm = empty_witgen_vm();
+        vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
+        let frame = Frame::base_frame(12, &mut vm);
+        // A pushed frame is `alloc`ated and not zeroed, so every cell an operand covers is written.
+        for cell in 0..12 {
+            frame.write_u64(cell, 0);
+        }
+        for (i, word) in [7u64, 0, u64::MAX].into_iter().enumerate() {
+            frame.write_u64((a + i) as isize, word);
+            frame.write_u64((b + i) as isize, word);
+        }
+
+        let entry = header.entry_points[0];
+        unsafe { crate::interpreter::dispatch(binary.as_ptr().add(entry + 2), frame, &mut vm) };
+
+        let got: Vec<u64> = (0..3)
+            .map(|i| frame.read_u64((complement + i) as isize))
+            .collect();
+        assert_eq!(
+            got,
+            vec![!7u64, u64::MAX, 0],
+            "the assertion passed but did not resume on the instruction after it"
+        );
+
+        frame.pop(&mut vm);
+    }
+
+    /// The double lane wraps at its operand's width, not at the width of its two cells.
+    #[test]
+    fn the_double_lane_wraps_at_the_operand_width() {
+        const BITS: u64 = 96;
+        let (a, b, sum) = (2usize, 4, 6);
+
+        let program = Program {
+            functions: vec![Function {
+                name: "main".to_string(),
+                frame_size: 12,
+                code: vec![
+                    OpCode::AddInt128 {
+                        res: FramePosition(sum),
+                        a: FramePosition(a),
+                        b: FramePosition(b),
+                        bits: BITS,
+                    },
+                    OpCode::Trap {},
+                ],
+                source_locations: vec![location("main", 1); 2],
+            }],
+            entry_points: vec![0],
+            entry_blob_field_count: 0,
+            global_frame_size: 0,
+            struct_layouts: Vec::new(),
+            constant_pool: Vec::new(),
+        };
+
+        let (mut binary, debug_info) = program.to_binary_and_debug_info();
+        let header = parse_program_header(&binary);
+        crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
+
+        let mut vm = empty_witgen_vm();
+        vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
+        let frame = Frame::base_frame(12, &mut vm);
+
+        // A pushed frame is `alloc`ated and not zeroed, so every cell an opcode reads has to be
+        // written here, including the high cell of a small addend, which is otherwise whatever the
+        // allocator last left there.
+        for cell in 0..12 {
+            frame.write_u64(cell, 0);
+        }
+
+        // The largest value 96 bits holds, plus one: zero at 96 bits, and `2^96` at 128.
+        frame.write_u64(a as isize, u64::MAX);
+        frame.write_u64(a as isize + 1, 0xFFFF_FFFF);
+        frame.write_u64(b as isize, 1);
+
+        let entry = header.entry_points[0];
+        unsafe { crate::interpreter::dispatch(binary.as_ptr().add(entry + 2), frame, &mut vm) };
+
+        assert_eq!(
+            (
+                frame.read_u64(sum as isize),
+                frame.read_u64(sum as isize + 1)
+            ),
+            (0, 0),
+            "the sum wrapped at 128 bits rather than at 96"
+        );
+
+        frame.pop(&mut vm);
+    }
+
+    /// The overlap check exists because SSA is what keeps a result off its own operands: a property
+    /// of the frame layouter in another crate.
+    #[test]
+    #[should_panic(expected = "overlap")]
+    fn a_result_sharing_cells_with_an_operand_is_caught() {
+        const BITS: u64 = 192;
+        let program = Program {
+            functions: vec![Function {
+                name: "main".to_string(),
+                frame_size: 12,
+                // `res` at cell 3 covers 3..6 and `b` at cell 5 covers 5..8.
+                code: vec![
+                    OpCode::AddIntn {
+                        bits: BITS,
+                        res: FramePosition(3),
+                        a: FramePosition(0),
+                        b: FramePosition(5),
+                    },
+                    OpCode::Trap {},
+                ],
+                source_locations: vec![location("main", 1); 2],
+            }],
+            entry_points: vec![0],
+            entry_blob_field_count: 0,
+            global_frame_size: 0,
+            struct_layouts: Vec::new(),
+            constant_pool: Vec::new(),
+        };
+
+        let (mut binary, debug_info) = program.to_binary_and_debug_info();
+        let header = parse_program_header(&binary);
+        crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
+
+        let mut vm = empty_witgen_vm();
+        vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
+        let frame = Frame::base_frame(12, &mut vm);
+        let entry = header.entry_points[0];
+        unsafe { crate::interpreter::dispatch(binary.as_ptr().add(entry + 2), frame, &mut vm) };
     }
 
     #[test]
@@ -3631,7 +4212,7 @@ mod tests {
         assert_eq!(table_row_index(Field::from(0u64), 0), None);
     }
 
-    /// The bound alone is not enough. The row is addressed by the key's *low limb*, so a key whose
+    /// The bound alone is not enough. The row is addressed by the key's _low limb_, so a key whose
     /// high limbs are set has to be rejected even when that low limb names a valid row — otherwise
     /// `2^64 + 3` reads as row 3 of an 8-row table, and the lookup it cannot satisfy silently
     /// succeeds against a row it does not name.
@@ -3746,7 +4327,7 @@ mod tests {
             "an 8-bit `>>` by 8 reduces to `>> 0`"
         );
 
-        // An amount past the *host* width too, which is where a bare `a << b` panics in debug.
+        // An amount past the _host_ width too, which is where a bare `a << b` panics in debug.
         assert_eq!(cell_shl(a, 200, 8), a);
         assert_eq!(cell_ushr(a, 200, 8), a);
         assert_eq!(cell_ashr(a, 200, 8), a);
@@ -3800,49 +4381,50 @@ mod tests {
     }
 
     #[test]
-    fn the_128_bit_lane_masks_its_shift_amount_like_llvm() {
-        // `shift_amount_128` discards `b.hi` and the top of `b.lo`. That is not a check going
-        // missing: LLVM masks the whole 128-bit amount with 127, and the low seven bits of a
-        // 128-bit pattern live entirely in its low limb, so both backends shift by the same amount
-        // for every amount there is.
+    fn the_double_lane_reduces_its_shift_amount_like_llvm() {
+        // At a power-of-two width the mask reaches only the low limb, so discarding `b.hi` is
+        // exact rather than a check going missing: LLVM masks the whole pattern with
+        // `bit_width - 1`, and those bits live entirely in the low limb.
         let hi_set = Int128 { lo: 3, hi: 1 };
         assert_eq!(
-            shift_amount_128(hi_set),
+            shift_amount_128(hi_set, 128),
             3,
             "a high limb cannot change the low seven bits"
         );
-        assert_eq!(shift_amount_128(Int128 { lo: 1 << 32, hi: 0 }), 0);
+        assert_eq!(shift_amount_128(Int128 { lo: 1 << 32, hi: 0 }, 128), 0);
         assert_eq!(
-            shift_amount_128(Int128 {
-                lo: 127,
-                hi: u64::MAX
-            }),
-            127
-        );
-        assert_eq!(
-            shift_amount_128(Int128 { lo: 128, hi: 0 }),
+            shift_amount_128(Int128 { lo: 128, hi: 0 }, 128),
             0,
-            "128 masks to a shift by zero"
-        );
-        assert_eq!(
-            shift_amount_128(Int128 {
-                lo: u64::MAX,
-                hi: u64::MAX
-            }),
-            127
+            "128 reduces to a shift by zero"
         );
 
-        // The mask is what LLVM computes, spelled out independently: `amount & 127` over the whole
-        // 128-bit pattern.
+        // Spelled out independently at 128, where LLVM's reduction is a mask.
         for lo in [0u64, 1, 63, 64, 127, 128, 255, 1 << 32, u64::MAX] {
             for hi in [0u64, 1, u64::MAX] {
                 let b = Int128 { lo, hi };
                 let llvm = (b.to_u128() & 127) as u32;
                 assert_eq!(
-                    shift_amount_128(b),
+                    shift_amount_128(b, 128),
                     llvm,
                     "disagreed with LLVM's mask at {b:?}"
                 );
+            }
+        }
+
+        // Below the lane's top width the reduction is a real modulo, and the high limb carries
+        // bits the modulus can see. The top width is the exhaustive block above, where it is a
+        // mask instead, so it is the one width this loop drops.
+        let top = *double_lane_widths().last().expect("the lane holds a width");
+        for bits in double_lane_widths().into_iter().filter(|bits| *bits < top) {
+            for lo in [0u64, 1, 63, 64, 95, 96, 1 << 32, u64::MAX] {
+                for hi in [0u64, 1, u64::MAX] {
+                    let b = Int128 { lo, hi };
+                    assert_eq!(
+                        u128::from(shift_amount_128(b, bits)),
+                        b.to_u128() % u128::from(bits),
+                        "the reduction at {bits} bits is not the model's at {b:?}"
+                    );
+                }
             }
         }
     }
@@ -3929,7 +4511,7 @@ mod tests {
     fn a_complement_stays_inside_its_declared_width() {
         // An unmasked `!a` sets all 64 host bits, so an 8-bit `!0` would leave
         // `0xFFFF_FFFF_FFFF_FFFF` in a cell every later reader treats as 8 bits wide -- and, at
-        // one bit, would make `!1` a *truthy* value where the answer is `0`.
+        // one bit, would make `!1` a _truthy_ value where the answer is `0`.
         assert_eq!(cell_complement(0x0F, 8), 0xF0);
         assert_eq!(cell_complement(0x00, 8), 0xFF);
         assert_eq!(cell_complement(0, 1), 1, "!false is true");
@@ -3975,7 +4557,9 @@ mod tests {
 /// which is what makes those inputs safe rather than merely unspecified.
 #[cfg(test)]
 mod int_semantics_conformance {
-    use mavros_int_semantics::{CmpOp, IntBits, IntOp, Sign, corners, residue};
+    use mavros_int_semantics::{
+        CmpOp, IntBits, IntOp, Sign, corners, int_bits::HOST_LIMB_BITS, residue,
+    };
 
     use super::*;
 
@@ -3990,7 +4574,7 @@ mod int_semantics_conformance {
         corners::widths_for(sign.is_signed())
             .iter()
             .copied()
-            .filter(|bits| *bits <= 64)
+            .filter(|bits| *bits <= HOST_LIMB_BITS)
             .map(|bits| bits as u64)
             .collect()
     }
@@ -4002,8 +4586,8 @@ mod int_semantics_conformance {
     /// through the dispatch loop.
     fn int_lane(op: IntOp, bits: u64, a: u64, b: u64) -> u64 {
         match op {
-            // Add, sub and mul come in a signed pair in the model because they differ in *when they
-            // fail*. By the time an opcode runs the guard IR has already decided. So both members
+            // Add, sub and mul come in a signed pair in the model because they differ in _when they
+            // fail_. By the time an opcode runs the guard IR has already decided. So both members
             // map to one body here, which is the same reason `residue` and not `eval` is what this
             // lane is held to.
             IntOp::UAdd | IntOp::SAdd => cell_add(a, b, bits),
@@ -4028,24 +4612,27 @@ mod int_semantics_conformance {
     /// Run one operation through the 128-bit lane's opcode bodies.
     ///
     /// Unsigned only, and that is the lane's contract rather than a gap in the sweep:
-    /// `MAX_SUPPORTED_SIGNED_BITS` is 64, so no signed opcode ever reads a pattern this wide, which
+    /// `MAX_LOWERED_SIGNED_BITS` is 64, so no signed opcode ever reads a pattern this wide, which
     /// is why there is no `ashr_int128` or `sdiv_int128` to call.
-    fn int128_lane(op: IntOp, a: Int128, b: Int128) -> Int128 {
+    fn int128_lane(op: IntOp, bits: u64, a: Int128, b: Int128) -> Int128 {
         match op {
-            IntOp::UAdd => a.wrapping_add(b),
-            IntOp::USub => a.wrapping_sub(b),
-            IntOp::UMul => a.wrapping_mul(b),
+            IntOp::UAdd => double_add(a, b, bits),
+            IntOp::USub => double_sub(a, b, bits),
+            IntOp::UMul => double_mul(a, b, bits),
+            // Division and the bitwise three carry no width, and that is the masked-cell
+            // invariant being used: a quotient cannot exceed its dividend, and neither can a
+            // bitwise result set a bit its operands did not have.
             IntOp::UDiv => a.unsigned_div(b),
             IntOp::URem => a.unsigned_rem(b),
             IntOp::And => a & b,
             IntOp::Or => a | b,
             IntOp::Xor => a ^ b,
-            IntOp::Shl => a.wrapping_shl(shift_amount_128(b)),
-            IntOp::UShr => a.wrapping_shr(shift_amount_128(b)),
+            IntOp::Shl => double_shl(a, b, bits),
+            IntOp::UShr => double_ushr(a, b, bits),
             // The signed forms have no 128-bit opcode to sweep, which the caller enforces by
             // sweeping this lane unsigned; naming them here keeps a new variant a compile error.
             IntOp::SAdd | IntOp::SSub | IntOp::SMul | IntOp::SDiv | IntOp::SRem | IntOp::SShr => {
-                unreachable!("{op:?} has no 128-bit lane: MAX_SUPPORTED_SIGNED_BITS is 64")
+                unreachable!("{op:?} has no 128-bit lane: MAX_LOWERED_SIGNED_BITS is 64")
             }
         }
     }
@@ -4077,7 +4664,7 @@ mod int_semantics_conformance {
     /// exists only for the length of a call into the model. It is the one evaluator whose value
     /// domain _is_ the machine's, which is why it carries no `IntBits` of its own.
     fn host(value: &IntBits) -> u128 {
-        u128::try_from(value).expect("a pattern no wider than MAX_BITS fits a host word")
+        u128::try_from(value).expect("a pattern this sweep builds fits a host word")
     }
 
     /// `residue` on the host words either side of it.
@@ -4149,21 +4736,31 @@ mod int_semantics_conformance {
     fn the_int128_lane_agrees_with_the_model() {
         let mut checked = 0usize;
 
-        // Unsigned only: `MAX_SUPPORTED_SIGNED_BITS` is 64, so no signed opcode reads a pattern
+        // Unsigned only: `MAX_LOWERED_SIGNED_BITS` is 64, so no signed opcode reads a pattern
         // this wide and there is none to sweep. The filter is what the lane's own `unreachable!`
         // arms rely on.
         for op in IntOp::ALL.into_iter().filter(|op| !op.is_signed()) {
-            for (a, b) in operand_pairs(op, 128) {
-                let got = int128_lane(op, Int128::from_u128(a), Int128::from_u128(b));
+            // Every width the lane holds, not only its widest — see `double_lane_widths`.
+            for bits in double_lane_widths() {
+                for (a, b) in operand_pairs(op, bits as usize) {
+                    let got = int128_lane(op, bits, Int128::from_u128(a), Int128::from_u128(b));
 
-                if let Some(want) = model(op, 128, a, 128, b) {
+                    // Rule 3: whatever the answer is, it is inside the width.
                     assert_eq!(
-                        got.to_u128(),
-                        want,
-                        "{op:?} at 128 bits: {a:#x} {b:#x} gave {:#x}, model says {want:#x}",
-                        got.to_u128()
+                        got.to_u128() & !int_mask(bits),
+                        0,
+                        "{op:?} at {bits} bits left {a:#x} {b:#x} outside the width"
                     );
-                    checked += 1;
+
+                    if let Some(want) = model(op, bits as usize, a, bits as usize, b) {
+                        assert_eq!(
+                            got.to_u128(),
+                            want,
+                            "{op:?} at {bits} bits: {a:#x} {b:#x} gave {:#x}, model says {want:#x}",
+                            got.to_u128()
+                        );
+                        checked += 1;
+                    }
                 }
             }
         }
@@ -4207,6 +4804,19 @@ mod int_semantics_conformance {
                     u128::from(cell_complement(a as u64, bits)),
                     host(&IntBits::from_u128(bits as usize, a).complement()),
                     "not_int disagreed at {bits} bits on {a:#x}"
+                );
+            }
+        }
+
+        // The double lane's complement, which the sweep above cannot reach: `IntOp` has no
+        // complement variant, so `int128_lane` never sees one and `not_int128` would otherwise
+        // have no conformance test in either lane.
+        for bits in double_lane_widths() {
+            for a in corners::values(bits as usize) {
+                assert_eq!(
+                    double_complement(Int128::from_u128(a), bits).to_u128(),
+                    host(&IntBits::from_u128(bits as usize, a).complement()),
+                    "not_int128 disagreed at {bits} bits on {a:#x}"
                 );
             }
         }

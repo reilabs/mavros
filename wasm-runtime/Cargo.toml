@@ -10,5 +10,11 @@ crate-type = ["cdylib", "staticlib"]
 ark-bn254.workspace = true
 ark-ff.workspace = true
 
+# The normative integer model, for the conformance sweep only: this crate is an evaluator the
+# register holds to it, and nothing in the shipped runtime consults a specification at runtime.
+[dev-dependencies]
+mavros-int-semantics.workspace = true
+num-bigint.workspace = true
+
 [lints]
 workspace = true

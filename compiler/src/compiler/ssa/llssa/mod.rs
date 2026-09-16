@@ -780,29 +780,27 @@ pub struct LLStruct {
 }
 
 impl LLStruct {
+    // FIELD-ASSUMPTION: L3-llstruct
+    /// How many `i64`s a field element occupies, in either limb form.
+    ///
+    /// The two layouts below are the same shape read two ways — Montgomery storage and canonical
+    /// raw limbs — so they share one count, and anything that packs an integer into a field element
+    /// reads it here rather than naming a number of its own.
+    pub const FIELD_LIMBS: usize = 4;
+
     pub fn new(fields: Vec<LLFieldType>) -> Self {
         LLStruct { fields }
     }
 
     // FIELD-ASSUMPTION: L3-llstruct
-    /// 4×i64 struct representing a BN254 field element in Montgomery form.
+    /// Struct representing a BN254 field element in Montgomery form.
     pub fn field_elem() -> Self {
-        Self::new(vec![
-            LLFieldType::Int(64),
-            LLFieldType::Int(64),
-            LLFieldType::Int(64),
-            LLFieldType::Int(64),
-        ])
+        Self::new(vec![LLFieldType::Int(64); Self::FIELD_LIMBS])
     }
 
-    /// 4×i64 struct representing raw (non-Montgomery) limbs.
+    /// Struct representing raw (non-Montgomery) limbs.
     pub fn limbs() -> Self {
-        Self::new(vec![
-            LLFieldType::Int(64),
-            LLFieldType::Int(64),
-            LLFieldType::Int(64),
-            LLFieldType::Int(64),
-        ])
+        Self::new(vec![LLFieldType::Int(64); Self::FIELD_LIMBS])
     }
 
     /// RC header: { Int(64) } — just a refcount.
