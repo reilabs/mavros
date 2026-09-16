@@ -109,11 +109,11 @@ pub struct ExpressionConverter<'a> {
     current_source_location: SourceLocation,
 }
 
-/// A match scrutinee, and an optional tag in case the scrutinee is an enum or a tuple.
+/// A match scrutinee, plus its `Field` tag when the scrutinee is an enum.
 struct Scrutinee {
     value: ValueId,
     ty: AstType,
-    tag: Option<(ValueId, AstType)>,
+    tag: Option<ValueId>,
 }
 
 impl<'a> ExpressionConverter<'a> {
@@ -982,8 +982,7 @@ impl<'a> ExpressionConverter<'a> {
         let tag = match m.cases.first().map(|first| &first.constructor) {
             Some(c @ Constructor::Variant(..)) if c.is_enum() => {
                 let location = self.current_source_location.clone();
-                let tag = self.emit_at_source_location(b, location, |e| e.tuple_proj(value, 0));
-                Some((tag, AstType::Field))
+                Some(self.emit_at_source_location(b, location, |e| e.tuple_proj(value, 0)))
             }
             Some(
                 Constructor::Variant(..)
@@ -1061,10 +1060,7 @@ impl<'a> ExpressionConverter<'a> {
     ) -> ValueId {
         use acvm::FieldElement;
 
-        let (tag, tag_ty) = match &s.tag {
-            Some((tag, tag_ty)) => (*tag, tag_ty),
-            None => (s.value, &s.ty),
-        };
+        let tag = s.tag.unwrap_or(s.value);
         match constructor {
             c if c.is_tuple_or_struct() => {
                 panic!("ICE: {constructor:?} is a single-constructor pattern and is never tested")
@@ -1075,12 +1071,12 @@ impl<'a> ExpressionConverter<'a> {
             Constructor::True => tag,
             Constructor::False => self.emit_at_source_location(b, location, |e| e.not(tag)),
             Constructor::Int(value) => {
-                let c = Self::tag_constant(*value, tag_ty, b);
+                let c = Self::tag_constant(*value, &s.ty, b);
                 self.emit_at_source_location(b, location, |e| e.eq(tag, c))
             }
             // Guaranteed to be enum since tuple cases are matched above
             Constructor::Variant(_, idx) => {
-                let c = Self::tag_constant(FieldElement::from(*idx as u128), tag_ty, b);
+                let c = Self::tag_constant(FieldElement::from(*idx as u128), &AstType::Field, b);
                 self.emit_at_source_location(b, location, |e| e.eq(tag, c))
             }
             Constructor::Range(..) => {
