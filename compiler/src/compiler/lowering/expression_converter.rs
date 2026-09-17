@@ -71,6 +71,10 @@ pub struct ExpressionConverter<'a> {
 
     /// The Noir type of every `let`-bound local whose type `expression_type` can recover, plus
     /// every match case argument, since nested patterns match on those.
+    ///
+    /// The map only has to be complete for match scrutinees. The elaborator wraps the scrutinee
+    /// in a fresh `let` (`wrap_in_let`) and nested matches run on fresh case-argument locals, so
+    /// every scrutinee `convert_match` sees was recorded here.
     local_types: HashMap<LocalId, AstType>,
 
     /// Maps AST FuncId to SSA FunctionId
