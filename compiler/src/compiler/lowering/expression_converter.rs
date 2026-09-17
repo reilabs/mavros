@@ -1660,7 +1660,7 @@ impl<'a> ExpressionConverter<'a> {
                 }
             }
             AstType::Bool => Constant::int(1, value.to_u128()),
-            _ => panic!("Unexpected type for integer literal: {:?}", typ),
+            _ => panic!("ICE: integer constant with non-integer type {typ:?}"),
         }
     }
 
