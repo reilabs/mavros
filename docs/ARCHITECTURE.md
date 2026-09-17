@@ -125,11 +125,11 @@ code to evaluate both branches and select the result, **converting control flow 
 Control-flow linearization records branch-result merges without choosing their implementation. A
 private function driver directly captures original SSA provenance, linearizes control flow, and
 emits the returned merges. After linearization, it computes flow, types, and ranges once for the
-module before emitting any merges. Intermediate state stays local to that driver. Merge
-emission replays profitable sparse writes in source order, selecting changed elements. Unsupported
-shapes and chains that cross a write's or nested parent read's guard boundary retain the general
-element-wise merge. Replay preserves the original branch predicates for bounds checks, so active
-invalid writes and parent reads fail and inactive accesses remain safe.
+module before emitting any merges. Intermediate state stays local to that driver. Merge emission
+replays profitable sparse writes in source order, selecting changed elements. Unsupported shapes and
+chains that cross a write's or nested parent read's guard boundary retain the general element-wise
+merge. Replay preserves the original branch predicates for bounds checks, so active invalid writes
+and parent reads fail and inactive accesses remain safe.
 
 ### Stage 3: Optimization Passes
 
