@@ -1,5 +1,5 @@
 // True/False constructors, a bool arm with a wildcard, and arms that yield the same value
-// (the elaborator compares arm bodies by `ExprId`, so these are still two tested cases).
+// (the elaborator compares arm bodies by `ExprId`, so `same` keeps two cases and no default).
 fn pick(b: bool, x: Field, y: Field) -> Field {
     match b {
         true => x,
