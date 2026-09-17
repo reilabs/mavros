@@ -909,6 +909,7 @@ pub struct VM {
     /// interpreter checks this after dispatch returns to distinguish a clean
     /// halt from a trapped one.
     pub trapped: bool,
+    pub(crate) trap_message: Option<String>,
     program_base: *const u64,
     program_len: usize,
     debug_info: DebugInfo,
@@ -961,6 +962,7 @@ impl VM {
             struct_layouts,
             constants,
             trapped: false,
+            trap_message: None,
             program_base: ptr::null(),
             program_len: 0,
             debug_info: DebugInfo::default(),
@@ -1013,6 +1015,7 @@ impl VM {
             struct_layouts,
             constants,
             trapped: false,
+            trap_message: None,
             program_base: ptr::null(),
             program_len: 0,
             debug_info: DebugInfo::default(),
@@ -1447,12 +1450,24 @@ mod def {
     }
 
     /// Halts execution and marks the VM as trapped. The interpreter analogue
-    /// of the WASM target's `unreachable`: the assert-family opcodes delegate
-    /// here when their check fails.
+    /// of the WASM target's `unreachable`: assertions, range checks and indexed
+    /// accesses delegate here when their checks fail.
     #[raw_opcode]
     fn trap(pc: *const u64, frame: Frame, vm: &mut VM) -> (*const u64, Frame) {
         vm.capture_trap(pc, frame);
         (std::ptr::null(), frame)
+    }
+
+    /// Attach a diagnostic without adding a message operand to the serialized trap opcode.
+    #[cold]
+    fn trap_with_message(
+        pc: *const u64,
+        frame: Frame,
+        vm: &mut VM,
+        message: String,
+    ) -> (*const u64, Frame) {
+        vm.trap_message = Some(message);
+        trap(pc, frame, vm)
     }
 
     #[raw_opcode]
@@ -2193,6 +2208,7 @@ mod def {
         }
     }
 
+    /// Raw so an invalid index can halt dispatch instead of advancing to the next instruction.
     #[raw_opcode]
     fn array_get(
         pc: *const u64,
@@ -2204,18 +2220,25 @@ mod def {
         stride: usize,
     ) -> (*const u64, Frame) {
         // Check the element index before multiplying by stride: a large index can wrap.
-        if stride == 0 || index as usize >= array.layout().array_size() / stride {
-            return trap(pc, frame, vm);
+        let len = array.array_len(stride);
+        if index as usize >= len {
+            return trap_with_message(
+                pc,
+                frame,
+                vm,
+                format!("array_get: index {index} out of bounds for array of length {len}"),
+            );
         }
         let src = array.array_idx(index as usize, stride);
         unsafe {
             ptr::copy_nonoverlapping(src, res, stride);
         }
-        (unsafe { pc.add(5) }, frame)
+        (unsafe { pc.offset(5) }, frame)
     }
 
     /// Read an element out of a blob: a raw sequence of `len` elements of
     /// `stride` cells each, stored inline in the frame starting at `source`.
+    /// Raw so a failed bounds check can halt dispatch before accessing the frame.
     #[raw_opcode]
     fn blob_get(
         pc: *const u64,
@@ -2227,13 +2250,19 @@ mod def {
         stride: usize,
         len: usize,
     ) -> (*const u64, Frame) {
+        assert!(stride > 0, "blob element stride must be nonzero");
         if index as usize >= len {
-            return trap(pc, frame, vm);
+            return trap_with_message(
+                pc,
+                frame,
+                vm,
+                format!("blob_get: index {index} out of bounds for blob of length {len}"),
+            );
         }
         unsafe {
             frame.write_to(res, (source.0 + (index as usize) * stride) as isize, stride);
         }
-        (unsafe { pc.add(6) }, frame)
+        (unsafe { pc.offset(6) }, frame)
     }
 
     #[opcode]
@@ -2250,6 +2279,7 @@ mod def {
         }
     }
 
+    /// Raw so an invalid index can halt dispatch before copying or mutating the array.
     #[raw_opcode]
     #[inline(never)]
     fn array_set(
@@ -2262,8 +2292,14 @@ mod def {
         source: FramePosition,
         stride: usize,
     ) -> (*const u64, Frame) {
-        if stride == 0 || index as usize >= array.layout().array_size() / stride {
-            return trap(pc, frame, vm);
+        let len = array.array_len(stride);
+        if index as usize >= len {
+            return trap_with_message(
+                pc,
+                frame,
+                vm,
+                format!("array_set: index {index} out of bounds for array of length {len}"),
+            );
         }
         let new_array = array.copy_if_reused(vm);
         let target = new_array.array_idx(index as usize, stride);
@@ -2287,12 +2323,12 @@ mod def {
             frame.write_to(target, source.0 as isize, stride);
             *res = new_array;
         }
-        (unsafe { pc.add(6) }, frame)
+        (unsafe { pc.offset(6) }, frame)
     }
 
     #[opcode]
     fn slice_len(#[out] res: *mut u64, #[frame] array: BoxedValue, stride: usize) {
-        let len = array.layout().array_size() / stride;
+        let len = array.array_len(stride);
         unsafe {
             *res = len as u64;
         }
@@ -4012,6 +4048,20 @@ mod tests {
                 } else {
                     assert!(vm.trapped, "{opcode}, index={index}");
                     assert!(next_pc.is_null());
+                    let (operation, kind) = match opcode {
+                        OpCode::ArrayGet { .. } => ("array_get", "array"),
+                        OpCode::ArraySet { .. } => ("array_set", "array"),
+                        _ => ("blob_get", "blob"),
+                    };
+                    assert_eq!(
+                        vm.trap_message.as_deref(),
+                        Some(
+                            format!(
+                                "{operation}: index {index} out of bounds for {kind} of length 2"
+                            )
+                            .as_str()
+                        )
+                    );
                     assert_eq!(output, &[0; 4]);
                     assert_eq!(contents, initial);
                 }
@@ -4019,6 +4069,220 @@ mod tests {
                 frame.pop(&mut vm);
             }
         }
+    }
+
+    #[test]
+    fn zero_stride_is_invalid_bytecode_not_a_program_trap() {
+        let array = BoxedValue(ptr::null_mut());
+        let frame = Frame {
+            data: ptr::null_mut(),
+        };
+        let mut vm = empty_witgen_vm();
+        // The invariant must be checked before touching any of these null pointers.
+        for operation in ["array_get", "array_set", "blob_get", "slice_len"] {
+            let panic =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match operation {
+                    "array_get" => {
+                        array_get(ptr::null(), frame, &mut vm, ptr::null_mut(), array, 0, 0);
+                    }
+                    "array_set" => {
+                        array_set(
+                            ptr::null(),
+                            frame,
+                            &mut vm,
+                            ptr::null_mut(),
+                            array,
+                            0,
+                            FramePosition(0),
+                            0,
+                        );
+                    }
+                    "blob_get" => {
+                        blob_get(
+                            ptr::null(),
+                            frame,
+                            &mut vm,
+                            ptr::null_mut(),
+                            FramePosition(0),
+                            0,
+                            0,
+                            2,
+                        );
+                    }
+                    _ => slice_len(ptr::null_mut(), array, 0),
+                }))
+                .expect_err("zero stride must panic");
+            let message = panic.downcast_ref::<&str>().unwrap();
+            assert!(
+                message.contains("stride must be nonzero"),
+                "{operation}: {message}"
+            );
+            assert!(!vm.trapped);
+        }
+    }
+
+    #[test]
+    fn every_raw_opcode_uses_the_serialized_instruction_boundary() {
+        use FramePosition as P;
+        let mut covered = Vec::new();
+        for opcode in [
+            OpCode::Jmp {
+                target: JumpTarget(0),
+            },
+            OpCode::JmpIf {
+                cond: P(2),
+                if_t: JumpTarget(0),
+                if_f: JumpTarget(0),
+            },
+            OpCode::Call {
+                func: JumpTarget(0),
+                args: vec![],
+                ret: P(10),
+            },
+            OpCode::Call {
+                func: JumpTarget(0),
+                args: vec![(1, P(2)), (4, P(6))],
+                ret: P(10),
+            },
+            OpCode::Ret {},
+            OpCode::Trap {},
+            OpCode::R1C {
+                a: P(2),
+                b: P(2),
+                c: P(2),
+            },
+            OpCode::WriteWitness { val: P(2) },
+            OpCode::ArrayGet {
+                res: P(10),
+                array: P(20),
+                index: P(2),
+                stride: 4,
+            },
+            OpCode::ArraySet {
+                res: P(10),
+                array: P(20),
+                index: P(2),
+                source: P(6),
+                stride: 4,
+            },
+            OpCode::BlobGet {
+                res: P(10),
+                source: P(6),
+                index: P(2),
+                stride: 4,
+                len: 2,
+            },
+            OpCode::AssertEqInt { a: P(2), b: P(2) },
+            OpCode::AssertEqInt128 { a: P(2), b: P(2) },
+            OpCode::AssertEqIntn {
+                bits: 192,
+                a: P(2),
+                b: P(6),
+            },
+            OpCode::AssertEqField { a: P(2), b: P(2) },
+            OpCode::AssertR1C {
+                a: P(2),
+                b: P(2),
+                c: P(2),
+            },
+            OpCode::Rangecheck {
+                val: P(2),
+                max_bits: 8,
+            },
+            OpCode::SpreadLookupField {
+                val: P(2),
+                result: P(2),
+                flag: P(2),
+                bits: 1,
+            },
+            OpCode::Pow2LookupField {
+                amount: P(2),
+                factor: P(2),
+                flag: P(2),
+                size: 1,
+            },
+            OpCode::RngchkField {
+                val: P(2),
+                flag: P(2),
+                bits: 1,
+            },
+            OpCode::ArrayLookupField {
+                array: P(20),
+                index: P(2),
+                result: P(2),
+                flag: P(2),
+                stride: 4,
+                elem_kind: ELEM_FIELD,
+            },
+        ] {
+            // Separate tape regions keep every forward opcode's writes in allocated storage.
+            let mut tapes = vec![Field::ZERO; 8 * 16];
+            let mut ptrs = tapes.chunks_mut(16).map(|chunk| chunk.as_mut_ptr());
+            let mut vm = VM::new_witgen(
+                ptrs.next().unwrap(),
+                ptrs.next().unwrap(),
+                ptrs.next().unwrap(),
+                ptrs.next().unwrap(),
+                ptrs.next().unwrap(),
+                ptrs.next().unwrap(),
+                ptrs.next().unwrap(),
+                ptrs.next().unwrap(),
+                0,
+                0,
+                ptr::null_mut(),
+                vec![],
+                vec![],
+            );
+            let frame = Frame::base_frame(24, &mut vm);
+            let array = BoxedValue::alloc(BoxedLayout::array(8, false), &mut vm);
+            unsafe {
+                ptr::write_bytes(frame.data, 0, 24);
+                ptr::write_bytes(array.data(), 0, 8);
+                *frame.data.add(20) = array.0 as u64;
+            }
+            let mut binary = Vec::new();
+            opcode.to_binary(&mut binary, &mut Vec::new());
+            let id = binary[0] as usize;
+            covered.push(id);
+            let end = OpCode::next_opcode(&binary, 0);
+            // Append a callee header and instruction for Call, or a jump destination.
+            binary.extend([8, 0]);
+            match opcode {
+                OpCode::Jmp { .. } => binary[1] = end as u64,
+                OpCode::JmpIf { .. } => {
+                    binary[2] = end as u64;
+                    binary[3] = end as u64;
+                }
+                OpCode::Call { .. } => binary[1] = (end + 1) as u64,
+                _ => {}
+            }
+            let expected = unsafe { binary.as_ptr().add(end) };
+            let (next_pc, next_frame) = DISPATCH[id](binary.as_ptr(), frame, &mut vm);
+            match opcode {
+                OpCode::Call { .. } => {
+                    assert_eq!(next_pc, unsafe { expected.add(1) });
+                    let (return_pc, caller) = ret(next_pc, next_frame, &mut vm);
+                    assert_eq!(return_pc, expected, "{opcode}");
+                    assert_eq!(caller.data, frame.data);
+                }
+                OpCode::Ret { .. } | OpCode::Trap { .. } => assert!(next_pc.is_null()),
+                _ => {
+                    assert!(!vm.trapped, "{opcode}");
+                    assert_eq!(next_pc, expected, "{opcode}");
+                    assert_eq!(next_frame.data, frame.data);
+                }
+            }
+            array.dec_rc(&mut vm);
+            if !matches!(opcode, OpCode::Ret { .. }) {
+                frame.pop(&mut vm);
+            }
+        }
+        covered.sort_unstable();
+        covered.dedup();
+        assert_eq!(
+            covered, RAW_OPCODES,
+            "add a dispatch case for each new raw opcode"
+        );
     }
 
     #[test]

@@ -389,6 +389,12 @@ impl BoxedValue {
     //     unsafe { *self.meta() }.size()
     // }
 
+    /// Number of elements in an array or slice. A zero stride is invalid bytecode.
+    pub fn array_len(&self, stride: usize) -> usize {
+        assert!(stride > 0, "array element stride must be nonzero");
+        self.layout().array_size() / stride
+    }
+
     pub fn array_idx(&self, idx: usize, stride: usize) -> *mut u64 {
         unsafe { self.data().offset(idx as isize * stride as isize) }
     }
