@@ -40,6 +40,8 @@ use crate::compiler::{
     },
 };
 
+use mavros_int_semantics::IntBits;
+
 pub struct LowerZstSlices {}
 
 impl LowerZstSlices {
@@ -118,7 +120,8 @@ fn lower_instruction(
 ) {
     let is_zst_slice = |v: ValueId| is_zst_slice_type(fti.get_value_type(v));
     let ty_of = |v: ValueId| fti.get_value_type(v);
-    let len_const = |b: &mut HLInstrBuilder<'_>, n: usize| b.int_const(32, n as u128);
+    let len_const =
+        |b: &mut HLInstrBuilder<'_>, n: usize| b.int_const(IntBits::from_u128(32, n as u128));
 
     match op {
         OpCode::MkSeq {
@@ -354,7 +357,10 @@ fn lower_type(ty: &Type) -> Type {
         TypeExpr::Ref(inner) => lower_type(inner).ref_of(),
         TypeExpr::Tuple(elems) => Type::tuple_of(elems.iter().map(lower_type).collect()),
         TypeExpr::WitnessOf(inner) => Type::witness_of(lower_type(inner)),
-        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => ty.clone(),
+        TypeExpr::Function(returns) => {
+            Type::function_returning(returns.iter().map(lower_type).collect())
+        }
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Blob(..) => ty.clone(),
     }
 }
 
@@ -371,7 +377,7 @@ pub fn is_zero_leaf(ty: &Type) -> bool {
         TypeExpr::Slice(_)
         | TypeExpr::Field
         | TypeExpr::Int(_)
-        | TypeExpr::Function
+        | TypeExpr::Function(_)
         | TypeExpr::Blob(..) => false,
     }
 }
