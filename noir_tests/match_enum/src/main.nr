@@ -6,7 +6,8 @@ enum Shape {
     Rect(Field, Field),
 }
 
-// A single-variant enum has one untested case, so no tag is projected at all.
+// A single-variant enum has one case and no default, so it runs untested. The tag is projected
+// but never compared.
 enum Only {
     Just(u32),
 }
