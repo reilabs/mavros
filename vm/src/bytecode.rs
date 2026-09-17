@@ -260,16 +260,45 @@ impl VM {
     }
 }
 
-/// Element storage kind for array lookup opcodes.
-/// Encoded as usize for compatibility with the opcode proc macro.
+/// Element storage kind for array lookup opcodes, encoded as `usize` for compatibility with the
+/// opcode proc macro.
 pub const ELEM_WORD: usize = 0;
 pub const ELEM_FIELD: usize = 1;
 pub const ELEM_WITNESS: usize = 2;
 pub const ELEM_U128: usize = 3;
 
+/// An integer spanning the opcode's own `stride` cells, read as one little-endian element.
+pub const ELEM_CELLS: usize = 4;
+
+/// One element of `cells` consecutive cells, little-endian, as a field element.
+///
+/// The bound is a real assertion rather than a `debug_assert!` to avoid a silent state corruption:
+/// `take` below would read the low [`FELT_LIMBS`] cells of a wider element and answer as if that
+/// were the entire value. `lookup_elem_kind` in the compiler ensures the same bound from the other
+/// end.
+#[inline(always)]
+unsafe fn read_cells_as_field(ptr: *mut u64, cells: usize) -> Field {
+    assert!(
+        cells <= FELT_LIMBS,
+        "an element is carried through {FELT_LIMBS} limbs, so {cells} cells have nowhere to go"
+    );
+    let mut limbs = [0u64; FELT_LIMBS];
+    for (index, limb) in limbs.iter_mut().enumerate().take(cells) {
+        *limb = unsafe { *ptr.add(index) };
+    }
+    <Field as ark_ff::PrimeField>::from_bigint(ark_ff::BigInt(limbs))
+        .expect("a width the modulus carries injectively has an element for every value")
+}
+
 /// Read an array element as a Field and bump out_db accordingly.
 #[inline(always)]
-unsafe fn lookup_elem_bump_db(ptr: *mut u64, elem_kind: usize, coeff: Field, vm: &mut VM) {
+unsafe fn lookup_elem_bump_db(
+    ptr: *mut u64,
+    elem_kind: usize,
+    cells: usize,
+    coeff: Field,
+    vm: &mut VM,
+) {
     match elem_kind {
         ELEM_WORD => unsafe {
             let v = Field::from(*(ptr as *const u64));
@@ -283,6 +312,10 @@ unsafe fn lookup_elem_bump_db(ptr: *mut u64, elem_kind: usize, coeff: Field, vm:
             let v = Field::from((*(ptr as *const Int128)).to_u128());
             *vm.data.as_ad.out_db += coeff * v;
         },
+        ELEM_CELLS => unsafe {
+            let v = read_cells_as_field(ptr, cells);
+            *vm.data.as_ad.out_db += coeff * v;
+        },
         ELEM_WITNESS => {
             let elem = BoxedValue(unsafe { *(ptr as *const *mut u64) });
             elem.bump_db(coeff, vm);
@@ -293,11 +326,12 @@ unsafe fn lookup_elem_bump_db(ptr: *mut u64, elem_kind: usize, coeff: Field, vm:
 
 /// Read a pure (non-WitnessOf) array element as a Field value.
 #[inline(always)]
-unsafe fn read_pure_elem_as_field(ptr: *mut u64, elem_kind: usize) -> Field {
+unsafe fn read_pure_elem_as_field(ptr: *mut u64, elem_kind: usize, cells: usize) -> Field {
     match elem_kind {
         ELEM_WORD => Field::from(unsafe { *(ptr as *const u64) }),
         ELEM_FIELD => unsafe { *(ptr as *const Field) },
         ELEM_U128 => Field::from(unsafe { (*(ptr as *const Int128)).to_u128() }),
+        ELEM_CELLS => unsafe { read_cells_as_field(ptr, cells) },
         _ => unreachable!(),
     }
 }
@@ -3032,7 +3066,7 @@ mod def {
             // Dump array element values into the x-slots (even offsets) of the table section
             let length = unsafe {
                 for_each_array_leaf(array, stride, |i, elem_ptr| {
-                    let elem_field = read_pure_elem_as_field(elem_ptr, elem_kind);
+                    let elem_field = read_pure_elem_as_field(elem_ptr, elem_kind, stride);
                     // Write it into the x-slot (even offset: 2*i) of the constraint section
                     *vm.data.as_forward.out_a_base.add(cnst_off + 2 * i) = elem_field;
                 })
@@ -3235,7 +3269,7 @@ mod def {
                             .out_da
                             .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) += x_coeff;
                         // db[v_i] += x_coeff (B entry: element value)
-                        lookup_elem_bump_db(elem_ptr, elem_kind, x_coeff, vm);
+                        lookup_elem_bump_db(elem_ptr, elem_kind, stride, x_coeff, vm);
                         // dc[x_wit] -= x_coeff (C entry: (x, -1))
                         *vm.data
                             .as_ad

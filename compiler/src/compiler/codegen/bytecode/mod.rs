@@ -2119,12 +2119,27 @@ fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {
         TypeExpr::Int(bits) => match int_lane(*bits) {
             // One `ELEM_WORD` per element.
             Lane::Cell => (1, bytecode::ELEM_WORD),
-            // The tag names a cell count and a reading, not a width: it makes the tape read two
-            // cells as one unsigned value, which is the right value at any width the lane holds.
+            // The tag names a cell count and a reading: it makes the tape read two cells as one
+            // unsigned value.
             Lane::Double => (2, bytecode::ELEM_U128),
-            // `ELEM_WORD` and `ELEM_U128` are tags the VM's lookup tape reads, so a wide element
-            // needs a third one rather than the stride alone.
-            Lane::Wide => unsupported_int_width("an array lookup element", *bits),
+            // Wider than either narrow lane, and still one field element: the tape takes the cell
+            // count and reads the element little-endian out of that many cells.
+            //
+            // The band this covers is bounded by the widest width the field carries injectively.
+            // Above it, `passes::wide_witness_ints` transposes a sequence into one per limb before
+            // codegen, so every element reaching here is a limb of at most one cell and takes the
+            // arm above.
+            Lane::Wide => {
+                let cells = int_cell_count(*bits);
+                assert!(
+                    cells <= bytecode::FELT_LIMBS,
+                    "ICE: an int{bits} sequence element spans {cells} cells, past the {} an \
+                     element is carried through; a width the field cannot carry injectively is \
+                     transposed into one sequence per limb before codegen",
+                    bytecode::FELT_LIMBS
+                );
+                (cells, bytecode::ELEM_CELLS)
+            }
         },
         TypeExpr::WitnessOf(inner) => {
             let inner_kind = lookup_elem_kind(inner);

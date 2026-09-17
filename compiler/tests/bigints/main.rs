@@ -9,13 +9,13 @@ use mavros_compiler::{
         SourceLocation, SourcePosition,
         hlssa::{
             BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, HLSSA, OpCode,
-            SequenceTargetType, Type,
+            SequenceTargetType, SliceOpDir, Type,
             builder::{HLEmitter as _, HLSSABuilder},
         },
     },
     driver::{Driver, Error as DriverError},
 };
-use mavros_int_semantics::{IntBits, IntOp, corners};
+use mavros_int_semantics::{IntBits, IntOp, corners, int_bits::HOST_LIMB_BITS};
 use num_bigint::BigUint;
 
 // UTILITIES
@@ -477,6 +477,52 @@ fn a_bare_narrowing_cast_truncates_at_every_width() {
                 }
             ),
             "int{bits} accepted a wrong truncation: {refused:?}"
+        );
+    }
+}
+
+/// A narrowing **between two widths the representation carries as limbs**, where the target is not
+/// a whole number of limbs.
+///
+/// The limb list a narrowing builds is the **target's**, so its top limb is narrower than the
+/// source limb it comes from. Cutting that limb with a `BitRange` gives the right bits and the
+/// wrong type (as a window keeps its source's width) and the limb then meets an operand split at
+/// its true width with nothing able to pair the two.
+///
+/// Limb-aligned targets never cut a limb at all, which is why 256 and 320 compile either way and
+/// the widths here are deliberately not multiples of the limb.
+#[test]
+fn a_narrowing_between_two_widths_held_as_limbs() {
+    let injective = first_width_past_the_field() - 1;
+    let source = BigUint::from(1u8) << 200;
+    for (from, to) in [(384usize, 300usize), (320, 254), (384, 319), (320, 256)] {
+        let ssa = main_program(
+            &[Type::int(injective)],
+            &[Type::int(1)],
+            move |e, params| {
+                let widened = e.cast_to(CastTarget::Int(from), params[0]);
+                let narrowed = e.cast_to(CastTarget::Int(to), widened);
+                // The whole target width, so a limb dropped or mistyped is visible rather than hidden
+                // below 64 bits.
+                let want = e.int_const(IntBits::from_biguint(to, &(BigUint::from(1u8) << 200)));
+                vec![e.cmp(narrowed, want, CmpKind::Eq)]
+            },
+        );
+        let compiled = Compiled::new(ssa)
+            .unwrap_or_else(|error| panic!("int{from} narrowed to int{to}: {error}"));
+
+        let param = IntBits::from_biguint(injective, &source);
+        let verdict = compiled.run(&input_block(&[&param, &IntBits::from_u128(1, 1)]));
+        assert!(
+            verdict.is_accepted(),
+            "int{from} narrowed to int{to}: {verdict:?}"
+        );
+
+        // And it can go red: the same program asked for the opposite answer.
+        let verdict = compiled.run(&input_block(&[&param, &IntBits::from_u128(1, 0)]));
+        assert!(
+            !verdict.is_accepted(),
+            "int{from} narrowed to int{to}: a wrong answer was accepted"
         );
     }
 }
@@ -1094,7 +1140,66 @@ fn every_column_of_a_wide_value_is_pinned() {
     }
 }
 
-/// `main(a: int64, i: int32) -> int64 { [a as int(bits), 3][i] as int64 }`.
+/// Every column a wide **sequence** contributes is pinned, which no honest witness can show.
+///
+/// The scalar test above says the representation constrains its own limbs. This says the same of a
+/// sequence: entering one mints `k` witness columns **per element**, each with a range check of its
+/// own, and reading one back pins `k` lookups rather than a decomposition.
+///
+/// The element is derived from a **parameter** so the columns exist at all, and the sequence is
+/// read at a **witness** index so the lookups are real. The declared return is narrower than the
+/// element, so the program does not pin the high limbs through its own assertion.
+///
+/// **What this does not say:** a column that nothing pins is also a column nothing reads, so it is
+/// eliminated rather than left free: delete one of the `k` lookups and the witness comes back
+/// shorter with every column in it still pinned. A pinning test can only find a free column that
+/// survives DCE.
+#[test]
+fn every_column_of_a_wide_sequence_is_pinned() {
+    let wide = 320usize;
+    let ssa = main_program(
+        &[Type::int(253), Type::int(32)],
+        &[Type::int(64)],
+        move |e, params| {
+            let element = e.cast_to(CastTarget::Int(wide), params[0]);
+            let other = e.int_const(IntBits::from_biguint(
+                wide,
+                &((BigUint::from(1u8) << (wide - 8)) + BigUint::from(7u8)),
+            ));
+            let array = e.mk_seq(
+                vec![element, other],
+                SequenceTargetType::Array(2),
+                Type::int(wide),
+            );
+            let read = e.array_get(array, params[1]);
+            vec![e.cast_to(CastTarget::Int(64), read)]
+        },
+    );
+    let compiled = Compiled::new(ssa).expect("a wide sequence compiles");
+
+    let value = IntBits::from_biguint(253, &((BigUint::from(1u8) << 200) + BigUint::from(5u8)));
+    let index = IntBits::from_u128(32, 0);
+    let low = IntBits::from_u128(64, 5);
+    let verdict = compiled.run(&input_block(&[&value, &index, &low]));
+    let witness = verdict
+        .witness()
+        .unwrap_or_else(|| panic!("an int{wide} sequence: {verdict:?}"))
+        .to_vec();
+
+    for column in 0..witness.len() {
+        let mut perturbed = witness.clone();
+        perturbed[column] += Field::from(1u64);
+        assert!(
+            compiled.first_unsatisfied_constraint(&perturbed).is_some(),
+            "column {column} of {} is unconstrained — adding one to it left every constraint \
+             satisfied",
+            witness.len()
+        );
+    }
+}
+
+/// `main(a: int64, i: int32) -> int64 { [a as int(bits), TOP][i] as int64 }`, where `TOP` is
+/// `2^(bits - 8) + 7`.
 ///
 /// The index is a parameter, so the lookup cannot be folded away before validation sees the
 /// sequence it reads, and it is a witness, so the lookup is one the tape has to address.
@@ -1104,7 +1209,13 @@ fn program_indexing_a_sequence_of(bits: usize) -> HLSSA {
         &[Type::int(64)],
         move |e, params| {
             let wide = e.cast_to(CastTarget::Int(bits), params[0]);
-            let other = e.int_const(IntBits::from_u128(bits, 3));
+            // The constant occupies the **top** limb the width reaches, which makes a reader that
+            // drops the high cells detectable: the tape's entry then disagrees with the witnessed
+            // element and the lookup goes unsatisfied.
+            let other = e.int_const(IntBits::from_biguint(
+                bits,
+                &((BigUint::from(1u8) << (bits - 8)) + BigUint::from(7u8)),
+            ));
             let array = e.mk_seq(
                 vec![wide, other],
                 SequenceTargetType::Array(2),
@@ -1116,80 +1227,408 @@ fn program_indexing_a_sequence_of(bits: usize) -> HLSSA {
     )
 }
 
-/// A wide element of a sequence is refused, and names the lane that cannot read it.
+/// A sequence element wider than the field carries is **read**, by transposing the sequence.
 ///
-/// **Both bands, and the second is the one a bound stated as the field alone would miss.** An
-/// element has to become one field element, which is the modulus' question; and the VM's lookup
-/// tape addresses it with a tag naming a cell count, of which it has `ELEM_WORD` for a cell and
-/// `ELEM_U128` for a pair and no third. So the tape stops at the double lane, far below the
-/// modulus, and a width between the two reaches `lookup_elem_kind` with no tag to take.
+/// Above the injective width an entry has no field element of its own, so the sequence is stored
+/// one sequence per limb and each limb is an entry the tape already knows how to read. 254 is the
+/// first such width; 320 is neither a limb multiple of it nor the same limb count, so the two
+/// exercise different shapes.
 #[test]
-fn a_sequence_element_wider_than_the_tape_is_refused() {
-    // Past the modulus, and between the tape and the modulus.
-    for bits in [first_width_past_the_field(), 200] {
-        let Err(DriverError::Refused(diagnostics)) =
-            Compiled::new(program_indexing_a_sequence_of(bits))
-        else {
-            panic!("an int{bits} sequence element is refused rather than compiled");
-        };
+fn a_sequence_element_wider_than_the_field_is_transposed() {
+    for bits in [first_width_past_the_field(), 320] {
+        let compiled = Compiled::new(program_indexing_a_sequence_of(bits))
+            .unwrap_or_else(|error| panic!("an int{bits} element is not read: {error}"));
+
+        let value = IntBits::from_u128(64, 0xdead_beef);
+        let index = IntBits::from_u128(32, 1);
+        let expected = IntBits::from_u128(64, 7);
+        let verdict = compiled.run(&input_block(&[&value, &index, &expected]));
+        assert!(verdict.is_accepted(), "int{bits} element: {verdict:?}");
+
+        // And the lane can go red: a declared return the program does not compute is refused.
+        let wrong = IntBits::from_u128(64, 8);
+        let verdict = compiled.run(&input_block(&[&value, &index, &wrong]));
         assert!(
-            diagnostics
-                .iter()
-                .any(|d| d.message() == format!("an int{bits} sequence element is not supported")),
-            "int{bits}: {diagnostics:?}"
+            !verdict.is_accepted(),
+            "int{bits} element: a wrong answer was accepted"
         );
     }
 }
 
-/// And the bound is exact rather than conservative: the widest element the tape names still
-/// compiles, so what is refused above is a frontier and not a blanket.
+/// The band **between** the narrow lanes and the transpose, served by `ELEM_CELLS`.
+///
+/// Three widths reach the VM's lookup tape by three different paths, and only the third is this
+/// unit's: one cell is `ELEM_WORD`, two are `ELEM_U128`, and from 129 bits up to the widest width
+/// the field carries injectively an element is still **one** field element but spans more cells
+/// than either tag names. That is `ELEM_CELLS`, and above it a sequence is transposed instead, so
+/// no width outside `129..=253` selects it.
+///
+/// The element is compared **whole** rather than narrowed to its low limb. A narrowing return is
+/// answered correctly by a reader that drops every high cell, and that is exactly the ablation
+/// this test exists to catch: `read_cells_as_field` taking one cell instead of `cells` leaves the
+/// entire workspace green without it.
 #[test]
-fn the_widest_element_the_tape_names_still_compiles() {
-    let _ = Compiled::new(program_indexing_a_sequence_of(128))
-        .expect("an int128 element is one the tape has a tag for");
+fn an_element_between_the_narrow_lanes_and_the_transpose_is_read_whole() {
+    let injective = first_width_past_the_field() - 1;
+    // The first width past the double lane, one in the middle, and the widest the band holds.
+    for bits in [2 * HOST_LIMB_BITS + 1, 200, injective] {
+        let top = IntBits::from_biguint(
+            bits,
+            &((BigUint::from(1u8) << (bits - 8))
+                + (BigUint::from(1u8) << 130)
+                + BigUint::from(7u8)),
+        );
+        let expected = top.clone();
+        let ssa = main_program(
+            &[Type::int(injective), Type::int(32)],
+            &[Type::int(1)],
+            move |e, params| {
+                let element = e.cast_to(CastTarget::Int(bits), params[0]);
+                let other = e.int_const(top.clone());
+                let array = e.mk_seq(
+                    vec![element, other],
+                    SequenceTargetType::Array(2),
+                    Type::int(bits),
+                );
+                let read = e.array_get(array, params[1]);
+                let want = e.int_const(expected.clone());
+                vec![e.cmp(read, want, CmpKind::Eq)]
+            },
+        );
+        let compiled = Compiled::new(ssa)
+            .unwrap_or_else(|error| panic!("an int{bits} element is not read: {error}"));
+
+        let value = IntBits::from_biguint(injective, &(BigUint::from(1u8) << 200));
+        let index = IntBits::from_u128(32, 1);
+        let verdict = compiled.run(&input_block(&[&value, &index, &IntBits::from_u128(1, 1)]));
+        assert!(verdict.is_accepted(), "int{bits} element: {verdict:?}");
+
+        // And it can go red: slot 0 is the parameter, which is not the constant.
+        let miss = IntBits::from_u128(32, 0);
+        let verdict = compiled.run(&input_block(&[&value, &miss, &IntBits::from_u128(1, 1)]));
+        assert!(
+            !verdict.is_accepted(),
+            "int{bits} element: a wrong answer was accepted"
+        );
+    }
 }
 
-/// The same refusal for a sequence built from a **blob**, which states its element type under a
-/// name of its own.
+/// An array of wide elements becomes a **slice** of them, which is `k` casts rather than one.
 ///
-/// Three opcodes make a sequence and each spells its element type differently, so a rule that
-/// matched on two of them would let the third through to `lookup_elem_kind`, which has no tag to
-/// take, or to the multi-cell representation, which does not reach inside a sequence.
+/// `Cast{ArrayToSlice}` is the one opcode in the slice family that survives to this pass without a
+/// sequence test of its own: `SlicePop`, `SliceInsert` and `SliceRemove` are lowered before it
+/// runs, and `SlicePush`/`SliceLen` are covered above.
 #[test]
-fn a_blob_sequence_of_wide_elements_is_refused() {
-    for bits in [200usize, first_width_past_the_field()] {
-        let ssa = main_program(&[Type::int(32)], &[Type::int(64)], move |e, params| {
+fn a_wide_array_becomes_a_slice() {
+    let bits = 320usize;
+    let top = |n: u128| {
+        IntBits::from_biguint(
+            bits,
+            &((BigUint::from(1u8) << (bits - 8)) + BigUint::from(n)),
+        )
+    };
+    let expected = top(2);
+    let ssa = main_program(
+        &[Type::int(253), Type::int(32)],
+        &[Type::int(1)],
+        move |e, params| {
+            let element = e.cast_to(CastTarget::Int(bits), params[0]);
+            let other = e.int_const(top(2));
+            let array = e.mk_seq(
+                vec![element, other],
+                SequenceTargetType::Array(2),
+                Type::int(bits),
+            );
+            let slice = e.cast_to(CastTarget::ArrayToSlice, array);
+            let read = e.array_get(slice, params[1]);
+            let want = e.int_const(expected.clone());
+            vec![e.cmp(read, want, CmpKind::Eq)]
+        },
+    );
+    let compiled = Compiled::new(ssa).expect("a wide array becomes a slice");
+
+    let value = IntBits::from_biguint(253, &(BigUint::from(1u8) << 200));
+    let index = IntBits::from_u128(32, 1);
+    let verdict = compiled.run(&input_block(&[&value, &index, &IntBits::from_u128(1, 1)]));
+    assert!(
+        verdict.is_accepted(),
+        "an int{bits} array to slice: {verdict:?}"
+    );
+
+    let miss = IntBits::from_u128(32, 0);
+    let verdict = compiled.run(&input_block(&[&value, &miss, &IntBits::from_u128(1, 1)]));
+    assert!(
+        !verdict.is_accepted(),
+        "an int{bits} array to slice: a wrong answer was accepted"
+    );
+}
+
+/// The same for a sequence built from a **blob**, whose elements are constants.
+///
+/// This is the case a bound stated on the tape's reading could not have served. A blob of constants
+/// is never witnessed, so it stays in the pure domain — and a 320-bit constant has no field element
+/// for an entry to be read as. Transposing it makes every entry a narrow constant, which does.
+#[test]
+fn a_blob_sequence_of_wide_constants_is_read() {
+    for bits in [first_width_past_the_field(), 320] {
+        let ssa = main_program(&[Type::int(32)], &[Type::int(1)], move |e, params| {
             let blob = e.emit_constant(Constant::Blob(Blob::new(
                 Type::int(bits),
                 vec![
-                    Constant::Int(IntBits::from_u128(bits, 3)),
-                    Constant::Int(IntBits::from_u128(bits, 4)),
+                    // Top-limb values, so a reading that drops the high limbs is detectable.
+                    Constant::Int(IntBits::from_biguint(
+                        bits,
+                        &((BigUint::from(1u8) << (bits - 8)) + BigUint::from(3u8)),
+                    )),
+                    Constant::Int(IntBits::from_biguint(
+                        bits,
+                        &((BigUint::from(1u8) << (bits - 9)) + BigUint::from(4u8)),
+                    )),
                 ],
             )));
             let array = e.mk_seq_of_blob(Type::int(bits), blob);
             let element = e.array_get(array, params[0]);
-            vec![e.cast_to(CastTarget::Int(64), element)]
+            // Compared against the whole expected element rather than narrowed to 64 bits. A
+            // narrowing return sees only the low limb, so a split that put the low window in every
+            // limb would still answer correctly.
+            let expected = e.int_const(IntBits::from_biguint(
+                bits,
+                &((BigUint::from(1u8) << (bits - 9)) + BigUint::from(4u8)),
+            ));
+            vec![e.cmp(element, expected, CmpKind::Eq)]
         });
 
-        let Err(DriverError::Refused(diagnostics)) = Compiled::new(ssa) else {
-            panic!("an int{bits} blob element is refused rather than compiled");
-        };
+        let compiled = Compiled::new(ssa)
+            .unwrap_or_else(|error| panic!("an int{bits} blob element is not read: {error}"));
+        let index = IntBits::from_u128(32, 1);
+        let expected = IntBits::from_u128(1, 1);
+        let verdict = compiled.run(&input_block(&[&index, &expected]));
+        assert!(verdict.is_accepted(), "int{bits} blob element: {verdict:?}");
+
+        let wrong = IntBits::from_u128(1, 0);
+        let verdict = compiled.run(&input_block(&[&index, &wrong]));
         assert!(
-            diagnostics
-                .iter()
-                .any(|d| d.message() == format!("an int{bits} sequence element is not supported")),
-            "int{bits}: {diagnostics:?}"
+            !verdict.is_accepted(),
+            "int{bits} blob element: a wrong answer was accepted"
         );
     }
+}
+
+/// Every sequence shape carries a wide element, not just the one the other tests use.
+#[test]
+fn every_sequence_shape_carries_a_wide_element() {
+    let bits = 320usize;
+    // `MkRepeated`: every slot is the same wide element. The element is derived from a parameter
+    // rather than being a constant because an all-constant wide element folds, and the fold has no
+    // field element to land in — the divergence `docs/int-semantics.md` states for a pure integer
+    // wider than the field carries injectively.
+    let repeated = main_program(
+        &[Type::int(64), Type::int(32)],
+        &[Type::int(64)],
+        move |e, params| {
+            let element = e.cast_to(CastTarget::Int(bits), params[0]);
+            let array = e.mk_repeated(element, SequenceTargetType::Array(3), 3, Type::int(bits));
+            let read = e.array_get(array, params[1]);
+            vec![e.cast_to(CastTarget::Int(64), read)]
+        },
+    );
+    let compiled = Compiled::new(repeated).expect("a repeated wide element");
+    let value = IntBits::from_u128(64, 0xfeed);
+    let index = IntBits::from_u128(32, 2);
+    let expected = IntBits::from_u128(64, 0xfeed);
+    let verdict = compiled.run(&input_block(&[&value, &index, &expected]));
+    assert!(verdict.is_accepted(), "MkRepeated: {verdict:?}");
+
+    // A slice, which reaches its elements through its own opcode family rather than the tape, and
+    // whose elements here are **constants**, which is the shape that folds if a read reassembles a
+    // whole wide value instead of keeping its limbs.
+    let sliced = main_program(&[Type::int(32)], &[Type::int(64)], move |e, params| {
+        let top = |low: u128| {
+            IntBits::from_biguint(
+                bits,
+                &((BigUint::from(1u8) << (bits - 8)) + BigUint::from(low)),
+            )
+        };
+        let first = e.int_const(top(1));
+        let second = e.int_const(top(2));
+        let slice = e.mk_seq(
+            vec![first, second],
+            SequenceTargetType::Slice,
+            Type::int(bits),
+        );
+        let read = e.array_get(slice, params[0]);
+        vec![e.cast_to(CastTarget::Int(64), read)]
+    });
+    let compiled = Compiled::new(sliced).expect("a wide slice element");
+    let index = IntBits::from_u128(32, 1);
+    let expected = IntBits::from_u128(64, 2);
+    let verdict = compiled.run(&input_block(&[&index, &expected]));
+    assert!(verdict.is_accepted(), "slice of constants: {verdict:?}");
+}
+
+/// An `[int256; 4]` with a witness index, read and written.
+///
+/// Four slots rather than two, so a transpose that happened to line up at two does not pass; and
+/// nested, because `limb_types` recurses through a sequence and the inner one has to transpose
+/// under the outer.
+#[test]
+fn a_four_element_wide_array_is_read_written_and_nested() {
+    let bits = 256usize;
+    let top = |n: u128| {
+        IntBits::from_biguint(
+            bits,
+            &((BigUint::from(1u8) << (bits - 8)) + BigUint::from(n)),
+        )
+    };
+
+    // Read at a witness index.
+    let read = main_program(
+        &[Type::int(253), Type::int(32)],
+        &[Type::int(64)],
+        move |e, params| {
+            let wide = e.cast_to(CastTarget::Int(bits), params[0]);
+            let (a, b, c) = (
+                e.int_const(top(1)),
+                e.int_const(top(2)),
+                e.int_const(top(3)),
+            );
+            let array = e.mk_seq(
+                vec![wide, a, b, c],
+                SequenceTargetType::Array(4),
+                Type::int(bits),
+            );
+            let element = e.array_get(array, params[1]);
+            vec![e.cast_to(CastTarget::Int(64), element)]
+        },
+    );
+    let compiled = Compiled::new(read).expect("[int256; 4] read");
+    let value = IntBits::from_biguint(253, &(BigUint::from(1u8) << 200));
+    let index = IntBits::from_u128(32, 3);
+    let expected = IntBits::from_u128(64, 3);
+    let verdict = compiled.run(&input_block(&[&value, &index, &expected]));
+    assert!(verdict.is_accepted(), "[int256; 4] read: {verdict:?}");
+
+    // Written at a witness index, and read back at a constant one.
+    let written = main_program(
+        &[Type::int(253), Type::int(32)],
+        &[Type::int(64)],
+        move |e, params| {
+            let wide = e.cast_to(CastTarget::Int(bits), params[0]);
+            let (a, b, c, d) = (
+                e.int_const(top(1)),
+                e.int_const(top(2)),
+                e.int_const(top(3)),
+                e.int_const(top(4)),
+            );
+            let array = e.mk_seq(
+                vec![a, b, c, d],
+                SequenceTargetType::Array(4),
+                Type::int(bits),
+            );
+            let set = e.array_set(array, params[1], wide);
+            let two = e.int_const(IntBits::from_u128(32, 2));
+            let element = e.array_get(set, two);
+            vec![e.cast_to(CastTarget::Int(64), element)]
+        },
+    );
+    let compiled = Compiled::new(written).expect("[int256; 4] write");
+    // Written at slot 0, so slot 2 keeps its constant.
+    let index = IntBits::from_u128(32, 0);
+    let expected = IntBits::from_u128(64, 3);
+    let verdict = compiled.run(&input_block(&[&value, &index, &expected]));
+    assert!(verdict.is_accepted(), "[int256; 4] write: {verdict:?}");
+
+    // Nested, with the outer row chosen at a witness index.
+    let nested = main_program(
+        &[Type::int(253), Type::int(32)],
+        &[Type::int(64)],
+        move |e, params| {
+            let wide = e.cast_to(CastTarget::Int(bits), params[0]);
+            let one = e.int_const(top(1));
+            let inner_a = e.mk_seq(
+                vec![wide, one],
+                SequenceTargetType::Array(2),
+                Type::int(bits),
+            );
+            let (two, three) = (e.int_const(top(2)), e.int_const(top(3)));
+            let inner_b = e.mk_seq(
+                vec![two, three],
+                SequenceTargetType::Array(2),
+                Type::int(bits),
+            );
+            let outer = e.mk_seq(
+                vec![inner_a, inner_b],
+                SequenceTargetType::Array(2),
+                Type::int(bits).array_of(2),
+            );
+            let row = e.array_get(outer, params[1]);
+            let zero = e.int_const(IntBits::zero(32));
+            let element = e.array_get(row, zero);
+            vec![e.cast_to(CastTarget::Int(64), element)]
+        },
+    );
+    let compiled = Compiled::new(nested).expect("[[int256; 2]; 2]");
+    let index = IntBits::from_u128(32, 1);
+    let expected = IntBits::from_u128(64, 2);
+    let verdict = compiled.run(&input_block(&[&value, &index, &expected]));
+    assert!(verdict.is_accepted(), "[[int256; 2]; 2]: {verdict:?}");
+}
+
+/// A slice whose length changes at runtime, carrying wide elements.
+///
+/// The slice family is the half of this unit with no tape involvement: `SlicePush` and `SliceLen`
+/// are limb-moving in their own right, and `SliceLen` reads the length off **one** limb sequence,
+/// which is only correct because every length-changing operation is applied identically to all of
+/// them. A push that reached some limb sequences and not others would leave them ragged, and the
+/// length would then depend on which one was asked.
+#[test]
+fn a_wide_slice_grows_and_reports_its_length() {
+    let bits = 320usize;
+    let top = |n: u128| {
+        IntBits::from_biguint(
+            bits,
+            &((BigUint::from(1u8) << (bits - 8)) + BigUint::from(n)),
+        )
+    };
+
+    let pushed = main_program(
+        &[Type::int(253), Type::int(32)],
+        &[Type::int(64)],
+        move |e, params| {
+            let wide = e.cast_to(CastTarget::Int(bits), params[0]);
+            let seed = e.int_const(top(1));
+            let slice = e.mk_seq(vec![seed], SequenceTargetType::Slice, Type::int(bits));
+            let longer = e.slice_push(slice, vec![wide], SliceOpDir::Back);
+            let read = e.array_get(longer, params[1]);
+            vec![e.cast_to(CastTarget::Int(64), read)]
+        },
+    );
+    let compiled = Compiled::new(pushed).expect("a wide slice push");
+    let value = IntBits::from_biguint(253, &(BigUint::from(1u8) << 200));
+    // Slot 0 is the seed, whose low 64 bits are 1.
+    let index = IntBits::from_u128(32, 0);
+    let expected = IntBits::from_u128(64, 1);
+    let verdict = compiled.run(&input_block(&[&value, &index, &expected]));
+    assert!(verdict.is_accepted(), "a wide slice push: {verdict:?}");
+
+    let length = main_program(&[Type::int(253)], &[Type::int(32)], move |e, params| {
+        let wide = e.cast_to(CastTarget::Int(bits), params[0]);
+        let slice = e.mk_seq(vec![wide], SequenceTargetType::Slice, Type::int(bits));
+        let longer = e.slice_push(slice, vec![wide], SliceOpDir::Back);
+        vec![e.slice_len(longer)]
+    });
+    let compiled = Compiled::new(length).expect("a wide slice length");
+    let two = IntBits::from_u128(32, 2);
+    let verdict = compiled.run(&input_block(&[&value, &two]));
+    assert!(verdict.is_accepted(), "a wide slice length: {verdict:?}");
 }
 
 /// The third lane: the same programs compiled to WASM and run under wasmtime.
 ///
 /// The corpus already checks this lane byte-identically at every width Noir can name, which is
-/// strictly stronger than anything here — and it is silent above 128 bits, because no corpus
-/// program has a width there. So this is the only thing that says the wide field boundary and the
-/// multi-cell representation compute the same answers in the compiled module as in the interpreter
-/// and the constraint system.
+/// strictly stronger than anything here, and it is silent above 128 bits because no corpus program
+/// has a width there. So this says that the wide field boundary and the multi-cell representation
+/// compute the same answers in the compiled module as in the interpreter and the constraint system.
 ///
 /// Skipped only where the linker reported success and wrote no module; a WASM lane that fails to
 /// compile fails here rather than being skipped. See `harness::compile_wasm`.
@@ -1234,9 +1673,27 @@ fn the_wasm_lane_agrees_at_a_wide_width() {
         assert!(wasm.is_accepted(), "an int320 round trip in WASM: {wasm:?}");
     }
 
+    // A wide **sequence** read at a witness index, which is the only thing that exercises the
+    // compiled half of the lookup: `ELEM_CELLS` in the VM and the transposed tables in codegen are
+    // both unreachable from the scalar programs above.
+    for bits in [200usize, 320] {
+        let compiled = Compiled::new(program_indexing_a_sequence_of(bits))
+            .unwrap_or_else(|error| panic!("an int{bits} sequence compiles: {error}"));
+        let value = IntBits::from_u128(64, 0xdead_beef);
+        let index = IntBits::from_u128(32, 1);
+        let expected = IntBits::from_u128(64, 7);
+        if let Some(wasm) = compiled.run_wasm(&input_block(&[&value, &index, &expected])) {
+            ran += 1;
+            assert!(
+                wasm.is_accepted(),
+                "an int{bits} sequence element in WASM: {wasm:?}"
+            );
+        }
+    }
+
     assert!(
-        ran == 6 || !compiled.wasm_is_available(),
-        "the WASM lane was available and ran {ran} of 6"
+        ran == 8 || !compiled.wasm_is_available(),
+        "the WASM lane was available and ran {ran} of 8"
     );
 }
 
