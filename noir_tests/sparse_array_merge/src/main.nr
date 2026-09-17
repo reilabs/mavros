@@ -1,4 +1,4 @@
-// Small arrays exercise the general merge and cost-gated fallbacks. The large
+// Cover small-array merges as well as large sparse updates. The large
 // arrays in check_sparse_aliases and check_model exercise profitable replay;
 // planner unit tests check shape acceptance, and a compiler integration test
 // verifies that check_model emits nested replay.

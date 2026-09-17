@@ -6,17 +6,20 @@
 //!
 //! Its intermediate state remains local; there is no callback or capture/finalize API.
 
+use crate::collections::HashSet;
 use mavros_int_semantics::IntBits;
 
 use super::{UntaintControlFlow, emit_value_conversion, get_witness_or_pure};
 use crate::compiler::{
     analysis::{
         flow_analysis::FlowAnalysis,
-        types::FunctionTypeInfo,
-        witness_info::{FunctionWitnessType, WitnessType},
+        types::{FunctionTypeInfo, TypeInfo, Types},
+        value_range_analysis::ValueRangeAnalysis,
+        witness_info::WitnessType,
+        witness_taint_inference::WitnessTaintInference,
     },
     ssa::{
-        BlockId, FunctionId, SourceLocation, Terminator, ValueId,
+        BlockId, SourceLocation, Terminator, ValueId,
         hlssa::{
             HLFunction, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
             builder::{HLEmitter, HLFunctionBuilder},
@@ -41,49 +44,75 @@ pub(super) struct MergePoint {
 }
 
 impl UntaintControlFlow {
-    /// Own the complete per-function lowering sequence, including its temporary snapshot.
-    pub(super) fn lower_function(
+    /// Keep provenance and pending merges private while sharing module analyses.
+    pub(super) fn lower_functions(
         &mut self,
-        function_id: FunctionId,
-        function: &mut HLFunction,
         ssa: &mut HLSSA,
-        function_wt: &FunctionWitnessType,
-        flow_analysis: &FlowAnalysis,
-        types: Option<&FunctionTypeInfo>,
+        witness: &WitnessTaintInference,
+        flow: &FlowAnalysis,
+        types: &TypeInfo,
     ) {
-        let has_witness_branch = function.get_blocks().any(|(_, block)| {
-            matches!(block.get_terminator(), Some(Terminator::JmpIf(cond, _, _))
-                if get_witness_or_pure(function_wt, *cond) == WitnessType::Witness)
-        });
-        let mut sparse = types
-            .filter(|_| has_witness_branch)
-            .map(|types| SparseArrayMerge::new(function, types, ssa));
-        let merges = self.linearize_function(
-            function_id,
-            function,
-            ssa,
-            function_wt,
-            flow_analysis,
-            types,
-        );
-        if let Some(sparse) = sparse.as_mut() {
-            sparse.capture_guards(function);
-            // Pending merges still carry one arm's placeholder arguments. Keep
-            // their parameters unknown until the complete choices are emitted.
-            let unknown = merges
-                .iter()
-                .flat_map(|merge| {
+        let mut pending = Vec::new();
+        let mut unknown = HashSet::default();
+        for id in ssa.get_function_ids().collect::<Vec<_>>() {
+            let Some(wt) = witness.try_get_function_witness_type(id) else { continue };
+            let mut function = ssa.take_function(id);
+            let has_witness_branch = function.get_blocks().any(|(_, block)| {
+                matches!(block.get_terminator(), Some(Terminator::JmpIf(cond, _, _))
+                    if get_witness_or_pure(wt, *cond) == WitnessType::Witness)
+            });
+            let mut sparse = has_witness_branch
+                .then(|| SparseArrayMerge::new(&function, types.get_function(id), ssa));
+            let merges = self.linearize_function(
+                id,
+                &mut function,
+                ssa,
+                wt,
+                flow,
+                Some(types.get_function(id)),
+            );
+            if let Some(sparse) = sparse.as_mut() {
+                sparse.capture_guards(&function);
+            }
+            // Placeholder arguments describe only one arm; do not infer ranges
+            // from them, including through values that depend on these parameters.
+            for merge in &merges {
+                unknown.extend(
                     function
                         .get_block(merge.destination)
                         .get_parameters()
-                        .map(|(id, _)| *id)
-                })
-                .collect();
-            sparse.capture_ranges(function_id, function, ssa, &unknown);
+                        .map(|(id, _)| *id),
+                );
+            }
+            ssa.put_function(id, function);
+            pending.push((id, sparse, merges));
         }
-        emit_merges(function, ssa, types, sparse.as_mut(), merges);
-        if let Some(sparse) = sparse {
-            sparse.remove_redundant_updates(function, ssa);
+        // Analyze the rewritten CFG once, after all function signatures and calls
+        // agree. Pre-linearization branch facts are unsafe for hoisted accesses.
+        let mut ranges = pending
+            .iter()
+            .any(|(_, sparse, _)| sparse.is_some())
+            .then(|| {
+                let flow = FlowAnalysis::run(ssa);
+                let types = Types::new().run(ssa, &flow);
+                ValueRangeAnalysis::new().run_with_unknown_parameters(ssa, &flow, &types, &unknown)
+            });
+        for (id, mut sparse, merges) in pending {
+            if let Some(sparse) = sparse.as_mut() {
+                sparse.ranges = Some(ranges.as_mut().unwrap().take_function(id));
+            }
+            let mut function = ssa.take_function(id);
+            emit_merges(
+                &mut function,
+                ssa,
+                Some(types.get_function(id)),
+                sparse.as_mut(),
+                merges,
+            );
+            if let Some(sparse) = sparse {
+                sparse.remove_redundant_updates(&mut function, ssa);
+            }
+            ssa.put_function(id, function);
         }
     }
 }

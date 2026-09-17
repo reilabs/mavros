@@ -326,26 +326,7 @@ impl UntaintControlFlow {
                     .push_parameter(guard, Type::witness_of(Type::int(1)));
             }
         }
-        for function_id in function_ids {
-            if let Some(function_wt) = witness_inference.try_get_function_witness_type(function_id)
-            {
-                let func_type_info = if type_info.has_function(function_id) {
-                    Some(type_info.get_function(function_id))
-                } else {
-                    None
-                };
-                let mut function = ssa.take_function(function_id);
-                self.lower_function(
-                    function_id,
-                    &mut function,
-                    &mut ssa,
-                    function_wt,
-                    &flow_analysis,
-                    func_type_info,
-                );
-                ssa.put_function(function_id, function);
-            }
-        }
+        self.lower_functions(&mut ssa, witness_inference, &flow_analysis, &type_info);
 
         ssa
     }

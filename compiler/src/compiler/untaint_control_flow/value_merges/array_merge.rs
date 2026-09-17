@@ -31,20 +31,23 @@
 //! distinct dynamic indices cannot alias.
 
 use super::{emit_merge_select, emit_value_conversion};
+#[cfg(test)]
+use crate::compiler::{
+    analysis::{
+        flow_analysis::FlowAnalysis, types::Types, value_range_analysis::ValueRangeAnalysis,
+    },
+    ssa::FunctionId,
+};
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
-        analysis::{
-            flow_analysis::FlowAnalysis,
-            types::{FunctionTypeInfo, Types},
-            value_range_analysis::{FunctionValueRanges, ValueRangeAnalysis},
-        },
+        analysis::{types::FunctionTypeInfo, value_range_analysis::FunctionValueRanges},
         passes::shared::{
             seq_bounds::{seq_bounds_operands, widen_comparison_operands},
             value_replacements::{ReplaceScope, ValueReplacements},
         },
         ssa::{
-            BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
+            BlockId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
                 CastTarget, CmpKind, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr,
                 builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder, HLInstrBuilder},
@@ -102,7 +105,7 @@ pub(super) struct SparseArrayMerge<'a> {
     constants: HashMap<ValueId, usize>,
     reads: HashMap<ValueId, Vec<ValueId>>,
     uses: HashMap<ValueId, usize>,
-    ranges: Option<FunctionValueRanges>,
+    pub(super) ranges: Option<FunctionValueRanges>,
     merge_block: Option<BlockId>,
     replayed: HashSet<ValueId>,
     guards: HashMap<ValueId, Option<ValueId>>,
@@ -170,6 +173,11 @@ impl<'a> SparseArrayMerge<'a> {
                 .or_insert_with(Vec::new)
                 .push(*result);
         }
+        // Count original consumers before linearization inserts casts and guards.
+        // These wrappers preserve the dependency of each original use; cleanup
+        // removes dead wrappers along with replayed stores. Other consumers still
+        // retain that dependency. Uses eliminated by earlier merges may remain in
+        // this snapshot, conservatively withholding a deletion credit from plan.
         let uses = count_uses(function);
         let constants = definitions
             .values()
@@ -194,12 +202,15 @@ impl<'a> SparseArrayMerge<'a> {
         }
     }
 
-    fn is_base(&self, value: ValueId, base: Base) -> bool {
+    fn is_base(&self, value: ValueId, base: Base, active: ValueId) -> bool {
         match base {
             Base::Value(expected) => value == expected,
-            Base::Element { array, index } => self.definitions.get(&value).is_some_and(|access| {
-                access.value.is_none() && access.array == array && access.index == index
-            }),
+            Base::Element { array, index } => {
+                self.guards.get(&value) == Some(&Some(active))
+                    && self.definitions.get(&value).is_some_and(|access| {
+                        access.value.is_none() && access.array == array && access.index == index
+                    })
+            }
         }
     }
 
@@ -219,7 +230,7 @@ impl<'a> SparseArrayMerge<'a> {
         }
         let mut current = changed;
         let mut chain = Vec::new();
-        while !self.is_base(current, base) {
+        while !self.is_base(current, base, active) {
             if chain.len() >= *budget {
                 return None;
             }
@@ -272,7 +283,7 @@ impl<'a> SparseArrayMerge<'a> {
             self.uses.get(result).copied().unwrap_or(0)
                 > internal_uses + forwarded_reads + usize::from(*result == changed)
         });
-        let retained_cost = if retained {
+        let eliminated_cost = if !retained {
             chain
                 .len()
                 .saturating_mul(ARRAY_SET_COST + CAST_COST + BOUNDS_COST)
@@ -308,11 +319,9 @@ impl<'a> SparseArrayMerge<'a> {
         // while replay includes bounds work and conversion allowances: at most one
         // extra cast per selected leaf, plus the initial base conversion.
         let cost =
-            writes.iter().fold(
-                CAST_COST
-                    .saturating_add(forwarding_cost)
-                    .saturating_add(retained_cost),
-                |cost, write| {
+            writes
+                .iter()
+                .fold(CAST_COST.saturating_add(forwarding_cost), |cost, write| {
                     let bounds = if self.index_is_safe(write.index, *len) {
                         0
                     } else {
@@ -322,9 +331,11 @@ impl<'a> SparseArrayMerge<'a> {
                         .saturating_add(write.nested.as_ref().map(|plan| plan.cost).unwrap_or_else(
                             || merge_cost(elem).saturating_add(conversion_cost(elem)),
                         ))
-                },
-            );
-        (cost < merge_cost(typ)).then(|| Plan {
+                });
+        // The original writes already exist on the general-merge side. Keeping
+        // them adds no relative cost; deleting them is a credit to replay. Nested
+        // plans retain gross replay cost here, conservatively omitting their credit.
+        (cost < merge_cost(typ).saturating_add(eliminated_cost)).then(|| Plan {
             typ: typ.clone(),
             writes,
             cost,
@@ -372,8 +383,9 @@ impl<'a> SparseArrayMerge<'a> {
             .collect();
     }
 
-    /// Use the rewritten CFG, not branch-local facts from before linearization.
-    pub(super) fn capture_ranges(
+    /// Test helper for exercising a single rewritten function.
+    #[cfg(test)]
+    fn capture_ranges(
         &mut self,
         id: FunctionId,
         function: &HLFunction,
@@ -849,7 +861,7 @@ mod tests {
             (1024, MAX_MERGED_WRITES + 1, false, false, false),
             (1024, 2, true, false, true),
             (3, 1, false, true, false),
-            (3, 3, false, false, false),
+            (3, 3, false, false, true), // deleting the original writes makes replay cheaper
             (3, MAX_MERGED_WRITES, false, false, false),
             (0, 1, false, false, false),
         ] {
@@ -927,13 +939,16 @@ mod tests {
         let mut merger = f.merger(&types);
         let child = merger.definitions[&f.changed].value.unwrap();
         let read = merger.definitions[&child].array;
-        for (parent, child_guard, nested) in [
-            (f.base, Some(f.condition), true),
-            (f.other, Some(f.condition), false),
-            (f.base, None, false),
+        for (parent, child_guard, read_guard, nested) in [
+            (f.base, Some(f.condition), Some(f.condition), true),
+            (f.other, Some(f.condition), Some(f.condition), false),
+            (f.base, None, Some(f.condition), false),
+            (f.base, Some(f.condition), None, false),
+            (f.base, Some(f.condition), Some(f.index), false),
         ] {
             merger.definitions.get_mut(&read).unwrap().array = parent;
             merger.guards.insert(child, child_guard);
+            merger.guards.insert(read, read_guard);
             let mut budget = MAX_MERGED_WRITES;
             let plan = f.plan(&merger, &mut budget).unwrap();
             assert_eq!(plan.writes[0].nested.is_some(), nested);
@@ -941,9 +956,9 @@ mod tests {
     }
 
     #[test]
-    fn retained_intermediate_updates_are_charged_to_the_plan() {
+    fn only_dead_original_updates_receive_a_deletion_credit() {
         for retained in [false, true] {
-            let mut f = fixture(8, 2, false, 32);
+            let mut f = fixture(6, 2, false, 32);
             if retained {
                 let function = f.ssa.get_function_mut(f.function);
                 let entry = function.get_entry_id();

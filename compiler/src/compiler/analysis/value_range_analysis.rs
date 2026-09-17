@@ -87,6 +87,17 @@ impl ValueRangeAnalysis {
 
     #[instrument(skip_all, name = "ValueRangeAnalysis::run")]
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, types: &TypeInfo) -> ValueRanges {
+        self.run_with_unknown_parameters(ssa, cfg, types, &HashSet::default())
+    }
+
+    /// Pending merge parameters must retain their declared ranges until all arms exist.
+    pub(crate) fn run_with_unknown_parameters(
+        &self,
+        ssa: &HLSSA,
+        cfg: &FlowAnalysis,
+        types: &TypeInfo,
+        unknown_parameters: &HashSet<ValueId>,
+    ) -> ValueRanges {
         let mut result = ValueRanges {
             functions: HashMap::default(),
         };
@@ -107,7 +118,7 @@ impl ValueRangeAnalysis {
                 func_types,
                 &constant_bounds,
                 field,
-                &HashSet::default(),
+                unknown_parameters,
             );
             result.functions.insert(*function_id, function_ranges);
         }
@@ -117,6 +128,7 @@ impl ValueRangeAnalysis {
     /// Analyze a detached function against its current CFG and types.
     /// `unknown_parameters` stay at their declared ranges: use this for merge
     /// parameters whose incoming arguments have not yet been fully emitted.
+    #[cfg(test)]
     pub fn run_on_function(
         &self,
         function: &HLFunction,
@@ -2035,6 +2047,12 @@ pub struct ValueRanges {
 }
 
 impl ValueRanges {
+    pub(crate) fn take_function(&mut self, id: FunctionId) -> FunctionValueRanges {
+        self.functions
+            .remove(&id)
+            .expect("ValueRanges: function not found")
+    }
+
     pub fn get_function(&self, id: FunctionId) -> &FunctionValueRanges {
         self.functions
             .get(&id)
