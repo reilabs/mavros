@@ -999,10 +999,8 @@ impl<'a> ExpressionConverter<'a> {
             .clone();
         let value = self.local_value(*var, None, b);
 
-        // `Variant` covers both enums and structs. An enum is `(tag: Field, payload0, ...)`;
-        // a struct is a plain tuple.
         let tag = match m.cases.first().map(|first| &first.constructor) {
-            Some(c @ Constructor::Variant(..)) if c.is_enum() => {
+            Some(c) if is_enum_variant(c) => {
                 let location = self.current_source_location.clone();
                 Some(self.emit_at_source_location(b, location, |e| e.tuple_proj(value, 0)))
             }
@@ -1126,10 +1124,8 @@ impl<'a> ExpressionConverter<'a> {
             )
         };
 
-        // A struct pattern is `Variant(struct_type, 0)`, so the constructor's own type decides.
         let (payload, payload_fields) = match &case.constructor {
-            c if c.is_tuple_or_struct() => (scrutinee, fields),
-            Constructor::Variant(_, idx) => {
+            Constructor::Variant(_, idx) if is_enum_variant(&case.constructor) => {
                 let AstType::Tuple(variant_fields) = &fields[idx + 1] else {
                     panic!(
                         "ICE: enum variant {idx} payload is not a tuple: {:?}",
@@ -1141,6 +1137,7 @@ impl<'a> ExpressionConverter<'a> {
                 });
                 (payload, variant_fields)
             }
+            Constructor::Variant(..) | Constructor::Tuple(_) => (scrutinee, fields),
             other => panic!("ICE: match constructor {other:?} binds no arguments"),
         };
 
@@ -2191,4 +2188,15 @@ fn ast_type_is_signed(t: &noirc_frontend::monomorphization::ast::Type) -> bool {
     use noirc_frontend::shared::Signedness;
 
     matches!(t, AstType::Integer(Signedness::Signed, _))
+}
+
+/// Whether a match constructor is an enum variant, whose value is `(tag: Field, payload0, ...)`.
+///
+/// Noir's `Constructor::Variant` is used for both enum patterns and struct patterns. A struct is
+/// treated as an enum with exactly one variant, so a struct pattern arrives as
+/// `Variant(struct_type, 0)`. The lowered values look different though. An enum lowers to a tuple
+/// whose first field is a `Field` tag and whose remaining fields are one payload tuple per
+/// variant. A struct lowers to a plain tuple of its fields with no tag in front.
+fn is_enum_variant(c: &Constructor) -> bool {
+    matches!(c, Constructor::Variant(..)) && c.is_enum()
 }
