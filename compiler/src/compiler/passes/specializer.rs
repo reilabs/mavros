@@ -612,6 +612,15 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         Self(val)
     }
 
+    fn try_constant_bool(&self, ctx: &mut SpecializationState) -> Result<bool, AssertionFailure> {
+        match ctx.const_vals.get(&self.0) {
+            Some(ConstVal::Int(v)) => Ok(v.is_one()),
+            _ => Err(AssertionFailure::new(
+                "specialization branch condition is not constant",
+            )),
+        }
+    }
+
     fn expect_constant_bool(&self, ctx: &mut SpecializationState) -> bool {
         let val = ctx.const_vals.get(&self.0).unwrap();
         match val {
@@ -1006,7 +1015,7 @@ impl Specializer {
                 &mut state,
             ) {
                 info!(
-                    message = %"Aborting specialization: assertion is statically violated for these arguments",
+                    message = %"Aborting specialization: cannot evaluate this candidate for these arguments",
                     specialization = %name,
                     failure = %failure
                 );
@@ -1163,6 +1172,20 @@ impl Specializer {
 mod tests {
     use super::*;
     use crate::compiler::{analysis::symbolic_executor::Value as _, located::SourceLocation};
+
+    #[test]
+    fn an_unknown_branch_declines_speculation() {
+        let mut ssa = HLSSA::new();
+        let body = ssa.take_function(ssa.get_unique_entrypoint_id());
+        let unknown = Val(ssa.fresh_value());
+        let mut ctx = SpecializationState {
+            ssa: &ssa,
+            body,
+            const_vals: HashMap::default(),
+            current_location: SourceLocation::synthetic("unknown_branch"),
+        };
+        assert!(unknown.try_constant_bool(&mut ctx).is_err());
+    }
 
     /// Fold `a << b` exactly as the specializer does, returning the constant it produced or `None`
     /// when it declined and left the shift in the residual program.

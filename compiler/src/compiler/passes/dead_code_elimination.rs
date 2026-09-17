@@ -196,9 +196,8 @@ pub struct Config {
     /// can kill it.
     pub rewrite_dead_partial_ops: bool,
 
-    /// Whether an `ArraySet` on a fixed-length array whose result is dead is replaced by its bounds
-    /// check instead of being deleted outright. Reads are excluded on cost grounds, see
-    /// [`SeqBoundsCheck::SeqAccess`].
+    /// Whether an `ArrayGet` or `ArraySet` on an array or vector whose result is dead is
+    /// replaced by its bounds check instead of being deleted outright.
     ///
     /// A witness-indexed array access does not get a bounds check until `LowerWitnessArrayOps`,
     /// which runs at `driver.rs:484`. Deleting the access before that takes the only thing that
@@ -682,16 +681,24 @@ impl DCE {
                         }
                     }
 
-                    // A dead array write needs only its *index* held live: the bound it is checked
-                    // against comes from the array's type, not from the array value, so the
-                    // container itself and everything feeding it stay collectable. Noir's DIE keeps
-                    // exactly the same operand for the same reason. A slice access needs nothing,
-                    // since the sweep emits no check for one.
+                    // Arrays need only the index; vectors also need the value supplying their
+                    // logical length. Keep it alive until the sweep emits the check.
                     if self.rewrites_dead_seq_access()
-                        && let Some(SeqBoundsCheck::SeqAccess { index, .. }) =
+                        && let Some(SeqBoundsCheck::SeqAccess { seq, index }) =
                             failable_bounds(instruction)
                     {
                         worklist.push(WorkItem::LiveValue(*function_id, index));
+                        let ty = rewrite_types
+                            .as_ref()
+                            .unwrap()
+                            .get_function(*function_id)
+                            .get_value_type(seq);
+                        if matches!(
+                            ty.strip_witness().expr,
+                            crate::compiler::ssa::hlssa::TypeExpr::Slice(_)
+                        ) {
+                            worklist.push(WorkItem::LiveValue(*function_id, seq));
+                        }
                     }
                 }
 

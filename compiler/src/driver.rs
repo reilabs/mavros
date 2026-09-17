@@ -33,7 +33,7 @@ use crate::{
             llssa_to_llvm::WasmCompileOpts,
         },
         diagnostic::{self, Diagnostic},
-        pass_manager::PassManager,
+        pass_manager::{AnalysisStore, Pass, PassManager},
         passes::{
             arg_promotion::ArgPromotion,
             array_boundary_expansion::ArrayBoundaryExpansion,
@@ -342,11 +342,17 @@ impl Driver {
         // We initially validate all integer widths for sound usage under the configured field.
         self.check_widths(&ssa)?;
 
+        Defunctionalize::new().run(&mut ssa, &AnalysisStore::new());
+        if !crate::compiler::analysis::return_reachability::entry_can_return(&ssa) {
+            return Err(Error::UnsatisfiableProgram(
+                "entry point has no returning path (unconditional recursion or loop)".into(),
+            ));
+        }
+
         let mut pass_manager = PassManager::new(
             "make_struct_access_static".to_string(),
             self.draw_cfg,
             vec![
-                Box::new(Defunctionalize::new()),
                 Box::new(PrepareEntryPoint::new(self.main_is_unconstrained)),
                 // Eliminate all tuple types immediately after the entry point is prepared, so every
                 // subsequent pass operates on tuple-free IR.

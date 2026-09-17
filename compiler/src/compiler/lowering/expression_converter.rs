@@ -1602,6 +1602,34 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
+    // Recomposition preserves the builtin's failure semantics even when its result is dead
+    // or constant folding would otherwise silently truncate the high digits.
+    fn checked_radix(
+        e: &mut impl HLEmitter,
+        input: ValueId,
+        radix: ValueId,
+        endian: Endianness,
+        count: usize,
+    ) -> ValueId {
+        let digits = e.to_radix(input, Radix::Dyn(radix), endian, count);
+        let radix = e.cast_to_field(radix);
+        let mut value = e.field_const(e.field().zero());
+        for offset in 0..count {
+            let i = if endian == Endianness::Big {
+                offset
+            } else {
+                count - 1 - offset
+            };
+            let index = e.emit_constant(Constant::int(32, i as u128));
+            let digit = e.array_get(digits, index);
+            let digit = e.cast_to_field(digit);
+            let shifted = e.umul(value, radix);
+            value = e.uadd(shifted, digit);
+        }
+        e.assert_eq(input, value);
+        digits
+    }
+
     fn convert_builtin_call(
         &mut self,
         name: &str,
@@ -1655,7 +1683,7 @@ impl<'a> ExpressionConverter<'a> {
                     ),
                 };
                 let result = self.emit_located(b, Some(call.location), |e| {
-                    e.to_radix(input, Radix::Dyn(radix), Endianness::Little, output_size)
+                    Self::checked_radix(e, input, radix, Endianness::Little, output_size)
                 });
                 Some(result)
             }
@@ -1671,7 +1699,7 @@ impl<'a> ExpressionConverter<'a> {
                     ),
                 };
                 let result = self.emit_located(b, Some(call.location), |e| {
-                    e.to_radix(input, Radix::Dyn(radix), Endianness::Big, output_size)
+                    Self::checked_radix(e, input, radix, Endianness::Big, output_size)
                 });
                 Some(result)
             }
@@ -1759,6 +1787,9 @@ impl<'a> ExpressionConverter<'a> {
                     ),
                 };
                 let result = self.emit_located(b, Some(call.location), |e| {
+                    if output_size < e.field().field_bit_size() as usize {
+                        e.rangecheck(input, output_size);
+                    }
                     e.to_bits(input, Endianness::Little, output_size)
                 });
                 Some(result)
@@ -1773,6 +1804,9 @@ impl<'a> ExpressionConverter<'a> {
                     ),
                 };
                 let result = self.emit_located(b, Some(call.location), |e| {
+                    if output_size < e.field().field_bit_size() as usize {
+                        e.rangecheck(input, output_size);
+                    }
                     e.to_bits(input, Endianness::Big, output_size)
                 });
                 Some(result)

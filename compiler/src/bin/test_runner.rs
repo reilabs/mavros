@@ -176,7 +176,11 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             emit("END:COMPILED:reject");
             return;
         }
-        Err(error @ (DriverError::AssertConstantFailed(_) | DriverError::Refused(_))) => {
+        Err(
+            error @ (DriverError::AssertConstantFailed(_)
+            | DriverError::Refused(_)
+            | DriverError::UnsatisfiableProgram(_)),
+        ) => {
             eprintln!("Mavros compiler rejected program: {error}");
             emit("END:COMPILED:reject");
             return;

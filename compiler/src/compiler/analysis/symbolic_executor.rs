@@ -142,6 +142,11 @@ where
     fn ptr_write(&self, val: &Self, ctx: &mut Context);
     fn ptr_read(&self, out_type: &Type, ctx: &mut Context) -> Self;
     fn expect_constant_bool(&self, ctx: &mut Context) -> bool;
+
+    /// Speculative evaluators may decline a branch whose condition is not known.
+    fn try_constant_bool(&self, ctx: &mut Context) -> Result<bool, AssertionFailure> {
+        Ok(self.expect_constant_bool(ctx))
+    }
     fn select(&self, if_t: &Self, if_f: &Self, out_type: &Type, ctx: &mut Context) -> Self;
     fn write_witness(&self, tp: Option<&Type>, ctx: &mut Context) -> Self;
     fn fresh_witness(result_type: &Type, ctx: &mut Context) -> Self;
@@ -746,7 +751,7 @@ impl SymbolicExecutor {
                 }
                 Terminator::JmpIf(cond, if_true, if_false) => {
                     let cond = &scope[cond];
-                    if cond.expect_constant_bool(ctx) {
+                    if cond.try_constant_bool(ctx)? {
                         current = Some(fn_body.get_block(*if_true));
                     } else {
                         current = Some(fn_body.get_block(*if_false));
