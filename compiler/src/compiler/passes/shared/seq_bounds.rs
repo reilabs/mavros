@@ -110,13 +110,17 @@ pub fn seq_bounds_operands(
 /// Returns `(assert, len)`; the caller emits the assert — bare, or under the op's guard.
 pub fn build_pop_bounds_assert(emitter: &mut impl HLEmitter, slice: ValueId) -> (OpCode, ValueId) {
     let len = emitter.slice_len(slice);
+    (build_pop_bounds_assert_on_len(emitter, len), len)
+}
+
+/// Returns `assert`.
+pub fn build_pop_bounds_assert_on_len(emitter: &mut impl HLEmitter, len: ValueId) -> OpCode {
     let zero = emitter.int_const(32, 0);
-    let assert = OpCode::AssertCmp {
+    OpCode::AssertCmp {
         kind: CmpKind::ULt,
         lhs: zero,
         rhs: len,
-    };
-    (assert, len)
+    }
 }
 
 /// Returns `(assert, len, new_len, idx_cmp, cmp_bits)`; the insert lowering's rebuild scan reuses
@@ -127,18 +131,11 @@ pub fn build_insert_bounds_assert(
     index: ValueId,
     index_ty: &Type,
 ) -> (OpCode, ValueId, ValueId, ValueId, usize) {
-    let idx_bits = index_bits(index_ty, "slice insert");
     let len = emitter.slice_len(slice);
     let one = emitter.int_const(32, 1);
     let new_len = emitter.uadd(len, one);
-    let cmp_bits = idx_bits.max(32);
-    let idx_cmp = emitter.widen_u(index, idx_bits, cmp_bits);
-    let new_len_cmp = emitter.widen_u(new_len, 32, cmp_bits);
-    let assert = OpCode::AssertCmp {
-        kind: CmpKind::ULt,
-        lhs: idx_cmp,
-        rhs: new_len_cmp,
-    };
+    let (assert, idx_cmp, cmp_bits) =
+        build_lt_bounds_assert_on_len(emitter, new_len, index, index_ty, "slice insert");
     (assert, len, new_len, idx_cmp, cmp_bits)
 }
 
@@ -149,8 +146,21 @@ pub fn build_remove_bounds_assert(
     index: ValueId,
     index_ty: &Type,
 ) -> (OpCode, ValueId, ValueId, usize) {
-    let idx_bits = index_bits(index_ty, "slice remove");
     let len = emitter.slice_len(slice);
+    let (assert, idx_cmp, cmp_bits) =
+        build_lt_bounds_assert_on_len(emitter, len, index, index_ty, "slice remove");
+    (assert, len, idx_cmp, cmp_bits)
+}
+
+/// Returns `(assert, idx_cmp, cmp_bits)`.
+pub fn build_lt_bounds_assert_on_len(
+    emitter: &mut impl HLEmitter,
+    len: ValueId,
+    index: ValueId,
+    index_ty: &Type,
+    context: &str,
+) -> (OpCode, ValueId, usize) {
+    let idx_bits = index_bits(index_ty, context);
     let cmp_bits = idx_bits.max(32);
     let idx_cmp = emitter.widen_u(index, idx_bits, cmp_bits);
     let len_cmp = emitter.widen_u(len, 32, cmp_bits);
@@ -159,7 +169,7 @@ pub fn build_remove_bounds_assert(
         lhs: idx_cmp,
         rhs: len_cmp,
     };
-    (assert, len, idx_cmp, cmp_bits)
+    (assert, idx_cmp, cmp_bits)
 }
 
 /// `index < len(seq)` for an array element access, or `None` when `seq` is not a fixed-length array
