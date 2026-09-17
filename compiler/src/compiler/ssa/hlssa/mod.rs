@@ -13,9 +13,7 @@ use crate::compiler::ssa::{
     SourceLocation, ValueId,
 };
 
-pub use type_system::{
-    MAX_SUPPORTED_SIGNED_BITS, MAX_SUPPORTED_UNSIGNED_BITS, Type, TypeExpr, assert_signed_op_width,
-};
+pub use type_system::{MAX_SUPPORTED_INT_BITS, Type, TypeExpr, assert_signed_op_width};
 
 // HLSSA
 // ================================================================================================
@@ -1993,7 +1991,7 @@ impl BinaryArithOpKind {
     /// Every operation, so a new variant cannot be added without appearing here.
     ///
     /// The counterpart of `IntOp::ALL`, and the list a conformance sweep must drive from when it
-    /// is checking a *lowering*: the two vocabularies are not in bijection, so sweeping the model's
+    /// is checking a _lowering_: the two vocabularies are not in bijection, so sweeping the model's
     /// sixteen would cover only one of `UShl`/`SShl`.
     pub const ALL: [BinaryArithOpKind; 17] = [
         Self::UAdd,
@@ -2070,15 +2068,15 @@ impl BinaryArithOpKind {
     /// `SAdd` therefore deletes the unsigned overflow check outright: `noir_failure_tests/`
     /// `signed_unsigned_vn_merge` is a program that must fail and did not.
     ///
-    /// The argument offered for the narrower rule was that one operand pair cannot reach both a
-    /// signed and an unsigned opcode, because a `ValueId` has a single Noir-level origin and
+    /// The argument for a narrower rule is that one operand pair cannot reach both a signed and an
+    /// unsigned opcode, because a `ValueId` has a single Noir-level origin and
     /// `expression_converter::operand_is_signed` reads the sign off that origin. That is a claim
-    /// about `ValueId` **identity**, and value numbering does not key on identity — it keys on
-    /// operand _congruence classes_. `x as u8` and `x as i8` are one class (both are
-    /// `Cast(CastTarget::Int(8))` over the same operand), as are `u8 200` and `i8 -56` (one
-    /// [`Constant::Int`]), so a differently-signed pair over congruent operands is ordinary rather
-    /// than exotic. Before the `U`/`I` collapse the two were kept apart by their differing cast
-    /// targets and result types; nothing separates them now except this discriminator.
+    /// about `ValueId` **identity**, and value numbering does not key on identity but instead on
+    /// operand _congruence classes_.
+    ///
+    /// `x as u8` and `x as i8` are one class (both are `Cast(CastTarget::Int(8))` over the same
+    /// operand), as are `u8 200` and `i8 -56` (one [`Constant::Int`]), so a differently-signed pair
+    /// over congruent operands is ordinary rather than exotic. This allows us to separate the pair.
     ///
     /// [`Constant::Int`]: Constant::Int
     pub fn signedness(self) -> Option<bool> {
@@ -2462,6 +2460,15 @@ impl Constant {
             Self::Blob(_) => false,
         }
     }
+
+    /// `true` if this constant is, or transitively contains, a function pointer.
+    pub fn contains_fn_ptr(&self) -> bool {
+        match self {
+            Self::FnPtr(_) => true,
+            Self::Blob(blob) => blob.elements.iter().any(Constant::contains_fn_ptr),
+            Self::Int(_) | Self::Field(_) => false,
+        }
+    }
 }
 
 // REFERENCE COUNTING OPS
@@ -2489,31 +2496,23 @@ pub enum DMatrix {
 // LOOKUP TARGET
 // ================================================================================================
 
-/// The largest [`LookupTarget::Pow2`] payload any backend will build a table for.
+/// The largest [`LookupTarget::Pow2`] payload any backend can build a table for.
 ///
-/// FIELD-ASSUMPTION: L4-decompose. What caps this is the _field_, not any host integer: a size-`s`
-/// table holds the amounts `0..2^s`, so its widest row carries the value `2^(2^s - 1)`, and a row
-/// at or past the modulus wraps. Every evaluator builds its rows by doubling and so wraps the same
-/// way, which is the bad case — the two agree on values that are not powers of two, so `factor ==
-/// 2^amount` quietly stops holding, and with it the `factor <= 2^(bits-1)` premise that
-/// `witness_bitwise::wrap_shifted_product` rests on. Nothing rejects that; it is a wrong answer,
-/// not a failure.
+/// A **ceiling on the representation**, not the safety bound. Every backend indexes its table cache
+/// by size (see the assert below), so this is the widest a slot exists for whatever field is
+/// configured. It is `7` because bn254 needs exactly that and nothing needs more.
 ///
-/// `7` is therefore the largest safe size on bn254 (widest row `2^127`, against a 254-bit modulus)
-/// and, not by coincidence, exactly the size a shift of the widest supported integer needs — see
-/// the assert below. A narrower field admits less: goldilocks reaches `s = 6`. That is the same
-/// `L4-decompose` debt as `two_pow(bits)` in the shift lowering itself, and is discharged with it.
+/// FIELD-ASSUMPTION: L4-decompose. The safety bound is a _field_ question and is derived rather
+/// than named: a size-`s` table holds the amounts `0..2^s`, so its widest row carries the value
+/// `2^(2^s - 1)`, and a row at or past the modulus wraps. Every evaluator builds its rows by
+/// doubling and so wraps the same way, which is the bad case — the two agree on values that are
+/// not powers of two, so `factor == 2^amount` quietly stops holding, and with it the
+/// `factor <= 2^(bits-1)` premise that `witness_bitwise::wrap_shifted_product` rests on. Nothing
+/// rejects that; it is a wrong answer, not a failure. `passes::shared::limbs::max_pow2_table_size`
+/// answers it per field, clamped to this ceiling: bn254 reaches `7` (widest row `2^127` against a
+/// 254-bit modulus), goldilocks only `6`. That is the same `L4-decompose` debt as `two_pow(bits)`
+/// in the shift lowering itself, and is discharged with it.
 pub const MAX_POW2_TABLE_SIZE: usize = 7;
-
-/// Every integer width the type system admits must have a table, since
-/// `witness_bitwise::lower_shift` has no other way to build `2^n` for a witness `n`. Raising
-/// [`MAX_SUPPORTED_UNSIGNED_BITS`] past what this covers is the case the ceiling above is a
-/// tripwire for: the widest row would then be one the field cannot hold, so the fix is a limb-wise
-/// factor rather than a larger table.
-const _: () = assert!(
-    MAX_SUPPORTED_UNSIGNED_BITS <= 1 << MAX_POW2_TABLE_SIZE,
-    "an integer width wider than the powers-of-two table can key; see MAX_POW2_TABLE_SIZE",
-);
 
 /// A `Pow2` table is indexed into the backends' fixed-size table caches (`vm::VM::pow2_tables`, and
 /// the per-size helper maps on the WASM side) by its own size, so the cache must have a slot for

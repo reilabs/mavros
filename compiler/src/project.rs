@@ -9,7 +9,7 @@ use nargo::{
     package::{Dependency, Package},
     workspace::Workspace,
 };
-use nargo_toml::PackageSelection::All;
+use nargo_toml::PackageSelection::DefaultOrAll;
 use noirc_driver::stdlib_paths_with_source;
 use noirc_frontend::{
     ast::{
@@ -41,8 +41,20 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
         include_str!("../../mavros_stdlib/replacements.nr"),
     ),
     (
+        "std/mavros/replacements/aes128_encrypt.nr",
+        include_str!("../../mavros_stdlib/replacements/aes128_encrypt.nr"),
+    ),
+    (
+        "std/mavros/replacements/blake2s.nr",
+        include_str!("../../mavros_stdlib/replacements/blake2s.nr"),
+    ),
+    (
         "std/mavros/replacements/blake3.nr",
         include_str!("../../mavros_stdlib/replacements/blake3.nr"),
+    ),
+    (
+        "std/mavros/replacements/blake_helper.nr",
+        include_str!("../../mavros_stdlib/replacements/blake_helper.nr"),
     ),
     (
         "std/mavros/replacements/derive_pedersen_generators.nr",
@@ -100,6 +112,8 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
 /// ordinary function: type checking, generic instantiation and the constrained/unconstrained
 /// pairing all apply natively, and the mavros pipeline never sees a lowlevel call for it.
 const FOREIGN_REPLACEMENTS: &[&str] = &[
+    "aes128_encrypt",
+    "blake2s",
     "blake3",
     "derive_pedersen_generators",
     "ecdsa_secp256k1",
@@ -246,11 +260,46 @@ fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
 }
 
 impl Project {
+    fn resolve_workspace(root: &Path) -> Result<Workspace, Error> {
+        let manifest = nargo_toml::get_package_manifest(root)?;
+        Ok(nargo_toml::resolve_workspace_from_toml(
+            &manifest,
+            DefaultOrAll,
+            None,
+        )?)
+    }
+
+    /// Select the default member, or all binary members in manifest order when no default is set.
+    /// Libraries remain available as dependencies but are not executable entry points.
+    pub fn binary_package_roots(root: &Path) -> Result<Vec<PathBuf>, Error> {
+        let workspace = Self::resolve_workspace(root)?;
+        let roots: Vec<_> = (&workspace)
+            .into_iter()
+            .filter(|package| package.is_binary())
+            .map(|package| package.root_dir.clone())
+            .collect();
+        if roots.is_empty() {
+            return Err(Error::NoBinaryPackages(root.to_path_buf()));
+        }
+        Ok(roots)
+    }
+
     pub fn new(project_root: PathBuf) -> Result<Self, Error> {
         // Workspace loading was done based on https://github.com/noir-lang/noir/blob/c3a43abf9be80c6f89560405b65f5241ed67a6b2/tooling/nargo_cli/src/cli/mod.rs#L180
-        let toml_path = nargo_toml::get_package_manifest(&project_root)?;
-
-        let nargo_workspace = nargo_toml::resolve_workspace_from_toml(&toml_path, All, None)?;
+        let mut nargo_workspace = Self::resolve_workspace(&project_root)?;
+        let mut selected = (&nargo_workspace)
+            .into_iter()
+            .filter(|package| package.is_binary());
+        let package = selected
+            .next()
+            .ok_or_else(|| Error::NoBinaryPackages(project_root.clone()))?;
+        if selected.next().is_some() {
+            return Err(Error::MultipleBinaryPackages(project_root));
+        }
+        nargo_workspace.selected_package_index = nargo_workspace
+            .members
+            .iter()
+            .position(|member| member.root_dir == package.root_dir);
 
         let (nargo_file_manager, nargo_parsed_files) = parse_workspace(&nargo_workspace);
 
@@ -263,13 +312,10 @@ impl Project {
     }
 
     pub fn get_only_crate(&self) -> &Package {
-        if self.nargo_workspace.members.len() != 1 {
-            panic!(
-                "Expected exactly one package in the project, got: {}",
-                self.nargo_workspace.members.len()
-            );
-        }
-        &self.nargo_workspace.members[0]
+        (&self.nargo_workspace)
+            .into_iter()
+            .next()
+            .expect("Project selects one binary package")
     }
 
     /// Root directory of the package being compiled. For a workspace this is
@@ -337,5 +383,74 @@ impl Debug for Project {
         writeln!(f, ")")?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn workspace(default: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Nargo.toml"),
+            format!("[workspace]\nmembers = [\"a\", \"b\", \"lib\"]\n{default}"),
+        )
+        .unwrap();
+        for name in ["a", "b", "lib"] {
+            let root = dir.path().join(name);
+            fs::create_dir_all(root.join("src")).unwrap();
+            let kind = if name == "lib" { "lib" } else { "bin" };
+            fs::write(
+                root.join("Nargo.toml"),
+                format!("[package]\nname = \"{name}\"\ntype = \"{kind}\"\nauthors = []\n"),
+            )
+            .unwrap();
+            fs::write(
+                root.join(if kind == "lib" {
+                    "src/lib.nr"
+                } else {
+                    "src/main.nr"
+                }),
+                "fn main() {}\n",
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn workspace_selects_binaries_in_manifest_order_and_honors_default() {
+        let dir = workspace("");
+        assert_eq!(
+            Project::binary_package_roots(dir.path()).unwrap(),
+            vec![dir.path().join("a"), dir.path().join("b")]
+        );
+        assert!(matches!(
+            Project::new(dir.path().to_path_buf()),
+            Err(Error::MultipleBinaryPackages(_))
+        ));
+        let dir = workspace("default-member = \"b\"");
+        assert_eq!(
+            Project::binary_package_roots(dir.path()).unwrap(),
+            vec![dir.path().join("b")]
+        );
+        let project = Project::new(dir.path().to_path_buf()).unwrap();
+        assert_eq!(project.get_only_crate().name.to_string(), "b");
+        assert_eq!(project.package_root(), dir.path().join("b"));
+        let member = Project::new(dir.path().join("a")).unwrap();
+        assert_eq!(member.get_only_crate().name.to_string(), "a");
+    }
+
+    #[test]
+    fn workspace_does_not_fall_back_from_invalid_or_library_default() {
+        let dir = workspace("default-member = \"missing\"");
+        assert!(Project::binary_package_roots(dir.path()).is_err());
+        let dir = workspace("default-member = \"lib\"");
+        assert!(matches!(
+            Project::binary_package_roots(dir.path()),
+            Err(Error::NoBinaryPackages(_))
+        ));
     }
 }

@@ -33,11 +33,13 @@
 //! - **Mixed Operand Widths:** Noir's elaborator unifies a shift's amount with its value, so
 //!   `rhs_bits == bits` in every program here. The `s2 > s1` axis arises only from shifts the
 //!   compiler builds itself.
-//! - **`i128`:** Noir has it while Mavros caps a signed _reading_ at [`crate::MAX_SIGNED_BITS`], so
-//!   a signed 128-bit program is rejected at compile time rather than run. See that constant's doc
-//!   for more info.
-//! - **`u128 <<`:** `witness_bitwise::product_headroom_or_bail` refuses to lower it, so the left
-//!   shift stops at 64 bits while every other operation runs the full unsigned set.
+//! - **`i128`:** Noir has it while no Mavros lowering reads a signed pattern above
+//!   [`crate::MAX_LOWERED_SIGNED_BITS`], so a signed 128-bit program is rejected at compile time
+//!   rather than run. See that constant's doc for more info.
+//! - **`u128 <<`:** every operand here is a witness, amounts included, so `width_validation`'s
+//!   static shift bound refuses it — `2^(128 + 127)` is past what the field carries — and the left
+//!   shift stops at 64 bits while every other operation runs the full unsigned set. The
+//!   literal-amount exemption cannot apply, there being no literal amount.
 //!
 //! The **rejecting** half renders one program per `(operation, reading, reason)` at the narrowest
 //! width the model rejects at — see [`first_rejection`] — because a rejection reason is a property
@@ -51,7 +53,7 @@
 //! the discharge that deletes a check outright.
 
 use crate::{
-    IntBits, IntOp, MAX_BITS, MAX_SIGNED_BITS, Outcome, Reject, Sign, SignedValue, corners, eval,
+    IntBits, IntOp, MAX_LOWERED_SIGNED_BITS, Outcome, Reject, Sign, SignedValue, corners, eval,
     residue,
 };
 
@@ -372,7 +374,7 @@ fn pattern(bits: usize, value: u128) -> IntBits {
 
 /// The host word a model answer denotes, the other half of [`pattern`].
 fn host(value: &IntBits) -> u128 {
-    u128::try_from(value).expect("a pattern no wider than MAX_BITS fits a host word")
+    u128::try_from(value).expect("a pattern at one of NOIR_WIDTHS fits a host word")
 }
 
 /// The operands one rejecting program is built from, or `None` where the case has no program.
@@ -632,13 +634,15 @@ fn widths_for(op: IntOp, sign: Sign) -> Vec<usize> {
         .iter()
         .copied()
         .filter(|&bits| {
-            // Mavros caps a signed reading at 64 bits, so `i128` is rejected at compile time.
-            if sign == Sign::Signed && bits > MAX_SIGNED_BITS {
+            // No Mavros lowering reads a signed pattern above one host limb, so `i128` is rejected
+            // at compile time.
+            if sign == Sign::Signed && bits > MAX_LOWERED_SIGNED_BITS {
                 return false;
             }
-            // `witness_bitwise::product_headroom_or_bail` refuses a 128-bit left shift, so the
-            // program would not compile. Every other operation runs the full unsigned set.
-            !(op == IntOp::Shl && bits == MAX_BITS)
+
+            // A 128-bit left shift by a witness amount is refused by `width_validation`, so the
+            // program would not compile. Every other operation covers the full unsigned set.
+            !(op == IntOp::Shl && bits == 128)
         })
         .collect()
 }
@@ -847,8 +851,8 @@ mod tests {
             let (bits, _, rhs) = negative_amount_rejection(op, Sign::Signed, Reject::ShiftAmount)
                 .unwrap_or_else(|| panic!("{op:?} generates no negative-amount program"));
             assert_eq!(
-                bits, MAX_SIGNED_BITS,
-                "the conjunct is dead below {MAX_SIGNED_BITS} bits"
+                bits, MAX_LOWERED_SIGNED_BITS,
+                "the conjunct is dead below {MAX_LOWERED_SIGNED_BITS} bits"
             );
             assert!(
                 pattern(bits, rhs).to_signed() < SignedValue::from(0u8),
@@ -892,8 +896,8 @@ mod tests {
                     );
                     if sign == Sign::Signed {
                         assert!(
-                            bits <= MAX_SIGNED_BITS,
-                            "i{bits} is wider than Mavros can read"
+                            bits <= MAX_LOWERED_SIGNED_BITS,
+                            "i{bits} is wider than any Mavros lowering can read"
                         );
                     }
                 }

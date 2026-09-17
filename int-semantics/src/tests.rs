@@ -17,8 +17,10 @@ use num_bigint::BigUint;
 use proptest::prelude::*;
 
 use crate::{
-    CmpOp, IntBits, IntOp, MAX_BITS, MAX_SIGNED_BITS, Outcome, Reject, SignedValue, corners, eval,
-    int_bits::FIELD_LIMB_BITS, mask, residue,
+    CmpOp, IntBits, IntOp, MAX_BITS, MAX_LOWERED_SIGNED_BITS, Outcome, Reject, SignedValue,
+    corners, eval,
+    int_bits::{FIELD_LIMB_BITS, HOST_WORD_BITS},
+    mask, residue,
 };
 
 // PROPTEST UTILITIES
@@ -36,7 +38,7 @@ fn pat(bits: usize, value: u128) -> IntBits {
 
 /// The host word a pattern denotes, the other half of [`pat`].
 fn host(value: &IntBits) -> u128 {
-    u128::try_from(value).expect("a pattern no wider than MAX_BITS fits a host word")
+    u128::try_from(value).expect("a pattern no wider than HOST_WORD_BITS fits a host word")
 }
 
 /// Shorthand for the common equal-width call.
@@ -69,10 +71,10 @@ fn enc(bits: usize, v: i64) -> u128 {
     host(&IntBits::from_signed(bits, &sv(v)))
 }
 
-/// `reduced_shift_amount` on a host word, carried at the widest width the model admits — which is
-/// how an amount reaches it from an evaluator that has not narrowed it.
+/// `reduced_shift_amount` on a host word, carried at the widest width the host façade has — which
+/// is how an amount reaches it from an evaluator that has not narrowed it.
 fn reduced(amount: u128, bits: usize) -> u32 {
-    pat(MAX_BITS, amount).reduced_shift_amount(bits)
+    pat(HOST_WORD_BITS, amount).reduced_shift_amount(bits)
 }
 
 /// `IntBits::compare` on host words.
@@ -178,7 +180,7 @@ fn signed_division_truncates_toward_zero() {
 #[test]
 fn a_left_shift_wraps_and_only_the_amount_can_reject() {
     // `noir_tests/specialized_shl_wrap` exists to pin this: 200 << 1 is 400, which keeps only its
-    // low eight bits, so the answer is 144 and *not* a rejection. Losing bits off the top is the
+    // low eight bits, so the answer is 144 and _not_ a rejection. Losing bits off the top is the
     // specified behaviour of `<<`, unlike `*`, where it is an error.
     assert_eq!(ev(IntOp::Shl, 8, 200, 1), val(8, 144));
     assert_eq!(
@@ -214,7 +216,7 @@ fn a_shift_amount_at_or_above_the_width_is_rejected() {
         assert_eq!(ev(op, 64, 1, 100), Outcome::Rejected(Reject::ShiftAmount));
     }
 
-    // A *negative* amount is the same rejection and not a separate rule:
+    // A _negative_ amount is the same rejection and not a separate rule:
     // `enforce_bitshift_rhs_lt_bit_size` casts the amount to unsigned first, so -1 reads as a huge
     // magnitude. `shl_signed_regression_9592` is this case.
     let minus_one = enc(32, -1);
@@ -321,7 +323,7 @@ fn the_fit_test_covers_exactly_the_bits_the_read_keeps() {
             }
             assert_eq!(
                 field_int(&limbs, bits),
-                field_int(&limbs, MAX_BITS),
+                field_int(&limbs, HOST_WORD_BITS),
                 "{limbs:?} was said to fit {bits} bits but reading it there lost something"
             );
         }
@@ -348,7 +350,7 @@ fn limb_width_is_a_parameter_not_an_assumption() {
     assert_eq!(limb_int(&[u64::MAX], 32, 128), u128::from(u32::MAX));
 
     // A limb at least as wide as the result needs no recombination at all.
-    assert_eq!(limb_int(&[7u64], MAX_BITS, 128), 7);
+    assert_eq!(limb_int(&[7u64], HOST_WORD_BITS, 128), 7);
 }
 
 #[test]
@@ -360,7 +362,7 @@ fn a_zero_width_limb_describes_no_representation() {
 // SIGN EXTENSION
 // ================================================================================================
 //
-// These are the tests that sweep the width extended *from*, which is what distinguishes
+// These are the tests that sweep the width extended _from_, which is what distinguishes
 // `sign_extend` from a widening cast: an implementation filling from a fixed width passes every
 // other test in this file.
 
@@ -414,7 +416,7 @@ fn sign_extend_handles_full_width() {
 // THE VOCABULARY
 // ================================================================================================
 //
-// The reading lives on the operation rather than beside it. What these check is the *shape* of the
+// The reading lives on the operation rather than beside it. What these check is the _shape_ of the
 // vocabulary: that the operations which behave differently are two, and the ones that behave
 // identically are one.
 
@@ -455,13 +457,13 @@ fn every_operation_that_reads_its_operands_comes_in_a_pair() {
 #[test]
 fn the_operations_with_no_reading_are_the_ones_that_answer_the_same_either_way() {
     // The claim behind `And`/`Or`/`Xor`/`Shl` having no signed form, checked rather than asserted
-    // in prose: for every corner pair, the answer read as *signed* is the one signed arithmetic
-    // would have produced, and the answer read as *unsigned* is the one unsigned arithmetic would
+    // in prose: for every corner pair, the answer read as _signed_ is the one signed arithmetic
+    // would have produced, and the answer read as _unsigned_ is the one unsigned arithmetic would
     // have produced. Both are derived here through `SignedValue`/`BigUint` rather than through
     // `IntBits`'s own limb code, so this compares two routes rather than restating one.
     //
     // A signed `<<` differs from an unsigned one only in a rejecting constraint on a negative
-    // *amount*, which is guard IR and not something `eval` computes.
+    // _amount_, which is guard IR and not something `eval` computes.
     for bits in [1usize, 8, 64] {
         for &lhs in &corners::values(bits) {
             for &rhs in &corners::values(bits) {
@@ -561,7 +563,7 @@ fn a_shift_takes_its_amount_at_whatever_width_it_arrives() {
     // two evaluators pass a narrower amount through at runtime -- see `corners::shift_width_pairs`.
     assert_eq!(eval(IntOp::Shl, &pat(8, 1), &pat(32, 3)), val(8, 8));
     assert_eq!(
-        eval(IntOp::Shl, &pat(8, 1), &pat(MAX_BITS, 8)),
+        eval(IntOp::Shl, &pat(8, 1), &pat(HOST_WORD_BITS, 8)),
         Outcome::Rejected(Reject::ShiftAmount),
         "the bound is the value's width, not the amount's"
     );
@@ -572,20 +574,41 @@ fn a_shift_takes_its_amount_at_whatever_width_it_arrives() {
 fn a_zero_width_operand_cannot_even_be_built() {
     // `check_widths` states `1..=MAX_BITS`, but the lower half of that range is not its to
     // enforce: a width of zero is refused a whole layer earlier, when the operand is constructed.
-    // The upper half is live, since `MAX_BITS` is the model's cap rather than the type's.
+    // The upper half is live, and is the one the test below exercises.
     let _ = eval(IntOp::UAdd, &pat(0, 0), &pat(0, 0));
 }
 
 #[test]
-#[should_panic(expected = "operand width 200 is outside")]
+#[should_panic(expected = "is outside 1..=16384")]
 fn an_operand_wider_than_the_model_admits_is_refused() {
-    let _ = eval(IntOp::UAdd, &pat(200, 1), &pat(200, 1));
+    let bits = MAX_BITS + 1;
+    let _ = eval(IntOp::UAdd, &pat(bits, 1), &pat(bits, 1));
 }
 
 #[test]
-#[should_panic(expected = "signed operation on a 128-bit value")]
-fn a_signed_reading_stops_where_the_lowerings_do() {
-    let _ = eval(IntOp::SAdd, &pat(128, 1), &pat(128, 1));
+fn a_signed_reading_no_longer_stops_where_the_lowerings_do() {
+    // Checked at a width no host signed type has -- `i128::MIN` is expressible but `1i128 << 127`
+    // is not -- and again well past any of them, where only the `BigInt` reading can answer.
+    assert_eq!(
+        eval(IntOp::SAdd, &pat(128, u128::MAX), &pat(128, 1)),
+        Outcome::Value(pat(128, 0)),
+        "-1 + 1 at 128 bits"
+    );
+    assert_eq!(
+        eval(IntOp::SAdd, &pat(128, 1u128 << 127), &pat(128, u128::MAX)),
+        Outcome::Rejected(Reject::Overflow),
+        "INT_MIN - 1 at 128 bits"
+    );
+
+    let wide = IntBits::from_signed(1000, &SignedValue::from(-1i8));
+    assert_eq!(wide.to_signed(), SignedValue::from(-1i8));
+    assert_eq!(
+        eval(IntOp::SMul, &wide, &wide)
+            .value()
+            .map(|v| v.to_signed()),
+        Some(SignedValue::from(1u8)),
+        "-1 * -1 at 1000 bits"
+    );
 }
 
 #[test]
@@ -601,7 +624,7 @@ fn a_comparison_refuses_two_widths() {
 #[test]
 fn bit_level_helpers_agree_with_their_definitions() {
     // Each operand states the width it came from, which is what these helpers read: the width
-    // `sign_extend` extends *from* is the operand's own rather than a second opinion beside it.
+    // `sign_extend` extends _from_ is the operand's own rather than a second opinion beside it.
     assert_eq!(host(&pat(9, 0x1FF).cast(8)), 0xFF);
     assert_eq!(
         host(&pat(8, 0xFF).cast(32)),
@@ -630,16 +653,16 @@ fn bit_level_helpers_agree_with_their_definitions() {
 fn the_host_word_mask_saturates_at_the_host_width_not_the_models_cap() {
     // `mask` is the last host word in the model, and its saturating arm exists because
     // `1u128 << bits` is a debug panic and a release build that silently masks the shift amount.
-    // The bound has to be the **host's** 128 rather than `MAX_BITS`, which the plan moves.
+    // The bound is therefore the **host's** 128 and not `MAX_BITS`, which sits far above it.
     assert_eq!(mask(0), 0);
     assert_eq!(mask(1), 1);
     assert_eq!(mask(64), u128::from(u64::MAX));
     assert_eq!(mask(127), u128::MAX >> 1);
     assert_eq!(mask(128), u128::MAX);
 
-    // The tripwire. Today `MAX_BITS` is 128 and these are the same assertion as the one above; the
-    // moment the cap moves they stop being, and a bound written against it would take the `<<` arm
-    // for a width no `u128` can express.
+    // The widths between the host word and the model's cap, which is where the two bounds come
+    // apart: a bound written against the cap would take the `<<` arm for a width no `u128` can
+    // express.
     assert_eq!(mask(129), u128::MAX);
     assert_eq!(mask(1000), u128::MAX);
     assert_eq!(mask(MAX_BITS + 1), u128::MAX);
@@ -660,10 +683,14 @@ fn a_reading_outside_the_width_encodes_by_wrapping() {
 
 #[test]
 fn the_signed_boundaries_are_total_at_every_width() {
-    // The two boundaries are pure powers of two and nothing caps them at `MAX_SIGNED_BITS`, so
-    // they are the first part of the model to reach the full width — and the part a host type
+    // The two boundaries are pure powers of two and never carried a signed cap of any kind, so
+    // they were the first part of the model to reach the full width — and the part a host type
     // could not have carried. `1i128 << 127` is not representable, which is what made the obvious
     // spelling of the signed reading panic at width 127.
+    //
+    // Swept to the cap rather than to the host word, unlike most of this file: the sweep is linear
+    // and each step is one `BigInt` two-power, so the whole wide range is affordable here — and it
+    // is the one place a 16384-bit boundary is checked directly.
     for bits in 1..=MAX_BITS {
         let (min, max) = (IntBits::signed_min(bits), IntBits::signed_max(bits));
         assert_eq!(
@@ -702,8 +729,9 @@ fn the_shift_backstop_reduces_to_the_operand_width_not_the_host() {
     assert_eq!(reduced(1, 7), 1, "an in-range amount is untouched");
     assert!(reduced(u128::MAX, 7) < 7);
 
-    // Every width, not only the powers of two: an amount already below the width survives.
-    for bits in 1..=MAX_BITS {
+    // Every width, not only the powers of two: an amount already below the width survives. Swept
+    // to the host word rather than to `MAX_BITS`, which would make this quadratic in the cap.
+    for bits in 1..=HOST_WORD_BITS {
         for amount in 0..bits {
             assert_eq!(
                 reduced(amount as u128, bits),
@@ -821,13 +849,13 @@ fn the_accept_boundary_is_exactly_the_width() {
         for &bits in corners::widths_for(op.is_signed()) {
             for amount in 0..bits {
                 assert!(
-                    !eval(op, &pat(bits, 1), &pat(MAX_BITS, amount as u128)).is_rejected(),
+                    !eval(op, &pat(bits, 1), &pat(HOST_WORD_BITS, amount as u128)).is_rejected(),
                     "{op:?}/{bits} rejected a legal amount {amount}"
                 );
             }
-            for amount in bits..=(bits + 2).min(MAX_BITS) {
+            for amount in bits..=(bits + 2).min(HOST_WORD_BITS) {
                 assert_eq!(
-                    eval(op, &pat(bits, 1), &pat(MAX_BITS, amount as u128)),
+                    eval(op, &pat(bits, 1), &pat(HOST_WORD_BITS, amount as u128)),
                     Outcome::Rejected(Reject::ShiftAmount),
                     "{op:?}/{bits} accepted an illegal amount {amount}"
                 );
@@ -893,7 +921,7 @@ proptest! {
     /// would catch a masking or sign-decode bug that is not corner-shaped.
     #[test]
     fn model_invariants_hold_anywhere_unsigned(
-        (bits, lhs) in width_and_value(MAX_BITS),
+        (bits, lhs) in width_and_value(HOST_WORD_BITS),
         rhs in any::<u128>(),
         op in any_unsigned_op(),
     ) {
@@ -902,7 +930,7 @@ proptest! {
 
     #[test]
     fn model_invariants_hold_anywhere_signed(
-        (bits, lhs) in width_and_value(MAX_SIGNED_BITS),
+        (bits, lhs) in width_and_value(MAX_LOWERED_SIGNED_BITS),
         rhs in any::<u128>(),
         op in any_signed_op(),
     ) {
@@ -912,8 +940,8 @@ proptest! {
     /// Mixed operand widths, which the hand-written pairs cannot enumerate.
     #[test]
     fn shifts_hold_across_independent_widths(
-        (bits, lhs) in width_and_value(MAX_BITS),
-        (rhs_bits, rhs) in width_and_value(MAX_BITS),
+        (bits, lhs) in width_and_value(HOST_WORD_BITS),
+        (rhs_bits, rhs) in width_and_value(HOST_WORD_BITS),
         shl in any::<bool>(),
     ) {
         let op = if shl { IntOp::Shl } else { IntOp::UShr };
@@ -922,7 +950,7 @@ proptest! {
 
     /// Two's complement round-trips, which everything signed rests on.
     #[test]
-    fn signed_encoding_round_trips((bits, raw) in width_and_value(MAX_SIGNED_BITS)) {
+    fn signed_encoding_round_trips((bits, raw) in width_and_value(MAX_LOWERED_SIGNED_BITS)) {
         let decoded = pat(bits, raw).to_signed();
         prop_assert!(IntBits::fits_signed(bits, &decoded));
         prop_assert_eq!(host(&IntBits::from_signed(bits, &decoded)), raw);
@@ -933,7 +961,7 @@ proptest! {
     /// that does not — stated independently of how `eval` decides it.
     #[test]
     fn signed_addition_rejects_exactly_the_unrepresentable(
-        (bits, lhs) in width_and_value(MAX_SIGNED_BITS),
+        (bits, lhs) in width_and_value(MAX_LOWERED_SIGNED_BITS),
         rhs in any::<u128>(),
     ) {
         let rhs = rhs & mask(bits);
@@ -953,20 +981,20 @@ proptest! {
     /// A shift is accepted exactly when the amount is below the width, whatever else is true.
     #[test]
     fn shift_acceptance_depends_only_on_the_amount(
-        (bits, lhs) in width_and_value(MAX_BITS),
+        (bits, lhs) in width_and_value(HOST_WORD_BITS),
         amount in any::<u128>(),
         shl in any::<bool>(),
     ) {
         let op = if shl { IntOp::Shl } else { IntOp::UShr };
         let rejected =
-            eval(op, &pat(bits, lhs), &pat(MAX_BITS, amount))
+            eval(op, &pat(bits, lhs), &pat(HOST_WORD_BITS, amount))
                 .is_rejected();
         prop_assert_eq!(rejected, amount >= bits as u128);
     }
 
     /// Comparison is a total order consistent with the reading it names.
     #[test]
-    fn comparison_matches_its_reading((bits, lhs) in width_and_value(MAX_SIGNED_BITS), rhs in any::<u128>()) {
+    fn comparison_matches_its_reading((bits, lhs) in width_and_value(MAX_LOWERED_SIGNED_BITS), rhs in any::<u128>()) {
         let rhs = rhs & mask(bits);
         prop_assert_eq!(compare(CmpOp::ULt, bits, lhs, rhs), lhs < rhs);
         prop_assert_eq!(

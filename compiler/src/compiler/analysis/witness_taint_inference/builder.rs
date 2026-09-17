@@ -785,7 +785,7 @@ fn leaf_paths(ty: &Type) -> Vec<Vec<Descent>> {
     let mut out = Vec::new();
     fn go(ty: &Type, prefix: &mut Vec<Descent>, out: &mut Vec<Vec<Descent>>) {
         match &ty.peel_witness().expr {
-            TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
+            TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {
                 out.push(prefix.clone())
             }
             TypeExpr::Ref(_) => out.push(prefix.clone()),

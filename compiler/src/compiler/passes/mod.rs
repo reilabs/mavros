@@ -28,6 +28,8 @@ pub mod sparse_conditional_simplification;
 pub mod specializer;
 pub mod strip_witness_of;
 pub mod trivial_phi_elimination;
+pub mod wide_witness_ints;
+pub mod width_validation;
 pub mod witness_lowering;
 pub mod witness_write_to_fresh;
 pub mod witness_write_to_void;

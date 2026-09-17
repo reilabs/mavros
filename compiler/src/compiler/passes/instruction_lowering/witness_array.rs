@@ -5,7 +5,10 @@
 
 use crate::compiler::{
     analysis::types::{FunctionTypeInfo, push_witness_of_to_leaves},
-    passes::instruction_lowering::{InstructionLoweringRule, LoweringContext},
+    passes::{
+        instruction_lowering::{InstructionLoweringRule, LoweringContext},
+        shared::seq_bounds::seq_bounds_operands,
+    },
     ssa::{
         ValueId,
         hlssa::{
@@ -15,6 +18,7 @@ use crate::compiler::{
     },
     util::ice_non_elided_tuple,
 };
+use mavros_int_semantics::IntBits;
 
 pub struct LowerWitnessArrayOps {}
 
@@ -145,8 +149,40 @@ impl LowerWitnessArrayOps {
         let result_type = result_type_full.strip_all_witness();
         let arr_elem_type = function_type_info.get_value_type(arr).get_array_element();
 
+        let arr_type = function_type_info.get_value_type(arr);
+        let idx_type = function_type_info.get_value_type(idx);
+        let idx_bits = int_bits(idx_type, "witness array get index");
+
+        // For an empty array, emit a guarded compare that is guaranteed to fail and return a
+        // default value.
+        if array_len(arr_type, "witness array get") == 0 {
+            let (_, len_cmp, idx_cmp, _) = seq_bounds_operands(b, arr, idx, arr_type, idx_type);
+            b.emit_guarded(
+                cond,
+                OpCode::AssertCmp {
+                    kind: CmpKind::ULt,
+                    lhs: idx_cmp,
+                    rhs: len_cmp,
+                },
+            );
+            let default = b.default_value(&result_type_full);
+            b.emit(OpCode::Cast {
+                result,
+                value: default,
+                target: CastTarget::Nop,
+            });
+            return;
+        }
+
         let pure_idx = b.value_of(idx);
-        let hint = self.emit_array_get_hint(b, arr, pure_idx, cond);
+        // Substitute a safe index (0) for the hint index so the VM never reads out of bounds; the
+        // lookup below still rejects an out-of-range witness index, so this only changes *when*
+        // it fails.
+        let (_, len_cmp, idx_cmp, _) = seq_bounds_operands(b, arr, pure_idx, arr_type, idx_type);
+        let in_bounds = b.ult(idx_cmp, len_cmp);
+        let zero = b.int_const(IntBits::zero(idx_bits));
+        let hint_idx = b.select(in_bounds, pure_idx, zero);
+        let hint = self.emit_array_get_hint(b, arr, hint_idx, cond);
         let idx_field = b.cast_to_field(idx);
         let stride = leaf_scalar_count(&result_type);
         let base_key = if stride == 1 {
@@ -246,8 +282,8 @@ impl LowerWitnessArrayOps {
                 rhs: len_cmp,
             },
         );
-        let zero = b.int_const(32, 0);
-        let one = b.int_const(32, 1);
+        let zero = b.int_const(IntBits::zero(32));
+        let one = b.int_const(IntBits::one(32));
         let init = b.default_value(&acc_type);
         let results = b.build_loop(
             vec![(zero, Type::int(32)), (init, acc_type)],
@@ -450,7 +486,7 @@ impl LowerWitnessArrayOps {
                 panic!("multidimensional witness array read: slice element types not supported")
             }
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
-            TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
+            TypeExpr::Ref(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {
                 panic!(
                     "multidimensional witness array read: unsupported element type {}",
                     target_type
@@ -517,7 +553,7 @@ fn leaf_scalar_count(t: &Type) -> usize {
         TypeExpr::Field | TypeExpr::Int(_) => 1,
         TypeExpr::WitnessOf(inner) => leaf_scalar_count(inner),
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
-        TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
+        TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {
             panic!("leaf_scalar_count: unsupported type {}", t)
         }
     }

@@ -1,10 +1,10 @@
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
-use ark_ff::{AdditiveGroup, BigInt, BigInteger, Field, PrimeField};
+use ark_ff::{AdditiveGroup, BigInteger, Field, PrimeField};
 use tracing::{instrument, warn};
 
 use mavros_artifacts::FieldConfig;
-use mavros_int_semantics::{self as semantics, CmpOp, IntBits};
+use mavros_int_semantics::{self as semantics, CmpOp, IntBits, int_bits::HOST_WORD_BITS};
 
 use crate::compiler::{
     analysis::{
@@ -14,11 +14,11 @@ use crate::compiler::{
     ssa::{
         BlockId, FunctionId,
         hlssa::{
-            self, ArithGroup, BinaryArithOpKind, CmpKind, HLSSA, MAX_SUPPORTED_UNSIGNED_BITS,
-            Radix, RefCountOp, SliceOpDir, Type, TypeExpr, assert_signed_op_width,
+            self, ArithGroup, BinaryArithOpKind, CmpKind, HLSSA, Radix, RefCountOp, SliceOpDir,
+            Type, TypeExpr, assert_signed_op_width,
         },
     },
-    util::{host_word, spread_bits, unspread_bits},
+    util::{field_constant, host_word, spread_bits, unspread_bits},
 };
 
 pub use mavros_artifacts::{
@@ -89,6 +89,17 @@ impl Value {
         panic!(
             "ICE: undefined {kind:?} reached the R1CS constant fold on {sign}{bits}; \
              LowerPureGuards should have rejected the program at the preceding assertion"
+        )
+    }
+
+    /// Report a constant with no field element reaching this evaluator as a compiler bug.
+    ///
+    /// This evaluator carries a number as **one field element**, for now, so a magnitude at or
+    /// above the modulus has no way of being held.
+    #[track_caller]
+    fn ice_no_element(what: std::fmt::Arguments<'_>) -> ! {
+        panic!(
+            "ICE: {what} reached R1CS generation carrying a value at or above the modulus, which one field element cannot hold; width_validation should have refused the program, or the fold should have happened before here"
         )
     }
 
@@ -184,11 +195,6 @@ impl Value {
 
     /// The canonical value of a constant as a `u128`, or `None` if it needs more than 128 bits.
     ///
-    /// Every `expect_u*` goes through this. They each used to format the constant as a decimal
-    /// string and re-parse it, which is correct but costs an allocation and a base-10 conversion
-    /// per operand — fine at the handful of calls R1CS generation makes, and far too slow to sweep
-    /// a conformance test through.
-    ///
     /// Both the read and the test that it lost nothing come from the model, which is what makes
     /// the agreement with `lattice::int_cast_bits` structural rather than a coincidence the two
     /// have to be kept in. Deriving "which limbs are outside 128 bits" here as well is how a
@@ -197,13 +203,26 @@ impl Value {
     /// The limb _count_ is a property of the field, and both entry points take the slice whatever
     /// its length: a field whose `BigInt` is narrower than this one simply has fewer, where
     /// `limbs[2]` would have panicked.
+    ///
+    /// # Why the width is spelled as a host word
+    ///
+    /// [`HOST_WORD_BITS`] below asks whether this element fits the word it is about to be returned
+    /// in — the return type's own word, and not any integer-width cap. That is the whole of it,
+    /// and it is why this reading is not waiting on a wider one: every caller wants a _small
+    /// number_ out of a field element, an array index or a bit, and an element that does not fit
+    /// one has no answer to give them however wide integers get.
+    ///
+    /// How wide an integer **operand** may be is a different question with a different bound, and
+    /// belongs to [`Value::expect_pattern`], which reads the element's limbs directly and is
+    /// bounded by the field. Routing an operand through here would bound it by a number that is
+    /// not about operands at all.
     fn const_u128(&self, what: &str) -> Option<u128> {
         match self {
             // FIELD-ASSUMPTION: L4-decompose
             Value::Const(c) => {
                 let limbs = c.into_bigint().0;
-                IntBits::field_limbs_fit(&limbs, semantics::MAX_BITS)
-                    .then(|| host_word(&IntBits::from_field_limbs(&limbs, semantics::MAX_BITS)))
+                IntBits::field_limbs_fit(&limbs, HOST_WORD_BITS)
+                    .then(|| host_word(&IntBits::from_field_limbs(&limbs, HOST_WORD_BITS)))
             }
             r => panic!("expected {what}, got {r:?}"),
         }
@@ -241,10 +260,21 @@ impl Value {
 
     /// The canonical value as a `bits`-wide pattern.
     ///
-    /// This evaluator carries its integers as field elements and reads them out as host words, so a
-    /// pattern exists only for the length of a call into the model.
+    /// This evaluator carries its integers as field elements, so a pattern exists only for the
+    /// length of a call into the model. Masking to `bits` enforces the reading as the model takes
+    /// its operands already normalized and does no masking of its own, so a bit above the declared
+    /// width is not part of the value being operated on whether it sits at index 60 or index 600.
+    ///
+    /// An element carrying more than `bits` is read as its low `bits` rather than refused, which is
+    /// the cast semantics `docs/int-semantics.md` gives and the same reading `int_cast_bits` gives
+    /// in the folder. This is not a bounds check and must not be read as one. A constant that
+    /// reaches a _constraint_ without passing through here is not truncated by anything.
     fn expect_pattern(&self, bits: usize) -> IntBits {
-        IntBits::from_u128(bits, self.expect_u128())
+        match self {
+            // FIELD-ASSUMPTION: L4-decompose
+            Value::Const(c) => IntBits::from_field_limbs(&c.into_bigint().0, bits),
+            r => panic!("expected an int{bits}, got {r:?}"),
+        }
     }
 
     // FIELD-ASSUMPTION: L4-eval
@@ -542,6 +572,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
             CmpKind::ULt => self.lt(b),
             CmpKind::SLt => {
                 let bits = bits.expect("ICE: signed comparison without an operand width");
+                assert_signed_op_width(bits, "R1CS constant comparison");
                 let less = self
                     .expect_pattern(bits)
                     .compare(CmpOp::SLt, &b.expect_pattern(bits));
@@ -573,15 +604,21 @@ impl symbolic_executor::Value<R1CGen> for Value {
         b: &Self,
         binary_arith_op_kind: BinaryArithOpKind,
         out_type: &Type,
-        _ctx: &mut R1CGen,
+        ctx: &mut R1CGen,
     ) -> Self {
         match &out_type.strip_witness().expr {
             TypeExpr::Int(bits) => {
                 let bits = *bits;
-                assert!(
-                    bits > 0 && bits <= MAX_SUPPORTED_UNSIGNED_BITS,
-                    "Unsupported integer size in R1CS arith: int{bits}"
-                );
+                // The _width_ bounds nothing here. What this evaluator can hold is a question
+                // about the **value**: a constant is one field element, so any magnitude below the
+                // modulus is representable whatever type it is declared at, and an `int16384`
+                // carrying 5 folds exactly as a `u8` carrying 5 does. The bound belongs on the
+                // answer, below, where it is a fact about a number rather than a guess from a
+                // type.
+                //
+                // Both operands are already below the modulus by construction: a constant reaches
+                // this evaluator through `of_int` or as a field element, and each is bounded there.
+                assert!(bits > 0, "an int0 describes a value with no bits");
                 if binary_arith_op_kind.is_signed() {
                     assert_signed_op_width(bits, "R1CS constant arithmetic");
                 }
@@ -610,7 +647,14 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     )
                 });
 
-                Value::Const(ark_bn254::Fr::from(host_word(&raw)))
+                // Operands below the modulus still combine into magnitudes at or above it and this
+                // evaluator has no second element to put one in for now.
+                let element = field_constant(ctx.field(), &raw).unwrap_or_else(|| {
+                    Value::ice_no_element(format_args!(
+                        "the answer of {binary_arith_op_kind:?} on int{bits}"
+                    ))
+                });
+                Value::Const(element.to_ark())
             }
             TypeExpr::Field | TypeExpr::WitnessOf(_) => match binary_arith_op_kind.group() {
                 ArithGroup::Add => self.add(b),
@@ -712,35 +756,38 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::mk_array(new_array)
     }
 
+    /// The `width` bits starting at `offset`, as an element again.
+    ///
+    /// The same reading as `click_cooper::lattice::eval_bit_range`'s field arm, through the same
+    /// two calls. The source is read as a pattern at the window's own top, and the window is minted
+    /// back through [`field_constant`].
     // FIELD-ASSUMPTION: L4-decompose
-    fn bit_range(&self, offset: usize, width: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
-        let new_value = self
-            .expect_constant()
-            .into_bigint()
-            .to_bits_le()
-            .iter()
-            .skip(offset)
-            .take(width)
-            .cloned()
-            .collect::<Vec<_>>();
-        Value::Const(ark_bn254::Fr::from_bigint(BigInt::from_bits_le(&new_value)).unwrap())
+    fn bit_range(&self, offset: usize, width: usize, _out_type: &Type, ctx: &mut R1CGen) -> Self {
+        let read = offset
+            .checked_add(width)
+            .expect("ICE: a bit range whose top overflows a usize");
+        let window = self.expect_pattern(read).bit_range(offset, width);
+
+        // Total, and not merely total so far: `window` is cut from a canonical element, so its
+        // magnitude is bounded by that element's and the element was below the modulus already.
+        let element = field_constant(ctx.field(), &window)
+            .expect("ICE: a window of a canonical field element is below the modulus");
+        Value::Const(element.to_ark())
     }
 
-    fn sext(&self, from: usize, _to: usize, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
-        // Sign-extend: if sign bit is set, add (2^to - 2^from) to the value
-        let val = self.expect_constant();
-        let bits = val.into_bigint().to_bits_le();
-        let sign_bit = if from > 0 && from - 1 < bits.len() {
-            bits[from - 1]
-        } else {
-            false
-        };
-        if sign_bit {
-            let extension = two_pow(_to) - two_pow(from);
-            Value::Const(val + extension)
-        } else {
-            self.clone()
-        }
+    /// Widen `from` bits to `to`, replicating the sign bit using the integer semantic model.
+    fn sext(&self, from: usize, to: usize, _out_type: &Type, ctx: &mut R1CGen) -> Self {
+        assert!(from > 0, "an int0 has no sign bit to extend");
+        assert!(
+            to >= from,
+            "sign extension must widen: int{from} -> int{to}"
+        );
+
+        let extended = self.expect_pattern(from).sign_extend(to);
+        let element = field_constant(ctx.field(), &extended).unwrap_or_else(|| {
+            Value::ice_no_element(format_args!("int{from} sign-extended to int{to}"))
+        });
+        Value::Const(element.to_ark())
     }
 
     fn cast(&self, cast_target: &hlssa::CastTarget, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
@@ -803,20 +850,20 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::mk_array(bit_values)
     }
 
+    /// Every bit below the result's width, flipped using the semantic model.
     fn not(&self, out_type: &Type, ctx: &mut R1CGen) -> Self {
-        let value_const = self.expect_constant();
-        let bits = value_const.into_bigint().to_bits_le();
-        let bit_size = out_type.get_bit_size(ctx.field());
-        let mut negated_bits = Vec::new();
-        for i in 0..bit_size {
-            let bit = if i < bits.len() { bits[i] } else { false };
-            negated_bits.push(!bit);
-        }
-        Value::Const(ark_bn254::Fr::from_bigint(BigInt::from_bits_le(&negated_bits)).unwrap())
+        let bits = out_type.get_bit_size(ctx.field());
+        let complemented = self.expect_pattern(bits).complement();
+        let element = field_constant(ctx.field(), &complemented).unwrap_or_else(|| {
+            Value::ice_no_element(format_args!("the complement of an int{bits}"))
+        });
+        Value::Const(element.to_ark())
     }
 
-    fn of_int(v: &IntBits, _ctx: &mut R1CGen) -> Self {
-        Value::Const(ark_bn254::Fr::from(host_word(v)))
+    fn of_int(v: &IntBits, ctx: &mut R1CGen) -> Self {
+        let element = field_constant(ctx.field(), v)
+            .unwrap_or_else(|| Value::ice_no_element(format_args!("an int{} constant", v.bits())));
+        Value::Const(element.to_ark())
     }
 
     fn of_field(f: crate::compiler::Field, _ctx: &mut R1CGen) -> Self {
@@ -1765,12 +1812,10 @@ mod comparison_tests {
     /// Both comparison paths read their operands the way the opcode says, not the way the operand
     /// type says.
     ///
-    /// `assert_cmp` is the half that was wrong. It used to pick two's complement by asking whether
-    /// the operand was an integer, which was a working proxy for "signed" only while an unsigned
-    /// integer wore a different type tag. Once `TypeExpr::U` and `TypeExpr::I` collapsed into one
-    /// `Int`, that question started answering "yes" for every integer, and a `ULt` over a byte with
-    /// its high bit set read it as negative — passing an assertion that should have failed, which
-    /// is the direction that matters: the program is accepted, not rejected.
+    /// `assert_cmp` is the half where reading the type would be unsound. An integer type carries no
+    /// sign, so "is the operand an integer" answers "yes" for every operand either comparison can
+    /// take: a `ULt` over a byte with its high bit set would read as negative and pass an assertion
+    /// that should have failed.
     #[test]
     fn a_comparison_reads_its_operands_the_way_the_opcode_says() {
         // 0xFB in eight bits is 251 read as a magnitude and -5 read as two's complement, so the
@@ -1811,6 +1856,34 @@ mod comparison_tests {
     }
 }
 
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A field element wider than a host word is **refused readably**, not read as a residue and
+    /// not ICEd on.
+    ///
+    /// This pins the width `const_u128` reads at to its own return type. Spelled as an integer type
+    /// cap instead, raising that cap makes `field_limbs_fit` vacuously true here and sends every
+    /// oversized constant into `host_word`, converting the `None` below into a compiler bug report.
+    /// The value is a bn254 element, so this is a path that can be hit today.
+    #[test]
+    fn a_constant_too_wide_for_a_host_word_declines_rather_than_reading_a_residue() {
+        // The widest value a host word holds, and the first one past it.
+        let widest = ark_bn254::Fr::from(u128::MAX);
+        let one_past = widest + ark_bn254::Fr::from(1u64);
+
+        assert_eq!(Value::Const(one_past).const_u128("test"), None);
+
+        // And the bound is exact rather than conservative: the value below it still reads, and
+        // reads right, so this is a boundary and not a blanket refusal.
+        assert_eq!(Value::Const(widest).const_u128("test"), Some(u128::MAX));
+    }
+}
+
 // INT-SEMANTICS CONFORMANCE
 // ================================================================================================
 
@@ -1818,7 +1891,9 @@ mod comparison_tests {
 mod int_semantics_conformance {
     use mavros_int_semantics::{IntBits, IntOp, Sign, corners, residue};
 
-    use super::{BinaryArithOpKind, FieldConfig, R1CGen, Type, Value, symbolic_executor};
+    use super::{
+        BinaryArithOpKind, FieldConfig, R1CGen, Type, Value, field_constant, symbolic_executor,
+    };
 
     /// Every operation, spelled out so a new variant cannot quietly skip the sweep.
     const ALL_ARITH: [BinaryArithOpKind; 17] = [
@@ -1991,5 +2066,120 @@ mod int_semantics_conformance {
         // two, so a failure isolated to `<<` points at the shift direction rather than at the
         // reduction.
         assert_eq!(fold(BinaryArithOpKind::SShr, 8, 0xFF, 8), 0xFF);
+    }
+
+    // THE WIDE HALF
+    // --------------------------------------------------------------------------------------
+    //
+    // This evaluator's domain is bounded by the **field**, and by the _value_ rather than the
+    // width: a constant here is one field element, so it reaches every pattern below the modulus,
+    // at any width the type system admits. The wide corner set deliberately runs past the modulus.
+
+    /// Fold one operation the way `R1CGen` does, with patterns on both sides of the call.
+    fn fold_wide(op: BinaryArithOpKind, bits: usize, a: &IntBits, b: &IntBits) -> IntBits {
+        let field = FieldConfig::bn254();
+        let mut generator = R1CGen::new(field);
+        let operand = |p: &IntBits| {
+            Value::Const(
+                field_constant(field, p)
+                    .expect("an operand below the modulus has an element")
+                    .to_ark(),
+            )
+        };
+
+        <Value as symbolic_executor::Value<R1CGen>>::arith(
+            &operand(a),
+            &operand(b),
+            op,
+            &Type::int(bits),
+            &mut generator,
+        )
+        .expect_pattern(bits)
+    }
+
+    /// The exact relation again, at every wide width, skipping only what the field cannot hold.
+    ///
+    /// Every width in the wide set runs, **16384 included**: the skip is per _pair_, because
+    /// whether a constant can be held here is a question about its value.
+    #[test]
+    fn the_r1cs_fold_agrees_with_the_model_at_wide_widths() {
+        let field = FieldConfig::bn254();
+        let mut checked = 0usize;
+        let mut past_the_modulus = 0usize;
+
+        for op in ALL_ARITH {
+            for bits in corners::wide_widths_for(op.is_signed()) {
+                let (values, rhs) = corners::wide_operands(op.into(), bits);
+
+                for a in &values {
+                    for b in &rhs {
+                        let Some(want) = residue(op.into(), a, b) else {
+                            // The divmod shapes the model leaves unspecified, which this evaluator
+                            // ICEs on rather than folding; the narrow sweep pins that.
+                            continue;
+                        };
+
+                        // An operand or an answer at or above the modulus is outside this
+                        // evaluator's domain.
+                        if [a, b, &want]
+                            .iter()
+                            .any(|p| field_constant(field, p).is_none())
+                        {
+                            past_the_modulus += 1;
+                            continue;
+                        }
+
+                        assert_eq!(
+                            fold_wide(op, bits, a, b),
+                            want,
+                            "{op:?} at {bits} bits disagreed on {a:?}, {b:?}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            checked > 1_000,
+            "the wide sweep only reached {checked} specified points"
+        );
+
+        // The corner set is meant to reach past the modulus. If it stopped, the skip above would be
+        // covering nothing and the pins below would be the only evidence the boundary exists.
+        assert!(
+            past_the_modulus > 0,
+            "no wide corner reached past the modulus"
+        );
+    }
+
+    /// The bound is on the **value**, not on the width.
+    ///
+    /// The widest type the type system admits folds when what it carries fits, which is the whole
+    /// difference between this evaluator's limit and a cap on the type.
+    #[test]
+    fn the_widest_type_folds_when_its_value_fits() {
+        let bits = crate::compiler::ssa::hlssa::MAX_SUPPORTED_INT_BITS;
+        let three = IntBits::from_u128(bits, 3);
+        let four = IntBits::from_u128(bits, 4);
+
+        assert_eq!(
+            fold_wide(BinaryArithOpKind::UAdd, bits, &three, &four),
+            IntBits::from_u128(bits, 7)
+        );
+    }
+
+    /// `2^253` is below the modulus and `2^254` is above it, so this is a sum of two representable
+    /// operands with no element of its own.
+    #[test]
+    #[should_panic(expected = "carrying a value at or above the modulus")]
+    fn an_answer_above_the_modulus_is_an_ice_though_its_operands_fit() {
+        let half = IntBits::from_u128(256, 1).shifted_left(253);
+        assert!(
+            field_constant(FieldConfig::bn254(), &half).is_some(),
+            "the operand must itself be representable, or this pins the wrong boundary"
+        );
+
+        let _ = fold_wide(BinaryArithOpKind::UAdd, 256, &half, &half);
     }
 }

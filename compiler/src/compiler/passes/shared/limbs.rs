@@ -8,16 +8,92 @@ use num_bigint::BigInt;
 use num_traits::One;
 
 use mavros_artifacts::FieldConfig;
-use mavros_int_semantics::int_bits::HOST_LIMB_BITS;
+use mavros_int_semantics::int_bits::{HOST_LIMB_BITS, HOST_WORD_BITS};
 
 use crate::compiler::{
     analysis::value_range_analysis::field_modulus,
     passes::shared::unsupported::unsupported_on_this_field,
     ssa::{
         ValueId,
-        hlssa::{CastTarget, builder::HLEmitter},
+        hlssa::{CastTarget, MAX_POW2_TABLE_SIZE, builder::HLEmitter},
     },
 };
+
+// THE NARROW/WIDE DISPATCH THRESHOLD
+// ================================================================================================
+
+/// The host half of [`narrow_int_bits`]: the widest value the narrow lowerings can _mint_.
+///
+/// Derived from the host, as [`HOST_LIMB_BITS`] is and for the same kind of reason: every narrow
+/// lowering builds its constants through `HLEmitter::int_const`, whose payload is a `u128`, and
+/// masks them with host-word shifts. No field choice moves that.
+const NARROW_HOST_BITS: usize = HOST_WORD_BITS;
+
+/// The widest integer the single-cell lowerings handle.
+///
+/// **Two conjuncts, and each binds on a real field:**
+///
+/// - the **field**, because a narrow lowering pins its result with linear combinations over one
+///   field element. Two values that agree modulo `p` are then the same witness, so `2^bits <= p`
+///   has to hold or the rangecheck on the result cannot tell a residue from the value it should
+///   have been.
+/// - the **host**, because the constants those combinations are built from are host words. See
+///   [`NARROW_HOST_BITS`].
+///
+/// This is a **dispatch** threshold and **not a soundness bound**: it only tells a lowering which
+/// shape to take, and it replaces none of the per-operation predicates —
+/// [`two_limb_product_packing_fits`], [`spread_sum_fits_field`], [`combined_limbs_fit_field`] and
+/// `witness_integer_arith::range_fits_field_injectively` each ask for strictly more than this
+/// does, and each is still the thing that decides whether a particular lowering is sound.
+///
+/// There is no limb-wise **arithmetic** on the other side of it yet: a witnessed operation above
+/// this width is refused by `passes::width_validation`, which is what the wide lowering units
+/// replace. What does reach past it is everything that is not arithmetic: the multi-cell rep
+/// (`passes::wide_witness_ints`) carries a value as limbs, and the bit window and the range check
+/// are bounded by the field rather than by this.
+pub fn narrow_int_bits(field: FieldConfig) -> usize {
+    narrow_int_bits_for_modulus(&field_modulus(field))
+}
+
+/// The body of [`narrow_int_bits`], stated against the modulus so that a field this compiler cannot
+/// yet be configured for can still be checked.
+pub fn narrow_int_bits_for_modulus(modulus: &BigInt) -> usize {
+    (NARROWEST_LIMB_BITS..=NARROW_HOST_BITS)
+        .rev()
+        .find(|&bits| combined_limbs_fit_modulus(modulus, bits, 1))
+        .unwrap_or(NARROWEST_LIMB_BITS)
+}
+
+/// The largest `LookupTarget::Pow2` table size whose widest row `field` can hold.
+///
+/// A size-`s` table holds the amounts `0..2^s`, so its widest row carries `2^(2^s - 1)`. A row at
+/// or past the modulus wraps, and every evaluator builds its rows by doubling and so wraps
+/// _identically_. This is bad as the table quietly stops holding powers of two and
+/// `factor == 2^amount` stops being true, with nothing rejecting it. That makes this a soundness
+/// bound and a **field** question, which is why it is derived rather than named.
+///
+/// [`MAX_POW2_TABLE_SIZE`] remains the ceiling this clamps to, because the backends index their
+/// table caches by size and a size no cache has a slot for is unbuildable however wide the field
+/// is. bn254 answers the ceiling exactly (7, widest row `2^127`); goldilocks answers 6.
+pub fn max_pow2_table_size(field: FieldConfig) -> usize {
+    max_pow2_table_size_for_modulus(&field_modulus(field))
+}
+
+/// The body of [`max_pow2_table_size`], stated against the modulus so a field this compiler cannot
+/// yet be configured for can still be checked.
+pub fn max_pow2_table_size_for_modulus(modulus: &BigInt) -> usize {
+    (0..=MAX_POW2_TABLE_SIZE)
+        .rev()
+        .find(|&size| widest_pow2_row(size) < *modulus)
+        // Size zero's widest row is `2^0`, so this is unreachable for any modulus above one; it
+        // keeps the function total rather than standing for a real case.
+        .unwrap_or(0)
+}
+
+/// The value in the last row of a size-`size` powers-of-two table: `2^(2^size - 1)`.
+fn widest_pow2_row(size: usize) -> BigInt {
+    BigInt::one() << ((1usize << size) - 1)
+}
 
 // THE WITNESS LIMB WIDTH
 // ================================================================================================
@@ -199,6 +275,24 @@ pub fn combined_limbs_fit_modulus(modulus: &BigInt, limb_bits: usize, limb_count
     (BigInt::one() << (limb_bits * limb_count)) <= *modulus
 }
 
+/// The widest integer type whose every value is a distinct element of `field`.
+///
+/// This is the bound on the `Int -> Field` cast for a given field: at this width and below, the
+/// cast is injective, so the element identifies the integer it came from. One bit wider and it
+/// cannot be, because `2^bits` has passed the modulus and so both `0` and `p` are values of the
+/// type.
+pub fn widest_injective_int_bits(field: FieldConfig) -> usize {
+    widest_injective_int_bits_for_modulus(&field_modulus(field))
+}
+
+/// The body of [`widest_injective_int_bits`], stated against the modulus so that a field this
+/// compiler cannot yet be configured for can still be checked.
+pub fn widest_injective_int_bits_for_modulus(modulus: &BigInt) -> usize {
+    usize::try_from(modulus.bits())
+        .unwrap_or(usize::MAX)
+        .saturating_sub(1)
+}
+
 // LIMB DECOMPOSITIONS
 // ================================================================================================
 
@@ -266,10 +360,10 @@ pub fn extract_limb(
 /// Refuses on a field the recombination does not fit; see [`combined_limbs_fit_field`].
 // FIELD-ASSUMPTION: L6-int-representation
 // The result is one field element, so this is sound only while the recombined value fits one — it
-// is the _representation_ half of the assumption that survives limb widths becoming field-derived.
-// The widths are now `h` and the fit is now checked rather than assumed, so a narrow field refuses
-// here instead of returning a residue; what is still missing is the multi-cell representation that
-// would let it _succeed_, which is Phase 4's work rather than a wider constant.
+// is the _representation_ half of the assumption, which field-derived limb widths do not discharge.
+// The widths are `h` and the fit is checked rather than assumed, so a narrow field refuses here
+// instead of returning a residue; what is missing is the multi-cell representation that would let
+// it _succeed_, which is Phase 4's work rather than a wider constant.
 // FIELD-ASSUMPTION: L4-decompose
 // The place values are minted as `two_pow`, so they are only the powers they are meant to be while
 // they have not wrapped the modulus.
@@ -325,11 +419,41 @@ pub fn derive_low_limb(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mavros_int_semantics::IntBits;
 
     use crate::compiler::ssa::hlssa::{
-        BinaryArithOpKind, Constant, HLSSA, MAX_SUPPORTED_UNSIGNED_BITS, OpCode,
-        builder::HLSSABuilder,
+        BinaryArithOpKind, Constant, HLSSA, MAX_SUPPORTED_INT_BITS, OpCode, builder::HLSSABuilder,
     };
+
+    /// The LLVM lane's `Int <-> Field` packing has room the field does not carry.
+    #[test]
+    fn the_packing_has_room_the_field_does_not_carry() {
+        let widest = widest_injective_int_bits(FieldConfig::bn254());
+
+        assert!(crate::compiler::ssa::hlssa_to_llssa::INT_TO_FIELD_MAX_BITS > widest);
+        assert!(!combined_limbs_fit_field(
+            FieldConfig::bn254(),
+            crate::compiler::ssa::hlssa_to_llssa::INT_TO_FIELD_MAX_BITS,
+            1
+        ));
+    }
+
+    #[test]
+    fn the_injective_width_is_where_a_single_limb_stops_fitting() {
+        for modulus in [field_modulus(FieldConfig::bn254()), goldilocks()] {
+            let widest = widest_injective_int_bits_for_modulus(&modulus);
+
+            assert!(combined_limbs_fit_modulus(&modulus, widest, 1));
+            assert!(!combined_limbs_fit_modulus(&modulus, widest + 1, 1));
+        }
+    }
+
+    /// bn254 and goldilocks, written out so the two numbers this bound answers are on the record.
+    #[test]
+    fn the_injective_widths_of_the_two_moduli() {
+        assert_eq!(widest_injective_int_bits(FieldConfig::bn254()), 253);
+        assert_eq!(widest_injective_int_bits_for_modulus(&goldilocks()), 63);
+    }
 
     /// `2^64 - 2^32 + 1`. Not a field this compiler can be configured for yet, which is exactly why
     /// it is written out here: it is the worked example in `docs/field-agnosticism.md`, and the only
@@ -409,16 +533,95 @@ mod tests {
 
         // And the reason it is not offered: 24 does not divide the widths this compiler lowers, so
         // every split would first have to widen its operand to a multiple of 24 -- which for a u128
-        // is 144 bits, past the integer type cap. `lookup_sizing` charges the slack on top.
+        // is 144 bits, past the narrow threshold. `lookup_sizing` charges the slack on top.
         assert_ne!(32 % 24, 0);
         assert_ne!(128 % 24, 0);
-        assert!(128usize.div_ceil(24) * 24 > MAX_SUPPORTED_UNSIGNED_BITS);
+        assert!(128usize.div_ceil(24) * 24 > narrow_int_bits(FieldConfig::bn254()));
 
         // And nothing is given up at the budget the compiler actually runs: 24 only wins once a
         // second product has to fit, and at `DEFAULT` the two rules agree on 32, which is a power
         // of two _and_ byte-aligned. Dropping the granularity knob costs goldilocks nothing.
         assert_eq!(coarser_limb_bits(&p, 8, 1), 32);
         assert_eq!(limb_bits_for_modulus(&p, LimbBudget::DEFAULT), 32);
+    }
+
+    /// The pow2 ceiling is a real field question, and the two moduli give two answers.
+    ///
+    /// `MAX_POW2_TABLE_SIZE` is only the cache-slot ceiling; this is the bound that matters, and
+    /// bn254 meeting the ceiling exactly is a coincidence of that modulus rather than a design.
+    #[test]
+    fn the_pow2_ceiling_is_the_widest_row_the_modulus_can_hold() {
+        assert_eq!(max_pow2_table_size(FieldConfig::bn254()), 7);
+        assert_eq!(max_pow2_table_size_for_modulus(&goldilocks()), 6);
+
+        // Stated the long way at each answer and one past it, so the boundary is checked rather
+        // than the number recited.
+        for modulus in [field_modulus(FieldConfig::bn254()), goldilocks()] {
+            let size = max_pow2_table_size_for_modulus(&modulus);
+            assert!(widest_pow2_row(size) < modulus);
+            assert!(size == MAX_POW2_TABLE_SIZE || widest_pow2_row(size + 1) >= modulus);
+        }
+    }
+
+    /// The threshold is derived, and the two conjuncts **trade places** between the two moduli.
+    ///
+    /// This is why neither can be dropped: on bn254 the host binds and the field has 125 bits to
+    /// spare; on goldilocks the field binds and the host has 65. A threshold pinned to either
+    /// one alone would be wrong on the other field.
+    #[test]
+    fn the_narrow_threshold_is_the_field_and_the_host_whichever_binds() {
+        let bn254 = FieldConfig::bn254();
+        assert_eq!(narrow_int_bits(bn254), 128);
+        assert_eq!(narrow_int_bits_for_modulus(&goldilocks()), 63);
+
+        // Stated as the property rather than the number, at each answer and one past it: the
+        // widest width whose whole value range still has distinct field encodings.
+        for modulus in [field_modulus(bn254), goldilocks()] {
+            let n = narrow_int_bits_for_modulus(&modulus);
+            assert!(
+                combined_limbs_fit_modulus(&modulus, n, 1),
+                "{n} does not fit"
+            );
+            assert!(
+                n == NARROW_HOST_BITS || !combined_limbs_fit_modulus(&modulus, n + 1, 1),
+                "{n} is not the widest that fits"
+            );
+        }
+
+        assert!(
+            narrow_int_bits(bn254) < MAX_SUPPORTED_INT_BITS,
+            "the dispatch threshold and the type cap answer different questions, and should not answer them with the same number"
+        );
+        assert_eq!(narrow_int_bits(bn254), NARROW_HOST_BITS);
+        assert!(narrow_int_bits_for_modulus(&goldilocks()) < NARROW_HOST_BITS);
+    }
+
+    /// Every width the narrow path admits has a `2^n` table, and so does every limb.
+    ///
+    /// `witness_bitwise::lower_shift` has no other way to build `2^n` for a witness `n`, so a
+    /// width without a table falls back rather than being lowered. Neither half can be a const
+    /// assert, both sides of both being field-derived — which is the point, since **the narrow
+    /// half only holds on goldilocks because the threshold is derived.** Pinned at 128 it would
+    /// ask for a size-7 table against a modulus whose ceiling is 6.
+    #[test]
+    fn every_narrow_width_and_every_limb_has_a_powers_of_two_table() {
+        for modulus in [field_modulus(FieldConfig::bn254()), goldilocks()] {
+            let size = max_pow2_table_size_for_modulus(&modulus);
+            let rows = 1usize << size;
+
+            // The narrow half: 128 <= 128 on bn254, 63 <= 64 on goldilocks.
+            let narrow = narrow_int_bits_for_modulus(&modulus);
+            assert!(
+                narrow <= rows,
+                "narrow width {narrow} has no table at size {size}"
+            );
+
+            // The wide half, which is the one a limb-wise shift depends on: the amounts a limb is
+            // shifted by are `0..h`, not `0..N`, so this is what survives once widths outrun any
+            // table. 64 <= 128 on bn254, 32 <= 64 on goldilocks.
+            let h = limb_bits_for_modulus(&modulus, LimbBudget::DEFAULT);
+            assert!(h <= rows, "limb width {h} has no table at size {size}");
+        }
     }
 
     #[test]
@@ -538,10 +741,10 @@ mod tests {
         }
 
         // The boundary on bn254, well past the `U(bits*2)` cast's own reach: the cast is capped at
-        // `MAX_SUPPORTED_UNSIGNED_BITS`, so no width past 64 could have been spread there anyway.
+        // the narrow threshold, so no width past 64 could have been spread there anyway.
         assert!(spread_sum_fits_field(127, bn254));
         assert!(!spread_sum_fits_field(128, bn254));
-        assert!(2 * 65 > MAX_SUPPORTED_UNSIGNED_BITS);
+        assert!(2 * 65 > narrow_int_bits(bn254));
 
         // Why the bound is stated against the modulus. A spread pair is barely over two thirds of
         // `2^(2*bits)`, so goldilocks carries a full 32-bit bitwise op -- which is what
@@ -552,7 +755,7 @@ mod tests {
         assert!(!spread_sum_fits_modulus(33, &p));
         assert!(2 * 32 >= 64, "the bit-count bound refuses this width");
 
-        // And why it is the sum of *two* spreads rather than one: a modulus can hold a single
+        // And why it is the sum of _two_ spreads rather than one: a modulus can hold a single
         // 32-bit spread and not the pair, which is the only thing that separates this bound from
         // the bound on one operand.
         let holds_one_spread_only = BigInt::one() << 63;
@@ -603,7 +806,7 @@ mod tests {
         sb.modify_function(main_id, |b| {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
-            let limb = e.int_const(64, 1);
+            let limb = e.int_const(IntBits::one(64));
             combine_limbs(
                 &mut e,
                 &WitnessLimbs {
@@ -625,7 +828,7 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let value = e.int_const(48, 0x0000_DEAD_BEEF);
+                let value = e.int_const(IntBits::from_u128(48, 0x0000_DEAD_BEEF));
                 let limbs = split_into_limbs(&mut e, value, 16, 3);
                 assert_eq!(limbs.limb_bits, 16);
                 assert_eq!(limbs.limbs.len(), 3);

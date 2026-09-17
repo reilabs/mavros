@@ -10,6 +10,7 @@ use crate::compiler::ssa::{
     ValueId,
     hlssa::{CastTarget, CmpKind, OpCode, Type, TypeExpr, builder::HLEmitter},
 };
+use mavros_int_semantics::IntBits;
 
 /// A failable sequence op's bounds condition.
 pub enum SeqBoundsCheck {
@@ -89,7 +90,7 @@ pub fn seq_bounds_operands(
     index_ty: &Type,
 ) -> (ValueId, ValueId, ValueId, usize) {
     let len = match &seq_ty.strip_witness().expr {
-        TypeExpr::Array(_, n) => emitter.int_const(32, *n as u128),
+        TypeExpr::Array(_, n) => emitter.int_const(IntBits::from_u128(32, *n as u128)),
         TypeExpr::Slice(_) => emitter.slice_len(seq),
         other => panic!("seq bounds check on non-sequence type: {other:?}"),
     };
@@ -115,7 +116,7 @@ pub fn build_pop_bounds_assert(emitter: &mut impl HLEmitter, slice: ValueId) -> 
 
 /// Returns `assert`.
 pub fn build_pop_bounds_assert_on_len(emitter: &mut impl HLEmitter, len: ValueId) -> OpCode {
-    let zero = emitter.int_const(32, 0);
+    let zero = emitter.int_const(IntBits::zero(32));
     OpCode::AssertCmp {
         kind: CmpKind::ULt,
         lhs: zero,
@@ -132,7 +133,7 @@ pub fn build_insert_bounds_assert(
     index_ty: &Type,
 ) -> (OpCode, ValueId, ValueId, ValueId, usize) {
     let len = emitter.slice_len(slice);
-    let one = emitter.int_const(32, 1);
+    let one = emitter.int_const(IntBits::one(32));
     let new_len = emitter.uadd(len, one);
     let (assert, idx_cmp, cmp_bits) =
         build_lt_bounds_assert_on_len(emitter, new_len, index, index_ty, "slice insert");

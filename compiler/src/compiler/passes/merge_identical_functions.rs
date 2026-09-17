@@ -95,16 +95,8 @@ impl MergeIdenticalFunctions {
         // before the program merge; re-check it here so a future pipeline reorder fails loudly.
         #[cfg(debug_assertions)]
         {
-            use crate::compiler::ssa::hlssa::Constant;
-            fn contains_fn_ptr(c: &Constant) -> bool {
-                match c {
-                    Constant::FnPtr(_) => true,
-                    Constant::Blob(blob) => blob.elements.iter().any(contains_fn_ptr),
-                    Constant::Int(_) | Constant::Field(_) => false,
-                }
-            }
             let mut has_fn_ptr = false;
-            ssa.for_each_const(|_, cv| has_fn_ptr = has_fn_ptr || contains_fn_ptr(cv.as_ref()));
+            ssa.for_each_const(|_, cv| has_fn_ptr = has_fn_ptr || cv.as_ref().contains_fn_ptr());
             assert!(
                 !has_fn_ptr,
                 "merge_identical_functions requires defunctionalization first: a FnPtr constant \

@@ -9,6 +9,7 @@ mod slice_select;
 mod witness_array;
 mod witness_assert;
 mod witness_bitwise;
+mod witness_cast;
 mod witness_compare;
 mod witness_field;
 mod witness_integer_arith;
@@ -45,6 +46,7 @@ use self::{
     witness_array::LowerWitnessArrayOps,
     witness_assert::LowerWitnessAssertOps,
     witness_bitwise::LowerWitnessBitwiseOps,
+    witness_cast::LowerWitnessNarrowingCast,
     witness_compare::LowerWitnessCompareOps,
     witness_field::LowerWitnessFieldOps,
     witness_integer_arith::LowerWitnessIntegerArithOps,
@@ -166,6 +168,18 @@ pub(super) trait InstructionLoweringRule {
 }
 
 impl InstructionLowering {
+    /// The narrowing witness casts the program itself states, rewritten into bit windows.
+    ///
+    /// A phase of its own, between the multi-cell representation and the lowerings below it: see
+    /// [`LowerWitnessNarrowingCast`] for why it cannot share one with them.
+    pub fn witness_narrowing_casts() -> Self {
+        Self::with_lowerers(
+            "instruction_lowering_witness_narrowing_casts",
+            vec![Box::new(LowerWitnessNarrowingCast::new())],
+            false,
+        )
+    }
+
     pub fn witness_integer_ops() -> Self {
         Self::with_lowerers(
             "instruction_lowering_witness_integer_ops",

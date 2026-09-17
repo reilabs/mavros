@@ -709,7 +709,7 @@ pub fn contains_tuple(ty: &Type) -> bool {
         | TypeExpr::Slice(inner)
         | TypeExpr::Ref(inner)
         | TypeExpr::WitnessOf(inner) => contains_tuple(inner),
-        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => false,
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => false,
     }
 }
 
@@ -721,7 +721,7 @@ fn slot_count(ty: &Type) -> usize {
         | TypeExpr::Slice(inner)
         | TypeExpr::Ref(inner)
         | TypeExpr::WitnessOf(inner) => slot_count(inner),
-        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => 1,
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => 1,
     }
 }
 
@@ -738,7 +738,7 @@ fn witness_of_leaf(leaf: Type) -> Type {
 /// upward through `Array`/`Slice`/`Ref`/`WitnessOf`.
 fn leaf_types(ty: &Type) -> Vec<Type> {
     match &ty.expr {
-        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function | TypeExpr::Blob(..) => {
+        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {
             vec![ty.clone()]
         }
         TypeExpr::Tuple(elements) => elements.iter().flat_map(leaf_types).collect(),
@@ -936,9 +936,14 @@ mod tests {
 
     #[test]
     fn function_is_an_opaque_leaf() {
-        let t = Type::tuple_of(vec![field(), Type::function()]);
-        assert_eq!(leaf_types(&t), vec![field(), Type::function()]);
-        assert!(!contains_tuple(&Type::function()));
+        let t = Type::tuple_of(vec![field(), Type::function_returning(vec![Type::field()])]);
+        assert_eq!(
+            leaf_types(&t),
+            vec![field(), Type::function_returning(vec![Type::field()])]
+        );
+        assert!(!contains_tuple(&Type::function_returning(vec![
+            Type::field()
+        ])));
     }
 
     #[test]
