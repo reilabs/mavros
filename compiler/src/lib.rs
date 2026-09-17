@@ -1,5 +1,5 @@
 #[macro_use]
-pub mod ice;
+pub mod r#macro;
 
 pub mod abi_helpers;
 pub mod collections;

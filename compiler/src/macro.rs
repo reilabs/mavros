@@ -15,11 +15,11 @@ macro_rules! ice {
 #[macro_export]
 macro_rules! ice_unreachable {
     () => {
-        ::std::panic!("ICE: entered unreachable code")
+        ::std::panic!("ICE::Unreachable")
     };
     ($($arg:tt)+) => {
         ::std::panic!(
-            "ICE: entered unreachable code: {}",
+            "ICE::Unreachable: {}",
             ::std::format_args!($($arg)+)
         )
     };
