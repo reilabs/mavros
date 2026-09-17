@@ -289,6 +289,40 @@ impl Pass for DCE {
 }
 
 impl DCE {
+    // Discharge bounds before marking operands live; otherwise a redundant check can
+    // retain an entire computation and interfere with specialization/witness inference.
+    fn bounds_proven(
+        sequence_lengths: &HashMap<ValueId, usize>,
+        analyses: Option<(&TypeInfo, &ValueRanges)>,
+        function: FunctionId,
+        block: BlockId,
+        check: &SeqBoundsCheck,
+    ) -> bool {
+        let Some((types, ranges)) = analyses else {
+            return false;
+        };
+        let SeqBoundsCheck::SeqAccess { seq, index } = check else {
+            return false;
+        };
+        use crate::compiler::ssa::hlssa::TypeExpr;
+        let len = match &types
+            .get_function(function)
+            .get_value_type(*seq)
+            .strip_witness()
+            .expr
+        {
+            TypeExpr::Array(_, len) => *len,
+            TypeExpr::Slice(_) => match sequence_lengths.get(seq) {
+                Some(len) => *len,
+                None => return false,
+            },
+            _ => return false,
+        };
+        let range = ranges.get_function(function).get_at(block, *index);
+        range.unsigned().hi().is_some_and(|hi| hi < &len.into())
+            && range.unsigned().lo().is_some_and(|lo| lo >= &0.into())
+    }
+
     pub fn new(config: Config) -> Self {
         Self { config }
     }
@@ -510,8 +544,7 @@ impl DCE {
         // constant has just been pruned out from under it. Nothing between here and the sweep
         // touches the SSA, so running them at the top is strictly safer than running them later.
         //
-        // The types serve every rewrite path; only the arithmetic paths consult the ranges, as the
-        // bounds paths have nothing for them to discharge (see the sweep below).
+        // Arithmetic and known-length sequence bounds checks can be discharged by the ranges.
         let rewrite_types: Option<TypeInfo> = self
             .needs_rewrite_types()
             .then(|| Types::new().run(ssa, cfg));
@@ -527,6 +560,7 @@ impl DCE {
             "`divmod_check_survives` and `shift_check_survives` read `None` as 'the partial-op rewrite is off'; the two must agree exactly or it silently re-enables itself"
         );
 
+        let mut sequence_lengths = HashMap::default();
         let mut definitions_by_function: HashMap<FunctionId, HashMap<ValueId, ValueDefinition>> =
             HashMap::default();
         let mut static_calls_by_callee: HashMap<FunctionId, Vec<(FunctionId, BlockId, usize)>> =
@@ -538,6 +572,18 @@ impl DCE {
 
             for (block_id, block) in function.get_blocks() {
                 for (i, instruction) in block.get_instructions().enumerate() {
+                    // Before slice purification these constructors expose the logical length.
+                    match instruction {
+                        OpCode::MkSeq { result, elems, .. } => {
+                            sequence_lengths.insert(*result, elems.len());
+                        }
+                        OpCode::MkSeqOfBlob { result, blob, .. } => {
+                            if let Some(Constant::Blob(blob)) = ssa.get_const(*blob).as_deref() {
+                                sequence_lengths.insert(*result, blob.len());
+                            }
+                        }
+                        _ => {}
+                    }
                     if let OpCode::Call {
                         function: CallTarget::Static(callee),
                         ..
@@ -602,8 +648,8 @@ impl DCE {
                     // computes them alive for nothing. This is where most of the saving is — the
                     // sweep only ever *avoids emitting* a few instructions, while the mark phase
                     // decides whether an entire dependency chain survives. There is no matching
-                    // exemption for the sequence bounds below: nothing here can prove such a check
-                    // away, so their operands are always seeded.
+                    // exemption for unknown vector lengths; known-length bounds use the same
+                    // range-based discharge before seeding their operands below.
                     if let Some((kind, lhs, rhs)) = unguarded_divmod_operands(instruction)
                         && self.divmod_check_survives(
                             partial_op_analyses,
@@ -684,8 +730,15 @@ impl DCE {
                     // Arrays need only the index; vectors also need the value supplying their
                     // logical length. Keep it alive until the sweep emits the check.
                     if self.rewrites_dead_seq_access()
-                        && let Some(SeqBoundsCheck::SeqAccess { seq, index }) =
+                        && let Some(check @ SeqBoundsCheck::SeqAccess { seq, index }) =
                             failable_bounds(instruction)
+                        && !Self::bounds_proven(
+                            &sequence_lengths,
+                            partial_op_analyses,
+                            *function_id,
+                            *block_id,
+                            &check,
+                        )
                     {
                         worklist.push(WorkItem::LiveValue(*function_id, index));
                         let ty = rewrite_types
@@ -1081,14 +1134,15 @@ impl DCE {
                                 }
                             } else if let Some(check) = failable_bounds(&instruction)
                                 && self.rewrites_bounds_of(&check)
+                                && !Self::bounds_proven(
+                                    &sequence_lengths,
+                                    partial_op_analyses,
+                                    function_id,
+                                    block_id,
+                                    &check,
+                                )
                             {
-                                // No `can_fail` gate to mirror `divmod_can_fail`: whether a seq op
-                                // is in bounds turns on the index, and for a slice on the *length*,
-                                // neither of which is a type property, so nothing here can decide
-                                // it. The check is always emitted and folds away downstream
-                                // (Click-Cooper knows the constant lengths, `SimplifyAsserts` drops
-                                // the tautologies) whenever the op was in fact total — which is
-                                // also what keeps a constant in-range index free.
+                                // Retain bounds that the mark phase could not prove safe.
                                 let (seq, index) = check.operands();
                                 let function_types = types.get_function(function_id);
                                 let seq_ty = function_types.get_value_type(seq).clone();
@@ -1359,5 +1413,54 @@ impl DCE {
             current_block = cfg.get_post_dominator(current_block);
         }
         current_block
+    }
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use super::*;
+    use crate::compiler::ssa::hlssa::{SequenceTargetType, Type, builder::HLSSABuilder};
+
+    #[test]
+    fn discard_proven_safe_read_but_keep_possible_boundary_failure() {
+        for (len, vector) in [(3, false), (4, false), (3, true), (4, true)] {
+            let mut ssa = HLSSA::new();
+            let main = ssa.get_unique_entrypoint_id();
+            HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+                let mut e = b.test_block(b.function.get_entry_id());
+                let input = e.add_parameter(Type::int(32));
+                let mask = e.emit_constant(Constant::int(32, 3));
+                let index = e.and(input, mask);
+                let array = e.mk_seq(
+                    vec![mask; len],
+                    if vector {
+                        SequenceTargetType::Slice
+                    } else {
+                        SequenceTargetType::Array(len)
+                    },
+                    Type::int(32),
+                );
+                e.array_get(array, index);
+                e.terminate_return(vec![]);
+            });
+            let flow = FlowAnalysis::run(&ssa);
+            DCE::new(Config::preserve_blocks()).do_run(&mut ssa, &flow);
+            let ops: Vec<_> = ssa
+                .get_unique_entrypoint()
+                .get_entry()
+                .get_instructions()
+                .collect();
+            assert!(!ops.iter().any(|op| matches!(op, OpCode::ArrayGet { .. })));
+            assert_eq!(
+                ops.iter().any(|op| matches!(op, OpCode::AssertCmp { .. })),
+                len == 3
+            );
+            if len == 4 {
+                assert!(
+                    ops.is_empty(),
+                    "safe check must not retain its operand chain"
+                );
+            }
+        }
     }
 }

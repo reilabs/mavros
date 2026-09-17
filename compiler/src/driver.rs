@@ -590,6 +590,7 @@ impl Driver {
             "witness_spilling".to_string(),
             self.draw_cfg,
             vec![
+                Box::new(InstructionLowering::pure_decompositions()),
                 // Lower the remaining (pure-length) slice pops/inserts/removes. The
                 // witness-length ones were already rewritten by `PurifyWitnessSlices`.
                 Box::new(InstructionLowering::slice_ops()),

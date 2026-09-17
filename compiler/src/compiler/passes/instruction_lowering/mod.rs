@@ -1,6 +1,7 @@
 mod bit_range;
 mod degree_spilling;
 mod guards;
+mod pure_decompositions;
 mod pure_guards;
 mod side_effect_free_guards;
 mod slice_insert_remove;
@@ -168,6 +169,15 @@ pub(super) trait InstructionLoweringRule {
 }
 
 impl InstructionLowering {
+    /// Validate source decompositions once, before witness lowering creates raw hints.
+    pub fn pure_decompositions() -> Self {
+        Self::with_lowerers(
+            "instruction_lowering_pure_decompositions",
+            vec![Box::new(pure_decompositions::LowerPureDecompositions)],
+            false,
+        )
+    }
+
     /// The narrowing witness casts the program itself states, rewritten into bit windows.
     ///
     /// A phase of its own, between the multi-cell representation and the lowerings below it: see
