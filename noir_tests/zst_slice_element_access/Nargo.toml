@@ -1,0 +1,6 @@
+[package]
+name = "zst_slice_element_access"
+type = "bin"
+authors = [""]
+
+[dependencies]
