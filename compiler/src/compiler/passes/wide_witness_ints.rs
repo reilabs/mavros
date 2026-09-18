@@ -1098,6 +1098,50 @@ impl Rewriter<'_> {
                 }
             }
 
+            // The bitwise three, which are the one arithmetic family with **no cross-limb
+            // interaction**: bit `i` of the answer depends on bit `i` of each operand and nothing
+            // else, so a limb of the answer is the same operation on the matching pair of operand
+            // limbs. There is no carry to thread and no reconstruction to re-establish — each limb
+            // is already held to its own width, and an operation that cannot set a bit the operands
+            // did not have between them cannot break that.
+            OpCode::BinaryArithOp {
+                kind:
+                    kind @ (BinaryArithOpKind::And | BinaryArithOpKind::Or | BinaryArithOpKind::Xor),
+                result,
+                lhs,
+                rhs,
+            } => {
+                let results = self.limbs(*result);
+                let pairs = self.operand_pair(*lhs, *rhs);
+                assert_eq!(
+                    results.len(),
+                    pairs.len(),
+                    "ICE: a bitwise result of {} limbs met operands of {}",
+                    results.len(),
+                    pairs.len()
+                );
+                for (result, (lhs, rhs)) in results.into_iter().zip(pairs) {
+                    self.push(OpCode::BinaryArithOp {
+                        kind: *kind,
+                        result,
+                        lhs,
+                        rhs,
+                    });
+                }
+            }
+
+            // The complement, which is the unary member of the same family and limb-wise for the
+            // same reason: bit `i` of the answer depends on bit `i` of the operand alone. Each limb
+            // is complemented at **its own** width, so the top one — which may be narrower than a
+            // full limb — does not acquire bits the value's width does not have.
+            OpCode::Not { result, value } => {
+                let results = self.limbs(*result);
+                let values = self.operand_limbs(*value, results.len());
+                for (result, value) in paired(results, values) {
+                    self.push(OpCode::Not { result, value });
+                }
+            }
+
             OpCode::Alloc { result, value } => {
                 for (result, value) in paired(self.limbs(*result), self.limbs(*value)) {
                     self.push(OpCode::Alloc { result, value });
