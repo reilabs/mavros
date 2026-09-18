@@ -1055,14 +1055,19 @@ impl<'a> ExpressionConverter<'a> {
             }
             [case, rest @ ..] => {
                 let location = self.expression_source_location(&case.branch);
-                let cond = self.case_condition(s, &case.constructor, location.clone(), b);
-                self.branch(
-                    cond,
-                    typ,
-                    |this, b| this.convert_arm(s, case, location, b),
-                    |this, b| this.convert_cases(s, rest, default, typ, b),
-                    b,
-                )
+                let (cond, arm_on_true) =
+                    self.case_condition(s, &case.constructor, location.clone(), b);
+                let arm = |this: &mut Self, b: &mut HLFunctionBuilder<'_>| {
+                    this.convert_arm(s, case, location, b)
+                };
+                let others = |this: &mut Self, b: &mut HLFunctionBuilder<'_>| {
+                    this.convert_cases(s, rest, default, typ, b)
+                };
+                if arm_on_true {
+                    self.branch(cond, typ, arm, others, b)
+                } else {
+                    self.branch(cond, typ, others, arm, b)
+                }
             }
         }
     }
@@ -1078,23 +1083,25 @@ impl<'a> ExpressionConverter<'a> {
         self.convert_expression(&case.branch, b)
     }
 
+    /// The value to branch on for `constructor`, and whether the arm is the `then` side of that
+    /// branch.
     fn case_condition(
         &mut self,
         s: &Scrutinee,
         constructor: &Constructor,
         location: SourceLocation,
         b: &mut HLFunctionBuilder<'_>,
-    ) -> ValueId {
+    ) -> (ValueId, bool) {
         let value = s.value;
         match constructor {
             Constructor::Unit | Constructor::Tuple(_) => {
                 panic!("ICE: {constructor:?} is a single-constructor pattern and is never tested")
             }
-            Constructor::True => value,
-            Constructor::False => self.emit_at_source_location(b, location, |e| e.not(value)),
+            Constructor::True => (value, true),
+            Constructor::False => (value, false),
             Constructor::Int(int) => {
                 let c = b.emit_const(Self::integer_constant(int, &s.ty));
-                self.emit_at_source_location(b, location, |e| e.eq(value, c))
+                (self.emit_at_source_location(b, location, |e| e.eq(value, c)), true)
             }
             // Only an enum scrutinee carries a tag; a struct pattern is single-constructor too.
             Constructor::Variant(_, idx) => {
@@ -1104,7 +1111,7 @@ impl<'a> ExpressionConverter<'a> {
                     )
                 });
                 let c = b.emit_const(Constant::Field((*idx as u128).into()));
-                self.emit_at_source_location(b, location, |e| e.eq(tag, c))
+                (self.emit_at_source_location(b, location, |e| e.eq(tag, c)), true)
             }
             Constructor::Range(..) => {
                 panic!("ICE: range patterns are not produced by the current frontend")
