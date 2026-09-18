@@ -524,9 +524,7 @@ impl UntaintControlFlow {
                             block.set_terminator(Terminator::Jmp(if_true, vec![]));
 
                             if merge == function.get_entry_id() {
-                                ice!(
-                                    "jump back into entry not supported yet. Is it even possible?"
-                                )
+                                ice!("jump back into entry not supported yet. Is it even possible?")
                             }
 
                             let jumps = cfg.get_jumps_into_merge_from_branch(if_true, merge);
