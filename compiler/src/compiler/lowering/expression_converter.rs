@@ -944,6 +944,13 @@ impl<'a> ExpressionConverter<'a> {
         )
     }
 
+    /// Lower a two-way conditional to `jmp_if` plus a merge block, returning the merged value.
+    ///
+    /// The current block is terminated with the `jmp_if`. Each closure then runs with
+    /// `current_block` already set to its own fresh, unterminated block.
+    ///
+    /// `typ` decides the merge protocol. `Unit` means the merge block takes no parameter and the
+    /// result is `None`. Any other type means the merge block takes one parameter of that type.
     fn branch(
         &mut self,
         condition: ValueId,
