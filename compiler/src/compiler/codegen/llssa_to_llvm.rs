@@ -554,7 +554,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .into()
             }
             Constant::Blob(_) => {
-                panic!("Blob constants cannot be materialized as normal LLVM values")
+                ice!("Blob constants cannot be materialized as normal LLVM values")
             }
         }
     }
@@ -803,7 +803,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         // gets emitted. It costs ~0.04% of a compile which is cheap enough to run under every
         // build.
         if let Err(message) = self.module.verify() {
-            panic!("LLVM rejected the generated module:\n{message}");
+            ice!("LLVM rejected the generated module:\n{message}");
         }
     }
 
@@ -1713,7 +1713,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             } => {
                 let blob_data = match self.constants.get(blob).map(|constant| constant.as_ref()) {
                     Some(Constant::Blob(blob)) => blob.clone(),
-                    _ => panic!("ConstDataPtr input v{} is not a blob", blob.0),
+                    _ => ice!("ConstDataPtr input v{} is not a blob", blob.0),
                 };
                 let ptr = self.materialize_const_data(elem_type, &blob_data);
                 self.value_map.insert(*result, ptr.into());
@@ -1923,7 +1923,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .arg(&opts.runtime_lib)
             .output()
             .unwrap_or_else(|_| {
-                panic!(
+                ice_usr!(
                     "Failed to run wasm-ld (tried: {}). Make sure LLVM with wasm-ld is installed.",
                     wasm_ld
                 )
@@ -1938,13 +1938,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 "wasm-ld stderr: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            panic!("wasm-ld failed with status: {}", output.status);
+            ice_usr!("wasm-ld failed with status: {}", output.status);
         }
 
         let debug_path = wasm_debug_info_path(path);
         if opts.include_debug_info {
             let linked = std::fs::read(path).unwrap_or_else(|error| {
-                panic!("failed to read linked WASM {}: {error}", path.display())
+                ice_usr!("failed to read linked WASM {}: {error}", path.display())
             });
             let external_url = debug_path
                 .file_name()
@@ -1952,16 +1952,16 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 .expect("WASM debug sidecar path must have a UTF-8 filename");
             let (stripped, debug) = crate::wasm_debug::split_debug_info(&linked, external_url)
                 .unwrap_or_else(|error| {
-                    panic!(
+                    ice_usr!(
                         "failed to split WASM debug info from {}: {error}",
                         path.display()
                     )
                 });
             std::fs::write(path, stripped).unwrap_or_else(|error| {
-                panic!("failed to write stripped WASM {}: {error}", path.display())
+                ice_usr!("failed to write stripped WASM {}: {error}", path.display())
             });
             std::fs::write(&debug_path, debug).unwrap_or_else(|error| {
-                panic!(
+                ice_usr!(
                     "failed to write WASM debug sidecar {}: {error}",
                     debug_path.display()
                 )

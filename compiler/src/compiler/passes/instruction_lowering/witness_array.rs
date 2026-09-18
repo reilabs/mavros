@@ -483,11 +483,11 @@ impl LowerWitnessArrayOps {
                 }
             }
             TypeExpr::Slice(_) => {
-                panic!("multidimensional witness array read: slice element types not supported")
+                ice!("multidimensional witness array read: slice element types not supported")
             }
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Ref(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {
-                panic!(
+                ice!(
                     "multidimensional witness array read: unsupported element type {}",
                     target_type
                 )
@@ -540,7 +540,7 @@ pub(super) fn select_leaves(
                 select_leaves(b, hit, nj, aj, &inner)
             })
         }
-        other => panic!(
+        other => ice!(
             "witness-indexed array/slice rebuild: unsupported element type {:?}",
             other
         ),
@@ -554,7 +554,7 @@ fn leaf_scalar_count(t: &Type) -> usize {
         TypeExpr::WitnessOf(inner) => leaf_scalar_count(inner),
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
         TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {
-            panic!("leaf_scalar_count: unsupported type {}", t)
+            ice!("leaf_scalar_count: unsupported type {}", t)
         }
     }
 }
@@ -563,21 +563,21 @@ fn scalar_cast_target(ty: &Type, context: &str) -> CastTarget {
     match &ty.strip_all_witness().expr {
         TypeExpr::Int(s) => CastTarget::Int(*s),
         TypeExpr::Field => CastTarget::Field,
-        other => panic!("{context}: unsupported scalar type {:?}", other),
+        other => ice!("{context}: unsupported scalar type {:?}", other),
     }
 }
 
 fn array_len(ty: &Type, context: &str) -> usize {
     match &ty.strip_witness().expr {
         TypeExpr::Array(_, n) => *n,
-        TypeExpr::Slice(_) => panic!("{context}: slice is not supported"),
-        other => panic!("{context}: expected array type, got {:?}", other),
+        TypeExpr::Slice(_) => ice!("{context}: slice is not supported"),
+        other => ice!("{context}: expected array type, got {:?}", other),
     }
 }
 
 pub(super) fn int_bits(ty: &Type, context: &str) -> usize {
     match ty.strip_witness().expr {
         TypeExpr::Int(n) => n,
-        _ => panic!("{context}: expected integer type, got {ty}"),
+        _ => ice!("{context}: expected integer type, got {ty}"),
     }
 }

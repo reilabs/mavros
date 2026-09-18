@@ -141,7 +141,7 @@ fn lower_map(
                 apply_elem_cast(e, elem, elem_src, inner)
             })
         }
-        other => panic!("Map cast over non-sequence type {:?}", other),
+        other => ice!("Map cast over non-sequence type {:?}", other),
     }
 }
 

@@ -812,17 +812,20 @@ fn verify_op_tuple_free(op: &OpCode, fid: FunctionId, bid: BlockId) {
         );
     };
     match op {
-        OpCode::MkTuple { .. } => panic!(
+        OpCode::MkTuple { .. } => ice!(
             "elide_tuples verification: fn {:?} block_{} still contains a MkTuple",
-            fid, bid.0
+            fid,
+            bid.0
         ),
-        OpCode::TupleProj { .. } => panic!(
+        OpCode::TupleProj { .. } => ice!(
             "elide_tuples verification: fn {:?} block_{} still contains a TupleProj",
-            fid, bid.0
+            fid,
+            bid.0
         ),
-        OpCode::TupleRefProj { .. } => panic!(
+        OpCode::TupleRefProj { .. } => ice!(
             "elide_tuples verification: fn {:?} block_{} still contains a TupleRefProj",
-            fid, bid.0
+            fid,
+            bid.0
         ),
         OpCode::MkSeq { elem_type, .. } | OpCode::MkRepeated { elem_type, .. } => {
             assert_free(elem_type, "sequence element type")

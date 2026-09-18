@@ -58,7 +58,7 @@ impl LowerDegreeSpillingOps {
 
         match lhs_type.strip_witness().expr {
             TypeExpr::Int(_) => {
-                panic!(
+                ice!(
                     "witness integer multiplication should have been lowered by instruction_lowering"
                 )
             }

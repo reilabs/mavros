@@ -24,3 +24,17 @@ macro_rules! ice_unreachable {
         )
     };
 }
+
+/// Panic on an error that a user's program or environment can trigger.
+#[macro_export]
+macro_rules! ice_usr {
+    () => {
+        ::std::panic!("Unhandled error from user input")
+    };
+    ($($arg:tt)+) => {
+        ::std::panic!(
+            "Unhandled error from user input: {}",
+            ::std::format_args!($($arg)+)
+        )
+    };
+}

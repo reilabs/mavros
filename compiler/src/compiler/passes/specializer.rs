@@ -304,7 +304,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
             (ArithGroup::Shr, _, _) => {
                 let res = ctx.bin(binary_arith_op_kind, self.0, b.0);
                 Self(res)
-            } /* No `_ => panic!("Not yet implemented")` arm: every op kind now ends in a catch-all
+            } /* No `_ => ice!("Not yet implemented")` arm: every op kind now ends in a catch-all
                * that emits the operation unfolded, so exhaustiveness checking proves an
                * unmodelled constant pair can no longer crash the compiler. Adding a variant to
                * `BinaryArithOpKind` will now fail to compile here rather than panicking at runtime. */
@@ -351,7 +351,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                 (None, _) | (_, None) => {
                     HLEmitter::assert_cmp(ctx, kind, a.0, b.0);
                 }
-                _ => panic!("Not yet implemented {:?}", (l_const, r_const)),
+                _ => todo!("Not yet implemented {:?}", (l_const, r_const)),
             },
             _ => {
                 HLEmitter::assert_cmp(ctx, kind, a.0, b.0);
@@ -406,14 +406,14 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                         ctx.const_vals.insert(res_v, ConstVal::Int(bit));
                         Self(res_v)
                     }
-                    _ => panic!("Not yet implemented {:?}", (v_const, endianness)),
+                    _ => ice!("Not yet implemented {:?}", (v_const, endianness)),
                 }
             }
             (None, _) | (_, None) => {
                 let res = HLEmitter::array_get(ctx, self.0, index.0);
                 Self(res)
             }
-            (a, i) => panic!("Not yet implemented {:?}", (a, i)),
+            (a, i) => ice!("Not yet implemented {:?}", (a, i)),
         }
     }
 
@@ -548,7 +548,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
             match ctx
                 .const_vals
                 .get(&value)
-                .unwrap_or_else(|| panic!("Blob element v{} is not a constant", value.0))
+                .unwrap_or_else(|| ice!("Blob element v{} is not a constant", value.0))
             {
                 ConstVal::Int(pattern) => Constant::Int(pattern.clone()),
                 ConstVal::Field(value) => Constant::Field(*value),
@@ -562,9 +562,10 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                             .collect(),
                     ))
                 }
-                other => panic!(
+                other => ice!(
                     "Blob element v{} is not a scalar/blob constant: {:?}",
-                    value.0, other
+                    value.0,
+                    other
                 ),
             }
         }
@@ -582,7 +583,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
     fn expect_blob(&self, ctx: &mut SpecializationState) -> Vec<Self> {
         match ctx.const_vals.get(&self.0) {
             Some(ConstVal::Blob(elements)) => elements.iter().copied().map(Self).collect(),
-            other => panic!("Expected blob, got {:?}", other),
+            other => ice!("Expected blob, got {:?}", other),
         }
     }
 

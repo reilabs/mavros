@@ -182,7 +182,7 @@ pub trait Context<V> {
     }
 
     fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<V> {
-        panic!("Todo opcode encountered: {}", payload);
+        ice!("Todo opcode encountered: {}", payload);
     }
 
     fn slice_push(&mut self, _slice: &V, _values: &[V], _dir: SliceOpDir) -> V {
@@ -450,7 +450,7 @@ impl SymbolicExecutor {
                         function: CallTarget::Dynamic(_),
                         ..
                     } => {
-                        panic!("Dynamic call targets are not supported in symbolic execution")
+                        ice!("Dynamic call targets are not supported in symbolic execution")
                     }
                     OpCode::ArrayGet {
                         result: r,
@@ -670,7 +670,7 @@ impl SymbolicExecutor {
                         // The context handler should return the result values
                         let result_values = ctx.todo(&payload, result_types);
                         if result_values.len() != results.len() {
-                            panic!(
+                            ice!(
                                 "Todo opcode handler returned {} values but {} were expected",
                                 result_values.len(),
                                 results.len()

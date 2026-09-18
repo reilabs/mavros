@@ -408,7 +408,7 @@ impl<'a> ExpressionConverter<'a> {
                 let value = *self
                     .bindings
                     .get(local_id)
-                    .unwrap_or_else(|| panic!("Undefined local variable: {:?}", local_id));
+                    .unwrap_or_else(|| ice!("Undefined local variable: {:?}", local_id));
 
                 // For mutable variables, we need to load from the pointer
                 let value = if self.mutable_locals.contains(local_id) {
@@ -423,7 +423,7 @@ impl<'a> ExpressionConverter<'a> {
                 let ssa_func_id = self
                     .function_mapper
                     .get(func_id)
-                    .unwrap_or_else(|| panic!("Undefined function: {:?}", func_id));
+                    .unwrap_or_else(|| ice!("Undefined function: {:?}", func_id));
                 // Return a function pointer constant
                 let value_id = b.emit_const(Constant::FnPtr(*ssa_func_id));
                 Some(value_id)
@@ -446,7 +446,7 @@ impl<'a> ExpressionConverter<'a> {
                 let slot = *self
                     .global_slots
                     .get(global_id)
-                    .unwrap_or_else(|| panic!("Undefined global: {:?}", global_id));
+                    .unwrap_or_else(|| ice!("Undefined global: {:?}", global_id));
                 let typ = self.type_converter.convert_type(&ident.typ);
                 let value =
                     self.emit_located(b, ident.location, |e| e.read_global(slot as u64, typ));
@@ -573,7 +573,7 @@ impl<'a> ExpressionConverter<'a> {
         }
 
         match lvalue {
-            LValue::Ident(_) => panic!("Cannot assign to non-addressable lvalue: {:?}", lvalue),
+            LValue::Ident(_) => ice!("Cannot assign to non-addressable lvalue: {:?}", lvalue),
             LValue::MemberAccess {
                 object,
                 field_index,
@@ -1196,7 +1196,7 @@ impl<'a> ExpressionConverter<'a> {
                 checked_int_cast_target(*signedness, *bit_size)
             }
             AstType::Bool => (CastTarget::Int(1), 1),
-            _ => panic!("Unsupported cast target type: {:?}", cast.r#type),
+            _ => ice!("Unsupported cast target type: {:?}", cast.r#type),
         };
 
         let result = self.emit_located(b, Some(cast.location), |e| {
@@ -1255,7 +1255,7 @@ impl<'a> ExpressionConverter<'a> {
                 let elem_ast_type = match typ {
                     AstType::Array(_, elem_type) => elem_type.as_ref(),
                     AstType::Vector(elem_type) => elem_type.as_ref(),
-                    _ => panic!(
+                    _ => ice!(
                         "Expected array/vector type for Repeated literal, got {:?}",
                         typ
                     ),
@@ -1343,7 +1343,7 @@ impl<'a> ExpressionConverter<'a> {
             noirc_frontend::monomorphization::ast::Type::Vector(elem_type) => {
                 (None, elem_type.as_ref())
             }
-            _ => panic!(
+            _ => ice!(
                 "Expected array/slice type for array literal, got {:?}",
                 array_lit.typ
             ),
@@ -1454,7 +1454,7 @@ impl<'a> ExpressionConverter<'a> {
                     let value = field_element.to_u128();
                     Some(Constant::int(1, value))
                 }
-                _ => panic!("Unexpected type for integer literal: {:?}", typ),
+                _ => ice!("Unexpected type for integer literal: {:?}", typ),
             },
             _ => None,
         }
@@ -1576,7 +1576,7 @@ impl<'a> ExpressionConverter<'a> {
         let ssa_func_id = self
             .function_mapper
             .get(func_id)
-            .unwrap_or_else(|| panic!("Undefined function: {:?}", func_id));
+            .unwrap_or_else(|| ice!("Undefined function: {:?}", func_id));
 
         // Return size is 1 for tuples (they're returned as a single value)
         // and 0 for unit
@@ -1640,7 +1640,7 @@ impl<'a> ExpressionConverter<'a> {
                             self.emit_located(b, Some(call.location), |e| e.slice_len(slice));
                         Some(value)
                     }
-                    _ => panic!("array_len called on non-array/slice type: {:?}", arg_type),
+                    _ => ice!("array_len called on non-array/slice type: {:?}", arg_type),
                 }
             }
             "to_le_radix" => {
@@ -1649,7 +1649,7 @@ impl<'a> ExpressionConverter<'a> {
                 let radix = self.convert_expression(&call.arguments[1], b).unwrap();
                 let output_size = match call.return_type {
                     noirc_frontend::monomorphization::ast::Type::Array(len, _) => len as usize,
-                    _ => panic!(
+                    _ => ice!(
                         "to_le_radix must return an array, got {:?}",
                         call.return_type
                     ),
@@ -1665,7 +1665,7 @@ impl<'a> ExpressionConverter<'a> {
                 let radix = self.convert_expression(&call.arguments[1], b).unwrap();
                 let output_size = match call.return_type {
                     noirc_frontend::monomorphization::ast::Type::Array(len, _) => len as usize,
-                    _ => panic!(
+                    _ => ice!(
                         "to_be_radix must return an array, got {:?}",
                         call.return_type
                     ),
@@ -1681,7 +1681,7 @@ impl<'a> ExpressionConverter<'a> {
                     Expression::Literal(
                         noirc_frontend::monomorphization::ast::Literal::Integer(sf, _, _),
                     ) => sf.to_u128() as usize,
-                    other => panic!(
+                    other => ice!(
                         "apply_range_constraint bit_size must be a constant, got {:?}",
                         other
                     ),
@@ -1753,7 +1753,7 @@ impl<'a> ExpressionConverter<'a> {
                 let input = self.convert_expression(&call.arguments[0], b).unwrap();
                 let output_size = match call.return_type {
                     noirc_frontend::monomorphization::ast::Type::Array(len, _) => len as usize,
-                    _ => panic!(
+                    _ => ice!(
                         "to_le_bits must return an array, got {:?}",
                         call.return_type
                     ),
@@ -1767,7 +1767,7 @@ impl<'a> ExpressionConverter<'a> {
                 let input = self.convert_expression(&call.arguments[0], b).unwrap();
                 let output_size = match call.return_type {
                     noirc_frontend::monomorphization::ast::Type::Array(len, _) => len as usize,
-                    _ => panic!(
+                    _ => ice!(
                         "to_be_bits must return an array, got {:?}",
                         call.return_type
                     ),
@@ -1803,7 +1803,7 @@ impl<'a> ExpressionConverter<'a> {
                 let slice = self.convert_expression(&call.arguments[0], b).unwrap();
                 let tuple_ty = self.type_converter.convert_type(&call.return_type);
                 let TypeExpr::Tuple(parts) = &tuple_ty.expr else {
-                    panic!("vector pop builtin must return a tuple, got {tuple_ty}")
+                    ice!("vector pop builtin must return a tuple, got {tuple_ty}")
                 };
                 let parts = parts.clone();
                 Some(self.emit_located(b, Some(call.location), |e| {
@@ -1829,7 +1829,7 @@ impl<'a> ExpressionConverter<'a> {
                 let index = self.convert_expression(&call.arguments[1], b).unwrap();
                 let tuple_ty = self.type_converter.convert_type(&call.return_type);
                 let TypeExpr::Tuple(parts) = &tuple_ty.expr else {
-                    panic!("vector remove builtin must return a tuple, got {tuple_ty}")
+                    ice!("vector remove builtin must return a tuple, got {tuple_ty}")
                 };
                 let parts = parts.clone();
                 Some(self.emit_located(b, Some(call.location), |e| {
@@ -1873,7 +1873,7 @@ impl<'a> ExpressionConverter<'a> {
                     AstType::Integer(signedness, bit_size) => {
                         checked_int_cast_target(*signedness, *bit_size).0
                     }
-                    other => panic!("unsafe_cast: unsupported target type {:?}", other),
+                    other => ice_usr!("unsafe_cast: unsupported target type {:?}", other),
                 };
 
                 let value = self.convert_expression(&call.arguments[0], b).unwrap();
@@ -1917,7 +1917,7 @@ impl<'a> ExpressionConverter<'a> {
                 _typ,
                 _location,
             )) => signed_field.to_u128() as u32,
-            _ => panic!("Expected a constant integer argument, got {:?}", expr),
+            _ => ice!("Expected a constant integer argument, got {:?}", expr),
         }
     }
 }

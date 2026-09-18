@@ -764,7 +764,7 @@ impl RCInsertion {
                         if_f: v2,
                     } => {
                         if self.needs_rc(type_info, v1) || self.needs_rc(type_info, v2) {
-                            panic!("Unsupported yet");
+                            ice!("Unsupported yet");
                         }
                         new_instructions.push(instruction);
                     }

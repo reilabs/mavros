@@ -181,7 +181,7 @@ fn replace_foreign_function(function: &mut NoirFunction, replaced: &mut HashSet<
         .iter()
         .map(|param| {
             let Pattern::Identifier(ident) = &param.pattern else {
-                panic!("foreign function '{foreign_name}' has a non-identifier parameter pattern")
+                ice_usr!("foreign function '{foreign_name}' has a non-identifier parameter pattern")
             };
             variable(AstPath::plain(
                 vec![PathSegment {
@@ -278,7 +278,7 @@ impl Project {
 
     pub fn get_only_crate(&self) -> &Package {
         if self.nargo_workspace.members.len() != 1 {
-            panic!(
+            ice_usr!(
                 "Expected exactly one package in the project, got: {}",
                 self.nargo_workspace.members.len()
             );

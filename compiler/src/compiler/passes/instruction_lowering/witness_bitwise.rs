@@ -360,7 +360,7 @@ impl LowerWitnessBitwiseOps {
     ) {
         let lhs_type = context.types().get_value_type(lhs);
         let bits = integer_bits(lhs_type)
-            .unwrap_or_else(|| panic!("witness shift on non-integer lhs type {lhs_type:?}"));
+            .unwrap_or_else(|| ice!("witness shift on non-integer lhs type {lhs_type:?}"));
         // The shift's own sign decides which lowering runs.
         let lhs_signed = kind.is_signed();
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
@@ -734,7 +734,7 @@ fn shift_amount_bits(
 ) -> ShiftAmountWidths {
     let rhs_type = context.types().get_value_type(rhs);
     let rhs_bits = integer_bits(rhs_type)
-        .unwrap_or_else(|| panic!("witness shift by a non-integer amount type {rhs_type:?}"));
+        .unwrap_or_else(|| ice!("witness shift by a non-integer amount type {rhs_type:?}"));
     ShiftAmountWidths {
         rhs_bits,
         amount_bits: bits.trailing_zeros() as usize,
@@ -1172,7 +1172,7 @@ fn cast_target_for_integer_type(ty: &Type) -> CastTarget {
         // A `CastTarget` is a raw-bits conversion, so there is one target per width and no sign to
         // choose. Sign extension is the separate `SExt` opcode.
         TypeExpr::Int(bits) => CastTarget::Int(bits),
-        other => panic!("expected integer type, got {:?}", other),
+        other => ice!("expected integer type, got {:?}", other),
     }
 }
 
@@ -1188,7 +1188,7 @@ fn integer_bits_and_cast(
     {
         // One target per width, no sign to choose; see `cast_target_for_integer_type`.
         TypeExpr::Int(bits) => (bits, CastTarget::Int(bits)),
-        other => panic!("{context}: expected integer type, got {:?}", other),
+        other => ice!("{context}: expected integer type, got {:?}", other),
     }
 }
 

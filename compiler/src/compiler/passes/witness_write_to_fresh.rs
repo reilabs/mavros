@@ -49,7 +49,7 @@ impl WitnessWriteToFresh {
                                 ice!("WriteWitness input has WitnessOf type: {:?}", tp);
                             }
                             if !tp.is_numeric() {
-                                panic!("Expected numeric type, got {:?}", tp);
+                                ice!("Expected numeric type, got {:?}", tp);
                             }
                             OpCode::FreshWitness {
                                 result: r.unwrap(),

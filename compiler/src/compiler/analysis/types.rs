@@ -1,8 +1,6 @@
 //! An analysis pass that gathers (extrinsic) type information wherever needed, avoiding the need to
 //! perform detailed bookkeeping of type information whenever transforming the IR.
 
-use core::panic;
-
 use mavros_artifacts::FieldConfig;
 use tracing::{Level, instrument};
 
@@ -79,7 +77,7 @@ fn replace_array_element_type(container: &Type, element_type: Type) -> Type {
         TypeExpr::WitnessOf(inner) => {
             Type::witness_of_collapsed(replace_array_element_type(inner, element_type))
         }
-        _ => panic!("Type is not an array: {}", container),
+        _ => ice!("Type is not an array: {}", container),
     }
 }
 
@@ -226,7 +224,7 @@ impl Types {
 
             for instruction in block.get_instructions() {
                 self.run_opcode(instruction, &mut function_info, function_types, field)
-                    .unwrap_or_else(|e| panic!("Error running opcode {instruction:?}: {e}"));
+                    .unwrap_or_else(|e| ice!("Error running opcode {instruction:?}: {e}"));
             }
         }
 
@@ -691,7 +689,7 @@ impl Types {
                              for a value of type int{operand_bits}"
                         ));
                     }
-                    _ => panic!("SExt on non-integer type: {:?}", value_type),
+                    _ => ice!("SExt on non-integer type: {:?}", value_type),
                 };
                 let result_type = if value_type.is_witness_of() {
                     Type::witness_of(widened)

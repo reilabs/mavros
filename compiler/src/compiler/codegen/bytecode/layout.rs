@@ -227,7 +227,7 @@ pub fn for_each_constant_word(constant: &Constant, visit: &mut impl FnMut(u64)) 
                 for_each_constant_word(element, visit);
             }
         }
-        Constant::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
+        Constant::FnPtr(_) => ice!("FnPtr constants not supported in codegen"),
     }
 }
 

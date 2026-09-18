@@ -503,10 +503,12 @@ impl UntaintControlFlow {
                             } else if cfg.dominates(if_false, body_bid) {
                                 else_taint
                             } else {
-                                panic!(
+                                ice!(
                                     "untaint_cf: block {:?} in if-body is dominated by neither \
                                      then-branch {:?} nor else-branch {:?}",
-                                    body_bid, if_true, if_false
+                                    body_bid,
+                                    if_true,
+                                    if_false
                                 );
                             };
                             block_taint_vars.insert(body_bid, Some(taint));
@@ -522,16 +524,19 @@ impl UntaintControlFlow {
                             block.set_terminator(Terminator::Jmp(if_true, vec![]));
 
                             if merge == function.get_entry_id() {
-                                panic!(
-                                    "TODO: jump back into entry not supported yet. Is it even possible?"
+                                ice!(
+                                    "jump back into entry not supported yet. Is it even possible?"
                                 )
                             }
 
                             let jumps = cfg.get_jumps_into_merge_from_branch(if_true, merge);
                             if jumps.len() != 1 {
-                                panic!(
-                                    "TODO: handle multiple jumps into merge {:?} {:?} {:?} {:?}",
-                                    block_id, if_true, merge, jumps
+                                todo!(
+                                    "handle multiple jumps into merge {:?} {:?} {:?} {:?}",
+                                    block_id,
+                                    if_true,
+                                    merge,
+                                    jumps
                                 );
                             }
                             let out_true_block = jumps[0];
@@ -543,7 +548,7 @@ impl UntaintControlFlow {
                                 .take_terminator()
                             {
                                 Some(Terminator::Jmp(_, args)) => args,
-                                _ => panic!(
+                                _ => ice_unreachable!(
                                     "Impossible – out jump must be a JMP, otherwise the join point wouldn't be a join point"
                                 ),
                             };
@@ -554,9 +559,12 @@ impl UntaintControlFlow {
 
                             let jumps = cfg.get_jumps_into_merge_from_branch(if_false, merge);
                             if jumps.len() != 1 {
-                                panic!(
-                                    "TODO: handle multiple jumps into merge {:?} {:?} {:?} {:?}",
-                                    block_id, if_false, merge, jumps
+                                todo!(
+                                    "handle multiple jumps into merge {:?} {:?} {:?} {:?}",
+                                    block_id,
+                                    if_false,
+                                    merge,
+                                    jumps
                                 );
                             }
                             let out_false_block = jumps[0];
@@ -565,7 +573,7 @@ impl UntaintControlFlow {
                                 .take_terminator()
                             {
                                 Some(Terminator::Jmp(_, args)) => args,
-                                _ => panic!(
+                                _ => ice_unreachable!(
                                     "Impossible – out jump must be a JMP, otherwise the join point wouldn't be a join point"
                                 ),
                             };
@@ -759,7 +767,7 @@ impl UntaintControlFlow {
                 function: CallTarget::Dynamic(_),
                 ..
             } => {
-                panic!("Dynamic call targets are not supported in untaint_control_flow")
+                ice!("Dynamic call targets are not supported in untaint_control_flow")
             }
             // -- Cast insertion for MkSeq --
             OpCode::MkSeq {
@@ -833,7 +841,7 @@ impl UntaintControlFlow {
                 let expected_elem_type = match &result_type.expr {
                     TypeExpr::Array(inner, _) => inner.as_ref().clone(),
                     TypeExpr::Slice(inner) => inner.as_ref().clone(),
-                    _ => panic!("ArraySet on non-array type"),
+                    _ => ice!("ArraySet on non-array type"),
                 };
                 let mut cast_instrs = Vec::new();
                 let (converted_array, converted_value) = {
@@ -867,7 +875,7 @@ impl UntaintControlFlow {
                 let result_slice_type = ti.get_value_type(result);
                 let expected_elem_type = match &result_slice_type.expr {
                     TypeExpr::Slice(inner) => inner.as_ref().clone(),
-                    _ => panic!("SlicePush on non-slice type"),
+                    _ => ice!("SlicePush on non-slice type"),
                 };
                 let mut cast_instrs = Vec::new();
                 let (new_slice, new_values) = {
@@ -1037,14 +1045,14 @@ fn emit_merge_select(
         TypeExpr::Array(result_elem_type, size) => {
             let lhs_elem_type = match &lhs_type.expr {
                 TypeExpr::Array(e, _) => e.as_ref(),
-                _ => panic!(
+                _ => ice!(
                     "emit_merge_select: expected array for lhs, got {:?}",
                     lhs_type
                 ),
             };
             let rhs_elem_type = match &rhs_type.expr {
                 TypeExpr::Array(e, _) => e.as_ref(),
-                _ => panic!(
+                _ => ice!(
                     "emit_merge_select: expected array for rhs, got {:?}",
                     rhs_type
                 ),
@@ -1107,7 +1115,7 @@ fn emit_merge_select(
             });
             result
         }
-        TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
+        TypeExpr::Ref(_) => ice!("Witness select on Ref type not supported"),
         TypeExpr::Slice(_) => {
             let lhs = emit_value_conversion(lhs, lhs_type, result_type, builder);
             let rhs = emit_value_conversion(rhs, rhs_type, result_type, builder);
@@ -1120,8 +1128,8 @@ fn emit_merge_select(
             });
             result
         }
-        TypeExpr::Function(_) => panic!("Witness select on Function type not supported"),
-        TypeExpr::Blob(..) => panic!("Witness select on Blob type not supported"),
+        TypeExpr::Function(_) => ice!("Witness select on Function type not supported"),
+        TypeExpr::Blob(..) => ice!("Witness select on Blob type not supported"),
     }
 }
 
@@ -1175,7 +1183,7 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
             );
             Type::blob(*elem, n)
         }
-        (tp, wt) => panic!("Unexpected type {:?} with witness type {:?}", tp, wt),
+        (tp, wt) => ice!("Unexpected type {:?} with witness type {:?}", tp, wt),
     }
 }
 

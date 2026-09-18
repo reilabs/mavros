@@ -443,7 +443,7 @@ impl LowerPureGuards {
 
             // Guard-within-Guard should not happen
             OpCode::Guard { .. } => {
-                panic!("LowerPureGuards: nested Guard not expected");
+                ice!("LowerPureGuards: nested Guard not expected");
             }
             _ => false,
         }
@@ -803,7 +803,7 @@ impl LowerPureGuards {
         let array_type = type_info.get_value_type(array);
         let elem_type = match &array_type.strip_witness().expr {
             TypeExpr::Array(elem, _) | TypeExpr::Slice(elem) => (**elem).clone(),
-            other => panic!("LowerPureGuards: ArrayGet on non-seq type: {:?}", other),
+            other => ice!("LowerPureGuards: ArrayGet on non-seq type: {:?}", other),
         };
         let oob = self.emit_oob_cond(emitter, array, index, type_info);
 
@@ -870,7 +870,7 @@ impl LowerPureGuards {
                     |_| vec![],
                 );
             }
-            other => panic!(
+            other => ice!(
                 "LowerPureGuards: pure rangecheck on unsupported type {:?}; add a comparison strategy for this type",
                 other
             ),
