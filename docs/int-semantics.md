@@ -313,11 +313,16 @@ currently implement Noir.
   of which does have an element, so a constant no element can carry still selects, moves and
   narrows. Closing the pure half means carrying an integer there as a pattern — a `Value::Int`
   variant — and becoming an element only at the boundary, where the modulus is the bound. Nothing
-  reaches it today: every operation that would put a pure value that wide into a constraint is
-  either refused by `passes::width_validation` or folded before R1CS generation, which is why
-  `Value::ice_no_element` reports as a **compiler bug** rather than as a refusal. That makes this
-  the one half of the field boundary held by an argument rather than by a rule, and the argument is
-  what the ICE names.
+  reaches it today. A wide sequence element is not refused: `passes::wide_witness_ints` transposes a
+  sequence into one per limb, so an `int320` array element compiles. What keeps a pure value that
+  wide out of a constraint is the shape of the read. A read from a transposed sequence yields its
+  **limbs**, each of which is one field element, and the only thing that reassembles them into a
+  whole value is a witness strip, whose operands are witnesses rather than constants and so do not
+  fold. A recombination that ran eagerly and let its consumer split the result again would fold for
+  a sequence of **constants**, and the intermediate has no element — which is why the read keeps its
+  limbs. `Value::ice_no_element` reports as a **compiler bug** rather than a refusal, which makes
+  this the one half of the field boundary held by an argument rather than by a rule, and the reason
+  to state the argument precisely here rather than as "nothing reaches it".
 - **A _witness_ shift at a non-power-of-two width does not compile**, and is refused with a
   diagnostic. All three total evaluators reduce the amount modulo the width, so they agree at every
   width and the gap is not a disagreement between backends; what is missing is the _guard IR_, and
