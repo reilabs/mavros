@@ -1051,15 +1051,16 @@ impl<'a> ExpressionConverter<'a> {
                         Constructor::Int(_) | Constructor::Range(..)
                     ) =>
             {
-                self.convert_arm(s, last, b)
+                let location = self.expression_source_location(&last.branch);
+                self.convert_arm(s, last, location, b)
             }
             [case, rest @ ..] => {
                 let location = self.expression_source_location(&case.branch);
-                let cond = self.case_condition(s, &case.constructor, location, b);
+                let cond = self.case_condition(s, &case.constructor, location.clone(), b);
                 self.branch(
                     cond,
                     typ,
-                    |this, b| this.convert_arm(s, case, b),
+                    |this, b| this.convert_arm(s, case, location, b),
                     |this, b| this.convert_cases(s, rest, default, typ, b),
                     b,
                 )
@@ -1071,9 +1072,9 @@ impl<'a> ExpressionConverter<'a> {
         &mut self,
         s: &Scrutinee,
         case: &MatchCase,
+        location: SourceLocation,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        let location = self.expression_source_location(&case.branch);
         self.bind_case_arguments(s, case, location, b);
         self.convert_expression(&case.branch, b)
     }
