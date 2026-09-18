@@ -1050,41 +1050,6 @@ fn compiled_source(file_manager: &fm::FileManager, path: &str) -> Option<Arc<str
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn sparse_array_model_emits_nested_replay() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("src")).unwrap();
-        std::fs::write(
-            dir.path().join("Nargo.toml"),
-            include_str!("../../noir_tests/sparse_array_merge/Nargo.toml"),
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("src/main.nr"),
-            include_str!("../../noir_tests/sparse_array_merge/src/main.nr"),
-        )
-        .unwrap();
-        let project = crate::Project::new(dir.path().canonicalize().unwrap()).unwrap();
-        let mut driver = super::Driver::new(project, false);
-        driver.run_noir_compiler().unwrap();
-        driver.make_struct_access_static().unwrap();
-        driver.monomorphize().unwrap();
-        let ssa = driver.monomorphized_ssa.as_ref().unwrap();
-        let types = crate::compiler::analysis::types::Types::new().run(
-            ssa,
-            &crate::compiler::analysis::flow_analysis::FlowAnalysis::run(ssa),
-        );
-        use crate::compiler::ssa::hlssa::{OpCode, TypeExpr};
-        // All source-level element writes in check_model are witness-guarded.
-        // An unguarded write into a three-cell row therefore demonstrates nested
-        // replay, independently of whether the final values happen to be correct.
-        assert!(ssa.iter_functions().filter(|(_, f)| f.get_name().contains("check_model"))
-            .any(|(id, f)| f.get_blocks().any(|(_, block)| block.get_instructions().any(|op| {
-                matches!(op, OpCode::ArraySet { array, .. }
-                    if matches!(types.get_function(*id).get_value_type(*array).expr, TypeExpr::Array(ref elem, 3) if elem.is_witness_of()))
-            }))), "check_model must exercise inner-array replay");
-    }
-
     use noirc_abi::{Abi, AbiParameter, AbiReturnType, AbiType, AbiVisibility, Sign};
 
     use super::{Diagnostic, Error, SourceLocation};

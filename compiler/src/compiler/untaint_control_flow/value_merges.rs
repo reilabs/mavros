@@ -21,7 +21,7 @@ use crate::compiler::{
     ssa::{
         BlockId, SourceLocation, Terminator, ValueId,
         hlssa::{
-            HLFunction, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
+            CastTarget, HLFunction, HLSSA, OpCode, SequenceTargetType, Type, TypeExpr,
             builder::{HLEmitter, HLFunctionBuilder},
         },
     },
@@ -57,12 +57,23 @@ impl UntaintControlFlow {
         for id in ssa.get_function_ids().collect::<Vec<_>>() {
             let Some(wt) = witness.try_get_function_witness_type(id) else { continue };
             let mut function = ssa.take_function(id);
-            let has_witness_branch = function.get_blocks().any(|(_, block)| {
-                matches!(block.get_terminator(), Some(Terminator::JmpIf(cond, _, _))
-                    if get_witness_or_pure(wt, *cond) == WitnessType::Witness)
-            });
-            let mut sparse = has_witness_branch
-                .then(|| SparseArrayMerge::new(&function, types.get_function(id), ssa));
+            let cfg = flow.get_function_cfg(id);
+            let merge_blocks = function
+                .get_blocks()
+                .filter_map(|(block, body)| {
+                    let Some(Terminator::JmpIf(cond, lhs, rhs)) = body.get_terminator() else {
+                        return None;
+                    };
+                    if get_witness_or_pure(wt, *cond) != WitnessType::Witness {
+                        return None;
+                    }
+                    let merge = cfg.get_merge_point(*block);
+                    (merge != *lhs && merge != *rhs).then_some(merge)
+                })
+                .collect();
+            let mut sparse =
+                SparseArrayMerge::has_candidates(&function, types.get_function(id), &merge_blocks)
+                    .then(|| SparseArrayMerge::new(&function, types.get_function(id), ssa));
             let merges = self.linearize_function(
                 id,
                 &mut function,
@@ -182,8 +193,8 @@ fn emit_merge_select(
     match &result_type.expr {
         TypeExpr::Array(result_elem_type, size) => {
             // Match the identical-arm path's conversion contract, including lengths.
-            crate::compiler::ssa::hlssa::CastTarget::conversion(lhs_type, result_type);
-            crate::compiler::ssa::hlssa::CastTarget::conversion(rhs_type, result_type);
+            CastTarget::assert_conversion(lhs_type, result_type);
+            CastTarget::assert_conversion(rhs_type, result_type);
             let lhs_elem_type = match &lhs_type.expr {
                 TypeExpr::Array(e, _) => e.as_ref(),
                 _ => panic!(
@@ -241,6 +252,62 @@ mod tests {
     use crate::compiler::analysis::types::Types;
 
     #[test]
+    fn sparse_array_merge_emits_nested_replay() {
+        let mut ssa = HLSSA::with_main("nested_replay".into());
+        let id = ssa.get_unique_entrypoint_id();
+        let mut function = ssa.take_function(id);
+        let entry = function.get_entry_id();
+        let then_block = function.add_block();
+        let else_block = function.add_block();
+        let merge = function.add_block();
+        let typ = Type::field().array_of(3).array_of(128);
+        function.add_return_type(typ.clone());
+        {
+            let mut fb = HLFunctionBuilder::new(&mut function, &mut ssa);
+            let mut b = fb.test_block(entry);
+            let base = b.add_parameter(typ.clone());
+            let index = b.add_parameter(Type::int(32));
+            let enabled = b.add_parameter(Type::int(1));
+            let value = b.add_parameter(Type::field());
+            let condition = b.cast_to_witness_of(enabled);
+            b.set_terminator(Terminator::JmpIf(condition, then_block, else_block));
+            drop(b);
+            let mut b = fb.test_block(then_block);
+            let row = b.array_get(base, index);
+            let zero = b.int_const(IntBits::from_u128(32, 0));
+            let row = b.array_set(row, zero, value);
+            let updated = b.array_set(base, index, row);
+            b.set_terminator(Terminator::Jmp(merge, vec![updated]));
+            drop(b);
+            fb.test_block(else_block)
+                .set_terminator(Terminator::Jmp(merge, vec![base]));
+            let mut b = fb.test_block(merge);
+            let result = b.add_parameter(typ);
+            b.set_terminator(Terminator::Return(vec![result]));
+        }
+        ssa.put_function(id, function);
+        let flow = FlowAnalysis::run(&ssa);
+        let mut witness = WitnessTaintInference::new();
+        witness.run(&mut ssa, &flow);
+        let ssa = UntaintControlFlow::new().run(ssa, &witness);
+        let types = Types::new().run(&ssa, &FlowAnalysis::run(&ssa));
+        // Linearization guards the source writes. An unguarded inner-row write
+        // therefore proves that merge emission actually chose nested replay.
+        assert!(
+            ssa.iter_functions().any(|(id, f)| {
+                f.get_blocks().any(|(_, block)| {
+                    block.get_instructions().any(|op| {
+                        matches!(op, OpCode::ArraySet { array, .. }
+                    if matches!(types.get_function(*id).get_value_type(*array).expr,
+                        TypeExpr::Array(_, 3)))
+                    })
+                })
+            }),
+            "the small SSA program must exercise inner-array replay"
+        );
+    }
+
+    #[test]
     fn identical_and_distinct_arms_share_the_conversion_contract() {
         use crate::compiler::ssa::hlssa::builder::HLInstrBuilder;
         use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -262,6 +329,10 @@ mod tests {
             (Type::witness_of(Type::int(32)), Type::int(32), false),
             (Type::field().array_of(2), Type::field().array_of(3), false),
         ] {
+            assert_eq!(
+                catch_unwind(|| CastTarget::assert_conversion(&source, &target)).is_ok(),
+                accepted
+            );
             for identical in [false, true] {
                 let mut ssa = HLSSA::with_main("conversion".into());
                 let mut function = ssa.take_function(ssa.get_unique_entrypoint_id());

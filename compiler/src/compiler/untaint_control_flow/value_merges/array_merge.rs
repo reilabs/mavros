@@ -133,6 +133,37 @@ fn count_uses(function: &HLFunction) -> HashMap<ValueId, usize> {
 }
 
 impl<'a> SparseArrayMerge<'a> {
+    /// Cheap structural filter before allocating provenance and use-count maps.
+    /// Profitability and exact guard/provenance checks remain the planner's job.
+    pub(super) fn has_candidates(
+        function: &HLFunction,
+        types: &FunctionTypeInfo,
+        merges: &HashSet<BlockId>,
+    ) -> bool {
+        if merges.is_empty() {
+            return false;
+        }
+        let mut incoming = HashSet::default();
+        for (_, block) in function.get_blocks() {
+            if let Some(Terminator::Jmp(target, args)) = block.get_terminator()
+                && merges.contains(target)
+            {
+                for (arg, (_, typ)) in args
+                    .iter()
+                    .zip(function.get_block(*target).get_parameters())
+                {
+                    if matches!(typ.expr, TypeExpr::Array(_, len) if len > 0) {
+                        incoming.insert(*arg);
+                    }
+                }
+            }
+        }
+        function.get_blocks().any(|(_, block)| block.get_instructions().any(|op| {
+            matches!(op, OpCode::ArraySet { result, index, .. }
+                if incoming.contains(result) && matches!(types.get_value_type(*index).expr, TypeExpr::Int(_)))
+        }))
+    }
+
     /// Snapshot before linearization changes operands and wraps instructions in guards.
     pub(super) fn new(function: &HLFunction, types: &'a FunctionTypeInfo, ssa: &HLSSA) -> Self {
         let mut definitions = HashMap::default();
@@ -849,6 +880,61 @@ mod tests {
                 })
                 .collect();
             block.put_instructions(instructions);
+        }
+    }
+
+    #[test]
+    fn candidate_filter_requires_an_array_merge_fed_by_a_pure_index_write() {
+        // array length, witness index, array merge, updated argument, witness merge
+        for (len, witness, array, updated, branch, expected) in [
+            (128, false, true, true, true, true),
+            (128, true, true, true, true, false),
+            (0, false, true, true, true, false),
+            (128, false, false, true, true, false),
+            (128, false, true, false, true, false),
+            (128, false, true, true, false, false),
+        ] {
+            let mut f = fixture(len, 1, false, 32);
+            let parameter = f.ssa.fresh_value();
+            let function = f.ssa.get_function_mut(f.function);
+            let entry = function.get_entry_id();
+            if witness {
+                for (id, typ) in function.get_block_mut(entry).get_parameters_mut() {
+                    if *id == f.index {
+                        *typ = Type::witness_of(typ.clone());
+                    }
+                }
+            }
+            let merge = function.add_block();
+            let arg = if !array {
+                f.index
+            } else if updated {
+                f.changed
+            } else {
+                f.base
+            };
+            let typ = if array { f.typ.clone() } else { Type::int(32) };
+            function
+                .get_block_mut(entry)
+                .set_terminator(Terminator::Jmp(merge, vec![arg]));
+            function.get_block_mut(merge).push_parameter(parameter, typ);
+            function
+                .get_block_mut(merge)
+                .set_terminator(Terminator::Return(vec![f.base]));
+            let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
+            let merges = if branch {
+                HashSet::from_iter([merge])
+            } else {
+                HashSet::default()
+            };
+            assert_eq!(
+                SparseArrayMerge::has_candidates(
+                    f.ssa.get_function(f.function),
+                    types.get_function(f.function),
+                    &merges
+                ),
+                expected
+            );
         }
     }
 
