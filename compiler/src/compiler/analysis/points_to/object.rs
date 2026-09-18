@@ -154,7 +154,9 @@ impl NodeKey {
         match self {
             NodeKey::Val(owner, path) => NodeKey::Val(owner.clone(), join(path, suffix)),
             NodeKey::Obj(obj, path) => NodeKey::Obj(obj.clone(), join(path, suffix)),
-            NodeKey::ObjRef(_) => unreachable!("ObjRef nodes are leaves and are never descended"),
+            NodeKey::ObjRef(_) => {
+                ice_unreachable!("ObjRef nodes are leaves and are never descended")
+            }
         }
     }
 }

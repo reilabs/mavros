@@ -119,7 +119,7 @@ impl LowerWitnessIntegerArithOps {
                     | ArithGroup::Or
                     | ArithGroup::Xor
                     | ArithGroup::Shl
-                    | ArithGroup::Shr => unreachable!("filtered out above"),
+                    | ArithGroup::Shr => ice_unreachable!("filtered out above"),
                 }
             }
             _ => false,
@@ -157,12 +157,12 @@ impl LowerWitnessIntegerArithOps {
         let value = match kind.group() {
             ArithGroup::Add => b.uadd(lhs_field, rhs_field),
             ArithGroup::Sub => b.usub(lhs_field, rhs_field),
-            _ => unreachable!(),
+            _ => ice_unreachable!(),
         };
         let range = match kind.group() {
             ArithGroup::Add => context.urange(lhs).add(&context.urange(rhs)),
             ArithGroup::Sub => context.urange(lhs).sub(&context.urange(rhs)),
-            _ => unreachable!(),
+            _ => ice_unreachable!(),
         };
         if !range.proves_fits_in_unsigned_bits(bits) {
             let rc_bits = narrow_rangecheck_width(&range, bits);
@@ -307,7 +307,7 @@ impl LowerWitnessIntegerArithOps {
         let result_range = match kind.group() {
             ArithGroup::Add => lhs_range.add(&rhs_range),
             ArithGroup::Sub => lhs_range.sub(&rhs_range),
-            _ => unreachable!(),
+            _ => ice_unreachable!(),
         };
         if !range_fits_field_injectively(&result_range, b.field()) {
             unsupported_on_this_field(
@@ -323,7 +323,7 @@ impl LowerWitnessIntegerArithOps {
         let signed_raw = match kind.group() {
             ArithGroup::Add => b.uadd(lhs_signed, rhs_signed),
             ArithGroup::Sub => b.usub(lhs_signed, rhs_signed),
-            _ => unreachable!(),
+            _ => ice_unreachable!(),
         };
 
         let lhs_witness = context.types().get_value_type(lhs).is_witness_of();
@@ -454,7 +454,7 @@ impl LowerWitnessIntegerArithOps {
         let value = match kind.group() {
             ArithGroup::Div => divmod.q,
             ArithGroup::Rem => divmod.r,
-            _ => unreachable!(),
+            _ => ice_unreachable!(),
         };
         b.emit(OpCode::Cast {
             result,
@@ -585,7 +585,7 @@ impl LowerWitnessIntegerArithOps {
         let value = match kind.group() {
             ArithGroup::Div => quotient,
             ArithGroup::Rem => remainder,
-            _ => unreachable!(),
+            _ => ice_unreachable!(),
         };
         b.emit(OpCode::Cast {
             result,

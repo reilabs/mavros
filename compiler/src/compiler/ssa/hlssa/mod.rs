@@ -2203,7 +2203,7 @@ impl SequenceTargetType {
         match self {
             SequenceTargetType::Array(len) => t.array_of(*len),
             SequenceTargetType::Slice => t.slice_of(),
-            SequenceTargetType::Tuple => panic!("Tuple type requires multiple element types"),
+            SequenceTargetType::Tuple => ice!("Tuple type requires multiple element types"),
         }
     }
 }
@@ -2285,9 +2285,11 @@ impl CastTarget {
             (TypeExpr::Slice(s), TypeExpr::Slice(t)) => {
                 Self::conversion_impl(s, t, strip).map(|inner| CastTarget::Map(Box::new(inner)))
             }
-            _ => panic!(
+            _ => ice!(
                 "no cast target converts {:?} -> {:?} (strip: {})",
-                src, tgt, strip
+                src,
+                tgt,
+                strip
             ),
         }
     }
@@ -2312,17 +2314,17 @@ impl CastTarget {
             CastTarget::Nop => value_type.clone(),
             CastTarget::ArrayToSlice => match &value_type.expr {
                 TypeExpr::Array(elem, _len) => elem.as_ref().clone().slice_of(),
-                _ => panic!("ArrayToSlice cast on non-array type"),
+                _ => ice!("ArrayToSlice cast on non-array type"),
             },
             CastTarget::WitnessOf => Type::witness_of(value_type.clone()),
             CastTarget::ValueOf => match &value_type.expr {
                 TypeExpr::WitnessOf(inner) => inner.as_ref().clone(),
-                _ => panic!("ValueOf cast on non-WitnessOf type {:?}", value_type),
+                _ => ice!("ValueOf cast on non-WitnessOf type {:?}", value_type),
             },
             CastTarget::Map(inner) => match &value_type.expr {
                 TypeExpr::Array(elem, len) => inner.result_type(elem).array_of(*len),
                 TypeExpr::Slice(elem) => inner.result_type(elem).slice_of(),
-                _ => panic!("Map cast on non-sequence type {:?}", value_type),
+                _ => ice!("Map cast on non-sequence type {:?}", value_type),
             },
         }
     }

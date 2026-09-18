@@ -137,7 +137,7 @@ impl LowerGuards {
                     (**elem).clone(),
                 )
             }
-            other => panic!(
+            other => ice!(
                 "LowerGuards: cannot synthesize default value for type {:?}",
                 other
             ),

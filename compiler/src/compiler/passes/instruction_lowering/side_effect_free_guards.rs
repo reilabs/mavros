@@ -98,7 +98,7 @@ impl LowerSideEffectFreeGuards {
             OpCode::MkTuple { .. } | OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } => {
                 ice_non_elided_tuple()
             }
-            OpCode::Guard { .. } => panic!("nested Guard not expected"),
+            OpCode::Guard { .. } => ice!("nested Guard not expected"),
         }
     }
 }

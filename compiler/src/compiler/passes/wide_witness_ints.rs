@@ -485,7 +485,7 @@ impl Rewriter<'_> {
         );
 
         let bits = int_width(self.types.get_value_type(value))
-            .unwrap_or_else(|| panic!("ICE: a non-integer operand met a wide witnessed integer"));
+            .unwrap_or_else(|| ice!("a non-integer operand met a wide witnessed integer"));
         let widths = limb_widths(bits, self.limb_bits());
         assert_eq!(
             widths.len(),
@@ -966,10 +966,10 @@ impl Rewriter<'_> {
                 let results = self.limbs(*result);
                 let Some(Constant::Blob(blob)) = self.ssa.get_const(*blob).map(|c| (*c).clone())
                 else {
-                    panic!("ICE: a blob-backed sequence without a blob constant")
+                    ice!("a blob-backed sequence without a blob constant")
                 };
                 let bits = int_width(element_type)
-                    .unwrap_or_else(|| panic!("ICE: a wide blob sequence of {element_type}"));
+                    .unwrap_or_else(|| ice!("a wide blob sequence of {element_type}"));
                 let widths = limb_widths(bits, self.limb_bits());
                 let elem_types = element_types(element_type, self.field, results.len());
                 for (index, ((result, width), element_type)) in
@@ -981,7 +981,7 @@ impl Rewriter<'_> {
                         .iter()
                         .map(|element| {
                             let Constant::Int(pattern) = element else {
-                                panic!("ICE: a wide blob element that is not an integer")
+                                ice!("a wide blob element that is not an integer")
                             };
                             Constant::Int(pattern.bit_range(low, *width))
                         })
@@ -1179,8 +1179,8 @@ impl Rewriter<'_> {
             // witnessed operand `width_validation` is what refuses it; a **pure** one has no width
             // rule to refuse it and reaches here only by being read out of a transposed sequence,
             // which no arm above hands to anything but another limb-mover.
-            other => panic!(
-                "ICE: {other:?} reached the multi-cell representation with a wide operand, which is a shape it does not represent"
+            other => ice!(
+                "{other:?} reached the multi-cell representation with a wide operand, which is a shape it does not represent"
             ),
         }
     }

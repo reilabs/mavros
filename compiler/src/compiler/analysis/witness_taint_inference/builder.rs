@@ -116,7 +116,7 @@ impl<'a> GraphBuilder<'a> {
             }],
             Owner::Top => vec![Position::top()],
             Owner::Value(_) => {
-                panic!("ICE: summary referenced a non-formal position {formal:?}")
+                ice!("summary referenced a non-formal position {formal:?}")
             }
         }
     }
@@ -504,7 +504,7 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             // initial value that is written into the cell.
             let pointee = match &builder.value_type(*result).peel_witness().expr {
                 TypeExpr::Ref(inner) => &**inner,
-                other => panic!("ICE: Alloc result of a non-ref type {other:?}"),
+                other => ice!("Alloc result of a non-ref type {other:?}"),
             };
             let slot = builder.value_position(*result).child(Descent::Deref);
             builder.copy_levels(slot.clone(), builder.value_position(*value), pointee);
@@ -515,7 +515,7 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             // slot's content and the stored ref become aliases).
             let pointee = match &builder.value_type(*ptr).peel_witness().expr {
                 TypeExpr::Ref(inner) => &**inner,
-                other => panic!("ICE: Store through a non-ref value of type {other:?}"),
+                other => ice!("Store through a non-ref value of type {other:?}"),
             };
             let slot = builder.value_position(*ptr).child(Descent::Deref);
             builder.copy_levels(slot.clone(), builder.value_position(*value), pointee);
@@ -543,7 +543,7 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             // loaded ref aliases the stored one).
             let pointee = match &builder.value_type(*ptr).peel_witness().expr {
                 TypeExpr::Ref(inner) => &**inner,
-                other => panic!("ICE: Load through a non-ref value of type {other:?}"),
+                other => ice!("Load through a non-ref value of type {other:?}"),
             };
             builder.copy_levels(
                 builder.value_position(*result),
@@ -603,7 +603,7 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
         OpCode::Call {
             function: CallTarget::Dynamic(_),
             ..
-        } => panic!("ICE: dynamic call target during witness-taint inference"),
+        } => ice!("dynamic call target during witness-taint inference"),
         OpCode::ReadGlobal {
             result,
             offset,
@@ -683,7 +683,7 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
         | OpCode::Lookup { .. }
         | OpCode::DLookup { .. }
         | OpCode::Todo { .. } => {
-            panic!("ICE: opcode should not be present during witness-taint inference: {instr:?}")
+            ice!("opcode should not be present during witness-taint inference: {instr:?}")
         }
     }
 }

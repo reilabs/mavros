@@ -727,7 +727,7 @@ impl DCE {
                             Some(Terminator::JmpIf(condition, _, _)) => {
                                 worklist.push(WorkItem::LiveValue(function_id, *condition));
                             }
-                            _ => panic!("ICE: It's a frontier, must end with a conditional"),
+                            _ => ice!("It's a frontier, must end with a conditional"),
                         }
                     }
 
@@ -819,9 +819,7 @@ impl DCE {
                                         );
                                         worklist.push(WorkItem::LiveValue(function_id, params[*i]));
                                     }
-                                    _ => panic!(
-                                        "ICE: the block has phis, so jumps into it must be Jmps"
-                                    ),
+                                    _ => ice!("the block has phis, so jumps into it must be Jmps"),
                                 }
                             }
                         }
@@ -1197,7 +1195,7 @@ impl DCE {
                         }
                         Terminator::Return(new_values)
                     }
-                    None => panic!("ICE: block has no terminator"),
+                    None => ice!("block has no terminator"),
                 };
 
                 block.set_terminator(new_terminator);
