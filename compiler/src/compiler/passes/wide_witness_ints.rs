@@ -5,8 +5,16 @@
 //! little-endian order, where `h` is [`witness_limb_bits`]. Limbs `0..k-1` are `WitnessOf(Int(h))`
 //! and the top one is `WitnessOf(Int(N - (k-1)h))`, so a limb's declared width remains correct.
 //!
-//! A **pure** `Int(N)` is untouched as it exists in the hint domain where both backends can compute
-//! on it at arbitrary width.
+//! A **pure** `Int(N)` **scalar** is untouched as it exists in the hint domain where both backends
+//! can compute on it at arbitrary width.
+//!
+//! A **sequence** of wide elements is transposed instead: `Array(E, n)` becomes `k` parallel
+//! `Array(E_j, n)`, each holding one limb position of every element, and a read or a write is that
+//! operation once per limb sequence at the caller's own index. This is [`element_limb_types`], and
+//! it splits a **pure** wide element too. A sequence has to make one field element per entry for
+//! the lookup tape to address it; transposing makes every entry a limb the tape already knows how
+//! to read. Putting such an element back together is [`Rewriter::recombine_pure`], which is integer
+//! arithmetic at the value's own width and so costs interpreter work rather than constraints.
 //!
 //! This representation is sound because **every limb is range-checked** to its declared width when
 //! it is created or modified. `2^h` is invertible mod `p`, so an unbounded limb lets a prover solve
@@ -50,8 +58,8 @@ use crate::compiler::{
     ssa::{
         BlockId, FunctionId, Instruction, Located, Terminator, ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Constant, HLSSA, OpCode, Type, TypeExpr,
-            builder::two_pow_pattern,
+            BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, HLSSA, LookupTarget, OpCode,
+            Type, TypeExpr, builder::two_pow_pattern,
         },
     },
 };
@@ -87,7 +95,8 @@ impl Pass for WideWitnessInts {
         for global in ssa.get_global_types() {
             assert!(
                 limb_types(global, field).len() == 1,
-                "ICE: a global carries a wide witnessed integer, which has no slot layout here"
+                "ICE: a global carries a wide integer, as a value or as a sequence element, and \
+                 neither has a slot layout here"
             );
         }
 
@@ -141,20 +150,45 @@ fn limb_types(ty: &Type, field: FieldConfig) -> Vec<Type> {
             }
             _ => vec![ty.clone()],
         },
-        // A sequence carrying one is refused by `width_validation` before here: an element is read
-        // off the lookup tape as a single field element for the moment.
-        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => {
-            assert!(
-                wide_witness_width(inner, field).is_none(),
-                "ICE: a sequence of wide witnessed integers reached the multi-cell representation"
-            );
-            vec![ty.clone()]
-        }
+        // A sequence of wide elements is transposed: one sequence per limb position, each holding
+        // the corresponding limb of every element. The element type of each array is a single limb,
+        // which is at most one host cell wide, so the lookup tape reads it with the tag it already
+        // has for a cell and needs no notion of a wide element at all.
+        //
+        // The alternative (one sequence of `n * k` limbs) would make the index `i * k + j` and so
+        // put arithmetic between the caller's index and the tape's. Here every limb sequence is
+        // indexed by the caller's own index.
+        TypeExpr::Array(inner, count) => element_limb_types(inner, field)
+            .into_iter()
+            .map(|leaf| leaf.array_of(*count))
+            .collect(),
+        TypeExpr::Slice(inner) => element_limb_types(inner, field)
+            .into_iter()
+            .map(Type::slice_of)
+            .collect(),
         TypeExpr::Ref(inner) => limb_types(inner, field)
             .into_iter()
             .map(|leaf| leaf.ref_of())
             .collect(),
         _ => vec![ty.clone()],
+    }
+}
+
+/// A sequence element splits whether or not it is witnessed.
+///
+/// A sequence is stored one sequence per limb, so a **pure** wide element splits too — otherwise a
+/// purely-constant wide sequence stays whole, its entries have to become one field element each,
+/// and the widest it can hold is what the modulus carries. Splitting it costs pure arithmetic to
+/// put an element back together, which is interpreter work rather than constraints.
+fn element_limb_types(ty: &Type, field: FieldConfig) -> Vec<Type> {
+    match &ty.expr {
+        TypeExpr::Int(bits) if *bits > multi_cell_int_bits(field) => {
+            limb_widths(*bits, witness_limb_bits(field))
+                .into_iter()
+                .map(Type::int)
+                .collect()
+        }
+        _ => limb_types(ty, field),
     }
 }
 
@@ -208,6 +242,81 @@ fn plan_function(
         }
     }
 
+    // A wide value's expansion has to reach the values that merely **carry** it, which are not
+    // identified by their types.
+    //
+    // A witness-indexed array read moves its element through a field element: the lowering reads
+    // the hint, strips it to the pure domain, casts that to `Field`, writes it as a witness, pins
+    // it with `constrain_lookup`, and casts back to the element's own width. Only the first and
+    // last of those are typed as the wide integer. The middle ones are a pure `int`, a `Field` and
+    // a `WitnessOf(Field)` — each of which `limb_types` calls a single value, because each of them
+    // **is** a single value everywhere else in the program.
+    //
+    // So the expansion is propagated along the instructions that carry a value without reading it,
+    // to a fixed point. Two facts make that sound rather than a heuristic: a value the modulus
+    // cannot carry has no single field element **in either domain**, so its field image is one
+    // element per limb whether it was stripped or not; and every step below preserves the value.
+    let expansion = |map: &HashMap<ValueId, Vec<ValueId>>, value: ValueId| -> usize {
+        map.get(&value).map_or(1, Vec::len)
+    };
+    loop {
+        let mut grew = false;
+        for bid in reachable {
+            for instr in func.get_block(*bid).get_instructions() {
+                let (result, count) = match instr {
+                    // The field image of a wide integer, pure or witnessed.
+                    OpCode::Cast {
+                        result,
+                        value,
+                        target: CastTarget::Field,
+                    } => {
+                        let Some(bits) = int_width(fti.get_value_type(*value))
+                            .filter(|bits| *bits > multi_cell_int_bits(field))
+                        else {
+                            continue;
+                        };
+                        (*result, limb_widths(bits, witness_limb_bits(field)).len())
+                    }
+                    // Not converted at all, so whatever the source stands for the result stands for
+                    // too.
+                    //
+                    // `WitnessOf` and `ValueOf` are deliberately **not** here: they are where the
+                    // representation is entered and left, and the rewriter decomposes and
+                    // recombines at them explicitly. A strip in particular yields one pure wide
+                    // value, because the pure lane holds such a value whole.
+                    OpCode::Cast {
+                        result,
+                        value,
+                        target: CastTarget::Nop,
+                    } => (*result, expansion(&value_map, *value)),
+                    // Written to a witness column, one per limb.
+                    OpCode::WriteWitness {
+                        result: Some(result),
+                        value,
+                        ..
+                    } => (*result, expansion(&value_map, *value)),
+                    // Read out of a transposed sequence, which yields its limbs.
+                    //
+                    // We keep the limbs to avoid doing the same work twice, so reassembly only
+                    // happens where the whole value is required.
+                    OpCode::ArrayGet { result, array, .. } => {
+                        (*result, limb_types(fti.get_value_type(*array), field).len())
+                    }
+                    _ => continue,
+                };
+                if count <= 1 || expansion(&value_map, result) == count {
+                    continue;
+                }
+                let limbs = (0..count).map(|_| ssa.fresh_value()).collect();
+                value_map.insert(result, limbs);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
     value_map
 }
 
@@ -237,6 +346,24 @@ fn flat_limbs(value_map: &HashMap<ValueId, Vec<ValueId>>, values: &[ValueId]) ->
         .iter()
         .flat_map(|value| limbs_of(value_map, *value))
         .collect()
+}
+
+/// The limb types of a sequence element, refused if they do not line up with the sequences.
+///
+/// A constructor names its element type separately from its result, so the two are computed from
+/// different places and a `zip` between them builds fewer limb sequences than the plan minted
+/// values for whenever they disagree. That failure is silent (the missing sequences are simply
+/// never emitted) so the two are checked against each other here instead.
+#[track_caller]
+fn element_types(elem_type: &Type, field: FieldConfig, expected: usize) -> Vec<Type> {
+    let types = element_limb_types(elem_type, field);
+    assert_eq!(
+        types.len(),
+        expected,
+        "ICE: a sequence of {expected} limbs was built from an element of {} limbs",
+        types.len()
+    );
+    types
 }
 
 /// Pair two limb lists, refusing a pair that does not line up.
@@ -526,13 +653,56 @@ impl Rewriter<'_> {
         limbs
     }
 
+    /// A **pure** wide value injected into the representation as witnessed, range-checked limbs.
+    ///
+    /// The counterpart of [`Self::decompose`] above the width the field carries. There is no
+    /// reconstruction constraint here as the source is a hint rather than a constrained value, so
+    /// there is no prior value to tie the limbs back to. The limbs **are** the value's definition,
+    /// and each one is bounded by an individual range check.
+    ///
+    /// [`Self::decompose`] cannot be used here: it constrains the limbs against the source's field
+    /// element, which a value wider than the modulus does not have. The limbs are written into
+    /// `results`, so that entering the representation costs only the injection.
+    fn inject(&mut self, value: ValueId, bits: usize, results: &[ValueId]) {
+        let widths = limb_widths(bits, self.limb_bits());
+        assert_eq!(
+            widths.len(),
+            results.len(),
+            "ICE: an int{bits} is {} limbs, not {}",
+            widths.len(),
+            results.len()
+        );
+        for (index, (result, width)) in results.iter().zip(&widths).enumerate() {
+            let low = index * self.limb_bits();
+            let hint = self.shifted_down(value, bits, low);
+            let narrowed = self.cast(hint, CastTarget::Int(*width));
+            self.push(OpCode::Cast {
+                result: *result,
+                value: narrowed,
+                target: CastTarget::WitnessOf,
+            });
+            let limb_field = self.cast(*result, CastTarget::Field);
+            self.push(OpCode::Rangecheck {
+                value: limb_field,
+                max_bits: *width,
+            });
+        }
+    }
+
     /// The low `bits` of a limb list, as a single witnessed value of that width, the inverse of
     /// [`Self::decompose`].
     ///
     /// It needs no constraint of its own: a linear combination of values that are already pinned is
-    /// itself pinned. `bits` is at most [`multi_cell_int_bits`], so the sum reaches the target's
-    /// element without wrapping.
+    /// itself pinned.
+    ///
+    /// `bits` has to be at most [`multi_cell_int_bits`], and the assertion is the whole reason this
+    /// is sound: the sum is formed in **one field element**, so a target the modulus cannot carry
+    /// would wrap silently. [`Self::pure_limbs_at`] is what a wider target takes instead.
     fn recombine(&mut self, limbs: &[ValueId], widths: &[usize], bits: usize) -> ValueId {
+        assert!(
+            bits <= multi_cell_int_bits(self.field),
+            "ICE: an int{bits} recombination is summed in one field element, which cannot carry it"
+        );
         let target = limb_widths(bits, self.limb_bits());
         let mut sum = None;
         for (index, target_width) in target.iter().enumerate() {
@@ -559,22 +729,83 @@ impl Rewriter<'_> {
         self.cast(sum, CastTarget::Int(bits))
     }
 
-    /// The low `width` bits of a limb, as a witnessed value of that width.
+    /// Pure limbs shifted into place and or-ed together, as one pure value of `bits`.
+    ///
+    /// The **pure** counterpart of [`Self::recombine`], and the distinction is not cosmetic: that
+    /// one sums field elements, so it wraps once the value passes the modulus. This one is integer
+    /// arithmetic at the value's own width, which both compiled backends have at every width, and
+    /// which costs interpreter work rather than constraints. It is what lets a sequence hold
+    /// elements the field cannot carry.
+    fn recombine_pure(&mut self, limbs: &[ValueId], bits: usize) -> ValueId {
+        let mut sum = None;
+        for (index, limb) in limbs.iter().enumerate() {
+            let widened = self.cast(*limb, CastTarget::Int(bits));
+            let placed = if index == 0 {
+                widened
+            } else {
+                let amount =
+                    self.int_const(IntBits::from_u128(bits, (index * self.limb_bits()) as u128));
+                self.bin(BinaryArithOpKind::UShl, widened, amount)
+            };
+            sum = Some(match sum {
+                None => placed,
+                Some(acc) => self.bin(BinaryArithOpKind::Or, acc, placed),
+            });
+        }
+        sum.expect("an integer has at least one limb")
+    }
+
+    /// The low `width` bits of a limb, as a value **of that width**.
+    ///
+    /// A narrowing cast rather than a `BitRange`: `BitRange` keeps its source's type, so a window
+    /// cut out of an `int64` limb is still an `int64` carrying `width` bits. That is right for a
+    /// window but wrong for a limb as the caller is building a limb list whose widths are the
+    /// target's, and a limb whose declared width disagrees with its position meets an operand split
+    /// at the true width and the two cannot be paired. The cast lowers to the same mask, witness
+    /// and range check.
     fn truncate_limb(&mut self, limb: ValueId, width: usize) -> ValueId {
-        let result = self.fresh();
-        self.push(OpCode::BitRange {
-            result,
-            value: limb,
-            offset: 0,
-            width,
-        });
-        result
+        self.cast(limb, CastTarget::Int(width))
     }
 
     /// A witnessed zero of `width` bits, which is a constant and therefore pinned by being one.
     fn zero_limb(&mut self, width: usize) -> ValueId {
         let zero = self.int_const(IntBits::zero(width));
         self.cast(zero, CastTarget::WitnessOf)
+    }
+
+    /// The limbs of a wide value as **pure** values, cut to the shape a `to_bits` target needs.
+    ///
+    /// What a narrowing out of the representation takes when the target is wider than the field
+    /// carries, where [`Self::recombine`] cannot serve: that one sums field elements, and a sum
+    /// reaching `2^to_bits` wraps once the target passes the modulus. Reading these back is
+    /// [`Self::recombine_pure`], which is integer arithmetic at the target's own width.
+    fn pure_limbs_at(&mut self, value: ValueId, from_bits: usize, to_bits: usize) -> Vec<ValueId> {
+        assert!(
+            to_bits <= from_bits,
+            "ICE: an int{from_bits} held as limbs was widened to an int{to_bits} on the way out of \
+             the representation"
+        );
+        let witnessed = self.wide_width(value).is_some();
+        let source_widths = limb_widths(from_bits, self.limb_bits());
+        let limbs = self.limbs(value);
+
+        limb_widths(to_bits, self.limb_bits())
+            .into_iter()
+            .enumerate()
+            .map(|(index, width)| {
+                let limb = limbs[index];
+                let pure = if witnessed {
+                    self.cast(limb, CastTarget::ValueOf)
+                } else {
+                    limb
+                };
+                if width < source_widths[index] {
+                    self.cast(pure, CastTarget::Int(width))
+                } else {
+                    pure
+                }
+            })
+            .collect()
     }
 
     /// The limbs of `value` read at `to_bits`, whatever the two widths are.
@@ -654,6 +885,219 @@ impl Rewriter<'_> {
                 }
             }
 
+            // The transpose. An element-major sequence of `k`-limb values becomes `k` limb-major
+            // sequences, each holding one limb position of every element.
+            //
+            // A pure element beside a witnessed one arrives as a single value which `operand_limbs`
+            // splits: the same mixed-domain case a wide comparison meets.
+            OpCode::MkSeq {
+                result,
+                elems,
+                seq_type,
+                elem_type,
+            } => {
+                let results = self.limbs(*result);
+                let count = results.len();
+                let elem_types = element_types(elem_type, self.field, count);
+                let per_element: Vec<Vec<ValueId>> = elems
+                    .iter()
+                    .map(|elem| self.operand_limbs(*elem, count))
+                    .collect();
+                for (index, (result, elem_type)) in results.into_iter().zip(elem_types).enumerate()
+                {
+                    let elems = per_element.iter().map(|limbs| limbs[index]).collect();
+                    self.push(OpCode::MkSeq {
+                        result,
+                        elems,
+                        seq_type: *seq_type,
+                        elem_type,
+                    });
+                }
+            }
+
+            // The witness-indexed read, which is the lookup the array lowering built at
+            // `driver.rs:619` — before this pass, so the index and the flag are already narrow and
+            // already pinned. One lookup per limb sequence against that same index and flag, so
+            // each limb is selected by the same `sum(hit) == 1` argument rather than a new one.
+            OpCode::Lookup {
+                target: LookupTarget::Array(array),
+                args,
+                flag,
+            }
+            | OpCode::DLookup {
+                target: LookupTarget::Array(array),
+                args,
+                flag,
+            } => {
+                assert_eq!(
+                    args.len(),
+                    2,
+                    "ICE: an array lookup takes an index and a result"
+                );
+                let dynamic = matches!(op, OpCode::DLookup { .. });
+                let index = self.one(args[0]);
+                let flag = self.one(*flag);
+                let results = self.limbs(args[1]);
+                let arrays = self.limbs(*array);
+                // `paired` rather than a `zip`: a limb short here is a limb the tape never pins,
+                // which an honest witness still satisfies. It is the one mismatch in this pass
+                // that would be unsound rather than merely wrong.
+                for (result, array) in paired(results, arrays) {
+                    let target = LookupTarget::Array(array);
+                    let args = vec![index, result];
+                    self.push(if dynamic {
+                        OpCode::DLookup { target, args, flag }
+                    } else {
+                        OpCode::Lookup { target, args, flag }
+                    });
+                }
+            }
+
+            // A blob-backed sequence: one blob per limb, holding that limb of every element.
+            //
+            // The elements are constants, so the split is arithmetic on the patterns rather than
+            // emitted code, which is what lets a constant sequence carry elements the field
+            // cannot hold where reading one whole entry as a field element could not.
+            OpCode::MkSeqOfBlob {
+                result,
+                element_type,
+                blob,
+            } => {
+                let results = self.limbs(*result);
+                let Some(Constant::Blob(blob)) = self.ssa.get_const(*blob).map(|c| (*c).clone())
+                else {
+                    ice!("a blob-backed sequence without a blob constant")
+                };
+                let bits = int_width(element_type)
+                    .unwrap_or_else(|| ice!("a wide blob sequence of {element_type}"));
+                let widths = limb_widths(bits, self.limb_bits());
+                let elem_types = element_types(element_type, self.field, results.len());
+                for (index, ((result, width), element_type)) in
+                    results.into_iter().zip(&widths).zip(elem_types).enumerate()
+                {
+                    let low = index * self.limb_bits();
+                    let elements = blob
+                        .elements
+                        .iter()
+                        .map(|element| {
+                            let Constant::Int(pattern) = element else {
+                                ice!("a wide blob element that is not an integer")
+                            };
+                            Constant::Int(pattern.bit_range(low, *width))
+                        })
+                        .collect();
+                    let limb_blob = self
+                        .ssa
+                        .add_const(Constant::Blob(Blob::new(element_type.clone(), elements)));
+                    self.push(OpCode::MkSeqOfBlob {
+                        result,
+                        element_type,
+                        blob: limb_blob,
+                    });
+                }
+            }
+
+            OpCode::MkRepeated {
+                result,
+                element,
+                seq_type,
+                count,
+                elem_type,
+            } => {
+                let results = self.limbs(*result);
+                let elem_types = element_types(elem_type, self.field, results.len());
+                let elements = self.operand_limbs(*element, results.len());
+                for ((result, element), elem_type) in
+                    results.into_iter().zip(elements).zip(elem_types)
+                {
+                    self.push(OpCode::MkRepeated {
+                        result,
+                        element,
+                        seq_type: *seq_type,
+                        count: *count,
+                        elem_type,
+                    });
+                }
+            }
+
+            // One read per limb sequence, at the caller's own index. The index is narrow and is
+            // shared rather than re-derived, so a witnessed one is looked up once per limb against
+            // the same value the array lowering pinned.
+            OpCode::ArrayGet {
+                result,
+                array,
+                index,
+            } => {
+                let index = self.one(*index);
+                for (result, array) in paired(self.limbs(*result), self.limbs(*array)) {
+                    self.push(OpCode::ArrayGet {
+                        result,
+                        array,
+                        index,
+                    });
+                }
+            }
+
+            OpCode::ArraySet {
+                result,
+                array,
+                index,
+                value,
+            } => {
+                let index = self.one(*index);
+                let results = self.limbs(*result);
+                let arrays = self.limbs(*array);
+                let values = self.operand_limbs(*value, results.len());
+                for ((result, array), value) in paired(results, arrays).zip(values) {
+                    self.push(OpCode::ArraySet {
+                        result,
+                        array,
+                        index,
+                        value,
+                    });
+                }
+            }
+
+            // The slice family that survives this far. Every limb sequence is the same length,
+            // because every operation that changes one is applied identically to all `k` of them —
+            // which is what lets the length be read off any single limb, and is the same reason the
+            // index is shared rather than re-derived.
+            //
+            // `SlicePop`, `SliceInsert` and `SliceRemove` have no arm because
+            // `InstructionLowering::slice_ops` replaces each of them with an assert, a get and a
+            // copy loop before this pass runs. A wide one therefore arrives here as the `ArrayGet`,
+            // `ArraySet` and `SliceLen` this pass already handles.
+            OpCode::SliceLen { result, slice } => {
+                let slice = self.limbs(*slice);
+                self.push(OpCode::SliceLen {
+                    result: self.one(*result),
+                    slice: slice[0],
+                });
+            }
+
+            OpCode::SlicePush {
+                dir,
+                result,
+                slice,
+                values,
+            } => {
+                let results = self.limbs(*result);
+                let slices = self.limbs(*slice);
+                let per_value: Vec<Vec<ValueId>> = values
+                    .iter()
+                    .map(|value| self.operand_limbs(*value, results.len()))
+                    .collect();
+                for (index, (result, slice)) in paired(results, slices).enumerate() {
+                    let values = per_value.iter().map(|limbs| limbs[index]).collect();
+                    self.push(OpCode::SlicePush {
+                        dir: *dir,
+                        result,
+                        slice,
+                        values,
+                    });
+                }
+            }
+
             OpCode::Alloc { result, value } => {
                 for (result, value) in paired(self.limbs(*result), self.limbs(*value)) {
                     self.push(OpCode::Alloc { result, value });
@@ -678,10 +1122,17 @@ impl Rewriter<'_> {
                 pinned,
             } => {
                 let values = self.limbs(*value);
-                let results = match result {
+                let results: Vec<Option<ValueId>> = match result {
                     Some(result) => self.limbs(*result).into_iter().map(Some).collect(),
                     None => vec![None; values.len()],
                 };
+                assert_eq!(
+                    results.len(),
+                    values.len(),
+                    "ICE: {} witness columns were written from {} limbs",
+                    results.len(),
+                    values.len()
+                );
                 for (result, value) in results.into_iter().zip(values) {
                     self.push(OpCode::WriteWitness {
                         result,
@@ -696,7 +1147,15 @@ impl Rewriter<'_> {
                 result_type,
             } => {
                 let types = limb_types(result_type, self.field);
-                for (result, result_type) in self.limbs(*result).into_iter().zip(types) {
+                let results = self.limbs(*result);
+                assert_eq!(
+                    results.len(),
+                    types.len(),
+                    "ICE: {} fresh witnesses were minted for a type of {} limbs",
+                    results.len(),
+                    types.len()
+                );
+                for (result, result_type) in results.into_iter().zip(types) {
                     self.push(OpCode::FreshWitness {
                         result,
                         result_type,
@@ -716,10 +1175,12 @@ impl Rewriter<'_> {
                 unconstrained: *unconstrained,
             }),
 
-            // A wide value reaching anything else is a shape this pass does not represent, which
-            // should have been refused by width validation.
+            // A wide value reaching anything else is a shape this pass does not represent. For a
+            // witnessed operand `width_validation` is what refuses it; a **pure** one has no width
+            // rule to refuse it and reaches here only by being read out of a transposed sequence,
+            // which no arm above hands to anything but another limb-mover.
             other => ice!(
-                "{other:?} reached the multi-cell representation with a wide witnessed operand; width validation should have refused the program"
+                "{other:?} reached the multi-cell representation with a wide operand, which is a shape it does not represent"
             ),
         }
     }
@@ -731,9 +1192,37 @@ impl Rewriter<'_> {
 
         match target {
             CastTarget::Int(to_bits) => {
-                let from_bits = source_bits.unwrap_or_else(|| {
-                    ice!("a width cast of a non-integer reached the multi-cell representation")
-                });
+                // The other side of the field boundary: a wide value read back out of the field
+                // elements its limbs were pinned as. Each limb returns at its own width, so there
+                // is nothing to recombine and no place value to mint.
+                if source_bits.is_none() {
+                    let limbs = self.limbs(value);
+                    let results = self.limbs(result);
+                    let widths = limb_widths(*to_bits, self.limb_bits());
+                    assert_eq!(
+                        limbs.len(),
+                        results.len(),
+                        "ICE: a non-integer of {} limbs was read back as an int{to_bits} of {}",
+                        limbs.len(),
+                        results.len()
+                    );
+                    assert_eq!(
+                        widths.len(),
+                        results.len(),
+                        "ICE: an int{to_bits} is {} limbs, not {}",
+                        widths.len(),
+                        results.len()
+                    );
+                    for ((result, limb), width) in results.into_iter().zip(limbs).zip(widths) {
+                        self.push(OpCode::Cast {
+                            result,
+                            value: limb,
+                            target: CastTarget::Int(width),
+                        });
+                    }
+                    return;
+                }
+                let from_bits = source_bits.expect("a non-integer source returned above");
                 match self.wide_width(result) {
                     // Into the representation, or between two widths inside it.
                     Some(_) => {
@@ -746,11 +1235,20 @@ impl Rewriter<'_> {
                             });
                         }
                     }
-                    // Out of it: the target is one element again, so the low limbs recombine.
+                    // Out of it. A target the field carries is one element again, so the low
+                    // limbs recombine there and the linear combination carries the pinning with
+                    // them. A target it cannot carry has no element to be summed into, so the
+                    // limbs go back together as integer arithmetic at the target's own width —
+                    // which is what the witness strip does, and for the same reason.
                     None => {
-                        let widths = limb_widths(from_bits, self.limb_bits());
-                        let limbs = self.limbs(value);
-                        let combined = self.recombine(&limbs, &widths, *to_bits);
+                        let combined = if *to_bits > multi_cell_int_bits(self.field) {
+                            let limbs = self.pure_limbs_at(value, from_bits, *to_bits);
+                            self.recombine_pure(&limbs, *to_bits)
+                        } else {
+                            let widths = limb_widths(from_bits, self.limb_bits());
+                            let limbs = self.limbs(value);
+                            self.recombine(&limbs, &widths, *to_bits)
+                        };
                         self.push(OpCode::Cast {
                             result,
                             value: combined,
@@ -764,51 +1262,23 @@ impl Rewriter<'_> {
                 let bits = self.wide_width(result).expect(
                     "ICE: a witness injection reached the multi-cell representation without a wide result",
                 );
-                let widths = limb_widths(bits, self.limb_bits());
                 let results = self.limbs(result);
-                for (index, (result, width)) in results.into_iter().zip(&widths).enumerate() {
-                    let low = index * self.limb_bits();
-                    let hint = self.shifted_down(value, bits, low);
-                    let narrowed = self.cast(hint, CastTarget::Int(*width));
-                    self.push(OpCode::Cast {
-                        result,
-                        value: narrowed,
-                        target: CastTarget::WitnessOf,
-                    });
-                    let limb_field = self.cast(result, CastTarget::Field);
-                    self.push(OpCode::Rangecheck {
-                        value: limb_field,
-                        max_bits: *width,
-                    });
-                }
+                self.inject(value, bits, &results);
             }
 
             CastTarget::ValueOf => {
                 let bits = self.wide_width(value).expect(
                     "ICE: a witness strip reached the multi-cell representation without a wide source",
                 );
-                let limbs = self.limbs(value);
-                let mut sum = None;
-                for (index, limb) in limbs.into_iter().enumerate() {
-                    let pure = self.cast(limb, CastTarget::ValueOf);
-                    let widened = self.cast(pure, CastTarget::Int(bits));
-                    let placed = if index == 0 {
-                        widened
-                    } else {
-                        let amount = self.int_const(IntBits::from_u128(
-                            bits,
-                            (index * self.limb_bits()) as u128,
-                        ));
-                        self.bin(BinaryArithOpKind::UShl, widened, amount)
-                    };
-                    sum = Some(match sum {
-                        None => placed,
-                        Some(acc) => self.bin(BinaryArithOpKind::Or, acc, placed),
-                    });
-                }
+                let stripped: Vec<ValueId> = self
+                    .limbs(value)
+                    .into_iter()
+                    .map(|limb| self.cast(limb, CastTarget::ValueOf))
+                    .collect();
+                let sum = self.recombine_pure(&stripped, bits);
                 self.push(OpCode::Cast {
                     result,
-                    value: sum.expect("an integer has at least one limb"),
+                    value: sum,
                     target: CastTarget::Nop,
                 });
             }
@@ -823,15 +1293,46 @@ impl Rewriter<'_> {
                 }
             }
 
-            // A value at a width the field cannot carry has no element, so this cast is refused by
-            // the language rule long before here.
+            // A wide value's field image is one element per limb, which the array lowering's lookup
+            // chain moves through a field. The limbs are already held to their own widths, so each
+            // is an element.
             CastTarget::Field => {
-                ice!("a value wider than the field carries injectively reached a cast to Field")
+                let results = self.limbs(result);
+                let limbs = self.operand_limbs(value, results.len());
+                for (result, limb) in results.into_iter().zip(limbs) {
+                    self.push(OpCode::Cast {
+                        result,
+                        value: limb,
+                        target: CastTarget::Field,
+                    });
+                }
             }
 
-            CastTarget::Map(_) | CastTarget::ArrayToSlice => ice!(
-                "a wide witnessed integer inside a sequence reached the multi-cell representation; wide array elements are not supported"
-            ),
+            // A whole sequence entering the representation: `k` sequences out, each holding one
+            // limb position of every element.
+            //
+            // Both sides are transposed already, so this is a mapped cast per limb sequence and
+            // nothing here reads an element. Every limb sequence is narrow, so `LowerMapCasts`
+            // expands each into the ordinary per-element witness injection later in the pipeline.
+            CastTarget::Map(inner) => {
+                for (result, value) in paired(self.limbs(result), self.limbs(value)) {
+                    self.push(OpCode::Cast {
+                        result,
+                        value,
+                        target: CastTarget::Map(inner.clone()),
+                    });
+                }
+            }
+
+            CastTarget::ArrayToSlice => {
+                for (result, value) in paired(self.limbs(result), self.limbs(value)) {
+                    self.push(OpCode::Cast {
+                        result,
+                        value,
+                        target: CastTarget::ArrayToSlice,
+                    });
+                }
+            }
         }
     }
 
@@ -912,6 +1413,8 @@ pub fn multi_cell_int_bits(field: FieldConfig) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mavros_int_semantics::int_bits::HOST_LIMB_BITS;
+
     use crate::compiler::{
         analysis::types::Types,
         passes::shared::limbs::narrow_int_bits,
@@ -964,17 +1467,46 @@ mod tests {
         );
     }
 
-    /// A reference to a wide value expands, because a reference is a place and every limb needs
-    /// one; a sequence of them does not, because a lookup element is read as one field element.
+    /// A reference and a sequence both expand, and a sequence expands whether or not its element
+    /// is witnessed.
+    ///
+    /// A reference is a place and every limb needs one. A sequence is transposed, so the count is
+    /// the element's limbs rather than the sequence's length. A **pure** wide element counts too,
+    /// which is the one place [`element_limb_types`] parts company with [`limb_types`]. A narrow
+    /// element does not expand at any of it, which is what keeps a `[u128; n]` on bn254 off this
+    /// path entirely.
     #[test]
-    fn a_reference_expands_and_a_sequence_does_not() {
+    fn a_reference_and_a_sequence_both_expand_by_the_element() {
         let field = bn254();
-        let element = Type::witness_of(Type::int(320));
-        let expected = 320usize.div_ceil(witness_limb_bits(field));
+        let wide = multi_cell_int_bits(field) + 1;
+        let expected = wide.div_ceil(witness_limb_bits(field));
+        assert!(expected > 1, "the width has to span limbs to be a test");
 
-        assert_eq!(limb_types(&element.ref_of(), field).len(), expected);
         assert_eq!(
-            limb_types(&Type::witness_of(Type::int(64)).array_of(4), field).len(),
+            limb_types(&Type::witness_of(Type::int(wide)).ref_of(), field).len(),
+            expected
+        );
+        assert_eq!(
+            limb_types(&Type::witness_of(Type::int(wide)).array_of(4), field).len(),
+            expected
+        );
+        assert_eq!(
+            limb_types(&Type::int(wide).array_of(4), field).len(),
+            expected,
+            "a pure wide element is transposed too, or a constant sequence could not be read"
+        );
+        assert_eq!(
+            limb_types(&Type::slice_of(Type::int(wide)), field).len(),
+            expected
+        );
+
+        // A narrow element, at the widest width the double lane holds, stays one sequence.
+        assert_eq!(
+            limb_types(
+                &Type::witness_of(Type::int(2 * HOST_LIMB_BITS)).array_of(4),
+                field
+            )
+            .len(),
             1
         );
     }
@@ -1063,6 +1595,173 @@ mod tests {
             block.terminate_return(vec![result]);
         });
         ssa
+    }
+
+    /// `main(value: int(bits)) -> WitnessOf<int(bits)> { value as witness }`, a **pure** wide value
+    /// injected into the representation.
+    fn program_injecting(bits: usize) -> HLSSA {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let value = ssa.fresh_value();
+        let result = ssa.fresh_value();
+        let mut builder = HLSSABuilder::new(&mut ssa);
+        builder.modify_function(main, |fb| {
+            fb.function
+                .add_return_type(Type::witness_of(Type::int(bits)));
+            let entry = fb.function.get_entry_id();
+            fb.function
+                .get_block_mut(entry)
+                .push_parameter(value, Type::int(bits));
+            let mut block = fb.test_block(entry);
+            block.emit(OpCode::Cast {
+                result,
+                value,
+                target: CastTarget::WitnessOf,
+            });
+            block.terminate_return(vec![result]);
+        });
+        ssa
+    }
+
+    /// A **pure** value injected into the representation is bounded, and that bound is all there is.
+    ///
+    /// The counterpart of the test above. [`Rewriter::decompose`] ties its limbs back to a value
+    /// that already existed, so a limb out of range breaks the reconstruction. [`Rewriter::inject`]
+    /// has no prior value to tie back to so the per-limb range check is the **only** thing that
+    /// bounds them. `2^h` being invertible mod `p` means an unbounded limb lets a prover solve for
+    /// any value at all.
+    ///
+    /// **No honest witness can see this**, so we check it here.
+    #[test]
+    fn a_pure_value_injected_into_the_representation_is_bounded_per_limb() {
+        // Above the representation threshold, so the value is limbs at all, and not a whole number
+        // of them, so the top limb is bounded at its own width rather than a full limb's.
+        let bits = 328usize;
+        let mut ssa = program_injecting(bits);
+        run_pass(&mut ssa);
+
+        let ops = emitted(&ssa);
+        let bounded: Vec<usize> = ops
+            .iter()
+            .filter_map(|op| match op {
+                OpCode::Rangecheck { max_bits, .. } => Some(*max_bits),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            bounded,
+            limb_widths(bits, witness_limb_bits(bn254())),
+            "each injected limb is bounded at its own declared width"
+        );
+        assert!(
+            bounded.len() > 1,
+            "the value has to span more than one limb to be a test"
+        );
+        // And there is deliberately no reconstruction: a hint has nothing to be tied back to.
+        assert!(
+            !ops.iter().any(|op| matches!(op, OpCode::Constrain { .. })),
+            "an injection ties nothing back; if it does, this test is checking the wrong gadget"
+        );
+    }
+
+    /// `main(shadow, table, index, flag)`, the part of `witness_array_access`'s output that this
+    /// arm reads: a hint out of the pure shadow, across the field boundary, into a column, and a
+    /// lookup tying that column to the table.
+    fn program_reading_a_sequence_at_a_witness_index(bits: usize, slots: usize) -> HLSSA {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let (shadow, table) = (ssa.fresh_value(), ssa.fresh_value());
+        let (hint_index, index, flag) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        let (hint, image, column) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        let mut builder = HLSSABuilder::new(&mut ssa);
+        builder.modify_function(main, |fb| {
+            let entry = fb.function.get_entry_id();
+            {
+                let block = fb.function.get_block_mut(entry);
+                // The hint comes off the pure shadow and the lookup pins it against the witnessed
+                // table, which is the pair `witness_array_access` leaves behind.
+                block.push_parameter(shadow, Type::int(bits).array_of(slots));
+                block.push_parameter(hint_index, Type::int(32));
+                block.push_parameter(table, Type::witness_of(Type::int(bits)).array_of(slots));
+                block.push_parameter(index, Type::witness_of(Type::int(32)));
+                block.push_parameter(flag, Type::witness_of(Type::field()));
+            }
+            let mut block = fb.test_block(entry);
+            block.emit(OpCode::ArrayGet {
+                result: hint,
+                array: shadow,
+                index: hint_index,
+            });
+            block.emit(OpCode::Cast {
+                result: image,
+                value: hint,
+                target: CastTarget::Field,
+            });
+            block.emit(OpCode::WriteWitness {
+                result: Some(column),
+                value: image,
+                pinned: false,
+            });
+            block.emit(OpCode::Lookup {
+                target: LookupTarget::Array(table),
+                args: vec![index, column],
+                flag,
+            });
+            block.terminate_return(vec![]);
+        });
+        ssa
+    }
+
+    /// A transposed read is **one lookup per limb**, every one of them at the same index.
+    ///
+    /// The count is what makes the read sound, and no run can see it: a limb the tape never pins
+    /// is a limb nothing else reads either, so it is eliminated rather than left as a free column
+    /// and `every_column_of_a_wide_sequence_is_pinned` stays green without it. So the lookups are
+    /// counted here, where they are emitted.
+    ///
+    /// The shared index is the other half: `k` lookups against `k` tables at `k` **different**
+    /// indices would pin `k` limbs of no single element.
+    #[test]
+    fn a_transposed_read_is_one_lookup_per_limb_at_one_index() {
+        let bits = 320usize;
+        let mut ssa = program_reading_a_sequence_at_a_witness_index(bits, 2);
+        run_pass(&mut ssa);
+
+        let lookups: Vec<(ValueId, ValueId, ValueId)> = emitted(&ssa)
+            .into_iter()
+            .filter_map(|op| match op {
+                OpCode::Lookup {
+                    target: LookupTarget::Array(array),
+                    args,
+                    ..
+                } => Some((array, args[0], args[1])),
+                _ => None,
+            })
+            .collect();
+
+        let expected = limb_widths(bits, witness_limb_bits(bn254())).len();
+        assert!(expected > 1, "the element has to span limbs to be a test");
+        assert_eq!(
+            lookups.len(),
+            expected,
+            "an int{bits} element is {expected} limbs and each one needs its own lookup"
+        );
+
+        let indices: Vec<ValueId> = lookups.iter().map(|(_, index, _)| *index).collect();
+        assert!(
+            indices.windows(2).all(|pair| pair[0] == pair[1]),
+            "every limb is read at the same index, or the limbs are not one element's"
+        );
+
+        let mut tables: Vec<ValueId> = lookups.iter().map(|(array, ..)| *array).collect();
+        let mut results: Vec<ValueId> = lookups.iter().map(|(.., result)| *result).collect();
+        tables.sort();
+        tables.dedup();
+        results.sort();
+        results.dedup();
+        assert_eq!(tables.len(), expected, "one table per limb sequence");
+        assert_eq!(results.len(), expected, "one column per limb");
     }
 
     /// Every emitted opcode of one function, in order.

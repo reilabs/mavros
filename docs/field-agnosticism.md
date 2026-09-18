@@ -185,7 +185,13 @@ or intern keys. Every **middle-end** cluster now mints through the façade (`b.f
 ### `L3-felt-limbs` — The Limb-Count Constant (Representation, P4→P5)
 
 - [ ] `vm/src/bytecode.rs:16` — `pub const FELT_LIMBS: usize = 4;`. Becomes `F::STORAGE_CELLS`.
-      Consumers: `codegen/bytecode/mod.rs:1737`, `codegen/bytecode/layout.rs:58,71,85,228,271`.
+      Consumers: `codegen/bytecode/mod.rs:1737`, `codegen/bytecode/layout.rs:58,71,85,228,271`, and
+      `vm/src/bytecode.rs`'s `read_cells_as_field`, which reads a lookup-tape element of
+      `ELEM_CELLS` kind out of that many limbs. That last one is a **new** consumer rather than a
+      residual: wide array elements added it. It is bounded by the same fact as `cast_intn_to_field`
+      beside it — an element has nowhere to put bits past the limbs it has — so it moves with this
+      constant and needs no separate entry. It asserts the bound rather than assuming it, and
+      `codegen::bytecode::lookup_elem_kind` asserts the same one where the cell count is chosen.
 - [ ] `compiler/src/compiler/passes/instruction_lowering/bit_range.rs` —
       `decompose_canonical_field_bytes` assumes 32 bytes / four 64-bit limbs / a 2×128-bit modulus
       split. Its modulus _values_ are now read from `FieldConfig` (see `L4-modulus-literal`); only
