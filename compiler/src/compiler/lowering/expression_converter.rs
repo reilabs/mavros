@@ -261,13 +261,12 @@ impl<'a> ExpressionConverter<'a> {
             Expression::Constrain(_, location, _) => Some(*location),
             Expression::Assign(assign) => Self::lvalue_location(&assign.lvalue)
                 .or_else(|| Self::expression_location(&assign.expression)),
-            Expression::Match(m) => {
-                let arm = match m.cases.first() {
-                    Some(case) => Some(&case.branch),
-                    None => m.default_case.as_deref(),
-                };
-                arm.and_then(Self::expression_location)
-            }
+            Expression::Match(m) => m
+                .cases
+                .first()
+                .map(|case| &case.branch)
+                .or_else(|| m.default_case.as_deref())
+                .and_then(Self::expression_location),
             Expression::Break | Expression::Continue => None,
         }
     }
