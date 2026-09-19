@@ -5,9 +5,10 @@ use fm::{FileId, FileManager};
 use noirc_errors::Location as NoirLocation;
 use noirc_frontend::{
     ast::BinaryOpKind,
+    hir_def::expr::Constructor,
     monomorphization::ast::{
         Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, GlobalId, Ident, If,
-        Index, LValue, Let, LocalId, Type as AstType, While,
+        Index, LValue, Let, LocalId, Match, MatchCase, Type as AstType, While,
     },
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -68,6 +69,10 @@ pub struct ExpressionConverter<'a> {
     /// Tracks which LocalIds are mutable (their binding is a pointer)
     mutable_locals: HashSet<LocalId>,
 
+    /// The Noir type of every `let`-bound local whose type `expression_type` can recover, plus
+    /// every match case argument, since nested patterns match on those.
+    local_types: HashMap<LocalId, AstType>,
+
     /// Maps AST FuncId to SSA FunctionId
     function_mapper: &'a HashMap<AstFuncId, FunctionId>,
 
@@ -105,6 +110,13 @@ pub struct ExpressionConverter<'a> {
     current_source_location: SourceLocation,
 }
 
+/// A match scrutinee, plus its `Field` tag when the scrutinee is an enum.
+struct Scrutinee {
+    value: ValueId,
+    ty: AstType,
+    tag: Option<ValueId>,
+}
+
 impl<'a> ExpressionConverter<'a> {
     pub fn new_with_globals(
         function_mapper: &'a HashMap<AstFuncId, FunctionId>,
@@ -118,6 +130,7 @@ impl<'a> ExpressionConverter<'a> {
         Self {
             bindings: HashMap::default(),
             mutable_locals: HashSet::default(),
+            local_types: HashMap::default(),
             function_mapper,
             natively_unconstrained,
             type_converter: TypeConverter::new(),
@@ -244,7 +257,14 @@ impl<'a> ExpressionConverter<'a> {
             Expression::Constrain(_, location, _) => Some(*location),
             Expression::Assign(assign) => Self::lvalue_location(&assign.lvalue)
                 .or_else(|| Self::expression_location(&assign.expression)),
-            Expression::Match(_) | Expression::Break | Expression::Continue => None,
+            Expression::Match(m) => {
+                let arm = match m.cases.first() {
+                    Some(case) => Some(&case.branch),
+                    None => m.default_case.as_deref(),
+                };
+                arm.and_then(Self::expression_location)
+            }
+            Expression::Break | Expression::Continue => None,
         }
     }
 
@@ -395,30 +415,31 @@ impl<'a> ExpressionConverter<'a> {
             }
             Expression::While(w) => self.convert_while(w, b),
             Expression::Loop(body) => self.convert_loop(body, b),
-            _ => todo!(
-                "Expression type not yet supported: {:?}",
-                std::mem::discriminant(expr)
-            ),
+            Expression::Match(m) => self.convert_match(m, b),
+        }
+    }
+
+    /// The current value of a local. Mutable locals are bound to a pointer, so read through it.
+    fn local_value(
+        &mut self,
+        local_id: LocalId,
+        location: Option<NoirLocation>,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> ValueId {
+        let value = *self
+            .bindings
+            .get(&local_id)
+            .unwrap_or_else(|| panic!("Undefined local variable: {:?}", local_id));
+        if self.mutable_locals.contains(&local_id) {
+            self.emit_located(b, location, |e| e.load(value))
+        } else {
+            value
         }
     }
 
     fn convert_ident(&mut self, ident: &Ident, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
         match &ident.definition {
-            Definition::Local(local_id) => {
-                let value = *self
-                    .bindings
-                    .get(local_id)
-                    .unwrap_or_else(|| panic!("Undefined local variable: {:?}", local_id));
-
-                // For mutable variables, we need to load from the pointer
-                let value = if self.mutable_locals.contains(local_id) {
-                    self.emit_located(b, ident.location, |e| e.load(value))
-                } else {
-                    value
-                };
-
-                Some(value)
-            }
+            Definition::Local(local_id) => Some(self.local_value(*local_id, ident.location, b)),
             Definition::Function(func_id) => {
                 let ssa_func_id = self
                     .function_mapper
@@ -527,6 +548,9 @@ impl<'a> ExpressionConverter<'a> {
         } else {
             // Immutable - store single materialized value
             self.bindings.insert(let_expr.id, value);
+        }
+        if let Some(typ) = Self::expression_type(&let_expr.expression) {
+            self.local_types.insert(let_expr.id, typ);
         }
         None
     }
@@ -889,8 +913,6 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn convert_if(&mut self, if_expr: &If, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
-        use noirc_frontend::monomorphization::ast::Type as AstType;
-
         // Fold constant boolean conditions (e.g. if !is_unconstrained())
         // to avoid emitting dead branches that contain unsupported operations.
         if let Some(known) = self.try_eval_const_bool(&if_expr.condition) {
@@ -904,7 +926,28 @@ impl<'a> ExpressionConverter<'a> {
         }
 
         let condition = self.convert_expression(&if_expr.condition, b).unwrap();
+        self.branch(
+            condition,
+            &if_expr.typ,
+            |this, b| this.convert_expression(&if_expr.consequence, b),
+            |this, b| {
+                if_expr
+                    .alternative
+                    .as_ref()
+                    .and_then(|alt| this.convert_expression(alt, b))
+            },
+            b,
+        )
+    }
 
+    fn branch(
+        &mut self,
+        condition: ValueId,
+        typ: &AstType,
+        then: impl FnOnce(&mut Self, &mut HLFunctionBuilder<'_>) -> Option<ValueId>,
+        otherwise: impl FnOnce(&mut Self, &mut HLFunctionBuilder<'_>) -> Option<ValueId>,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
         let then_block = b.add_block(|_| {});
         let else_block = b.add_block(|_| {});
         let merge_block = b.add_block(|_| {});
@@ -912,30 +955,16 @@ impl<'a> ExpressionConverter<'a> {
         b.block(self.current_block)
             .terminate_jmp_if(condition, then_block, else_block);
 
-        let is_unit = matches!(if_expr.typ, AstType::Unit);
+        let is_unit = matches!(typ, AstType::Unit);
 
         // Then branch
         self.current_block = then_block;
-        let then_result = self.convert_expression(&if_expr.consequence, b);
-        let then_value = if is_unit {
-            None
-        } else {
-            Some(then_result.unwrap())
-        };
+        let then_value = then(self, b);
         let then_exit = self.current_block;
 
         // Else branch
         self.current_block = else_block;
-        let else_value = if let Some(alt) = &if_expr.alternative {
-            let else_result = self.convert_expression(alt, b);
-            if is_unit {
-                None
-            } else {
-                Some(else_result.unwrap())
-            }
-        } else {
-            None
-        };
+        let else_value = otherwise(self, b);
         let else_exit = self.current_block;
 
         if is_unit {
@@ -944,7 +973,7 @@ impl<'a> ExpressionConverter<'a> {
             self.current_block = merge_block;
             None
         } else {
-            let result_type = self.type_converter.convert_type(&if_expr.typ);
+            let result_type = self.type_converter.convert_type(typ);
             let merge_param = b.block(merge_block).add_parameter(result_type);
             b.block(then_exit)
                 .terminate_jmp(merge_block, vec![then_value.unwrap()]);
@@ -952,6 +981,180 @@ impl<'a> ExpressionConverter<'a> {
                 .terminate_jmp(merge_block, vec![else_value.unwrap()]);
             self.current_block = merge_block;
             Some(merge_param)
+        }
+    }
+
+    fn convert_match(&mut self, m: &Match, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
+        let (var, var_name) = &m.variable_to_match;
+        let ty = self
+            .local_types
+            .get(var)
+            .unwrap_or_else(|| {
+                panic!("ICE: no recorded type for match scrutinee `{var_name}` ({var:?})")
+            })
+            .clone();
+        let value = self.local_value(*var, None, b);
+
+        // `Variant` covers both enums and structs. An enum is `(tag: Field, payload0, ...)`;
+        // a struct is a plain tuple.
+        let tag = match m.cases.first().map(|first| &first.constructor) {
+            Some(c @ Constructor::Variant(..)) if c.is_enum() => {
+                let location = self.current_source_location.clone();
+                Some(self.emit_at_source_location(b, location, |e| e.tuple_proj(value, 0)))
+            }
+            Some(
+                Constructor::Variant(..)
+                | Constructor::True
+                | Constructor::False
+                | Constructor::Int(_)
+                | Constructor::Unit
+                | Constructor::Tuple(_),
+            )
+            | None => None,
+            Some(Constructor::Range(..)) => {
+                panic!("ICE: range patterns are not produced by the current frontend")
+            }
+        };
+        let scrutinee = Scrutinee { value, ty, tag };
+        self.convert_cases(&scrutinee, &m.cases, m.default_case.as_deref(), &m.typ, b)
+    }
+
+    fn convert_cases(
+        &mut self,
+        s: &Scrutinee,
+        cases: &[MatchCase],
+        default: Option<&Expression>,
+        typ: &AstType,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
+        match cases {
+            [] => {
+                let default = default.expect("ICE: match with no cases and no default");
+                self.convert_expression(default, b)
+            }
+            // With no default the last case is the only constructor left and can run untested.
+            // That relies on the scrutinee having a finite constructor set. `Int` and `Range` do
+            // not, and the elaborator always emits a default for them.
+            [last]
+                if default.is_none()
+                    && !matches!(
+                        last.constructor,
+                        Constructor::Int(_) | Constructor::Range(..)
+                    ) =>
+            {
+                self.convert_arm(s, last, b)
+            }
+            [case, rest @ ..] => {
+                let location = self.expression_source_location(&case.branch);
+                let cond = self.case_condition(s, &case.constructor, location, b);
+                self.branch(
+                    cond,
+                    typ,
+                    |this, b| this.convert_arm(s, case, b),
+                    |this, b| this.convert_cases(s, rest, default, typ, b),
+                    b,
+                )
+            }
+        }
+    }
+
+    fn convert_arm(
+        &mut self,
+        s: &Scrutinee,
+        case: &MatchCase,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> Option<ValueId> {
+        let location = self.expression_source_location(&case.branch);
+        self.bind_case_arguments(s, case, location, b);
+        self.convert_expression(&case.branch, b)
+    }
+
+    fn case_condition(
+        &mut self,
+        s: &Scrutinee,
+        constructor: &Constructor,
+        location: SourceLocation,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> ValueId {
+        let value = s.value;
+        match constructor {
+            Constructor::Unit | Constructor::Tuple(_) => {
+                panic!("ICE: {constructor:?} is a single-constructor pattern and is never tested")
+            }
+            Constructor::True => value,
+            Constructor::False => self.emit_at_source_location(b, location, |e| e.not(value)),
+            Constructor::Int(int) => {
+                let c = b.emit_const(Self::integer_constant(int, &s.ty));
+                self.emit_at_source_location(b, location, |e| e.eq(value, c))
+            }
+            // Only an enum scrutinee carries a tag; a struct pattern is single-constructor too.
+            Constructor::Variant(_, idx) => {
+                let tag = s.tag.unwrap_or_else(|| {
+                    panic!(
+                        "ICE: {constructor:?} is a single-constructor pattern and is never tested"
+                    )
+                });
+                let c = b.emit_const(Constant::Field((*idx as u128).into()));
+                self.emit_at_source_location(b, location, |e| e.eq(tag, c))
+            }
+            Constructor::Range(..) => {
+                panic!("ICE: range patterns are not produced by the current frontend")
+            }
+        }
+    }
+
+    fn bind_case_arguments(
+        &mut self,
+        s: &Scrutinee,
+        case: &MatchCase,
+        location: SourceLocation,
+        b: &mut HLFunctionBuilder<'_>,
+    ) {
+        if case.arguments.is_empty() {
+            return;
+        }
+
+        let scrutinee = s.value;
+        let AstType::Tuple(fields) = &s.ty else {
+            panic!(
+                "ICE: a case that binds arguments needs a tuple scrutinee, found {:?}",
+                s.ty
+            )
+        };
+
+        // A struct pattern is `Variant(struct_type, 0)`, so the constructor's own type decides.
+        let (payload, payload_fields) = match &case.constructor {
+            c if c.is_tuple_or_struct() => (scrutinee, fields),
+            Constructor::Variant(_, idx) => {
+                let AstType::Tuple(variant_fields) = &fields[idx + 1] else {
+                    panic!(
+                        "ICE: enum variant {idx} payload is not a tuple: {:?}",
+                        fields[idx + 1]
+                    )
+                };
+                let payload = self.emit_at_source_location(b, location.clone(), |e| {
+                    e.tuple_proj(scrutinee, idx + 1)
+                });
+                (payload, variant_fields)
+            }
+            other => panic!("ICE: match constructor {other:?} binds no arguments"),
+        };
+
+        assert_eq!(
+            case.arguments.len(),
+            payload_fields.len(),
+            "ICE: match case {:?} binds {} arguments but the value has {} fields",
+            case.constructor,
+            case.arguments.len(),
+            payload_fields.len()
+        );
+        for (i, ((local_id, _name), field_ty)) in
+            case.arguments.iter().zip(payload_fields).enumerate()
+        {
+            let value =
+                self.emit_at_source_location(b, location.clone(), |e| e.tuple_proj(payload, i));
+            self.bind_local(*local_id, value);
+            self.local_types.insert(*local_id, field_ty.clone());
         }
     }
 
@@ -1422,41 +1625,41 @@ impl<'a> ExpressionConverter<'a> {
     fn scalar_literal_to_constant(
         lit: &noirc_frontend::monomorphization::ast::Literal,
     ) -> Option<Constant> {
-        use noirc_frontend::monomorphization::ast::{Literal, Type as AstType};
+        use noirc_frontend::monomorphization::ast::Literal;
 
         match lit {
             Literal::Bool(bv) => {
                 let value = if *bv { 1 } else { 0 };
                 Some(Constant::int(1, value))
             }
-            Literal::Integer(field_element, typ, _location) => match typ {
-                AstType::Field => {
-                    // Boundary: the Noir frontend hands us a raw `ark_bn254::Fr`.
-                    let field_val = field_element.into_repr();
-                    Some(Constant::Field(field_val.into()))
-                }
-                AstType::Integer(signedness, bit_size) => {
-                    use noirc_frontend::shared::Signedness;
-                    let bits: usize = bit_size.bit_size() as usize;
-                    if *signedness == Signedness::Signed {
-                        assert!(
-                            bits <= MAX_LOWERED_SIGNED_BITS,
-                            "signed integers wider than i{MAX_LOWERED_SIGNED_BITS} are unsupported"
-                        );
-                        let val = field_element.to_i128();
-                        Some(Constant::int(bits, val as u128))
-                    } else {
-                        let value = field_element.to_u128();
-                        Some(Constant::int(bits, value))
-                    }
-                }
-                AstType::Bool => {
-                    let value = field_element.to_u128();
-                    Some(Constant::int(1, value))
-                }
-                _ => panic!("Unexpected type for integer literal: {:?}", typ),
-            },
+            Literal::Integer(field_element, typ, _location) => {
+                Some(Self::integer_constant(field_element, typ))
+            }
             _ => None,
+        }
+    }
+
+    fn integer_constant(value: &acvm::FieldElement, typ: &AstType) -> Constant {
+        match typ {
+            AstType::Field => {
+                // Boundary: the Noir frontend hands us a raw `ark_bn254::Fr`.
+                Constant::Field(value.into_repr().into())
+            }
+            AstType::Integer(signedness, bit_size) => {
+                use noirc_frontend::shared::Signedness;
+                let bits: usize = bit_size.bit_size() as usize;
+                if *signedness == Signedness::Signed {
+                    assert!(
+                        bits <= MAX_LOWERED_SIGNED_BITS,
+                        "signed integers wider than i{MAX_LOWERED_SIGNED_BITS} are unsupported"
+                    );
+                    Constant::int(bits, value.to_i128() as u128)
+                } else {
+                    Constant::int(bits, value.to_u128())
+                }
+            }
+            AstType::Bool => Constant::int(1, value.to_u128()),
+            _ => panic!("Unexpected type for integer literal: {:?}", typ),
         }
     }
 
