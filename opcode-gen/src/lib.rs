@@ -1086,6 +1086,10 @@ fn gen_opcode_helpers(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
     });
 
     let opcode_name_strs = codes.iter().map(|code| code.name.clone());
+    let raw_opcode_indices = codes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, code)| code.is_raw.then_some(index));
 
     quote! {
         /// The number of distinct opcodes — i.e. the size of the dispatch table
@@ -1095,6 +1099,10 @@ fn gen_opcode_helpers(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
         /// Opcode names indexed by discriminant. Used by the profiling report.
         #[cfg(feature = "vm-profile")]
         pub static OPCODE_NAMES: [&str; #dsp_size] = [ #(#opcode_name_strs),* ];
+
+        /// Lets dispatch tests require coverage when a new raw opcode is introduced.
+        #[cfg(test)]
+        pub const RAW_OPCODES: &[usize] = &[#(#raw_opcode_indices),*];
 
         impl OpCode {
             pub fn to_binary(&self, binary: &mut Vec<u64>, jumps_to_fix: &mut Vec<(usize, isize)>) {

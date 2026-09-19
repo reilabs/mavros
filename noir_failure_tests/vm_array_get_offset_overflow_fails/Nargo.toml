@@ -1,0 +1,6 @@
+[package]
+name = "vm_array_get_offset_overflow_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]
