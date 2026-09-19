@@ -176,6 +176,9 @@ pub(crate) fn eval_cmp(kind: CmpKind, a: &Constant, b: &Constant) -> Option<Cons
                 .and_then(res)
         }
         (CmpKind::Eq, Constant::Field(x), Constant::Field(y)) => res(x == y),
+        (CmpKind::ULt, Constant::Field(x), Constant::Field(y)) => {
+            res(x.into_bigint() < y.into_bigint())
+        }
 
         // Width-mismatched, mixed-kind, and non-scalar comparisons do not fold
         (
@@ -466,6 +469,25 @@ pub(crate) fn eval_mk_repeated(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn field_less_than_folds_canonical_values_without_truncation() {
+        let field = FieldConfig::bn254();
+        let values = [
+            field.zero(),
+            field.constant(5),
+            field.two_pow(200),
+            -field.one(),
+        ];
+        for (i, a) in values.iter().enumerate() {
+            for (j, b) in values.iter().enumerate() {
+                assert_eq!(
+                    eval_cmp(CmpKind::ULt, &Constant::Field(*a), &Constant::Field(*b)),
+                    Some(Constant::int(1, u128::from(i < j)))
+                );
+            }
+        }
+    }
+
     use mavros_int_semantics::{Outcome, SignedValue, corners, int_bits::HOST_WORD_BITS};
 
     use super::*;

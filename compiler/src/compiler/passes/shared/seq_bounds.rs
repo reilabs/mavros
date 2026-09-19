@@ -23,20 +23,11 @@ pub enum SeqBoundsCheck {
     /// Requires `index < len`.
     Remove { slice: ValueId, index: ValueId },
 
-    /// An `ArraySet`: requires `index < len`.
+    /// An `ArrayGet` or `ArraySet`: requires `index < len`.
     ///
-    /// Only *arrays* are checked through this variant. A witness-length slice access already
-    /// carries `index < log_len` from `PurifyWitnessSlices`, and a pure-length one is constrained
-    /// by its own lowering, so re-deriving a bound from the physical container here would be both
-    /// redundant and — for a purified slice, whose `slice_len` is the capacity rather than the
-    /// logical length — weaker than the check already present. Noir draws the same line: see
-    /// `should_insert_oob_check` in `noirc_evaluator/src/ssa/opt/die/array_oob_checks.rs`, which
-    /// notes that "vectors are expected to have explicit checks laid down in the initial SSA".
-    ///
-    /// `ArrayGet` is deliberately **not** matched, which is the one place this diverges from
-    /// Noir's `should_insert_oob_check`. A live witness-indexed read already gets its bound for
-    /// free from the lookup argument `gen_witness_array_get` emits, so the only thing at stake is
-    /// a read whose result nothing uses.
+    /// DCE emits this only before witness-slice purification, while a vector's `slice_len`
+    /// is still its logical length. A live witness-indexed read gets its bounds constraint
+    /// from lowering; an unused read must retain a check when its lookup is removed.
     SeqAccess { seq: ValueId, index: ValueId },
 }
 
@@ -53,10 +44,12 @@ pub fn failable_bounds(instruction: &OpCode) -> Option<SeqBoundsCheck> {
             slice: *slice,
             index: *index,
         }),
-        OpCode::ArraySet { array, index, .. } => Some(SeqBoundsCheck::SeqAccess {
-            seq: *array,
-            index: *index,
-        }),
+        OpCode::ArrayGet { array, index, .. } | OpCode::ArraySet { array, index, .. } => {
+            Some(SeqBoundsCheck::SeqAccess {
+                seq: *array,
+                index: *index,
+            })
+        }
         _ => None,
     }
 }
@@ -175,8 +168,7 @@ pub fn build_remove_bounds_assert(
     (assert, len, idx_cmp, cmp_bits)
 }
 
-/// `index < len(seq)` for an array element access, or `None` when `seq` is not a fixed-length array
-/// — see [`SeqBoundsCheck::SeqAccess`] for why slices are excluded here.
+/// `index < len(seq)` for a user array/vector access, before witness-slice purification.
 pub fn build_seq_access_bounds_assert(
     emitter: &mut impl HLEmitter,
     seq: ValueId,
@@ -184,7 +176,10 @@ pub fn build_seq_access_bounds_assert(
     seq_ty: &Type,
     index_ty: &Type,
 ) -> Option<OpCode> {
-    if !matches!(seq_ty.strip_witness().expr, TypeExpr::Array(_, _)) {
+    if !matches!(
+        seq_ty.strip_witness().expr,
+        TypeExpr::Array(_, _) | TypeExpr::Slice(_)
+    ) {
         return None;
     }
     let (_, len_cmp, idx_cmp, _) = seq_bounds_operands(emitter, seq, index, seq_ty, index_ty);
