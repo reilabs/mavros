@@ -109,7 +109,7 @@ fn rewrite_function(
         }
         function.get_block_mut(*bid).put_instructions(new_instrs);
     }
-    aliases.apply_to_function(function, ReplaceScope::Inputs);
+    aliases.apply_to_blocks(function, ReplaceScope::Inputs, reachable.iter().copied());
 }
 
 fn lower_instruction(
