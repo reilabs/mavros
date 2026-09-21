@@ -92,7 +92,7 @@ pub fn seq_bounds_operands(
     (len, len_cmp, idx_cmp, cmp_bits)
 }
 
-/// For an `Int` index, compare at the wider of the two widths. A Field index is narrowed down to `Int(32)`. 
+/// For an `Int` index, compare at the wider of the two widths. A Field index is narrowed down to `Int(32)`.
 pub fn index_bounds_operands(
     emitter: &mut impl HLEmitter,
     index: ValueId,
