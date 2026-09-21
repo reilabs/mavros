@@ -3,7 +3,7 @@
 
 use crate::{
     collections::{HashMap, HashSet},
-    compiler::ssa::{BlockId, FunctionId, Instruction, SSA, SSAType, Terminator},
+    compiler::ssa::{BlockId, Function, FunctionId, Instruction, SSA, SSAType, Terminator},
 };
 
 use itertools::Itertools;
@@ -672,42 +672,41 @@ impl FlowAnalysis {
         }
 
         for (func_id, func) in ssa.iter_functions() {
-            let mut cfg = CFGBuilder::new();
-
-            for (block_id, _) in func.get_blocks() {
-                cfg.add_block(*block_id);
-            }
-
-            cfg.set_entry(func.get_entry_id());
-
-            for (block_id, block) in func.get_blocks() {
-                if let Some(instruction) = block.get_terminator() {
-                    match instruction {
-                        Terminator::Jmp(target, _) => {
-                            cfg.add_jump(*block_id, *target, JumpType::Jmp);
-                        }
-                        Terminator::JmpIf(_, t1, t2) => {
-                            cfg.add_jump(*block_id, *t1, JumpType::JmpIf);
-                            cfg.add_jump(*block_id, *t2, JumpType::JmpIf);
-                        }
-                        Terminator::Return(_) => {
-                            cfg.add_return(*block_id);
-                        }
-                    }
-                }
+            function_cfgs.insert(*func_id, Self::run_function(func));
+            for (_, block) in func.get_blocks() {
                 for instruction in block.get_instructions() {
                     for target_id in instruction.get_static_call_targets() {
                         call_graph.add_call(*func_id, target_id);
                     }
                 }
             }
-            function_cfgs.insert(*func_id, cfg.build());
         }
 
         Self {
             call_graph,
             function_cfgs,
         }
+    }
+
+    /// Build a fresh CFG for a function being rewritten outside its owning SSA.
+    pub fn run_function<Op: Instruction, Ty: SSAType>(function: &Function<Op, Ty>) -> CFG {
+        let mut cfg = CFGBuilder::new();
+        for (id, _) in function.get_blocks() {
+            cfg.add_block(*id);
+        }
+        cfg.set_entry(function.get_entry_id());
+        for (id, block) in function.get_blocks() {
+            match block.get_terminator() {
+                Some(Terminator::Jmp(target, _)) => cfg.add_jump(*id, *target, JumpType::Jmp),
+                Some(Terminator::JmpIf(_, lhs, rhs)) => {
+                    cfg.add_jump(*id, *lhs, JumpType::JmpIf);
+                    cfg.add_jump(*id, *rhs, JumpType::JmpIf);
+                }
+                Some(Terminator::Return(_)) => cfg.add_return(*id),
+                None => {}
+            }
+        }
+        cfg.build()
     }
 
     pub fn get_call_graph(&self) -> &CallGraph {

@@ -1,0 +1,6 @@
+[package]
+name = "sparse_array_merge_outer_guard_oob"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -41,7 +41,7 @@ use num_traits::{One, Signed, ToPrimitive, Zero};
 use tracing::{Level, instrument, warn};
 
 use crate::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     compiler::{
         Field,
         analysis::{
@@ -87,6 +87,17 @@ impl ValueRangeAnalysis {
 
     #[instrument(skip_all, name = "ValueRangeAnalysis::run")]
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, types: &TypeInfo) -> ValueRanges {
+        self.run_with_unknown_parameters(ssa, cfg, types, &HashSet::default())
+    }
+
+    /// Pending merge parameters must retain their declared ranges until all arms exist.
+    pub(crate) fn run_with_unknown_parameters(
+        &self,
+        ssa: &HLSSA,
+        cfg: &FlowAnalysis,
+        types: &TypeInfo,
+        unknown_parameters: &HashSet<ValueId>,
+    ) -> ValueRanges {
         let mut result = ValueRanges {
             functions: HashMap::default(),
         };
@@ -101,11 +112,39 @@ impl ValueRangeAnalysis {
         for (function_id, function) in ssa.iter_functions() {
             let func_cfg = cfg.get_function_cfg(*function_id);
             let func_types = types.get_function(*function_id);
-            let function_ranges =
-                self.run_function(function, func_cfg, func_types, &constant_bounds, field);
+            let function_ranges = self.run_function(
+                function,
+                func_cfg,
+                func_types,
+                &constant_bounds,
+                field,
+                unknown_parameters,
+            );
             result.functions.insert(*function_id, function_ranges);
         }
         result
+    }
+
+    /// Analyze a detached function against its current CFG and types.
+    /// `unknown_parameters` stay at their declared ranges: use this for merge
+    /// parameters whose incoming arguments have not yet been fully emitted.
+    #[cfg(test)]
+    pub fn run_on_function(
+        &self,
+        function: &HLFunction,
+        cfg: &CFG,
+        types: &FunctionTypeInfo,
+        ssa: &HLSSA,
+        unknown_parameters: &HashSet<ValueId>,
+    ) -> FunctionValueRanges {
+        self.run_function(
+            function,
+            cfg,
+            types,
+            &compute_constant_bounds(ssa),
+            ssa.field(),
+            unknown_parameters,
+        )
     }
 
     #[instrument(skip_all, level = Level::TRACE, fields(function = function.get_name()))]
@@ -116,6 +155,7 @@ impl ValueRangeAnalysis {
         types: &FunctionTypeInfo,
         constant_bounds: &HashMap<ValueId, ValueRange>,
         field: FieldConfig,
+        unknown_parameters: &HashSet<ValueId>,
     ) -> FunctionValueRanges {
         let mut bounds: HashMap<ValueId, ValueRange> = constant_bounds.clone();
         // How many times each value has been refined, which is what `overwrite` widens against.
@@ -176,6 +216,9 @@ impl ValueRangeAnalysis {
                         .collect();
 
                     for (idx, (param_id, param_type)) in block.get_parameters().enumerate() {
+                        if unknown_parameters.contains(param_id) {
+                            continue;
+                        }
                         let mut joined: Option<ValueRange> = None;
                         for args in &pred_args {
                             if let Some(arg_id) = args.get(idx) {
@@ -2004,6 +2047,12 @@ pub struct ValueRanges {
 }
 
 impl ValueRanges {
+    pub(crate) fn take_function(&mut self, id: FunctionId) -> FunctionValueRanges {
+        self.functions
+            .remove(&id)
+            .expect("ValueRanges: function not found")
+    }
+
     pub fn get_function(&self, id: FunctionId) -> &FunctionValueRanges {
         self.functions
             .get(&id)

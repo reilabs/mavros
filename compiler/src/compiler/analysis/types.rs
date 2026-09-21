@@ -126,18 +126,8 @@ impl Types {
             functions: HashMap::default(),
         };
 
-        let function_types = ssa
-            .iter_functions()
-            .map(|(id, func)| (*id, (func.get_param_types(), func.get_returns())))
-            .collect::<HashMap<_, _>>();
-
-        // The constants side-table is module-level; pre-compute types for every constant
-        // `ValueId` so `run_function` can seed `function_info` with them.
-        let constant_types = pool_constant_types(&ssa.const_snapshot(), &|fn_id| {
-            function_types
-                .get(&fn_id)
-                .map(|(_, returns)| returns.to_vec())
-        });
+        let function_types = Self::function_types(ssa);
+        let constant_types = Self::constant_types(ssa, &function_types);
 
         // The configured field, threaded through calls so that the width of a `Field` can be read
         // from it rather than a static.
@@ -150,6 +140,21 @@ impl Types {
             type_info.functions.insert(*function_id, function_info);
         }
         type_info
+    }
+
+    pub(crate) fn function_types(ssa: &HLSSA) -> HashMap<FunctionId, (Vec<Type>, &[Type])> {
+        ssa.iter_functions()
+            .map(|(id, function)| (*id, (function.get_param_types(), function.get_returns())))
+            .collect()
+    }
+
+    pub(crate) fn constant_types(
+        ssa: &HLSSA,
+        signatures: &HashMap<FunctionId, (Vec<Type>, &[Type])>,
+    ) -> HashMap<ValueId, Type> {
+        pool_constant_types(&ssa.const_snapshot(), &|id| {
+            signatures.get(&id).map(|(_, returns)| returns.to_vec())
+        })
     }
 
     fn spread_result_type(value_type: &Type) -> Result<Type, String> {
