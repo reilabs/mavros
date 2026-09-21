@@ -9,7 +9,7 @@
 //! the bounds check it would normally have, taken from [`seq_bounds`]:
 //!
 //! - `MkSeq`/`MkRepeated`/`ArrayToSlice` cast: the constant element count.
-//! - `SliceLen`, `ArraySet`, per-element `Map` cast: alias the operand (the slice *is* its length).
+//! - `SliceLen`, `ArraySet`: alias the operand (the slice *is* its length).
 //! - `ArrayGet`: `assert index < len`; the element is synthesized.
 //! - `SlicePush`: `len + k`.  `SliceInsert`: `len + 1`, `assert index < len + 1`.
 //! - `SlicePop`: `assert 0 < len`, `len - 1`.  `SliceRemove`: `assert index < len`, `len - 1`.
@@ -17,6 +17,8 @@
 //! A fixed-size array of a leaf-less element keeps its length in its type, but the elision drops
 //! its accesses and their bounds checks with them. This pass emits that check, again through
 //! [`seq_bounds`], and leaves the op for the elision to drop.
+//!
+//! `Map` casts and guards are generated later so reaching them in this pass is an ICE.
 
 use crate::compiler::{
     analysis::{
@@ -156,10 +158,9 @@ fn lower_instruction(
             aliases.insert(result, n);
         }
         OpCode::Cast {
-            result,
-            value,
             target: CastTarget::Map(_),
-        } if is_zst_slice(value) => aliases.insert(result, value),
+            ..
+        } => ice!("lower_zst_slices: Map cast before ElideTuples"),
         OpCode::SliceLen { result, slice } if is_zst_slice(slice) => aliases.insert(result, slice),
         OpCode::ArrayGet {
             result,
