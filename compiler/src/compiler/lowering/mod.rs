@@ -295,7 +295,7 @@ impl SSAConverter {
                     file_manager,
                 );
                 let (_name, _typ, init_expr) = &program.globals[gid];
-                let value = expr_converter.convert_expression(init_expr, b).unwrap();
+                let value = expr_converter.convert_value(init_expr, b);
                 current_block = expr_converter.current_block();
                 let idx = self.global_slots[gid];
                 let location = expr_converter.expression_source_location(init_expr);
@@ -384,7 +384,13 @@ impl SSAConverter {
         let result = expr_converter.convert_expression(&ast_func.body, &mut b);
 
         // Add return terminator
-        let return_values = result.into_iter().collect();
+        let return_values = if TypeConverter::call_returns_a_value(&ast_func.return_type) {
+            result.into_iter().collect()
+        } else {
+            // A unit binding or projection may have materialized an empty tuple,
+            // but unit-returning functions have no SSA results.
+            vec![]
+        };
         b.block(expr_converter.current_block())
             .terminate_return(return_values);
 

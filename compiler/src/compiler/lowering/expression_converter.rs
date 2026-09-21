@@ -320,6 +320,25 @@ impl<'a> ExpressionConverter<'a> {
         result
     }
 
+    /// Evaluate an expression where storage or an operand requires an SSA value.
+    /// Unit expressions still run for their side effects, then materialize as the
+    /// empty tuple used by `TypeConverter` for unit parameters and aggregate fields.
+    pub(super) fn convert_value(
+        &mut self,
+        expr: &Expression,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> ValueId {
+        self.convert_expression(expr, b).unwrap_or_else(|| {
+            assert!(
+                matches!(expr.return_type().as_deref(), None | Some(AstType::Unit)),
+                "non-unit expression did not produce an SSA value"
+            );
+            self.emit_located(b, Self::expression_location(expr), |e| {
+                e.mk_tuple(vec![], vec![])
+            })
+        })
+    }
+
     fn convert_expression_inner(
         &mut self,
         expr: &Expression,
@@ -460,8 +479,8 @@ impl<'a> ExpressionConverter<'a> {
         binary: &Binary,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        let lhs = self.convert_expression(&binary.lhs, b).unwrap();
-        let rhs = self.convert_expression(&binary.rhs, b).unwrap();
+        let lhs = self.convert_value(&binary.lhs, b);
+        let rhs = self.convert_value(&binary.rhs, b);
 
         // This is where signedness enters the compiler, and after it there is no second source: the
         // HLSSA type carries no sign, so every downstream decision reads the opcode this line ends
@@ -507,13 +526,7 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn convert_let(&mut self, let_expr: &Let, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
-        let result = self.convert_expression(&let_expr.expression, b);
-        let value = result.unwrap_or_else(|| {
-            // Unit binding (e.g., `let unit = ()`) — create an empty tuple
-            self.emit_located(b, Self::expression_location(&let_expr.expression), |e| {
-                e.mk_tuple(vec![], vec![])
-            })
-        });
+        let value = self.convert_value(&let_expr.expression, b);
 
         if let_expr.mutable {
             // Use a single pointer for the whole value.
@@ -548,7 +561,7 @@ impl<'a> ExpressionConverter<'a> {
         assign: &Assign,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        let new_value = self.convert_expression(&assign.expression, b).unwrap();
+        let new_value = self.convert_value(&assign.expression, b);
         self.with_lvalue_ref(
             &assign.lvalue,
             b,
@@ -978,7 +991,7 @@ impl<'a> ExpressionConverter<'a> {
                 }
 
                 // General case: evaluate the expression, alloc a fresh Ref, store into it.
-                let value = self.convert_expression(&unary.rhs, b).unwrap();
+                let value = self.convert_value(&unary.rhs, b);
                 let ptr = self.emit_located(b, Some(unary.location), |e| e.alloc(value));
                 Some(ptr)
             }
@@ -1260,7 +1273,7 @@ impl<'a> ExpressionConverter<'a> {
                         typ
                     ),
                 };
-                let element_val = self.convert_expression(element, b).unwrap();
+                let element_val = self.convert_value(element, b);
                 let len = *length as usize;
                 let seq_type = if *is_vector {
                     SequenceTargetType::Slice
@@ -1315,10 +1328,13 @@ impl<'a> ExpressionConverter<'a> {
                 let mut elem_types = vec![Type::int(32).array_of(cp_len)];
                 if let Expression::Tuple(capture_exprs) = captures.as_ref() {
                     for expr in capture_exprs {
-                        let val = self.convert_expression(expr, b).unwrap();
+                        let val = self.convert_value(expr, b);
                         tuple_elems.push(val);
-                        let typ = expr.return_type().expect("FmtStr capture must have a type");
-                        elem_types.push(self.type_converter.convert_type(&typ));
+                        let typ = expr.return_type();
+                        elem_types.push(
+                            self.type_converter
+                                .convert_type(typ.as_deref().unwrap_or(&AstType::Unit)),
+                        );
                     }
                 }
 
@@ -1372,7 +1388,7 @@ impl<'a> ExpressionConverter<'a> {
         let elements: Vec<ValueId> = array_lit
             .contents
             .iter()
-            .map(|e| self.convert_expression(e, b).unwrap())
+            .map(|e| self.convert_value(e, b))
             .collect();
 
         let result = self.emit_located(
@@ -1487,10 +1503,7 @@ impl<'a> ExpressionConverter<'a> {
         }
 
         // Convert each element to a single materialized value
-        let values: Vec<ValueId> = exprs
-            .iter()
-            .map(|e| self.convert_expression(e, b).unwrap())
-            .collect();
+        let values: Vec<ValueId> = exprs.iter().map(|e| self.convert_value(e, b)).collect();
 
         // Get types for each element
         // Note: For Definition::Function idents, the Noir type may be
@@ -1505,8 +1518,9 @@ impl<'a> ExpressionConverter<'a> {
                 {
                     return self.function_ident_type(ident);
                 }
-                let return_type = e.return_type().expect("Tuple element must have a type");
-                self.type_converter.convert_type(&return_type)
+                let return_type = e.return_type();
+                self.type_converter
+                    .convert_type(return_type.as_deref().unwrap_or(&AstType::Unit))
             })
             .collect();
 
@@ -1540,7 +1554,7 @@ impl<'a> ExpressionConverter<'a> {
                 let args: Vec<ValueId> = call
                     .arguments
                     .iter()
-                    .map(|arg| self.convert_expression(arg, b).unwrap())
+                    .map(|arg| self.convert_value(arg, b))
                     .collect();
 
                 let fn_ptr = self.convert_expression(&call.func, b).unwrap();
@@ -1570,7 +1584,7 @@ impl<'a> ExpressionConverter<'a> {
         let args: Vec<ValueId> = call
             .arguments
             .iter()
-            .map(|arg| self.convert_expression(arg, b).unwrap())
+            .map(|arg| self.convert_value(arg, b))
             .collect();
 
         let ssa_func_id = self
@@ -1610,8 +1624,8 @@ impl<'a> ExpressionConverter<'a> {
     ) -> Option<ValueId> {
         match name {
             "assert_eq" => {
-                let lhs = self.convert_expression(&call.arguments[0], b).unwrap();
-                let rhs = self.convert_expression(&call.arguments[1], b).unwrap();
+                let lhs = self.convert_value(&call.arguments[0], b);
+                let rhs = self.convert_value(&call.arguments[1], b);
                 self.emit_located(b, Some(call.location), |e| e.assert_eq(lhs, rhs));
                 None
             }
@@ -1786,14 +1800,14 @@ impl<'a> ExpressionConverter<'a> {
             }
             "vector_push_back" => {
                 let slice = self.convert_expression(&call.arguments[0], b).unwrap();
-                let elem = self.convert_expression(&call.arguments[1], b).unwrap();
+                let elem = self.convert_value(&call.arguments[1], b);
                 Some(self.emit_located(b, Some(call.location), |e| {
                     e.slice_push(slice, vec![elem], SliceOpDir::Back)
                 }))
             }
             "vector_push_front" => {
                 let slice = self.convert_expression(&call.arguments[0], b).unwrap();
-                let elem = self.convert_expression(&call.arguments[1], b).unwrap();
+                let elem = self.convert_value(&call.arguments[1], b);
                 Some(self.emit_located(b, Some(call.location), |e| {
                     e.slice_push(slice, vec![elem], SliceOpDir::Front)
                 }))
@@ -1819,7 +1833,7 @@ impl<'a> ExpressionConverter<'a> {
             "vector_insert" => {
                 let slice = self.convert_expression(&call.arguments[0], b).unwrap();
                 let index = self.convert_expression(&call.arguments[1], b).unwrap();
-                let elem = self.convert_expression(&call.arguments[2], b).unwrap();
+                let elem = self.convert_value(&call.arguments[2], b);
                 Some(self.emit_located(b, Some(call.location), |e| {
                     e.slice_insert(slice, index, elem)
                 }))
