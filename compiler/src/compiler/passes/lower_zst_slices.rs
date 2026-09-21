@@ -369,7 +369,7 @@ fn is_zst_slice_type(ty: &Type) -> bool {
     matches!(&ty.expr, TypeExpr::Slice(inner) if is_zero_leaf(inner))
 }
 
-pub fn is_zero_leaf(ty: &Type) -> bool {
+fn is_zero_leaf(ty: &Type) -> bool {
     match &ty.expr {
         TypeExpr::Tuple(elems) => elems.iter().all(is_zero_leaf),
         TypeExpr::Array(inner, _) | TypeExpr::Ref(inner) | TypeExpr::WitnessOf(inner) => {
