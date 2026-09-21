@@ -336,6 +336,10 @@ fn synthesize_leafless(b: &mut impl HLEmitter, ty: &Type) -> ValueId {
             let value = synthesize_leafless(b, inner);
             b.alloc(value)
         }
+        TypeExpr::WitnessOf(inner) => {
+            let value = synthesize_leafless(b, inner);
+            b.cast_to_witness_of(value)
+        }
         other => panic!("ICE: lower_zst_slices: {other:?} is not leaf-less"),
     }
 }
