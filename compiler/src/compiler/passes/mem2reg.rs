@@ -249,7 +249,7 @@ impl Mem2Reg {
                         let additional_params = phi_map.get(tgt).unwrap_or(&tmp);
                         for (_, val) in additional_params {
                             let param_val = values.get(val).unwrap_or_else(|| {
-                                panic!("ICE: block {} has no value for v{}", block_id.0, val.0)
+                                ice!("block {} has no value for v{}", block_id.0, val.0)
                             });
                             params.push(value_replacements.get_replacement(*param_val));
                         }
@@ -263,10 +263,7 @@ impl Mem2Reg {
                                 .iter()
                                 .map(|(_, val)| {
                                     let v = *values.get(val).unwrap_or_else(|| {
-                                        panic!(
-                                            "ICE: block {} has no value for v{}",
-                                            block_id.0, val.0
-                                        )
+                                        ice!("block {} has no value for v{}", block_id.0, val.0)
                                     });
                                     value_replacements.get_replacement(v)
                                 })
@@ -282,10 +279,7 @@ impl Mem2Reg {
                                 .iter()
                                 .map(|(_, val)| {
                                     let v = *values.get(val).unwrap_or_else(|| {
-                                        panic!(
-                                            "ICE: block {} has no value for v{}",
-                                            block_id.0, val.0
-                                        )
+                                        ice!("block {} has no value for v{}", block_id.0, val.0)
                                     });
                                     value_replacements.get_replacement(v)
                                 })

@@ -149,7 +149,7 @@ fn cast_target_for_type(ty: &Type) -> CastTarget {
         // choose: `TypeExpr::Int(n)` says only "an n-bit integer", and `CastTarget::Int(n)` says
         // only "reinterpret at n bits". Sign extension is the separate `SExt` opcode.
         TypeExpr::Int(bits) => CastTarget::Int(bits),
-        other => panic!(
+        other => ice!(
             "Expected integer type for witness spread result, got {:?}",
             other
         ),

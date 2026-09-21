@@ -122,7 +122,7 @@ impl AnalysisStore {
     pub fn get<A: 'static>(&self) -> &A {
         self.data
             .get(&TypeId::of::<A>())
-            .unwrap_or_else(|| panic!("Analysis {} not found in store", std::any::type_name::<A>()))
+            .unwrap_or_else(|| ice!("Analysis {} not found in store", std::any::type_name::<A>()))
             .downcast_ref::<A>()
             .unwrap()
     }

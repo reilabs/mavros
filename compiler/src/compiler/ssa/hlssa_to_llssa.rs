@@ -47,7 +47,7 @@ fn lower_type(ty: &HLType) -> LLType {
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::Ref(_) => LLType::Ptr,
         HLTypeExpr::Blob(..) => LLType::Ptr,
-        _ => panic!("Unsupported type in HLSSA->LLSSA lowering: {}", ty),
+        _ => ice!("Unsupported type in HLSSA->LLSSA lowering: {}", ty),
     }
 }
 
@@ -61,7 +61,7 @@ fn elem_struct(ty: &HLType) -> LLStruct {
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::WitnessOf(_) => LLStruct::new(vec![LLFieldType::Ptr]),
         HLTypeExpr::Ref(_) => LLStruct::new(vec![LLFieldType::Ptr]),
-        _ => panic!("Unsupported element type: {}", ty),
+        _ => ice!("Unsupported element type: {}", ty),
     }
 }
 
@@ -79,7 +79,7 @@ fn tuple_field_type(ty: &HLType) -> LLFieldType {
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::WitnessOf(_) => LLFieldType::Ptr,
         HLTypeExpr::Ref(_) => LLFieldType::Ptr,
-        _ => panic!("Unsupported tuple element type: {}", ty),
+        _ => ice!("Unsupported tuple element type: {}", ty),
     }
 }
 
@@ -95,21 +95,21 @@ fn rc_ref_cell_struct(inner_type: &HLType) -> LLStruct {
 fn array_info(ty: &HLType) -> (&HLType, usize) {
     match &ty.expr {
         HLTypeExpr::Array(inner, n) => (inner.as_ref(), *n),
-        _ => panic!("Expected array type, got: {}", ty),
+        _ => ice!("Expected array type, got: {}", ty),
     }
 }
 
 fn sequence_elem_type(ty: &HLType) -> &HLType {
     match &ty.expr {
         HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice(inner) => inner.as_ref(),
-        _ => panic!("Expected array or slice type, got: {}", ty),
+        _ => ice!("Expected array or slice type, got: {}", ty),
     }
 }
 
 fn sequence_rc_struct(ty: &HLType) -> LLStruct {
     match &ty.expr {
         HLTypeExpr::Array(inner, _) | HLTypeExpr::Slice(inner) => rc_seq_struct(inner),
-        _ => panic!("Expected array or slice type, got: {}", ty),
+        _ => ice!("Expected array or slice type, got: {}", ty),
     }
 }
 
@@ -120,7 +120,7 @@ const SEQ_DATA_FIELD: usize = 3;
 fn sequence_data_field(ty: &HLType) -> usize {
     match &ty.expr {
         HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => SEQ_DATA_FIELD,
-        _ => panic!("Expected array or slice type, got: {}", ty),
+        _ => ice!("Expected array or slice type, got: {}", ty),
     }
 }
 
@@ -132,7 +132,7 @@ fn sequence_len_value(e: &mut LLBlockEmitter<'_>, ptr: ValueId, ty: &HLType) -> 
             let len_ptr = e.struct_field_ptr(ptr, rc_struct, SEQ_LEN_FIELD);
             e.ll_load(len_ptr, LLType::i64())
         }
-        _ => panic!("Expected array or slice type, got: {}", ty),
+        _ => ice!("Expected array or slice type, got: {}", ty),
     }
 }
 
@@ -211,7 +211,7 @@ fn get_or_create_drop_fn(
         }
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::Ref(_) => llssa.add_function(format!("drop_{}", ty)),
-        _ => panic!("{} is not supported yet", ty),
+        _ => ice!("{} is not supported yet", ty),
     };
     drop_fns.push(DropFnEntry::new(ty.clone(), fn_id));
     fn_id
@@ -698,7 +698,7 @@ fn lower_constant_to_ll_constant(constant: &Constant) -> LLConstant {
                 .collect(),
         )),
         Constant::FnPtr(_) => {
-            panic!("FnPtr constants not supported in HLSSA->LLSSA lowering");
+            ice!("FnPtr constants not supported in HLSSA->LLSSA lowering");
         }
     }
 }
@@ -917,7 +917,7 @@ fn lower_instruction(
                         ArithGroup::Add => FieldArithOp::Add,
                         ArithGroup::Sub => FieldArithOp::Sub,
                         ArithGroup::Div => FieldArithOp::Div,
-                        _ => panic!("Unsupported field arith op: {:?}", kind),
+                        _ => ice!("Unsupported field arith op: {:?}", kind),
                     };
                     e.field_arith(op, ll_lhs, ll_rhs)
                 }
@@ -934,13 +934,13 @@ fn lower_instruction(
                     // AD path: Add on WitnessOf → allocate ADSumNode
                     match kind.group() {
                         ArithGroup::Add => lower_ad_sum(e, ll_lhs, ll_rhs),
-                        _ => panic!(
+                        _ => ice!(
                             "Unsupported WitnessOf arith op: {:?} (should be lowered by WitnessLowering)",
                             kind
                         ),
                     }
                 }
-                _ => panic!(
+                _ => ice!(
                     "Unsupported type for BinaryArithOp in lowering: {:?}",
                     result_type
                 ),
@@ -987,7 +987,7 @@ fn lower_instruction(
                 // panic below, agreeing with `symbolic_executor::cmp_operand_bits`, which rejects
                 // the same combination on the path that does go through the executor.
                 (CmpKind::ULt, HLTypeExpr::Field, HLTypeExpr::Field) => e.field_lt(ll_lhs, ll_rhs),
-                _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
+                _ => ice!("unsupported args {} {}", lhs_type, rhs_type),
             };
             val_map.insert(*result, ll_result);
         }
@@ -1071,7 +1071,7 @@ fn lower_instruction(
         } => {
             let count = match &fn_type_info.get_value_type(*result).expr {
                 HLTypeExpr::Array(_, count) => *count,
-                other => panic!("MkSeqOfBlob result must be an array, got {:?}", other),
+                other => ice!("MkSeqOfBlob result must be an array, got {:?}", other),
             };
             lower_mk_blob_array(e, val_map, *result, *blob, element_type, count);
         }
@@ -1090,7 +1090,7 @@ fn lower_instruction(
                 lower_mk_repeated_slice(e, val_map, *result, *element, elem_type, *count);
             }
             SequenceTargetType::Tuple => {
-                panic!("MkRepeated(Tuple) is not supported in HLSSA->LLSSA lowering");
+                ice!("MkRepeated(Tuple) is not supported in HLSSA->LLSSA lowering");
             }
         },
 
@@ -1231,7 +1231,7 @@ fn lower_instruction(
                     } else {
                         let source_bits = match &source_type.expr {
                             HLTypeExpr::Int(bits) => *bits,
-                            _ => panic!("Cast to Field from unsupported type: {}", source_type),
+                            _ => ice!("Cast to Field from unsupported type: {}", source_type),
                         };
                         let limb_values = int_to_raw_limbs(e, ll_value, source_bits);
                         let limbs = e.mk_struct(LLStruct::limbs(), limb_values);
@@ -1263,9 +1263,10 @@ fn lower_instruction(
                                 ll_value
                             }
                         }
-                        _ => panic!(
+                        _ => ice!(
                             "Cast to int({}) from unsupported type: {}",
-                            target_bits, source_type
+                            target_bits,
+                            source_type
                         ),
                     };
                     val_map.insert(*result, ll_result);
@@ -1280,8 +1281,8 @@ fn lower_instruction(
                     val_map.insert(*result, ll_value);
                 }
                 CastTarget::ValueOf | CastTarget::Map(_) => {
-                    panic!(
-                        "ICE: {} cast should have been lowered before HLSSA->LLSSA lowering",
+                    ice!(
+                        "{} cast should have been lowered before HLSSA->LLSSA lowering",
                         target
                     );
                 }
@@ -1289,7 +1290,7 @@ fn lower_instruction(
         }
 
         OpCode::BitRange { .. } => {
-            panic!("BitRange should have been lowered before HLSSA->LLSSA lowering");
+            ice!("BitRange should have been lowered before HLSSA->LLSSA lowering");
         }
 
         OpCode::Spread {
@@ -1360,7 +1361,7 @@ fn lower_instruction(
                     {
                         e.int_cmp(IntCmpOp::Eq, ll_lhs, ll_rhs)
                     }
-                    _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
+                    _ => ice!("unsupported args {} {}", lhs_type, rhs_type),
                 },
                 CmpKind::ULt | CmpKind::SLt => {
                     let signed = kind.is_signed();
@@ -1379,7 +1380,7 @@ fn lower_instruction(
                         (HLTypeExpr::Field, HLTypeExpr::Field) if !signed => {
                             e.field_lt(ll_lhs, ll_rhs)
                         }
-                        _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
+                        _ => ice!("unsupported args {} {}", lhs_type, rhs_type),
                     }
                 }
             };
@@ -1395,9 +1396,11 @@ fn lower_instruction(
             let b_type = fn_type_info.get_value_type(*b);
             let c_type = fn_type_info.get_value_type(*c);
             if !a_type.is_field() || !b_type.is_field() || !c_type.is_field() {
-                panic!(
+                ice!(
                     "Unsupported type for AssertR1C in HLSSA->LLSSA lowering: {:?}, {:?}, {:?}",
-                    a_type, b_type, c_type
+                    a_type,
+                    b_type,
+                    c_type
                 );
             }
 
@@ -1485,7 +1488,7 @@ fn lower_instruction(
         }
 
         OpCode::ToBits { value, .. } => {
-            panic!(
+            ice!(
                 "HLSSA->LLSSA lowering: ToBits only supports pure Field inputs, got {}: {:?}",
                 fn_type_info.get_value_type(*value),
                 instruction
@@ -1518,7 +1521,7 @@ fn lower_instruction(
                     value_type
                 ),
             };
-            panic!("HLSSA->LLSSA lowering: {}: {:?}", reason, instruction);
+            ice!("HLSSA->LLSSA lowering: {}: {:?}", reason, instruction);
         }
 
         OpCode::Lookup {
@@ -1583,7 +1586,7 @@ fn lower_instruction(
             e.call(fn_id, vec![amount, factor, flag_val], 0);
         }
         OpCode::Lookup { .. } => {
-            panic!(
+            ice!(
                 "Unsupported Lookup variant in HLSSA->LLSSA lowering: {:?}",
                 instruction
             );
@@ -1655,13 +1658,13 @@ fn lower_instruction(
             e.call(fn_id, vec![amount, factor, flag_val], 0);
         }
         OpCode::DLookup { .. } => {
-            panic!(
+            ice!(
                 "Unsupported DLookup variant in HLSSA->LLSSA lowering: {:?}",
                 instruction
             );
         }
 
-        _ => panic!(
+        _ => ice!(
             "Unsupported opcode in HLSSA->LLSSA lowering: {:?}",
             instruction
         ),
@@ -1672,7 +1675,7 @@ fn integer_width(ty: &HLType) -> u32 {
     let scalar_ty = ty.strip_witness();
     match scalar_ty.expr {
         HLTypeExpr::Int(bits) => bits as u32,
-        _ => panic!("Expected integer type, got {}", ty),
+        _ => ice!("Expected integer type, got {}", ty),
     }
 }
 
@@ -1921,7 +1924,7 @@ fn rc_struct_for_droppable_type(ty: &HLType) -> LLStruct {
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::WitnessOf(_) => LLStruct::ad_node_base(),
         HLTypeExpr::Ref(inner) => rc_ref_cell_struct(inner),
-        _ => panic!("Unsupported RC type: {}", ty),
+        _ => ice!("Unsupported RC type: {}", ty),
     }
 }
 
@@ -2402,7 +2405,7 @@ fn lower_rc_bump(
         HLTypeExpr::Array(..) | HLTypeExpr::Slice(..) => sequence_rc_struct(val_type),
         HLTypeExpr::Tuple(_) => ice_non_elided_tuple(),
         HLTypeExpr::Ref(inner) => rc_ref_cell_struct(inner),
-        _ => panic!("lower_rc_bump: unexpected type {}", val_type),
+        _ => ice!("lower_rc_bump: unexpected type {}", val_type),
     };
 
     let ll_arr = val_map[&value];
@@ -2510,7 +2513,7 @@ fn ensure_field_sized(
         return ll_val;
     }
     let HLTypeExpr::Int(bits) = &source_type.expr else {
-        panic!("ensure_field_sized: unsupported type: {}", source_type)
+        ice!("ensure_field_sized: unsupported type: {}", source_type)
     };
     let limb_values = int_to_raw_limbs(e, ll_val, *bits);
     // FIELD-ASSUMPTION: L3-limb-op
@@ -2955,7 +2958,7 @@ fn generate_all_drop_functions(llssa: &mut LLSSA, drop_fns: &[DropFnEntry]) {
             }
             // WitnessOf points to ad_drop, whose body is generated by generate_all_ad_functions
             HLTypeExpr::WitnessOf(_) => continue,
-            other => panic!("No drop function generator for type: {:?}", other),
+            other => ice!("No drop function generator for type: {:?}", other),
         };
         llssa.put_function(entry.fn_id, func);
     }
@@ -3661,9 +3664,9 @@ fn load_pure_lookup_elem_as_field(
             int_to_field(e, value, *bits)
         }
         HLTypeExpr::WitnessOf(_) => {
-            panic!("Forward array lookup cannot materialize WitnessOf table elements")
+            ice!("Forward array lookup cannot materialize WitnessOf table elements")
         }
-        _ => panic!("Unsupported array element type in lookup: {}", elem_type),
+        _ => ice!("Unsupported array element type in lookup: {}", elem_type),
     }
 }
 
@@ -3693,7 +3696,7 @@ fn ad_bump_lookup_elem_db(
             let value = e.ll_load(elem_ptr, LLType::Ptr);
             e.call(bump_db_fn, vec![value, coeff], 0);
         }
-        _ => panic!("Unsupported array element type in lookup: {}", elem_type),
+        _ => ice!("Unsupported array element type in lookup: {}", elem_type),
     }
 }
 
@@ -3706,9 +3709,9 @@ fn lookup_leaf_count(elem_type: &HLType) -> usize {
                 .expect("Array lookup table length overflow")
         }
         HLTypeExpr::Slice(_) => {
-            panic!("Array lookup over nested slices is not supported in HLSSA->LLSSA lowering")
+            ice!("Array lookup over nested slices is not supported in HLSSA->LLSSA lowering")
         }
-        _ => panic!("Unsupported array element type in lookup: {}", elem_type),
+        _ => ice!("Unsupported array element type in lookup: {}", elem_type),
     }
 }
 
@@ -3743,7 +3746,7 @@ fn emit_lookup_leaf_loop(
                     emit_lookup_leaf_loop(e, inner_array, elem_type, flat_index, on_leaf)
                 }
                 HLTypeExpr::Slice(_) => {
-                    panic!(
+                    ice!(
                         "Array lookup over nested slices is not supported in HLSSA->LLSSA lowering"
                     )
                 }

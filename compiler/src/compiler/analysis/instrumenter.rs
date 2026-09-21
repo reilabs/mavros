@@ -49,8 +49,8 @@ impl ScalarKind {
         match &tp.strip_witness().expr {
             TypeExpr::Field => ScalarKind::Field,
             TypeExpr::Int(s) => ScalarKind::Int(*s),
-            TypeExpr::WitnessOf(_) => panic!("WitnessOf is not a scalar type: {:?}", tp),
-            _ => panic!("Not a scalar type: {:?}", tp),
+            TypeExpr::WitnessOf(_) => ice!("WitnessOf is not a scalar type: {:?}", tp),
+            _ => ice!("Not a scalar type: {:?}", tp),
         }
     }
 }
@@ -199,7 +199,7 @@ impl Value {
             TypeExpr::Ref(inner) => {
                 Value::Pointer(Rc::new(RefCell::new(Value::unknown_from_type(inner))))
             }
-            TypeExpr::Function(_) => panic!("Cannot create unknown value for Function type"),
+            TypeExpr::Function(_) => ice!("Cannot create unknown value for Function type"),
             TypeExpr::Blob(elem, n) => {
                 let elem_unknown = Value::unknown_from_type(elem);
                 Value::Blob(vec![elem_unknown; *n])
@@ -245,7 +245,7 @@ impl Value {
                 self.unwrap_witness().cmp_op(b.unwrap_witness(), kind, bits),
             )),
             (Value::Unknown(_), _) | (_, Value::Unknown(_)) => Value::Unknown(ScalarKind::Int(1)),
-            _ => panic!("Cannot compare {:?} and {:?}", self, b),
+            _ => ice!("Cannot compare {:?} and {:?}", self, b),
         }
     }
 
@@ -321,7 +321,7 @@ impl Value {
                 | ArithGroup::Xor
                 | ArithGroup::Shl
                 | ArithGroup::Shr => {
-                    panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b)
+                    ice!("Cannot perform binary arithmetic on {:?} and {:?}", self, b)
                 }
             },
 
@@ -349,7 +349,7 @@ impl Value {
                 )))
             }
             (Value::Unknown(k), _) | (_, Value::Unknown(k)) => Value::Unknown(*k),
-            _ => panic!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
+            _ => ice!("Cannot perform binary arithmetic on {:?} and {:?}", self, b),
         }
     }
 
@@ -430,9 +430,10 @@ impl Value {
             Value::Array(values) => values,
             Value::Blob(values) => values,
             Value::Unknown(_) | Value::UnknownSlice => return Value::unknown_from_type(tp),
-            _ => panic!(
+            _ => ice!(
                 "Cannot get array element from {:?} with index {:?}",
-                self, index
+                self,
+                index
             ),
         };
 
@@ -452,9 +453,10 @@ impl Value {
                 _ => Value::unknown_from_type(tp),
             },
             Value::Unknown(_) => Value::unknown_from_type(tp),
-            _ => panic!(
+            _ => ice!(
                 "Cannot get array element from {:?} with index {:?}",
-                self, index
+                self,
+                index
             ),
         }
     }
@@ -487,9 +489,11 @@ impl Value {
                 Value::array(new_vals)
             }
             (Value::UnknownSlice, _, _) => Value::UnknownSlice,
-            _ => panic!(
+            _ => ice!(
                 "Cannot set array element of {:?} with index {:?} to {:?}",
-                self, index, value
+                self,
+                index,
+                value
             ),
         }
     }
@@ -521,7 +525,7 @@ impl Value {
                     .from_bigint(BigInt::from_bits_le(&bits));
                 Value::Field(r.unwrap())
             }
-            _ => panic!("Cannot extract bit range from {:?}", self),
+            _ => ice!("Cannot extract bit range from {:?}", self),
         }
     }
 
@@ -539,7 +543,7 @@ impl Value {
             Value::Int(v) => Value::Int(v.sign_extend(to)),
             // `Unknown(Field)` lands here with `Value::Field`: a field has no sign bit to fill, and
             // `analysis::types` rejects an `SExt` on one before this is ever reached.
-            _ => panic!("Cannot sext {:?}", self),
+            _ => ice!("Cannot sext {:?}", self),
         }
     }
 
@@ -553,7 +557,7 @@ impl Value {
                 );
                 Value::int(bits * 2, spread_bits(host_word(v), bits))
             }
-            Value::Field(_) => panic!("Spread of field values is unsupported"),
+            Value::Field(_) => ice!("Spread of field values is unsupported"),
             Value::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.spread_op())),
             Value::Unknown(ScalarKind::Int(bits)) => {
                 assert!(
@@ -563,8 +567,8 @@ impl Value {
                 );
                 Value::Unknown(ScalarKind::Int(bits * 2))
             }
-            Value::Unknown(ScalarKind::Field) => panic!("Spread of field values is unsupported"),
-            _ => panic!("Cannot spread {:?}", self),
+            Value::Unknown(ScalarKind::Field) => ice!("Spread of field values is unsupported"),
+            _ => ice!("Cannot spread {:?}", self),
         }
     }
 
@@ -584,7 +588,7 @@ impl Value {
                     Value::int(half_bits, even_val),
                 )
             }
-            Value::Field(_) => panic!("Unspread of field values is unsupported"),
+            Value::Field(_) => ice!("Unspread of field values is unsupported"),
             Value::WitnessOf(inner) => {
                 let (odd, even) = inner.unspread_op();
                 (
@@ -606,9 +610,9 @@ impl Value {
                 )
             }
             Value::Unknown(ScalarKind::Field) => {
-                panic!("Unspread of field values is unsupported")
+                ice!("Unspread of field values is unsupported")
             }
-            _ => panic!("Cannot unspread {:?}", self),
+            _ => ice!("Cannot unspread {:?}", self),
         }
     }
 
@@ -636,7 +640,7 @@ impl Value {
                 Value::WitnessOf(Box::new(inner.cast_op(target, instrumenter)))
             }
             (Value::Int(_), CastTarget::Int(0)) => {
-                panic!("ICE: a cast to int0 describes a value with no bits")
+                ice!("a cast to int0 describes a value with no bits")
             }
             (Value::Int(v), CastTarget::Int(s2)) => Value::Int(v.cast(*s2)),
             // A pattern the field cannot carry has no element to cost, so we simply answer with
@@ -648,7 +652,7 @@ impl Value {
                 Value::Int(IntBits::from_field_limbs(&f.into_bigint().0, *s))
             }
             (_, CastTarget::Nop | CastTarget::ArrayToSlice) => self.clone(),
-            _ => panic!("Cannot cast {:?} to {:?}", self, cast_target),
+            _ => ice!("Cannot cast {:?} to {:?}", self, cast_target),
         }
     }
 
@@ -693,7 +697,7 @@ impl Value {
                             .map(|b| Value::WitnessOf(Box::new(b)))
                             .collect(),
                     ),
-                    _ => unreachable!("to_bits of a WitnessOf expected an Array result"),
+                    _ => ice_unreachable!("to_bits of a WitnessOf expected an Array result"),
                 }
             }
             // Decomposition is a property of the bit pattern, so a signed value decomposes
@@ -720,7 +724,7 @@ impl Value {
                 }
                 Value::array(bits)
             }
-            _ => panic!("Cannot convert {:?} to bits", self),
+            _ => ice!("Cannot convert {:?} to bits", self),
         }
     }
 
@@ -741,7 +745,7 @@ impl Value {
                             .map(|d| Value::WitnessOf(Box::new(d)))
                             .collect(),
                     ),
-                    _ => unreachable!("to_radix of a WitnessOf expected an Array result"),
+                    _ => ice_unreachable!("to_radix of a WitnessOf expected an Array result"),
                 }
             }
             Value::Unknown(_) => Value::array(vec![Value::Unknown(ScalarKind::Int(8)); size]),
@@ -753,7 +757,7 @@ impl Value {
                     // ten is the same whether it arrives as an `int32` or an `int16384`.
                     Radix::Dyn(Value::Int(r)) if u128::try_from(r).is_ok() => host_word(r),
                     Radix::Bytes => 256,
-                    _ => panic!("Cannot convert {:?} to radix {:?}", self, radix),
+                    _ => ice!("Cannot convert {:?} to radix {:?}", self, radix),
                 };
                 let mut val = f.into_bigint();
                 let mut digits = vec![];
@@ -773,7 +777,7 @@ impl Value {
                 }
                 Value::array(digits)
             }
-            _ => panic!("Cannot convert {:?} to radix {:?}", self, radix),
+            _ => ice!("Cannot convert {:?} to radix {:?}", self, radix),
         }
     }
 
@@ -782,14 +786,14 @@ impl Value {
             Value::Unknown(kind) => Value::Unknown(*kind),
             Value::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.not_op(_instrumenter))),
             Value::Int(v) => Value::Int(v.complement()),
-            _ => panic!("Cannot perform not operation on {:?}", self),
+            _ => ice!("Cannot perform not operation on {:?}", self),
         }
     }
 
     fn ptr_read(&self, _tp: &Type, _instrumenter: &mut dyn OpInstrumenter) -> Value {
         match self {
             Value::Pointer(val) => val.borrow().clone(),
-            _ => panic!("Cannot read from {:?}", self),
+            _ => ice!("Cannot read from {:?}", self),
         }
     }
 
@@ -798,7 +802,7 @@ impl Value {
             Value::Pointer(ptr) => {
                 *(ptr.borrow_mut()) = val.clone();
             }
-            _ => panic!("Cannot write to {:?}", self),
+            _ => ice!("Cannot write to {:?}", self),
         }
     }
 
@@ -828,7 +832,7 @@ impl Value {
                 result.forget_concrete();
                 result
             }
-            _ => panic!("Cannot select on {:?}", self),
+            _ => ice!("Cannot select on {:?}", self),
         }
     }
 }
@@ -1154,14 +1158,14 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
     fn expect_constant_bool(&self, _ctx: &mut CostAnalysis) -> bool {
         let specialized = match &self.specialized {
             Value::Int(v) if v.bits() == 1 => !v.is_zero(),
-            _ => panic!(
+            _ => ice!(
                 "Expected constant bool, got specialized={:?}",
                 self.specialized
             ),
         };
         let unspecialized = match &self.unspecialized {
             Value::Int(v) if v.bits() == 1 => !v.is_zero(),
-            _ => panic!(
+            _ => ice!(
                 "Expected constant bool, got unspecialized={:?}",
                 self.unspecialized
             ),
@@ -1224,9 +1228,10 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
                     })
                     .collect()
             }
-            _ => panic!(
+            _ => ice!(
                 "Expected blob, got unspecialized={:?}, specialized={:?}",
-                self.unspecialized, self.specialized
+                self.unspecialized,
+                self.specialized
             ),
         }
     }
@@ -1365,7 +1370,7 @@ impl OpInstrumenter for Instrumenter {
             LookupTarget::DynRangecheck(_) => {
                 // `to_radix` lowers its (asserted radix-256) digit checks to static 8-bit
                 // rangechecks, so none survive to cost analysis.
-                unreachable!(
+                ice_unreachable!(
                     "DynRangecheck is lowered to a static 8-bit rangecheck before spilling"
                 )
             }
@@ -1619,7 +1624,7 @@ impl FunctionInstrumenter for DummyInstrumenter {
     fn record_call(&mut self, _: FunctionSignature) {}
 
     fn seal(self: Box<Self>) -> FunctionCost {
-        panic!("DummyInstrumenter cannot be sealed");
+        ice!("DummyInstrumenter cannot be sealed");
     }
 }
 
@@ -1663,7 +1668,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                     TypeExpr::Ref(inner) => {
                         Value::Pointer(Rc::new(RefCell::new(unknown_value(inner))))
                     }
-                    _ => panic!("Unsupported type for unknown value: {:?}", ty),
+                    _ => ice!("Unsupported type for unknown value: {:?}", ty),
                 }
             }
             return Some(
@@ -1770,7 +1775,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
     }
 
     fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<SpecSplitValue> {
-        panic!("Todo opcode encountered in CostAnalysis: {}", payload);
+        ice!("Todo opcode encountered in CostAnalysis: {}", payload);
     }
 
     fn slice_push(
@@ -1789,7 +1794,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                 Value::array(new_values)
             }
             Value::UnknownSlice => Value::UnknownSlice,
-            _ => panic!("Cannot push to {:?}", slice.unspecialized),
+            _ => ice!("Cannot push to {:?}", slice.unspecialized),
         };
         let new_spec = match &slice.specialized {
             Value::Array(values) => {
@@ -1801,7 +1806,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                 Value::array(new_values)
             }
             Value::UnknownSlice => Value::UnknownSlice,
-            _ => panic!("Cannot push to {:?}", slice.specialized),
+            _ => ice!("Cannot push to {:?}", slice.specialized),
         };
         SpecSplitValue {
             unspecialized: new_unspec,
@@ -1813,12 +1818,12 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         let unspec = match &slice.unspecialized {
             Value::Array(values) => Value::int(32, values.len() as u128),
             Value::UnknownSlice => Value::Unknown(ScalarKind::Int(32)),
-            _ => panic!("Cannot get length of {:?}", slice.unspecialized),
+            _ => ice!("Cannot get length of {:?}", slice.unspecialized),
         };
         let spec = match &slice.specialized {
             Value::Array(values) => Value::int(32, values.len() as u128),
             Value::UnknownSlice => Value::Unknown(ScalarKind::Int(32)),
-            _ => panic!("Cannot get length of {:?}", slice.specialized),
+            _ => ice!("Cannot get length of {:?}", slice.specialized),
         };
         SpecSplitValue {
             unspecialized: unspec,
@@ -1842,7 +1847,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                 TypeExpr::Tuple(_) => ice_non_elided_tuple(),
                 TypeExpr::WitnessOf(inner) => Value::WitnessOf(Box::new(unknown_value(inner))),
                 TypeExpr::Ref(inner) => Value::Pointer(Rc::new(RefCell::new(unknown_value(inner)))),
-                _ => panic!("Unsupported type for unknown value: {:?}", ty),
+                _ => ice!("Unsupported type for unknown value: {:?}", ty),
             }
         }
 

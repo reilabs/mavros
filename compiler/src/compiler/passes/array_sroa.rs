@@ -190,7 +190,7 @@ impl ArraySroa {
                     .expect("ICE: MkSeqOfBlob blob is not a constant")
                 {
                     Constant::Blob(b) => b.elements.clone(),
-                    other => panic!("ICE: MkSeqOfBlob blob is not a Blob constant: {:?}", other),
+                    other => ice!("MkSeqOfBlob blob is not a Blob constant: {:?}", other),
                 };
                 let cells: Vec<ValueId> = elements.into_iter().map(|c| ssa.add_const(c)).collect();
                 debug_assert_dense(points_to, fid, *result, cells.len(), fti);
@@ -457,7 +457,7 @@ fn flat_components(value_map: &HashMap<ValueId, Vec<ValueId>>, values: &[ValueId
 fn array_size(ty: &Type) -> usize {
     match &ty.peel_witness().expr {
         TypeExpr::Array(_, n) => *n,
-        other => panic!("ICE: array_sroa expected an array type, got {:?}", other),
+        other => ice!("array_sroa expected an array type, got {:?}", other),
     }
 }
 
