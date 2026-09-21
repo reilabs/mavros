@@ -166,8 +166,7 @@ fn lower_instruction(
             array,
             index,
         } if is_zst_slice(array) => {
-            let (assert, _, _) =
-                build_lt_bounds_assert_on_len(b, array, index, ty_of(index), "slice get");
+            let (assert, _, _) = build_lt_bounds_assert_on_len(b, array, index, ty_of(index));
             b.emit(assert);
             let elem = synthesize_leafless(b, ty_of(result));
             aliases.insert(result, elem);
@@ -178,8 +177,7 @@ fn lower_instruction(
             index,
             ..
         } if is_zst_slice(array) => {
-            let (assert, _, _) =
-                build_lt_bounds_assert_on_len(b, array, index, ty_of(index), "slice set");
+            let (assert, _, _) = build_lt_bounds_assert_on_len(b, array, index, ty_of(index));
             b.emit(assert);
             aliases.insert(result, array);
         }
@@ -215,8 +213,7 @@ fn lower_instruction(
         } if is_zst_slice(slice) => {
             let one = len_const(b, 1);
             let new_len = b.uadd(slice, one);
-            let (assert, _, _) =
-                build_lt_bounds_assert_on_len(b, new_len, index, ty_of(index), "slice insert");
+            let (assert, _, _) = build_lt_bounds_assert_on_len(b, new_len, index, ty_of(index));
             b.emit(assert);
             aliases.insert(result, new_len);
         }
@@ -226,8 +223,7 @@ fn lower_instruction(
             slice,
             index,
         } if is_zst_slice(slice) => {
-            let (assert, _, _) =
-                build_lt_bounds_assert_on_len(b, slice, index, ty_of(index), "slice remove");
+            let (assert, _, _) = build_lt_bounds_assert_on_len(b, slice, index, ty_of(index));
             b.emit(assert);
             let one = len_const(b, 1);
             let new_len = b.usub(slice, one);
