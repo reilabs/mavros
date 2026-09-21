@@ -152,7 +152,7 @@ fn lower_instruction(
         } if is_zst_slice(result) => {
             let n = match &ty_of(value).expr {
                 TypeExpr::Array(_, n) => *n,
-                other => panic!("ICE: ArrayToSlice cast of a non-array {other:?}"),
+                other => ice!("ArrayToSlice cast of a non-array {other:?}"),
             };
             let n = len_const(b, n);
             aliases.insert(result, n);
@@ -316,7 +316,7 @@ fn lower_instruction(
 
         // No pass before this one emits guards, so a guarded slice op cannot slip through unseen.
         OpCode::Guard { .. } => {
-            panic!("ICE: lower_zst_slices: unexpected guard before ElideTuples")
+            ice!("lower_zst_slices: unexpected guard before ElideTuples")
         }
 
         other => b.emit(other),
@@ -341,7 +341,7 @@ fn synthesize_leafless(b: &mut impl HLEmitter, ty: &Type) -> ValueId {
             let value = synthesize_leafless(b, inner);
             b.cast_to_witness_of(value)
         }
-        other => panic!("ICE: lower_zst_slices: {other:?} is not leaf-less"),
+        other => ice!("lower_zst_slices: {other:?} is not leaf-less"),
     }
 }
 
