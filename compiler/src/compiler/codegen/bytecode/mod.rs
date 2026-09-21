@@ -38,8 +38,8 @@ use crate::{
 /// two's-complement frontier, and the lookup element by the tape's own cell-count tags. Reaching
 /// here means a rule stopped covering a lowering it is written against.
 fn unsupported_int_width(operation: &str, bits: usize) -> ! {
-    panic!(
-        "ICE: {operation} on an int{bits} reached bytecode generation with no lowering; width_validation should have refused the program"
+    ice!(
+        "{operation} on an int{bits} reached bytecode generation with no lowering; width_validation should have refused the program"
     )
 }
 
@@ -138,7 +138,7 @@ fn materialize_constants(
             hlssa::Constant::Int(v) => layouter.alloc_int(vid, v.bits()),
             hlssa::Constant::Field(_) => layouter.alloc_field(vid),
             hlssa::Constant::Blob(_) => layouter.alloc_long_data(vid, cells),
-            hlssa::Constant::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
+            hlssa::Constant::FnPtr(_) => ice!("FnPtr constants not supported in codegen"),
         };
 
         // Multi-cell constants (fields, u128s, blobs) are interned into the program-global constant
@@ -525,7 +525,7 @@ impl CodeGen {
                             b: layouter.get_value(*op2),
                         });
                     }
-                    t => panic!("Unsupported type for addition: {:?}", t),
+                    t => ice!("Unsupported type for addition: {:?}", t),
                 },
                 hlssa::OpCode::BinaryArithOp {
                     kind: BinaryArithOpKind::USub | BinaryArithOpKind::SSub,
@@ -570,7 +570,7 @@ impl CodeGen {
                             }
                         }
                     }
-                    t => panic!("Unsupported type for subtraction: {:?}", t),
+                    t => ice!("Unsupported type for subtraction: {:?}", t),
                 },
                 hlssa::OpCode::BinaryArithOp {
                     kind: kind @ (BinaryArithOpKind::UDiv | BinaryArithOpKind::SDiv),
@@ -629,7 +629,7 @@ impl CodeGen {
                             unsupported_int_width("a signed division", *bits)
                         }
                     },
-                    (signed, t) => panic!(
+                    (signed, t) => ice!(
                         "Unsupported type for {} division: {:?}",
                         if signed { "signed" } else { "unsigned" },
                         t
@@ -642,7 +642,7 @@ impl CodeGen {
                     rhs: op2,
                 } => match (kind.is_signed(), &type_info.get_value_type(*val).expr) {
                     (_, TypeExpr::Field) => {
-                        panic!("Modulo is not defined on field elements")
+                        ice!("Modulo is not defined on field elements")
                     }
                     (false, TypeExpr::Int(bits)) => {
                         let result = layouter.alloc_int(*val, *bits);
@@ -687,7 +687,7 @@ impl CodeGen {
                             unsupported_int_width("a signed remainder", *bits)
                         }
                     },
-                    (signed, t) => panic!(
+                    (signed, t) => ice!(
                         "Unsupported type for {} modulo: {:?}",
                         if signed { "signed" } else { "unsigned" },
                         t
@@ -736,7 +736,7 @@ impl CodeGen {
                             }
                         }
                     }
-                    t => panic!("Unsupported type for multiplication: {:?}", t),
+                    t => ice!("Unsupported type for multiplication: {:?}", t),
                 },
                 hlssa::OpCode::BinaryArithOp {
                     kind: BinaryArithOpKind::And,
@@ -745,7 +745,7 @@ impl CodeGen {
                     rhs: op2,
                 } => match &type_info.get_value_type(*val).expr {
                     TypeExpr::Field => {
-                        panic!("Unsupported: field and");
+                        ice!("Unsupported: field and");
                     }
                     TypeExpr::Int(bits) => {
                         let result = layouter.alloc_int(*val, *bits);
@@ -774,7 +774,7 @@ impl CodeGen {
                             }
                         }
                     }
-                    t => panic!("Unsupported type for bitwise and: {:?}", t),
+                    t => ice!("Unsupported type for bitwise and: {:?}", t),
                 },
                 hlssa::OpCode::BinaryArithOp {
                     kind: BinaryArithOpKind::Or,
@@ -809,7 +809,7 @@ impl CodeGen {
                             }
                         }
                     }
-                    t => panic!("Unsupported type for bitwise or: {:?}", t),
+                    t => ice!("Unsupported type for bitwise or: {:?}", t),
                 },
                 hlssa::OpCode::BinaryArithOp {
                     kind: BinaryArithOpKind::Xor,
@@ -844,7 +844,7 @@ impl CodeGen {
                             }
                         }
                     }
-                    t => panic!("Unsupported type for bitwise xor: {:?}", t),
+                    t => ice!("Unsupported type for bitwise xor: {:?}", t),
                 },
                 hlssa::OpCode::BinaryArithOp {
                     kind: BinaryArithOpKind::UShl | BinaryArithOpKind::SShl,
@@ -881,7 +881,7 @@ impl CodeGen {
                             }
                         }
                     }
-                    t => panic!("Unsupported type for shift left: {:?}", t),
+                    t => ice!("Unsupported type for shift left: {:?}", t),
                 },
                 hlssa::OpCode::BinaryArithOp {
                     kind: kind @ (BinaryArithOpKind::UShr | BinaryArithOpKind::SShr),
@@ -940,7 +940,7 @@ impl CodeGen {
                             unsupported_int_width("a signed right shift", *bits)
                         }
                     },
-                    (signed, t) => panic!(
+                    (signed, t) => ice!(
                         "Unsupported type for {} shift right: {:?}",
                         if signed { "signed" } else { "unsigned" },
                         t
@@ -954,7 +954,7 @@ impl CodeGen {
                 } => {
                     let result_bits = match &type_info.get_value_type(*val).expr {
                         TypeExpr::Int(bits) => *bits,
-                        t => panic!("Unsupported result type for comparison: {:?}", t),
+                        t => ice!("Unsupported result type for comparison: {:?}", t),
                     };
                     let result = layouter.alloc_int(*val, result_bits);
                     let lhs_type = type_info.get_value_type(*op1);
@@ -1010,7 +1010,7 @@ impl CodeGen {
                                 b: layouter.get_value(*op2),
                             })
                         }
-                        _ => panic!(
+                        _ => ice!(
                             "unsupported args for `{}`: {} {}",
                             kind.symbol(),
                             lhs_type,
@@ -1026,7 +1026,7 @@ impl CodeGen {
                 } => {
                     let result_bits = match &type_info.get_value_type(*val).expr {
                         TypeExpr::Int(bits) => *bits,
-                        t => panic!("Unsupported result type for comparison: {:?}", t),
+                        t => ice!("Unsupported result type for comparison: {:?}", t),
                     };
                     let result = layouter.alloc_int(*val, result_bits);
                     let lhs_type = type_info.get_value_type(*op1);
@@ -1068,7 +1068,7 @@ impl CodeGen {
                                 b: layouter.get_value(*op2),
                             });
                         }
-                        _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
+                        _ => ice!("unsupported args {} {}", lhs_type, rhs_type),
                     }
                 }
                 hlssa::OpCode::Cast {
@@ -1079,8 +1079,8 @@ impl CodeGen {
                     let l_type = type_info.get_value_type(*v);
                     let r_type = type_info.get_value_type(*r);
                     if matches!(tgt, hlssa::CastTarget::Map(_) | hlssa::CastTarget::ValueOf) {
-                        panic!(
-                            "ICE: {} cast should have been lowered before bytecode codegen",
+                        ice!(
+                            "{} cast should have been lowered before bytecode codegen",
                             tgt
                         );
                     }
@@ -1111,7 +1111,7 @@ impl CodeGen {
                                         });
                                     }
                                 },
-                                t => panic!("Unsupported witness cast source: {:?}", t),
+                                t => ice!("Unsupported witness cast source: {:?}", t),
                             }
                             tmp
                         } else {
@@ -1273,7 +1273,7 @@ impl CodeGen {
                                 });
                             }
                         },
-                        _ => panic!("unsupported args {} {}", l_type, r_type),
+                        _ => ice!("unsupported args {} {}", l_type, r_type),
                     }
                 }
 
@@ -1310,7 +1310,7 @@ impl CodeGen {
                                 },
                             });
                         }
-                        t => panic!("Unsupported type for not: {:?}", t),
+                        t => ice!("Unsupported type for not: {:?}", t),
                     }
                 }
                 hlssa::OpCode::Constrain { a, b, c } => {
@@ -1318,9 +1318,11 @@ impl CodeGen {
                     let b_type = type_info.get_value_type(*b);
                     let c_type = type_info.get_value_type(*c);
                     if !a_type.is_field() || !b_type.is_field() || !c_type.is_field() {
-                        panic!(
+                        ice!(
                             "Unsupported type for constrain: {:?}, {:?}, {:?}",
-                            a_type, b_type, c_type
+                            a_type,
+                            b_type,
+                            c_type
                         );
                     }
                     if self.options.check_constraints {
@@ -1459,7 +1461,7 @@ impl CodeGen {
                     let stride = layouter.type_size(eltype);
                     let len = match &type_info.get_value_type(*r).expr {
                         TypeExpr::Array(_, len) => *len,
-                        other => panic!("MkSeqOfBlob result must be an array, got {:?}", other),
+                        other => ice!("MkSeqOfBlob result must be an array, got {:?}", other),
                     };
                     let blob_start = layouter.get_value(*blob);
                     emitter.push_op(bytecode::OpCode::ArrayAllocFromFrame {
@@ -1520,7 +1522,7 @@ impl CodeGen {
                     function: hlssa::CallTarget::Dynamic(_),
                     ..
                 } => {
-                    panic!("Dynamic call targets are not supported in codegen")
+                    ice!("Dynamic call targets are not supported in codegen")
                 }
                 hlssa::OpCode::MemOp {
                     kind: RefCountOp::Drop,
@@ -1576,7 +1578,7 @@ impl CodeGen {
                                     }
                                 }
                             }
-                            _ => panic!("unsupported args {} {}", lhs_type, rhs_type),
+                            _ => ice!("unsupported args {} {}", lhs_type, rhs_type),
                         }
                     }
                     kind @ (hlssa::CmpKind::ULt | hlssa::CmpKind::SLt) => {
@@ -1630,7 +1632,7 @@ impl CodeGen {
                                     b: layouter.get_value(*rhs),
                                 });
                             }
-                            _ => panic!(
+                            _ => ice!(
                                 "unsupported args for `{}`: {} {}",
                                 kind.symbol(),
                                 lhs_type,
@@ -1704,7 +1706,7 @@ impl CodeGen {
                     endianness,
                     count,
                 } => {
-                    panic!(
+                    ice!(
                         "ToRadix not yet implemented: radix={:?} endianness={:?} count={} value_type={:?}",
                         radix,
                         endianness,
@@ -1760,7 +1762,7 @@ impl CodeGen {
                             });
                             tmp
                         }
-                        t => panic!("Unsupported MulConst coefficient type: {:?}", t),
+                        t => ice!("Unsupported MulConst coefficient type: {:?}", t),
                     };
                     emitter.push_op(bytecode::OpCode::MulConst {
                         res: layouter.alloc_ptr(*r),
@@ -1898,7 +1900,7 @@ impl CodeGen {
                     // and the width it actually supports is `SPREAD_MAX_BITS`.
                     let value_bits = match value_type.strip_witness().expr {
                         TypeExpr::Int(bits) => bits,
-                        t => panic!("Unsupported spread value type: {:?}", t),
+                        t => ice!("Unsupported spread value type: {:?}", t),
                     };
                     if value_bits > SPREAD_MAX_BITS {
                         todo!(
@@ -1909,7 +1911,7 @@ impl CodeGen {
                     let res = match result_type.strip_witness().expr {
                         TypeExpr::Int(bits) => layouter.alloc_int(*result, bits),
                         TypeExpr::Field => layouter.alloc_field(*result),
-                        _ => panic!("Unsupported spread result type: {result_type}"),
+                        _ => ice!("Unsupported spread result type: {result_type}"),
                     };
                     emitter.push_op(bytecode::OpCode::SpreadU32ToU64 {
                         res,
@@ -1927,12 +1929,12 @@ impl CodeGen {
                     let res_and = match odd_type.strip_witness().expr {
                         TypeExpr::Int(bits) => layouter.alloc_int(*result_odd, bits),
                         TypeExpr::Field => layouter.alloc_field(*result_odd),
-                        _ => panic!("Unsupported unspread odd result type: {odd_type}"),
+                        _ => ice!("Unsupported unspread odd result type: {odd_type}"),
                     };
                     let res_xor = match even_type.strip_witness().expr {
                         TypeExpr::Int(bits) => layouter.alloc_int(*result_even, bits),
                         TypeExpr::Field => layouter.alloc_field(*result_even),
-                        _ => panic!("Unsupported unspread even result type: {even_type}"),
+                        _ => ice!("Unsupported unspread even result type: {even_type}"),
                     };
                     emitter.push_op(bytecode::OpCode::UnspreadU64ToU32 {
                         res_and,
@@ -1941,7 +1943,7 @@ impl CodeGen {
                     });
                 }
                 hlssa::OpCode::Todo { payload, .. } => {
-                    panic!("Todo opcode encountered in Codegen: {}", payload);
+                    ice!("Todo opcode encountered in Codegen: {}", payload);
                 }
                 hlssa::OpCode::InitGlobal { global, value } => {
                     emitter.push_op(bytecode::OpCode::InitGlobal {
@@ -2009,7 +2011,7 @@ impl CodeGen {
                         stride,
                     });
                 }
-                other => panic!("Unsupported instruction: {:?}", other),
+                other => ice!("Unsupported instruction: {:?}", other),
             }
         }
         emitter.exit_block(block_id);
@@ -2150,6 +2152,6 @@ fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {
             (1, bytecode::ELEM_WITNESS)
         }
         TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => lookup_elem_kind(inner),
-        _ => panic!("Unsupported array element type in lookup: {elem_type}"),
+        _ => ice!("Unsupported array element type in lookup: {elem_type}"),
     }
 }

@@ -16,7 +16,7 @@ use crate::compiler::passes::shared::limbs::witness_limb_bits;
 /// `attempted` says what was being lowered and which quantity did not fit; the tail added here says
 /// what the field actually offers, so the two halves of the mismatch appear in one message.
 pub fn unsupported_on_this_field(attempted: fmt::Arguments<'_>, field: FieldConfig) -> ! {
-    unimplemented!(
+    ice_usr!(
         "{attempted}. The configured field has a {}-bit modulus and a {}-bit witness limb. This \
          is a limit of the lowering on this field rather than an internal invariant — see \
          docs/field-agnosticism.md, Layer 6.",

@@ -92,7 +92,7 @@ pub fn seq_bounds_operands(
     let len = match &seq_ty.strip_witness().expr {
         TypeExpr::Array(_, n) => emitter.int_const(IntBits::from_u128(32, *n as u128)),
         TypeExpr::Slice(_) => emitter.slice_len(seq),
-        other => panic!("seq bounds check on non-sequence type: {other:?}"),
+        other => ice!("seq bounds check on non-sequence type: {other:?}"),
     };
     match index_ty.strip_witness().expr {
         TypeExpr::Int(idx_bits) => {
@@ -237,6 +237,6 @@ pub fn emit_bounds_assert(
 fn index_bits(ty: &Type, context: &str) -> usize {
     match ty.strip_witness().expr {
         TypeExpr::Int(n) => n,
-        _ => panic!("{context}: index must be an integer, got {ty}"),
+        _ => ice!("{context}: index must be an integer, got {ty}"),
     }
 }

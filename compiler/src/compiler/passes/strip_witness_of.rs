@@ -151,7 +151,7 @@ impl StripWitnessOf {
             | OpCode::Unspread { .. } => {}
             OpCode::AssertConstant { .. } => ice_unvalidated_assert_constant(),
             OpCode::Guard { .. } => {
-                panic!("ICE: Found Guard but `LowerGuards` should have removed them")
+                ice!("Found Guard but `LowerGuards` should have removed them")
             }
         }
     }

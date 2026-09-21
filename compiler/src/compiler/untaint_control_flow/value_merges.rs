@@ -197,14 +197,14 @@ fn emit_merge_select(
             CastTarget::assert_conversion(rhs_type, result_type);
             let lhs_elem_type = match &lhs_type.expr {
                 TypeExpr::Array(e, _) => e.as_ref(),
-                _ => panic!(
+                _ => ice!(
                     "emit_merge_select: expected array for lhs, got {:?}",
                     lhs_type
                 ),
             };
             let rhs_elem_type = match &rhs_type.expr {
                 TypeExpr::Array(e, _) => e.as_ref(),
-                _ => panic!(
+                _ => ice!(
                     "emit_merge_select: expected array for rhs, got {:?}",
                     rhs_type
                 ),
@@ -240,9 +240,9 @@ fn emit_merge_select(
             let rhs = emit_value_conversion(rhs, rhs_type, result_type, builder);
             builder.select(cond, lhs, rhs)
         }
-        TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
-        TypeExpr::Function(_) => panic!("Witness select on Function type not supported"),
-        TypeExpr::Blob(..) => panic!("Witness select on Blob type not supported"),
+        TypeExpr::Ref(_) => ice!("Witness select on Ref type not supported"),
+        TypeExpr::Function(_) => ice!("Witness select on Function type not supported"),
+        TypeExpr::Blob(..) => ice!("Witness select on Blob type not supported"),
     }
 }
 

@@ -383,7 +383,7 @@ impl CFG {
         if let Some(dom) = r {
             *self.node_to_block.get(&dom).unwrap()
         } else {
-            panic!("ICE: block has no post-dominator");
+            ice!("block has no post-dominator");
         }
     }
 

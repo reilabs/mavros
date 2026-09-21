@@ -529,10 +529,10 @@ impl<'a> SparseArrayMerge<'a> {
                 let mut current = current;
                 for write in pending.into_iter().rev() {
                     let TypeExpr::Int(a) = self.types.get_value_type(write.index).expr else {
-                        unreachable!()
+                        ice_unreachable!()
                     };
                     let TypeExpr::Int(c) = self.types.get_value_type(read.index).expr else {
-                        unreachable!()
+                        ice_unreachable!()
                     };
                     let (lhs, rhs, _) =
                         widen_comparison_operands(&mut b, write.index, a, read.index, c);
@@ -683,12 +683,12 @@ impl<'a> SparseArrayMerge<'a> {
         mut base: ValueId,
         plan: &Plan,
     ) -> ValueId {
-        let TypeExpr::Array(elem, len) = &plan.typ.expr else { unreachable!() };
+        let TypeExpr::Array(elem, len) = &plan.typ.expr else { ice_unreachable!() };
         for write in &plan.writes {
             self.replayed.insert(write.original);
             base = b.emit_with_location(write.location.clone(), |b| {
                 let index_type = self.types.get_value_type(write.index);
-                let TypeExpr::Int(bits) = index_type.expr else { unreachable!() };
+                let TypeExpr::Int(bits) = index_type.expr else { ice_unreachable!() };
                 // If the entire index type fits, the access is already safe. Otherwise
                 // clamp by bounds, not by the witness branch condition: pure loop indices
                 // must remain pure, or witness-index lowering would scan the whole array.

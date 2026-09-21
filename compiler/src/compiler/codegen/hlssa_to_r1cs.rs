@@ -86,8 +86,8 @@ impl Value {
     #[track_caller]
     fn ice_undefined_divmod(kind: BinaryArithOpKind, bits: usize, signed: bool) -> ! {
         let sign = if signed { 'i' } else { 'u' };
-        panic!(
-            "ICE: undefined {kind:?} reached the R1CS constant fold on {sign}{bits}; \
+        ice!(
+            "undefined {kind:?} reached the R1CS constant fold on {sign}{bits}; \
              LowerPureGuards should have rejected the program at the preceding assertion"
         )
     }
@@ -98,8 +98,8 @@ impl Value {
     /// above the modulus has no way of being held.
     #[track_caller]
     fn ice_no_element(what: std::fmt::Arguments<'_>) -> ! {
-        panic!(
-            "ICE: {what} reached R1CS generation carrying a value at or above the modulus, which one field element cannot hold; width_validation should have refused the program, or the fold should have happened before here"
+        ice!(
+            "{what} reached R1CS generation carrying a value at or above the modulus, which one field element cannot hold; width_validation should have refused the program, or the fold should have happened before here"
         )
     }
 
@@ -146,7 +146,7 @@ impl Value {
         match self {
             Value::Const(c) => Value::Const(-*c),
             Value::LC(lc) => Value::LC(lc.iter().map(|(i, c)| (*i, -*c)).collect()),
-            _ => panic!("expected linear combination"),
+            _ => ice!("expected linear combination"),
         }
     }
 
@@ -164,8 +164,8 @@ impl Value {
         if let Value::Const(rhs) = other
             && *rhs == ark_bn254::Fr::ZERO
         {
-            panic!(
-                "ICE: zero divisor reached the R1CS field division fold; \
+            ice!(
+                "zero divisor reached the R1CS field division fold; \
                  LowerPureGuards should have rejected the program at the preceding assertion"
             );
         }
@@ -176,14 +176,14 @@ impl Value {
                 let inv = Value::Const(ark_bn254::Fr::ONE / rhs);
                 self.mul(&inv)
             }
-            (_, _) => panic!("expected constant"),
+            (_, _) => ice!("expected constant"),
         }
     }
 
     pub fn expect_constant(&self) -> ark_bn254::Fr {
         match self {
             Value::Const(c) => *c,
-            _ => panic!("expected constant"),
+            _ => ice!("expected constant"),
         }
     }
 
@@ -224,22 +224,24 @@ impl Value {
                 IntBits::field_limbs_fit(&limbs, HOST_WORD_BITS)
                     .then(|| host_word(&IntBits::from_field_limbs(&limbs, HOST_WORD_BITS)))
             }
-            r => panic!("expected {what}, got {r:?}"),
+            r => ice!("expected {what}, got {r:?}"),
         }
     }
 
     /// The canonical value as a `u128`, panicking with the caller's name if it does not fit.
     fn expect_in_u128(&self, what: &str) -> u128 {
         self.const_u128(what).unwrap_or_else(|| {
-            let Value::Const(c) = self else { unreachable!("const_u128 panics on a non-constant") };
-            panic!("expected {what}, but field value is {}", c.into_bigint())
+            let Value::Const(c) = self else {
+                ice_unreachable!("const_u128 panics on a non-constant")
+            };
+            ice!("expected {what}, but field value is {}", c.into_bigint())
         })
     }
 
     /// Narrow to `T`, panicking with the caller's name if the value does not fit it.
     fn expect_narrow<T: TryFrom<u128>>(&self, what: &str) -> T {
         let v = self.expect_in_u128(what);
-        T::try_from(v).unwrap_or_else(|_| panic!("expected {what}, but field value is {v}"))
+        T::try_from(v).unwrap_or_else(|_| ice!("expected {what}, but field value is {v}"))
     }
 
     pub fn expect_u8(&self) -> u8 {
@@ -273,7 +275,7 @@ impl Value {
         match self {
             // FIELD-ASSUMPTION: L4-decompose
             Value::Const(c) => IntBits::from_field_limbs(&c.into_bigint().0, bits),
-            r => panic!("expected an int{bits}, got {r:?}"),
+            r => ice!("expected an int{bits}, got {r:?}"),
         }
     }
 
@@ -291,14 +293,14 @@ impl Value {
                 }
                 Value::LC(result)
             }
-            (_, _) => panic!("expected constant or linear combination and constant"),
+            (_, _) => ice!("expected constant or linear combination and constant"),
         }
     }
 
     pub fn expect_ptr(&self) -> Rc<RefCell<Value>> {
         match self {
             Value::Ptr(ptr) => ptr.clone(),
-            _ => panic!("expected ptr"),
+            _ => ice!("expected ptr"),
         }
     }
 
@@ -315,21 +317,21 @@ impl Value {
     pub fn expect_array(&self) -> Rc<RefCell<ArrayData>> {
         match self {
             Value::Array(array) => array.clone(),
-            _ => panic!("expected array"),
+            _ => ice!("expected array"),
         }
     }
 
     pub fn expect_blob(&self) -> Vec<Value> {
         match self {
             Value::Blob(elements) => elements.clone(),
-            _ => panic!("expected blob"),
+            _ => ice!("expected blob"),
         }
     }
     pub fn expect_linear_combination(&self) -> Vec<(usize, ark_bn254::Fr)> {
         match self {
             Value::Const(c) => vec![(0, *c)],
             Value::LC(lc) => lc.clone(),
-            _ => panic!("expected constant or linear combination"),
+            _ => ice!("expected constant or linear combination"),
         }
     }
 
@@ -480,7 +482,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
             hlssa::LookupTarget::DynRangecheck(_) => {
                 // `to_radix` lowers its (asserted radix-256) digit checks to static 8-bit
                 // rangechecks, so no `DynRangecheck` survives to R1CS generation.
-                unreachable!(
+                ice_unreachable!(
                     "DynRangecheck is lowered to a static 8-bit rangecheck before R1CS gen"
                 )
             }
@@ -529,7 +531,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
     }
 
     fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<Value> {
-        panic!("Todo opcode encountered in R1CSGen: {}", payload);
+        ice!("Todo opcode encountered in R1CSGen: {}", payload);
     }
 
     fn slice_push(&mut self, slice: &Value, values: &[Value], dir: SliceOpDir) -> Value {
@@ -559,7 +561,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
         _inputs: Vec<&Value>,
         _result_types: Vec<&Type>,
     ) -> Vec<Value> {
-        panic!("ICE: Guard should not appear in R1CS gen (should be lowered before)")
+        ice!("Guard should not appear in R1CS gen (should be lowered before)")
     }
 }
 
@@ -662,17 +664,17 @@ impl symbolic_executor::Value<R1CGen> for Value {
                 ArithGroup::Mul => self.mul(b),
                 ArithGroup::Div => self.div(b),
                 ArithGroup::Rem => {
-                    panic!("Modulo is not defined on field elements")
+                    ice!("Modulo is not defined on field elements")
                 }
                 ArithGroup::And
                 | ArithGroup::Or
                 | ArithGroup::Xor
                 | ArithGroup::Shl
                 | ArithGroup::Shr => {
-                    panic!("Bitwise operations are not supported on field elements")
+                    ice!("Bitwise operations are not supported on field elements")
                 }
             },
-            _ => panic!("Unsupported type in R1CS arith"),
+            _ => ice!("Unsupported type in R1CS arith"),
         }
     }
 
@@ -1433,7 +1435,7 @@ impl R1CGen {
                     });
                     y
                 }
-                _ => panic!("unsupported lookup width {}", lookup.elements.len()),
+                _ => ice!("unsupported lookup width {}", lookup.elements.len()),
             };
 
             result[table_infos[lookup.table_id].sum_constraint_idx]

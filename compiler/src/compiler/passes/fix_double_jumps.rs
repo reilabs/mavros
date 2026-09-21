@@ -52,7 +52,7 @@ impl FixDoubleJumps {
 
                 let jump_args = match source_block.get_terminator() {
                     Some(Terminator::Jmp(_, params)) => params.clone(),
-                    _ => panic!("ICE: CFG says there is a jump here"),
+                    _ => ice!("CFG says there is a jump here"),
                 };
 
                 for ((param, _), arg) in target_block.get_parameters().zip(jump_args) {

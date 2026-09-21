@@ -89,8 +89,8 @@ impl LowerMapCasts {
                                             ..
                                         }
                                     ) {
-                                        panic!(
-                                            "ICE: guarded Map cast reached LowerMapCasts; \
+                                        ice!(
+                                            "guarded Map cast reached LowerMapCasts; \
                                              LowerSideEffectFreeGuards should have unwrapped it"
                                         );
                                     }
@@ -141,7 +141,7 @@ fn lower_map(
                 apply_elem_cast(e, elem, elem_src, inner)
             })
         }
-        other => panic!("Map cast over non-sequence type {:?}", other),
+        other => ice!("Map cast over non-sequence type {:?}", other),
     }
 }
 

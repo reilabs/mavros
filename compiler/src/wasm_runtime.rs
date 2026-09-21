@@ -99,7 +99,7 @@ pub fn locate_or_build() -> PathBuf {
         if lib_path.exists() {
             return lib_path;
         }
-        panic!("{WASM_RUNTIME_LIB_ENV} is set but {lib_path:?} does not exist");
+        ice_usr!("{WASM_RUNTIME_LIB_ENV} is set but {lib_path:?} does not exist");
     }
 
     let metadata = cargo_metadata::MetadataCommand::new()
@@ -120,7 +120,7 @@ pub fn locate_or_build() -> PathBuf {
             "wasm-runtime build stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        panic!("Failed to build wasm-runtime for wasm32");
+        ice_usr!("Failed to build wasm-runtime for wasm32");
     }
 
     let lib_path = workspace_root
@@ -130,7 +130,7 @@ pub fn locate_or_build() -> PathBuf {
         .join("libmavros_wasm_runtime.a");
 
     if !lib_path.exists() {
-        panic!("wasm-runtime library not found at {:?}", lib_path);
+        ice_usr!("wasm-runtime library not found at {:?}", lib_path);
     }
 
     lib_path
