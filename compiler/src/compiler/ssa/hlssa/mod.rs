@@ -2249,46 +2249,61 @@ impl CastTarget {
     /// request always indicates a witness-inference inconsistency. Strips are
     /// only legal for unconstrained call arguments, via [`Self::strip_conversion`].
     pub fn conversion(src: &Type, tgt: &Type) -> Option<CastTarget> {
-        Self::conversion_impl(src, tgt, false)
+        Self::assert_conversion(src, tgt);
+        Self::conversion_impl(src, tgt)
+    }
+
+    /// Assert that witness-injecting conversion is legal, without constructing a cast.
+    pub fn assert_conversion(src: &Type, tgt: &Type) {
+        Self::assert_conversion_impl(src, tgt, false);
     }
 
     /// The cast target stripping witness wrappers to convert a value of type
     /// `src` into type `tgt` (for unconstrained call arguments), or `None`
     /// when the types already match.
     pub fn strip_conversion(src: &Type, tgt: &Type) -> Option<CastTarget> {
-        Self::conversion_impl(src, tgt, true)
+        Self::assert_conversion_impl(src, tgt, true);
+        Self::conversion_impl(src, tgt)
     }
 
-    fn conversion_impl(src: &Type, tgt: &Type, strip: bool) -> Option<CastTarget> {
+    fn assert_conversion_impl(src: &Type, tgt: &Type, strip: bool) {
         if src == tgt {
-            return None;
+            return;
         }
         match (&src.expr, &tgt.expr) {
-            (TypeExpr::Field | TypeExpr::Int(_), TypeExpr::WitnessOf(_)) if !strip => {
-                Some(CastTarget::WitnessOf)
-            }
+            (TypeExpr::Field | TypeExpr::Int(_), TypeExpr::WitnessOf(_)) if !strip => {}
             (TypeExpr::WitnessOf(inner), TypeExpr::Field | TypeExpr::Int(_))
-                if strip && inner.as_ref() == tgt =>
-            {
-                Some(CastTarget::ValueOf)
-            }
+                if strip && inner.as_ref() == tgt => {}
             // Same runtime representation on both sides.
-            (TypeExpr::WitnessOf(_), TypeExpr::WitnessOf(_)) if !strip => None,
-            (TypeExpr::Ref(_), TypeExpr::Ref(_)) if !strip => None,
+            (TypeExpr::WitnessOf(_), TypeExpr::WitnessOf(_)) if !strip => {}
+            (TypeExpr::Ref(_), TypeExpr::Ref(_)) if !strip => {}
             (TypeExpr::Array(s, n), TypeExpr::Array(t, m)) => {
                 assert_eq!(
                     n, m,
                     "array size mismatch in cast conversion: {src} -> {tgt}"
                 );
-                Self::conversion_impl(s, t, strip).map(|inner| CastTarget::Map(Box::new(inner)))
+                Self::assert_conversion_impl(s, t, strip)
             }
-            (TypeExpr::Slice(s), TypeExpr::Slice(t)) => {
-                Self::conversion_impl(s, t, strip).map(|inner| CastTarget::Map(Box::new(inner)))
-            }
+            (TypeExpr::Slice(s), TypeExpr::Slice(t)) => Self::assert_conversion_impl(s, t, strip),
             _ => panic!(
                 "no cast target converts {:?} -> {:?} (strip: {})",
                 src, tgt, strip
             ),
+        }
+    }
+
+    fn conversion_impl(src: &Type, tgt: &Type) -> Option<CastTarget> {
+        if src == tgt {
+            return None;
+        }
+        match (&src.expr, &tgt.expr) {
+            (TypeExpr::Field | TypeExpr::Int(_), TypeExpr::WitnessOf(_)) => Some(Self::WitnessOf),
+            (TypeExpr::WitnessOf(_), TypeExpr::Field | TypeExpr::Int(_)) => Some(Self::ValueOf),
+            (TypeExpr::Array(s, _), TypeExpr::Array(t, _))
+            | (TypeExpr::Slice(s), TypeExpr::Slice(t)) => {
+                Self::conversion_impl(s, t).map(|inner| Self::Map(Box::new(inner)))
+            }
+            _ => None, // Validated equal representations (witnesses or references).
         }
     }
 
