@@ -132,7 +132,9 @@ pub fn emit_divmod_failure_cond(
     let zero_val = match &lhs_type.expr {
         TypeExpr::Int(b) => emitter.int_const(IntBits::zero(*b)),
         TypeExpr::Field => emitter.field_const(emitter.field().constant(0u64)),
-        other => unreachable!("divmod failure condition on a non-numeric operand type: {other:?}"),
+        other => {
+            ice_unreachable!("divmod failure condition on a non-numeric operand type: {other:?}")
+        }
     };
     let is_zero = emitter.eq(rhs, zero_val);
     match &lhs_type.expr {

@@ -194,13 +194,13 @@ impl ElideTuples {
                 let tuple_ref_comps = components(value_map, *tuple_ref);
                 value_map.insert(*result, tuple_ref_comps[offset..offset + width].to_vec());
             }
-            OpCode::Guard { .. } => panic!("ICE: Guard encountered during tuple elision"),
+            OpCode::Guard { .. } => ice!("Guard encountered during tuple elision"),
             // Every genuine result gets freshly-allocated components (or maps to itself when its
             // type is already tuple-free).
             other => {
                 for result in other.get_results() {
                     if value_map.contains_key(result) {
-                        panic!("ICE: Value encountered before visiting its definition");
+                        ice!("Value encountered before visiting its definition");
                     }
                     let ty = fti.get_value_type(*result);
                     let comps = alloc_components(ssa, *result, ty);
@@ -812,17 +812,20 @@ fn verify_op_tuple_free(op: &OpCode, fid: FunctionId, bid: BlockId) {
         );
     };
     match op {
-        OpCode::MkTuple { .. } => panic!(
+        OpCode::MkTuple { .. } => ice!(
             "elide_tuples verification: fn {:?} block_{} still contains a MkTuple",
-            fid, bid.0
+            fid,
+            bid.0
         ),
-        OpCode::TupleProj { .. } => panic!(
+        OpCode::TupleProj { .. } => ice!(
             "elide_tuples verification: fn {:?} block_{} still contains a TupleProj",
-            fid, bid.0
+            fid,
+            bid.0
         ),
-        OpCode::TupleRefProj { .. } => panic!(
+        OpCode::TupleRefProj { .. } => ice!(
             "elide_tuples verification: fn {:?} block_{} still contains a TupleRefProj",
-            fid, bid.0
+            fid,
+            bid.0
         ),
         OpCode::MkSeq { elem_type, .. } | OpCode::MkRepeated { elem_type, .. } => {
             assert_free(elem_type, "sequence element type")

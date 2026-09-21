@@ -490,7 +490,7 @@ impl MotionContext {
                     arg_blocks,
                 }
             }
-            Terminator::Return(_) => unreachable!("a Return block has no successors"),
+            Terminator::Return(_) => ice_unreachable!("a Return block has no successors"),
         };
         self.wiring.insert((pred, target), wiring.clone());
         wiring
@@ -939,7 +939,7 @@ impl FunctionMotionState {
                 for &arg_block in &pred.arg_blocks {
                     match function.get_block_mut(arg_block).get_terminator_mut() {
                         Terminator::Jmp(_, args) => args.push(arg),
-                        _ => unreachable!("argument-carrying predecessors end in Jmp"),
+                        _ => ice_unreachable!("argument-carrying predecessors end in Jmp"),
                     }
                 }
             }

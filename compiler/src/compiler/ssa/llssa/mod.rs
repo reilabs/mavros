@@ -1060,7 +1060,7 @@ impl LLFieldType {
             LLFieldType::Ptr => Type::Ptr,
             LLFieldType::Inline(s) => Type::Struct(s.clone()),
             LLFieldType::InlineArray(_, _) | LLFieldType::FlexArray(_) => {
-                panic!("InlineArray/FlexArray fields are memory-only; cannot convert to Type")
+                ice!("InlineArray/FlexArray fields are memory-only; cannot convert to Type")
             }
         }
     }

@@ -68,7 +68,7 @@ impl ValueReplacements {
                 _ => return current,
             }
         }
-        panic!("ValueReplacements: cycle starting at {:?}", value)
+        ice!("ValueReplacements: cycle starting at {:?}", value)
     }
 
     /// Walks every instruction and terminator in `function`, applying the collected replacements.

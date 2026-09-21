@@ -443,7 +443,7 @@ impl LowerPureGuards {
 
             // Guard-within-Guard should not happen
             OpCode::Guard { .. } => {
-                panic!("LowerPureGuards: nested Guard not expected");
+                ice!("LowerPureGuards: nested Guard not expected");
             }
             _ => false,
         }
@@ -492,7 +492,7 @@ impl LowerPureGuards {
             ArithGroup::Mul => {
                 self.lower_unsigned_mul_guard(emitter, condition, original_result, lhs, rhs, bits);
             }
-            _ => unreachable!("lower_overflow_guard called for {:?}", kind),
+            _ => ice_unreachable!("lower_overflow_guard called for {:?}", kind),
         }
     }
 
@@ -733,7 +733,7 @@ impl LowerPureGuards {
                 let default_val = match &lhs_type.expr {
                     TypeExpr::Int(b) => e.int_const(IntBits::zero(*b)),
                     TypeExpr::Field => e.field_const(e.field().constant(0u64)),
-                    _ => unreachable!(),
+                    _ => ice_unreachable!(),
                 };
                 vec![default_val]
             },
@@ -803,7 +803,7 @@ impl LowerPureGuards {
         let array_type = type_info.get_value_type(array);
         let elem_type = match &array_type.strip_witness().expr {
             TypeExpr::Array(elem, _) | TypeExpr::Slice(elem) => (**elem).clone(),
-            other => panic!("LowerPureGuards: ArrayGet on non-seq type: {:?}", other),
+            other => ice!("LowerPureGuards: ArrayGet on non-seq type: {:?}", other),
         };
         let oob = self.emit_oob_cond(emitter, array, index, type_info);
 
@@ -842,8 +842,8 @@ impl LowerPureGuards {
             // `analysis::types` admits a field element and nothing else as a `Rangecheck`
             // operand, so an integer one is a compiler bug rather than a width this lowering
             // has yet to reach.
-            TypeExpr::Int(bits) => panic!(
-                "ICE: a pure rangecheck on an int{bits} reached lowering; only field types are \
+            TypeExpr::Int(bits) => ice!(
+                "a pure rangecheck on an int{bits} reached lowering; only field types are \
                  supported for rangecheck"
             ),
             TypeExpr::Field => {
@@ -870,7 +870,7 @@ impl LowerPureGuards {
                     |_| vec![],
                 );
             }
-            other => panic!(
+            other => ice!(
                 "LowerPureGuards: pure rangecheck on unsupported type {:?}; add a comparison strategy for this type",
                 other
             ),

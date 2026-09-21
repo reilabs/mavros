@@ -46,10 +46,10 @@ impl WitnessWriteToFresh {
                         } => {
                             let tp = type_info.get_function(*function_id).get_value_type(*v);
                             if tp.is_witness_of() {
-                                panic!("ICE: WriteWitness input has WitnessOf type: {:?}", tp);
+                                ice!("WriteWitness input has WitnessOf type: {:?}", tp);
                             }
                             if !tp.is_numeric() {
-                                panic!("Expected numeric type, got {:?}", tp);
+                                ice!("Expected numeric type, got {:?}", tp);
                             }
                             OpCode::FreshWitness {
                                 result: r.unwrap(),

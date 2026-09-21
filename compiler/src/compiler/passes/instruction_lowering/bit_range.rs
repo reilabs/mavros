@@ -393,7 +393,7 @@ fn lower_pure_bit_range_value(
             b.udiv(masked, divisor)
         }
         TypeExpr::Field => lower_pure_field_bit_range_value(b, value, offset, width),
-        other => panic!("BitRange expects a scalar source, got {:?}", other),
+        other => ice!("BitRange expects a scalar source, got {:?}", other),
     }
 }
 
@@ -476,7 +476,7 @@ fn cast_target_for_scalar_type(ty: &Type) -> CastTarget {
         // choose: `TypeExpr::Int(n)` says only "an n-bit integer", and `CastTarget::Int(n)` says
         // only "reinterpret at n bits". Sign extension is the separate `SExt` opcode.
         TypeExpr::Int(bits) => CastTarget::Int(bits),
-        other => panic!("BitRange result must be scalar, got {:?}", other),
+        other => ice!("BitRange result must be scalar, got {:?}", other),
     }
 }
 

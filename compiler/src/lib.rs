@@ -1,3 +1,6 @@
+#[macro_use]
+pub mod r#macro;
+
 pub mod abi_helpers;
 pub mod collections;
 pub mod compiler;

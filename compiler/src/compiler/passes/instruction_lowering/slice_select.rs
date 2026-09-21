@@ -43,11 +43,11 @@ fn emit_elem_select(
             })
         }
         TypeExpr::Slice(_) => {
-            panic!("LowerSliceSelect: nested slice is not allowed")
+            ice!("LowerSliceSelect: nested slice is not allowed")
         }
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
         TypeExpr::Ref(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {
-            panic!("LowerSliceSelect: witness select on element type {typ} is not supported")
+            ice!("LowerSliceSelect: witness select on element type {typ} is not supported")
         }
     }
 }

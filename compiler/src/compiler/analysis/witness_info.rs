@@ -106,9 +106,10 @@ impl WitnessShape {
             (WitnessShape::Ref(t1, inner1), WitnessShape::Ref(t2, inner2)) => {
                 WitnessShape::Ref(t1.join(*t2), Box::new(inner1.join(inner2)))
             }
-            _ => panic!(
+            _ => ice!(
                 "Cannot join different witness types: {:?} vs {:?}",
-                self, other
+                self,
+                other
             ),
         }
     }

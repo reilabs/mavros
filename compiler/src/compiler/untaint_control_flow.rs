@@ -177,7 +177,7 @@ impl UntaintControlFlow {
                     // never before witness inference; a Guard slipping through here would
                     // silently skip the elem_type rewrite of a wrapped Alloc/MkSeq/... below.
                     OpCode::Guard { .. } => {
-                        panic!("ICE: Guard should not be present during witness type application")
+                        ice!("Guard should not be present during witness type application")
                     }
                     OpCode::ReadGlobal {
                         result: r,
@@ -507,10 +507,12 @@ impl UntaintControlFlow {
                             } else if cfg.dominates(if_false, body_bid) {
                                 else_taint
                             } else {
-                                panic!(
+                                ice!(
                                     "untaint_cf: block {:?} in if-body is dominated by neither \
                                      then-branch {:?} nor else-branch {:?}",
-                                    body_bid, if_true, if_false
+                                    body_bid,
+                                    if_true,
+                                    if_false
                                 );
                             };
                             block_taint_vars.insert(body_bid, Some(taint));
@@ -526,16 +528,17 @@ impl UntaintControlFlow {
                             block.set_terminator(Terminator::Jmp(if_true, vec![]));
 
                             if merge == function.get_entry_id() {
-                                panic!(
-                                    "TODO: jump back into entry not supported yet. Is it even possible?"
-                                )
+                                ice!("jump back into entry not supported yet. Is it even possible?")
                             }
 
                             let jumps = cfg.get_jumps_into_merge_from_branch(if_true, merge);
                             if jumps.len() != 1 {
-                                panic!(
-                                    "TODO: handle multiple jumps into merge {:?} {:?} {:?} {:?}",
-                                    block_id, if_true, merge, jumps
+                                todo!(
+                                    "handle multiple jumps into merge {:?} {:?} {:?} {:?}",
+                                    block_id,
+                                    if_true,
+                                    merge,
+                                    jumps
                                 );
                             }
                             let out_true_block = jumps[0];
@@ -551,7 +554,7 @@ impl UntaintControlFlow {
                                 .take_terminator()
                             {
                                 Some(Terminator::Jmp(_, args)) => args,
-                                _ => panic!(
+                                _ => ice_unreachable!(
                                     "Impossible – out jump must be a JMP, otherwise the join point wouldn't be a join point"
                                 ),
                             };
@@ -562,9 +565,12 @@ impl UntaintControlFlow {
 
                             let jumps = cfg.get_jumps_into_merge_from_branch(if_false, merge);
                             if jumps.len() != 1 {
-                                panic!(
-                                    "TODO: handle multiple jumps into merge {:?} {:?} {:?} {:?}",
-                                    block_id, if_false, merge, jumps
+                                todo!(
+                                    "handle multiple jumps into merge {:?} {:?} {:?} {:?}",
+                                    block_id,
+                                    if_false,
+                                    merge,
+                                    jumps
                                 );
                             }
                             let out_false_block = jumps[0];
@@ -573,7 +579,7 @@ impl UntaintControlFlow {
                                 .take_terminator()
                             {
                                 Some(Terminator::Jmp(_, args)) => args,
-                                _ => panic!(
+                                _ => ice_unreachable!(
                                     "Impossible – out jump must be a JMP, otherwise the join point wouldn't be a join point"
                                 ),
                             };
@@ -759,7 +765,7 @@ impl UntaintControlFlow {
                 function: CallTarget::Dynamic(_),
                 ..
             } => {
-                panic!("Dynamic call targets are not supported in untaint_control_flow")
+                ice!("Dynamic call targets are not supported in untaint_control_flow")
             }
             // -- Cast insertion for MkSeq --
             OpCode::MkSeq {
@@ -833,7 +839,7 @@ impl UntaintControlFlow {
                 let expected_elem_type = match &result_type.expr {
                     TypeExpr::Array(inner, _) => inner.as_ref().clone(),
                     TypeExpr::Slice(inner) => inner.as_ref().clone(),
-                    _ => panic!("ArraySet on non-array type"),
+                    _ => ice!("ArraySet on non-array type"),
                 };
                 let mut cast_instrs = Vec::new();
                 let (converted_array, converted_value) = {
@@ -867,7 +873,7 @@ impl UntaintControlFlow {
                 let result_slice_type = ti.get_value_type(result);
                 let expected_elem_type = match &result_slice_type.expr {
                     TypeExpr::Slice(inner) => inner.as_ref().clone(),
-                    _ => panic!("SlicePush on non-slice type"),
+                    _ => ice!("SlicePush on non-slice type"),
                 };
                 let mut cast_instrs = Vec::new();
                 let (new_slice, new_values) = {
@@ -1070,7 +1076,7 @@ fn apply_witness_type(typ: Type, wt: &WitnessShape) -> Type {
             );
             Type::blob(*elem, n)
         }
-        (tp, wt) => panic!("Unexpected type {:?} with witness type {:?}", tp, wt),
+        (tp, wt) => ice!("Unexpected type {:?} with witness type {:?}", tp, wt),
     }
 }
 

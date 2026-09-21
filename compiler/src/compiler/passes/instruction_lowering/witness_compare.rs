@@ -115,7 +115,7 @@ impl LowerWitnessCompareOps {
     ) {
         let rhs_type = context.types().get_value_type(rhs);
         let TypeExpr::Int(bits) = rhs_type.strip_witness().expr else {
-            panic!("ICE: Cmp Lt rhs is not an integer type");
+            ice!("Cmp Lt rhs is not an integer type");
         };
 
         if kind.is_signed() {

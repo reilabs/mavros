@@ -776,7 +776,7 @@ impl HLBlockEmitter<'_> {
                 self.mk_tuple(elems, element_types.clone())
             }
             TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {
-                panic!("cannot build a default value for type {}", typ)
+                ice!("cannot build a default value for type {}", typ)
             }
         }
     }

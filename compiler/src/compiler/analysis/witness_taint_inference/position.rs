@@ -154,7 +154,7 @@ fn collect_paths(ty: &Type, prefix: &mut Vec<Descent>, out: &mut Vec<Vec<Descent
             collect_paths(inner, prefix, out);
             prefix.pop();
         }
-        TypeExpr::WitnessOf(_) => unreachable!("peeled above"),
+        TypeExpr::WitnessOf(_) => ice_unreachable!("peeled above"),
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
     }
 }

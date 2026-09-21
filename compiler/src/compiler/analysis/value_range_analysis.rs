@@ -856,7 +856,7 @@ impl ValueRangeAnalysis {
                         None => ValueRange::full(width),
                     },
                     (Shl, None) => ValueRange::full(width),
-                    _ => unreachable!("kind is Shl or Shr"),
+                    _ => ice_unreachable!("kind is Shl or Shr"),
                 }
             }
         }
