@@ -39,8 +39,20 @@ pub fn wasm_engine() -> wasmtime::Result<Engine> {
 
 // FIELD-ASSUMPTION: L3-field-size
 const FIELD_SIZE: usize = 32; // 4 x i64 = 32 bytes
-const WASM_STACK_SIZE_BYTES: u32 = 256 * 1024;
-const WASM_STATIC_DATA_BYTES: u32 = 4096;
+
+/// The `env::memory` type the module imports. Its minimum covers the module's stack and data.
+fn imported_memory_type(
+    module: &wasmtime::Module,
+) -> Result<wasmtime::MemoryType, Box<dyn std::error::Error>> {
+    module
+        .imports()
+        .find(|import| import.module() == "env" && import.name() == "memory")
+        .and_then(|import| match import.ty() {
+            wasmtime::ExternType::Memory(memory_type) => Some(memory_type),
+            _ => None,
+        })
+        .ok_or_else(|| "WASM module does not import env::memory".into())
+}
 
 /// What one witgen run of a compiled module produced.
 pub struct WasmResult {
@@ -127,8 +139,6 @@ pub fn run_witgen(
     let input_bytes = (input_fields.len() * FIELD_SIZE) as u32;
     let tables_cap = r1cs.constraints_layout.tables_data_size as u32;
     let table_info_bytes = tables_cap * TABLE_INFO_SLOT_SIZE;
-    let our_data_size =
-        vm_struct_size + witness_bytes + 3 * constraint_bytes + input_bytes + table_info_bytes;
 
     // Create wasmtime engine and store
     let engine = wasm_engine()?;
@@ -137,11 +147,7 @@ pub fn run_witgen(
     // Load the WASM module
     let module = wasm_runtime::load_wasmtime_module(&engine, wasm_path)?;
 
-    // Estimate initial memory: linker-reserved stack + module static data + our buffers.
-    let initial_estimate = WASM_STACK_SIZE_BYTES + WASM_STATIC_DATA_BYTES + our_data_size;
-    let pages = ((initial_estimate as usize + 65535) / 65536) as u32;
-    let memory_type = wasmtime::MemoryType::new(pages.max(4), None);
-    let memory = Memory::new(&mut store, memory_type)?;
+    let memory = Memory::new(&mut store, imported_memory_type(&module)?)?;
 
     // Create linker, register imported memory, and instantiate
     let mut linker = Linker::new(&engine);
@@ -442,17 +448,13 @@ pub fn run_ad(
     let dc_bytes = da_bytes;
     // FIELD-ASSUMPTION: L3-field-size
     let coeffs_bytes = (constraint_count * FIELD_SIZE) as u32;
-    let our_data_size = vm_struct_size + da_bytes + db_bytes + dc_bytes + coeffs_bytes;
 
     let engine = wasm_engine()?;
     let mut store = Store::new(&engine, ());
 
     let module = wasm_runtime::load_wasmtime_module(&engine, wasm_path)?;
 
-    let initial_estimate = WASM_STACK_SIZE_BYTES + WASM_STATIC_DATA_BYTES + our_data_size;
-    let pages = ((initial_estimate as usize + 65535) / 65536) as u32;
-    let memory_type = wasmtime::MemoryType::new(pages.max(4), None);
-    let memory = Memory::new(&mut store, memory_type)?;
+    let memory = Memory::new(&mut store, imported_memory_type(&module)?)?;
 
     let mut linker = Linker::new(&engine);
     linker.define(&store, "env", "memory", memory)?;
