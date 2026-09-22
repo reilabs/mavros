@@ -66,7 +66,8 @@ impl Pass for LowerZstSlices {
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {
-        vec![]
+        // No block or terminator is added, removed or edited.
+        vec![FlowAnalysis::id()]
     }
 }
 
