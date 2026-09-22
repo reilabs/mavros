@@ -9,10 +9,12 @@
 //! the bounds check it would normally have, taken from [`seq_bounds`]:
 //!
 //! - `MkSeq`/`MkRepeated`/`ArrayToSlice` cast: the constant element count.
-//! - `SliceLen`, `ArraySet`: alias the operand (the slice *is* its length).
+//! - `SliceLen`: alias the operand (the slice *is* its length).
 //! - `ArrayGet`: `assert index < len`; the element is synthesized.
+//! - `ArraySet`: `assert index < len`; alias the operand.
 //! - `SlicePush`: `len + k`.  `SliceInsert`: `len + 1`, `assert index < len + 1`.
-//! - `SlicePop`: `assert 0 < len`, `len - 1`.  `SliceRemove`: `assert index < len`, `len - 1`.
+//! - `SlicePop`: `assert 0 < len`, `len - 1`; the popped element is synthesized.
+//! - `SliceRemove`: `assert index < len`, `len - 1`; the removed element is synthesized.
 //!
 //! A fixed-size array of a leaf-less element keeps its length in its type, but the elision drops
 //! its accesses and their bounds checks with them. This pass emits that check, again through
