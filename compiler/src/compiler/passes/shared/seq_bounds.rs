@@ -1,5 +1,6 @@
 //! The single definition of "this sequence op is out of bounds", shared by the slice lowerings,
-//! `LowerPureGuards`, `side_effect_free_guards`, and DCE's dead-op rewrite so they cannot drift.
+//! `LowerZstSlices`, `LowerPureGuards`, `side_effect_free_guards`, and DCE's dead-op rewrite so they
+//! cannot drift.
 //!
 //! Two shapes are needed because the consumers want different things from the same comparison: the
 //! lowerings and DCE want an `AssertCmp` to emit, while `LowerPureGuards` wants the *condition* as
@@ -37,6 +38,10 @@ pub enum SeqBoundsCheck {
     /// Noir's `should_insert_oob_check`. A live witness-indexed read already gets its bound for
     /// free from the lookup argument `gen_witness_array_get` emits, so the only thing at stake is
     /// a read whose result nothing uses.
+    ///
+    /// `LowerZstSlices` is the one consumer that does check `ArrayGet`: a leaf-less container has
+    /// no lookup at all, the read is aliased to a synthesized value and the op dropped, so nothing
+    /// else would bound the index.
     SeqAccess { seq: ValueId, index: ValueId },
 }
 

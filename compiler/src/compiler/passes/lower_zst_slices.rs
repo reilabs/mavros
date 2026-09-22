@@ -5,8 +5,10 @@
 //! bounds check against it.
 //!
 //! This pass runs before the first `ElideTuples` and rewrites `Slice<T>` with leaf-less `T` to a
-//! plain `u32`, its length. Each op on such a slice becomes arithmetic on the length plus
-//! the bounds check it would normally have, taken from [`seq_bounds`]:
+//! plain `u32`, its length. Each op on such a slice becomes arithmetic on the length plus an
+//! explicit bounds check built through [`seq_bounds`]. For every op but `ArrayGet` that is the
+//! check the op normally has; `ArrayGet` is normally bounded by the lookup argument of a real
+//! read, and a leaf-less read has no lookup, so the check is asserted here instead:
 //!
 //! - `MkSeq`/`MkRepeated`/`ArrayToSlice` cast: the constant element count.
 //! - `SliceLen`: alias the operand (the slice *is* its length).
@@ -17,8 +19,9 @@
 //! - `SliceRemove`: `assert index < len`, `len - 1`; the removed element is synthesized.
 //!
 //! A fixed-size array of a leaf-less element keeps its length in its type, but the elision drops
-//! its accesses and their bounds checks with them. This pass emits that check, again through
-//! [`seq_bounds`], and leaves the op for the elision to drop.
+//! its accesses, and with them the lookup or assert that would have bounded the index. This pass
+//! asserts `index < n` for both `ArrayGet` and `ArraySet`, again through [`seq_bounds`], and
+//! leaves the op for the elision to drop.
 //!
 //! `Map` casts and guards are generated later so reaching them in this pass is an ICE.
 
