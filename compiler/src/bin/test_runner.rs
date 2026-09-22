@@ -228,8 +228,8 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
         // R1CS. That is the _expected_ outcome for an execution_failure test, so it gets its own
         // `reject` marker — distinct from a plain `fail`, which signals a real problem (e.g. an
         // unsupported construct) that should never be silently accepted.
-        Err(DriverError::UnsatisfiableProgram(msg)) => {
-            eprintln!("R1CS rejected program as unsatisfiable: {msg}");
+        Err(error @ DriverError::UnsatisfiableProgram(_)) => {
+            eprintln!("R1CS rejected program as unsatisfiable: {error}");
             emit("END:R1CS:reject");
             None
         }

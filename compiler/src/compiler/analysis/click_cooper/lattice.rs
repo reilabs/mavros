@@ -469,6 +469,10 @@ pub(crate) fn eval_mk_repeated(
 
 #[cfg(test)]
 mod tests {
+    use mavros_int_semantics::{Outcome, SignedValue, corners, int_bits::HOST_WORD_BITS};
+
+    use super::*;
+
     #[test]
     fn field_less_than_folds_canonical_values_without_truncation() {
         let field = FieldConfig::bn254();
@@ -487,10 +491,6 @@ mod tests {
             }
         }
     }
-
-    use mavros_int_semantics::{Outcome, SignedValue, corners, int_bits::HOST_WORD_BITS};
-
-    use super::*;
 
     /// An `i8` constant, written as the value it denotes rather than its raw bits.
     fn i8c(v: i128) -> Constant {

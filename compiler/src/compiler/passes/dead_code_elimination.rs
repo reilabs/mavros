@@ -33,8 +33,8 @@ use crate::{
         ssa::{
             BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
-                ArithGroup, BinaryArithOpKind, CallTarget, Constant, HLFunction, HLSSA,
-                LocatedOpCode, OpCode, builder::HLEmitter,
+                ArithGroup, BinaryArithOpKind, CallTarget, CastTarget, Constant, HLFunction, HLSSA,
+                LocatedOpCode, OpCode, Type, TypeExpr, builder::HLEmitter,
             },
         },
         util::ice_non_elided_tuple,
@@ -200,7 +200,7 @@ pub struct Config {
     /// replaced by its bounds check instead of being deleted outright.
     ///
     /// A witness-indexed array access does not get a bounds check until `LowerWitnessArrayOps`,
-    /// which runs at `driver.rs:484`. Deleting the access before that takes the only thing that
+    /// which runs in `Driver::spill_witness`. Deleting the access before that takes the only thing that
     /// could ever fail with it, and nothing downstream puts it back; a program whose out-of-range
     /// write happens to be unread would verify. Rewriting the dead access into the check keeps it.
     ///
@@ -217,7 +217,7 @@ pub struct Config {
     ///
     /// What is **not** covered is an access that is live pre-untaint and only becomes dead
     /// afterwards; that is the same residual the divmod rewrite carries, and closing it needs a
-    /// check emitted before `driver.rs:480` rather than a different DCE configuration.
+    /// check emitted before `UntaintControlFlow` in `Driver::monomorphize` rather than a different DCE configuration.
     ///
     /// Cheap where it does not matter: a check on an in-range constant index folds away downstream,
     /// and with a pure index and no guard `LowerWitnessAssertOps` leaves the `AssertCmp` alone, so
@@ -293,34 +293,81 @@ impl DCE {
     // retain an entire computation and interfere with specialization/witness inference.
     fn bounds_proven(
         sequence_lengths: &HashMap<ValueId, usize>,
-        analyses: Option<(&TypeInfo, &ValueRanges)>,
+        ranges: Option<&ValueRanges>,
         function: FunctionId,
         block: BlockId,
-        check: &SeqBoundsCheck,
+        seq: ValueId,
+        index: ValueId,
+        seq_type: Option<&Type>,
     ) -> bool {
-        let Some((types, ranges)) = analyses else {
+        let (Some(ranges), Some(seq_type)) = (ranges, seq_type) else {
             return false;
         };
-        let SeqBoundsCheck::SeqAccess { seq, index } = check else {
-            return false;
-        };
-        use crate::compiler::ssa::hlssa::TypeExpr;
-        let len = match &types
-            .get_function(function)
-            .get_value_type(*seq)
-            .strip_witness()
-            .expr
-        {
+        let len = match &seq_type.strip_witness().expr {
             TypeExpr::Array(_, len) => *len,
-            TypeExpr::Slice(_) => match sequence_lengths.get(seq) {
+            TypeExpr::Slice(_) => match sequence_lengths.get(&seq) {
                 Some(len) => *len,
                 None => return false,
             },
             _ => return false,
         };
-        let range = ranges.get_function(function).get_at(block, *index);
+        let range = ranges.get_function(function).get_at(block, index);
         range.unsigned().hi().is_some_and(|hi| hi < &len.into())
             && range.unsigned().lo().is_some_and(|lo| lo >= &0.into())
+    }
+
+    /// Source slice lengths in dominance order, so cast/push chains see their definitions.
+    /// Block parameters and unknown lengths stay unknown rather than confusing capacity with
+    /// logical length. Arrays (including blobs) already carry their length in the type.
+    fn sequence_lengths(
+        ssa: &HLSSA,
+        cfg: &FlowAnalysis,
+        types: &TypeInfo,
+    ) -> HashMap<ValueId, usize> {
+        let mut lengths = HashMap::default();
+        for (id, function) in ssa.iter_functions() {
+            if !types.has_function(*id) {
+                continue;
+            }
+            let types = types.get_function(*id);
+            for block in cfg.get_function_cfg(*id).get_domination_pre_order() {
+                for op in function.get_block(block).get_instructions() {
+                    let (result, len) = match op {
+                        OpCode::MkSeq { result, elems, .. } => (*result, Some(elems.len())),
+                        OpCode::MkRepeated { result, count, .. } => (*result, Some(*count)),
+                        OpCode::Cast {
+                            result,
+                            value,
+                            target: CastTarget::ArrayToSlice,
+                        } => {
+                            let len = types.try_get_value_type(*value).and_then(|ty| {
+                                match ty.strip_witness().expr {
+                                    TypeExpr::Array(_, len) => Some(len),
+                                    _ => None,
+                                }
+                            });
+                            (*result, len)
+                        }
+                        OpCode::SlicePush {
+                            result,
+                            slice,
+                            values,
+                            ..
+                        } => (
+                            *result,
+                            lengths
+                                .get(slice)
+                                .and_then(|len: &usize| len.checked_add(values.len())),
+                        ),
+                        _ => continue,
+                    };
+                    if let Some(len) = len {
+                        lengths.insert(result, len);
+                    }
+                }
+            }
+        }
+        lengths
     }
 
     pub fn new(config: Config) -> Self {
@@ -530,6 +577,10 @@ impl DCE {
     }
 
     pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
+        assert!(
+            !self.rewrites_dead_seq_access() || !ssa.witness_slices_purified(),
+            "cannot rewrite source sequence accesses after witness-slice purification"
+        );
         let function_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
 
         // Typed and ranged for the whole module whenever this run can rewrite, without first
@@ -548,11 +599,14 @@ impl DCE {
         let rewrite_types: Option<TypeInfo> = self
             .needs_rewrite_types()
             .then(|| Types::new().run(ssa, cfg));
-        let partial_op_ranges: Option<ValueRanges> = rewrite_types
+        let rewrite_ranges: Option<ValueRanges> = rewrite_types
             .as_ref()
-            .filter(|_| self.rewrites_dead_partial_ops())
+            .filter(|_| self.rewrites_dead_partial_ops() || self.rewrites_dead_seq_access())
             .map(|types| ValueRangeAnalysis::new().run(ssa, cfg, types));
-        let partial_op_analyses = rewrite_types.as_ref().zip(partial_op_ranges.as_ref());
+        let partial_op_analyses = rewrite_types
+            .as_ref()
+            .zip(rewrite_ranges.as_ref())
+            .filter(|_| self.rewrites_dead_partial_ops());
 
         debug_assert_eq!(
             partial_op_analyses.is_some(),
@@ -560,7 +614,12 @@ impl DCE {
             "`divmod_check_survives` and `shift_check_survives` read `None` as 'the partial-op rewrite is off'; the two must agree exactly or it silently re-enables itself"
         );
 
-        let mut sequence_lengths = HashMap::default();
+        let sequence_lengths = rewrite_types
+            .as_ref()
+            .filter(|_| self.rewrites_dead_seq_access())
+            .map(|types| Self::sequence_lengths(ssa, cfg, types))
+            .unwrap_or_default();
+        let mut proven_bounds = HashSet::default();
         let mut definitions_by_function: HashMap<FunctionId, HashMap<ValueId, ValueDefinition>> =
             HashMap::default();
         let mut static_calls_by_callee: HashMap<FunctionId, Vec<(FunctionId, BlockId, usize)>> =
@@ -572,18 +631,6 @@ impl DCE {
 
             for (block_id, block) in function.get_blocks() {
                 for (i, instruction) in block.get_instructions().enumerate() {
-                    // Before slice purification these constructors expose the logical length.
-                    match instruction {
-                        OpCode::MkSeq { result, elems, .. } => {
-                            sequence_lengths.insert(*result, elems.len());
-                        }
-                        OpCode::MkSeqOfBlob { result, blob, .. } => {
-                            if let Some(Constant::Blob(blob)) = ssa.get_const(*blob).as_deref() {
-                                sequence_lengths.insert(*result, blob.len());
-                            }
-                        }
-                        _ => {}
-                    }
                     if let OpCode::Call {
                         function: CallTarget::Static(callee),
                         ..
@@ -730,27 +777,36 @@ impl DCE {
                     // Arrays need only the index; vectors also need the value supplying their
                     // logical length. Keep it alive until the sweep emits the check.
                     if self.rewrites_dead_seq_access()
-                        && let Some(check @ SeqBoundsCheck::SeqAccess { seq, index }) =
+                        && let Some(SeqBoundsCheck::SeqAccess { seq, index }) =
                             failable_bounds(instruction)
-                        && !Self::bounds_proven(
-                            &sequence_lengths,
-                            partial_op_analyses,
-                            *function_id,
-                            *block_id,
-                            &check,
-                        )
                     {
-                        worklist.push(WorkItem::LiveValue(*function_id, index));
+                        // Types omit unreachable blocks. A missing type is no proof of safety,
+                        // and seeding the sequence conservatively avoids a second unchecked lookup.
                         let ty = rewrite_types
                             .as_ref()
-                            .unwrap()
-                            .get_function(*function_id)
-                            .get_value_type(seq);
-                        if matches!(
-                            ty.strip_witness().expr,
-                            crate::compiler::ssa::hlssa::TypeExpr::Slice(_)
+                            .and_then(|types| {
+                                types
+                                    .has_function(*function_id)
+                                    .then(|| types.get_function(*function_id))
+                            })
+                            .and_then(|types| types.try_get_value_type(seq));
+                        if Self::bounds_proven(
+                            &sequence_lengths,
+                            rewrite_ranges.as_ref(),
+                            *function_id,
+                            *block_id,
+                            seq,
+                            index,
+                            ty,
                         ) {
-                            worklist.push(WorkItem::LiveValue(*function_id, seq));
+                            proven_bounds.insert((*function_id, *block_id, i));
+                        } else {
+                            worklist.push(WorkItem::LiveValue(*function_id, index));
+                            if ty.is_none_or(|ty| {
+                                matches!(ty.strip_witness().expr, TypeExpr::Slice(_))
+                            }) {
+                                worklist.push(WorkItem::LiveValue(*function_id, seq));
+                            }
                         }
                     }
                 }
@@ -1132,15 +1188,13 @@ impl DCE {
                                 }
                             } else if let Some(check) = failable_bounds(&instruction)
                                 && self.rewrites_bounds_of(&check)
-                                && !Self::bounds_proven(
-                                    &sequence_lengths,
-                                    partial_op_analyses,
-                                    function_id,
-                                    block_id,
-                                    &check,
-                                )
+                                && !proven_bounds.contains(&(function_id, block_id, i))
                             {
-                                // Retain bounds that the mark phase could not prove safe.
+                                // Unlike arithmetic partial ops, bounds depend on the index and
+                                // the sequence's logical length, not just operand types. Keep any
+                                // check the mark phase could not prove safe. Downstream constant
+                                // folding and SimplifyAsserts can still remove tautologies once
+                                // lengths/indices become known, keeping safe constant accesses free.
                                 let (seq, index) = check.operands();
                                 let function_types = types.get_function(function_id);
                                 let seq_ty = function_types.get_value_type(seq).clone();
@@ -1152,6 +1206,7 @@ impl DCE {
                                     location: instruction.location().clone(),
                                 };
                                 emit_bounds_assert(
+                                    ssa,
                                     &mut emitter,
                                     &check,
                                     Some(&seq_ty),
@@ -1418,6 +1473,105 @@ impl DCE {
 mod bounds_tests {
     use super::*;
     use crate::compiler::ssa::hlssa::{SequenceTargetType, Type, builder::HLSSABuilder};
+
+    #[test]
+    fn cast_and_push_lengths_discharge_bounds_independently_of_partial_ops() {
+        use crate::compiler::ssa::hlssa::SliceOpDir;
+        for partial_ops in [false, true] {
+            for (initial_len, push, safe) in [
+                (4, false, true),
+                (3, false, false),
+                (3, true, true),
+                (2, true, false),
+            ] {
+                let mut ssa = HLSSA::new();
+                let main = ssa.get_unique_entrypoint_id();
+                HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+                    // Allocate the consumer block first to make block-map order unsuitable for
+                    // length propagation. Definitions still dominate their uses.
+                    let consumer = b.add_block(|_| {});
+                    let producer = b.add_block(|_| {});
+                    b.test_block(b.function.get_entry_id())
+                        .terminate_jmp(producer, vec![]);
+                    let (slice, index, element) = {
+                        let mut e = b.test_block(producer);
+                        let input = e.emit_constant(Constant::int(32, 3));
+                        let array = e.mk_seq(
+                            vec![input; initial_len],
+                            SequenceTargetType::Array(initial_len),
+                            Type::int(32),
+                        );
+                        let slice = e.cast_to(CastTarget::ArrayToSlice, array);
+                        e.terminate_jmp(consumer, vec![]);
+                        (slice, input, input)
+                    };
+                    let mut e = b.test_block(consumer);
+                    let slice = if push {
+                        e.slice_push(slice, vec![element], SliceOpDir::Back)
+                    } else {
+                        slice
+                    };
+                    e.array_get(slice, index);
+                    e.terminate_return(vec![]);
+                });
+                let mut config = Config::preserve_blocks();
+                config.rewrite_dead_partial_ops = partial_ops;
+                let flow = FlowAnalysis::run(&ssa);
+                DCE::new(config).do_run(&mut ssa, &flow);
+                let ops: Vec<_> = ssa
+                    .get_unique_entrypoint()
+                    .get_blocks()
+                    .flat_map(|(_, b)| b.get_instructions())
+                    .collect();
+                assert_eq!(
+                    ops.iter().any(|op| matches!(op, OpCode::AssertCmp { .. })),
+                    !safe
+                );
+                if safe {
+                    assert!(
+                        ops.is_empty(),
+                        "a safe access must not pin the vector construction"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unreachable_sequence_definitions_do_not_require_types() {
+        let mut ssa = HLSSA::new();
+        let main = ssa.get_unique_entrypoint_id();
+        HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+            b.test_block(b.function.get_entry_id())
+                .terminate_return(vec![]);
+            let dead = b.add_block(|_| {});
+            let mut e = b.test_block(dead);
+            let zero = e.emit_constant(Constant::int(32, 0));
+            let array = e.mk_seq(vec![zero], SequenceTargetType::Array(1), Type::int(32));
+            e.array_get(array, zero);
+            e.terminate_return(vec![]);
+        });
+        let flow = FlowAnalysis::run(&ssa);
+        DCE::new(Config::preserve_blocks()).do_run(&mut ssa, &flow);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "cannot rewrite source sequence accesses after witness-slice purification"
+    )]
+    fn rejects_sequence_rewriting_after_purification_even_after_rebuild() {
+        let mut ssa = HLSSA::new();
+        ssa.get_unique_entrypoint_mut()
+            .get_entry_mut()
+            .set_terminator(Terminator::Return(vec![]));
+        ssa.mark_witness_slices_purified();
+        let (mut rebuilt, functions, _) = ssa.clone().prepare_rebuild();
+        for (id, function) in functions {
+            rebuilt.put_function(id, function);
+        }
+        let flow = FlowAnalysis::run(&rebuilt);
+        DCE::new(Config::preserve_blocks()).do_run(&mut rebuilt, &flow);
+    }
 
     #[test]
     fn discard_proven_safe_read_but_keep_possible_boundary_failure() {

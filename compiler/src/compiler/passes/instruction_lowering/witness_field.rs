@@ -83,6 +83,20 @@ impl LowerWitnessFieldOps {
                 *endianness,
                 *count,
             ),
+            // Radix normalization can introduce a pure fit check after the pure-guard phase.
+            // Lower only this check with the existing rule, leaving raw arithmetic hints alone.
+            OpCode::Rangecheck { value, .. }
+                if guard.is_some() && !context.types().get_value_type(*value).is_witness_of() =>
+            {
+                super::pure_guards::LowerPureGuards::new().lower_instruction(
+                    b,
+                    context,
+                    &OpCode::Guard {
+                        condition: guard.unwrap(),
+                        inner: Box::new(op.clone()),
+                    },
+                )
+            }
             OpCode::Rangecheck { value, max_bits }
                 if context.types().get_value_type(*value).is_witness_of() =>
             {
@@ -382,13 +396,31 @@ impl LowerWitnessFieldOps {
         };
 
         if !context.types().get_value_type(value).is_witness_of() {
-            b.emit(OpCode::ToRadix {
+            let decomposition = OpCode::ToRadix {
                 result,
                 value,
                 radix,
                 endianness,
                 count,
-            });
+            };
+            let decomposition = match guard {
+                Some(condition) => OpCode::Guard {
+                    condition,
+                    inner: Box::new(decomposition),
+                },
+                None => decomposition,
+            };
+            // A source radix can be a function parameter even when callers pass 256. The
+            // earlier pure-decomposition pass must decline that unknown radix. Now that the
+            // assertion above establishes Bytes, retain its fit check before emitting the
+            // raw decomposition. This branch never handles compiler-generated witness hints.
+            if !super::pure_decompositions::LowerPureDecompositions.lower_instruction(
+                b,
+                context,
+                &decomposition,
+            ) {
+                b.emit(decomposition);
+            }
             return true;
         }
 

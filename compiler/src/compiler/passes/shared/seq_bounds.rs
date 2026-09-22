@@ -8,7 +8,7 @@
 
 use crate::compiler::ssa::{
     ValueId,
-    hlssa::{CastTarget, CmpKind, OpCode, Type, TypeExpr, builder::HLEmitter},
+    hlssa::{CastTarget, CmpKind, HLSSA, OpCode, Type, TypeExpr, builder::HLEmitter},
 };
 use mavros_int_semantics::IntBits;
 
@@ -170,6 +170,7 @@ pub fn build_remove_bounds_assert(
 
 /// `index < len(seq)` for a user array/vector access, before witness-slice purification.
 pub fn build_seq_access_bounds_assert(
+    ssa: &HLSSA,
     emitter: &mut impl HLEmitter,
     seq: ValueId,
     index: ValueId,
@@ -182,6 +183,11 @@ pub fn build_seq_access_bounds_assert(
     ) {
         return None;
     }
+    assert!(
+        !matches!(seq_ty.strip_witness().expr, TypeExpr::Slice(_))
+            || !ssa.witness_slices_purified(),
+        "cannot derive logical slice bounds after witness-slice purification"
+    );
     let (_, len_cmp, idx_cmp, _) = seq_bounds_operands(emitter, seq, index, seq_ty, index_ty);
     Some(OpCode::AssertCmp {
         kind: CmpKind::ULt,
@@ -192,6 +198,7 @@ pub fn build_seq_access_bounds_assert(
 
 /// The check alone — DCE's form, when the op itself is dead. Returns whether one was emitted.
 pub fn emit_bounds_assert(
+    ssa: &HLSSA,
     emitter: &mut impl HLEmitter,
     check: &SeqBoundsCheck,
     seq_ty: Option<&Type>,
@@ -208,7 +215,7 @@ pub fn emit_bounds_assert(
         }
         SeqBoundsCheck::SeqAccess { seq, index } => {
             let seq_ty = seq_ty.expect("a sequence access bounds check requires the sequence type");
-            match build_seq_access_bounds_assert(emitter, *seq, *index, seq_ty, index_ty()) {
+            match build_seq_access_bounds_assert(ssa, emitter, *seq, *index, seq_ty, index_ty()) {
                 Some(assert) => assert,
                 None => return false,
             }

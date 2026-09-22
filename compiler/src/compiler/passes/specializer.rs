@@ -622,14 +622,6 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         }
     }
 
-    fn expect_constant_bool(&self, ctx: &mut SpecializationState) -> bool {
-        let val = ctx.const_vals.get(&self.0).unwrap();
-        match val {
-            ConstVal::Int(v) => v.is_one(),
-            _ => todo!(),
-        }
-    }
-
     fn select(
         &self,
         if_t: &Self,

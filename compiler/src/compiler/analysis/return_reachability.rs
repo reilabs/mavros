@@ -1,24 +1,34 @@
 //! Conservative return reachability, before DCE can discard unused unconstrained calls.
+//!
 //! The least fixed point admits a function only when some CFG path returns using callees
 //! already admitted. Recursive functions with a base case are admitted; unconditional call
 //! cycles are not. Unknown conditions, dynamic calls and guarded calls may return.
+//!
+//! Known gap: this proves only that an entry has no returning path. A conditionally reached
+//! non-returning call is accepted if another path returns, even when runtime inputs select
+//! the non-returning branch. It is not a termination proof for every execution.
 
 use crate::{
     collections::HashSet,
-    compiler::ssa::{
-        FunctionId, Terminator,
-        hlssa::{CallTarget, HLSSA, OpCode},
+    compiler::{
+        analysis::{flow_analysis::FlowAnalysis, shared::fixpoint::call_graph_fixpoint},
+        diagnostic::Diagnostic,
+        ssa::{
+            SourceLocation, Terminator,
+            hlssa::{CallTarget, HLSSA, OpCode},
+        },
     },
 };
 
-pub fn entry_can_return(ssa: &HLSSA) -> bool {
-    let mut returning = HashSet::default();
-    loop {
-        let before = returning.len();
-        for (id, function) in ssa.iter_functions() {
-            if returning.contains(id) {
-                continue;
-            }
+pub(crate) fn non_returning_entries(ssa: &HLSSA, flow: &FlowAnalysis) -> Vec<Diagnostic> {
+    let functions: Vec<_> = ssa.get_function_ids().collect();
+    let returning = call_graph_fixpoint(
+        ssa,
+        flow,
+        &functions,
+        |_| false,
+        |id, returning| {
+            let function = ssa.get_function(id);
             let mut pending = vec![function.get_entry_id()];
             let mut seen = HashSet::default();
             while let Some(block) = pending.pop() {
@@ -26,34 +36,66 @@ pub fn entry_can_return(ssa: &HLSSA) -> bool {
                     continue;
                 }
                 let block = function.get_block(block);
-                if block.get_instructions().any(|op| {
-                    matches!(op,
-                    OpCode::Call { function: CallTarget::Static(callee), .. }
-                    if !returning.contains(callee))
+                if block.get_instructions().any(|op| match op {
+                    OpCode::Call {
+                        function: CallTarget::Static(callee),
+                        ..
+                    } => !returning.get(callee).copied().unwrap_or(true),
+                    _ => false,
                 }) {
                     continue;
                 }
                 match block.get_terminator() {
-                    Some(Terminator::Return(_)) => {
-                        returning.insert(*id);
-                        break;
-                    }
+                    Some(Terminator::Return(_)) => return true,
+                    // Incomplete IR is not a proof of non-return.
+                    None => return true,
                     Some(Terminator::Jmp(target, _)) => pending.push(*target),
                     Some(Terminator::JmpIf(_, a, b)) => pending.extend([*a, *b]),
-                    None => {
-                        returning.insert(*id);
-                        break;
-                    } // Incomplete IR is not a proof.
                 }
             }
-        }
-        if returning.len() == before {
-            return ssa
-                .get_entry_points()
-                .iter()
-                .all(|id: &FunctionId| returning.contains(id));
-        }
-    }
+            false
+        },
+    );
+    ssa.get_entry_points()
+        .iter()
+        .filter(|id| !returning[id])
+        .map(|id| {
+            let function = ssa.get_function(*id);
+            let mut fallback = None;
+            let mut call_location = None;
+            for block in flow.get_function_cfg(*id).get_domination_pre_order() {
+                for (op, location) in function
+                    .get_block(block)
+                    .get_instructions_with_source_locations()
+                {
+                    fallback.get_or_insert_with(|| location.clone());
+                    if matches!(op, OpCode::Call { function: CallTarget::Static(callee), .. }
+                    if !returning.get(callee).copied().unwrap_or(true))
+                    {
+                        call_location = Some(location.clone());
+                        break;
+                    }
+                }
+                if call_location.is_some() {
+                    break;
+                }
+            }
+            // Terminators have no source spans. An instruction-free CFG loop can only use a
+            // synthetic location; source recursion reports the offending call's actual span.
+            Diagnostic::error(
+                "entry point has no returning path (unconditional recursion or loop)",
+                call_location
+                    .or(fallback)
+                    .unwrap_or_else(|| SourceLocation::synthetic("return_reachability")),
+            )
+            .with_note(format!("entry point: {}", function.get_name()))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn entry_can_return(ssa: &HLSSA) -> bool {
+    non_returning_entries(ssa, &FlowAnalysis::run(ssa)).is_empty()
 }
 
 #[cfg(test)]

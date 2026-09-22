@@ -55,3 +55,30 @@ fn source_checks_survive_unused_results_and_respect_inactive_branches() {
         }
     }
 }
+
+#[test]
+fn nonreturning_recursion_reports_the_source_call_and_keeps_debug_dumps() {
+    for name in ["nonreturning_recursion", "nonreturning_mutual_recursion"] {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../noir_failure_tests")
+            .join(name);
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        for file in ["Nargo.toml", "src/main.nr"] {
+            std::fs::copy(fixture.join(file), dir.path().join(file)).unwrap();
+        }
+        let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
+        driver.run_noir_compiler().unwrap();
+        let error = driver.make_struct_access_static().unwrap_err();
+        let mavros_compiler::driver::Error::UnsatisfiableProgram(diagnostics) = &error else {
+            panic!("expected a non-returning diagnostic, got {error:?}");
+        };
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].location().file.ends_with("src/main.nr"));
+        assert!(diagnostics[0].location().start.line > 0);
+        let rendered = error.to_string();
+        assert!(rendered.contains("unsafe"), "{rendered}");
+        let debug = dir.path().join("mavros_debug/validate_return_reachability");
+        assert!(debug.is_dir(), "validation should be in the debug pipeline");
+    }
+}
