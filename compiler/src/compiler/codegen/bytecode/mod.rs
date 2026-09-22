@@ -1277,10 +1277,10 @@ impl CodeGen {
                     }
                 }
 
-                // Unreachable on any program that gets here: `LowerWitnessBitwiseOps::lower_not`
-                // rewrites every `Not`, pure or witness, into `(2^bits - 1) - value` during
-                // `spill_witness`. Kept because lowering a pure `Not` straight to `NotInt` is the
-                // obvious way to make it one instruction instead of a field subtraction.
+                // Every complement outside the witness domain. `LowerWitnessBitwiseOps::lower_not`
+                // takes the witnessed ones during `spill_witness` and rewrites those into
+                // `(2^bits - 1) - value`, so what reaches here is a pure `Not` and the opcode makes
+                // it one instruction instead of a field subtraction.
                 hlssa::OpCode::Not {
                     result: r,
                     value: v,

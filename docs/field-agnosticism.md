@@ -321,8 +321,8 @@ that gives each field its own implementation. Nothing here is outstanding P3 wor
       `bit_range`/`sext`/`to_bits`/`not`/`rangecheck`/`to_radix`/spread.
 - [ ] `vm/src/bytecode.rs:1767-1815,1242-1252` — `rngchk`/`to_bytes_be|le`/`truncate_f_to_u` (slice
       `into_bigint().0` limbs).
-- [ ] `compiler/src/compiler/passes/shared/limbs.rs` — `combine_limbs`/`derive_low_limb` place
-      values (`two_pow`).
+- [ ] `compiler/src/compiler/passes/shared/limbs.rs` — `combine_limbs_of_value` place values
+      (`two_pow`).
 - [ ] `compiler/src/compiler/passes/instruction_lowering/witness_bitwise.rs` — bitmask/sign-extend
       via `b.field().two_pow(..)`. The helper is gone (see `L4-two-pow`); what remains is the
       _strategy_, which wraps mod p once the shift reaches the field width (see also
@@ -512,8 +512,10 @@ Let `B = floor(log2 p)` (bn254: 253; goldilocks: 63). For standard widths on gol
   technically be made to fit"); bitwise natural-spread (≤ 32 bits) and shl fit. All **fragile** —
   correct standalone, but a fused `q·divisor + r` reconstruction can tip over.
 - `u64 / u128 / i64`: a bare value's range `≥ p` (`2⁶⁴ − 1 > p`) ⇒ it **cannot be held injectively
-  in one cell**; every recombination into one cell (`shared/limbs.rs`'s `combine_limbs`,
-  `lower_not`'s `2⁶⁴ − 1`, signed `sign·2⁶⁴` packing) wraps.
+  in one cell**; every recombination into one cell (`shared/limbs.rs`'s `combine_limbs_of_value`,
+  signed `sign·2⁶⁴` packing) wraps. `lower_not`'s all-ones mask is **not** in that list any more:
+  the representation splits a witnessed `u64` into limbs on such a field before the complement is
+  lowered, so the mask is only ever minted at a width the cell holds.
 
 So on goldilocks standard widths collapse to **{single-field for n ≤ 32, multi-cell for n ≥ 64}**;
 the "operation-strategy-only" band is empty for standard widths. `range_fits_field_injectively`
@@ -534,7 +536,7 @@ machine-readable half of this register.
 The call sites: `witness_bitwise`'s `lower_integer_sext`, `lower_word_bitwise` (spread width) and
 `product_headroom_or_bail`; `witness_integer_arith`'s `lower_unsigned_mul` (both the single-field
 product and the two-limb packing, the latter covering the limb _count_ as well as the packing);
-`lower_signed_addsub` and `lower_signed_mul`; `shared/limbs.rs`'s `combine_limbs` (the
+`lower_signed_addsub` and `lower_signed_mul`; `shared/limbs.rs`'s `combine_limbs_of_value` (the
 recombination); `witness_field`'s `to_bits` and `to_radix`; and `shared::overflow_guard`'s
 `abs_as_u`.
 
@@ -570,25 +572,39 @@ A single-field arithmetic op assumes its exact result span fits one cell (one `b
       fallback packing), `lower_signed_mul` (no fallback), `lower_unsigned_addsub`,
       `lower_signed_addsub`, `signed_value_from_encoded`/`encode_signed_value` (sign packing),
       `lower_unsigned_divmod`.
-- [ ] `witness_bitwise.rs` — `lower_not`, `lower_integer_sext`, `lower_word_bitwise` (spread width).
+- [ ] `witness_bitwise.rs` — `lower_integer_sext`, `lower_word_bitwise` (spread width).
+- [x] `witness_bitwise.rs` — `lower_not`. The FALSE case is the **representation**, not a second
+      lowering: `WideWitnessInts` runs ahead of this pass, with only the narrowing-cast lowering
+      between them, and splits a witnessed value wider than `multi_cell_int_bits` into limbs,
+      complementing each at its own width — and that threshold **is** `widest_injective_int_bits`.
+      So the all-ones mask this mints is bounded by `2^(bits(p) - 1) - 1 < p` on any field, and
+      there is no width at which it can wrap. The assert on the bound states the coupling rather
+      than guarding a reachable case.
 
 **Five of these refuse** rather than miscompiling when their span does not fit (see the funnel
 above): `lower_unsigned_mul` on both its paths, `lower_signed_mul`, `lower_signed_addsub`,
 `lower_integer_sext` and `lower_word_bitwise`. What remains for P5 at those five is the FALSE-case
-lowering itself.
+lowering itself — except at `lower_word_bitwise`, where it partly exists. `lower_binary_bitwise`
+asks `spread_sum_fits_field` before taking the whole-width arm, so a width whose spread sum the
+field cannot hold falls through to the half-limb decomposition instead of refusing. What that site
+still refuses is a field whose **half-limb** spread sum does not fit, which no decomposition below
+it helps.
 
 **The rest still carry the assumption unchecked**, with only a `FIELD-ASSUMPTION` comment on it, and
 are what to fix first if a narrow field is configured before P5's lowerings exist:
-`lower_unsigned_addsub`, `lower_not`, and the `signed_value_from_encoded`/`encode_signed_value` sign
-packing. `lower_unsigned_divmod` is a mixture: its 128-bit path reconstructs `q·divisor + r` by
-emitting `UMul`/`UAdd` **ops**, which this same pass re-lowers, so it inherits the mul's refusal and
-the add's gap; its narrow path multiplies in the field directly and has no check of its own.
+`lower_unsigned_addsub` and the `signed_value_from_encoded`/`encode_signed_value` sign packing.
+`lower_unsigned_divmod` is a mixture: its 128-bit path reconstructs `q·divisor + r` by emitting
+`UMul`/`UAdd` **ops**, which this same pass re-lowers, so it inherits the mul's refusal and the
+add's gap; its narrow path multiplies in the field directly and has no check of its own.
 
 Note that the funnel's condition is per-site, because `witness_limb_bits` certifies only that a bare
 `a·b` fits. A lowering that additionally scales a column by a place value asks
 `two_limb_product_packing_fits`, one that spreads asks `spread_sum_fits_field`, and one that
-recombines asks `combined_limbs_fit_field` — all three in `shared/limbs.rs`, alongside the limb rule
-they each strengthen.
+recombines asks for the width of the value its limbs came from, which is `widest_injective_int_bits`
+— all three in `shared/limbs.rs`, alongside the limb rule they each strengthen. The recombination
+asks the value's width rather than the limbs' nominal span (`combined_limbs_fit_modulus`, which the
+limb rule itself uses) because a decomposition may bound its top limb below a full one, and the
+nominal question would then refuse widths that fit.
 
 ### `L6-int-representation` — Value Range `≥ p` Assumed to Fit One Cell (Representation, P5 multi-cell)
 
@@ -602,20 +618,22 @@ serde). Wide integers are supported, not capped away.
       multi-cell representation carries any width `> B` on a small field. What _is_ field-derived is
       the narrow/wide dispatch threshold, `passes::shared::limbs::narrow_int_bits` — one field cell
       and one host word, whichever binds first.
-- [ ] `passes/shared/limbs.rs` — `combine_limbs` (recombines `⌈n/h⌉` limbs into **one** cell). The
-      limb _widths_ are done: `witness_limb_bits` derives `h` from the modulus, and every splitter
-      and place value in the tree now asks it — though asking it is not on its own a proof that the
-      _result_ fits, which is why the packing, spread and recombination sites carry their own
-      predicates. `combine_limbs` now refuses through the funnel when `⌈n/h⌉` limbs do not fit one
-      cell, so the wrap is not reachable; what is left is the multi-cell target that would let it
-      **succeed** instead, and the limb count on the way there — a decomposition wider than two
-      limbs has nowhere to go, so `WitnessLimbs::pair` refuses rather than truncates.
+- [ ] `passes/shared/limbs.rs` — `combine_limbs_of_value` (recombines `⌈n/h⌉` limbs into **one**
+      cell). The limb _widths_ are done: `witness_limb_bits` derives `h` from the modulus, and every
+      splitter and place value in the tree now asks it — though asking it is not on its own a proof
+      that the _result_ fits, which is why the packing, spread and recombination sites carry their
+      own predicates. The recombination refuses through the funnel when the value being rebuilt is
+      wider than one cell carries injectively, so the wrap is not reachable; what is left is the
+      multi-cell target that would let it **succeed** instead.
 - [ ] `witness_integer_arith.rs` — `split_u128_value`'s caller `lower_unsigned_mul` reads the split
-      as a pair.
-- [ ] `witness_bitwise.rs` — the `bits == 64` / `bits == 128` bitwise dispatch is a **type**-width
-      dispatch, so on a narrower field it routes a `u64` to a lowering that no longer suits it.
-      `decompose_into_half_limbs` asserts on exactly that mismatch, so the miscompile is not
-      reachable, but the dispatch still has to grow a `⌈n/h⌉` arm before a narrow field works.
+      as a pair, so a decomposition wider than two limbs has nowhere to go and `WitnessLimbs::pair`
+      refuses rather than truncates.
+- [x] `witness_bitwise.rs` — the bitwise dispatch has its `⌈n/h⌉` arm. `decompose_into_spread_limbs`
+      splits any width into `⌈n/(h/2)⌉` half-limbs and bounds each at the bits it actually carries,
+      so no arm is keyed on a **type** width any more and a narrower field gets more limbs rather
+      than a lowering that no longer suits the value. The arms above it are a single bit, which is
+      field arithmetic at any width, and a whole-width spread, which asks `spread_sum_fits_field`
+      before taking itself.
 
 The `value_range_analysis.rs` interval domain is over `BigInt` and stays correct on any field — it
 already produces the exact spans the FALSE-case codegen consumes (no new marker; only `field_top` /
