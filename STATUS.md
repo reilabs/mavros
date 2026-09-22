@@ -26,7 +26,7 @@
 | noir_tests/array_witness_set_dead_guarded_false | ✅ | ✅ | 36 | 66 | 15856 | 3188 | 52694 | 224217 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/array_witness_set_guarded_false | ✅ | ✅ | 40 | 59 | 16952 | 4977 | 57861 | 229877 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/array_witness_set_nested | ✅ | ✅ | 46 | 69 | 18976 | 8128 | 65578 | 239578 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir_tests/assert_constant | ✅ | ✅ | 0 | 2 | 161472 | 2106 | 185105 | 355298 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ |
+| noir_tests/assert_constant | ✅ | ✅ | 0 | 2 | 161472 | 2106 | 185105 | 355298 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/assert_constant_large_value | ✅ | ✅ | 1 | 2 | 2616 | 2447 | 27501 | 197785 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/assert_constant_large_value_control | ✅ | ✅ | 1 | 2 | 2408 | 2125 | 26823 | 196981 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/assert_constant_unconstrained_divergence | ✅ | ✅ | 0 | 2 | 1120 | 744 | 24937 | 194331 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -399,7 +399,7 @@
 | noir/test_programs/execution_success/global_var_entry_point_used_in_another_entry | ✅ | ✅ | 0 | 3 | 1576 | 1357 | 25653 | 195307 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/global_var_func_with_multiple_entry_points | ✅ | ✅ | 0 | 3 | 1576 | 1355 | 25653 | 195309 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/global_var_multiple_entry_points_nested | ✅ | ✅ | 0 | 3 | 1512 | 1233 | 25465 | 195112 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/global_var_regression_entry_points | ✅ | ✅ | 12 | 15 | 2142952 | 12778 | 2167433 | 2340179 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ |
+| noir/test_programs/execution_success/global_var_regression_entry_points | ✅ | ✅ | 12 | 15 | 2142952 | 12778 | 2167433 | 2340179 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/global_var_regression_simple | ✅ | ✅ | 993 | 1816 | 69424 | 42680 | 77856 | 258390 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/global_vector_rc_regression_8259 | ✅ | ✅ | 1 | 2 | 3048 | 2269 | 27859 | 198575 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/higher_order_functions | ✅ | ✅ | 2 | 4 | 30064 | 29817 | 48511 | 230018 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -540,7 +540,7 @@
 | noir/test_programs/execution_success/regression_4202 | ✅ | ✅ | 53 | 98 | 11104 | 6576 | 44343 | 216826 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_4449 | ✅ | ✅ | 1635466 | 3084760 | 97328 | 73996 | 207893 | 399582 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_4663 | ✅ | ✅ | 0 | 1 | 216 | 505 | 24793 | 194081 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/regression_4709 | ✅ | ✅ | 558 | 1030 | 2207744 | 40159 | 2208264 | 2389561 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ➖ | ➖ | ❌ | ➖ | ➖ |
+| noir/test_programs/execution_success/regression_4709 | ✅ | ✅ | 558 | 1030 | 2207744 | 40159 | 2208264 | 2389561 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_5045 | ✅ | ✅ | 121472 | 208840 | 106704 | 68034 | 200051 | 389906 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_5252 | ✅ | ✅ | 55066 | 47747 | 165512 | 136275 | 198456 | 399324 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_5435 | ✅ | ✅ | 1 | 3 | 2720 | 1565 | 28509 | 199085 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
