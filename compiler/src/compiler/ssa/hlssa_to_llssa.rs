@@ -126,7 +126,7 @@ fn sequence_data_field(ty: &HLType) -> usize {
 
 fn sequence_len_value(e: &mut LLBlockEmitter<'_>, ptr: ValueId, ty: &HLType) -> ValueId {
     match &ty.expr {
-        HLTypeExpr::Array(_, n) => e.emit_int_const(64, *n as u64),
+        HLTypeExpr::Array(_, n) | HLTypeExpr::Blob(_, n) => e.emit_int_const(64, *n as u64),
         HLTypeExpr::Slice(_) => {
             let rc_struct = sequence_rc_struct(ty);
             let len_ptr = e.struct_field_ptr(ptr, rc_struct, SEQ_LEN_FIELD);
@@ -2136,7 +2136,7 @@ fn lower_ref_load(
     val_map.insert(result, val);
 }
 
-/// Lower ArrayGet to struct_field_ptr + array_elem_ptr + load.
+/// Bounds-check ArrayGet before computing an element pointer and loading it.
 fn lower_array_get(
     e: &mut LLBlockEmitter<'_>,
     val_map: &mut HashMap<ValueId, ValueId>,
@@ -2153,8 +2153,12 @@ fn lower_array_get(
     let ll_arr = val_map[&array];
     let ll_idx = val_map[&index];
 
-    // ZExt index from u32 to i64 for pointer arithmetic
+    // Check the full index before wasm32 pointer arithmetic can truncate or wrap it.
+    // This also covers constant blobs, whose data comes from sequence_data_ptr.
     let idx64 = e.zext(ll_idx, 64);
+    let len = sequence_len_value(e, ll_arr, arr_type);
+    let in_bounds = e.int_ult(idx64, len);
+    assert(e, in_bounds);
 
     let data = sequence_data_ptr(e, ll_arr, arr_type);
     let elem_ptr = e.array_elem_ptr(data, es, idx64);
@@ -2198,8 +2202,10 @@ fn lower_array_set(
     let ll_val = val_map[&value];
     let len = sequence_len_value(e, ll_arr, arr_type);
 
-    // ZExt index
+    // Reject invalid indices before pointer arithmetic or copy-on-write side effects.
     let idx64 = e.zext(ll_idx, 64);
+    let in_bounds = e.int_ult(idx64, len);
+    assert(e, in_bounds);
 
     // Load RC
     let hdr = e.struct_field_ptr(ll_arr, rc_struct.clone(), 0);
@@ -4752,6 +4758,128 @@ mod tests {
         ssa::{DefaultSSAAnnotator, llssa::builder::LLSSABuilder},
     };
     use mavros_int_semantics::IntBits;
+
+    /// Exercise the backend backstop directly, without the earlier guard-insertion passes.
+    /// Noir corpus cases cover that full pipeline separately.
+    #[test]
+    fn indexed_accesses_trap_in_wasm_before_pointer_arithmetic() {
+        use crate::compiler::{
+            analysis::types::Types,
+            codegen::llssa_to_llvm::{LLVMCodeGen, WasmCompileOpts},
+            ssa::hlssa::{
+                SequenceTargetType,
+                builder::{HLEmitter, HLSSABuilder},
+            },
+        };
+        use mavros_wasm_layout::{WITGEN_INPUTS_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE};
+        let runtime = crate::wasm_runtime::locate_or_build();
+        for (name, sequence, write) in [
+            ("array_get", Some(SequenceTargetType::Array(2)), false),
+            ("slice_get", Some(SequenceTargetType::Slice), false),
+            ("blob_get", None, false),
+            ("array_set", Some(SequenceTargetType::Array(2)), true),
+            ("slice_set", Some(SequenceTargetType::Slice), true),
+        ] {
+            let mut hlssa = HLSSA::with_main(name.to_string());
+            let main = hlssa.get_unique_entrypoint_id();
+            hlssa
+                .get_function_mut(main)
+                .add_return_type(HLType::int(64));
+            HLSSABuilder::new(&mut hlssa).modify_function(main, |fb| {
+                let entry = fb.function.get_entry_id();
+                let mut e = fb.test_block(entry);
+                let inputs = e.add_parameter(HLType::blob(HLType::int(64), 3));
+                let zero = e.int_const(IntBits::from(0u64));
+                let index = e.array_get(inputs, zero);
+                let array = if let Some(kind) = sequence {
+                    let a = e.int_const(IntBits::from(10u64));
+                    let b = e.int_const(IntBits::from(20u64));
+                    e.mk_seq(vec![a, b], kind, HLType::int(64))
+                } else {
+                    inputs
+                };
+                let array = if write {
+                    let value = e.int_const(IntBits::from(99u64));
+                    e.array_set(array, index, value)
+                } else {
+                    array
+                };
+                // A valid read after ArraySet must not mask a missing write-side guard.
+                let read_index = if write {
+                    e.int_const(IntBits::from(1u64))
+                } else {
+                    index
+                };
+                let result = e.array_get(array, read_index);
+                e.terminate_return(vec![result]);
+            });
+            let flow = FlowAnalysis::run(&hlssa);
+            let types = Types::new().run(&hlssa, &flow);
+            let llssa = lower_inner(&hlssa, &flow, &types, None, CodeGenOptions::default());
+            let context = inkwell::context::Context::create();
+            let mut codegen = LLVMCodeGen::new(&context, name);
+            codegen.compile(&llssa, &FlowAnalysis::run(&llssa));
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("bounds.wasm");
+            codegen.compile_to_wasm(&path, WasmCompileOpts::fast(runtime.clone()));
+            let engine = wasmtime::Engine::default();
+            let module = wasmtime::Module::from_file(&engine, &path).unwrap();
+            let len = if name == "blob_get" { 3 } else { 2 };
+            // The large index wraps an eight-byte offset to zero; it must trap even though
+            // that wrapped address lies inside linear memory and names an allocated element.
+            for index in [1u64, len, 1 << 61, u64::MAX] {
+                let mut store = wasmtime::Store::new(&engine, ());
+                let memory =
+                    wasmtime::Memory::new(&mut store, wasmtime::MemoryType::new(8, None)).unwrap();
+                let mut linker = wasmtime::Linker::new(&engine);
+                linker.define(&store, "env", "memory", memory).unwrap();
+                let instance = linker.instantiate(&mut store, &module).unwrap();
+                let data_end = instance
+                    .get_global(&mut store, "__data_end")
+                    .unwrap()
+                    .get(&mut store)
+                    .i32()
+                    .unwrap() as u32;
+                let vm = (data_end + 15) & !15;
+                let inputs = (vm + WITGEN_VM_STRUCT_SIZE + 7) & !7;
+                memory
+                    .write(
+                        &mut store,
+                        (vm + WITGEN_INPUTS_PTR_OFFSET) as usize,
+                        &inputs.to_le_bytes(),
+                    )
+                    .unwrap();
+                for (i, value) in [index, 10, 20].into_iter().enumerate() {
+                    memory
+                        .write(&mut store, inputs as usize + 8 * i, &value.to_le_bytes())
+                        .unwrap();
+                }
+                let run = instance
+                    .get_typed_func::<i32, i64>(&mut store, "mavros_main")
+                    .unwrap();
+                let result = run.call(&mut store, vm as i32);
+                if index == 1 {
+                    assert_eq!(
+                        result.unwrap(),
+                        if write {
+                            99
+                        } else if name == "blob_get" {
+                            10
+                        } else {
+                            20
+                        },
+                        "{name}"
+                    );
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().downcast_ref::<wasmtime::Trap>(),
+                        Some(&wasmtime::Trap::UnreachableCodeReached),
+                        "{name}, index={index}"
+                    );
+                }
+            }
+        }
+    }
 
     /// The limbs a width reaches, and nothing above them.
     fn packing_dump(bits: usize, pack: bool) -> String {

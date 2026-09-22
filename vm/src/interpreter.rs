@@ -283,13 +283,18 @@ pub struct WitgenResult {
     pub instrumenter: AllocationInstrumenter,
 }
 
-/// The program executed a trap: a failed assertion or rangecheck.
+/// The program executed a trap: a failed assertion, rangecheck, or bounds check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrapError {
+    message: Option<String>,
     stack_trace: Vec<bytecode::StackFrame>,
 }
 
 impl TrapError {
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+
     pub fn stack_trace(&self) -> &[bytecode::StackFrame] {
         &self.stack_trace
     }
@@ -304,6 +309,9 @@ impl TrapError {
 impl std::fmt::Display for TrapError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "VM trapped during execution")?;
+        if let Some(message) = &self.message {
+            write!(f, ": {message}")?;
+        }
         let has_explanatory_frame = self
             .stack_trace
             .iter()
@@ -475,6 +483,7 @@ fn run_phase1_impl(
 
     if vm.trapped {
         return Err(TrapError {
+            message: vm.trap_message.take(),
             stack_trace: std::mem::take(&mut vm.stack_trace),
         });
     }
@@ -953,6 +962,7 @@ fn run_ad_impl(
 
     if vm.trapped {
         return Err(TrapError {
+            message: vm.trap_message.take(),
             stack_trace: std::mem::take(&mut vm.stack_trace),
         });
     }
@@ -1060,6 +1070,7 @@ mod tests {
     #[test]
     fn trap_error_source_paths_can_be_made_relative() {
         let mut error = TrapError {
+            message: Some("array_get: index 2 out of bounds for array of length 2".into()),
             stack_trace: vec![
                 bytecode::StackFrame {
                     function: "helper".to_string(),
@@ -1076,13 +1087,14 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "VM trapped during execution\n  at helper (src/helper.nr:24:7)"
+            "VM trapped during execution: array_get: index 2 out of bounds for array of length 2\n  at helper (src/helper.nr:24:7)"
         );
     }
 
     #[test]
     fn explanatory_wrapper_frame_is_not_elided() {
         let error = TrapError {
+            message: None,
             stack_trace: vec![bytecode::StackFrame {
                 function: "wrapper_main".to_string(),
                 location: bytecode::SourceLocation::new("<public return value check>", 1, 1),
