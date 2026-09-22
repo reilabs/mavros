@@ -270,14 +270,14 @@ impl Type {
             TypeExpr::Slice(inner) => *inner.clone(),
             TypeExpr::Blob(inner, _) => *inner.clone(),
             TypeExpr::WitnessOf(inner) => Type::witness_of_collapsed(inner.get_array_element()),
-            _ => panic!("Type is not an array: {}", self),
+            _ => ice!("Type is not an array: {}", self),
         }
     }
 
     pub fn get_pointed(&self) -> Self {
         match &self.expr {
             TypeExpr::Ref(inner) => *inner.clone(),
-            _ => panic!("Type is not a reference: {}", self),
+            _ => ice!("Type is not a reference: {}", self),
         }
     }
 
@@ -289,7 +289,7 @@ impl Type {
             TypeExpr::WitnessOf(inner) => {
                 Type::witness_of_collapsed(inner.get_tuple_element(index))
             }
-            _ => panic!("Type is not a tuple: {}", self),
+            _ => ice!("Type is not a tuple: {}", self),
         }
     }
 
@@ -303,14 +303,14 @@ impl Type {
                 .into_iter()
                 .map(Type::witness_of_collapsed)
                 .collect(),
-            _ => panic!("Type is not a tuple: {}", self),
+            _ => ice!("Type is not a tuple: {}", self),
         }
     }
 
     pub fn get_refered(&self) -> &Self {
         match &self.expr {
             TypeExpr::Ref(inner) => inner.as_ref(),
-            _ => panic!("Type is not a reference: {}", self),
+            _ => ice!("Type is not a reference: {}", self),
         }
     }
 
@@ -322,7 +322,7 @@ impl Type {
             TypeExpr::Int(size) => *size,
             TypeExpr::Field => field.field_bit_size() as usize,
             TypeExpr::WitnessOf(inner) => inner.get_bit_size(field),
-            _ => panic!("Type is not numeric: {}", self),
+            _ => ice!("Type is not numeric: {}", self),
         }
     }
 
@@ -332,7 +332,7 @@ impl Type {
     pub fn unwrap_witness_of(&self) -> &Type {
         match &self.expr {
             TypeExpr::WitnessOf(inner) => inner,
-            _ => panic!("Type is not WitnessOf: {}", self),
+            _ => ice!("Type is not WitnessOf: {}", self),
         }
     }
 
@@ -492,7 +492,7 @@ impl Type {
                 assert_eq!(x, y, "Cannot join blobs with different element types");
                 Type::blob(*x.clone(), *n)
             }
-            _ => panic!("Cannot join types {} and {}", a, b),
+            _ => ice!("Cannot join types {} and {}", a, b),
         }
     }
 
@@ -522,7 +522,7 @@ impl Type {
             }
             (TypeExpr::Field, _) | (_, TypeExpr::Field) => Type::field(),
             (TypeExpr::Int(size1), TypeExpr::Int(size2)) => Type::int(*size1.max(size2)),
-            _ => panic!("Cannot perform arithmetic on types {} and {}", self, other),
+            _ => ice!("Cannot perform arithmetic on types {} and {}", self, other),
         }
     }
 
@@ -579,7 +579,7 @@ impl Type {
             TypeExpr::Blob(inner, n) => inner.calculate_type_size() * n,
             TypeExpr::Int(_) => 1,
             TypeExpr::WitnessOf(_) => 1, // pointer-sized (witness tape reference)
-            _ => panic!("Cannot currently calculate size for type {}", self),
+            _ => ice!("Cannot currently calculate size for type {}", self),
         }
     }
 }

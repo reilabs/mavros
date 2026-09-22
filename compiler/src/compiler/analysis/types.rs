@@ -1,8 +1,6 @@
 //! An analysis pass that gathers (extrinsic) type information wherever needed, avoiding the need to
 //! perform detailed bookkeeping of type information whenever transforming the IR.
 
-use core::panic;
-
 use mavros_artifacts::FieldConfig;
 use tracing::{Level, instrument};
 
@@ -51,7 +49,7 @@ pub(crate) fn pool_constant_types(
                 return None;
             }
             let typ = const_value_type(cv, &|fn_id| {
-                function_returns(fn_id).unwrap_or_else(|| panic!("ICE: no signature for {fn_id:?}"))
+                function_returns(fn_id).unwrap_or_else(|| ice!("no signature for {fn_id:?}"))
             });
             Some((*vid, typ))
         })
@@ -79,7 +77,7 @@ fn replace_array_element_type(container: &Type, element_type: Type) -> Type {
         TypeExpr::WitnessOf(inner) => {
             Type::witness_of_collapsed(replace_array_element_type(inner, element_type))
         }
-        _ => panic!("Type is not an array: {}", container),
+        _ => ice!("Type is not an array: {}", container),
     }
 }
 
@@ -128,18 +126,8 @@ impl Types {
             functions: HashMap::default(),
         };
 
-        let function_types = ssa
-            .iter_functions()
-            .map(|(id, func)| (*id, (func.get_param_types(), func.get_returns())))
-            .collect::<HashMap<_, _>>();
-
-        // The constants side-table is module-level; pre-compute types for every constant
-        // `ValueId` so `run_function` can seed `function_info` with them.
-        let constant_types = pool_constant_types(&ssa.const_snapshot(), &|fn_id| {
-            function_types
-                .get(&fn_id)
-                .map(|(_, returns)| returns.to_vec())
-        });
+        let function_types = Self::function_types(ssa);
+        let constant_types = Self::constant_types(ssa, &function_types);
 
         // The configured field, threaded through calls so that the width of a `Field` can be read
         // from it rather than a static.
@@ -152,6 +140,21 @@ impl Types {
             type_info.functions.insert(*function_id, function_info);
         }
         type_info
+    }
+
+    pub(crate) fn function_types(ssa: &HLSSA) -> HashMap<FunctionId, (Vec<Type>, &[Type])> {
+        ssa.iter_functions()
+            .map(|(id, function)| (*id, (function.get_param_types(), function.get_returns())))
+            .collect()
+    }
+
+    pub(crate) fn constant_types(
+        ssa: &HLSSA,
+        signatures: &HashMap<FunctionId, (Vec<Type>, &[Type])>,
+    ) -> HashMap<ValueId, Type> {
+        pool_constant_types(&ssa.const_snapshot(), &|id| {
+            signatures.get(&id).map(|(_, returns)| returns.to_vec())
+        })
     }
 
     fn spread_result_type(value_type: &Type) -> Result<Type, String> {
@@ -226,7 +229,7 @@ impl Types {
 
             for instruction in block.get_instructions() {
                 self.run_opcode(instruction, &mut function_info, function_types, field)
-                    .unwrap_or_else(|e| panic!("Error running opcode {instruction:?}: {e}"));
+                    .unwrap_or_else(|e| ice!("Error running opcode {instruction:?}: {e}"));
             }
         }
 
@@ -637,7 +640,7 @@ impl Types {
                     Some(Type {
                         expr: TypeExpr::Blob(_, len),
                     }) => *len,
-                    other => panic!("ICE: MkSeqOfBlob expected Blob input, got {:?}", other),
+                    other => ice!("MkSeqOfBlob expected Blob input, got {:?}", other),
                 };
                 function_info
                     .values
@@ -691,7 +694,7 @@ impl Types {
                              for a value of type int{operand_bits}"
                         ));
                     }
-                    _ => panic!("SExt on non-integer type: {:?}", value_type),
+                    _ => ice!("SExt on non-integer type: {:?}", value_type),
                 };
                 let result_type = if value_type.is_witness_of() {
                     Type::witness_of(widened)

@@ -64,10 +64,10 @@ fn emit_select(
         }
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
         TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::WitnessOf(_) => b.select(cond, lhs, rhs),
-        TypeExpr::Ref(_) => panic!("Witness select on Ref type not supported"),
+        TypeExpr::Ref(_) => ice!("Witness select on Ref type not supported"),
         TypeExpr::Slice(_) => b.select(cond, lhs, rhs),
-        TypeExpr::Function(_) => panic!("Witness select on Function type not supported"),
-        TypeExpr::Blob(..) => panic!("Witness select on Blob type not supported"),
+        TypeExpr::Function(_) => ice!("Witness select on Function type not supported"),
+        TypeExpr::Blob(..) => ice!("Witness select on Blob type not supported"),
     }
 }
 

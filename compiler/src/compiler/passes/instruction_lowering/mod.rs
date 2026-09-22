@@ -398,7 +398,7 @@ impl Pass for InstructionLowering {
                 return;
             }
         }
-        panic!("instruction lowering did not reach a fixed point");
+        ice!("instruction lowering did not reach a fixed point");
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {

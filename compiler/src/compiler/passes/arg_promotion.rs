@@ -623,7 +623,7 @@ fn rewrite_callee(func: &mut HLFunction, cp: &CalleePlan) {
         }
         match block.get_terminator_mut() {
             Terminator::Return(vals) => vals.extend(lvs.iter().copied()),
-            _ => unreachable!("return_loads recorded only for Return blocks"),
+            _ => ice_unreachable!("return_loads recorded only for Return blocks"),
         }
     }
     for pp in in_out {
@@ -672,7 +672,7 @@ fn apply_call_rewrite(instr: OpCode, cr: &CallRewrite, out: &mut Vec<OpCode>) {
         unconstrained,
     } = instr
     else {
-        unreachable!("apply_call_rewrite on a non-Call");
+        ice_unreachable!("apply_call_rewrite on a non-Call");
     };
 
     let mut new_args = args.clone();

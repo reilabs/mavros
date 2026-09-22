@@ -127,7 +127,7 @@ pub fn emit_overflow_cond(
         }
         (false, ArithGroup::Mul) => unsigned_mul_overflow(emitter, lhs, rhs, bits),
         (true, ArithGroup::Mul) => signed_mul_overflow(emitter, lhs, rhs, bits),
-        (_, group) => unreachable!("overflow condition for a non-arithmetic group: {group:?}"),
+        (_, group) => ice_unreachable!("overflow condition for a non-arithmetic group: {group:?}"),
     }
 }
 
@@ -172,7 +172,7 @@ fn unsigned_add_sub_overflow(
     match group {
         ArithGroup::Add => emitter.ult(wrapped, lhs),
         ArithGroup::Sub => emitter.ult(lhs, wrapped),
-        other => unreachable!("unsigned add/sub overflow for {other:?}"),
+        other => ice_unreachable!("unsigned add/sub overflow for {other:?}"),
     }
 }
 
@@ -202,7 +202,7 @@ fn signed_add_sub_overflow(
     match group {
         ArithGroup::Add => emitter.and(signs_same, sign_l_xor_result),
         ArithGroup::Sub => emitter.and(signs_differ, sign_l_xor_result),
-        other => unreachable!("signed add/sub overflow for {other:?}"),
+        other => ice_unreachable!("signed add/sub overflow for {other:?}"),
     }
 }
 
