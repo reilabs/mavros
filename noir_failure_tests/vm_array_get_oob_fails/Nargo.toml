@@ -1,0 +1,6 @@
+[package]
+name = "vm_array_get_oob_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]
