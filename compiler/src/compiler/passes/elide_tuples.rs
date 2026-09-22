@@ -748,10 +748,9 @@ fn leaf_types(ty: &Type) -> Vec<Type> {
             .collect(),
         TypeExpr::Slice(inner) => {
             let leaves = leaf_types(inner);
-            debug_assert!(
-                !leaves.is_empty(),
-                "elide_tuples: leaf-less slice {ty} reached in elision. LowerZstSlices must run first"
-            );
+            if leaves.is_empty() {
+                ice!("Leaf-less slice {ty} reached in elision. LowerZstSlices must run first");
+            }
             leaves.into_iter().map(|leaf| leaf.slice_of()).collect()
         }
         TypeExpr::Ref(inner) => leaf_types(inner)
