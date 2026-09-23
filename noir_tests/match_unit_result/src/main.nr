@@ -1,5 +1,6 @@
-// Matches in statement position: unit arms with side effects, a unit scrutinee, and arms
-// that assert. The merge block carries no parameter.
+// Matches in statement position: unit arms with side effects and arms that assert, so the
+// merge block carries no parameter. The `match ()` never reaches match lowering — a
+// wildcard-only match is rewritten to a `let` and stripped — but it still must compile.
 fn main(x: u8, y: u8) {
     let mut acc: u8 = 0;
     match x {

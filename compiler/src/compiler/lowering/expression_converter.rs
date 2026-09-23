@@ -999,9 +999,7 @@ impl<'a> ExpressionConverter<'a> {
         let ty = self
             .local_types
             .get(var)
-            .unwrap_or_else(|| {
-                ice!("no recorded type for match scrutinee `{var_name}` ({var:?})")
-            })
+            .unwrap_or_else(|| ice!("no recorded type for match scrutinee `{var_name}` ({var:?})"))
             .clone();
         let value = self.local_value(*var, None, b);
 
@@ -1101,7 +1099,10 @@ impl<'a> ExpressionConverter<'a> {
             Constructor::False => (value, false),
             Constructor::Int(int) => {
                 let c = b.emit_const(Self::integer_constant(int, &s.ty));
-                (self.emit_at_source_location(b, location, |e| e.eq(value, c)), true)
+                (
+                    self.emit_at_source_location(b, location, |e| e.eq(value, c)),
+                    true,
+                )
             }
             // Only an enum scrutinee carries a tag; a struct pattern is single-constructor too.
             Constructor::Variant(_, idx) => {
@@ -1109,7 +1110,10 @@ impl<'a> ExpressionConverter<'a> {
                     ice!("{constructor:?} is a single-constructor pattern and is never tested")
                 });
                 let c = b.emit_const(Constant::Field((*idx as u128).into()));
-                (self.emit_at_source_location(b, location, |e| e.eq(tag, c)), true)
+                (
+                    self.emit_at_source_location(b, location, |e| e.eq(tag, c)),
+                    true,
+                )
             }
             Constructor::Range(..) => {
                 ice!("range patterns are not produced by the current frontend")
@@ -1130,13 +1134,19 @@ impl<'a> ExpressionConverter<'a> {
 
         let scrutinee = s.value;
         let AstType::Tuple(fields) = &s.ty else {
-            ice!("a case that binds arguments needs a tuple scrutinee, found {:?}", s.ty)
+            ice!(
+                "a case that binds arguments needs a tuple scrutinee, found {:?}",
+                s.ty
+            )
         };
 
         let (payload, payload_fields) = match &case.constructor {
             Constructor::Variant(_, idx) if is_enum_variant(&case.constructor) => {
                 let AstType::Tuple(variant_fields) = &fields[idx + 1] else {
-                    ice!("enum variant {idx} payload is not a tuple: {:?}", fields[idx + 1])
+                    ice!(
+                        "enum variant {idx} payload is not a tuple: {:?}",
+                        fields[idx + 1]
+                    )
                 };
                 let payload = self.emit_at_source_location(b, location.clone(), |e| {
                     e.tuple_proj(scrutinee, idx + 1)

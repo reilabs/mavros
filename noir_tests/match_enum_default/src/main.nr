@@ -1,5 +1,7 @@
-// A wildcard arm: the untouched variants share one body, so the elaborator merges them into
-// a default and every remaining case is tested.
+// A wildcard arm over the untouched variants. In `is_rect` the duplicate bodies are adjacent,
+// so the elaborator merges them into a default and the one remaining case is tested. In
+// `length` they are split by `Line`, and `deduplicate_cases` only merges consecutive
+// duplicates — so no default is produced and the last case runs untested instead.
 enum Shape {
     Empty,
     Line(Field),
