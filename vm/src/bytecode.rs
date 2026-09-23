@@ -1749,12 +1749,10 @@ mod def {
     /// `lattice::eval_not` folds this as `!x & bit_mask(bits)` and LLVM's `not` is on an
     /// exact-width `iN`, so the mask is also what keeps the three implementations in agreement.
     ///
-    /// **Currently unreachable**, and the mask is defence for when it stops being so:
-    /// `LowerWitnessBitwiseOps::lower_not` rewrites _every_ `Not` — pure ones as well as witness
-    /// ones, unlike the `And`/`Or`/`Xor` arm beside it — into `(2^bits - 1) - value` before
-    /// codegen, so nothing emits this opcode today. Lowering a pure `Not` to it instead is the
-    /// obvious optimisation, and that is the moment an unmasked `!a` would start returning wrong
-    /// answers.
+    /// Reached by every complement outside the witness domain. `LowerWitnessBitwiseOps::lower_not`
+    /// takes the _witnessed_ ones and rewrites those into `(2^bits - 1) - value`, exactly as the
+    /// `And`/`Or`/`Xor` arm beside it does, so a pure `Not` arrives here and costs one instruction
+    /// rather than a field subtraction.
     #[opcode]
     fn not_int(#[out] res: *mut u64, #[frame] a: u64, bits: u64) {
         unsafe {
@@ -1767,9 +1765,9 @@ mod def {
     /// Takes `bits` for the reason `not_int` does: the lane holds `65..=128`, so `!a` sets every
     /// bit of the pair including the ones above the declared width, and leaving them set would
     /// break the masked-cell invariant for every later reader. At the lane's widest width the mask
-    /// is a no-op, which is why an unmasked complement passes a sweep that stops at 128 —
+    /// is a no-op, which is why an unmasked complement passes a sweep that stops at 128;
     /// `the_complement_opcode_agrees_with_the_model` covers both lanes at four narrower widths for
-    /// that reason. Unreachable today for the same reason as `not_int`.
+    /// that reason.
     #[opcode]
     fn not_int128(#[out] res: *mut Int128, #[frame] a: Int128, bits: u64) {
         unsafe { *res = double_complement(a, bits) };

@@ -163,6 +163,10 @@ fn every_witness_column_is_pinned_by_a_constraint() {
     for (kind, bits) in [
         (BinaryArithOpKind::UAdd, 8usize),
         (BinaryArithOpKind::UMul, 32),
+        (BinaryArithOpKind::UMul, 128),
+        (BinaryArithOpKind::And, 40),
+        (BinaryArithOpKind::And, 128),
+        (BinaryArithOpKind::Xor, 200),
         (BinaryArithOpKind::UDiv, 16),
         (BinaryArithOpKind::SShr, 8),
     ] {
@@ -397,32 +401,185 @@ fn a_wide_multiplication_is_refused_for_its_witness_operands_alone() {
     );
 }
 
-/// A bitwise operation falls off `lower_binary_bitwise`'s two limb cases — 64 and 128 — into the
-/// fall-through that spreads at the operand's own width. The VM's spread stops at 32, so every
-/// width in `33..=63` lands on this.
+/// A witnessed bitwise operation computes at **every** width, which no other arithmetic does.
+///
+/// **The widths are the ones that used to be gaps, and each was a different gap.** `40` fell off
+/// the two limb cases into a spread at the operand's own width, which the VM's `SpreadU32ToU64`
+/// stops at 32. `96` reached a _different_ ceiling — the spread of a `65..=127`-bit operand is a
+/// `130..=254`-bit value, and `Unspread`'s typing rule refused anything above `int128`. `200` was
+/// past the narrow bound with no representation to split it. `254` is the first width the
+/// representation splits **raggedly**, so its top limb is 62 bits and lands back in the first gap.
+///
+/// What closes all four is the same thing: the decomposition runs at the **half-limb**, which is
+/// what the spread instruction bounds, and the top half-limb carries only the bits that are left.
 #[test]
-fn a_bitwise_operation_between_the_word_sizes_is_refused() {
-    contains_all(
-        &refusal_for(BinaryArithOpKind::Xor, 40, 40),
-        &[
-            "error: a witnessed int40 bitwise xor is not supported",
-            "= note: a witnessed bitwise operation is decomposed limb-wise at int64 and int128",
-        ],
-    );
+fn a_witnessed_bitwise_operation_computes_at_every_width() {
+    for bits in [40usize, 96, 200, 253, 254, 320] {
+        for kind in [
+            BinaryArithOpKind::And,
+            BinaryArithOpKind::Or,
+            BinaryArithOpKind::Xor,
+        ] {
+            let ssa = main_program(
+                &[Type::int(64), Type::int(64)],
+                &[Type::int(64)],
+                move |e, params| {
+                    let lhs = e.cast_to(CastTarget::Int(bits), params[0]);
+                    let rhs = e.cast_to(CastTarget::Int(bits), params[1]);
+                    let answer = e.bin(kind, lhs, rhs);
+                    vec![e.cast_to(CastTarget::Int(64), answer)]
+                },
+            );
+            let compiled = Compiled::new(ssa)
+                .unwrap_or_else(|error| panic!("an int{bits} {kind:?} is refused: {error}"));
+
+            // Operands with bits in both halves of every limb, so a decomposition that dropped or
+            // mis-placed one is visible in the answer rather than only in the top limb.
+            let (x, y) = (0xF0F0_F0F0_0F0F_0F0Fu128, 0x00FF_00FF_FF00_FF00u128);
+            // The operands are narrowed to `bits` on the way in and the answer widened back, so
+            // below 64 the expected value is the operation on the *truncated* pair.
+            let mask = if bits >= 64 {
+                u128::from(u64::MAX)
+            } else {
+                (1u128 << bits) - 1
+            };
+            let (a, c) = (x & mask, y & mask);
+            let want = match kind {
+                BinaryArithOpKind::And => a & c,
+                BinaryArithOpKind::Or => a | c,
+                _ => a ^ c,
+            };
+            let verdict = compiled.run(&input_block(&[
+                &IntBits::from_u128(64, x),
+                &IntBits::from_u128(64, y),
+                &IntBits::from_u128(64, want),
+            ]));
+            assert!(verdict.is_accepted(), "int{bits} {kind:?}: {verdict:?}");
+        }
+    }
 }
 
-/// The same fall-through above 64 bits reaches a _different_ ceiling: the spread of a
-/// `65..=127`-bit operand is a `130..=254`-bit value, and `Unspread` refuses anything above
-/// `int128`. Both bands are one gap in the same lowering.
+/// One witnessed operand and one **pure** one, which take different halves of the decomposition.
+///
+/// `decompose_into_spread_limbs` branches on witness-ness: a witnessed operand has its high limbs
+/// written as columns and its lowest derived, while a pure one is read straight out of the hint.
+/// A mixed pair is the ordinary shape of `x & MASK`, and it is what puts a **wide** value through
+/// the pure branch while a constraint still reads the answer.
 #[test]
-fn a_bitwise_operation_between_a_word_and_a_double_word_is_refused() {
-    contains_all(
-        &refusal_for(BinaryArithOpKind::Xor, 96, 96),
-        &[
-            "error: a witnessed int96 bitwise xor is not supported",
-            "= note: a witnessed bitwise operation is decomposed limb-wise at int64 and int128",
-        ],
-    );
+fn a_wide_bitwise_operation_takes_one_pure_operand() {
+    for bits in [96usize, 200, 254, 320] {
+        let input = 0xDEAD_BEEF_0BAD_F00Du64;
+        // A bit in the **top** limb, placed on the witnessed operand with an `or` because bitwise
+        // is the only wide arithmetic a witnessed value admits. Without it every limb of the
+        // operand above the first is zero, and a decomposition that dropped one would be invisible.
+        let high = BigUint::from(1u8) << (bits - 8);
+        let mask = &high + BigUint::from(0x0F0F_0F0Fu32);
+        let expected = &high + BigUint::from(input & 0x0F0F_0F0F);
+
+        let (high_bit, mask_bits, want_bits) = (high, mask, expected);
+        let ssa = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
+            let widened = e.cast_to(CastTarget::Int(bits), params[0]);
+            let high = e.int_const(IntBits::from_biguint(bits, &high_bit));
+            let witnessed = e.bin(BinaryArithOpKind::Or, widened, high);
+            // The mask meets the operand in the top limb and in the bottom, so a decomposition
+            // that mislaid either end shows up in the answer.
+            let mask = e.int_const(IntBits::from_biguint(bits, &mask_bits));
+            let masked = e.bin(BinaryArithOpKind::And, witnessed, mask);
+            // Compared **whole**. Narrowing the result to the return width would read its lowest
+            // limb alone, and every limb above it could be dropped unseen.
+            let want = e.int_const(IntBits::from_biguint(bits, &want_bits));
+            let same = e.eq(masked, want);
+            vec![e.cast_to(CastTarget::Int(64), same)]
+        });
+        let compiled = Compiled::new(ssa)
+            .unwrap_or_else(|error| panic!("an int{bits} mixed bitwise is refused: {error}"));
+
+        let verdict = compiled.run(&input_block(&[
+            &IntBits::from_u128(64, u128::from(input)),
+            &IntBits::from_u128(64, 1),
+        ]));
+        assert!(verdict.is_accepted(), "int{bits} x & MASK: {verdict:?}");
+    }
+}
+
+/// A witnessed complement computes at every width, by the same limb-wise argument.
+///
+/// `!x ^ y` is the shape for two reasons. It needs no constant wider than the return — the low 64
+/// bits of a wide complement are the complement of the low 64 bits, which is what the declared
+/// return reads. And the answer **depends on the complement**: `!!x` is folded straight back to `x`
+/// by the simplifier's `~~x -> x` rewrite, in a phase long before any pass this exercises, so a
+/// double complement would assert only that a widening cast and a truncating cast round trip.
+///
+/// **253 and 254 are the pair that matters.** At 253 the operand is one field element and the
+/// complement really is `2^bits - 1 - value` there; at 254 it is limbs, and the complement is one
+/// per limb at that limb's own width. The same program either side of the threshold.
+#[test]
+fn a_witnessed_complement_computes_at_every_width() {
+    for bits in [96usize, 200, 253, 254, 320] {
+        let ssa = main_program(
+            &[Type::int(64), Type::int(64)],
+            &[Type::int(64)],
+            move |e, params| {
+                let wide = e.cast_to(CastTarget::Int(bits), params[0]);
+                let other = e.cast_to(CastTarget::Int(bits), params[1]);
+                let flipped = e.not(wide);
+                let answer = e.bin(BinaryArithOpKind::Xor, flipped, other);
+                vec![e.cast_to(CastTarget::Int(64), answer)]
+            },
+        );
+        let compiled = Compiled::new(ssa)
+            .unwrap_or_else(|error| panic!("an int{bits} complement is refused: {error}"));
+
+        let (x, y) = (0xDEAD_BEEF_0BAD_F00Du64, 0xF0F0_F0F0_0F0F_0F0Fu64);
+        let want = !x ^ y;
+        let verdict = compiled.run(&input_block(&[
+            &IntBits::from_u128(64, u128::from(x)),
+            &IntBits::from_u128(64, u128::from(y)),
+            &IntBits::from_u128(64, u128::from(want)),
+        ]));
+        assert!(verdict.is_accepted(), "int{bits} !x ^ y: {verdict:?}");
+    }
+}
+
+/// A complement **outside** the witness domain, at the double lane and the wide one.
+///
+/// A pure complement is not rewritten into `(2^bits - 1) - value` in the field: the witness
+/// lowering leaves it alone, exactly as it already left a pure `and` alone. Nothing in width
+/// validation binds it either, at any width, because bit `i` of the answer depends on bit `i` of
+/// the operand alone. The `xor` against a witnessed operand is what puts the answer somewhere a
+/// constraint reads it: a pure value on its own is a hint, and a wrong hint that nothing checks is
+/// not a failing test.
+///
+/// **What this does not reach is the opcodes.** A pure value that is not a constant cannot be
+/// built from an entry point — witness-ness is inferred, and every non-constant value here is
+/// tainted by it — so the operand is a constant and the complement is folded. That makes this a
+/// test of the width rule and of a `2^bits`-wide complement through the constant evaluators;
+/// `NotInt`, `NotInt128` and `NotIntn` are held to the semantic model in the VM crate instead, by
+/// `the_complement_opcode_agrees_with_the_model` and `the_intn_complement_agrees_with_the_model`.
+#[test]
+fn a_complement_outside_the_witness_domain_computes_at_every_width() {
+    /// Below `2^64`, so the wide constant's low word is `PURE` and its complement's is `!PURE`.
+    const PURE: u64 = 0xDEAD;
+
+    for bits in [96usize, 200, 253, 254, 320] {
+        let ssa = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
+            let pure = e.int_const(IntBits::from_biguint(bits, &BigUint::from(PURE)));
+            let flipped = e.not(pure);
+            let witnessed = e.cast_to(CastTarget::Int(bits), params[0]);
+            let answer = e.bin(BinaryArithOpKind::Xor, flipped, witnessed);
+            vec![e.cast_to(CastTarget::Int(64), answer)]
+        });
+        let compiled = Compiled::new(ssa)
+            .unwrap_or_else(|error| panic!("an int{bits} pure complement is refused: {error}"));
+
+        let x = 0xDEAD_BEEF_0BAD_F00Du64;
+        let want = !PURE ^ x;
+        let verdict = compiled.run(&input_block(&[
+            &IntBits::from_u128(64, u128::from(x)),
+            &IntBits::from_u128(64, u128::from(want)),
+        ]));
+        assert!(verdict.is_accepted(), "int{bits} !C ^ x: {verdict:?}");
+    }
 }
 
 /// Every signed operation is capped at one host word, which is the frontier unit 13 moves.
@@ -1691,9 +1848,67 @@ fn the_wasm_lane_agrees_at_a_wide_width() {
         }
     }
 
+    // And the bitwise family, which reaches a wide width by a different route than anything above:
+    // the operation is split per limb before the lowering, and each limb is decomposed again into
+    // half-limbs. Neither the split nor the ragged top limb is exercised by a scalar round trip.
+    for bits in [200usize, 254] {
+        let ssa = main_program(
+            &[Type::int(64), Type::int(64)],
+            &[Type::int(64)],
+            move |e, params| {
+                let lhs = e.cast_to(CastTarget::Int(bits), params[0]);
+                let rhs = e.cast_to(CastTarget::Int(bits), params[1]);
+                let answer = e.bin(BinaryArithOpKind::Xor, lhs, rhs);
+                vec![e.cast_to(CastTarget::Int(64), answer)]
+            },
+        );
+        let compiled = Compiled::new(ssa).expect("a wide bitwise compiles");
+        let (x, y) = (0xF0F0_F0F0_0F0F_0F0Fu128, 0x00FF_00FF_FF00_FF00u128);
+        let inputs = input_block(&[
+            &IntBits::from_u128(64, x),
+            &IntBits::from_u128(64, y),
+            &IntBits::from_u128(64, x ^ y),
+        ]);
+        if let Some(wasm) = compiled.run_wasm(&inputs) {
+            ran += 1;
+            assert!(wasm.is_accepted(), "an int{bits} xor in WASM: {wasm:?}");
+        }
+    }
+
+    // And the complement, on both sides of the representation threshold: at 200 it is one field
+    // subtraction against an all-ones mask, and at 254 the value is limbs and the complement is one
+    // per limb, the top one at the narrower width that limb actually carries.
+    for bits in [200usize, 254] {
+        let ssa = main_program(
+            &[Type::int(64), Type::int(64)],
+            &[Type::int(64)],
+            move |e, params| {
+                let wide = e.cast_to(CastTarget::Int(bits), params[0]);
+                let other = e.cast_to(CastTarget::Int(bits), params[1]);
+                let flipped = e.not(wide);
+                let answer = e.bin(BinaryArithOpKind::Xor, flipped, other);
+                vec![e.cast_to(CastTarget::Int(64), answer)]
+            },
+        );
+        let compiled = Compiled::new(ssa).expect("a wide complement compiles");
+        let (x, y) = (0xDEAD_BEEF_0BAD_F00Du64, 0xF0F0_F0F0_0F0F_0F0Fu64);
+        let inputs = input_block(&[
+            &IntBits::from_u128(64, u128::from(x)),
+            &IntBits::from_u128(64, u128::from(y)),
+            &IntBits::from_u128(64, u128::from(!x ^ y)),
+        ]);
+        if let Some(wasm) = compiled.run_wasm(&inputs) {
+            ran += 1;
+            assert!(
+                wasm.is_accepted(),
+                "an int{bits} complement in WASM: {wasm:?}"
+            );
+        }
+    }
+
     assert!(
-        ran == 8 || !compiled.wasm_is_available(),
-        "the WASM lane was available and ran {ran} of 8"
+        ran == 12 || !compiled.wasm_is_available(),
+        "the WASM lane was available and ran {ran} of 12"
     );
 }
 

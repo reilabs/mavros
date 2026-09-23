@@ -42,7 +42,7 @@ const NARROW_HOST_BITS: usize = HOST_WORD_BITS;
 ///
 /// This is a **dispatch** threshold and **not a soundness bound**: it only tells a lowering which
 /// shape to take, and it replaces none of the per-operation predicates —
-/// [`two_limb_product_packing_fits`], [`spread_sum_fits_field`], [`combined_limbs_fit_field`] and
+/// [`two_limb_product_packing_fits`], [`spread_sum_fits_field`], [`combined_limbs_fit_modulus`] and
 /// `witness_integer_arith::range_fits_field_injectively` each ask for strictly more than this
 /// does, and each is still the thing that decides whether a particular lowering is sound.
 ///
@@ -161,7 +161,7 @@ fn candidate_widths() -> Vec<usize> {
 /// - that a lowering which scales a limb column by a place value still fits
 ///   ([`two_limb_product_packing_fits`]);
 /// - that the sum of two spreads still fits ([`spread_sum_fits_field`]);
-/// - that the limbs recombine into one cell ([`combined_limbs_fit_field`]).
+/// - that the limbs recombine into one cell ([`combined_limbs_fit_modulus`]).
 pub fn witness_limb_bits(field: FieldConfig) -> usize {
     limb_bits_for_modulus(&field_modulus(field), LimbBudget::DEFAULT)
 }
@@ -193,10 +193,10 @@ pub fn limb_bits_for_modulus(modulus: &BigInt, budget: LimbBudget) -> usize {
 ///
 /// # Panics
 ///
-/// If the limb has no exact half. The halves have to cover the limb between them: `derive_low_limb`
-/// range-checks the low half to exactly this many bits, so an odd `h` would leave the top bit of
-/// the low half unconstrained. [`LimbBudget`] admits only powers of two precisely so this holds,
-/// and the assertion pins that the two have not drifted apart.
+/// If the limb has no exact half. The halves have to cover the limb between them: a decomposition
+/// range-checks its derived low half to exactly this many bits, so an odd `h` would leave the top
+/// bit of that half unconstrained. [`LimbBudget`] admits only powers of two precisely so this
+/// holds.
 pub fn witness_half_limb_bits(field: FieldConfig) -> usize {
     let limb_bits = witness_limb_bits(field);
     assert!(
@@ -257,16 +257,6 @@ pub fn spread_sum_fits_modulus(bits: usize, modulus: &BigInt) -> bool {
     (max_spread << 1) < *modulus
 }
 
-/// Whether `limb_count` limbs of `limb_bits` bits each recombine into one element of `field`.
-///
-/// This is [`combine_limbs`]' own precondition, and the representation half of the same question
-/// the two predicates above ask about operations: the recombined value reaches
-/// `2^(limb_count · limb_bits) − 1`, and once that can exceed the modulus the sum is a residue and
-/// nothing downstream can tell it from the honest value.
-pub fn combined_limbs_fit_field(field: FieldConfig, limb_bits: usize, limb_count: usize) -> bool {
-    combined_limbs_fit_modulus(&field_modulus(field), limb_bits, limb_count)
-}
-
 /// Whether `limb_count` limbs of `limb_bits` bits each recombine below `modulus`.
 ///
 /// The limbs are bounded by their own width, so the recombination is below `2^(limb_count ·
@@ -296,15 +286,15 @@ pub fn widest_injective_int_bits_for_modulus(modulus: &BigInt) -> usize {
 // LIMB DECOMPOSITIONS
 // ================================================================================================
 
-/// A value decomposed into equal-width limbs, least significant first.
+/// A value decomposed into limbs at a uniform place-value stride, least significant limb first.
 ///
-/// Equal-width is a contract, but does **not** forbid slack in the top limb. A limb carrying fewer
-/// meaningful bits than its width, the rest provably zero, is an ordinary `Int(limb_bits)` like
-/// every other one.
+/// `limb_bits` is the **stride** but not a promise about the top limb: a decomposition built at a
+/// width the stride does not divide, and the result of an operation carried out limb by limb on
+/// one, type their top limb at the bits it actually carries. Every other limb is `Int(limb_bits)`,
+/// and slack in one — meaningful bits below its width, the rest provably zero — is ordinary.
 ///
-/// The limbs are usually `Int(limb_bits)` values, but [`combine_limbs`] also accepts already-field
-/// limbs — `witness_bitwise`'s 128-bit path recombines two field-valued halves that way — so a
-/// consumer should not assume the integer typing without checking.
+/// A consumer reads the stride from `limb_bits` and must not assume the top limb's **typed** width
+/// from it.
 pub struct WitnessLimbs {
     /// The width of each limb, in bits.
     pub limb_bits: usize,
@@ -355,34 +345,50 @@ pub fn extract_limb(
     b.cast_to(CastTarget::Int(limb_bits), limb)
 }
 
-/// Recombine `limbs` into a single field value, `limb[0] + limb[1] * 2^h + ...`.
+/// Recombine `limbs` into a single field value, `limb[0] + limb[1] * 2^h + ...`, bounded by the
+/// **width of the value they came from** rather than by their own nominal span.
 ///
-/// Refuses on a field the recombination does not fit; see [`combined_limbs_fit_field`].
+/// [`combined_limbs_fit_modulus`] states the span question on the limb widths as every limb may be
+/// all ones. A decomposition whose top limb is bounded below its own width reaches `2^value_bits`
+/// rather than `2^(count · limb_bits)`. Asking the uniform question of it refuses widths that are
+/// perfectly representable: an `int253` splits into eight 32-bit limbs whose nominal span is 256,
+/// while the value itself is one field element.
 // FIELD-ASSUMPTION: L6-int-representation
 // The result is one field element, so this is sound only while the recombined value fits one — it
 // is the _representation_ half of the assumption, which field-derived limb widths do not discharge.
-// The widths are `h` and the fit is checked rather than assumed, so a narrow field refuses here
-// instead of returning a residue; what is missing is the multi-cell representation that would let
-// it _succeed_, which is Phase 4's work rather than a wider constant.
+// The fit is checked rather than assumed, so a narrow field refuses here instead of returning a
+// residue; what is missing is the multi-cell representation that would let it _succeed_, which is
+// Phase 4's work rather than a wider constant.
 // FIELD-ASSUMPTION: L4-decompose
 // The place values are minted as `two_pow`, so they are only the powers they are meant to be while
 // they have not wrapped the modulus.
-pub fn combine_limbs(b: &mut impl HLEmitter, limbs: &WitnessLimbs) -> ValueId {
+pub fn combine_limbs_of_value(
+    b: &mut impl HLEmitter,
+    limbs: &WitnessLimbs,
+    value_bits: usize,
+) -> ValueId {
     assert!(
         !limbs.limbs.is_empty(),
         "cannot recombine an empty decomposition"
     );
-    if !combined_limbs_fit_field(b.field(), limbs.limb_bits, limbs.limbs.len()) {
+    if value_bits > widest_injective_int_bits(b.field()) {
         unsupported_on_this_field(
             format_args!(
-                "recombining {} limbs of {} bits reaches 2^{} and so wraps modulo the field, leaving a residue no rangecheck on the result can tell from the value it should have been",
-                limbs.limbs.len(),
-                limbs.limb_bits,
-                limbs.limbs.len() * limbs.limb_bits
+                "recombining an int{value_bits} reaches 2^{value_bits} and so wraps modulo the field, leaving a residue no rangecheck on the result can tell from the value it should have been"
             ),
             b.field(),
         );
     }
+    accumulate_limbs(b, limbs)
+}
+
+/// The place-value sum of a decomposition, with no bound of its own.
+///
+/// Private because the bound is the whole question: every caller has to have asked it, and which
+/// form of the question is right depends on whether the top limb is full.
+// FIELD-ASSUMPTION: L4-decompose
+// The place values are minted as `two_pow`; see `combine_limbs_of_value`.
+fn accumulate_limbs(b: &mut impl HLEmitter, limbs: &WitnessLimbs) -> ValueId {
     let mut fields = Vec::with_capacity(limbs.limbs.len());
     for &limb in &limbs.limbs {
         fields.push(b.cast_to_field(limb));
@@ -395,22 +401,6 @@ pub fn combine_limbs(b: &mut impl HLEmitter, limbs: &WitnessLimbs) -> ValueId {
         acc = b.uadd(acc, shifted);
     }
     acc
-}
-
-/// Derive the low limb of `value` by subtracting an already-placed high limb, as a field value.
-// FIELD-ASSUMPTION: L4-decompose
-// The place value is minted as `two_pow`; see `combine_limbs`.
-pub fn derive_low_limb(
-    b: &mut impl HLEmitter,
-    value: ValueId,
-    hi_field: ValueId,
-    limb_bits: usize,
-) -> ValueId {
-    let value_field = b.cast_to_field(value);
-    let shift = b.field_const(b.field().two_pow(limb_bits));
-    let shifted_hi = b.umul(hi_field, shift);
-    let lo_field = b.usub(value_field, shifted_hi);
-    b.cast_to(CastTarget::Int(limb_bits), lo_field)
 }
 
 // TESTS
@@ -431,8 +421,8 @@ mod tests {
         let widest = widest_injective_int_bits(FieldConfig::bn254());
 
         assert!(crate::compiler::ssa::hlssa_to_llssa::INT_TO_FIELD_MAX_BITS > widest);
-        assert!(!combined_limbs_fit_field(
-            FieldConfig::bn254(),
+        assert!(!combined_limbs_fit_modulus(
+            &field_modulus(FieldConfig::bn254()),
             crate::compiler::ssa::hlssa_to_llssa::INT_TO_FIELD_MAX_BITS,
             1
         ));
@@ -768,11 +758,11 @@ mod tests {
 
     #[test]
     fn limbs_recombine_into_one_cell_only_while_their_place_values_fit() {
-        let bn254 = FieldConfig::bn254();
+        let bn254 = field_modulus(FieldConfig::bn254());
 
         // Every recombination in the tree, at the widths it actually runs at.
-        assert!(combined_limbs_fit_field(bn254, 32, 2), "u64 from halves");
-        assert!(combined_limbs_fit_field(bn254, 64, 2), "u128 from limbs");
+        assert!(combined_limbs_fit_modulus(&bn254, 32, 2), "u64 from halves");
+        assert!(combined_limbs_fit_modulus(&bn254, 64, 2), "u128 from limbs");
 
         // The boundary is exact rather than approximate: `limb_count` limbs of `limb_bits` reach
         // `2^(limb_count * limb_bits) - 1`, so a modulus of exactly that power is the last one that
@@ -792,13 +782,13 @@ mod tests {
         assert!(combined_limbs_fit_modulus(&p, 32, 1));
     }
 
-    /// The predicate above is wired into [`combine_limbs`], not merely available beside it.
+    /// The span question is wired into [`combine_limbs_of_value`], not merely available beside it.
     ///
     /// Unlike the other refusals in the tree this one is reachable on bn254 — not from any lowering
     /// the compiler has, but from a decomposition wide enough to ask for it, which is what the
     /// multi-cell work will eventually build.
     #[test]
-    #[should_panic(expected = "recombining 4 limbs of 64 bits reaches 2^256")]
+    #[should_panic(expected = "recombining an int256 reaches 2^256")]
     fn a_recombination_too_wide_for_the_field_is_refused_rather_than_wrapped() {
         let mut ssa = HLSSA::with_main("main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
@@ -807,20 +797,22 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let limb = e.int_const(IntBits::one(64));
-            combine_limbs(
+            combine_limbs_of_value(
                 &mut e,
                 &WitnessLimbs {
                     limb_bits: 64,
                     limbs: vec![limb; 4],
                 },
+                256,
             );
         });
     }
 
     #[test]
     fn a_three_limb_split_recombines_with_ascending_place_values() {
-        // Every caller in the tree splits into exactly two, so `combine_limbs`' loop past the first
-        // place value -- and the `i * limb_bits` exponent it mints -- has no other coverage.
+        // The one caller in the tree reaches three limbs and more only from `int96` upward, so the
+        // loop past the first place value -- and the `i * limb_bits` exponent it mints -- is pinned
+        // here rather than left to a wide end-to-end program.
         let mut ssa = HLSSA::with_main("main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
@@ -832,7 +824,7 @@ mod tests {
                 let limbs = split_into_limbs(&mut e, value, 16, 3);
                 assert_eq!(limbs.limb_bits, 16);
                 assert_eq!(limbs.limbs.len(), 3);
-                combine_limbs(&mut e, &limbs);
+                combine_limbs_of_value(&mut e, &limbs, 48);
                 e.terminate_return(vec![]);
             });
         }

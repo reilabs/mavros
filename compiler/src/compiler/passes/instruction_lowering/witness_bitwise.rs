@@ -1,11 +1,13 @@
 //! Lowers integer bitwise, bit-selection, and sign-extension operations before the main
 //! explicit-witness pass.
 //!
-//! This pass emits `Spread`/`Unspread` operations, except for `u64` bitwise ops where it keeps a
-//! two-limb decomposition at half the field's witness limb width (`shared::limbs`) — 32 bits on
-//! bn254. It also canonicalizes witness integer casts/shifts into the shared `BitRange`
-//! representation where possible.
+//! This pass emits `Spread`/`Unspread` operations. A width the spread instruction takes whole is
+//! spread directly; anything wider is decomposed into half-limbs at half the field's witness limb
+//! width (`shared::limbs`) — 32 bits on bn254 — with the top half-limb carrying only the bits that
+//! are left, which is what lets a bitwise operation reach **any** width. It also canonicalizes
+//! witness integer casts/shifts into the shared `BitRange` representation where possible.
 
+use crate::compiler::codegen::bytecode::layout::SPREAD_MAX_BITS;
 use crate::compiler::{
     analysis::{
         types::FunctionTypeInfo,
@@ -18,9 +20,9 @@ use crate::compiler::{
         },
         shared::{
             limbs::{
-                WitnessLimbs, combine_limbs, derive_low_limb, extract_limb, max_pow2_table_size,
-                narrow_int_bits, split_into_limbs, spread_sum_fits_field, witness_half_limb_bits,
-                witness_limb_bits,
+                WitnessLimbs, combine_limbs_of_value, extract_limb, max_pow2_table_size,
+                narrow_int_bits, spread_sum_fits_field, widest_injective_int_bits,
+                witness_half_limb_bits,
             },
             shift_guard::shift_amount_pinned_to,
             unsupported::unsupported_on_this_field,
@@ -96,7 +98,18 @@ impl LowerWitnessBitwiseOps {
                     false
                 }
             }
-            OpCode::Not { result, value } => {
+            // Gated on witness-ness exactly as the binary arm above is, and for the same reason:
+            // outside the witness domain a complement is a value the interpreter and the compiled
+            // WASM each compute with an opcode of their own, at every width. Rewriting it into
+            // field arithmetic constrains a hint, and leaves those opcodes unreachable from a
+            // compiled program.
+            //
+            // Measured rather than assumed: the gate moves **no constraint at all** — rows and
+            // columns are identical on every corpus test — and shrinks bytecode by 0.30% and WASM
+            // by 0.17%, `passport_08` by 7584 bytes.
+            OpCode::Not { result, value }
+                if function_type_info.get_value_type(*value).is_witness_of() =>
+            {
                 self.lower_not(b, function_type_info, *result, *value);
                 true
             }
@@ -167,10 +180,13 @@ impl LowerWitnessBitwiseOps {
         // The bound is the narrow threshold, not the integer type cap: what this lowering needs
         // is a value that spreads into a host word and a field cell, which is a representational
         // question and not a question about what widths the type system admits.
-        let narrow_bits = narrow_int_bits(b.field());
+        // The recombination is one field element, so what bounds this is the widest value the
+        // modulus carries injectively — above that a value is limbs before it reaches here, and
+        // each limb is a width this lowering holds.
+        let injective = widest_injective_int_bits(b.field());
         assert!(
-            bits <= narrow_bits,
-            "bitwise spread width too large for natural-width Spread lowering: {bits}"
+            bits <= injective,
+            "a bitwise operation recombines its limbs into one field element, so int{bits} is past what this field carries"
         );
 
         let lhs = b.cast_to(CastTarget::Int(bits), lhs);
@@ -181,36 +197,27 @@ impl LowerWitnessBitwiseOps {
             return;
         }
 
-        // The `64` and `128` below are the operand's **type** width, not the field's: they pick
-        // which lowering the value needs, and on a narrower field the very same `u64` would need
-        // more limbs rather than fewer.
-        let result_word = if bits == 64 {
-            let lhs_limbs = decompose_into_half_limbs(b, lhs, bits, lhs_witness);
-            let rhs_limbs = decompose_into_half_limbs(b, rhs, bits, rhs_witness);
-            let result_limbs = lower_limb_bitwise(b, kind, &lhs_limbs, &rhs_limbs);
-            combine_limbs(b, &result_limbs)
-        } else if bits == 128 {
-            let limb_bits = witness_limb_bits(b.field());
-            let limb_count = bits.div_ceil(limb_bits);
-            let (lhs_lo_limb, lhs_hi_limb) = split_into_limbs(b, lhs, limb_bits, limb_count).pair();
-            let (rhs_lo_limb, rhs_hi_limb) = split_into_limbs(b, rhs, limb_bits, limb_count).pair();
-            let lhs_lo = decompose_into_half_limbs(b, lhs_lo_limb, limb_bits, lhs_witness);
-            let rhs_lo = decompose_into_half_limbs(b, rhs_lo_limb, limb_bits, rhs_witness);
-            let lo = lower_limb_bitwise(b, kind, &lhs_lo, &rhs_lo);
-            let lhs_hi = decompose_into_half_limbs(b, lhs_hi_limb, limb_bits, lhs_witness);
-            let rhs_hi = decompose_into_half_limbs(b, rhs_hi_limb, limb_bits, rhs_witness);
-            let hi = lower_limb_bitwise(b, kind, &lhs_hi, &rhs_hi);
-            let lo = combine_limbs(b, &lo);
-            let hi = combine_limbs(b, &hi);
-            combine_limbs(
-                b,
-                &WitnessLimbs {
-                    limb_bits,
-                    limbs: vec![lo, hi],
-                },
-            )
+        let result_word = if bits <= SPREAD_MAX_BITS && spread_sum_fits_field(bits, b.field()) {
+            // A width the spread instruction takes whole. Decomposing it would be one half-limb
+            // plus a recombination, which is **measurably** worse: routing these through the
+            // general path below costs +1.88% of corpus rows.
+            //
+            // The spread bound is a bytecode-layout constant and the sum bound is the field's, so
+            // both are asked here: a field that cannot hold the sum of two spreads this wide has a
+            // width the arm below reaches perfectly well, and taking this one would refuse it.
+            let width = u8::try_from(bits).expect("a width the spread takes is under 256");
+            lower_word_bitwise(b, kind, lhs, rhs, width)
         } else {
-            lower_word_bitwise(b, kind, lhs, rhs, bits as u8)
+            // Every other width, including the ones between the arms above and the ragged top limb
+            // the multi-cell representation leaves at a width the limb count does not divide. The
+            // half-limbs are each at most what the spread instruction takes, so this reaches any
+            // width the recombination still fits a field element at.
+            let lhs_limbs = decompose_into_spread_limbs(b, lhs, bits, lhs_witness);
+            let rhs_limbs = decompose_into_spread_limbs(b, rhs, bits, rhs_witness);
+            let result_limbs = lower_limb_bitwise(b, kind, &lhs_limbs, &rhs_limbs);
+            // The value's own width, not the limbs' nominal span: a bitwise operation cannot set a
+            // bit neither operand had, so the result is bounded where the operands were.
+            combine_limbs_of_value(b, &result_limbs, bits)
         };
 
         b.emit(OpCode::Cast {
@@ -256,9 +263,10 @@ impl LowerWitnessBitwiseOps {
         });
     }
 
-    // FIELD-ASSUMPTION: L6-int-op-strategy
-    // `not = (2^bits - 1) - value`. The all-ones mask `2^bits - 1` exceeds p at bits=64 on a
-    // small field, so u64/u128 `not` must be done per-limb.
+    /// `not = (2^bits - 1) - value`, for a witnessed operand.
+    ///
+    /// A wider one is limbs before this pass runs and each limb is complemented at its own width.
+    /// That is what ensures this one field subtraction sound on **any** field.
     fn lower_not(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -267,6 +275,13 @@ impl LowerWitnessBitwiseOps {
         value: ValueId,
     ) {
         let (bits, cast_target) = integer_bits_and_cast(function_type_info, value, "bitwise not");
+
+        let injective = widest_injective_int_bits(b.field());
+        assert!(
+            bits <= injective,
+            "a complement subtracts from an all-ones mask in one field element, so int{bits} is past what this field carries"
+        );
+
         // FIELD-ASSUMPTION: L4-decompose
         let ones = b.field_const(b.field().two_pow(bits) - b.field().one());
         let value_field = b.cast_to_field(value);
@@ -1200,13 +1215,16 @@ fn spread_as_field(b: &mut impl HLEmitter, value: ValueId, bits: u8) -> ValueId 
 /// Bitwise on a whole `bits`-wide word, via spread-then-add.
 ///
 /// The two callers reach here by different routes and only one of them has already been sized by
-/// the field: `lower_limb_bitwise` arrives at [`witness_half_limb_bits`], while the sub-64 arm of
-/// [`LowerWitnessBitwiseOps::lower_binary_bitwise`] arrives at the operand's own **type** width.
+/// the field: `lower_limb_bitwise` arrives at [`witness_half_limb_bits`], while the direct arm of
+/// [`LowerWitnessBitwiseOps::lower_binary_bitwise`] arrives at the operand's own **type** width,
+/// which that arm caps at [`SPREAD_MAX_BITS`].
 // FIELD-ASSUMPTION: L6-int-op-strategy
 // Bitwise via spread-then-add: the spread of a `bits`-wide value occupies ~2*bits bits (cast
 // to `U(bits*2)`), so on a ~64-bit field even a 32-bit spread nearly saturates p. A half-limb
-// operand satisfies `2*bits <= h` by construction, which is why u64/u128 go through a half-limb
-// decomposition; a narrower type width arriving directly does not, and is what the refusal is for.
+// operand satisfies `2*bits <= h` by construction, which is why every width past the whole-width
+// arm goes through a half-limb decomposition. The whole-width arm asks this same predicate before
+// taking itself, so what the refusal below covers is a field whose own half-limb two spreads of do
+// not fit — which no decomposition below it can step around.
 fn lower_word_bitwise(
     b: &mut impl HLEmitter,
     kind: BinaryArithOpKind,
@@ -1238,16 +1256,34 @@ fn lower_word_bitwise(
     }
 }
 
-/// Bitwise limb by limb, at the width the operands were decomposed to.
+// SPREAD LIMBS
+// ================================================================================================
+
+/// A decomposition into limbs the spread instruction takes whole, each with the width it carries.
 ///
-/// Bitwise that needs no carries between limbs, so this is a plain zip: the width comes off the
-/// operands rather than from a second query of the field, because they were split by
-/// [`decompose_into_half_limbs`].
+/// [`WitnessLimbs`] is uniform-width by contract The **spread** wants the other reading as its cost
+/// falls as the width does (`LookupSizing::decompose_spread`), so a ragged top limb spread at its
+/// own four or thirty bits is cheaper than the same limb padded to a full half-limb first.
+struct SpreadLimbs {
+    /// The place-value stride, which is the half-limb whatever the top limb carries.
+    limb_bits: usize,
+
+    /// The limbs, least significant first.
+    limbs: Vec<ValueId>,
+
+    /// The bits each limb carries, equal to `limb_bits` for all but a ragged top.
+    widths: Vec<usize>,
+}
+
+/// Bitwise limb by limb, at the width each limb was decomposed to.
+///
+/// The result is uniform-width as a place-value sum reads it: limb `i` of the answer is bounded by
+/// limb `i` of the operands.
 fn lower_limb_bitwise(
     b: &mut impl HLEmitter,
     kind: BinaryArithOpKind,
-    lhs: &WitnessLimbs,
-    rhs: &WitnessLimbs,
+    lhs: &SpreadLimbs,
+    rhs: &SpreadLimbs,
 ) -> WitnessLimbs {
     assert_eq!(
         lhs.limb_bits, rhs.limb_bits,
@@ -1258,52 +1294,95 @@ fn lower_limb_bitwise(
         rhs.limbs.len(),
         "bitwise operands were decomposed into different limb counts"
     );
+    assert_eq!(
+        lhs.widths, rhs.widths,
+        "bitwise operands were decomposed with differently ragged top limbs"
+    );
     let limb_bits = lhs.limb_bits;
     let limbs = lhs
         .limbs
         .iter()
         .zip(&rhs.limbs)
-        .map(|(&lhs_limb, &rhs_limb)| {
-            lower_word_bitwise(b, kind, lhs_limb, rhs_limb, limb_bits as u8)
+        .zip(&lhs.widths)
+        .map(|((&lhs_limb, &rhs_limb), &limb_width)| {
+            let width = u8::try_from(limb_width).expect("a limb is at most one host word wide");
+            lower_word_bitwise(b, kind, lhs_limb, rhs_limb, width)
         })
         .collect();
     WitnessLimbs { limb_bits, limbs }
 }
 
-/// Split one witness limb into its two half-limbs, hinting the high half when the value is a
-/// witness.
+/// Split `value` into half-limbs at every width, the top one carrying only the bits that are left.
 ///
-/// The pure arm is an ordinary bit-range split. The witness arm cannot be as a witnessed value has
-/// no bits to range over, so the high half is hinted from the pure shadow, written as a witness,
-/// and the low half recovered by subtraction to yield one witness and one implicit range check
-/// instead of two of each.
-fn decompose_into_half_limbs(
+/// The only decomposition a bitwise operation needs. Every limb is at most a half-limb wide, which
+/// is what the spread instruction bounds, so what this reaches is every width past the one arm
+/// above it.
+///
+/// The high half-limbs are witnessed from the pure shadow and the lowest is **derived** as
+/// `value - sum(higher limbs at their places)`, so the reconstruction holds by construction and
+/// needs no constraint of its own. Otherwise, a dishonest prover could inflate a high limb and let
+/// the derived one absorb it, but the range check on **every** limb at **its own** width is what
+/// stops that: the top limb is bounded at the bits actually left over, not at a full half-limb, so
+/// the limbs cannot between them carry a value the operand's width does not.
+fn decompose_into_spread_limbs(
     b: &mut impl HLEmitter,
     value: ValueId,
     value_bits: usize,
     is_witness: bool,
-) -> WitnessLimbs {
+) -> SpreadLimbs {
     let half_bits = witness_half_limb_bits(b.field());
-    assert_eq!(
-        value_bits,
-        2 * half_bits,
-        "a half-limb decomposition covers exactly one witness limb"
-    );
+    let count = value_bits.div_ceil(half_bits);
+    let width_of = |index: usize| (value_bits - index * half_bits).min(half_bits);
+    let widths: Vec<usize> = (0..count).map(width_of).collect();
+
     if !is_witness {
-        return split_into_limbs(b, value, half_bits, 2);
+        // A hint, so the limbs are read straight out of it and bounded by where they came from.
+        let limbs = (0..count)
+            .map(|index| extract_limb(b, value, index * half_bits, width_of(index)))
+            .collect();
+        return SpreadLimbs {
+            limb_bits: half_bits,
+            limbs,
+            widths,
+        };
     }
 
     let pure_value = b.value_of(value);
-    let hi_hint = extract_limb(b, pure_value, half_bits, half_bits);
-    let hi_field = b.cast_to_field(hi_hint);
-    let hi_wit = b.write_witness(hi_field);
-    let lo = derive_low_limb(b, value, hi_wit, half_bits);
+    let mut high = Vec::with_capacity(count - 1);
+    for index in 1..count {
+        let hint = extract_limb(b, pure_value, index * half_bits, width_of(index));
+        let hint_field = b.cast_to_field(hint);
+        let written = b.write_witness(hint_field);
+        // At its **own** width: a full half-limb here would let the top limb carry bits the
+        // operand's width does not have, and the derived limb below would absorb the difference.
+        let bounded = b.cast_to(CastTarget::Int(width_of(index)), written);
+        high.push(bounded);
+    }
 
-    WitnessLimbs {
+    // The lowest limb is what is left once the others are taken out at their place values, so the
+    // reconstruction is an identity rather than a constraint.
+    let value_field = b.cast_to_field(value);
+    let mut remainder = value_field;
+    for (index, &limb) in high.iter().enumerate() {
+        let place = b.field_const(b.field().two_pow((index + 1) * half_bits));
+        let limb_field = b.cast_to_field(limb);
+        let shifted = b.umul(limb_field, place);
+        remainder = b.usub(remainder, shifted);
+    }
+    let low = b.cast_to(CastTarget::Int(width_of(0)), remainder);
+
+    let mut limbs = Vec::with_capacity(count);
+    limbs.push(low);
+    limbs.extend(high);
+    SpreadLimbs {
         limb_bits: half_bits,
-        limbs: vec![lo, b.cast_to(CastTarget::Int(half_bits), hi_wit)],
+        limbs,
+        widths,
     }
 }
+
+// TESTS
+// ================================================================================================
 
 #[cfg(test)]
 mod tests {
@@ -1312,31 +1391,124 @@ mod tests {
     use crate::compiler::ssa::hlssa::{HLSSA, MAX_POW2_TABLE_SIZE, builder::HLSSABuilder};
 
     /// The two routes into [`lower_word_bitwise`], both cleared on bn254.
-    ///
-    /// [`spread_sum_fits_field`]'s own boundary is pinned in `shared::limbs`; what belongs here is
-    /// the local claim that no width this dispatch can deliver reaches it.
     #[test]
     fn no_width_this_lowering_spreads_at_can_wrap_bn254() {
         let bn254 = FieldConfig::bn254();
 
-        // The half-limb route, and the widths the sub-64 arm reaches directly.
+        // The half-limb route, which is every width past the direct arm.
         assert!(spread_sum_fits_field(witness_half_limb_bits(bn254), bn254));
-        for bits in [2usize, 8, 16, 32, 63] {
+
+        // And the whole-width route. The dispatch asks this predicate before taking that arm, so
+        // what the loop pins is that on bn254 it never diverts: every width up to the cap goes
+        // whole. It starts at 2 because a single bit takes the arm above it.
+        for bits in 2..=SPREAD_MAX_BITS {
             assert!(spread_sum_fits_field(bits, bn254), "{bits} bits");
         }
 
-        // And the refusal is unreachable by a second, independent margin: the `U(bits * 2)` cast is
-        // capped at the narrow threshold, so no width past 64 could have been spread here at all,
-        // while the predicate itself only bites at 128.
-        assert!(2 * 65 > narrow_int_bits(bn254));
-        assert!(spread_sum_fits_field(127, bn254));
+        // The half-limb is itself a width the spread instruction takes, which is what lets the
+        // general arm reach any width at all: a wider one would meet the `todo!` in bytecode
+        // codegen rather than the predicate above. It holds because a limb width is a power of two
+        // capped at one host word, so its half is at most half a host word.
+        assert!(witness_half_limb_bits(bn254) <= SPREAD_MAX_BITS);
+    }
+
+    /// A ragged decomposition bounds its top limb at **its own** width, not a full half-limb.
+    ///
+    /// This is the whole soundness argument of the general bitwise path, and **no honest witness
+    /// can see it**: the limbs of a real value are inside their true widths either way, so widening
+    /// the top bound leaves every end-to-end test in this repository green. What it would allow is
+    /// a prover inflating the top limb and letting the derived low limb absorb the difference —
+    /// the decomposition would then represent a value the operand's width cannot hold.
+    ///
+    /// So it is checked by what the lowering emits. 100 bits over 32-bit half-limbs is
+    /// `32 + 32 + 32 + 4`, and the `4` is the assertion: under a full-width bound there is no cast
+    /// to `int4` anywhere in the output.
+    #[test]
+    fn a_ragged_decomposition_bounds_its_top_limb_at_its_own_width() {
+        let bits = 100usize;
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let value = ssa.fresh_value();
+        {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(main_id, |b| {
+                let entry = b.function.get_entry_id();
+                b.function
+                    .get_block_mut(entry)
+                    .push_parameter(value, Type::witness_of(Type::int(bits)));
+                let mut e = b.test_block(entry);
+                let limbs = decompose_into_spread_limbs(&mut e, value, bits, true);
+                assert_eq!(limbs.limbs.len(), bits.div_ceil(32));
+                e.terminate_return(vec![]);
+            });
+        }
+
+        // The bound is the cast applied to each **witness column**, which has to be read by
+        // following the column rather than by looking for a width: the hint extraction casts to the
+        // same widths, so a test that only asked whether some `int4` cast exists passes under the
+        // very ablation it is written for.
+        let function = ssa.get_unique_entrypoint();
+        let ops: Vec<&OpCode> = function
+            .get_block(function.get_entry_id())
+            .get_instructions()
+            .collect();
+        let columns: Vec<ValueId> = ops
+            .iter()
+            .filter_map(|op| match op {
+                OpCode::WriteWitness {
+                    result: Some(result),
+                    ..
+                } => Some(*result),
+                _ => None,
+            })
+            .collect();
+        let mut bounds: Vec<usize> = columns
+            .iter()
+            .map(|column| {
+                ops.iter()
+                    .find_map(|op| match op {
+                        OpCode::Cast {
+                            value,
+                            target: CastTarget::Int(width),
+                            ..
+                        } if value == column => Some(*width),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("witness column {column:?} is never bounded"))
+            })
+            .collect();
+        bounds.sort_unstable();
+
+        // `100 = 32 + 32 + 32 + 4`, and the lowest limb is derived rather than witnessed.
+        assert_eq!(
+            bounds,
+            vec![4, 32, 32],
+            "every witnessed limb is bounded at its own width, the top one included"
+        );
+    }
+
+    /// A decomposition of `bits` at `limb_bits`, every limb full, built the way a test wants one.
+    fn uniform_limbs(
+        e: &mut HLBlockEmitter<'_>,
+        value: ValueId,
+        limb_bits: usize,
+        count: usize,
+    ) -> SpreadLimbs {
+        SpreadLimbs {
+            limb_bits,
+            limbs: (0..count)
+                .map(|index| extract_limb(e, value, index * limb_bits, limb_bits))
+                .collect(),
+            widths: vec![limb_bits; count],
+        }
     }
 
     /// `lower_limb_bitwise` lowers _every_ limb, not the first two.
     ///
-    /// Both callers hand it a two-limb decomposition today, so the zip past the pair — and the
-    /// length check that stops `zip` from silently truncating a mismatched one — has no other
-    /// coverage. Phase 4's `⌈n/h⌉` dispatch is what will reach it in production.
+    /// Its one caller reaches three limbs and more from `int96` upward, but the shortest widths it
+    /// dispatches are a pair, and a zip that silently truncated a mismatched decomposition would
+    /// still pass every one of those. The length past the pair is pinned here, with the check that
+    /// refuses a mismatch rather than truncating it in the test below.
     #[test]
     fn a_bitwise_decomposition_is_lowered_limb_by_limb_at_any_length() {
         let mut ssa = HLSSA::with_main("main".to_string());
@@ -1348,8 +1520,8 @@ mod tests {
                 let mut e = b.test_block(entry);
                 let lhs = e.int_const(IntBits::from_u128(24, 0x00_AB_CD));
                 let rhs = e.int_const(IntBits::from_u128(24, 0x00_12_34));
-                let lhs_limbs = split_into_limbs(&mut e, lhs, 8, 3);
-                let rhs_limbs = split_into_limbs(&mut e, rhs, 8, 3);
+                let lhs_limbs = uniform_limbs(&mut e, lhs, 8, 3);
+                let rhs_limbs = uniform_limbs(&mut e, rhs, 8, 3);
                 let result =
                     lower_limb_bitwise(&mut e, BinaryArithOpKind::And, &lhs_limbs, &rhs_limbs);
                 assert_eq!(result.limb_bits, 8);
@@ -1387,8 +1559,8 @@ mod tests {
             let mut e = b.test_block(entry);
             let lhs = e.int_const(IntBits::zero(24));
             let rhs = e.int_const(IntBits::zero(16));
-            let lhs_limbs = split_into_limbs(&mut e, lhs, 8, 3);
-            let rhs_limbs = split_into_limbs(&mut e, rhs, 8, 2);
+            let lhs_limbs = uniform_limbs(&mut e, lhs, 8, 3);
+            let rhs_limbs = uniform_limbs(&mut e, rhs, 8, 2);
             lower_limb_bitwise(&mut e, BinaryArithOpKind::And, &lhs_limbs, &rhs_limbs);
         });
     }
