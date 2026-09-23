@@ -10,7 +10,7 @@ use noirc_frontend::{
         Index, LValue, Let, LocalId, Type as AstType, While,
     },
 };
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{borrow::Cow, cell::RefCell, rc::Rc, sync::Arc};
 
 use mavros_int_semantics::MAX_LOWERED_SIGNED_BITS;
 
@@ -301,11 +301,6 @@ impl<'a> ExpressionConverter<'a> {
         self.mutable_locals.insert(local_id);
     }
 
-    /// Calculate return size for function calls (tuples count as 1, unit as 0)
-    fn return_size(&self, typ: &noirc_frontend::monomorphization::ast::Type) -> usize {
-        usize::from(TypeConverter::call_returns_a_value(typ))
-    }
-
     /// Convert an expression to SSA instructions.
     pub fn convert_expression(
         &mut self,
@@ -320,9 +315,15 @@ impl<'a> ExpressionConverter<'a> {
         result
     }
 
+    /// The value type at an expression boundary. Noir gives statement-shaped unit
+    /// expressions (including empty blocks) no return type.
+    fn value_type(expr: &Expression) -> Cow<'_, AstType> {
+        expr.return_type().unwrap_or(Cow::Borrowed(&AstType::Unit))
+    }
+
     /// Evaluate an expression where storage or an operand requires an SSA value.
-    /// Unit expressions still run for their side effects, then materialize as the
-    /// empty tuple used by `TypeConverter` for unit parameters and aggregate fields.
+    /// Literals and ordinary calls already materialize unit. Statements and builtins
+    /// with no SSA result run for their side effects, then materialize an empty tuple.
     pub(super) fn convert_value(
         &mut self,
         expr: &Expression,
@@ -330,7 +331,7 @@ impl<'a> ExpressionConverter<'a> {
     ) -> ValueId {
         self.convert_expression(expr, b).unwrap_or_else(|| {
             assert!(
-                matches!(expr.return_type().as_deref(), None | Some(AstType::Unit)),
+                matches!(Self::value_type(expr).as_ref(), AstType::Unit),
                 "non-unit expression did not produce an SSA value"
             );
             self.emit_located(b, Self::expression_location(expr), |e| {
@@ -1254,7 +1255,7 @@ impl<'a> ExpressionConverter<'a> {
             Literal::Bool(_) | Literal::Integer(_, _, _) => {
                 Some(b.emit_const(Self::scalar_literal_to_constant(lit).unwrap()))
             }
-            Literal::Unit => None,
+            Literal::Unit => Some(self.emit_located(b, None, |e| e.mk_tuple(vec![], vec![]))),
             Literal::Array(array_lit) | Literal::Vector(array_lit) => {
                 self.convert_array_literal(array_lit, b)
             }
@@ -1330,11 +1331,7 @@ impl<'a> ExpressionConverter<'a> {
                     for expr in capture_exprs {
                         let val = self.convert_value(expr, b);
                         tuple_elems.push(val);
-                        let typ = expr.return_type();
-                        elem_types.push(
-                            self.type_converter
-                                .convert_type(typ.as_deref().unwrap_or(&AstType::Unit)),
-                        );
+                        elem_types.push(self.type_converter.convert_type(&Self::value_type(expr)));
                     }
                 }
 
@@ -1518,9 +1515,7 @@ impl<'a> ExpressionConverter<'a> {
                 {
                     return self.function_ident_type(ident);
                 }
-                let return_type = e.return_type();
-                self.type_converter
-                    .convert_type(return_type.as_deref().unwrap_or(&AstType::Unit))
+                self.type_converter.convert_type(&Self::value_type(e))
             })
             .collect();
 
@@ -1558,19 +1553,10 @@ impl<'a> ExpressionConverter<'a> {
                     .collect();
 
                 let fn_ptr = self.convert_expression(&call.func, b).unwrap();
-                let return_type = &call.return_type;
-                let return_size = self.return_size(return_type);
+                let results =
+                    self.emit_located(b, Some(call.location), |e| e.call_indirect(fn_ptr, args, 1));
 
-                let results = self.emit_located(b, Some(call.location), |e| {
-                    e.call_indirect(fn_ptr, args, return_size)
-                });
-
-                if results.is_empty() {
-                    None
-                } else {
-                    // Always a single value (tuples are materialized)
-                    Some(results[0])
-                }
+                Some(results[0])
             }
         }
     }
@@ -1592,28 +1578,19 @@ impl<'a> ExpressionConverter<'a> {
             .get(func_id)
             .unwrap_or_else(|| ice!("Undefined function: {:?}", func_id));
 
-        // Return size is 1 for tuples (they're returned as a single value)
-        // and 0 for unit
-        let return_size = self.return_size(&call.return_type);
-
         // Constrained calling unconstrained: emit unconstrained call
         let is_unconstrained_call =
             !self.in_unconstrained && self.natively_unconstrained.contains(func_id);
         let ssa_func_id = *ssa_func_id;
         let results = self.emit_located(b, Some(call.location), |e| {
             if is_unconstrained_call {
-                e.call_unconstrained(ssa_func_id, args, return_size)
+                e.call_unconstrained(ssa_func_id, args, 1)
             } else {
-                e.call(ssa_func_id, args, return_size)
+                e.call(ssa_func_id, args, 1)
             }
         });
 
-        if results.is_empty() {
-            None
-        } else {
-            // Always a single value (tuples are materialized)
-            Some(results[0])
-        }
+        Some(results[0])
     }
 
     fn convert_builtin_call(
@@ -1718,8 +1695,9 @@ impl<'a> ExpressionConverter<'a> {
             "black_box" => {
                 // `black_box` is an identity with a best-effort optimization hint, which Mavros
                 // currently ignores. Evaluate the argument exactly once, preserving its side
-                // effects, and return its value (or None for unit). This does not promise an
-                // optimization barrier or depend on whether calls are inlined or eliminated.
+                // effects, and return its value. Statement-shaped arguments may produce None.
+                // This does not promise an optimization barrier or depend on whether calls
+                // are inlined or eliminated.
                 self.convert_expression(&call.arguments[0], b)
             }
             "as_witness" => {
@@ -1728,7 +1706,8 @@ impl<'a> ExpressionConverter<'a> {
                 None
             }
             "assert_constant" => {
-                // Unit-valued expressions have no SSA value and are trivially constant.
+                // Statement-shaped unit expressions may have no SSA result. Their effects
+                // still run; materialized empty tuples are trivially constant as well.
                 if let Some(value) = self.convert_expression(&call.arguments[0], b) {
                     self.emit_located(b, Some(call.location), |e| e.assert_constant(value));
                 }

@@ -56,6 +56,7 @@ pub const RETURN_CHECK_ORIGIN: &str = "public return value check";
 
 pub struct PrepareEntryPoint {
     main_is_unconstrained: bool,
+    abi_has_return: Option<bool>,
 }
 
 struct PrepareFnEntry {
@@ -74,7 +75,7 @@ impl Pass for PrepareEntryPoint {
     }
 
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
-        Self::wrap_main(ssa, self.main_is_unconstrained);
+        Self::wrap_main(ssa, self.main_is_unconstrained, self.abi_has_return);
         Self::process_unconstrained_calls(ssa);
     }
 }
@@ -83,10 +84,18 @@ impl PrepareEntryPoint {
     pub fn new(main_is_unconstrained: bool) -> Self {
         Self {
             main_is_unconstrained,
+            abi_has_return: None,
         }
     }
 
-    fn wrap_main(ssa: &mut HLSSA, main_is_unconstrained: bool) {
+    /// The Noir ABI distinguishes unit (no public return) from an empty struct even
+    /// though both have an empty-tuple HLSSA result. Hand-built SSA defaults to its signature.
+    pub fn with_abi_return(mut self, has_return: bool) -> Self {
+        self.abi_has_return = Some(has_return);
+        self
+    }
+
+    fn wrap_main(ssa: &mut HLSSA, main_is_unconstrained: bool, abi_has_return: Option<bool>) {
         let original_main_id = ssa.get_unique_entrypoint_id();
         let original_main = ssa.get_unique_entrypoint();
         let param_types = original_main.get_param_types();
@@ -100,7 +109,7 @@ impl PrepareEntryPoint {
 
         // Reconstruct functions rebuild each typed input value from its
         // flattened field representation, range-checking integers on the way.
-        let has_return = !return_types.is_empty();
+        let has_return = abi_has_return.unwrap_or(!return_types.is_empty());
         let guard_type = Type::int(1);
         let mut reconstruct_fns = Vec::new();
         for typ in param_types.iter().chain(return_types.iter()) {
@@ -110,7 +119,7 @@ impl PrepareEntryPoint {
             Self::get_or_create_reconstruct_fn(&guard_type, ssa, &mut reconstruct_fns);
         }
 
-        let total_fields = Self::entry_blob_field_count(&param_types, &return_types);
+        let total_fields = Self::entry_blob_field_count(&param_types, &return_types, has_return);
 
         let wrapper_id = ssa.add_function("wrapper_main".to_string());
         let mut sb = HLSSABuilder::new(ssa);
@@ -182,8 +191,10 @@ impl PrepareEntryPoint {
             let return_guard = has_return.then(|| input_value(&mut e, &guard_type));
 
             let mut return_input_values = Vec::new();
-            for typ in &return_types {
-                return_input_values.push(input_value(&mut e, typ));
+            if has_return {
+                for typ in &return_types {
+                    return_input_values.push(input_value(&mut e, typ));
+                }
             }
 
             if let Some(init_fn) = globals_init_fn {
@@ -379,13 +390,17 @@ impl PrepareEntryPoint {
         format!("reconstruct_{}", reconstruct_fns.len())
     }
 
-    pub(crate) fn entry_blob_field_count(param_types: &[Type], return_types: &[Type]) -> usize {
+    pub(crate) fn entry_blob_field_count(
+        param_types: &[Type],
+        return_types: &[Type],
+        has_return: bool,
+    ) -> usize {
         param_types
             .iter()
             .chain(return_types.iter())
             .map(Self::flattened_field_count)
             .sum::<usize>()
-            + usize::from(!return_types.is_empty())
+            + usize::from(has_return)
     }
 
     /// How many elements of the entry point's input blob a value of `typ` occupies.

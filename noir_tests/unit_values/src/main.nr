@@ -61,7 +61,7 @@ fn check(index: u32) -> Field {
     assert(!(tick(&mut count) != ()));
     assert_eq(count, 19);
 
-    // An empty struct still has a return value even though unit has none.
+    // Both empty structs and unit have a materialized result before tuple elision.
     let _: Empty = empty();
     count
 }

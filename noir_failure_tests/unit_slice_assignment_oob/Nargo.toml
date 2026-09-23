@@ -1,0 +1,6 @@
+[package]
+name = "unit_slice_assignment_oob"
+type = "bin"
+authors = [""]
+
+[dependencies]

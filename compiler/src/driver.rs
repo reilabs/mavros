@@ -342,12 +342,16 @@ impl Driver {
         // We initially validate all integer widths for sound usage under the configured field.
         self.check_widths(&ssa)?;
 
+        let mut prepare_entry_point = PrepareEntryPoint::new(self.main_is_unconstrained);
+        if let Some(abi) = &self.abi {
+            prepare_entry_point = prepare_entry_point.with_abi_return(abi.return_type.is_some());
+        }
         let mut pass_manager = PassManager::new(
             "make_struct_access_static".to_string(),
             self.draw_cfg,
             vec![
                 Box::new(Defunctionalize::new()),
-                Box::new(PrepareEntryPoint::new(self.main_is_unconstrained)),
+                Box::new(prepare_entry_point),
                 // Eliminate all tuple types immediately after the entry point is prepared, so every
                 // subsequent pass operates on tuple-free IR.
                 Box::new(ElideTuples::new()),
@@ -1162,18 +1166,30 @@ mod tests {
         }
     }
 
-    /// The ABI side counts the guard slot iff `abi.return_type.is_some()`
-    /// ([`flattened_io_count`]) while the wrapper emits it iff `main` has HLSSA return values
-    /// ([`PrepareEntryPoint::entry_blob_field_count`]). The frontend makes these conditions
-    /// coincide — a unit-returning `main` gets `return_type: None` *and* no HLSSA return values —
-    /// and this test pins the resulting blob sizes to each other for both shapes.
+    /// The wrapper uses ABI return presence, not HLSSA result arity, to decide whether a
+    /// guard slot exists. Unit and empty structs both lower to one empty-tuple result,
+    /// but only the empty struct has an ABI return.
     #[test]
     fn abi_and_hlssa_blob_sizing_agree() {
         let cases: Vec<(Vec<AbiType>, Option<AbiType>, Vec<Type>, Vec<Type>)> = vec![
             // `fn main(x: Field) -> pub ()` — unit return: no guard slot on either side.
-            (vec![AbiType::Field], None, vec![Type::field()], vec![]),
+            (
+                vec![AbiType::Field],
+                None,
+                vec![Type::field()],
+                vec![Type::tuple_of(vec![])],
+            ),
             // No parameters, no return.
-            (vec![], None, vec![], vec![]),
+            (vec![], None, vec![], vec![Type::tuple_of(vec![])]),
+            (
+                vec![],
+                Some(AbiType::Struct {
+                    path: "Empty".into(),
+                    fields: vec![],
+                }),
+                vec![],
+                vec![Type::tuple_of(vec![])],
+            ),
             // `fn main(x: Field) -> pub Field` — guard slot on both sides.
             (
                 vec![AbiType::Field],
@@ -1199,7 +1215,11 @@ mod tests {
             let abi = abi_of(abi_params, abi_return);
             assert_eq!(
                 flattened_io_count(&abi),
-                PrepareEntryPoint::entry_blob_field_count(&hlssa_params, &hlssa_returns),
+                PrepareEntryPoint::entry_blob_field_count(
+                    &hlssa_params,
+                    &hlssa_returns,
+                    abi.return_type.is_some(),
+                ),
                 "blob size mismatch for ABI {:?} vs HLSSA ({hlssa_params:?}, {hlssa_returns:?})",
                 (&abi.parameters, &abi.return_type),
             );

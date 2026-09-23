@@ -2,9 +2,23 @@
 //!
 //! This module converts the monomorphized program directly to mavros SSA format,
 //! bypassing the intermediate Noir SSA representation.
+//!
+//! At the lowering boundary each Noir value occupies one HLSSA value: tuples and structs
+//! are materialized, and unit is the empty tuple, just like an empty struct. Ordinary calls
+//! and function signatures therefore have one result even for unit. Statement-shaped
+//! expressions and effect-only builtins may internally produce no result; `convert_value`
+//! evaluates them before supplying the empty tuple at a value boundary, and `value_type`
+//! supplies the matching unit type. Tuple elision later removes empty tuples from parameters,
+//! results, and storage. Sequence lowering must preserve bounds checks and slice lengths
+//! before that erasure; materializing unit alone is not sufficient. The entry-point wrapper
+//! uses the Noir ABI to decide whether a public return guard exists: an internal unit result
+//! does not add an ABI return slot.
 
 mod expression_converter;
 mod type_converter;
+
+#[cfg(test)]
+mod tests;
 
 use noirc_frontend::monomorphization::ast::{
     Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, Program,
@@ -380,19 +394,10 @@ impl SSAConverter {
             }
         }
 
-        // Convert the function body
-        let result = expr_converter.convert_expression(&ast_func.body, &mut b);
-
-        // Add return terminator
-        let return_values = if TypeConverter::call_returns_a_value(&ast_func.return_type) {
-            result.into_iter().collect()
-        } else {
-            // A unit binding or projection may have materialized an empty tuple,
-            // but unit-returning functions have no SSA results.
-            vec![]
-        };
+        // Function bodies follow the same one-value contract as call expressions.
+        let result = expr_converter.convert_value(&ast_func.body, &mut b);
         b.block(expr_converter.current_block())
-            .terminate_return(return_values);
+            .terminate_return(vec![result]);
 
         function
     }
