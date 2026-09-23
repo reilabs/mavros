@@ -4,17 +4,21 @@
 //! decompositions constrain recomposition already; pure field decompositions need a guarded
 //! range check before later lowerings turn them into raw hints. Integer IR decompositions
 //! are not these source builtins and must not receive a field range check.
-//! Unknown radices are deferred until the radix lowerer validates and normalizes them to bytes.
+//! The standalone pass handles source bit decompositions. The frontend emits dynamic radices
+//! for byte decompositions, whose fit checks are emitted by the radix lowerer after validation.
 
 use super::{InstructionLoweringRule, LoweringContext};
-use crate::compiler::ssa::hlssa::{
-    OpCode, Radix, TypeExpr,
-    builder::{HLBlockEmitter, HLEmitter},
+use crate::compiler::ssa::{
+    ValueId,
+    hlssa::{
+        OpCode, TypeExpr,
+        builder::{HLBlockEmitter, HLEmitter},
+    },
 };
 
-pub(super) struct LowerPureDecompositions;
+pub(super) struct LowerPureBitDecompositions;
 
-impl InstructionLoweringRule for LowerPureDecompositions {
+impl InstructionLoweringRule for LowerPureBitDecompositions {
     fn needs_value_ranges(&self) -> bool {
         false
     }
@@ -29,38 +33,42 @@ impl InstructionLoweringRule for LowerPureDecompositions {
             OpCode::Guard { condition, inner } => (inner.as_ref(), Some(*condition)),
             op => (op, None),
         };
-        let (value, max_bits) = match op {
-            OpCode::ToBits { value, count, .. } => (*value, *count),
-            // FIELD-ASSUMPTION: L4-decompose. Only byte radix is supported here; arbitrary
-            // radices need a radix^count fit check rather than this 8*count bit bound.
-            OpCode::ToRadix {
-                value,
-                radix: Radix::Bytes,
-                count,
-                ..
-            } => (*value, count.saturating_mul(8)),
-            // Even a constant-valued Dyn operand is normalized by the radix lowerer. Defer
-            // its fit check until then so it is emitted exactly once, after radix validation.
-            _ => return false,
+        let OpCode::ToBits { value, count, .. } = op else {
+            return false;
         };
-        if !matches!(context.types().get_value_type(value).expr, TypeExpr::Field)
-            || max_bits >= b.field().field_bit_size() as usize
-        {
+        if !emit_fit_check(b, context, guard, *value, *count) {
             return false;
         }
-        // Witness decompositions already constrain recomposition. Pure ones need only a
-        // runtime/constant check; inserting it after witness inference adds no circuit work.
-        let check = OpCode::Rangecheck { value, max_bits };
-        b.emit(match guard {
-            Some(condition) => OpCode::Guard {
-                condition,
-                inner: Box::new(check),
-            },
-            None => check,
-        });
         b.emit(instruction.clone());
         true
     }
+}
+
+/// Emit the fit check for a pure field decomposition. Byte callers must first validate the
+/// radix and derive the bound from it; this helper never treats an unknown radix as 256.
+pub(super) fn emit_fit_check(
+    b: &mut HLBlockEmitter<'_>,
+    context: &LoweringContext<'_>,
+    guard: Option<ValueId>,
+    value: ValueId,
+    max_bits: usize,
+) -> bool {
+    if !matches!(context.types().get_value_type(value).expr, TypeExpr::Field)
+        || max_bits >= b.field().field_bit_size() as usize
+    {
+        return false;
+    }
+    // Witness decompositions already constrain recomposition. Pure ones need only a
+    // runtime/constant check; inserting it after witness inference adds no circuit work.
+    let check = OpCode::Rangecheck { value, max_bits };
+    b.emit(match guard {
+        Some(condition) => OpCode::Guard {
+            condition,
+            inner: Box::new(check),
+        },
+        None => check,
+    });
+    true
 }
 
 #[cfg(test)]
@@ -71,12 +79,12 @@ mod tests {
         passes::instruction_lowering::InstructionLowering,
         ssa::{
             Terminator,
-            hlssa::{Constant, Endianness, HLSSA, Type},
+            hlssa::{Constant, Endianness, HLSSA, Radix, Type},
         },
     };
 
     #[test]
-    fn checks_only_pure_fields_with_bit_or_known_byte_radix() {
+    fn checks_pure_bits_early_and_defers_radix_validation() {
         for ty in [
             Type::field(),
             Type::int(32),
@@ -122,7 +130,8 @@ mod tests {
                         op
                     });
                     entry.set_terminator(Terminator::Return(vec![]));
-                    InstructionLowering::pure_decompositions().run(&mut ssa, &AnalysisStore::new());
+                    InstructionLowering::pure_bit_decompositions()
+                        .run(&mut ssa, &AnalysisStore::new());
                     let checks: Vec<_> = ssa
                         .get_unique_entrypoint()
                         .get_entry()
@@ -142,10 +151,10 @@ mod tests {
                             _ => None,
                         })
                         .collect();
-                    let expected = ty == Type::field() && matches!(radix, None | Some(1));
+                    let expected = ty == Type::field() && radix.is_none();
                     assert_eq!(checks.len(), usize::from(expected), "{ty:?}, {radix:?}");
                     if expected {
-                        assert_eq!(checks[0], (if radix.is_none() { 1 } else { 8 }, guarded));
+                        assert_eq!(checks[0], (1, guarded));
                     }
                     if ty == Type::field() && radix == Some(0) {
                         // A function parameter is checked only after the radix lowerer has

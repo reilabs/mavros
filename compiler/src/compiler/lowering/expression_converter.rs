@@ -576,16 +576,40 @@ impl<'a> ExpressionConverter<'a> {
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
         let new_value = self.convert_expression(&assign.expression, b).unwrap();
+        self.write_lvalue(&assign.lvalue, new_value, b);
+        None
+    }
+
+    /// Replace the whole destination without reading its old element. Partial updates such as
+    /// `a[i].field = value` still use `with_lvalue_ref` to preserve the other fields.
+    fn write_lvalue(&mut self, lvalue: &LValue, new_value: ValueId, b: &mut HLFunctionBuilder<'_>) {
+        match lvalue {
+            LValue::Clone(inner) => return self.write_lvalue(inner, new_value, b),
+            LValue::Index {
+                array,
+                index,
+                location,
+                ..
+            } => {
+                let array_value = self.read_lvalue(array, b);
+                let idx = self.convert_expression(index, b).unwrap();
+                let updated = self.emit_located(b, Some(*location), |e| {
+                    e.array_set(array_value, idx, new_value)
+                });
+                self.write_lvalue(array, updated, b);
+                return;
+            }
+            _ => {}
+        }
         self.with_lvalue_ref(
-            &assign.lvalue,
+            lvalue,
             b,
             &|this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
-                this.emit_located(b, Self::lvalue_location(&assign.lvalue), |e| {
+                this.emit_located(b, Self::lvalue_location(lvalue), |e| {
                     e.store(ptr, new_value)
                 });
             },
         );
-        None
     }
 
     fn with_lvalue_ref(
@@ -634,13 +658,7 @@ impl<'a> ExpressionConverter<'a> {
                 let updated = self.emit_located(b, Some(*location), |e| {
                     e.array_set(array_value, idx, element)
                 });
-                self.with_lvalue_ref(
-                    array,
-                    b,
-                    &|this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
-                        this.emit_located(b, Some(*location), |e| e.store(ptr, updated));
-                    },
-                );
+                self.write_lvalue(array, updated, b);
             }
             LValue::Dereference { .. } => ice_unreachable!("dereference lvalues have refs"),
             LValue::Clone(inner) => self.with_lvalue_ref(inner, b, f),

@@ -326,9 +326,6 @@ impl DCE {
     ) -> HashMap<ValueId, usize> {
         let mut lengths = HashMap::default();
         for (id, function) in ssa.iter_functions() {
-            if !types.has_function(*id) {
-                continue;
-            }
             let types = types.get_function(*id);
             for block in cfg.get_function_cfg(*id).get_domination_pre_order() {
                 for op in function.get_block(block).get_instructions() {
@@ -784,11 +781,7 @@ impl DCE {
                         // and seeding the sequence conservatively avoids a second unchecked lookup.
                         let ty = rewrite_types
                             .as_ref()
-                            .and_then(|types| {
-                                types
-                                    .has_function(*function_id)
-                                    .then(|| types.get_function(*function_id))
-                            })
+                            .map(|types| types.get_function(*function_id))
                             .and_then(|types| types.try_get_value_type(seq));
                         if Self::bounds_proven(
                             &sequence_lengths,

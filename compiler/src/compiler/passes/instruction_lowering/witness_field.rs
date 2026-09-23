@@ -410,17 +410,17 @@ impl LowerWitnessFieldOps {
                 },
                 None => decomposition,
             };
-            // A source radix can be a function parameter even when callers pass 256. The
-            // earlier pure-decomposition pass must decline that unknown radix. Now that the
-            // assertion above establishes Bytes, retain its fit check before emitting the
-            // raw decomposition. This branch never handles compiler-generated witness hints.
-            if !super::pure_decompositions::LowerPureDecompositions.lower_instruction(
+            // FIELD-ASSUMPTION: L4-decompose. The assertion above establishes radix 256,
+            // so each digit contributes exactly eight bits. This is the source conversion,
+            // before any raw witness hint is emitted.
+            super::pure_decompositions::emit_fit_check(
                 b,
                 context,
-                &decomposition,
-            ) {
-                b.emit(decomposition);
-            }
+                guard,
+                value,
+                count.saturating_mul(8),
+            );
+            b.emit(decomposition);
             return true;
         }
 

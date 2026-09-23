@@ -169,11 +169,12 @@ pub(super) trait InstructionLoweringRule {
 }
 
 impl InstructionLowering {
-    /// Validate source decompositions once, before witness lowering creates raw hints.
-    pub fn pure_decompositions() -> Self {
+    /// Validate source bit decompositions before witness lowering creates raw hints.
+    /// Byte decompositions are checked by the radix lowerer after radix validation.
+    pub fn pure_bit_decompositions() -> Self {
         Self::with_lowerers(
-            "instruction_lowering_pure_decompositions",
-            vec![Box::new(pure_decompositions::LowerPureDecompositions)],
+            "instruction_lowering_pure_bit_decompositions",
+            vec![Box::new(pure_decompositions::LowerPureBitDecompositions)],
             false,
         )
     }
