@@ -44,7 +44,7 @@ pub fn split_jmp_if_edge<Op: Instruction, Ty: SSAType>(
     let target = match (function.get_block_mut(pred).get_terminator_mut(), arm) {
         (Terminator::JmpIf(_, t, _), JmpIfArm::True) => std::mem::replace(t, split),
         (Terminator::JmpIf(_, _, f), JmpIfArm::False) => std::mem::replace(f, split),
-        (t, _) => panic!("split_jmp_if_edge: predecessor must end in JmpIf, found {t:?}"),
+        (t, _) => ice!("split_jmp_if_edge: predecessor must end in JmpIf, found {t:?}"),
     };
     assert!(
         !function.get_block(target).has_parameters(),

@@ -92,13 +92,12 @@ pub fn seq_bounds_operands(
     let len = match &seq_ty.strip_witness().expr {
         TypeExpr::Array(_, n) => emitter.int_const(IntBits::from_u128(32, *n as u128)),
         TypeExpr::Slice(_) => emitter.slice_len(seq),
-        other => panic!("seq bounds check on non-sequence type: {other:?}"),
+        other => ice!("seq bounds check on non-sequence type: {other:?}"),
     };
     match index_ty.strip_witness().expr {
         TypeExpr::Int(idx_bits) => {
-            let cmp_bits = idx_bits.max(32);
-            let idx_cmp = emitter.widen_u(index, idx_bits, cmp_bits);
-            let len_cmp = emitter.widen_u(len, 32, cmp_bits);
+            let (idx_cmp, len_cmp, cmp_bits) =
+                widen_comparison_operands(emitter, index, idx_bits, len, 32);
             (len, len_cmp, idx_cmp, cmp_bits)
         }
         _ => {
@@ -106,6 +105,22 @@ pub fn seq_bounds_operands(
             (len, len, idx_cmp, 32)
         }
     }
+}
+
+/// Bring unsigned operands to a common width without discarding high index bits.
+pub fn widen_comparison_operands(
+    emitter: &mut impl HLEmitter,
+    lhs: ValueId,
+    lhs_bits: usize,
+    rhs: ValueId,
+    rhs_bits: usize,
+) -> (ValueId, ValueId, usize) {
+    let bits = lhs_bits.max(rhs_bits);
+    (
+        emitter.widen_u(lhs, lhs_bits, bits),
+        emitter.widen_u(rhs, rhs_bits, bits),
+        bits,
+    )
 }
 
 /// Returns `(assert, len)`; the caller emits the assert — bare, or under the op's guard.
@@ -132,9 +147,8 @@ pub fn build_insert_bounds_assert(
     let len = emitter.slice_len(slice);
     let one = emitter.int_const(IntBits::one(32));
     let new_len = emitter.uadd(len, one);
-    let cmp_bits = idx_bits.max(32);
-    let idx_cmp = emitter.widen_u(index, idx_bits, cmp_bits);
-    let new_len_cmp = emitter.widen_u(new_len, 32, cmp_bits);
+    let (idx_cmp, new_len_cmp, cmp_bits) =
+        widen_comparison_operands(emitter, index, idx_bits, new_len, 32);
     let assert = OpCode::AssertCmp {
         kind: CmpKind::ULt,
         lhs: idx_cmp,
@@ -152,9 +166,7 @@ pub fn build_remove_bounds_assert(
 ) -> (OpCode, ValueId, ValueId, usize) {
     let idx_bits = index_bits(index_ty, "slice remove");
     let len = emitter.slice_len(slice);
-    let cmp_bits = idx_bits.max(32);
-    let idx_cmp = emitter.widen_u(index, idx_bits, cmp_bits);
-    let len_cmp = emitter.widen_u(len, 32, cmp_bits);
+    let (idx_cmp, len_cmp, cmp_bits) = widen_comparison_operands(emitter, index, idx_bits, len, 32);
     let assert = OpCode::AssertCmp {
         kind: CmpKind::ULt,
         lhs: idx_cmp,
@@ -214,6 +226,6 @@ pub fn emit_bounds_assert(
 fn index_bits(ty: &Type, context: &str) -> usize {
     match ty.strip_witness().expr {
         TypeExpr::Int(n) => n,
-        _ => panic!("{context}: index must be an integer, got {ty}"),
+        _ => ice!("{context}: index must be an integer, got {ty}"),
     }
 }

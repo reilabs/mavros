@@ -13,7 +13,7 @@ use crate::{
     collections::HashSet,
     compiler::{
         analysis::types::{FunctionTypeInfo, TypeInfo},
-        codegen::bytecode::layout::{SPREAD_MAX_BITS, int_cell_count},
+        codegen::bytecode::layout::int_cell_count,
         diagnostic::Diagnostic,
         passes::shared::limbs::{
             narrow_int_bits, two_limb_product_packing_fits, widest_injective_int_bits,
@@ -166,7 +166,7 @@ impl Funnel {
             OpCode::AssertCmp { kind, lhs, rhs } => {
                 self.check_compare(*kind, *lhs, *rhs, "assertion", types, location, refusals);
             }
-            OpCode::Not { value, .. } => self.check_not(*value, types, location, refusals),
+            OpCode::Not { .. } => {}
             OpCode::SExt {
                 value,
                 from_bits,
@@ -216,17 +216,21 @@ impl Funnel {
         // Noir's semantics ask for is built from constants stated at the operand's own width. Only
         // the amount rule at the end of this function binds there.
         if witnessed {
-            if bits > self.narrow {
+            // The bitwise three have a lowering at every width: below the representation threshold
+            // the half-limb decomposition reaches any width the recombination still fits an element
+            // at, and above it the bitwise three have no cross-limb interaction, so the
+            // representation rewrites one into the same operation on each limb pair and every limb
+            // is a width the narrow lowerings already hold.
+            let bitwise = matches!(
+                kind.group(),
+                ArithGroup::And | ArithGroup::Or | ArithGroup::Xor
+            );
+            if bits > self.narrow && !bitwise {
                 refusals.push(self.witnessed_too_wide(operation, bits, location));
                 return;
             }
 
             match kind.group() {
-                ArithGroup::And | ArithGroup::Or | ArithGroup::Xor => {
-                    if !self.bitwise_is_lowered(bits) {
-                        refusals.push(self.bitwise_width(operation, bits, location));
-                    }
-                }
                 ArithGroup::Shl | ArithGroup::Shr => {
                     let amount = literal_amount(ssa, rhs);
                     if !bits.is_power_of_two() {
@@ -243,7 +247,14 @@ impl Funnel {
                         refusals.push(self.product_too_wide(operation, bits, location));
                     }
                 }
-                ArithGroup::Add | ArithGroup::Sub | ArithGroup::Div | ArithGroup::Rem => {}
+                // The groups with no rule of their own beyond the bound above.
+                ArithGroup::And
+                | ArithGroup::Or
+                | ArithGroup::Xor
+                | ArithGroup::Add
+                | ArithGroup::Sub
+                | ArithGroup::Div
+                | ArithGroup::Rem => {}
             }
         }
 
@@ -295,31 +306,22 @@ impl Funnel {
         }
     }
 
-    /// The complement, which is the one bitwise operation lowered for a pure operand as well.
-    fn check_not(
+    /// An operand too wide for a lowering that reads two's complement.
+    fn signed_too_wide(
         &self,
-        value: ValueId,
-        types: &FunctionTypeInfo,
+        operation: &str,
+        bits: usize,
         location: &SourceLocation,
-        refusals: &mut Vec<Diagnostic>,
-    ) {
-        let Some(bits) = int_width_of(types, value) else {
-            return;
-        };
-
-        if bits > self.injective {
-            refusals.push(
-                Diagnostic::error(
-                    format!("a complement of an int{bits} value is not supported"),
-                    location.clone(),
-                )
-                .with_label(format!("int{bits} does not fit one field element"))
-                .with_note(format!(
-                    "a complement is computed as `2^bits - 1 - value` in the field, so the widest operand is the widest integer the field carries injectively, int{}",
-                    self.injective
-                )),
-            );
-        }
+    ) -> Diagnostic {
+        Diagnostic::error(
+            format!("a signed int{bits} {operation} is not supported"),
+            location.clone(),
+        )
+        .with_label(format!("int{bits} is wider than a signed lowering reads"))
+        .with_note(format!(
+            "a signed operand is read as two's complement in one integer cell, both where a witness lowering encodes the sign as a place value and where an overflow check tests it, so the widest signed operation is int{}",
+            self.signed
+        ))
     }
 
     /// Sign extension, which is lowered through the field for a pure operand as well.
@@ -425,16 +427,6 @@ impl Funnel {
         !kind.is_signed() || bits <= self.signed
     }
 
-    /// Whether a witnessed bitwise operation at `bits` has a lowering.
-    ///
-    /// `lower_binary_bitwise` has four arms: `u1` in plain field arithmetic, one limb decomposed
-    /// into half-limbs, two of those, and a fall-through that spreads at the operand's own width.
-    /// The two limb arms are keyed on the operand's **type** width rather than on the field, and
-    /// the fall-through is bounded by the widest spread the bytecode has an instruction for.
-    fn bitwise_is_lowered(&self, bits: usize) -> bool {
-        bits <= SPREAD_MAX_BITS || bits == HOST_LIMB_BITS || bits == 2 * HOST_LIMB_BITS
-    }
-
     /// Whether a witnessed multiplication at `bits` has a lowering.
     ///
     /// `lower_unsigned_mul` forms the product in one field element, so `2^(2 * bits)` has to stay
@@ -488,38 +480,6 @@ impl Funnel {
         .with_note(
             "the same operation is supported at this width outside the witness domain, where the value is computed rather than constrained",
         )
-    }
-
-    /// An operand too wide for a lowering that reads two's complement.
-    fn signed_too_wide(
-        &self,
-        operation: &str,
-        bits: usize,
-        location: &SourceLocation,
-    ) -> Diagnostic {
-        Diagnostic::error(
-            format!("a signed int{bits} {operation} is not supported"),
-            location.clone(),
-        )
-        .with_label(format!("int{bits} is wider than a signed lowering reads"))
-        .with_note(format!(
-            "a signed operand is read as two's complement in one integer cell, both where a witness lowering encodes the sign as a place value and where an overflow check tests it, so the widest signed operation is int{}",
-            self.signed
-        ))
-    }
-
-    /// A witnessed bitwise operation at a width between the lowerings that exist.
-    fn bitwise_width(&self, operation: &str, bits: usize, location: &SourceLocation) -> Diagnostic {
-        Diagnostic::error(
-            format!("a witnessed int{bits} {operation} is not supported"),
-            location.clone(),
-        )
-        .with_label(format!("int{bits} has no bitwise decomposition"))
-        .with_note(format!(
-            "a witnessed bitwise operation is decomposed limb-wise at int{} and int{}, and spread bit-wise at every width up to int{SPREAD_MAX_BITS}",
-            HOST_LIMB_BITS,
-            2 * HOST_LIMB_BITS
-        ))
     }
 
     /// A shift whose amount does not cover the cells its opcode reads it from.
@@ -733,6 +693,7 @@ mod tests {
 
     use mavros_artifacts::FieldConfig;
 
+    use crate::compiler::codegen::bytecode::layout::SPREAD_MAX_BITS;
     use crate::compiler::{
         analysis::{flow_analysis::FlowAnalysis, types::Types},
         ssa::{SourcePosition, Terminator, hlssa::MAX_SUPPORTED_INT_BITS},
@@ -1073,22 +1034,53 @@ mod tests {
         )));
     }
 
-    /// The three widths `lower_binary_bitwise` decomposes, and the two bands between them.
+    /// A witnessed bitwise operation has a lowering at **every** width, which no other arithmetic
+    /// family does.
+    ///
+    /// The widths named here are the ones that used to have none: the two bands between the three
+    /// arms `lower_binary_bitwise` was keyed on, and the band between the narrow bound and the
+    /// representation threshold. They are kept as the cases rather than a range because each is a
+    /// different reason — a spread past the instruction's width, a value that is neither one limb
+    /// nor two, and a value too wide for the narrow lowerings but not yet split into limbs.
+    ///
+    /// **Bitwise reaches them all because it has no cross-limb interaction.** Nothing else in this
+    /// funnel is unbounded, and a new arithmetic family should not be added to this test without
+    /// its own such argument.
     #[test]
-    fn a_witnessed_bitwise_operation_is_bounded_at_the_widths_it_decomposes() {
-        for bits in [1, SPREAD_MAX_BITS, HOST_LIMB_BITS, 2 * HOST_LIMB_BITS] {
-            assert!(
-                !refuses(&witnessed(BinaryArithOpKind::Xor, bits)),
-                "int{bits} has a bitwise lowering"
-            );
+    fn a_witnessed_bitwise_operation_has_a_lowering_at_every_width() {
+        let bands = [
+            1,
+            SPREAD_MAX_BITS,
+            SPREAD_MAX_BITS + 1,
+            HOST_LIMB_BITS - 1,
+            HOST_LIMB_BITS,
+            HOST_LIMB_BITS + 1,
+            2 * HOST_LIMB_BITS - 1,
+            2 * HOST_LIMB_BITS,
+            2 * HOST_LIMB_BITS + 1,
+            widest_injective_int_bits(FieldConfig::bn254()),
+            MAX_SUPPORTED_INT_BITS,
+        ];
+        for bits in bands {
+            for kind in [
+                BinaryArithOpKind::And,
+                BinaryArithOpKind::Or,
+                BinaryArithOpKind::Xor,
+            ] {
+                assert!(
+                    !refuses(&witnessed(kind, bits)),
+                    "int{bits} {kind:?} has a bitwise lowering"
+                );
+            }
         }
 
-        for bits in [SPREAD_MAX_BITS + 1, HOST_LIMB_BITS - 1, HOST_LIMB_BITS + 1] {
-            assert!(
-                refuses(&witnessed(BinaryArithOpKind::And, bits)),
-                "int{bits} has no bitwise lowering"
-            );
-        }
+        // And the exemption is the family's, not a hole: a width past the narrow bound still
+        // refuses for an operation that carries between limbs. (Below that bound an addition is
+        // supported too, so the control has to be taken from above it.)
+        assert!(refuses(&witnessed(
+            BinaryArithOpKind::UAdd,
+            2 * HOST_LIMB_BITS + 1
+        )));
     }
 
     /// A shift's amount has to cover the cells the opcode reads it from.
@@ -1354,19 +1346,28 @@ mod tests {
         )));
     }
 
-    /// A complement is computed in the field for a pure operand as much as for a witnessed one, so
-    /// it is bounded by what the field carries injectively rather than by the witness threshold.
+    /// A complement has a lowering at every width, in both domains, so no width here refuses one.
+    ///
+    /// Bit `i` of the answer depends on bit `i` of the operand alone. Outside the witness domain
+    /// that is an opcode each backend has at any width; inside it, a value past the representation
+    /// threshold is limbs before the lowering sees it and the complement is one per limb, each at
+    /// the width that limb actually carries.
     #[test]
-    fn a_complement_is_bounded_by_the_injective_width_in_both_domains() {
-        let complement = |bits: usize| {
-            program_with(&[Type::int(bits)], |values, result| OpCode::Not {
+    fn a_complement_is_admitted_at_every_width_in_both_domains() {
+        let complement = |value_type: Type| {
+            program_with(&[value_type], |values, result| OpCode::Not {
                 result,
                 value: values[0],
             })
         };
 
-        assert!(!refuses(&complement(injective())));
-        assert!(refuses(&complement(injective() + 1)));
+        for bits in [8usize, narrow(), narrow() + 1, injective(), injective() + 1] {
+            assert!(!refuses(&complement(Type::int(bits))), "pure int{bits}");
+            assert!(
+                !refuses(&complement(Type::witness_of(Type::int(bits)))),
+                "witnessed int{bits}"
+            );
+        }
     }
 
     /// A range check is what an integer parameter of `main` reaches, so this is the rule a wide

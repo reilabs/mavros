@@ -485,7 +485,7 @@ impl Rewriter<'_> {
         );
 
         let bits = int_width(self.types.get_value_type(value))
-            .unwrap_or_else(|| panic!("ICE: a non-integer operand met a wide witnessed integer"));
+            .unwrap_or_else(|| ice!("a non-integer operand met a wide witnessed integer"));
         let widths = limb_widths(bits, self.limb_bits());
         assert_eq!(
             widths.len(),
@@ -966,10 +966,10 @@ impl Rewriter<'_> {
                 let results = self.limbs(*result);
                 let Some(Constant::Blob(blob)) = self.ssa.get_const(*blob).map(|c| (*c).clone())
                 else {
-                    panic!("ICE: a blob-backed sequence without a blob constant")
+                    ice!("a blob-backed sequence without a blob constant")
                 };
                 let bits = int_width(element_type)
-                    .unwrap_or_else(|| panic!("ICE: a wide blob sequence of {element_type}"));
+                    .unwrap_or_else(|| ice!("a wide blob sequence of {element_type}"));
                 let widths = limb_widths(bits, self.limb_bits());
                 let elem_types = element_types(element_type, self.field, results.len());
                 for (index, ((result, width), element_type)) in
@@ -981,7 +981,7 @@ impl Rewriter<'_> {
                         .iter()
                         .map(|element| {
                             let Constant::Int(pattern) = element else {
-                                panic!("ICE: a wide blob element that is not an integer")
+                                ice!("a wide blob element that is not an integer")
                             };
                             Constant::Int(pattern.bit_range(low, *width))
                         })
@@ -1098,6 +1098,50 @@ impl Rewriter<'_> {
                 }
             }
 
+            // The bitwise three, which are the one arithmetic family with **no cross-limb
+            // interaction**: bit `i` of the answer depends on bit `i` of each operand and nothing
+            // else, so a limb of the answer is the same operation on the matching pair of operand
+            // limbs. There is no carry to thread and no reconstruction to re-establish — each limb
+            // is already held to its own width, and an operation that cannot set a bit the operands
+            // did not have between them cannot break that.
+            OpCode::BinaryArithOp {
+                kind:
+                    kind @ (BinaryArithOpKind::And | BinaryArithOpKind::Or | BinaryArithOpKind::Xor),
+                result,
+                lhs,
+                rhs,
+            } => {
+                let results = self.limbs(*result);
+                let pairs = self.operand_pair(*lhs, *rhs);
+                assert_eq!(
+                    results.len(),
+                    pairs.len(),
+                    "ICE: a bitwise result of {} limbs met operands of {}",
+                    results.len(),
+                    pairs.len()
+                );
+                for (result, (lhs, rhs)) in results.into_iter().zip(pairs) {
+                    self.push(OpCode::BinaryArithOp {
+                        kind: *kind,
+                        result,
+                        lhs,
+                        rhs,
+                    });
+                }
+            }
+
+            // The complement, which is the unary member of the same family and limb-wise for the
+            // same reason: bit `i` of the answer depends on bit `i` of the operand alone. Each limb
+            // is complemented at **its own** width, so the top one — which may be narrower than a
+            // full limb — does not acquire bits the value's width does not have.
+            OpCode::Not { result, value } => {
+                let results = self.limbs(*result);
+                let values = self.operand_limbs(*value, results.len());
+                for (result, value) in paired(results, values) {
+                    self.push(OpCode::Not { result, value });
+                }
+            }
+
             OpCode::Alloc { result, value } => {
                 for (result, value) in paired(self.limbs(*result), self.limbs(*value)) {
                     self.push(OpCode::Alloc { result, value });
@@ -1179,8 +1223,8 @@ impl Rewriter<'_> {
             // witnessed operand `width_validation` is what refuses it; a **pure** one has no width
             // rule to refuse it and reaches here only by being read out of a transposed sequence,
             // which no arm above hands to anything but another limb-mover.
-            other => panic!(
-                "ICE: {other:?} reached the multi-cell representation with a wide operand, which is a shape it does not represent"
+            other => ice!(
+                "{other:?} reached the multi-cell representation with a wide operand, which is a shape it does not represent"
             ),
         }
     }

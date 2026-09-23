@@ -58,7 +58,7 @@ const _: () = assert!(
 #[track_caller]
 pub fn host_word(pattern: &IntBits) -> u128 {
     u128::try_from(pattern)
-        .unwrap_or_else(|e| panic!("ICE: an integer constant is wider than the host: {e}"))
+        .unwrap_or_else(|e| ice!("an integer constant is wider than the host: {e}"))
 }
 
 /// The field element an integer pattern denotes, or `None` if this field cannot carry it.
@@ -102,13 +102,13 @@ pub fn field_constant(field: FieldConfig, pattern: &IntBits) -> Option<Field> {
 /// passes, analyses, and codegen.
 #[track_caller]
 pub fn ice_non_elided_tuple() -> ! {
-    panic!("ICE: Tuple encountered after ElideTuples pass")
+    ice!("Tuple encountered after ElideTuples pass")
 }
 
 /// Panic if an `AssertConstant` marker survives its dedicated validation phase.
 #[track_caller]
 pub fn ice_unvalidated_assert_constant() -> ! {
-    panic!("ICE: AssertConstant encountered after assert-constant validation")
+    ice!("AssertConstant encountered after assert-constant validation")
 }
 
 pub fn spread_bits(v: u128, bits: usize) -> u128 {

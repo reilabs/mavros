@@ -227,7 +227,7 @@ pub fn for_each_constant_word(constant: &Constant, visit: &mut impl FnMut(u64)) 
                 for_each_constant_word(element, visit);
             }
         }
-        Constant::FnPtr(_) => panic!("FnPtr constants not supported in codegen"),
+        Constant::FnPtr(_) => ice!("FnPtr constants not supported in codegen"),
     }
 }
 
@@ -322,7 +322,7 @@ pub fn int_lane(bits: usize) -> Lane {
         "ICE: an int{bits} is wider than the {MAX_SUPPORTED_INT_BITS}-bit maximum"
     );
     match bits {
-        0 => panic!("ICE: Encountered a query for a zero-width integer lane"),
+        0 => ice!("Encountered a query for a zero-width integer lane"),
         1..=CELL_LANE_BITS => Lane::Cell,
         ..=DOUBLE_LANE_BITS => Lane::Double,
         _ => Lane::Wide,

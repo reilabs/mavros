@@ -281,7 +281,7 @@ impl FnBuilder<'_> {
                 }
             }
             TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {}
-            TypeExpr::WitnessOf(_) => unreachable!("peeled above"),
+            TypeExpr::WitnessOf(_) => ice_unreachable!("peeled above"),
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
         }
     }
@@ -568,7 +568,7 @@ impl FnBuilder<'_> {
             OpCode::Call {
                 function: CallTarget::Dynamic(_),
                 ..
-            } => panic!("ICE: dynamic call target during points-to analysis"),
+            } => ice!("dynamic call target during points-to analysis"),
 
             // --- Globals. ---
             OpCode::ReadGlobal {
@@ -642,7 +642,7 @@ impl FnBuilder<'_> {
             | OpCode::Lookup { .. }
             | OpCode::DLookup { .. }
             | OpCode::Todo { .. } => {
-                panic!("ICE: opcode should not be present during points-to analysis: {instr:?}")
+                ice!("opcode should not be present during points-to analysis: {instr:?}")
             }
         }
     }
@@ -799,7 +799,7 @@ impl FnBuilder<'_> {
     fn pointee_of(&self, ptr: ValueId, op: &str) -> Type {
         match &self.value_type(ptr).peel_witness().expr {
             TypeExpr::Ref(inner) => (**inner).clone(),
-            other => panic!("ICE: {op} through a non-ref value of type {other:?}"),
+            other => ice!("{op} through a non-ref value of type {other:?}"),
         }
     }
 }
@@ -835,7 +835,7 @@ fn collect_ref_levels(ty: &Type, prefix: &mut Path, out: &mut Vec<Path>) {
             prefix.pop();
         }
         TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {}
-        TypeExpr::WitnessOf(_) => unreachable!("peeled above"),
+        TypeExpr::WitnessOf(_) => ice_unreachable!("peeled above"),
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
     }
 }
