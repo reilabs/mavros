@@ -1000,7 +1000,7 @@ impl<'a> ExpressionConverter<'a> {
             .local_types
             .get(var)
             .unwrap_or_else(|| {
-                panic!("ICE: no recorded type for match scrutinee `{var_name}` ({var:?})")
+                ice!("no recorded type for match scrutinee `{var_name}` ({var:?})")
             })
             .clone();
         let value = self.local_value(*var, None, b);
@@ -1020,7 +1020,7 @@ impl<'a> ExpressionConverter<'a> {
             )
             | None => None,
             Some(Constructor::Range(..)) => {
-                panic!("ICE: range patterns are not produced by the current frontend")
+                ice!("range patterns are not produced by the current frontend")
             }
         };
         let scrutinee = Scrutinee { value, ty, tag };
@@ -1095,7 +1095,7 @@ impl<'a> ExpressionConverter<'a> {
         let value = s.value;
         match constructor {
             Constructor::Unit | Constructor::Tuple(_) => {
-                panic!("ICE: {constructor:?} is a single-constructor pattern and is never tested")
+                ice!("{constructor:?} is a single-constructor pattern and is never tested")
             }
             Constructor::True => (value, true),
             Constructor::False => (value, false),
@@ -1106,15 +1106,13 @@ impl<'a> ExpressionConverter<'a> {
             // Only an enum scrutinee carries a tag; a struct pattern is single-constructor too.
             Constructor::Variant(_, idx) => {
                 let tag = s.tag.unwrap_or_else(|| {
-                    panic!(
-                        "ICE: {constructor:?} is a single-constructor pattern and is never tested"
-                    )
+                    ice!("{constructor:?} is a single-constructor pattern and is never tested")
                 });
                 let c = b.emit_const(Constant::Field((*idx as u128).into()));
                 (self.emit_at_source_location(b, location, |e| e.eq(tag, c)), true)
             }
             Constructor::Range(..) => {
-                panic!("ICE: range patterns are not produced by the current frontend")
+                ice!("range patterns are not produced by the current frontend")
             }
         }
     }
@@ -1132,19 +1130,13 @@ impl<'a> ExpressionConverter<'a> {
 
         let scrutinee = s.value;
         let AstType::Tuple(fields) = &s.ty else {
-            panic!(
-                "ICE: a case that binds arguments needs a tuple scrutinee, found {:?}",
-                s.ty
-            )
+            ice!("a case that binds arguments needs a tuple scrutinee, found {:?}", s.ty)
         };
 
         let (payload, payload_fields) = match &case.constructor {
             Constructor::Variant(_, idx) if is_enum_variant(&case.constructor) => {
                 let AstType::Tuple(variant_fields) = &fields[idx + 1] else {
-                    panic!(
-                        "ICE: enum variant {idx} payload is not a tuple: {:?}",
-                        fields[idx + 1]
-                    )
+                    ice!("enum variant {idx} payload is not a tuple: {:?}", fields[idx + 1])
                 };
                 let payload = self.emit_at_source_location(b, location.clone(), |e| {
                     e.tuple_proj(scrutinee, idx + 1)
@@ -1152,7 +1144,7 @@ impl<'a> ExpressionConverter<'a> {
                 (payload, variant_fields)
             }
             Constructor::Variant(..) | Constructor::Tuple(_) => (scrutinee, fields),
-            other => panic!("ICE: match constructor {other:?} binds no arguments"),
+            other => ice!("match constructor {other:?} binds no arguments"),
         };
 
         assert_eq!(
