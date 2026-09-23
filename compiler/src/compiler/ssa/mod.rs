@@ -102,6 +102,9 @@ pub struct SSA<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> {
     /// selector will seed it from the [`Driver`](crate::driver::Driver) (mirroring `logup_soundness`),
     /// but bn254 is the only field today so construction defaults to [`FieldConfig::bn254`].
     field: FieldConfig,
+
+    /// Whether HLSSA slice lengths may represent physical capacity after purification.
+    witness_slices_purified: bool,
 }
 
 impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Clone for SSA<Op, Ty, C> {
@@ -118,6 +121,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Clone for SSA<O
             next_value_id: AtomicU64::new(self.next_value_id.load(Ordering::Relaxed)),
             constants: RwLock::new(self.constants.read().unwrap().clone()),
             field: self.field,
+            witness_slices_purified: self.witness_slices_purified,
         }
     }
 }
@@ -137,6 +141,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
             next_value_id: AtomicU64::new(0),
             constants: RwLock::new(BiHashMap::default()),
             field: FieldConfig::bn254(),
+            witness_slices_purified: false,
         }
     }
 
@@ -176,6 +181,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
                 next_value_id: self.next_value_id,
                 constants: self.constants,
                 field: self.field,
+                witness_slices_purified: self.witness_slices_purified,
             },
             self.functions,
             self.global_types,

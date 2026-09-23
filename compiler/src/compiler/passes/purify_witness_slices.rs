@@ -54,6 +54,7 @@ impl Pass for PurifyWitnessSlices {
     }
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+        ssa.mark_witness_slices_purified();
         let flow = store.get::<FlowAnalysis>();
         let types = store.get::<TypeInfo>();
         let approx = ApproximateWitnessTaint::compute(ssa, flow, types);
