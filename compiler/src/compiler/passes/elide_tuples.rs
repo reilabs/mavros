@@ -39,7 +39,7 @@ use crate::{
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
         ssa::{
             BlockId, FunctionId, Instruction, Located, Terminator, ValueId,
-            hlssa::{HLSSA, OpCode, Type, TypeExpr},
+            hlssa::{Constant, HLSSA, OpCode, Type, TypeExpr},
         },
     },
 };
@@ -193,6 +193,10 @@ impl ElideTuples {
                 let width = slot_count(&elements[*idx]);
                 let tuple_ref_comps = components(value_map, *tuple_ref);
                 value_map.insert(*result, tuple_ref_comps[offset..offset + width].to_vec());
+            }
+            OpCode::RefCount { result, value } if slot_count(fti.get_value_type(*value)) == 0 => {
+                // Arrays of unit are erased entirely; there is no allocation to count.
+                value_map.insert(*result, vec![ssa.add_const(Constant::int(32, 0))]);
             }
             OpCode::Guard { .. } => ice!("Guard encountered during tuple elision"),
             // Every genuine result gets freshly-allocated components (or maps to itself when its
@@ -533,6 +537,17 @@ fn lower_instruction(
                     result: r,
                     slice: s,
                     values: slot_values,
+                });
+            }
+        }
+        OpCode::RefCount { result, value } => {
+            // Arrays of tuples become one allocation per leaf. Expose the first backing
+            // allocation's count; counts are backend/optimization dependent. With no leaves,
+            // planning already replaced the result with zero.
+            if let Some(value) = components(value_map, *value).first() {
+                out.push(OpCode::RefCount {
+                    result: single(value_map, *result),
+                    value: *value,
                 });
             }
         }

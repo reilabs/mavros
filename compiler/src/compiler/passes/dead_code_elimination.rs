@@ -478,6 +478,7 @@ impl DCE {
             | OpCode::SliceInsert { .. }
             | OpCode::SliceRemove { .. }
             | OpCode::SliceLen { .. }
+            | OpCode::RefCount { .. }
             | OpCode::MkSeq { .. }
             | OpCode::MkSeqOfBlob { .. }
             | OpCode::MkRepeated { .. }

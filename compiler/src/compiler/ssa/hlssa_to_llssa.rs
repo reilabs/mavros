@@ -1121,6 +1121,15 @@ fn lower_instruction(
             );
         }
 
+        OpCode::RefCount { result, value } => {
+            let ty = fn_type_info.get_value_type(*value);
+            let header = e.struct_field_ptr(val_map[value], sequence_rc_struct(ty), 0);
+            let rc_ptr = e.struct_field_ptr(header, LLStruct::rc_header(), 0);
+            let rc = e.ll_load(rc_ptr, LLType::i64());
+            let count = e.truncate(rc, 32);
+            val_map.insert(*result, count);
+        }
+
         OpCode::SliceLen { result, slice } => {
             let slice_type = fn_type_info.get_value_type(*slice);
             let ll_slice = val_map[slice];

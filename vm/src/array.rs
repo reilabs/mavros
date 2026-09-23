@@ -252,6 +252,10 @@ impl BoxedValue {
         unsafe { self.0.offset(1) }
     }
 
+    pub fn ref_count(&self) -> u64 {
+        unsafe { *self.rc() }
+    }
+
     pub fn layout(&self) -> BoxedLayout {
         unsafe { *(self.0 as *mut BoxedLayout) }
     }

@@ -133,6 +133,7 @@ impl StripWitnessOf {
             | OpCode::SliceInsert { .. }
             | OpCode::SliceRemove { .. }
             | OpCode::SliceLen { .. }
+            | OpCode::RefCount { .. }
             | OpCode::Select { .. }
             | OpCode::ToBits { .. }
             | OpCode::ToRadix { .. }

@@ -479,6 +479,7 @@ impl WitnessLowering {
                         | OpCode::Call { .. }
                         | OpCode::ArrayGet { .. }
                         | OpCode::SliceLen { .. }
+            | OpCode::RefCount { .. }
                         | OpCode::ToBits { .. }
                         | OpCode::ToRadix { .. }
                         | OpCode::MemOp { .. }

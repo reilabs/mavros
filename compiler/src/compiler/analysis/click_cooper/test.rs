@@ -183,6 +183,10 @@ fn scalar_fold_is_the_single_classifier() {
 
     // Representative non-folds: not foldable, not value-numbered, no `ScalarFold`.
     let non_folds: Vec<OpCode> = vec![
+        OpCode::RefCount {
+            result: v(),
+            value: v(),
+        },
         OpCode::Assert { value: v() },
         OpCode::Store {
             ptr: v(),

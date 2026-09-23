@@ -1814,6 +1814,13 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         }
     }
 
+    fn ref_count(&mut self, _value: &SpecSplitValue) -> SpecSplitValue {
+        SpecSplitValue {
+            unspecialized: Value::Unknown(ScalarKind::Int(32)),
+            specialized: Value::Unknown(ScalarKind::Int(32)),
+        }
+    }
+
     fn slice_len(&mut self, slice: &SpecSplitValue) -> SpecSplitValue {
         let unspec = match &slice.unspecialized {
             Value::Array(values) => Value::int(32, values.len() as u128),

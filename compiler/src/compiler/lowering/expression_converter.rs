@@ -1863,6 +1863,15 @@ impl<'a> ExpressionConverter<'a> {
                     _ => ice!("array_len called on non-array/slice type: {:?}", arg_type),
                 }
             }
+            "array_refcount" | "vector_refcount" => {
+                // Even the constrained form must evaluate its argument for side effects.
+                let value = self.convert_expression(&call.arguments[0], b).unwrap();
+                Some(if self.in_unconstrained {
+                    self.emit_located(b, Some(call.location), |e| e.ref_count(value))
+                } else {
+                    b.emit_const(Constant::int(32, 0))
+                })
+            }
             "to_le_radix" => {
                 // to_le_radix(value, radix) -> [u8; N]
                 let input = self.convert_expression(&call.arguments[0], b).unwrap();

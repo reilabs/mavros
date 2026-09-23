@@ -1414,6 +1414,13 @@ impl CodeGen {
                         values: value_positions,
                     });
                 }
+                hlssa::OpCode::RefCount { result, value } => {
+                    let res = layouter.alloc_value(*result, &type_info.get_value_type(*result));
+                    emitter.push_op(bytecode::OpCode::RefCount {
+                        res,
+                        array: layouter.get_value(*value),
+                    });
+                }
                 hlssa::OpCode::SliceLen {
                     result: r,
                     slice: sl,
