@@ -1,0 +1,7 @@
+[package]
+name = "match_enum_default"
+type = "bin"
+authors = [""]
+compiler_unstable_features = ["enums"]
+
+[dependencies]
