@@ -68,6 +68,17 @@
 | noir_tests/int_semantics_xor | ✅ | ✅ | 931 | 1675 | 77624 | 16623 | 151081 | 328454 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/just_add | ✅ | ✅ | 1 | 4 | 2408 | 1489 | 28031 | 198121 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/lambda_array | ✅ | ✅ | 1 | 3 | 6416 | 4385 | 31195 | 203159 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/match_bool | ✅ | ✅ | 9 | 8 | 7024 | 6415 | 37503 | 208686 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/match_enum | ✅ | ✅ | 25 | 43 | 14808 | 10519 | 46033 | 218805 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/match_enum_default | ✅ | ✅ | 1 | 3 | 5872 | 8865 | 28317 | 199426 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/match_enum_nested | ✅ | ✅ | 11 | 10 | 15352 | 15589 | 44372 | 216820 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/match_in_loop | ✅ | ✅ | 121 | 178 | 20400 | 9763 | 58892 | 232703 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/match_int | ✅ | ✅ | 175 | 205 | 46320 | 24763 | 110208 | 286270 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/match_struct | ✅ | ✅ | 82 | 131 | 28528 | 11473 | 68619 | 241763 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/match_tuple | ✅ | ✅ | 57 | 78 | 18464 | 9026 | 56693 | 229293 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/match_unconstrained | ✅ | ✅ | 44 | 82 | 14800 | 9053 | 45870 | 219599 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/match_unit_result | ✅ | ✅ | 27 | 25 | 12936 | 3908 | 50002 | 221239 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/match_value_result | ✅ | ✅ | 28 | 26 | 17688 | 11735 | 52633 | 225188 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/mem2reg_array_phi | ✅ | ✅ | 6 | 9 | 5208 | 3889 | 37988 | 208259 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/mem2reg_phi_merge | ✅ | ✅ | 4 | 7 | 4216 | 2694 | 36418 | 206559 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/multi_scalar_mul | ✅ | ✅ | 254527 | 433897 | 150648 | 77220 | 275973 | 470384 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -434,7 +445,7 @@
 | noir/test_programs/execution_success/loop_small_break | ✅ | ✅ | 0 | 2 | 1032 | 505 | 24937 | 194226 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/main_bool_arg | ✅ | ✅ | 7 | 6 | 7632 | 4506 | 39972 | 211732 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/main_return | ✅ | ✅ | 2 | 4 | 3552 | 1928 | 32646 | 203261 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/match_struct_pattern_field_order | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/match_struct_pattern_field_order | ✅ | ✅ | 30 | 29 | 14392 | 3245 | 53707 | 225027 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/merkle_insert | ✅ | ✅ | 802028 | 1348653 | 148368 | 136120 | 229414 | 433874 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/missing_closure_env | ✅ | ✅ | 1 | 2 | 3544 | 4639 | 27612 | 198873 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/modules | ✅ | ✅ | 3 | 5 | 3432 | 2100 | 34286 | 204451 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -557,7 +568,7 @@
 | noir/test_programs/execution_success/regression_7128 | ✅ | ✅ | 851 | 1422 | 85488 | 45523 | 101501 | 281426 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_7143 | ✅ | ✅ | 30 | 50 | 13208 | 4307 | 50023 | 222568 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_7195 | ✅ | ✅ | 9 | 12 | 5248 | 4449 | 36892 | 207832 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/regression_7323 | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/regression_7323 | ✅ | ✅ | 12 | 11 | 6736 | 2228 | 41188 | 211626 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_7451 | ✅ | ✅ | 47 | 44 | 17088 | 4112 | 52956 | 224175 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_7612 | ✅ | ✅ | 51 | 93 | 18928 | 6216 | 58892 | 232727 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_7744 | ✅ | ✅ | 8 | 7 | 19672 | 21069 | 51584 | 226778 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
