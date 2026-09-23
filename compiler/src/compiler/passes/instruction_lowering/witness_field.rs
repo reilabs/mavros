@@ -83,6 +83,20 @@ impl LowerWitnessFieldOps {
                 *endianness,
                 *count,
             ),
+            // Radix normalization can introduce a pure fit check after the pure-guard phase.
+            // Lower only this check with the existing rule, leaving raw arithmetic hints alone.
+            OpCode::Rangecheck { value, .. }
+                if guard.is_some() && !context.types().get_value_type(*value).is_witness_of() =>
+            {
+                super::pure_guards::LowerPureGuards::new().lower_instruction(
+                    b,
+                    context,
+                    &OpCode::Guard {
+                        condition: guard.unwrap(),
+                        inner: Box::new(op.clone()),
+                    },
+                )
+            }
             OpCode::Rangecheck { value, max_bits }
                 if context.types().get_value_type(*value).is_witness_of() =>
             {
@@ -382,13 +396,31 @@ impl LowerWitnessFieldOps {
         };
 
         if !context.types().get_value_type(value).is_witness_of() {
-            b.emit(OpCode::ToRadix {
+            let decomposition = OpCode::ToRadix {
                 result,
                 value,
                 radix,
                 endianness,
                 count,
-            });
+            };
+            let decomposition = match guard {
+                Some(condition) => OpCode::Guard {
+                    condition,
+                    inner: Box::new(decomposition),
+                },
+                None => decomposition,
+            };
+            // FIELD-ASSUMPTION: L4-decompose. The assertion above establishes radix 256,
+            // so each digit contributes exactly eight bits. This is the source conversion,
+            // before any raw witness hint is emitted.
+            super::pure_decompositions::emit_fit_check(
+                b,
+                context,
+                guard,
+                value,
+                count.saturating_mul(8),
+            );
+            b.emit(decomposition);
             return true;
         }
 

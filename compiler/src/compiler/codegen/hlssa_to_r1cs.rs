@@ -905,8 +905,8 @@ impl symbolic_executor::Value<R1CGen> for Value {
         ptr.borrow().clone()
     }
 
-    fn expect_constant_bool(&self, _ctx: &mut R1CGen) -> bool {
-        self.expect_constant() == ark_bn254::Fr::ONE
+    fn try_constant_bool(&self, _ctx: &mut R1CGen) -> Result<bool, AssertionFailure> {
+        Ok(self.expect_constant() == ark_bn254::Fr::ONE)
     }
 
     fn select(&self, if_t: &Self, if_f: &Self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {

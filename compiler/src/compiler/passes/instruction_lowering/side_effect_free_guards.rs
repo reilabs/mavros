@@ -3,7 +3,7 @@
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
     ssa::hlssa::{
-        ArithGroup, OpCode, TypeExpr,
+        ArithGroup, OpCode, Radix, TypeExpr,
         builder::{HLBlockEmitter, HLEmitter},
     },
     util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
@@ -76,7 +76,17 @@ impl LowerSideEffectFreeGuards {
             | OpCode::Unspread { .. }
             | OpCode::Todo { .. } => true,
             OpCode::ToBits { value, .. } => !type_info.get_value_type(*value).is_witness_of(),
-            OpCode::ToRadix { value, .. } => !type_info.get_value_type(*value).is_witness_of(),
+            // Dynamic radix validation and the source fit check have not been emitted yet.
+            // Keep their guard until the radix lowerer establishes the raw byte decomposition.
+            OpCode::ToRadix {
+                radix: Radix::Dyn(_),
+                ..
+            } => false,
+            OpCode::ToRadix {
+                value,
+                radix: Radix::Bytes,
+                ..
+            } => !type_info.get_value_type(*value).is_witness_of(),
             // Guard-elision judgment, not liveness. A pop from empty or an OOB insert/remove fails,
             // so running one unconditionally would fail a world whose guard is off.
             OpCode::SlicePop { .. } | OpCode::SliceInsert { .. } | OpCode::SliceRemove { .. } => {

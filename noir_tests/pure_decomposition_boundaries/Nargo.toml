@@ -1,0 +1,6 @@
+[package]
+name = "pure_decomposition_boundaries"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -169,10 +169,11 @@ impl ValueRangeAnalysis {
             }
             for instr in block.get_instructions() {
                 for vid in instr.get_results() {
-                    bounds.insert(
-                        *vid,
-                        ValueRange::for_type(types.get_value_type(*vid), field),
-                    );
+                    // Types omit unreachable definitions, which never participate in the
+                    // dominator-order refinement below.
+                    if let Some(ty) = types.try_get_value_type(*vid) {
+                        bounds.insert(*vid, ValueRange::for_type(ty, field));
+                    }
                 }
             }
         }

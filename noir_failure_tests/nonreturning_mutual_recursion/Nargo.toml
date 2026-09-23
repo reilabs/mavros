@@ -1,0 +1,6 @@
+[package]
+name = "nonreturning_mutual_recursion"
+type = "bin"
+authors = [""]
+
+[dependencies]
