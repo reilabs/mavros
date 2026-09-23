@@ -456,7 +456,7 @@
 | noir/test_programs/execution_success/no_predicates_numeric_generic_poseidon | ✅ | ✅ | 20428 | 18329 | 107664 | 106832 | 149174 | 352356 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/numeric_type_alias | ✅ | ✅ | 269 | 414 | 64928 | 29246 | 134344 | 314176 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/op_assign_desugaring | ✅ | ✅ | 0 | 1 | 1704 | 2764 | 25053 | 195095 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/overlapping_dep_and_mod | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/overlapping_dep_and_mod/bin | ✅ | ✅ | 2 | 3 | 4008 | 3334 | 32523 | 203244 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/pedersen_check | ✅ | ✅ | 355484 | 599659 | 240856 | 183310 | 379724 | 597146 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/pedersen_commitment | ✅ | ✅ | 109020 | 186492 | 138104 | 118973 | 227200 | 428129 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/pedersen_hash | ✅ | ✅ | 156943 | 267478 | 143632 | 130695 | 232607 | 435621 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -724,8 +724,9 @@
 | noir/test_programs/execution_success/while_loop_break_regression_8521 | ✅ | ✅ | 41 | 75 | 15024 | 7368 | 49284 | 223005 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/wildcard_type | ✅ | ✅ | 5 | 8 | 15216 | 11375 | 48743 | 222686 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/witness_compression | ✅ | ✅ | 5 | 7 | 5176 | 2638 | 37047 | 207719 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/workspace | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
-| noir/test_programs/execution_success/workspace_default_member | ✅ | ✅ | 1 | 3 | 2160 | 1081 | 27163 | 197213 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir/test_programs/execution_success/workspace/crates/a | ✅ | ✅ | 1 | 3 | 2160 | 1073 | 27163 | 197213 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir/test_programs/execution_success/workspace/crates/b | ✅ | ✅ | 3 | 5 | 3208 | 1433 | 34288 | 204294 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir/test_programs/execution_success/workspace_default_member/a | ✅ | ✅ | 1 | 3 | 2160 | 1081 | 27163 | 197213 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/wrapping_operations | ✅ | ✅ | 401 | 781 | 54864 | 9588 | 138060 | 315436 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/xor | ✅ | ✅ | 117 | 222 | 18048 | 3087 | 60881 | 232675 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/zeroed_array_of_references | ✅ | ✅ | 0 | 1 | 304 | 742 | 24793 | 194186 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -800,4 +801,5 @@
 | noir/test_programs/execution_failure/vector_pop_front_oob | ✅ | ✅ | 58 | 101 | 16976 | 7712 | 55112 | 228091 | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ✅ | ✅ | N/A | N/A | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_failure/vector_remove_failure | ✅ | ✅ | 24 | 44 | 11472 | 4362 | 50374 | 221653 | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ✅ | ✅ | N/A | N/A | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_failure/vector_remove_oob | ✅ | ✅ | 58 | 101 | 17552 | 7709 | 55112 | 228091 | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ✅ | ✅ | N/A | N/A | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_failure/workspace_fail | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | N/A | N/A | N/A | N/A | N/A | ➖ | ➖ | N/A | N/A | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_failure/workspace_fail/crates/a | ✅ | ✅ | 1 | 3 | 2160 | 1078 | 27163 | 197213 | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ✅ | ✅ | N/A | N/A | ✅ | ✅ | ✅ |
+| noir/test_programs/execution_failure/workspace_fail/crates/b | ✅ | ✅ | 3 | 5 | 3208 | 1438 | 34288 | 204294 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
