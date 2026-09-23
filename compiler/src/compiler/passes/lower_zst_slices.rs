@@ -388,3 +388,298 @@ fn is_zero_leaf(ty: &Type) -> bool {
         | TypeExpr::Blob(..) => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::{
+        analysis::types::Types,
+        ssa::{
+            Instruction, Terminator,
+            hlssa::{
+                BinaryArithOpKind, CmpKind, Constant, SliceOpDir,
+                builder::{HLBlockEmitter, HLSSABuilder},
+            },
+        },
+    };
+
+    fn empty_type() -> Type {
+        Type::tuple_of(vec![])
+    }
+
+    fn empty_value(e: &mut impl HLEmitter) -> ValueId {
+        e.mk_tuple(vec![], vec![])
+    }
+
+    fn zst_slice() -> Type {
+        empty_type().slice_of()
+    }
+
+    fn u32_const(n: u128) -> IntBits {
+        IntBits::from_u128(32, n)
+    }
+
+    fn analyses(ssa: &HLSSA) -> AnalysisStore {
+        let flow = FlowAnalysis::run(ssa);
+        let types = Types::new().run(ssa, &flow);
+        let mut store = AnalysisStore::new();
+        store.insert_with_deps::<FlowAnalysis>(flow, vec![]);
+        store.insert_with_deps::<TypeInfo>(types, vec![]);
+        store
+    }
+
+    fn lower(ssa: &mut HLSSA) {
+        LowerZstSlices::new().run(ssa, &analyses(ssa));
+    }
+
+    fn program(
+        ssa: &mut HLSSA,
+        returns: Vec<Type>,
+        body: impl FnOnce(&mut HLBlockEmitter<'_>) -> Vec<ValueId>,
+    ) {
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut sb = HLSSABuilder::new(ssa);
+        sb.modify_function(main_id, |b| {
+            for ty in returns {
+                b.function.add_return_type(ty);
+            }
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let results = body(&mut e);
+            e.terminate_return(results);
+        });
+    }
+
+    /// `main(s: [()], i: u32)`
+    fn lowered(
+        returns: Vec<Type>,
+        body: impl FnOnce(&mut HLBlockEmitter<'_>, ValueId, ValueId) -> Vec<ValueId>,
+    ) -> (HLSSA, ValueId, ValueId) {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut params = (ValueId(0), ValueId(0));
+        program(&mut ssa, returns, |e| {
+            let s = e.add_parameter(zst_slice());
+            let i = e.add_parameter(Type::int(32));
+            params = (s, i);
+            body(e, s, i)
+        });
+        lower(&mut ssa);
+        (ssa, params.0, params.1)
+    }
+
+    fn entry_ops(ssa: &HLSSA) -> Vec<OpCode> {
+        ssa.get_unique_entrypoint()
+            .get_blocks()
+            .flat_map(|(_, block)| block.get_instructions())
+            .cloned()
+            .collect()
+    }
+
+    fn entry_ops_text(ssa: &HLSSA) -> String {
+        format!("{:?}", entry_ops(ssa))
+    }
+
+    fn returned(ssa: &HLSSA) -> Vec<ValueId> {
+        ssa.get_unique_entrypoint()
+            .get_blocks()
+            .find_map(|(_, block)| match block.get_terminator() {
+                Some(Terminator::Return(values)) => Some(values.clone()),
+                _ => None,
+            })
+            .expect("main returns")
+    }
+
+    fn def_of(ssa: &HLSSA, value: ValueId) -> OpCode {
+        entry_ops(ssa)
+            .into_iter()
+            .find(|op| op.get_results().any(|r| *r == value))
+            .unwrap_or_else(|| panic!("{value:?} is not instruction-defined"))
+    }
+
+    fn int_const(ssa: &HLSSA, value: ValueId) -> Option<IntBits> {
+        match ssa.get_const(value).as_deref() {
+            Some(Constant::Int(pattern)) => Some(pattern.clone()),
+            _ => None,
+        }
+    }
+
+    fn arith(ssa: &HLSSA, value: ValueId) -> (BinaryArithOpKind, ValueId, Option<IntBits>) {
+        match def_of(ssa, value) {
+            OpCode::BinaryArithOp { kind, lhs, rhs, .. } => (kind, lhs, int_const(ssa, rhs)),
+            other => panic!("{value:?} is not arithmetic: {other:?}"),
+        }
+    }
+
+    fn asserts(ssa: &HLSSA) -> Vec<(CmpKind, ValueId, ValueId)> {
+        entry_ops(ssa)
+            .into_iter()
+            .filter_map(|op| match op {
+                OpCode::AssertCmp { kind, lhs, rhs } => Some((kind, lhs, rhs)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn get_the_bounds_assert(ssa: &HLSSA) -> (ValueId, ValueId) {
+        let all = asserts(ssa);
+        assert_eq!(all.len(), 1, "exactly one bounds assert, got {all:?}");
+        assert_eq!(all[0].0, CmpKind::ULt);
+        (all[0].1, all[0].2)
+    }
+    #[test]
+    fn mk_seq_becomes_its_element_count() {
+        let (ssa, ..) = lowered(vec![zst_slice()], |e, _, _| {
+            let nothing = empty_value(e);
+            vec![e.mk_seq(vec![nothing; 3], SequenceTargetType::Slice, empty_type())]
+        });
+        assert!(asserts(&ssa).is_empty());
+        assert_eq!(int_const(&ssa, returned(&ssa)[0]), Some(u32_const(3)));
+    }
+
+    #[test]
+    fn mk_repeated_becomes_its_count() {
+        let (ssa, ..) = lowered(vec![zst_slice()], |e, _, _| {
+            let nothing = empty_value(e);
+            vec![e.mk_repeated(nothing, SequenceTargetType::Slice, 5, empty_type())]
+        });
+        assert!(asserts(&ssa).is_empty());
+        assert_eq!(int_const(&ssa, returned(&ssa)[0]), Some(u32_const(5)));
+    }
+
+    #[test]
+    fn an_array_to_slice_cast_becomes_the_array_length() {
+        let (ssa, ..) = lowered(vec![zst_slice()], |e, _, _| {
+            let nothing = empty_value(e);
+            let array = e.mk_seq(vec![nothing; 2], SequenceTargetType::Array(2), empty_type());
+            vec![e.cast_to(CastTarget::ArrayToSlice, array)]
+        });
+        assert!(asserts(&ssa).is_empty());
+        assert_eq!(int_const(&ssa, returned(&ssa)[0]), Some(u32_const(2)));
+    }
+
+    #[test]
+    fn slice_len_aliases_the_slice() {
+        let (ssa, s, _) = lowered(vec![Type::int(32)], |e, s, _| vec![e.slice_len(s)]);
+        assert!(asserts(&ssa).is_empty());
+        assert_eq!(returned(&ssa)[0], s, "the slice *is* its length");
+    }
+
+    #[test]
+    fn array_get_is_bounded() {
+        let (ssa, s, i) = lowered(vec![empty_type()], |e, s, i| vec![e.array_get(s, i)]);
+        assert_eq!(get_the_bounds_assert(&ssa), (i, s));
+    }
+
+    #[test]
+    fn array_set_is_bounded_and_aliases_the_slice() {
+        let (ssa, s, i) = lowered(vec![zst_slice()], |e, s, i| {
+            let nothing = empty_value(e);
+            vec![e.array_set(s, i, nothing)]
+        });
+        assert_eq!(get_the_bounds_assert(&ssa), (i, s));
+        assert_eq!(returned(&ssa)[0], s);
+    }
+
+    #[test]
+    fn slice_push_adds_the_number_pushed() {
+        let (ssa, s, _) = lowered(vec![zst_slice()], |e, s, _| {
+            let nothing = empty_value(e);
+            vec![e.slice_push(s, vec![nothing; 2], SliceOpDir::Back)]
+        });
+        assert!(asserts(&ssa).is_empty(), "a push cannot fail");
+        assert_eq!(
+            arith(&ssa, returned(&ssa)[0]),
+            (BinaryArithOpKind::UAdd, s, Some(u32_const(2)))
+        );
+    }
+
+    #[test]
+    fn slice_insert_is_bounded_against_the_new_length() {
+        let (ssa, s, i) = lowered(vec![zst_slice()], |e, s, i| {
+            let nothing = empty_value(e);
+            vec![e.slice_insert(s, i, nothing)]
+        });
+        let result = returned(&ssa)[0];
+        assert_eq!(get_the_bounds_assert(&ssa), (i, result), "index < len + 1");
+        assert_eq!(
+            arith(&ssa, result),
+            (BinaryArithOpKind::UAdd, s, Some(u32_const(1)))
+        );
+    }
+
+    #[test]
+    fn slice_pop_is_bounded_against_zero() {
+        let (ssa, s, _) = lowered(vec![zst_slice()], |e, s, _| {
+            let (rest, _) = e.slice_pop(s, SliceOpDir::Back);
+            vec![rest]
+        });
+        let (zero, len) = get_the_bounds_assert(&ssa);
+        assert_eq!(int_const(&ssa, zero), Some(u32_const(0)), "0 < len");
+        assert_eq!(len, s);
+        assert_eq!(
+            arith(&ssa, returned(&ssa)[0]),
+            (BinaryArithOpKind::USub, s, Some(u32_const(1)))
+        );
+    }
+
+    #[test]
+    fn slice_remove_is_bounded_and_shortens_by_one() {
+        let (ssa, s, i) = lowered(vec![zst_slice()], |e, s, i| {
+            let (rest, _) = e.slice_remove(s, i);
+            vec![rest]
+        });
+        assert_eq!(get_the_bounds_assert(&ssa), (i, s));
+        assert_eq!(
+            arith(&ssa, returned(&ssa)[0]),
+            (BinaryArithOpKind::USub, s, Some(u32_const(1)))
+        );
+    }
+
+    #[test]
+    fn a_leaf_less_array_access_is_bounded() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut index = ValueId(0);
+        program(&mut ssa, vec![], |e| {
+            let array = e.add_parameter(empty_type().array_of(4));
+            let i = e.add_parameter(Type::int(32));
+            index = i;
+            let nothing = empty_value(e);
+            e.array_get(array, i);
+            e.array_set(array, i, nothing);
+            vec![]
+        });
+        lower(&mut ssa);
+
+        let all = asserts(&ssa);
+        assert_eq!(all.len(), 2, "one bound per access");
+        for (kind, lhs, rhs) in all {
+            assert_eq!(kind, CmpKind::ULt);
+            assert_eq!(lhs, index);
+            assert_eq!(int_const(&ssa, rhs), Some(u32_const(4)));
+        }
+    }
+
+    #[test]
+    fn a_leafy_slice_program_is_untouched() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        program(&mut ssa, vec![Type::int(32)], |e| {
+            let s = e.add_parameter(Type::field().slice_of());
+            let i = e.add_parameter(Type::int(32));
+            let x = e.add_parameter(Type::field());
+            let array = e.add_parameter(Type::field().array_of(4));
+            e.array_get(array, i);
+            let pushed = e.slice_push(s, vec![x], SliceOpDir::Back);
+            e.array_get(pushed, i);
+            let set = e.array_set(pushed, i, x);
+            let inserted = e.slice_insert(set, i, x);
+            let (popped, _) = e.slice_pop(inserted, SliceOpDir::Front);
+            let (removed, _) = e.slice_remove(popped, i);
+            vec![e.slice_len(removed)]
+        });
+        let before = entry_ops_text(&ssa);
+        let params_before = ssa.get_unique_entrypoint().get_param_types();
+        lower(&mut ssa);
+        assert_eq!(entry_ops_text(&ssa), before);
+        assert_eq!(ssa.get_unique_entrypoint().get_param_types(), params_before);
+    }
+}
