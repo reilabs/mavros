@@ -7,7 +7,7 @@
 //! are materialized, and unit is the empty tuple, just like an empty struct. Ordinary calls
 //! and function signatures therefore have one result even for unit. Statement-shaped
 //! expressions and effect-only builtins may internally produce no result; `convert_value`
-//! evaluates them before supplying the empty tuple at a value boundary, and `value_type`
+//! evaluates them before supplying the empty tuple at a value boundary, and `expression_type`
 //! supplies the matching unit type. Tuple elision later removes empty tuples from parameters,
 //! results, and storage. Sequence lowering must preserve bounds checks and slice lengths
 //! before that erasure; materializing unit alone is not sufficient. The entry-point wrapper
@@ -361,10 +361,8 @@ impl SSAConverter {
         let mut function = HLFunction::empty(name);
         let entry_block = function.get_entry_id();
 
-        // Add return types
-        for return_type in self.type_converter.call_results(&ast_func.return_type) {
-            function.add_return_type(return_type);
-        }
+        // Every Noir function returns one materialized value, including unit.
+        function.add_return_type(self.type_converter.convert_type(&ast_func.return_type));
 
         let mut b = HLFunctionBuilder::new(&mut function, ssa);
 

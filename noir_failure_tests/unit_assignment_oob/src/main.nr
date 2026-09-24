@@ -1,5 +1,5 @@
 fn main(index: u32) {
     let mut array = [()];
-    // Storing a zero-sized value must still check the index.
-    array[index] = ();
+    // A statement-shaped RHS must materialize unit before checking the store.
+    array[index] = { assert(index != 0); };
 }

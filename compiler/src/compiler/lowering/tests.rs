@@ -85,45 +85,50 @@ fn unit_bodies_and_empty_structs_have_one_typed_result_until_tuple_elision() {
     };
     let read = || ident(Definition::Local(LocalId(0)), AstType::Unit);
     let cases = [
-        ("literal", unit(), AstType::Unit),
-        ("empty block", Expression::Block(vec![]), AstType::Unit),
-        ("binding statement", binding(false), AstType::Unit),
+        ("literal", unit(), AstType::Unit, vec![]),
+        (
+            "empty block",
+            Expression::Block(vec![]),
+            AstType::Unit,
+            vec![],
+        ),
+        ("binding statement", binding(false), AstType::Unit, vec![]),
         (
             "immutable read",
             Expression::Block(vec![binding(false), read()]),
             AstType::Unit,
+            vec![],
         ),
         (
             "mutable read",
             Expression::Block(vec![binding(true), read()]),
             AstType::Unit,
+            vec![],
         ),
         (
             "projection",
             Expression::ExtractTupleField(Box::new(Expression::Tuple(vec![unit()])), 0),
             AstType::Unit,
+            vec![],
         ),
         (
             "empty struct",
             Expression::Tuple(vec![]),
             AstType::Tuple(vec![]),
+            vec![],
         ),
         (
             "scalar",
             Expression::Literal(Literal::Bool(true)),
             AstType::Bool,
+            vec![Type::bool()],
         ),
     ];
-    for (name, body, return_type) in cases {
+    for (name, body, return_type, after) in cases {
         let expected = TypeConverter::new().convert_type(&return_type);
         let mut ssa = lower(vec![function(0, body, return_type)]);
         assert_return_shape(&ssa, &[expected.clone()]);
         PassManager::new(name.into(), false, vec![Box::new(ElideTuples::new())]).run(&mut ssa);
-        let after = if expected == Type::bool() {
-            vec![expected]
-        } else {
-            vec![]
-        };
         assert_return_shape(&ssa, &after);
     }
 }
@@ -164,6 +169,59 @@ fn identity() -> AstFunction {
         Default::default(),
     ));
     f
+}
+
+#[test]
+fn nested_statement_aggregate_types_match_their_values() {
+    use noirc_frontend::token::FmtStrFragment;
+
+    let nested = || {
+        Expression::Tuple(vec![
+            Expression::Literal(Literal::Bool(false)),
+            Expression::Block(vec![Expression::Semi(Box::new(unit()))]),
+        ])
+    };
+    let nested_type = AstType::Tuple(vec![AstType::Bool, AstType::Unit]);
+    let cases = [
+        (nested(), nested_type.clone()),
+        (Expression::Block(vec![nested()]), nested_type.clone()),
+        (
+            Expression::ExtractTupleField(Box::new(Expression::Tuple(vec![nested()])), 0),
+            nested_type.clone(),
+        ),
+        (
+            Expression::Literal(Literal::FmtStr(
+                vec![FmtStrFragment::String("x".into())],
+                1,
+                Box::new(Expression::Tuple(vec![nested()])),
+            )),
+            AstType::FmtString(1, Rc::new(AstType::Tuple(vec![nested_type]))),
+        ),
+    ];
+    for (value, typ) in cases {
+        let body = Expression::Tuple(vec![value, Expression::Literal(Literal::Bool(true))]);
+        let typ = AstType::Tuple(vec![typ, AstType::Bool]);
+        let ssa = lower(vec![function(0, body, typ.clone())]);
+        assert_return_shape(&ssa, &[TypeConverter::new().convert_type(&typ)]);
+        let types = Types::new().run(&ssa, &FlowAnalysis::run(&ssa));
+        for (fid, f) in ssa.iter_functions() {
+            let fti = types.get_function(*fid);
+            for (_, block) in f.get_blocks() {
+                for op in block.get_instructions() {
+                    if let OpCode::MkTuple {
+                        elems,
+                        element_types,
+                        ..
+                    } = op
+                    {
+                        for (value, declared) in elems.iter().zip(element_types) {
+                            assert_eq!(fti.get_value_type(*value), declared);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]

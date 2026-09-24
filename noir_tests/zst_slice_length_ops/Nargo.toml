@@ -1,0 +1,6 @@
+[package]
+name = "zst_slice_length_ops"
+type = "bin"
+authors = [""]
+
+[dependencies]

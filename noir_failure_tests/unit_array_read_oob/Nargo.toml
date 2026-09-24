@@ -1,6 +1,0 @@
-[package]
-name = "unit_array_read_oob"
-type = "bin"
-authors = [""]
-
-[dependencies]

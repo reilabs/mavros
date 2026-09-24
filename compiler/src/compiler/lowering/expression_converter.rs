@@ -8,10 +8,10 @@ use noirc_frontend::{
     hir_def::expr::Constructor,
     monomorphization::ast::{
         Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, GlobalId, Ident, If,
-        Index, LValue, Let, LocalId, Match, MatchCase, Type as AstType, While,
+        Index, LValue, Let, Literal, LocalId, Match, MatchCase, Type as AstType, While,
     },
 };
-use std::{borrow::Cow, cell::RefCell, rc::Rc, sync::Arc};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use mavros_int_semantics::MAX_LOWERED_SIGNED_BITS;
 
@@ -69,7 +69,7 @@ pub struct ExpressionConverter<'a> {
     /// Tracks which LocalIds are mutable (their binding is a pointer)
     mutable_locals: HashSet<LocalId>,
 
-    /// The Noir type of every `let`-bound local whose type `expression_type` can recover, plus
+    /// The Noir type of every `let`-bound local, plus
     /// every match case argument, since nested patterns match on those.
     ///
     /// The map only has to be complete for match scrutinees. The elaborator wraps the scrutinee
@@ -193,7 +193,7 @@ impl<'a> ExpressionConverter<'a> {
                 ident.name
             )
         };
-        Type::function_returning(self.type_converter.call_results(ret))
+        Type::function_returning(vec![self.type_converter.convert_type(ret)])
     }
 
     /// Turn an optional Noir location into a definite `SourceLocation`.
@@ -338,15 +338,9 @@ impl<'a> ExpressionConverter<'a> {
         result
     }
 
-    /// The value type at an expression boundary. Noir gives statement-shaped unit
-    /// expressions (including empty blocks) no return type.
-    fn value_type(expr: &Expression) -> Cow<'_, AstType> {
-        expr.return_type().unwrap_or(Cow::Borrowed(&AstType::Unit))
-    }
-
     /// Evaluate an expression where storage or an operand requires an SSA value.
-    /// Literals and ordinary calls already materialize unit. Statements and builtins
-    /// with no SSA result run for their side effects, then materialize an empty tuple.
+    /// Unit literals, statements and effect-only builtins run for their side effects,
+    /// then materialize an empty tuple here when they have no SSA result.
     pub(super) fn convert_value(
         &mut self,
         expr: &Expression,
@@ -354,7 +348,7 @@ impl<'a> ExpressionConverter<'a> {
     ) -> ValueId {
         self.convert_expression(expr, b).unwrap_or_else(|| {
             assert!(
-                matches!(Self::value_type(expr).as_ref(), AstType::Unit),
+                matches!(Self::expression_type(expr), AstType::Unit),
                 "non-unit expression did not produce an SSA value"
             );
             self.emit_located(b, Self::expression_location(expr), |e| {
@@ -566,9 +560,8 @@ impl<'a> ExpressionConverter<'a> {
             // Immutable - store single materialized value
             self.bindings.insert(let_expr.id, value);
         }
-        if let Some(typ) = Self::expression_type(&let_expr.expression) {
-            self.local_types.insert(let_expr.id, typ);
-        }
+        self.local_types
+            .insert(let_expr.id, Self::expression_type(&let_expr.expression));
         None
     }
 
@@ -1318,7 +1311,7 @@ impl<'a> ExpressionConverter<'a> {
             }
             Expression::Clone(inner) => self.try_expression_ref(inner.as_ref(), b),
             _ => {
-                if Self::reference_pointee_type(&Self::expression_type(expr)?).is_some() {
+                if Self::reference_pointee_type(&Self::expression_type(expr)).is_some() {
                     self.convert_expression(expr, b)
                 } else {
                     None
@@ -1332,7 +1325,7 @@ impl<'a> ExpressionConverter<'a> {
         expr: &Expression,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        match Self::expression_type(expr)? {
+        match Self::expression_type(expr) {
             AstType::Reference(inner, _) if matches!(inner.as_ref(), AstType::Tuple(_)) => {
                 self.convert_expression(expr, b)
             }
@@ -1348,28 +1341,54 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
-    fn expression_type(expr: &Expression) -> Option<AstType> {
+    /// Recover aggregate types recursively: Noir's optional `return_type` can lose
+    /// statement-shaped unit fields inside tuples, projections and format captures.
+    fn expression_type(expr: &Expression) -> AstType {
         match expr {
-            Expression::Clone(inner) => Self::expression_type(inner.as_ref()),
-            Expression::Block(exprs) => exprs.last().and_then(Self::expression_type),
-            Expression::Tuple(exprs) => exprs
-                .iter()
-                .map(Self::expression_type)
-                .collect::<Option<Vec<_>>>()
-                .map(AstType::Tuple),
-            Expression::ExtractTupleField(tuple_expr, idx) => {
-                match Self::expression_type(tuple_expr.as_ref())? {
-                    AstType::Reference(inner, mutable) => match inner.as_ref() {
-                        AstType::Tuple(fields) => {
-                            Some(AstType::Reference(Rc::new(fields[*idx].clone()), mutable))
-                        }
-                        _ => None,
-                    },
-                    AstType::Tuple(fields) => Some(fields[*idx].clone()),
-                    _ => None,
+            Expression::Clone(inner) => Self::expression_type(inner),
+            Expression::Binary(binary) => {
+                if binary.operator.is_comparator() {
+                    AstType::Bool
+                } else {
+                    Self::expression_type(&binary.lhs)
                 }
             }
-            _ => expr.return_type().map(|typ| typ.into_owned()),
+            Expression::Block(exprs) => exprs
+                .last()
+                .map(Self::expression_type)
+                .unwrap_or(AstType::Unit),
+            Expression::Tuple(exprs) => {
+                AstType::Tuple(exprs.iter().map(Self::expression_type).collect())
+            }
+            Expression::Literal(Literal::FmtStr(_, size, captures)) => {
+                AstType::FmtString(*size as u32, Rc::new(Self::expression_type(captures)))
+            }
+            Expression::ExtractTupleField(tuple_expr, idx) => {
+                match Self::expression_type(tuple_expr) {
+                    AstType::Reference(inner, mutable) => match inner.as_ref() {
+                        AstType::Tuple(fields) => {
+                            AstType::Reference(Rc::new(fields[*idx].clone()), mutable)
+                        }
+                        other => ice!("Expected tuple reference, got {other:?}"),
+                    },
+                    AstType::Tuple(fields) => fields[*idx].clone(),
+                    other => ice!("Expected tuple, got {other:?}"),
+                }
+            }
+            Expression::Let(_)
+            | Expression::Constrain(..)
+            | Expression::Assign(_)
+            | Expression::Semi(_)
+            | Expression::Drop(_)
+            | Expression::For(_)
+            | Expression::Loop(_)
+            | Expression::While(_)
+            | Expression::Break
+            | Expression::Continue => AstType::Unit,
+            _ => expr
+                .return_type()
+                .expect("value expression must have a type")
+                .into_owned(),
         }
     }
 
@@ -1378,7 +1397,7 @@ impl<'a> ExpressionConverter<'a> {
         // If the collection is a reference, load through it first
         if matches!(
             Self::expression_type(&index.collection),
-            Some(noirc_frontend::monomorphization::ast::Type::Reference(_, _))
+            AstType::Reference(_, _)
         ) {
             collection = self.emit_located(b, Some(index.location), |e| e.load(collection));
         }
@@ -1396,7 +1415,7 @@ impl<'a> ExpressionConverter<'a> {
         let value = self.convert_expression(tuple_expr, b).unwrap();
         if matches!(
             Self::expression_type(tuple_expr),
-            Some(AstType::Reference(inner, _)) if matches!(inner.as_ref(), AstType::Tuple(_))
+            AstType::Reference(inner, _) if matches!(inner.as_ref(), AstType::Tuple(_))
         ) {
             return Some(
                 self.emit_located(b, Self::expression_location(tuple_expr), |e| {
@@ -1493,7 +1512,7 @@ impl<'a> ExpressionConverter<'a> {
             Literal::Bool(_) | Literal::Integer(_, _, _) => {
                 Some(b.emit_const(Self::scalar_literal_to_constant(lit).unwrap()))
             }
-            Literal::Unit => Some(self.emit_located(b, None, |e| e.mk_tuple(vec![], vec![]))),
+            Literal::Unit => None,
             Literal::Array(array_lit) | Literal::Vector(array_lit) => {
                 self.convert_array_literal(array_lit, b)
             }
@@ -1569,7 +1588,10 @@ impl<'a> ExpressionConverter<'a> {
                     for expr in capture_exprs {
                         let val = self.convert_value(expr, b);
                         tuple_elems.push(val);
-                        elem_types.push(self.type_converter.convert_type(&Self::value_type(expr)));
+                        elem_types.push(
+                            self.type_converter
+                                .convert_type(&Self::expression_type(expr)),
+                        );
                     }
                 }
 
@@ -1753,7 +1775,7 @@ impl<'a> ExpressionConverter<'a> {
                 {
                     return self.function_ident_type(ident);
                 }
-                self.type_converter.convert_type(&Self::value_type(e))
+                self.type_converter.convert_type(&Self::expression_type(e))
             })
             .collect();
 
@@ -1764,6 +1786,8 @@ impl<'a> ExpressionConverter<'a> {
         Some(tuple)
     }
 
+    // Ordinary calls always produce one value. Builtins and ignored print oracles
+    // may only have effects, so the dispatcher keeps an optional result.
     fn convert_call(
         &mut self,
         call: &noirc_frontend::monomorphization::ast::Call,
@@ -1773,7 +1797,9 @@ impl<'a> ExpressionConverter<'a> {
         match call.func.as_ref() {
             Expression::Ident(ident) => {
                 match &ident.definition {
-                    Definition::Function(func_id) => self.convert_static_call(func_id, call, b),
+                    Definition::Function(func_id) => {
+                        Some(self.convert_static_call(func_id, call, b))
+                    }
                     // Builtin/LowLevel calls handle their own argument conversion
                     // since some arguments (e.g. string messages) must be skipped
                     Definition::Builtin(name) => self.convert_builtin_call(name, call, b),
@@ -1804,7 +1830,7 @@ impl<'a> ExpressionConverter<'a> {
         func_id: &AstFuncId,
         call: &noirc_frontend::monomorphization::ast::Call,
         b: &mut HLFunctionBuilder<'_>,
-    ) -> Option<ValueId> {
+    ) -> ValueId {
         let args: Vec<ValueId> = call
             .arguments
             .iter()
@@ -1828,7 +1854,7 @@ impl<'a> ExpressionConverter<'a> {
             }
         });
 
-        Some(results[0])
+        results[0]
     }
 
     fn convert_builtin_call(

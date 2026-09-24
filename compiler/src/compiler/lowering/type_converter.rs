@@ -15,11 +15,6 @@ impl TypeConverter {
         Self
     }
 
-    /// Every Noir call produces one materialized value before tuple elision, including unit.
-    pub fn call_results(&self, ret: &NoirType) -> Vec<Type> {
-        vec![self.convert_type(ret)]
-    }
-
     /// Convert a monomorphized AST type to an SSA type.
     pub fn convert_type(&self, ast_type: &NoirType) -> Type {
         match ast_type {
@@ -61,7 +56,9 @@ impl TypeConverter {
             // not the arity of the call this value appears in -- see [`TypeExpr::Function`]. The
             // results are the same either way, and they are what lets an indirect call be typed
             // before defunctionalization has run.
-            NoirType::Function(_, ret, _, _) => Type::function_returning(self.call_results(ret)),
+            NoirType::Function(_, ret, _, _) => {
+                Type::function_returning(vec![self.convert_type(ret)])
+            }
             NoirType::String(len) => {
                 // str<N>: N is UTF-8 byte count, represented as Array(U(8), N)
                 Type::int(8).array_of(*len as usize)

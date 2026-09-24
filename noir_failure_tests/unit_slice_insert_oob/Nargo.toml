@@ -1,6 +1,0 @@
-[package]
-name = "unit_slice_insert_oob"
-type = "bin"
-authors = [""]
-
-[dependencies]

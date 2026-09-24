@@ -81,6 +81,9 @@ impl Pass for PrepareEntryPoint {
 }
 
 impl PrepareEntryPoint {
+    /// Defaults to signature-based return presence for hand-built SSA only.
+    /// Noir lowering materializes unit as one result, so callers compiling Noir
+    /// must also supply `with_abi_return` (as `Driver` does).
     pub fn new(main_is_unconstrained: bool) -> Self {
         Self {
             main_is_unconstrained,
@@ -112,7 +115,10 @@ impl PrepareEntryPoint {
         let has_return = abi_has_return.unwrap_or(!return_types.is_empty());
         let guard_type = Type::int(1);
         let mut reconstruct_fns = Vec::new();
-        for typ in param_types.iter().chain(return_types.iter()) {
+        for typ in param_types
+            .iter()
+            .chain(return_types.iter().filter(|_| has_return))
+        {
             Self::get_or_create_reconstruct_fn(typ, ssa, &mut reconstruct_fns);
         }
         if has_return {
@@ -299,7 +305,9 @@ impl PrepareEntryPoint {
         let mut prepare_fns = Vec::new();
         for return_types in callee_return_types.values() {
             for return_type in return_types {
-                Self::get_or_create_prepare_fn(return_type, ssa, &mut prepare_fns);
+                if !Self::is_zero_width(return_type) {
+                    Self::get_or_create_prepare_fn(return_type, ssa, &mut prepare_fns);
+                }
             }
         }
 
@@ -341,7 +349,14 @@ impl PrepareEntryPoint {
                             let original_results = results.clone();
                             let fresh_results = original_results
                                 .iter()
-                                .map(|_| fb.ssa.fresh_value())
+                                .zip(return_types)
+                                .map(|(original, typ)| {
+                                    if Self::is_zero_width(typ) {
+                                        *original
+                                    } else {
+                                        fb.ssa.fresh_value()
+                                    }
+                                })
                                 .collect::<Vec<_>>();
                             *results = fresh_results.clone();
 
@@ -351,6 +366,11 @@ impl PrepareEntryPoint {
                                 .zip(fresh_results)
                                 .zip(return_types.iter())
                             {
+                                // Keep the original call result for zero-width values:
+                                // it is already defined, and has no witness fields to prepare.
+                                if Self::is_zero_width(return_type) {
+                                    continue;
+                                }
                                 let prepare_fn = Self::find_prepare_fn(return_type, &prepare_fns);
                                 new_instructions.push(Located::new(
                                     OpCode::Call {
@@ -371,6 +391,17 @@ impl PrepareEntryPoint {
                     block.put_instructions(new_instructions);
                 }
             });
+        }
+    }
+
+    /// Unlike ABI field counting, this also accepts internal types. Slices retain
+    /// their length even with zero-width elements, so they cannot be skipped here.
+    fn is_zero_width(typ: &Type) -> bool {
+        match &typ.expr {
+            TypeExpr::Tuple(fields) => fields.iter().all(Self::is_zero_width),
+            TypeExpr::Array(inner, size) => *size == 0 || Self::is_zero_width(inner),
+            TypeExpr::WitnessOf(inner) => Self::is_zero_width(inner),
+            _ => false,
         }
     }
 
@@ -397,7 +428,7 @@ impl PrepareEntryPoint {
     ) -> usize {
         param_types
             .iter()
-            .chain(return_types.iter())
+            .chain(return_types.iter().filter(|_| has_return))
             .map(Self::flattened_field_count)
             .sum::<usize>()
             + usize::from(has_return)
@@ -441,11 +472,18 @@ impl PrepareEntryPoint {
 
         let child_fns = match &typ.expr {
             TypeExpr::Array(inner, _) => {
-                vec![Self::get_or_create_prepare_fn(inner, ssa, prepare_fns)]
+                vec![Some(Self::get_or_create_prepare_fn(
+                    inner,
+                    ssa,
+                    prepare_fns,
+                ))]
             }
             TypeExpr::Tuple(element_types) => element_types
                 .iter()
-                .map(|elem_type| Self::get_or_create_prepare_fn(elem_type, ssa, prepare_fns))
+                .map(|elem_type| {
+                    (!Self::is_zero_width(elem_type))
+                        .then(|| Self::get_or_create_prepare_fn(elem_type, ssa, prepare_fns))
+                })
                 .collect(),
             _ => Vec::new(),
         };
@@ -468,7 +506,7 @@ impl PrepareEntryPoint {
         e: &mut HLBlockEmitter<'_>,
         value_id: ValueId,
         typ: &Type,
-        child_fns: &[FunctionId],
+        child_fns: &[Option<FunctionId>],
     ) -> ValueId {
         match &typ.expr {
             TypeExpr::Field => e.write_witness(value_id),
@@ -493,6 +531,7 @@ impl PrepareEntryPoint {
                 let child_fn = child_fns
                     .first()
                     .copied()
+                    .flatten()
                     .expect("array prepare function should have child function");
                 let initial_array = Self::emit_default_witness_array(e, inner, *size);
                 let prepared_array = e.build_counted_loop(
@@ -512,8 +551,11 @@ impl PrepareEntryPoint {
                 let mut elems = Vec::with_capacity(element_types.len());
                 for (i, child_fn) in child_fns.iter().enumerate() {
                     let elem = e.tuple_proj(value_id, i);
-                    let prepared = e.call(*child_fn, vec![elem], 1);
-                    elems.push(prepared[0]);
+                    let prepared = match child_fn {
+                        Some(child_fn) => e.call(*child_fn, vec![elem], 1)[0],
+                        None => elem,
+                    };
+                    elems.push(prepared);
                 }
                 e.mk_tuple(elems, element_types.clone())
             }
@@ -755,5 +797,107 @@ impl PrepareEntryPoint {
             },
         );
         copied[0]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::ssa::Terminator;
+
+    #[test]
+    fn zero_width_unconstrained_results_keep_their_definitions_without_preparation() {
+        let unit = Type::tuple_of(vec![]);
+        for return_type in [
+            unit.clone(),
+            unit.clone().array_of(2),
+            Type::field().array_of(0),
+            unit.clone().slice_of(),
+            Type::field().slice_of(),
+            Type::tuple_of(vec![unit, Type::field()]),
+        ] {
+            let mut ssa = HLSSA::with_main("main".into());
+            let main = ssa.get_unique_entrypoint_id();
+            let callee = ssa.add_function("callee".into());
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(callee, |b| {
+                b.function.add_return_type(return_type.clone());
+                let entry = b.function.get_entry_id();
+                let mut e = b
+                    .block(entry)
+                    .with_source_location(SourceLocation::synthetic("test"));
+                let value = e.add_parameter(return_type.clone());
+                e.terminate_return(vec![value]);
+            });
+            let mut result = None;
+            sb.modify_function(main, |b| {
+                b.function.add_return_type(return_type.clone());
+                let entry = b.function.get_entry_id();
+                let mut e = b
+                    .block(entry)
+                    .with_source_location(SourceLocation::synthetic("test"));
+                let arg = e.add_parameter(return_type.clone());
+                let value = e.call_unconstrained(callee, vec![arg], 1)[0];
+                result = Some(value);
+                e.terminate_return(vec![value]);
+            });
+            PrepareEntryPoint::process_unconstrained_calls(&mut ssa);
+            let ops: Vec<_> = ssa
+                .get_function(main)
+                .get_entry()
+                .get_instructions()
+                .collect();
+            let zero_width = PrepareEntryPoint::is_zero_width(&return_type);
+            assert_eq!(ops.len(), if zero_width { 1 } else { 2 });
+            let OpCode::Call {
+                results,
+                function: CallTarget::Static(target),
+                unconstrained: true,
+                ..
+            } = ops[0]
+            else {
+                panic!("original unconstrained call must survive");
+            };
+            assert_eq!(*target, callee);
+            if zero_width {
+                assert_eq!(results, &[result.unwrap()]);
+            }
+            let Some(Terminator::Return(values)) =
+                ssa.get_function(main).get_entry().get_terminator()
+            else {
+                panic!("missing return");
+            };
+            assert_eq!(values, &[result.unwrap()]);
+            for (_, f) in ssa.iter_functions() {
+                if f.get_name().starts_with("prepare_") {
+                    assert!(!PrepareEntryPoint::is_zero_width(&f.get_param_types()[0]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn absent_abi_return_has_no_slots_or_return_reconstruction() {
+        let mut ssa = HLSSA::with_main("main".into());
+        let main = ssa.get_unique_entrypoint_id();
+        HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+            b.function.add_return_type(Type::int(8));
+            let entry = b.function.get_entry_id();
+            let mut e = b
+                .block(entry)
+                .with_source_location(SourceLocation::synthetic("test"));
+            let value = e.int_const(IntBits::zero(8));
+            e.terminate_return(vec![value]);
+        });
+        PrepareEntryPoint::wrap_main(&mut ssa, false, Some(false));
+        assert_eq!(
+            ssa.get_unique_entrypoint().get_param_types(),
+            vec![Type::blob(Type::field(), 0)]
+        );
+        assert_eq!(
+            ssa.iter_functions().count(),
+            2,
+            "unused return reconstruction should not be generated"
+        );
     }
 }

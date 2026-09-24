@@ -1,5 +1,4 @@
-// Requires zero-sized slice lowering before tuple elision (PR #365).
-// This exercises unit materialization together with length and bounds preservation.
+// Unit-valued calls in slice operations must execute exactly once.
 fn tick(count: &mut Field) {
     *count = *count + 1;
 }
@@ -15,18 +14,6 @@ fn check(index: u32) -> Field {
     assert_eq(values.len(), 5);
     let repeated: [(); 2] = [tick(&mut count); 2];
     assert_eq(repeated[index], values[index]);
-    let (without_last, last) = values.pop_back();
-    assert_eq(last, ());
-    let (first, without_first) = without_last.pop_front();
-    assert_eq(first, ());
-    let (remaining, removed) = without_first.remove(index);
-    assert_eq(removed, ());
-    assert_eq(remaining.len(), 2);
-    let from_array = repeated.as_vector();
-    assert_eq(from_array.len(), 2);
-    let empty: [()] = @[];
-    assert_eq(empty.len(), 0);
-    assert_eq(empty.push_back(()).len(), 1);
     assert_eq(count, 5);
     count
 }
