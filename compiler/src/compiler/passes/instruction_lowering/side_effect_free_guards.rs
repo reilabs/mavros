@@ -83,7 +83,6 @@ impl LowerSideEffectFreeGuards {
                 false
             }
             OpCode::Store { .. }
-            | OpCode::RefCount { .. }
             | OpCode::Assert { .. }
             | OpCode::AssertCmp { .. }
             | OpCode::AssertR1C { .. }

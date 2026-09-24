@@ -472,9 +472,6 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
                 builder.value_position(*slice).child(Descent::Len),
             );
         }
-        OpCode::RefCount { .. } => {
-            // Only emitted in unconstrained code; observes allocation metadata, not elements.
-        }
         OpCode::MkSeqOfBlob { .. } => {
             // the blob is compile-time constant data: the result starts Pure. (no edges)
         }
@@ -740,7 +737,6 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         | OpCode::ArrayGet { .. }
         | OpCode::ArraySet { .. }
         | OpCode::SliceLen { .. }
-        | OpCode::RefCount { .. }
         | OpCode::SlicePush { .. }
         | OpCode::SlicePop { .. }
         | OpCode::SliceInsert { .. }

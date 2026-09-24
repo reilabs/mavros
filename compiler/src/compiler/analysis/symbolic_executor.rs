@@ -193,10 +193,6 @@ pub trait Context<V> {
         ice!("backend does not implement slice_len");
     }
 
-    fn ref_count(&mut self, _value: &V) -> V {
-        ice!("backend does not implement ref_count");
-    }
-
     /// Handle a Guard instruction. Receives the inner opcode, the condition value,
     /// all resolved inner inputs, and result types. Returns values for each result.
     /// The implementer should nuke information on outputs and handle effectful ops
@@ -494,10 +490,6 @@ impl SymbolicExecutor {
                     }
                     OpCode::SliceRemove { .. } => {
                         ice!("SliceRemove must be lowered before symbolic execution")
-                    }
-                    OpCode::RefCount { result, value } => {
-                        let value = &scope[value];
-                        scope.insert(*result, ctx.ref_count(value));
                     }
                     OpCode::SliceLen {
                         result: r,

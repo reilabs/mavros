@@ -1,6 +1,0 @@
-[package]
-name = "vector_refcount_argument_effects"
-type = "bin"
-authors = [""]
-
-[dependencies]

@@ -665,7 +665,6 @@ impl CSE {
                     | OpCode::SliceInsert { .. }
                     | OpCode::SliceRemove { .. }
                     | OpCode::SliceLen { .. }
-                    | OpCode::RefCount { .. }
                     | OpCode::MemOp { kind: _, value: _ }
                     | OpCode::Lookup { .. }
                     | OpCode::DLookup {

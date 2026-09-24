@@ -1,6 +1,0 @@
-[package]
-name = "refcount_builtins"
-type = "bin"
-authors = [""]
-
-[dependencies]

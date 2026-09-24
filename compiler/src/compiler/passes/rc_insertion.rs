@@ -600,13 +600,9 @@ impl RCInsertion {
                         new_instructions.push(instruction.clone());
                         currently_live.insert(*array);
                     }
-                    OpCode::SliceLen { result: _, slice }
-                    | OpCode::RefCount {
-                        result: _,
-                        value: slice,
-                    } => {
-                        // These reads borrow their operand and return u32 (no RC).
-                        // Keep the allocation alive until after the read.
+                    OpCode::SliceLen { result: _, slice } => {
+                        // SliceLen returns u32, which doesn't need RC
+                        // But we need to keep the slice alive if it's currently live
                         if !currently_live.contains(slice) {
                             // The slice dies here, so we drop it _after_ the read.
                             Self::push_mem_op(

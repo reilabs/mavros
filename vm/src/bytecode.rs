@@ -3422,14 +3422,6 @@ mod def {
             std::ptr::copy_nonoverlapping(vm.constants.as_ptr().add(pool_offset), res, size);
         }
     }
-
-    // Append new opcodes to preserve the discriminants of existing bytecode.
-    #[opcode]
-    fn ref_count(#[out] res: *mut u64, #[frame] array: BoxedValue) {
-        unsafe {
-            *res = u64::from(array.ref_count() as u32);
-        }
-    }
 }
 
 pub struct Function {
@@ -3720,33 +3712,6 @@ mod tests {
             Vec::new(),
             Vec::new(),
         )
-    }
-
-    #[test]
-    fn ref_count_reads_current_ownership_without_changing_it() {
-        let mut vm = empty_witgen_vm();
-        let frame = Frame::base_frame(2, &mut vm);
-        let array = BoxedValue::alloc(BoxedLayout::array(0, false), &mut vm);
-        unsafe { *frame.data.add(1) = array.0 as u64 };
-        let mut binary = Vec::new();
-        OpCode::RefCount {
-            res: FramePosition(0),
-            array: FramePosition(1),
-        }
-        .to_binary(&mut binary, &mut Vec::new());
-        for expected in [1, 3, 2] {
-            let (next_pc, _) = DISPATCH[binary[0] as usize](binary.as_ptr(), frame, &mut vm);
-            assert!(!vm.trapped);
-            assert_eq!(next_pc, unsafe { binary.as_ptr().add(binary.len()) });
-            assert_eq!(unsafe { *frame.data }, expected);
-            assert_eq!(array.ref_count(), expected);
-            match expected {
-                1 => array.inc_rc(2),
-                _ => array.dec_rc(&mut vm),
-            }
-        }
-        array.dec_rc(&mut vm);
-        frame.pop(&mut vm);
     }
 
     /// Run the wide lane through real dispatch.

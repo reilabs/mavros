@@ -77,6 +77,12 @@ fn main() {
 }
 
 const DEFAULT_IGNORED_TESTS: &[&str] = &[
+    // `array_refcount` and `vector_refcount` are intentionally unsupported: Mavros does not
+    // guarantee Noir's reference-count behavior, so these implementation-specific tests are ignored.
+    "reference_counts_inliner_0",
+    "reference_counts_inliner_min",
+    "reference_counts_inliner_max",
+    "reference_counts_vectors_inliner_0",
     // `func_1` recurses without ever decrementing `ctx_limit`, so it never terminates. The witgen
     // VM has no recursion/step/memory guard (frames are heap-allocated per call in `Frame::push`),
     // so running it grows memory without bound. Depending on the compiled circuit shape it either

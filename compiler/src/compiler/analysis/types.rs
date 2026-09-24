@@ -548,16 +548,6 @@ impl Types {
                 function_info.values.insert(*result_elem, result_elem_type);
                 Ok(())
             }
-            OpCode::RefCount { result, value } => {
-                let ty = function_info.values.get(value).ok_or_else(|| {
-                    format!("RefCount value {value:?} not found in type assignments")
-                })?;
-                if !matches!(ty.expr, TypeExpr::Array(..) | TypeExpr::Slice(..)) {
-                    return Err(format!("RefCount requires an array or slice, got {ty}"));
-                }
-                function_info.values.insert(*result, Type::int(32));
-                Ok(())
-            }
             OpCode::SliceLen { result, slice } => {
                 let _ = function_info.values.get(slice).ok_or_else(|| {
                     format!("Slice value {:?} not found in type assignments", slice)

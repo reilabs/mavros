@@ -602,7 +602,6 @@ impl FnBuilder<'_> {
             | OpCode::ToBits { .. }
             | OpCode::ToRadix { .. }
             | OpCode::SliceLen { .. }
-            | OpCode::RefCount { .. }
             | OpCode::MkSeqOfBlob { .. }
             | OpCode::WriteWitness { .. }
             | OpCode::DropGlobal { .. }

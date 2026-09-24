@@ -455,12 +455,6 @@ pub trait HLEmitter {
         (result_slice, result_elem)
     }
 
-    fn ref_count(&mut self, value: ValueId) -> ValueId {
-        let result = self.fresh_value();
-        self.emit(OpCode::RefCount { result, value });
-        result
-    }
-
     fn slice_len(&mut self, slice: ValueId) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::SliceLen { result: r, slice });

@@ -179,12 +179,6 @@ pub enum OpCode {
         result: ValueId,
         slice: ValueId,
     },
-    /// Read an array/slice's current reference count as u32 without taking ownership.
-    /// This observes runtime state and must not be folded, hoisted, or value-numbered.
-    RefCount {
-        result: ValueId,
-        value: ValueId,
-    },
     Select {
         result: ValueId,
         cond: ValueId,
@@ -370,7 +364,6 @@ impl OpCode {
             | OpCode::SliceInsert { .. }
             | OpCode::SliceRemove { .. }
             | OpCode::SliceLen { .. }
-            | OpCode::RefCount { .. }
             | OpCode::ToBits { .. }
             | OpCode::ToRadix { .. }
             | OpCode::MemOp { .. }
@@ -637,14 +630,6 @@ impl Instruction for OpCode {
                     annotate_value(*result_elem),
                     slice.0,
                     index.0
-                )
-            }
-            OpCode::RefCount { result, value } => {
-                format!(
-                    "v{}{} = ref_count(v{})",
-                    result.0,
-                    annotate_value(*result),
-                    value.0
                 )
             }
             OpCode::SliceLen { result, slice } => {
@@ -1065,10 +1050,6 @@ impl Instruction for OpCode {
             Self::SliceLen {
                 result: _,
                 slice: b,
-            }
-            | Self::RefCount {
-                result: _,
-                value: b,
             } => vec![b].into_iter(),
             Self::AssertCmp {
                 kind: _,
@@ -1238,7 +1219,6 @@ impl Instruction for OpCode {
             | Self::ArraySet { result: r, .. }
             | Self::SlicePush { result: r, .. }
             | Self::SliceLen { result: r, .. }
-            | Self::RefCount { result: r, .. }
             | Self::Load { result: r, ptr: _ }
             | Self::MkSeq { result: r, .. }
             | Self::MkSeqOfBlob { result: r, .. }
@@ -1307,7 +1287,6 @@ impl Instruction for OpCode {
             | Self::ArraySet { result: r, .. }
             | Self::SlicePush { result: r, .. }
             | Self::SliceLen { result: r, .. }
-            | Self::RefCount { result: r, .. }
             | Self::Load { result: r, ptr: _ }
             | Self::MkSeq { result: r, .. }
             | Self::MkSeqOfBlob { result: r, .. }
@@ -1448,10 +1427,6 @@ impl Instruction for OpCode {
             Self::SliceLen {
                 result: _,
                 slice: b,
-            }
-            | Self::RefCount {
-                result: _,
-                value: b,
             } => vec![b].into_iter(),
             Self::AssertCmp {
                 kind: _,
@@ -1677,10 +1652,6 @@ impl Instruction for OpCode {
             Self::SliceLen {
                 result: a,
                 slice: b,
-            }
-            | Self::RefCount {
-                result: a,
-                value: b,
             } => vec![a, b].into_iter(),
             Self::AssertR1C { a, b, c } | Self::Constrain { a, b, c } => vec![a, b, c].into_iter(),
             Self::Store { ptr: a, value: b }
