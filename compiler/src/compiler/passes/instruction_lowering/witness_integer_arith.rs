@@ -10,7 +10,8 @@ use crate::compiler::{
         instruction_lowering::{InstructionLoweringRule, LoweringContext, integer_bits},
         shared::{
             limbs::{
-                WitnessLimbs, split_into_limbs, two_limb_product_packing_fits, witness_limb_bits,
+                WitnessLimbs, split_into_limbs, two_limb_product_packing_fits,
+                widest_cell_sum_bits, witness_limb_bits,
             },
             unsupported::unsupported_on_this_field,
         },
@@ -137,9 +138,11 @@ impl LowerWitnessIntegerArithOps {
         (lhs_ty.is_witness_of() || rhs_ty.is_witness_of()) && integer_bits(lhs_ty).is_some()
     }
 
-    // FIELD-ASSUMPTION: L6-int-op-strategy
-    // The sum/difference is computed in one field element. Sound while `2^(bits+1) < p`; a
-    // u64 sum (65 bits) overflows a ~64-bit field and needs a carry-chain lowering.
+    /// The sum or difference in one field element, range-checked back to `bits`.
+    ///
+    /// Sound while `2^(bits + 1) < p`, which is [`widest_cell_sum_bits`]. A wider one is lowered
+    /// through the carry chain before this pass runs, so that is what makes this one field
+    /// operation sound on **any** field.
     fn lower_unsigned_addsub(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -151,6 +154,10 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
+        assert!(
+            bits <= widest_cell_sum_bits(b.field()),
+            "ICE: an int{bits} sum reached the single-cell lowering, whose field cannot hold it"
+        );
         let lhs_field = b.cast_to_field(lhs);
         let rhs_field = b.cast_to_field(rhs);
         // The sum is a _field_ value, so the unsigned forms are the right ones to build it with.

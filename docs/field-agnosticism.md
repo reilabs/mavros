@@ -569,9 +569,23 @@ A single-field arithmetic op assumes its exact result span fits one cell (one `b
 `two_pow`-based packing). Fix = multi-limb schoolbook / carry-chain lowering in the FALSE branch.
 
 - [ ] `witness_integer_arith.rs` — `lower_unsigned_mul` (single-field product + the `2³ʰ⁺¹` u128
-      fallback packing), `lower_signed_mul` (no fallback), `lower_unsigned_addsub`,
-      `lower_signed_addsub`, `signed_value_from_encoded`/`encode_signed_value` (sign packing),
-      `lower_unsigned_divmod`.
+      fallback packing), `lower_signed_mul` (no fallback), `lower_signed_addsub`,
+      `signed_value_from_encoded`/`encode_signed_value` (sign packing), `lower_unsigned_divmod`.
+- [x] `witness_integer_arith.rs` — `lower_unsigned_addsub`; `witness_compare.rs` —
+      `lower_unsigned_lt` for an unsigned ordering; and `witness_assert.rs` —
+      `lower_unsigned_assert_lt` for an asserted one. The FALSE case is the **carry chain** in
+      `WideWitnessInts`, which lowers every unsigned sum, difference, ordering and asserted ordering
+      wider than `widest_cell_sum_bits` — one bit short of `widest_injective_int_bits`, because it
+      is the _sum_ that has to fit — limb by limb, with a witnessed, bit-checked carry per limb and
+      each limb of the answer range-checked at its own width. It takes a value that is still one
+      element too, decomposing it first, so the width at which the operands fit and their sum does
+      not is covered. What reaches the three single-cell lowerings fits the cell on any field, and
+      each asserts it: `lower_unsigned_addsub` and `lower_unsigned_assert_lt` themselves, and the
+      ordering in `lower_lt`'s unsigned arm, since `lower_unsigned_lt` is also the signed path's.
+- [ ] `witness_compare.rs` — `lower_signed_lt`, which reads the magnitudes through
+      `lower_unsigned_lt` at widths up to the signed frontier rather than the chain's. That is past
+      `widest_cell_sum_bits` only on a field whose modulus is at most 64 bits wide — goldilocks, at
+      63 bits. At 64 the operand is past that field's `narrow_int_bits`, and the funnel refuses it.
 - [ ] `witness_bitwise.rs` — `lower_integer_sext`, `lower_word_bitwise` (spread width).
 - [x] `witness_bitwise.rs` — `lower_not`. The FALSE case is the **representation**, not a second
       lowering: `WideWitnessInts` runs ahead of this pass, with only the narrowing-cast lowering
@@ -591,11 +605,11 @@ still refuses is a field whose **half-limb** spread sum does not fit, which no d
 it helps.
 
 **The rest still carry the assumption unchecked**, with only a `FIELD-ASSUMPTION` comment on it, and
-are what to fix first if a narrow field is configured before P5's lowerings exist:
-`lower_unsigned_addsub` and the `signed_value_from_encoded`/`encode_signed_value` sign packing.
+are what to fix first if a narrow field is configured before P5's lowerings exist: the
+`signed_value_from_encoded`/`encode_signed_value` sign packing, and `lower_signed_lt`'s ordering.
 `lower_unsigned_divmod` is a mixture: its 128-bit path reconstructs `q·divisor + r` by emitting
-`UMul`/`UAdd` **ops**, which this same pass re-lowers, so it inherits the mul's refusal and the
-add's gap; its narrow path multiplies in the field directly and has no check of its own.
+`UMul`/`UAdd` **ops**, which this same pass re-lowers, so it inherits the mul's refusal; its narrow
+path multiplies in the field directly and has no check of its own.
 
 Note that the funnel's condition is per-site, because `witness_limb_bits` certifies only that a bare
 `a·b` fits. A lowering that additionally scales a column by a place value asks

@@ -1,5 +1,8 @@
 use crate::compiler::{
-    passes::instruction_lowering::{InstructionLoweringRule, LoweringContext},
+    passes::{
+        instruction_lowering::{InstructionLoweringRule, LoweringContext},
+        shared::limbs::widest_cell_sum_bits,
+    },
     ssa::{
         ValueId,
         hlssa::{
@@ -121,10 +124,17 @@ impl LowerWitnessCompareOps {
         if kind.is_signed() {
             self.lower_signed_lt(b, context, result, lhs, rhs, bits, lhs_witness, rhs_witness)
         } else {
+            assert!(
+                bits <= widest_cell_sum_bits(b.field()),
+                "ICE: an int{bits} ordering reached the single-cell lowering, whose field cannot hold its difference"
+            );
             self.lower_unsigned_lt(b, context, result, lhs, rhs, bits, lhs_witness, rhs_witness)
         }
     }
 
+    // FIELD-ASSUMPTION: L6-int-op-strategy
+    // Reads the magnitudes through `lower_unsigned_lt` at any width up to the signed frontier, which
+    // is sound only while that is at most `widest_cell_sum_bits`.
     #[allow(clippy::too_many_arguments)]
     fn lower_signed_lt(
         &self,
@@ -161,6 +171,14 @@ impl LowerWitnessCompareOps {
         });
     }
 
+    /// The ordering as a witnessed bit, with the difference that bit selects range-checked at
+    /// `bits`.
+    ///
+    /// Sound while `2^(bits + 1) < p`, which is [`widest_cell_sum_bits`]: the difference on the
+    /// wrong side of the answer is then an element no range check at `bits` admits. An unsigned
+    /// ordering wider than that is lowered through the carry chain before this pass runs, and
+    /// [`Self::lower_lt`] asserts it. A signed one comes here through [`Self::lower_signed_lt`] and
+    /// is bounded by the signed frontier instead.
     #[allow(clippy::too_many_arguments)]
     fn lower_unsigned_lt(
         &self,

@@ -2342,7 +2342,7 @@ impl CastTarget {
             CastTarget::WitnessOf => Type::witness_of(value_type.clone()),
             CastTarget::ValueOf => match &value_type.expr {
                 TypeExpr::WitnessOf(inner) => inner.as_ref().clone(),
-                _ => ice!("ValueOf cast on non-WitnessOf type {:?}", value_type),
+                _ => value_type.clone(),
             },
             CastTarget::Map(inner) => match &value_type.expr {
                 TypeExpr::Array(elem, len) => inner.result_type(elem).array_of(*len),

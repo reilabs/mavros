@@ -29,7 +29,21 @@
 //! - **A value that is limbs from the start** (a widening cast, a pure-to-witness injection) has no
 //!   source value to agree with, so they are simply range-checked.
 //!
-//! Everything else simply moves limbs around, and so they remain constrained.
+//! Everything else either moves limbs around or, as the bitwise operations do, acts on each limb
+//! within its own width, and so they remain constrained. The exception is the carry chain.
+//!
+//! # The Carry Chain
+//!
+//! The unsigned sum, difference and ordering are one gadget: `a < b` **is** the borrow out of the
+//! top limb of `a - b`. Per limb of width `w`, the answer is `a + b + c_in - 2^w c_out` for a sum
+//! and `a - b - c_in + 2^w c_out` for a difference, with `c_out` a witnessed carry checked to be a
+//! bit and the answer range-checked at `w`, which is what pins the carry. A checked sum or
+//! difference lets no carry out of the top limb, an ordering witnesses that carry as its answer,
+//! and an asserted ordering fixes it at one.
+//!
+//! The chain runs past [`widest_cell_sum_bits`], one bit short of the threshold above: at that one
+//! width the operands still have an element each but their sum does not, so the operands are
+//! decomposed into limbs first. A sum or difference is then recombined into its element.
 //!
 //! # Strategy
 //!
@@ -54,7 +68,7 @@ use crate::compiler::{
         types::{FunctionTypeInfo, TypeInfo},
     },
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-    passes::shared::limbs::{widest_injective_int_bits, witness_limb_bits},
+    passes::shared::limbs::{widest_cell_sum_bits, widest_injective_int_bits, witness_limb_bits},
     ssa::{
         BlockId, FunctionId, Instruction, Located, Terminator, ValueId,
         hlssa::{
@@ -110,7 +124,18 @@ impl Pass for WideWitnessInts {
                 .get_domination_pre_order()
                 .collect();
             let value_map = plan_function(ssa, fid, &reachable, type_info);
-            if value_map.values().all(|limbs| limbs.len() == 1) {
+            // A function with no limbs can still hold an operation whose operands have an element
+            // each and whose sum does not, which the chain lowers all the same.
+            let fti = type_info.get_function(fid);
+            let chains = || {
+                reachable.iter().any(|bid| {
+                    ssa.get_function(fid)
+                        .get_block(*bid)
+                        .get_instructions()
+                        .any(|op| chained(op, fti, field).is_some())
+                })
+            };
+            if value_map.values().all(|limbs| limbs.len() == 1) && !chains() {
                 continue;
             }
             rewrite_function(ssa, fid, &reachable, &value_map, type_info, field);
@@ -417,6 +442,7 @@ fn rewrite_function(
 
         let old_instructions = block.take_instructions();
         let mut new_instructions = Vec::with_capacity(old_instructions.len());
+        let mut decomposed = HashMap::default();
         for instr in &old_instructions {
             let location = instr.location().clone();
             let mut rewriter = Rewriter {
@@ -424,6 +450,7 @@ fn rewrite_function(
                 value_map,
                 types: fti,
                 field,
+                decomposed: &mut decomposed,
                 out: Vec::new(),
             };
             rewriter.lower(instr.as_ref());
@@ -456,6 +483,14 @@ struct Rewriter<'a> {
     value_map: &'a HashMap<ValueId, Vec<ValueId>>,
     types: &'a FunctionTypeInfo,
     field: FieldConfig,
+
+    /// The decompositions already emitted in this block, by value and width.
+    ///
+    /// Kept per block as limbs minted in one block are in scope only in the blocks that block
+    /// dominates, and this pass does not track dominance. Within a block the instructions are
+    /// rewritten in order, so an earlier decomposition is always in scope.
+    decomposed: &'a mut HashMap<(ValueId, usize), Vec<ValueId>>,
+
     out: Vec<OpCode>,
 }
 
@@ -582,6 +617,32 @@ impl Rewriter<'_> {
         result
     }
 
+    fn select(&mut self, cond: ValueId, if_t: ValueId, if_f: ValueId) -> ValueId {
+        let result = self.fresh();
+        self.push(OpCode::Select {
+            result,
+            cond,
+            if_t,
+            if_f,
+        });
+        result
+    }
+
+    /// `op`, under `guard` where there is one.
+    fn push_guarded(&mut self, guard: Option<ValueId>, op: OpCode) {
+        match guard {
+            Some(condition) => self.push(OpCode::Guard {
+                condition,
+                inner: Box::new(op),
+            }),
+            None => self.push(op),
+        }
+    }
+
+    fn is_witness(&self, value: ValueId) -> bool {
+        self.types.get_value_type(value).is_witness_of()
+    }
+
     fn field_const(&self, value: Field) -> ValueId {
         self.ssa.add_const(Constant::Field(value))
     }
@@ -607,7 +668,13 @@ impl Rewriter<'_> {
     /// the constraints are what ensures that they are a representation. As
     /// `bits <= multi_cell_int_bits`, the source has an element and the limb sum below the modulus
     /// reaches it without wrapping.
+    ///
+    /// A value is decomposed once per block at a given width. A later request reuses the limbs,
+    /// which are already tied to the value, instead of paying the columns and checks again.
     fn decompose(&mut self, value: ValueId, bits: usize) -> Vec<ValueId> {
+        if let Some(limbs) = self.decomposed.get(&(value, bits)) {
+            return limbs.clone();
+        }
         let widths = limb_widths(bits, self.limb_bits());
         let pure = self.cast(value, CastTarget::ValueOf);
 
@@ -650,6 +717,7 @@ impl Rewriter<'_> {
             c: zero,
         });
 
+        self.decomposed.insert((value, bits), limbs.clone());
         limbs
     }
 
@@ -832,12 +900,341 @@ impl Rewriter<'_> {
     }
 }
 
+// THE CARRY CHAIN
+// ================================================================================================
+
+/// Where the carry out of a chain's top limb goes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CarryOut {
+    /// Nowhere: the operation is checked, and a carry past the top limb is its overflow.
+    Zero,
+
+    /// Out, always: an asserted ordering, whose subtraction has to borrow.
+    One,
+
+    /// Witnessed and handed back: an ordering, which **is** that borrow.
+    Witnessed,
+}
+
+/// An operation the carry chain lowers, with the width it is lowered at.
+struct Chained {
+    /// The width of both operands, which `check_widths` makes the same, and so of every limb list
+    /// the chain splits them into.
+    bits: usize,
+
+    /// The left operand as the program names it: the minuend of a difference, and the side an
+    /// ordering asks is the smaller. One element or limbs, witnessed or pure.
+    lhs: ValueId,
+
+    /// The right operand as the program names it, in the same forms as `lhs`.
+    rhs: ValueId,
+}
+
+/// What a carry chain leaves behind.
+struct Chain {
+    /// Each limb of the answer as a field element, range-checked at its own width.
+    answer: Vec<ValueId>,
+
+    /// The width of each limb, little-endian.
+    widths: Vec<usize>,
+
+    /// The carry out of the top limb, where the chain witnesses one.
+    carry_out: Option<ValueId>,
+}
+
+impl Rewriter<'_> {
+    /// The unsigned sum, difference and ordering at a width whose sum one element cannot carry,
+    /// returning `true` if the provided `op` was lowered or `false` otherwise.
+    ///
+    /// All three are lowered using the carry [`Chain`] regardless of the operand format, as it is
+    /// necessary to handle overflow properly.
+    fn lower_through_chain(&mut self, op: &OpCode) -> bool {
+        let Some(Chained { bits, lhs, rhs }) = chained(op, self.types, self.field) else {
+            return false;
+        };
+        let (guard, inner) = match op {
+            OpCode::Guard { condition, inner } => (Some(self.one(*condition)), inner.as_ref()),
+            other => (None, other),
+        };
+
+        match inner {
+            OpCode::BinaryArithOp { kind, result, .. } => {
+                self.lower_add_sub(*kind, *result, lhs, rhs, bits, guard);
+            }
+            // An ordering cannot fail, so a guard has nothing to withhold from it: the chain holds
+            // for any pair of operands, and every limb of either is bounded whatever the guard.
+            OpCode::Cmp { result, .. } => {
+                let chain = self.carry_chain(true, lhs, rhs, bits, CarryOut::Witnessed, None);
+                self.push(OpCode::Cast {
+                    result: *result,
+                    value: chain.carry_out.expect("an ordering witnesses its borrow"),
+                    target: CastTarget::Int(1),
+                });
+            }
+            OpCode::AssertCmp { .. } => {
+                self.carry_chain(true, lhs, rhs, bits, CarryOut::One, guard);
+            }
+            _ => ice_unreachable!("`chained` matches only these"),
+        }
+        true
+    }
+
+    /// A checked sum or difference, whose carry out of the top limb is its overflow.
+    ///
+    /// Under a guard the answer is zero where the guard is off, as the single-cell lowering's is:
+    /// there the operands are whatever the not-taken branch left, the chain's range checks are off
+    /// with the guard, and the limbs it would otherwise leave are unbounded.
+    fn lower_add_sub(
+        &mut self,
+        kind: BinaryArithOpKind,
+        result: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        bits: usize,
+        guard: Option<ValueId>,
+    ) {
+        let subtract = kind == BinaryArithOpKind::USub;
+        let chain = self.carry_chain(subtract, lhs, rhs, bits, CarryOut::Zero, guard);
+        let kept: Vec<ValueId> = chain
+            .answer
+            .into_iter()
+            .map(|limb| match guard {
+                Some(condition) => {
+                    let zero = self.field_const(self.field.zero());
+                    self.select(condition, limb, zero)
+                }
+                None => limb,
+            })
+            .collect();
+
+        let results = self.limbs(result);
+        if results.len() == chain.widths.len() {
+            for ((result, limb), width) in paired(results, kept).zip(&chain.widths) {
+                self.push(OpCode::Cast {
+                    result,
+                    value: limb,
+                    target: CastTarget::Int(*width),
+                });
+            }
+        } else {
+            // The answer has an element, as the operands do: only their sum lacks one, and the
+            // chain has already carried it.
+            let limbs: Vec<ValueId> = kept
+                .into_iter()
+                .zip(&chain.widths)
+                .map(|(limb, width)| self.cast(limb, CastTarget::Int(*width)))
+                .collect();
+            let whole = self.recombine(&limbs, &chain.widths, bits);
+            self.push(OpCode::Cast {
+                result,
+                value: whole,
+                target: CastTarget::Nop,
+            });
+        }
+    }
+
+    /// `lhs + rhs` or `lhs - rhs` limb by limb, each limb's carry a witnessed bit.
+    ///
+    /// Per limb of width `w`, the answer is `a + b + c_in - 2^w * c_out` for a sum and
+    /// `a - b - c_in + 2^w * c_out` for a difference, range-checked at `w`. This pins `c_out`: the
+    /// other choice moves the answer by `2^w`, either to `2^w` or past it, or below zero, where it
+    /// wraps to an element no range check at `w` admits. Either answer is within `2^(w + 1)` of
+    /// zero, far inside the modulus, so the identity is one field element whichever carry the
+    /// prover picks.
+    ///
+    /// Every check the chain itself makes is under `guard`. The decomposition of an operand that
+    /// is still one element is not: its checks restate that operand's own bounds, which hold
+    /// whether the guard is on or off.
+    fn carry_chain(
+        &mut self,
+        subtract: bool,
+        lhs: ValueId,
+        rhs: ValueId,
+        bits: usize,
+        out: CarryOut,
+        guard: Option<ValueId>,
+    ) -> Chain {
+        assert!(
+            subtract || out != CarryOut::One,
+            "ICE: a sum whose top carry is forced out has no meaning"
+        );
+        let (fold, unfold) = if subtract {
+            (BinaryArithOpKind::USub, BinaryArithOpKind::UAdd)
+        } else {
+            (BinaryArithOpKind::UAdd, BinaryArithOpKind::USub)
+        };
+
+        let widths = limb_widths(bits, self.limb_bits());
+        let (lhs_witnessed, rhs_witnessed) = (self.is_witness(lhs), self.is_witness(rhs));
+        let lhs = self.chain_operand(lhs, bits, widths.len());
+        let rhs = self.chain_operand(rhs, bits, widths.len());
+
+        // The carry into the next limb: its hint, which the next hint is computed from, and its
+        // column, which the next identity reads.
+        let mut carry: Option<(ValueId, ValueId)> = None;
+        let mut answer = Vec::with_capacity(widths.len());
+        for (index, width) in widths.iter().enumerate() {
+            let top = index + 1 == widths.len();
+            let a = self.cast(lhs[index], CastTarget::Field);
+            let b = self.cast(rhs[index], CastTarget::Field);
+            let mut limb = self.bin(fold, a, b);
+            if let Some((_, column)) = carry {
+                limb = self.bin(fold, limb, column);
+            }
+
+            let place = self.field.two_pow(*width);
+            let next = if !top || out == CarryOut::Witnessed {
+                let hint = self.carry_hint(
+                    subtract,
+                    (lhs[index], lhs_witnessed),
+                    (rhs[index], rhs_witnessed),
+                    carry.map(|(hint, _)| hint),
+                    *width,
+                );
+                let hint_field = self.cast(hint, CastTarget::Field);
+                let column = self.write_witness(hint_field);
+                self.push_guarded(
+                    guard,
+                    OpCode::Rangecheck {
+                        value: column,
+                        max_bits: 1,
+                    },
+                );
+                let place = self.field_const(place);
+                let scaled = self.bin(BinaryArithOpKind::UMul, column, place);
+                limb = self.bin(unfold, limb, scaled);
+                Some((hint, column))
+            } else {
+                if out == CarryOut::One {
+                    let place = self.field_const(place);
+                    limb = self.bin(unfold, limb, place);
+                }
+                None
+            };
+
+            self.push_guarded(
+                guard,
+                OpCode::Rangecheck {
+                    value: limb,
+                    max_bits: *width,
+                },
+            );
+            answer.push(limb);
+            carry = next;
+        }
+
+        // The top limb mints a carry only where `out` witnesses one, so that is the only carry
+        // that survives the loop.
+        Chain {
+            answer,
+            widths,
+            carry_out: carry.map(|(_, column)| column),
+        }
+    }
+
+    /// The honest carry out of one limb, computed on the pure side at one bit past the limb.
+    ///
+    /// A sum's carry is its bit `w`; a difference borrows exactly when what it takes away exceeds
+    /// what it takes it from. Neither reaches `2^(w + 1)`, so neither wraps.
+    fn carry_hint(
+        &mut self,
+        subtract: bool,
+        (a, a_witnessed): (ValueId, bool),
+        (b, b_witnessed): (ValueId, bool),
+        carry_in: Option<ValueId>,
+        width: usize,
+    ) -> ValueId {
+        let wider = CastTarget::Int(width + 1);
+        let a = self.pure_of(a, a_witnessed);
+        let a = self.cast(a, wider.clone());
+        let b = self.pure_of(b, b_witnessed);
+        let mut b = self.cast(b, wider.clone());
+        if let Some(carry_in) = carry_in {
+            let carry_in = self.cast(carry_in, wider);
+            b = self.bin(BinaryArithOpKind::UAdd, b, carry_in);
+        }
+
+        if subtract {
+            let borrow = self.fresh();
+            self.push(OpCode::Cmp {
+                kind: CmpKind::ULt,
+                result: borrow,
+                lhs: a,
+                rhs: b,
+            });
+            borrow
+        } else {
+            let sum = self.bin(BinaryArithOpKind::UAdd, a, b);
+            let high = self.shifted_down(sum, width + 1, width);
+            self.cast(high, CastTarget::Int(1))
+        }
+    }
+
+    /// A limb's value on the pure side, where a hint is computed.
+    fn pure_of(&mut self, limb: ValueId, witnessed: bool) -> ValueId {
+        if witnessed {
+            self.cast(limb, CastTarget::ValueOf)
+        } else {
+            limb
+        }
+    }
+
+    /// An operand of the chain as its `count` limbs at `bits`.
+    ///
+    /// A witnessed operand that is still one value is below the representation threshold, and is
+    /// split with [`Self::decompose`] so its limbs are tied to it; a pure one is cut on the pure side,
+    /// which costs no constraint because it is not witnessed.
+    fn chain_operand(&mut self, value: ValueId, bits: usize, count: usize) -> Vec<ValueId> {
+        if self.limbs(value).len() == 1 && self.is_witness(value) {
+            return self.decompose(value, bits);
+        }
+        self.operand_limbs(value, count)
+    }
+}
+
+/// The operation the carry chain lowers, if `op` is one: an unsigned sum, difference or ordering,
+/// guarded or not, with a witnessed operand, past [`widest_cell_sum_bits`].
+fn chained(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Option<Chained> {
+    let inner = match op {
+        OpCode::Guard { inner, .. } => inner.as_ref(),
+        other => other,
+    };
+    let (lhs, rhs) = match inner {
+        OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::UAdd | BinaryArithOpKind::USub,
+            lhs,
+            rhs,
+            ..
+        }
+        | OpCode::Cmp {
+            kind: CmpKind::ULt,
+            lhs,
+            rhs,
+            ..
+        }
+        | OpCode::AssertCmp {
+            kind: CmpKind::ULt,
+            lhs,
+            rhs,
+        } => (*lhs, *rhs),
+        _ => return None,
+    };
+    let bits = int_width(types.get_value_type(lhs))?;
+    let witnessed =
+        types.get_value_type(lhs).is_witness_of() || types.get_value_type(rhs).is_witness_of();
+    (witnessed && bits > widest_cell_sum_bits(field)).then_some(Chained { bits, lhs, rhs })
+}
+
 // PER-INSTRUCTION REWRITING
 // ================================================================================================
 
 impl Rewriter<'_> {
     /// Rewrite one instruction into the limb-wise instructions that replace it.
     fn lower(&mut self, op: &OpCode) {
+        if self.lower_through_chain(op) {
+            return;
+        }
+
         let touches_wide = op
             .get_inputs()
             .chain(op.get_results())
@@ -861,7 +1258,18 @@ impl Rewriter<'_> {
                 rhs,
             } => self.lower_compare(*kind, *result, *lhs, *rhs),
 
-            OpCode::AssertCmp { kind, lhs, rhs } => self.lower_assert_compare(*kind, *lhs, *rhs),
+            OpCode::AssertCmp { kind, lhs, rhs } => {
+                self.lower_assert_compare(*kind, *lhs, *rhs, None);
+            }
+
+            // An assertion in a branch on a witness, which holds only where the branch is taken.
+            OpCode::Guard { condition, inner } if matches!(**inner, OpCode::AssertCmp { .. }) => {
+                let OpCode::AssertCmp { kind, lhs, rhs } = **inner else {
+                    ice_unreachable!("matched above");
+                };
+                let guard = self.one(*condition);
+                self.lower_assert_compare(kind, lhs, rhs, Some(guard));
+            }
 
             // Everything below moves limbs without reading them, so each is its narrow self once
             // per limb.
@@ -1409,9 +1817,14 @@ impl Rewriter<'_> {
         });
     }
 
-    /// The assertion of one, which is one assertion per limb rather than a conjunction: the two
-    /// mean the same thing and this costs no conjunction to build.
-    fn lower_assert_compare(&mut self, kind: CmpKind, lhs: ValueId, rhs: ValueId) {
+    /// The assertion of a comparison, which is one assertion per limb.
+    fn lower_assert_compare(
+        &mut self,
+        kind: CmpKind,
+        lhs: ValueId,
+        rhs: ValueId,
+        guard: Option<ValueId>,
+    ) {
         assert!(
             matches!(kind, CmpKind::Eq),
             "ICE: a {kind:?} assertion of a wide witnessed integer reached the multi-cell representation; width validation should have refused the program"
@@ -1419,11 +1832,14 @@ impl Rewriter<'_> {
 
         let pairs = self.operand_pair(lhs, rhs);
         for (lhs, rhs) in pairs {
-            self.push(OpCode::AssertCmp {
-                kind: CmpKind::Eq,
-                lhs,
-                rhs,
-            });
+            self.push_guarded(
+                guard,
+                OpCode::AssertCmp {
+                    kind: CmpKind::Eq,
+                    lhs,
+                    rhs,
+                },
+            );
         }
     }
 }
@@ -1444,9 +1860,10 @@ fn int_width(ty: &Type) -> Option<usize> {
 /// Above it a value has no element to be carried in, which is what forces the limbs. It is
 /// [`widest_injective_int_bits`] and therefore field-derived: 253 on bn254, 63 on goldilocks.
 ///
-/// Units 9 to 13 lower this to the width their gadgets are built at. It is one constant, and
-/// `the_representation_threshold_is_where_an_element_stops_being_injective` is what fails when it
-/// moves without its reason moving with it.
+/// An operation whose gadget needs more headroom than one element leaves does not move this: it
+/// asks its own bound locally, as the carry chain asks [`widest_cell_sum_bits`], one bit narrower.
+/// It is one constant, and `the_representation_threshold_is_where_an_element_stops_being_injective`
+/// is what fails when it moves without its reason moving with it.
 pub fn multi_cell_int_bits(field: FieldConfig) -> usize {
     widest_injective_int_bits(field)
 }
@@ -1889,6 +2306,310 @@ mod tests {
         };
         assert_eq!(count(&narrow_source), 2);
         assert_eq!(count(&wider_source), 3);
+    }
+
+    /// `main(lhs, rhs: WitnessOf<int(bits)>) { op }`, returning the operation's result where it
+    /// has a type.
+    fn program_chaining(
+        bits: usize,
+        returns: Option<Type>,
+        op: impl FnOnce(ValueId, ValueId, ValueId) -> OpCode,
+    ) -> HLSSA {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let (lhs, rhs, result) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        let mut builder = HLSSABuilder::new(&mut ssa);
+        builder.modify_function(main, |fb| {
+            let entry = fb.function.get_entry_id();
+            for value in [lhs, rhs] {
+                fb.function
+                    .get_block_mut(entry)
+                    .push_parameter(value, Type::witness_of(Type::int(bits)));
+            }
+            let returned = match returns {
+                Some(returned) => {
+                    fb.function.add_return_type(returned);
+                    vec![result]
+                }
+                None => vec![],
+            };
+            let mut block = fb.test_block(entry);
+            block.emit(op(result, lhs, rhs));
+            block.terminate_return(returned);
+        });
+        ssa
+    }
+
+    fn difference(bits: usize) -> HLSSA {
+        program_chaining(
+            bits,
+            Some(Type::witness_of(Type::int(bits))),
+            |result, lhs, rhs| OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::USub,
+                result,
+                lhs,
+                rhs,
+            },
+        )
+    }
+
+    /// Every carry the chain witnesses is a bit, and every limb of the answer is bounded at its own
+    /// width.
+    ///
+    /// A structural audit, because perturbing a column by one cannot see the first half: a carry of
+    /// two moves its limb's answer by `2^w` and breaks that limb's range check anyway. What the bit
+    /// check stops is a carry that is not one step away, a field element that shifts value between
+    /// two neighbouring limbs' identities while each still passes.
+    #[test]
+    fn every_carry_is_a_bit_and_every_limb_of_the_chain_is_bounded() {
+        let h = witness_limb_bits(bn254());
+        for bits in [254usize, 320] {
+            let k = limb_widths(bits, h).len();
+            let sum = |kind| {
+                program_chaining(
+                    bits,
+                    Some(Type::witness_of(Type::int(bits))),
+                    move |result, lhs, rhs| OpCode::BinaryArithOp {
+                        kind,
+                        result,
+                        lhs,
+                        rhs,
+                    },
+                )
+            };
+            let ordering = program_chaining(
+                bits,
+                Some(Type::witness_of(Type::int(1))),
+                |result, lhs, rhs| OpCode::Cmp {
+                    kind: CmpKind::ULt,
+                    result,
+                    lhs,
+                    rhs,
+                },
+            );
+            let assertion = program_chaining(bits, None, |_, lhs, rhs| OpCode::AssertCmp {
+                kind: CmpKind::ULt,
+                lhs,
+                rhs,
+            });
+
+            // A checked operation has no carry out of its top limb, and an ordering witnesses the
+            // one it has; an asserted ordering fixes it, so witnesses none either.
+            for (what, mut ssa, carries) in [
+                ("sum", sum(BinaryArithOpKind::UAdd), k - 1),
+                ("difference", sum(BinaryArithOpKind::USub), k - 1),
+                ("ordering", ordering, k),
+                ("assertion", assertion, k - 1),
+            ] {
+                run_pass(&mut ssa);
+                let ops = emitted(&ssa);
+
+                let written: Vec<ValueId> = ops
+                    .iter()
+                    .filter_map(|op| match op {
+                        OpCode::WriteWitness {
+                            result: Some(result),
+                            ..
+                        } => Some(*result),
+                        _ => None,
+                    })
+                    .collect();
+                let bits_checked: Vec<ValueId> = ops
+                    .iter()
+                    .filter_map(|op| match op {
+                        OpCode::Rangecheck { value, max_bits: 1 } => Some(*value),
+                        _ => None,
+                    })
+                    .collect();
+                let limbs_checked: Vec<usize> = ops
+                    .iter()
+                    .filter_map(|op| match op {
+                        OpCode::Rangecheck { max_bits, .. } if *max_bits > 1 => Some(*max_bits),
+                        _ => None,
+                    })
+                    .collect();
+
+                assert_eq!(
+                    written.len(),
+                    carries,
+                    "int{bits} {what}: one column per carry"
+                );
+                assert_eq!(
+                    written, bits_checked,
+                    "int{bits} {what}: each carry is a bit"
+                );
+                assert_eq!(
+                    limbs_checked,
+                    limb_widths(bits, h),
+                    "int{bits} {what}: each limb of the answer is bounded at its own width"
+                );
+            }
+        }
+    }
+
+    /// A guarded chain checks nothing where the guard is off, since the operands are then whatever
+    /// the branch not taken left, and its answer is zero there.
+    #[test]
+    fn a_guarded_chain_is_checked_only_under_its_guard() {
+        let bits = 320usize;
+        let mut ssa = difference(bits);
+        let main = ssa.get_unique_entrypoint_id();
+        let condition = ssa.fresh_value();
+        {
+            let function = ssa.get_function_mut(main);
+            let entry = function.get_entry_mut();
+            entry.push_parameter(condition, Type::witness_of(Type::int(1)));
+            let instructions: Vec<_> = entry
+                .take_instructions()
+                .into_iter()
+                .map(|op| {
+                    let guarded = OpCode::Guard {
+                        condition,
+                        inner: Box::new(op.as_ref().clone()),
+                    };
+                    Located::new(guarded, op.location().clone())
+                })
+                .collect();
+            entry.put_instructions(instructions);
+        }
+        run_pass(&mut ssa);
+        let ops = emitted(&ssa);
+
+        assert!(
+            !ops.iter().any(|op| matches!(op, OpCode::Rangecheck { .. })),
+            "no range check is unguarded"
+        );
+        let guarded = ops
+            .iter()
+            .filter(|op| {
+                matches!(op, OpCode::Guard { condition: c, inner }
+                    if *c == condition && matches!(inner.as_ref(), OpCode::Rangecheck { .. }))
+            })
+            .count();
+        let k = limb_widths(bits, witness_limb_bits(bn254())).len();
+        assert_eq!(
+            guarded,
+            2 * k - 1,
+            "every carry and every limb, under the guard"
+        );
+        let selected = ops
+            .iter()
+            .filter(|op| matches!(op, OpCode::Select { cond, .. } if *cond == condition))
+            .count();
+        assert_eq!(
+            selected, k,
+            "each limb of the answer is zero where the guard is off"
+        );
+    }
+
+    /// The one width whose operands have an element each and whose sum does not goes through the
+    /// chain, on a decomposition of each operand; one bit narrower, the pass leaves it alone.
+    #[test]
+    fn a_sum_the_element_cannot_carry_takes_the_chain_without_limbs() {
+        let field = bn254();
+        let wide = widest_cell_sum_bits(field) + 1;
+        assert_eq!(
+            wide,
+            multi_cell_int_bits(field),
+            "the band is one width wide"
+        );
+
+        let mut ssa = difference(wide);
+        let main = ssa.get_unique_entrypoint_id();
+        let operands: Vec<ValueId> = ssa
+            .get_function(main)
+            .get_entry()
+            .get_parameters()
+            .map(|(value, _)| *value)
+            .collect();
+        run_pass(&mut ssa);
+        let ops = emitted(&ssa);
+        let tied = ops
+            .iter()
+            .filter(|op| matches!(op, OpCode::Constrain { .. }))
+            .count();
+        assert_eq!(
+            tied, 2,
+            "each operand is decomposed and tied back to its element"
+        );
+        assert!(
+            !ops.iter().any(|op| matches!(
+                op,
+                OpCode::BinaryArithOp { lhs, rhs, .. }
+                    if operands.contains(lhs) && operands.contains(rhs)
+            )),
+            "the single-cell difference is gone"
+        );
+
+        let mut narrower = difference(wide - 1);
+        let before = format!("{:?}", emitted(&narrower));
+        run_pass(&mut narrower);
+        assert_eq!(
+            format!("{:?}", emitted(&narrower)),
+            before,
+            "one bit narrower, the sum fits its element"
+        );
+    }
+
+    /// An operand in the band is decomposed once per block, however many chained operations read
+    /// it and whichever side it is on.
+    #[test]
+    fn a_band_operand_is_decomposed_once_per_block() {
+        let bits = multi_cell_int_bits(bn254());
+        let constraints = |ssa: &HLSSA| {
+            emitted(ssa)
+                .iter()
+                .filter(|op| matches!(op, OpCode::Constrain { .. }))
+                .count()
+        };
+
+        // `x + x`: one value, one decomposition.
+        let mut doubled = program_chaining(
+            bits,
+            Some(Type::witness_of(Type::int(bits))),
+            |result, lhs, _| OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::UAdd,
+                result,
+                lhs,
+                rhs: lhs,
+            },
+        );
+        run_pass(&mut doubled);
+        assert_eq!(constraints(&doubled), 1, "x + x decomposes x once");
+
+        // `lhs - rhs` and then `lhs < rhs` in the same block: two values, two decompositions.
+        let mut ssa = difference(bits);
+        let main = ssa.get_unique_entrypoint_id();
+        let operands: Vec<ValueId> = ssa
+            .get_function(main)
+            .get_entry()
+            .get_parameters()
+            .map(|(value, _)| *value)
+            .collect();
+        let less = ssa.fresh_value();
+        ssa.get_function_mut(main)
+            .get_entry_mut()
+            .push_test_instruction(OpCode::Cmp {
+                kind: CmpKind::ULt,
+                result: less,
+                lhs: operands[0],
+                rhs: operands[1],
+            });
+        run_pass(&mut ssa);
+        // Counting reconstructions alone cannot tell a reused decomposition from an ordering that
+        // was never lowered, which would leave the count at two as well.
+        assert!(
+            !emitted(&ssa).iter().any(|op| matches!(
+                op,
+                OpCode::Cmp { lhs, rhs, .. } if *lhs == operands[0] && *rhs == operands[1]
+            )),
+            "the ordering went through the chain"
+        );
+        assert_eq!(
+            constraints(&ssa),
+            2,
+            "the ordering reuses the decompositions the difference made"
+        );
     }
 
     fn run_pass(ssa: &mut HLSSA) {

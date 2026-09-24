@@ -14,6 +14,10 @@
 //! An accepted run means the VM produced a witness, the witness satisfies the R1CS, and the value
 //! it carries agrees with the model. A rejected run means the guard IR refused the operands.
 //!
+//! Every program is also held to its **AD** entry point on both lanes when it is compiled, since
+//! that answer depends on the circuit rather than on the operands. See
+//! [`Compiled::assert_the_ad_lane_agrees`].
+//!
 //! [`Compiled::run_wasm`] is the same judgement against the compiled WASM, run against the **same**
 //! R1CS, so a disagreement between the two lanes is a disagreement between two implementations of
 //! one program. It answers [`None`] only where no module came out of the linker; a lane that fails
@@ -21,9 +25,11 @@
 
 use std::path::{Path, PathBuf};
 
+use ark_ff::UniformRand as _;
 use mavros_artifacts::{Field, InputValueOrdered};
 use mavros_int_semantics::{IntBits, IntOp, Outcome, residue};
 use num_bigint::BigUint;
+use rand::{SeedableRng as _, rngs::StdRng};
 use tempfile::TempDir;
 
 use mavros_compiler::{
@@ -234,6 +240,10 @@ pub struct WasmArtifact {
 /// Environment variable naming a directory to keep the pipeline's per-stage dumps in.
 pub const KEEP_DUMPS_ENV: &str = "MAVROS_ORACLE_DUMPS";
 
+/// Environment variable fixing the seed the AD check draws its coefficients from, to replay a
+/// failure it reported.
+pub const AD_SEED_ENV: &str = "MAVROS_ORACLE_AD_SEED";
+
 impl Compiled {
     /// Runs the production pipeline over `ssa`, from `make_struct_access_static` to the VM
     /// binary. The Noir frontend is the only stage skipped, because the program did not come
@@ -280,7 +290,7 @@ impl Compiled {
 
         let wasm = compile_wasm(&mut driver, &r1cs);
 
-        Ok(Self {
+        let compiled = Self {
             r1cs,
             binary: artifact.binary,
             debug_info: artifact.debug_info,
@@ -288,7 +298,63 @@ impl Compiled {
             scratch,
             wasm,
             guard_slot,
-        })
+        };
+        compiled.assert_the_ad_lane_agrees();
+        Ok(compiled)
+    }
+
+    /// Runs the AD entry point on each lane and holds it to the constraint system.
+    ///
+    /// AD is the prover's other half: for random coefficients it computes each constraint matrix
+    /// weighted by them, and that answer depends on the circuit alone, not on any input. It is
+    /// checked once per program, here, rather than once per run, ensuring every test in this suite
+    /// is run on the AD lane as well.
+    ///
+    /// A disagreement is a compiler bug rather than a verdict about operands, so it panics.
+    ///
+    /// The coefficients are random, so that no one choice of them can hide a wrong row, but drawn
+    /// from a **seed** the panic names: a disagreement that only some coefficients expose is then
+    /// replayed by setting [`AD_SEED_ENV`] to it, rather than lost with the run.
+    fn assert_the_ad_lane_agrees(&self) {
+        let seed = match std::env::var(AD_SEED_ENV) {
+            Ok(seed) => seed
+                .parse()
+                .unwrap_or_else(|_| panic!("{AD_SEED_ENV} is not a u64: {seed:?}")),
+            Err(_) => rand::random(),
+        };
+        let mut rng = StdRng::seed_from_u64(seed);
+        let coeffs: Vec<Field> = (0..self.r1cs.constraints.len())
+            .map(|_| Field::rand(&mut rng))
+            .collect();
+        let replay = format!("replay with {AD_SEED_ENV}={seed}");
+
+        let mut binary = self.binary.clone();
+        let (a, b, c, _) =
+            api::run_ad_from_binary(&mut binary, &self.r1cs, &coeffs, self.debug_info.clone())
+                .unwrap_or_else(|error| {
+                    panic!("the AD entry point trapped on the VM: {error}; {replay}")
+                });
+        assert!(
+            api::check_ad(&self.r1cs, &coeffs, &a, &b, &c),
+            "the VM's AD entry point disagrees with the constraint system; {replay}"
+        );
+
+        if let Some(wasm) = &self.wasm {
+            let result =
+                wasm_host::run_ad(&wasm.path, &self.r1cs, &coeffs).unwrap_or_else(|error| {
+                    panic!("the AD entry point trapped on WASM: {error}; {replay}")
+                });
+            assert!(
+                api::check_ad(
+                    &self.r1cs,
+                    &coeffs,
+                    &result.out_da,
+                    &result.out_db,
+                    &result.out_dc
+                ),
+                "the WASM AD entry point disagrees with the constraint system; {replay}"
+            );
+        }
     }
 
     /// Whether the WASM lane was built for this program.
