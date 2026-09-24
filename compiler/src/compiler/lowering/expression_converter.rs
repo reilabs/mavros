@@ -837,10 +837,12 @@ impl<'a> ExpressionConverter<'a> {
         b.block(self.current_block)
             .terminate_jmp(loop_header, vec![]);
 
-        // In loop header: evaluate condition, branch
+        // Evaluate the condition outside this loop's context: break/continue target the
+        // enclosing loop. Evaluation can change current_block, so branch from its exit
+        // rather than overwriting the header's terminator.
         self.current_block = loop_header;
         let cond = self.convert_expression(&while_expr.condition, b).unwrap();
-        b.block(loop_header)
+        b.block(self.current_block)
             .terminate_jmp_if(cond, loop_body, exit_block);
 
         // In loop body: push context, convert body, pop context, jump back to header
