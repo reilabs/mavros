@@ -1,0 +1,6 @@
+[package]
+name = "unit_slice_remove_empty"
+type = "bin"
+authors = [""]
+
+[dependencies]

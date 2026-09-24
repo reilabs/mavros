@@ -1,0 +1,6 @@
+[package]
+name = "unit_assignment_oob"
+type = "bin"
+authors = [""]
+
+[dependencies]

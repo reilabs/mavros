@@ -11,7 +11,7 @@ use noirc_frontend::{
         Index, LValue, Let, LocalId, Match, MatchCase, Type as AstType, While,
     },
 };
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{borrow::Cow, cell::RefCell, rc::Rc, sync::Arc};
 
 use mavros_int_semantics::MAX_LOWERED_SIGNED_BITS;
 
@@ -324,11 +324,6 @@ impl<'a> ExpressionConverter<'a> {
         self.mutable_locals.insert(local_id);
     }
 
-    /// Calculate return size for function calls (tuples count as 1, unit as 0)
-    fn return_size(&self, typ: &noirc_frontend::monomorphization::ast::Type) -> usize {
-        usize::from(TypeConverter::call_returns_a_value(typ))
-    }
-
     /// Convert an expression to SSA instructions.
     pub fn convert_expression(
         &mut self,
@@ -341,6 +336,31 @@ impl<'a> ExpressionConverter<'a> {
         let result = self.convert_expression_inner(expr, b);
         self.current_source_location = previous_source_location;
         result
+    }
+
+    /// The value type at an expression boundary. Noir gives statement-shaped unit
+    /// expressions (including empty blocks) no return type.
+    fn value_type(expr: &Expression) -> Cow<'_, AstType> {
+        expr.return_type().unwrap_or(Cow::Borrowed(&AstType::Unit))
+    }
+
+    /// Evaluate an expression where storage or an operand requires an SSA value.
+    /// Literals and ordinary calls already materialize unit. Statements and builtins
+    /// with no SSA result run for their side effects, then materialize an empty tuple.
+    pub(super) fn convert_value(
+        &mut self,
+        expr: &Expression,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> ValueId {
+        self.convert_expression(expr, b).unwrap_or_else(|| {
+            assert!(
+                matches!(Self::value_type(expr).as_ref(), AstType::Unit),
+                "non-unit expression did not produce an SSA value"
+            );
+            self.emit_located(b, Self::expression_location(expr), |e| {
+                e.mk_tuple(vec![], vec![])
+            })
+        })
     }
 
     fn convert_expression_inner(
@@ -484,8 +504,8 @@ impl<'a> ExpressionConverter<'a> {
         binary: &Binary,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        let lhs = self.convert_expression(&binary.lhs, b).unwrap();
-        let rhs = self.convert_expression(&binary.rhs, b).unwrap();
+        let lhs = self.convert_value(&binary.lhs, b);
+        let rhs = self.convert_value(&binary.rhs, b);
 
         // This is where signedness enters the compiler, and after it there is no second source: the
         // HLSSA type carries no sign, so every downstream decision reads the opcode this line ends
@@ -531,13 +551,7 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn convert_let(&mut self, let_expr: &Let, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
-        let result = self.convert_expression(&let_expr.expression, b);
-        let value = result.unwrap_or_else(|| {
-            // Unit binding (e.g., `let unit = ()`) — create an empty tuple
-            self.emit_located(b, Self::expression_location(&let_expr.expression), |e| {
-                e.mk_tuple(vec![], vec![])
-            })
-        });
+        let value = self.convert_value(&let_expr.expression, b);
 
         if let_expr.mutable {
             // Use a single pointer for the whole value.
@@ -575,7 +589,7 @@ impl<'a> ExpressionConverter<'a> {
         assign: &Assign,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        let new_value = self.convert_expression(&assign.expression, b).unwrap();
+        let new_value = self.convert_value(&assign.expression, b);
         self.write_lvalue(&assign.lvalue, new_value, b);
         None
     }
@@ -1216,7 +1230,7 @@ impl<'a> ExpressionConverter<'a> {
                 }
 
                 // General case: evaluate the expression, alloc a fresh Ref, store into it.
-                let value = self.convert_expression(&unary.rhs, b).unwrap();
+                let value = self.convert_value(&unary.rhs, b);
                 let ptr = self.emit_located(b, Some(unary.location), |e| e.alloc(value));
                 Some(ptr)
             }
@@ -1479,7 +1493,7 @@ impl<'a> ExpressionConverter<'a> {
             Literal::Bool(_) | Literal::Integer(_, _, _) => {
                 Some(b.emit_const(Self::scalar_literal_to_constant(lit).unwrap()))
             }
-            Literal::Unit => None,
+            Literal::Unit => Some(self.emit_located(b, None, |e| e.mk_tuple(vec![], vec![]))),
             Literal::Array(array_lit) | Literal::Vector(array_lit) => {
                 self.convert_array_literal(array_lit, b)
             }
@@ -1498,7 +1512,7 @@ impl<'a> ExpressionConverter<'a> {
                         typ
                     ),
                 };
-                let element_val = self.convert_expression(element, b).unwrap();
+                let element_val = self.convert_value(element, b);
                 let len = *length as usize;
                 let seq_type = if *is_vector {
                     SequenceTargetType::Slice
@@ -1553,10 +1567,9 @@ impl<'a> ExpressionConverter<'a> {
                 let mut elem_types = vec![Type::int(32).array_of(cp_len)];
                 if let Expression::Tuple(capture_exprs) = captures.as_ref() {
                     for expr in capture_exprs {
-                        let val = self.convert_expression(expr, b).unwrap();
+                        let val = self.convert_value(expr, b);
                         tuple_elems.push(val);
-                        let typ = expr.return_type().expect("FmtStr capture must have a type");
-                        elem_types.push(self.type_converter.convert_type(&typ));
+                        elem_types.push(self.type_converter.convert_type(&Self::value_type(expr)));
                     }
                 }
 
@@ -1610,7 +1623,7 @@ impl<'a> ExpressionConverter<'a> {
         let elements: Vec<ValueId> = array_lit
             .contents
             .iter()
-            .map(|e| self.convert_expression(e, b).unwrap())
+            .map(|e| self.convert_value(e, b))
             .collect();
 
         let result = self.emit_located(
@@ -1725,10 +1738,7 @@ impl<'a> ExpressionConverter<'a> {
         }
 
         // Convert each element to a single materialized value
-        let values: Vec<ValueId> = exprs
-            .iter()
-            .map(|e| self.convert_expression(e, b).unwrap())
-            .collect();
+        let values: Vec<ValueId> = exprs.iter().map(|e| self.convert_value(e, b)).collect();
 
         // Get types for each element
         // Note: For Definition::Function idents, the Noir type may be
@@ -1743,8 +1753,7 @@ impl<'a> ExpressionConverter<'a> {
                 {
                     return self.function_ident_type(ident);
                 }
-                let return_type = e.return_type().expect("Tuple element must have a type");
-                self.type_converter.convert_type(&return_type)
+                self.type_converter.convert_type(&Self::value_type(e))
             })
             .collect();
 
@@ -1778,23 +1787,14 @@ impl<'a> ExpressionConverter<'a> {
                 let args: Vec<ValueId> = call
                     .arguments
                     .iter()
-                    .map(|arg| self.convert_expression(arg, b).unwrap())
+                    .map(|arg| self.convert_value(arg, b))
                     .collect();
 
                 let fn_ptr = self.convert_expression(&call.func, b).unwrap();
-                let return_type = &call.return_type;
-                let return_size = self.return_size(return_type);
+                let results =
+                    self.emit_located(b, Some(call.location), |e| e.call_indirect(fn_ptr, args, 1));
 
-                let results = self.emit_located(b, Some(call.location), |e| {
-                    e.call_indirect(fn_ptr, args, return_size)
-                });
-
-                if results.is_empty() {
-                    None
-                } else {
-                    // Always a single value (tuples are materialized)
-                    Some(results[0])
-                }
+                Some(results[0])
             }
         }
     }
@@ -1808,7 +1808,7 @@ impl<'a> ExpressionConverter<'a> {
         let args: Vec<ValueId> = call
             .arguments
             .iter()
-            .map(|arg| self.convert_expression(arg, b).unwrap())
+            .map(|arg| self.convert_value(arg, b))
             .collect();
 
         let ssa_func_id = self
@@ -1816,28 +1816,19 @@ impl<'a> ExpressionConverter<'a> {
             .get(func_id)
             .unwrap_or_else(|| ice!("Undefined function: {:?}", func_id));
 
-        // Return size is 1 for tuples (they're returned as a single value)
-        // and 0 for unit
-        let return_size = self.return_size(&call.return_type);
-
         // Constrained calling unconstrained: emit unconstrained call
         let is_unconstrained_call =
             !self.in_unconstrained && self.natively_unconstrained.contains(func_id);
         let ssa_func_id = *ssa_func_id;
         let results = self.emit_located(b, Some(call.location), |e| {
             if is_unconstrained_call {
-                e.call_unconstrained(ssa_func_id, args, return_size)
+                e.call_unconstrained(ssa_func_id, args, 1)
             } else {
-                e.call(ssa_func_id, args, return_size)
+                e.call(ssa_func_id, args, 1)
             }
         });
 
-        if results.is_empty() {
-            None
-        } else {
-            // Always a single value (tuples are materialized)
-            Some(results[0])
-        }
+        Some(results[0])
     }
 
     fn convert_builtin_call(
@@ -1848,8 +1839,8 @@ impl<'a> ExpressionConverter<'a> {
     ) -> Option<ValueId> {
         match name {
             "assert_eq" => {
-                let lhs = self.convert_expression(&call.arguments[0], b).unwrap();
-                let rhs = self.convert_expression(&call.arguments[1], b).unwrap();
+                let lhs = self.convert_value(&call.arguments[0], b);
+                let rhs = self.convert_value(&call.arguments[1], b);
                 self.emit_located(b, Some(call.location), |e| e.assert_eq(lhs, rhs));
                 None
             }
@@ -1942,8 +1933,9 @@ impl<'a> ExpressionConverter<'a> {
             "black_box" => {
                 // `black_box` is an identity with a best-effort optimization hint, which Mavros
                 // currently ignores. Evaluate the argument exactly once, preserving its side
-                // effects, and return its value (or None for unit). This does not promise an
-                // optimization barrier or depend on whether calls are inlined or eliminated.
+                // effects, and return its value. Statement-shaped arguments may produce None.
+                // This does not promise an optimization barrier or depend on whether calls
+                // are inlined or eliminated.
                 self.convert_expression(&call.arguments[0], b)
             }
             "as_witness" => {
@@ -1952,7 +1944,8 @@ impl<'a> ExpressionConverter<'a> {
                 None
             }
             "assert_constant" => {
-                // Unit-valued expressions have no SSA value and are trivially constant.
+                // Statement-shaped unit expressions may have no SSA result. Their effects
+                // still run; materialized empty tuples are trivially constant as well.
                 if let Some(value) = self.convert_expression(&call.arguments[0], b) {
                     self.emit_located(b, Some(call.location), |e| e.assert_constant(value));
                 }
@@ -2024,14 +2017,14 @@ impl<'a> ExpressionConverter<'a> {
             }
             "vector_push_back" => {
                 let slice = self.convert_expression(&call.arguments[0], b).unwrap();
-                let elem = self.convert_expression(&call.arguments[1], b).unwrap();
+                let elem = self.convert_value(&call.arguments[1], b);
                 Some(self.emit_located(b, Some(call.location), |e| {
                     e.slice_push(slice, vec![elem], SliceOpDir::Back)
                 }))
             }
             "vector_push_front" => {
                 let slice = self.convert_expression(&call.arguments[0], b).unwrap();
-                let elem = self.convert_expression(&call.arguments[1], b).unwrap();
+                let elem = self.convert_value(&call.arguments[1], b);
                 Some(self.emit_located(b, Some(call.location), |e| {
                     e.slice_push(slice, vec![elem], SliceOpDir::Front)
                 }))
@@ -2057,7 +2050,7 @@ impl<'a> ExpressionConverter<'a> {
             "vector_insert" => {
                 let slice = self.convert_expression(&call.arguments[0], b).unwrap();
                 let index = self.convert_expression(&call.arguments[1], b).unwrap();
-                let elem = self.convert_expression(&call.arguments[2], b).unwrap();
+                let elem = self.convert_value(&call.arguments[2], b);
                 Some(self.emit_located(b, Some(call.location), |e| {
                     e.slice_insert(slice, index, elem)
                 }))

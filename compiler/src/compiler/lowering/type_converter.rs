@@ -15,18 +15,9 @@ impl TypeConverter {
         Self
     }
 
-    /// Whether a call returning `ret` produces a value at all, with `Unit` as the sole exception.
-    pub fn call_returns_a_value(ret: &NoirType) -> bool {
-        !matches!(ret, NoirType::Unit)
-    }
-
-    /// The values a call returning `ret` produces: none for `Unit`, and one otherwise.
+    /// Every Noir call produces one materialized value before tuple elision, including unit.
     pub fn call_results(&self, ret: &NoirType) -> Vec<Type> {
-        if Self::call_returns_a_value(ret) {
-            vec![self.convert_type(ret)]
-        } else {
-            Vec::new()
-        }
+        vec![self.convert_type(ret)]
     }
 
     /// Convert a monomorphized AST type to an SSA type.
@@ -123,7 +114,7 @@ mod tests {
         );
         assert_eq!(
             converter.convert_type(&function_type(NoirType::Unit)),
-            Type::function_returning(Vec::new())
+            Type::function_returning(vec![Type::tuple_of(vec![])])
         );
     }
 

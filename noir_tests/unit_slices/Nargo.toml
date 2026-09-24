@@ -1,0 +1,6 @@
+[package]
+name = "unit_slices"
+type = "bin"
+authors = [""]
+
+[dependencies]
