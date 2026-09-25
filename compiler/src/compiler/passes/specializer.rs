@@ -757,15 +757,15 @@ impl symbolic_executor::Context<Val> for SpecializationState<'_> {
         _param_types: &[&Type],
         result_types: &[Type],
         unconstrained: bool,
-    ) -> Option<Vec<Val>> {
+    ) -> Result<Option<Vec<Val>>, AssertionFailure> {
         if unconstrained {
             // Emit the unconstrained call as-is into the specialized function
             let args: Vec<ValueId> = params.iter().map(|v| v.0).collect();
             let n = result_types.len();
             let results = self.call_unconstrained(func, args, n);
-            return Some(results.into_iter().map(Val).collect());
+            return Ok(Some(results.into_iter().map(Val).collect()));
         }
-        None
+        Ok(None)
     }
 
     fn on_return(&mut self, returns: &mut [Val], _return_types: &[Type]) {

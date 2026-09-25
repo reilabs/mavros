@@ -157,6 +157,7 @@ pub trait Context<V> {
     /// body is skipped and the returned values are used as call results. For unconstrained
     /// calls this MUST return Some, since unconstrained functions may contain JmpIfs on
     /// unknown values that the symbolic executor cannot trace through.
+    /// Returning an error aborts execution without entering the callee.
     fn on_call(
         &mut self,
         func: FunctionId,
@@ -164,7 +165,7 @@ pub trait Context<V> {
         param_types: &[&Type],
         result_types: &[Type],
         unconstrained: bool,
-    ) -> Option<Vec<V>>;
+    ) -> Result<Option<Vec<V>>, AssertionFailure>;
     fn on_return(&mut self, returns: &mut [V], return_types: &[Type]);
     fn on_jmp(&mut self, target: BlockId, params: &mut [V], param_types: &[&Type]);
 
@@ -275,7 +276,7 @@ impl SymbolicExecutor {
             &entry.get_parameters().map(|(_, tp)| tp).collect::<Vec<_>>(),
             &fn_body.get_returns(),
             false,
-        );
+        )?;
 
         if let Some(call_result) = call_result {
             return Ok(call_result);
@@ -437,7 +438,7 @@ impl SymbolicExecutor {
                                 &param_types,
                                 &result_types,
                                 true,
-                            )
+                            )?
                             .expect("ICE: on_call must return Some for unconstrained calls")
                         } else {
                             // For constrained calls, run_fn handles on_call internally

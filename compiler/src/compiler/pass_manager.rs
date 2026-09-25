@@ -8,6 +8,7 @@ use std::{
 
 use crate::{
     collections::HashMap,
+    compiler::diagnostic::Diagnostic,
     compiler::ssa::{
         DefaultSSAAnnotator, Instruction, SSA, SSAType,
         hlssa::{Constant, OpCode, Type},
@@ -23,7 +24,7 @@ pub struct AnalysisId {
     type_id: TypeId,
     type_name: &'static str,
     dependencies: fn() -> Vec<AnalysisId>,
-    compute_and_store: fn(&dyn Any, &mut AnalysisStore),
+    compute_and_store: fn(&dyn Any, &mut AnalysisStore) -> Result<(), Vec<Diagnostic>>,
 }
 
 impl AnalysisId {
@@ -42,13 +43,14 @@ impl AnalysisId {
                     let ssa: &SSA<Op, Ty, C> = ssa_any
                         .downcast_ref::<SSA<Op, Ty, C>>()
                         .expect("AnalysisId::compute_and_store: SSA downcast failed");
-                    let val = <A as Analysis<Op, Ty, C>>::compute(ssa, store);
+                    let val = <A as Analysis<Op, Ty, C>>::try_compute(ssa, store)?;
                     let dep_ids = <A as Analysis<Op, Ty, C>>::dependencies()
                         .iter()
                         .map(|d| d.type_id)
                         .collect();
                     store.insert_with_deps::<A>(val, dep_ids);
                 }
+                Ok(())
             },
         }
     }
@@ -100,6 +102,14 @@ pub trait Analysis<
     fn compute(ssa: &SSA<Op, Ty, C>, store: &AnalysisStore) -> Self
     where
         Self: Sized;
+
+    /// Analyses that cannot represent a program can refuse it before dependent passes run.
+    fn try_compute(ssa: &SSA<Op, Ty, C>, store: &AnalysisStore) -> Result<Self, Vec<Diagnostic>>
+    where
+        Self: Sized,
+    {
+        Ok(Self::compute(ssa, store))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -259,8 +269,14 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static> PassM
         self.debug_output_dir = Some(specific_dir);
     }
 
-    #[tracing::instrument(skip_all, name = "PassManager::run", fields(phase = %self.phase_label))]
     pub fn run(&mut self, ssa: &mut SSA<Op, Ty, C>) {
+        self.try_run(ssa).unwrap_or_else(|diagnostics| {
+            ice!("{}", crate::compiler::diagnostic::render_all(&diagnostics))
+        });
+    }
+
+    #[tracing::instrument(skip_all, name = "PassManager::run", fields(phase = %self.phase_label))]
+    pub fn try_run(&mut self, ssa: &mut SSA<Op, Ty, C>) -> Result<(), Vec<Diagnostic>> {
         if let Some(debug_output_dir) = &self.debug_output_dir {
             if debug_output_dir.exists() {
                 fs::remove_dir_all(debug_output_dir).unwrap();
@@ -269,11 +285,16 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static> PassM
         }
 
         let passes = std::mem::take(&mut self.passes);
+        let mut result = Ok(());
         for (i, pass) in passes.iter().enumerate() {
-            self.run_pass(ssa, pass.as_ref(), i);
+            if let Err(diagnostics) = self.run_pass(ssa, pass.as_ref(), i) {
+                result = Err(diagnostics);
+                break;
+            }
         }
         self.passes = passes;
         self.output_final_debug_info(ssa);
+        result
     }
 
     #[tracing::instrument(skip_all, fields(pass = %pass.name()))]
@@ -282,17 +303,18 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static> PassM
         ssa: &mut SSA<Op, Ty, C>,
         pass: &dyn Pass<Op, Ty, C>,
         pass_index: usize,
-    ) {
+    ) -> Result<(), Vec<Diagnostic>> {
         // Ensure all needed analyses are computed (in dependency order)
         let ordered = topo_sort(pass.needs(), &self.analyses);
         for id in ordered {
-            (id.compute_and_store)(ssa as &dyn Any, &mut self.analyses);
+            (id.compute_and_store)(ssa as &dyn Any, &mut self.analyses)?;
         }
 
         self.output_debug_info(ssa, pass_index, pass.name());
         pass.run(ssa, &self.analyses);
         self.analyses.apply_preserved(&pass.preserves());
         self.output_pass_ssa_snapshot(ssa, pass_index, pass.name());
+        Ok(())
     }
 
     /// When `MAVROS_DUMP_PASS_SSA` names a directory, write the SSA text after every pass to

@@ -442,7 +442,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
         _param_types: &[&Type],
         _result_types: &[Type],
         unconstrained: bool,
-    ) -> Option<Vec<Value>> {
+    ) -> Result<Option<Vec<Value>>, AssertionFailure> {
         assert!(
             !unconstrained,
             "ICE: unconstrained calls should be DCE'd before R1CS gen"
@@ -455,7 +455,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
                 .unwrap_or_else(|| format!("fn{}", func.0));
             self.push_profile_frame(name);
         }
-        None
+        Ok(None)
     }
 
     fn on_return(&mut self, _returns: &mut [Value], _return_types: &[Type]) {

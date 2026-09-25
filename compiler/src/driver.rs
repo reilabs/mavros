@@ -677,7 +677,14 @@ impl Driver {
         );
 
         pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
-        pass_manager.run(&mut ssa);
+        pass_manager.try_run(&mut ssa).map_err(|diagnostics| {
+            Error::Refused(
+                diagnostics
+                    .into_iter()
+                    .map(|diagnostic| self.attach_compiled_source(diagnostic))
+                    .collect(),
+            )
+        })?;
         self.witness_spilled_ssa = Some(ssa);
         Ok(())
     }

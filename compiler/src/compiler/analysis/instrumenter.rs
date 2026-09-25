@@ -22,9 +22,10 @@ use crate::{
             symbolic_executor::{self, AssertionFailure, SymbolicExecutor},
             types::TypeInfo,
         },
+        diagnostic::Diagnostic,
         pass_manager::{Analysis, AnalysisId, AnalysisStore},
         ssa::{
-            FunctionId,
+            FunctionId, SourceLocation,
             hlssa::{
                 ArithGroup, BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLSSA,
                 LookupTarget, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
@@ -1644,6 +1645,8 @@ pub struct CostAnalysis {
     functions: HashMap<FunctionSignature, FunctionCost>,
     cache: HashMap<FunctionSignature, Vec<ValueSignature>>,
     stack: Vec<(FunctionSignature, Box<dyn FunctionInstrumenter>)>,
+    current_location: SourceLocation,
+    refusal: Option<Diagnostic>,
 }
 
 impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
@@ -1654,7 +1657,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         param_types: &[&Type],
         result_types: &[Type],
         unconstrained: bool,
-    ) -> Option<Vec<SpecSplitValue>> {
+    ) -> Result<Option<Vec<SpecSplitValue>>, AssertionFailure> {
         if unconstrained {
             fn unknown_value(ty: &Type) -> Value {
                 match &ty.expr {
@@ -1671,7 +1674,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                     _ => ice!("Unsupported type for unknown value: {:?}", ty),
                 }
             }
-            return Some(
+            return Ok(Some(
                 result_types
                     .iter()
                     .map(|ty| {
@@ -1682,7 +1685,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                         }
                     })
                     .collect(),
-            );
+            ));
         }
 
         for (pval, _ptype) in params.iter_mut().zip(param_types.iter()) {
@@ -1701,6 +1704,21 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
             params: inputs_sig,
         };
 
+        // A completed signature can be reused, but an active one has no finite cost yet.
+        // In particular, witness-dependent recursion keeps reproducing the same blinded
+        // arguments. Do not record this back edge: it would also cycle in `walk_call_tree`.
+        // Concrete recursion remains valid as long as its arguments progress to a base case.
+        if self.stack.iter().any(|(active, _)| active == &sig) {
+            let message = "cannot bound constrained recursion at compile time";
+            self.refusal = Some(
+                Diagnostic::error(message, self.current_location.clone()).with_note(
+                    "a recursive call repeats the same symbolic arguments; use a compile-time \
+                     recursion bound (recursive #[fold] circuits are not supported)",
+                ),
+            );
+            return Err(AssertionFailure::new(message));
+        }
+
         // It's unsafe to use a cache for functions that take pointers,
         // as these could get modified. We can improve in the future by
         // also caching the final results of all input ptrs.
@@ -1708,7 +1726,7 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
         if !ptrs {
             if let Some(cached) = self.cache.get(&sig).cloned() {
                 self.register_cached_call(sig.clone());
-                return Some(
+                return Ok(Some(
                     cached
                         .iter()
                         .map(|v| SpecSplitValue {
@@ -1716,12 +1734,16 @@ impl symbolic_executor::Context<SpecSplitValue> for CostAnalysis {
                             specialized: v.to_value(),
                         })
                         .collect(),
-                );
+                ));
             }
         }
 
         self.enter_call(sig);
-        None
+        Ok(None)
+    }
+
+    fn on_location(&mut self, location: &SourceLocation) {
+        self.current_location = location.clone();
     }
 
     fn on_return(&mut self, returns: &mut [SpecSplitValue], _return_types: &[Type]) {
@@ -2138,7 +2160,7 @@ impl CostEstimator {
     }
 
     #[instrument(skip_all, name = "CostEstimator::run")]
-    pub fn run(&self, ssa: &HLSSA, type_info: &TypeInfo) -> CostAnalysis {
+    pub fn run(&self, ssa: &HLSSA, type_info: &TypeInfo) -> Result<CostAnalysis, Diagnostic> {
         let main_sig = self.make_main_sig(ssa);
         let mut costs = CostAnalysis {
             field: ssa.field(),
@@ -2146,11 +2168,16 @@ impl CostEstimator {
             stack: vec![],
             entry_point: Some(main_sig.clone()),
             cache: HashMap::default(),
+            current_location: SourceLocation::synthetic("cost_analysis"),
+            refusal: None,
         };
 
         self.run_fn_from_signature(ssa, type_info, main_sig, &mut costs);
 
-        costs
+        match costs.refusal.take() {
+            Some(diagnostic) => Err(diagnostic),
+            None => Ok(costs),
+        }
     }
 
     fn run_fn_from_signature(
@@ -2176,6 +2203,9 @@ impl CostEstimator {
         // canonical reporter that rejects the program. So we stop costing this function rather
         // than crashing compilation.
         if let Err(failure) = SymbolicExecutor::new().run(ssa, type_info, sig.id, inputs, costs) {
+            if costs.refusal.is_some() {
+                return;
+            }
             debug!(
                 message = %"cost analysis: statically-violated assertion; stopping cost estimation for this function",
                 failure = %failure
@@ -2225,10 +2255,18 @@ impl Analysis for Summary {
     }
 
     fn compute(ssa: &HLSSA, store: &AnalysisStore) -> Self {
+        Self::try_compute(ssa, store).unwrap_or_else(|diagnostics| {
+            ice!("{}", crate::compiler::diagnostic::render_all(&diagnostics))
+        })
+    }
+
+    fn try_compute(ssa: &HLSSA, store: &AnalysisStore) -> Result<Self, Vec<Diagnostic>> {
         let type_info = store.get::<TypeInfo>();
         let cost_estimator = CostEstimator::new();
-        let cost_analysis = cost_estimator.run(ssa, type_info);
-        cost_analysis.summarize()
+        let cost_analysis = cost_estimator
+            .run(ssa, type_info)
+            .map_err(|error| vec![error])?;
+        Ok(cost_analysis.summarize())
     }
 }
 
@@ -2664,7 +2702,7 @@ mod tests {
         InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
         let flow = FlowAnalysis::run(&ssa);
         let type_info = Types::new().run(&ssa, &flow);
-        let costs = CostEstimator::new().run(&ssa, &type_info);
+        let costs = CostEstimator::new().run(&ssa, &type_info).unwrap();
         let function_cost = costs
             .functions
             .values()
@@ -2698,7 +2736,7 @@ mod tests {
         InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
         let flow = FlowAnalysis::run(&ssa);
         let type_info = Types::new().run(&ssa, &flow);
-        let costs = CostEstimator::new().run(&ssa, &type_info);
+        let costs = CostEstimator::new().run(&ssa, &type_info).unwrap();
         let function_cost = costs
             .functions
             .values()
@@ -2719,7 +2757,10 @@ mod tests {
     fn run_cost_estimator(ssa: &HLSSA) {
         let flow = FlowAnalysis::run(ssa);
         let type_info = Types::new().run(ssa, &flow);
-        let _ = CostEstimator::new().run(ssa, &type_info).summarize();
+        let _ = CostEstimator::new()
+            .run(ssa, &type_info)
+            .unwrap()
+            .summarize();
     }
 
     /// `main` with a single `Constrain { a, b, c }` over compile-time field constants.
