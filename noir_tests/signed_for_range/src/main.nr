@@ -2,8 +2,7 @@
 //
 // The frontend desugars a `for` into three operations on the index -- the exit
 // test in the header, the increment it falls off the end of the body into, and
-// the increment `continue` jumps through -- plus a fourth, the bump of the end
-// bound that makes an inclusive range exclusive. All four have to be built at
+// the increment `continue` jumps through. All three have to be built at
 // the index's own signedness, and the constant `1` they step by has to be
 // tagged the same way the index is: `Types` gives a binary operation the type
 // `lhs.get_arithmetic_result_type(rhs)`, which has no mixed `U`/`I` case and
@@ -39,8 +38,7 @@ fn main(x: i64, y: i8) {
     }
     assert(acc == 15);
 
-    // Inclusive range, which bumps the end bound by one before the header is
-    // built -- a fourth operation on a signed value, at a narrower width.
+    // Inclusive range, with a signed endpoint comparison at a narrower width.
     let mut n: i8 = 0;
     for j in -2i8..=2i8 {
         n += j + y;

@@ -56,6 +56,7 @@ struct ForLoopIndex {
     value: ValueId,
     bit_size: usize,
     signed: bool,
+    inclusive_end: Option<ValueId>,
 }
 
 /// Converts expressions within a single function.
@@ -386,24 +387,19 @@ impl<'a> ExpressionConverter<'a> {
                 None
             }
             Expression::Continue => {
-                let (loop_header, for_loop_index, body_source_location) = {
+                let (loop_header, exit_block, for_loop_index, body_source_location) = {
                     let ctx = self.loop_stack.last().expect("continue outside of loop");
                     (
                         ctx.loop_header,
+                        ctx.exit_block,
                         ctx.for_loop_index,
                         ctx.body_source_location.clone(),
                     )
                 };
                 if let Some(index) = for_loop_index {
                     // For loop: increment index and jump back to header
-                    let one = b.emit_const(index_step_one(index.bit_size));
-                    let next_index = self.emit_at_source_location(b, body_source_location, |e| {
-                        e.bin(
-                            BinaryArithOpKind::with_sign(ArithGroup::Add, index.signed),
-                            index.value,
-                            one,
-                        )
-                    });
+                    let next_index =
+                        self.increment_for_index(index, exit_block, body_source_location, b);
                     b.block(self.current_block)
                         .terminate_jmp(loop_header, vec![next_index]);
                 } else {
@@ -730,7 +726,7 @@ impl<'a> ExpressionConverter<'a> {
 
         // Evaluate start and end range in the current block
         let start = self.convert_expression(&for_expr.start_range, b).unwrap();
-        let end_raw = self.convert_expression(&for_expr.end_range, b).unwrap();
+        let end = self.convert_expression(&for_expr.end_range, b).unwrap();
 
         let index_type = self.type_converter.convert_type(&for_expr.index_type);
         let field = b.field();
@@ -739,20 +735,6 @@ impl<'a> ExpressionConverter<'a> {
         // are operations _on_ it, so they take their sign from it rather than defaulting. It is
         // read from the Noir type, not from the converted one: an HLSSA integer type is a width.
         let index_signed = ast_type_is_signed(&for_expr.index_type);
-
-        // if range is inclusive, bump by one
-        let end = if for_expr.inclusive {
-            let one = b.emit_const(index_step_one(index_type.get_bit_size(field)));
-            self.emit_located(b, Some(for_expr.end_range_location), |e| {
-                e.bin(
-                    BinaryArithOpKind::with_sign(ArithGroup::Add, index_signed),
-                    end_raw,
-                    one,
-                )
-            })
-        } else {
-            end_raw
-        };
 
         // Create blocks for the loop structure
         let loop_header = b.add_block(|_| {});
@@ -764,8 +746,14 @@ impl<'a> ExpressionConverter<'a> {
             let header_location = self.resolve_location(Some(for_expr.end_range_location));
             let mut header = b.block(loop_header).with_source_location(header_location);
             let loop_index = header.add_parameter(index_type);
-            let cond = header.cmp(loop_index, end, CmpKind::lt(index_signed));
-            header.terminate_jmp_if(cond, loop_body, exit_block);
+            if for_expr.inclusive {
+                // Test index <= end without computing end + 1, which may overflow.
+                let past_end = header.cmp(end, loop_index, CmpKind::lt(index_signed));
+                header.terminate_jmp_if(past_end, exit_block, loop_body);
+            } else {
+                let cond = header.cmp(loop_index, end, CmpKind::lt(index_signed));
+                header.terminate_jmp_if(cond, loop_body, exit_block);
+            }
             loop_index
         };
 
@@ -781,17 +769,19 @@ impl<'a> ExpressionConverter<'a> {
             .type_converter
             .convert_type(&for_expr.index_type)
             .get_bit_size(field);
+        let index = ForLoopIndex {
+            value: loop_index,
+            bit_size: index_bit_size,
+            signed: index_signed,
+            inclusive_end: for_expr.inclusive.then_some(end),
+        };
 
         // Push loop context for break/continue
         self.loop_stack.push(LoopContext {
             loop_header,
             exit_block,
             body_source_location,
-            for_loop_index: Some(ForLoopIndex {
-                value: loop_index,
-                bit_size: index_bit_size,
-                signed: index_signed,
-            }),
+            for_loop_index: Some(index),
         });
 
         // Execute the loop body
@@ -802,14 +792,8 @@ impl<'a> ExpressionConverter<'a> {
         // Increment the index and jump back to header
         // (only if current block is not already terminated by break/continue)
         if !b.block(self.current_block).is_terminated() {
-            let one = b.emit_const(index_step_one(index_bit_size));
-            let next_index = self.emit_located(b, Some(for_expr.start_range_location), |e| {
-                e.bin(
-                    BinaryArithOpKind::with_sign(ArithGroup::Add, index_signed),
-                    loop_index,
-                    one,
-                )
-            });
+            let location = self.resolve_location(Some(for_expr.start_range_location));
+            let next_index = self.increment_for_index(index, exit_block, location, b);
             b.block(self.current_block)
                 .terminate_jmp(loop_header, vec![next_index]);
         }
@@ -819,6 +803,34 @@ impl<'a> ExpressionConverter<'a> {
 
         // For loops don't produce a value
         None
+    }
+
+    /// Exit an inclusive loop after its endpoint, before either increment site can overflow.
+    fn increment_for_index(
+        &mut self,
+        index: ForLoopIndex,
+        exit_block: BlockId,
+        location: SourceLocation,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> ValueId {
+        if let Some(end) = index.inclusive_end {
+            let at_end = self.emit_at_source_location(b, location.clone(), |e| {
+                e.cmp(index.value, end, CmpKind::Eq)
+            });
+            let increment_block = b.add_block(|_| {});
+            b.block(self.current_block)
+                .terminate_jmp_if(at_end, exit_block, increment_block);
+            self.current_block = increment_block;
+        }
+
+        let one = b.emit_const(index_step_one(index.bit_size));
+        self.emit_at_source_location(b, location, |e| {
+            e.bin(
+                BinaryArithOpKind::with_sign(ArithGroup::Add, index.signed),
+                index.value,
+                one,
+            )
+        })
     }
 
     fn convert_while(
