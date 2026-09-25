@@ -568,9 +568,21 @@ Two tags, distinct from the constant-swap tags:
 A single-field arithmetic op assumes its exact result span fits one cell (one `b.mul`/`b.add`, or a
 `two_pow`-based packing). Fix = multi-limb schoolbook / carry-chain lowering in the FALSE branch.
 
-- [ ] `witness_integer_arith.rs` — `lower_unsigned_mul` (single-field product + the `2³ʰ⁺¹` u128
-      fallback packing), `lower_signed_mul` (no fallback), `lower_signed_addsub`,
+- [ ] `witness_integer_arith.rs` — `lower_signed_mul` (no fallback), `lower_signed_addsub`,
       `signed_value_from_encoded`/`encode_signed_value` (sign packing), `lower_unsigned_divmod`.
+- [x] `witness_integer_arith.rs` — `lower_unsigned_mul` (single-field product + the `2³ʰ⁺¹` u128
+      fallback packing). The FALSE case is the **schoolbook product** in `WideWitnessInts`, which
+      takes every unsigned witnessed product `single_cell_product_fits` (`shared/limbs.rs`) says one
+      cell cannot hold — decomposing an operand that is still one element — column by column at the
+      witness limb, each column reduced into a range-checked limb and a witnessed, range-checked
+      carry, with the partial products past the top held to zero one constraint per left limb. Where
+      the reductions fall is planned on the operands' bounds against the modulus, so a column
+      reduces as often as the field requires, down to after every product. What the plan cannot hold
+      is one partial product plus the headroom it reduces in, and `schoolbook_product_fits` has the
+      funnel refuse that: goldilocks at the default `LimbBudget`, whose 32-bit limb's product alone
+      fills the field, is the one known case, and `accumulated_products` is the knob that narrows
+      the limb until it fits. `lower_unsigned_mul` keeps its two refusals for the product
+      `lower_unsigned_divmod` re-emits after the schoolbook has run (see below).
 - [x] `witness_integer_arith.rs` — `lower_unsigned_addsub`; `witness_compare.rs` —
       `lower_unsigned_lt` for an unsigned ordering; and `witness_assert.rs` —
       `lower_unsigned_assert_lt` for an asserted one. The FALSE case is the **carry chain** in
@@ -595,21 +607,21 @@ A single-field arithmetic op assumes its exact result span fits one cell (one `b
       there is no width at which it can wrap. The assert on the bound states the coupling rather
       than guarding a reachable case.
 
-**Five of these refuse** rather than miscompiling when their span does not fit (see the funnel
-above): `lower_unsigned_mul` on both its paths, `lower_signed_mul`, `lower_signed_addsub`,
-`lower_integer_sext` and `lower_word_bitwise`. What remains for P5 at those five is the FALSE-case
-lowering itself — except at `lower_word_bitwise`, where it partly exists. `lower_binary_bitwise`
-asks `spread_sum_fits_field` before taking the whole-width arm, so a width whose spread sum the
-field cannot hold falls through to the half-limb decomposition instead of refusing. What that site
-still refuses is a field whose **half-limb** spread sum does not fit, which no decomposition below
-it helps.
+**Four of the open ones refuse** rather than miscompiling when their span does not fit (see the
+funnel above): `lower_signed_mul`, `lower_signed_addsub`, `lower_integer_sext` and
+`lower_word_bitwise`. What remains for P5 at those four is the FALSE-case lowering itself — except
+at `lower_word_bitwise`, where it partly exists. `lower_binary_bitwise` asks `spread_sum_fits_field`
+before taking the whole-width arm, so a width whose spread sum the field cannot hold falls through
+to the half-limb decomposition instead of refusing. What that site still refuses is a field whose
+**half-limb** spread sum does not fit, which no decomposition below it helps.
 
 **The rest still carry the assumption unchecked**, with only a `FIELD-ASSUMPTION` comment on it, and
 are what to fix first if a narrow field is configured before P5's lowerings exist: the
 `signed_value_from_encoded`/`encode_signed_value` sign packing, and `lower_signed_lt`'s ordering.
 `lower_unsigned_divmod` is a mixture: its 128-bit path reconstructs `q·divisor + r` by emitting
-`UMul`/`UAdd` **ops**, which this same pass re-lowers, so it inherits the mul's refusal; its narrow
-path multiplies in the field directly and has no check of its own.
+`UMul`/`UAdd` **ops**, which this same pass re-lowers after `WideWitnessInts` has run, so it
+inherits the single-cell mul's refusal rather than reaching the schoolbook; its narrow path
+multiplies in the field directly and has no check of its own.
 
 Note that the funnel's condition is per-site, because `witness_limb_bits` certifies only that a bare
 `a·b` fits. A lowering that additionally scales a column by a place value asks

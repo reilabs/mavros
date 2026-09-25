@@ -205,7 +205,10 @@ fn every_witness_column_is_pinned_by_a_constraint() {
         (BinaryArithOpKind::UAdd, 253),
         (BinaryArithOpKind::USub, 253),
         (BinaryArithOpKind::UMul, 32),
+        (BinaryArithOpKind::UMul, 127),
         (BinaryArithOpKind::UMul, 128),
+        (BinaryArithOpKind::UMul, 200),
+        (BinaryArithOpKind::UMul, 253),
         (BinaryArithOpKind::And, 40),
         (BinaryArithOpKind::And, 128),
         (BinaryArithOpKind::Xor, 200),
@@ -315,6 +318,65 @@ fn every_witness_column_of_a_limbed_sum_difference_or_ordering_is_pinned() {
     }
 }
 
+/// The mutation test for a product whose operands are limbs, with one operand witnessed and with
+/// both.
+///
+/// Built inside the program for the reason
+/// [`every_witness_column_of_a_limbed_sum_difference_or_ordering_is_pinned`] gives. The left
+/// operand is a widened parameter; the right one is a constant reaching the fourth limb, taken as
+/// it is and then selected by a witnessed bit, which makes it a witnessed value held as limbs. The
+/// two differ in what they cost: a partial product of a witnessed limb and a pure one is a linear
+/// term, while one of two witnessed limbs is a column of its own that only its product constraint
+/// pins.
+///
+/// The product leaves through its low limb. A missing range check on a limb of the answer or on a
+/// carry is invisible here, whichever limb leaves: raising a carry by one lowers its limb by `2^h`
+/// and raises the next by one, which the recombination cancels, so it takes two columns moving
+/// together to exploit, and the structural audit in `wide_witness_ints` is what sees it.
+#[test]
+fn every_witness_column_of_a_limbed_product_is_pinned() {
+    let bits = 320usize;
+    let factor: BigUint = (BigUint::from(1u8) << 200) + 5u8;
+    let parameter = IntBits::from_u128(64, 3);
+    let low_limb = IntBits::from_u128(64, 15);
+    let selected = IntBits::from_u128(1, 1);
+
+    let pure_factor = factor.clone();
+    let one_witnessed = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
+        let multiplicand = e.cast_to(CastTarget::Int(bits), params[0]);
+        let multiplier = e.int_const(IntBits::from_biguint(bits, &pure_factor));
+        let product = e.bin(BinaryArithOpKind::UMul, multiplicand, multiplier);
+        vec![e.cast_to(CastTarget::Int(64), product)]
+    });
+    let compiled = Compiled::new(one_witnessed)
+        .unwrap_or_else(|error| panic!("UMul at {bits} bits does not compile: {error}"));
+    assert_every_column_is_pinned(
+        &format!("UMul by a constant at {bits} bits"),
+        &compiled,
+        &[&parameter, &low_limb],
+    );
+
+    let both_witnessed = main_program(
+        &[Type::int(64), Type::int(1)],
+        &[Type::int(64)],
+        move |e, params| {
+            let multiplicand = e.cast_to(CastTarget::Int(bits), params[0]);
+            let constant = e.int_const(IntBits::from_biguint(bits, &factor));
+            let zero = e.int_const(IntBits::zero(bits));
+            let multiplier = e.select(params[1], constant, zero);
+            let product = e.bin(BinaryArithOpKind::UMul, multiplicand, multiplier);
+            vec![e.cast_to(CastTarget::Int(64), product)]
+        },
+    );
+    let compiled = Compiled::new(both_witnessed)
+        .unwrap_or_else(|error| panic!("UMul at {bits} bits does not compile: {error}"));
+    assert_every_column_is_pinned(
+        &format!("UMul of two witnessed values at {bits} bits"),
+        &compiled,
+        &[&parameter, &selected, &low_limb],
+    );
+}
+
 /// The mutation test for the asserted ordering, in the band and on limbs.
 ///
 /// **This is the one chain shape the mutation test cannot fully judge.** An asserted ordering fixes
@@ -410,7 +472,7 @@ fn an_unsigned_ordering_agrees_with_the_model_at_the_limb_corners() {
         let values = corners::wide_values(bits);
         for lhs in &values {
             for rhs in &values {
-                let less = Chained::Ordering
+                let less = Limbed::Ordering
                     .model(lhs, rhs)
                     .expect("an ordering is always answered");
                 let verdict = compiled.run(&input_block(&[lhs, rhs, &less]));
@@ -430,29 +492,33 @@ fn an_unsigned_ordering_agrees_with_the_model_at_the_limb_corners() {
     }
 }
 
-/// The three operations the carry chain lowers.
+/// The operations the representation computes on limbs: the carry chain's three and the
+/// schoolbook's product.
 #[derive(Clone, Copy, Debug)]
-enum Chained {
+enum Limbed {
     Sum,
     Difference,
     Ordering,
+    Product,
 }
 
-impl Chained {
+impl Limbed {
     fn emit(self, e: &mut HLBlockEmitter<'_>, lhs: ValueId, rhs: ValueId) -> ValueId {
         match self {
-            Chained::Sum => e.bin(BinaryArithOpKind::UAdd, lhs, rhs),
-            Chained::Difference => e.bin(BinaryArithOpKind::USub, lhs, rhs),
-            Chained::Ordering => e.cmp(lhs, rhs, CmpKind::ULt),
+            Limbed::Sum => e.bin(BinaryArithOpKind::UAdd, lhs, rhs),
+            Limbed::Difference => e.bin(BinaryArithOpKind::USub, lhs, rhs),
+            Limbed::Ordering => e.cmp(lhs, rhs, CmpKind::ULt),
+            Limbed::Product => e.bin(BinaryArithOpKind::UMul, lhs, rhs),
         }
     }
 
     /// The model's answer, or [`None`] where it rejects the operands.
     fn model(self, lhs: &IntBits, rhs: &IntBits) -> Option<IntBits> {
         match self {
-            Chained::Sum => mavros_int_semantics::eval(IntOp::UAdd, lhs, rhs).value(),
-            Chained::Difference => mavros_int_semantics::eval(IntOp::USub, lhs, rhs).value(),
-            Chained::Ordering => Some(IntBits::from_u128(
+            Limbed::Sum => mavros_int_semantics::eval(IntOp::UAdd, lhs, rhs).value(),
+            Limbed::Difference => mavros_int_semantics::eval(IntOp::USub, lhs, rhs).value(),
+            Limbed::Product => mavros_int_semantics::eval(IntOp::UMul, lhs, rhs).value(),
+            Limbed::Ordering => Some(IntBits::from_u128(
                 1,
                 u128::from(BigUint::from(lhs) < BigUint::from(rhs)),
             )),
@@ -485,8 +551,8 @@ fn limbed_sums_differences_and_orderings_agree_with_the_model() {
             one.shifted_left(top_limb),
             IntBits::all_ones(bits),
         ];
-        for chained in [Chained::Sum, Chained::Difference, Chained::Ordering] {
-            check_limbed_corners(chained, bits, &values);
+        for limbed in [Limbed::Sum, Limbed::Difference, Limbed::Ordering] {
+            check_limbed_corners(limbed, bits, &values, Rhs::Witnessed);
         }
     }
 }
@@ -502,8 +568,90 @@ fn the_limbed_corner_matrix_agrees_with_the_model() {
     );
     for bits in [254usize, 320] {
         let values = corners::wide_values(bits);
-        for chained in [Chained::Sum, Chained::Difference, Chained::Ordering] {
-            check_limbed_corners(chained, bits, &values);
+        for limbed in [Limbed::Sum, Limbed::Difference, Limbed::Ordering] {
+            check_limbed_corners(limbed, bits, &values, Rhs::Witnessed);
+        }
+        let mut values = values;
+        values.extend(half_width_corners(bits));
+        check_limbed_corners(Limbed::Product, bits, &dedup(values), Rhs::Witnessed);
+    }
+}
+
+/// The corners a product turns on, which the model's wide set does not have: either side of half
+/// the width, so that the products of two of them land either side of `2^N`.
+///
+/// `2^⌊N/2⌋ · 2^⌈N/2⌉` is exactly `2^N`, the smallest product that overflows, and it overflows by
+/// nothing but a carry out of the top column. At an even width `(2^(N/2) + 1)(2^(N/2) - 1)` is the
+/// largest answer there is, which carries through every column on the way.
+fn half_width_corners(bits: usize) -> Vec<IntBits> {
+    let one = IntBits::from_u128(bits, 1);
+    let values = [bits / 2, bits.div_ceil(2)].into_iter().flat_map(|half| {
+        let power = one.shifted_left(half);
+        [
+            IntBits::all_ones(half).cast(bits),
+            power.clone(),
+            power.or(&one),
+        ]
+    });
+    dedup(values.collect())
+}
+
+/// `values` with repeats removed, in order.
+fn dedup(values: Vec<IntBits>) -> Vec<IntBits> {
+    let mut out: Vec<IntBits> = Vec::with_capacity(values.len());
+    for value in values {
+        if !out.contains(&value) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+/// A product agrees with the model where the operands have an element each and their product does
+/// not, which is where the schoolbook runs on a decomposition of each operand.
+///
+/// 127 is the one width below the double lane whose product the single cell cannot hold. 129 and
+/// 200 are past both narrow lanes, and 253 is the widest width an element carries.
+#[test]
+fn a_product_agrees_with_the_model_at_the_limb_corners() {
+    for bits in [127usize, 129, 200, 253] {
+        let mut values = corners::wide_values(bits);
+        values.extend(half_width_corners(bits));
+        let values = dedup(values);
+        let pairs = values
+            .iter()
+            .flat_map(|a| values.iter().map(move |b| (a.clone(), b.clone())))
+            .collect();
+        sweep_over(BinaryArithOpKind::UMul, bits, pairs);
+    }
+}
+
+/// The product on limbs, over the corners its carries and its overflow check turn on, on both
+/// lanes, with both operands witnessed and with a constant multiplier.
+///
+/// A constant is cut into limbs at compile time, and a limb it does not reach drops out of the
+/// plan along with every partial product and overflow term against it. So the constant half is
+/// what checks that nothing needed dropped out with them: `2^top_limb` is a constant whose only
+/// limb is the top one, whose overflow terms are all that stand between a large operand and a
+/// wrong answer.
+#[test]
+fn limbed_products_agree_with_the_model() {
+    let limb = witness_limb_bits(FieldConfig::bn254());
+    for bits in [254usize, 320] {
+        let one = IntBits::from_u128(bits, 1);
+        let top_limb = (bits - 1) / limb * limb;
+        let mut values = vec![
+            IntBits::zero(bits),
+            one.clone(),
+            IntBits::all_ones(limb).cast(bits),
+            one.shifted_left(limb),
+            one.shifted_left(top_limb),
+            IntBits::all_ones(bits),
+        ];
+        values.extend(half_width_corners(bits));
+        let values = dedup(values);
+        for rhs in [Rhs::Witnessed, Rhs::Constant] {
+            check_limbed_corners(Limbed::Product, bits, &values, rhs);
         }
     }
 }
@@ -513,55 +661,91 @@ fn the_limbed_corner_matrix_agrees_with_the_model() {
 /// Split because of the host rather than the compiler. On aarch64, wasmtime's Cranelift (0.118)
 /// trips its own branch-range assertion, `(label_offset - offset) <= kind.max_pos_range()` in
 /// `machinst/buffer.rs`, compiling a function holding a few hundred pairs, while the VM lane runs
-/// the same program to acceptance. Fifty per program stays clear of it.
-fn check_limbed_corners(chained: Chained, bits: usize, values: &[IntBits]) {
+/// the same program to acceptance. Fifty sums, differences or orderings per program stay clear of
+/// it. A product of two dense operands is several times their code, and fifty of those do not.
+fn check_limbed_corners(limbed: Limbed, bits: usize, values: &[IntBits], rhs: Rhs) {
     let pairs: Vec<(IntBits, IntBits)> = values
         .iter()
         .flat_map(|a| values.iter().map(move |b| (a.clone(), b.clone())))
         .collect();
-    for pairs in pairs.chunks(50) {
-        check_limbed_pairs(chained, bits, pairs.to_vec());
+    let per_program = match limbed {
+        Limbed::Product => 20,
+        Limbed::Sum | Limbed::Difference | Limbed::Ordering => 50,
+    };
+    for pairs in pairs.chunks(per_program) {
+        check_limbed_pairs(limbed, bits, pairs.to_vec(), rhs);
     }
 }
 
-/// `chained` over `pairs`, all in one program, against the model.
+/// How [`check_limbed_pairs`] builds its right operand.
+#[derive(Clone, Copy, Debug)]
+enum Rhs {
+    /// Selected by a witnessed bit, as the left one is: a witnessed value held as limbs.
+    Witnessed,
+
+    /// The corner constant itself, which a lowering sees as a constant and may cut at compile time.
+    Constant,
+}
+
+/// `limbed` over `pairs`, all in one program, against the model.
 ///
-/// No parameter can be this wide, so each operand is a corner constant selected by a witnessed
-/// bit: a witnessed value held as limbs, whose value is the constant. Every pair is then one
-/// program's worth of arithmetic, and one program holds them all.
+/// No parameter can be this wide, so each operand is a corner constant selected by a witnessed bit,
+/// one per side: a witnessed value held as limbs, whose value is the constant. Every pair is then
+/// one program's worth of arithmetic, and one program holds them all.
 ///
 /// A pair the model rejects cannot sit beside the others unconditionally, since it would refuse
 /// every run. Its operands are selected by a second parameter naming the pair instead, and are
 /// zero on every run but the one that names it — where the pipeline has to refuse, and only there.
-fn check_limbed_pairs(chained: Chained, bits: usize, pairs: Vec<(IntBits, IntBits)>) {
-    let answers: Vec<Option<IntBits>> = pairs.iter().map(|(a, b)| chained.model(a, b)).collect();
+/// A constant right operand is not selected, so there it is the left one alone that goes to zero.
+fn check_limbed_pairs(limbed: Limbed, bits: usize, pairs: Vec<(IntBits, IntBits)>, rhs: Rhs) {
+    let answers: Vec<Option<IntBits>> = pairs.iter().map(|(a, b)| limbed.model(a, b)).collect();
     let zero = IntBits::zero(bits);
-    let at_zero = chained
-        .model(&zero, &zero)
-        .expect("each operation accepts zero and zero");
+    let unnamed: Vec<IntBits> = pairs
+        .iter()
+        .map(|(_, right)| {
+            let right = match rhs {
+                Rhs::Witnessed => &zero,
+                Rhs::Constant => right,
+            };
+            limbed
+                .model(&zero, right)
+                .expect("the operation accepts a zero left operand against this right one")
+        })
+        .collect();
 
     let (program_pairs, program_answers) = (pairs.clone(), answers.clone());
     let ssa = main_program(
-        &[Type::int(1), Type::int(32)],
+        &[Type::int(1), Type::int(32), Type::int(1)],
         &[Type::int(1)],
         move |e, params| {
             let zero = e.int_const(IntBits::zero(bits));
             let mut all = None;
-            for (index, ((lhs, rhs), answer)) in
-                program_pairs.iter().zip(&program_answers).enumerate()
+            for (index, (((lhs, right), answer), unnamed)) in program_pairs
+                .iter()
+                .zip(&program_answers)
+                .zip(&unnamed)
+                .enumerate()
             {
-                let (chosen, want) = match answer {
-                    Some(want) => (params[0], want.clone()),
+                // Each side has a selector of its own, so that `a op b` and `b op a` are different
+                // values to the optimiser. With one selector the two are the same product, CSE
+                // keeps one of them, and a lowering that treats its operands differently is only
+                // ever run one way round.
+                let (left_chosen, right_chosen, want) = match answer {
+                    Some(want) => (params[0], params[2], want.clone()),
                     None => {
                         let name = e.int_const(IntBits::from_u128(32, index as u128));
-                        (e.eq(params[1], name), at_zero.clone())
+                        let named = e.eq(params[1], name);
+                        (named, named, unnamed.clone())
                     }
                 };
                 let lhs = e.int_const(lhs.clone());
-                let lhs = e.select(chosen, lhs, zero);
-                let rhs = e.int_const(rhs.clone());
-                let rhs = e.select(chosen, rhs, zero);
-                let got = chained.emit(e, lhs, rhs);
+                let lhs = e.select(left_chosen, lhs, zero);
+                let right = e.int_const(right.clone());
+                let rhs = match rhs {
+                    Rhs::Witnessed => e.select(right_chosen, right, zero),
+                    Rhs::Constant => right,
+                };
+                let got = limbed.emit(e, lhs, rhs);
                 let want = e.int_const(want);
                 let same = e.eq(got, want);
                 all = Some(match all {
@@ -572,24 +756,26 @@ fn check_limbed_pairs(chained: Chained, bits: usize, pairs: Vec<(IntBits, IntBit
             vec![all.expect("there is at least one corner pair")]
         },
     );
-    let compiled = Compiled::new(ssa)
-        .unwrap_or_else(|error| panic!("{chained:?} at {bits} bits does not compile: {error}"));
+    let compiled = Compiled::new(ssa).unwrap_or_else(|error| {
+        panic!("{limbed:?} at {bits} bits, {rhs:?} right operand, does not compile: {error}")
+    });
 
     let one = IntBits::from_u128(1, 1);
-    let inputs = |selected: u128| input_block(&[&one, &IntBits::from_u128(32, selected), &one]);
+    let inputs =
+        |selected: u128| input_block(&[&one, &IntBits::from_u128(32, selected), &one, &one]);
 
     let none = u128::from(u32::MAX);
     let verdict = compiled.run(&inputs(none));
     assert!(
         verdict.is_accepted(),
-        "{chained:?} at {bits} bits disagrees with the model on some pair it accepts: {verdict:?}"
+        "{limbed:?} at {bits} bits, {rhs:?} right operand, disagrees with the model on some pair it accepts: {verdict:?}"
     );
     let verdict = compiled
         .run_wasm(&inputs(none))
         .expect("the WASM lane builds");
     assert!(
         verdict.is_accepted(),
-        "{chained:?} at {bits} bits disagrees with the model on the WASM lane: {verdict:?}"
+        "{limbed:?} at {bits} bits, {rhs:?} right operand, disagrees with the model on the WASM lane: {verdict:?}"
     );
 
     for (index, ((lhs, rhs), answer)) in pairs.iter().zip(&answers).enumerate() {
@@ -599,7 +785,7 @@ fn check_limbed_pairs(chained: Chained, bits: usize, pairs: Vec<(IntBits, IntBit
         let verdict = compiled.run(&inputs(index as u128));
         assert!(
             verdict.is_refusal(),
-            "{chained:?}({lhs:?}, {rhs:?}) at {bits} bits is rejected by the model, but the \
+            "{limbed:?}({lhs:?}, {rhs:?}) at {bits} bits is rejected by the model, but the \
              pipeline answered {verdict:?}"
         );
     }
@@ -663,6 +849,69 @@ fn a_guarded_difference_is_checked_only_where_its_guard_holds() {
         assert!(
             verdict.is_accepted(),
             "int{bits}: not taken, 3 - 7: {verdict:?}"
+        );
+    }
+}
+
+/// A product under a witnessed condition is checked only where the condition holds.
+///
+/// The multiplier is `2^(N - 2)` or-ed onto a parameter, so a multiplicand of three fits and one of
+/// four overflows by exactly its top column. Where the branch is not taken that overflow is what the
+/// branch not taken left behind, and the schoolbook's checks go off with the guard.
+///
+/// 253 is the schoolbook on a decomposition of a single element, and 320 on limbs.
+#[test]
+fn a_guarded_product_is_checked_only_where_its_guard_holds() {
+    for bits in [253usize, 320] {
+        let high = IntBits::from_biguint(bits, &(BigUint::from(1u8) << (bits - 2)));
+        let ssa = main_program(
+            &[Type::int(1), Type::int(64), Type::int(64)],
+            &[Type::int(64)],
+            move |e, params| {
+                let lhs = e.cast_to(CastTarget::Int(bits), params[1]);
+                let rhs = e.cast_to(CastTarget::Int(bits), params[2]);
+                let top = e.int_const(high.clone());
+                let rhs = e.bin(BinaryArithOpKind::Or, rhs, top);
+
+                let (then_id, _) = e.add_block();
+                let (else_id, _) = e.add_block();
+                let (merge_id, _) = e.add_block();
+                e.seal_and_switch(Terminator::JmpIf(params[0], then_id, else_id), then_id);
+                let product = e.bin(BinaryArithOpKind::UMul, lhs, rhs);
+                let low = e.cast_to(CastTarget::Int(64), product);
+                e.seal_and_switch(Terminator::Jmp(merge_id, vec![low]), else_id);
+                let zero = e.int_const(IntBits::zero(64));
+                e.seal_and_switch(Terminator::Jmp(merge_id, vec![zero]), merge_id);
+                vec![e.add_parameter(Type::int(64))]
+            },
+        );
+        let compiled = Compiled::new(ssa)
+            .unwrap_or_else(|error| panic!("a guarded int{bits} UMul does not compile: {error}"));
+
+        let run = |taken: u128, lhs: u128, rhs: u128, answer: u128| {
+            compiled.run(&input_block(&[
+                &IntBits::from_u128(1, taken),
+                &IntBits::from_u128(64, lhs),
+                &IntBits::from_u128(64, rhs),
+                &IntBits::from_u128(64, answer),
+            ]))
+        };
+
+        // `3 * (2^(N - 2) + 5)`, whose low limb is fifteen.
+        let verdict = run(1, 3, 5, 15);
+        assert!(
+            verdict.is_accepted(),
+            "int{bits}: taken, 3 * (2^(N - 2) + 5): {verdict:?}"
+        );
+        let verdict = run(1, 4, 5, 20);
+        assert!(
+            verdict.is_refusal(),
+            "int{bits}: taken, 4 * (2^(N - 2) + 5): {verdict:?}"
+        );
+        let verdict = run(0, 4, 5, 0);
+        assert!(
+            verdict.is_accepted(),
+            "int{bits}: not taken, 4 * (2^(N - 2) + 5): {verdict:?}"
         );
     }
 }
@@ -885,43 +1134,250 @@ fn a_literal_shift_amount_is_admitted_only_while_its_own_product_fits() {
     }
 }
 
-/// A 127-bit witness `*` is the one width whose product the field cannot tell from a residue and
-/// which has no fallback: `int128` splits into two limbs, and `int126` and below fit one product.
+/// A **pure** wide value past the modulus that no fold can compute, alone and as a product's
+/// operand.
+///
+/// `3^200` built by a loop is an `int320` no fold answers, so R1CS generation computes it, and it
+/// has no field element. It is carried there as its pattern, which is what lets the loop run at
+/// all, and the schoolbook cuts it into limbs on the pure side, each an element again. A limb that
+/// kept the bits above it would be a wrong coefficient in the product's constraints, which is what
+/// the multiplied run checks, and a multiplier of sixteen overflows the width.
 #[test]
-fn a_witness_multiply_at_a_hundred_and_twenty_seven_bits_is_refused() {
-    contains_all(
-        &refusal_for(BinaryArithOpKind::UMul, 127, 127),
-        &[
-            "error: a witnessed int127 multiplication is not supported",
-            "= note: a witnessed multiplication is a single field product",
-        ],
-    );
+fn a_pure_wide_value_a_loop_computes_is_carried_to_its_limbs() {
+    let bits = 320usize;
+    let power: BigUint = BigUint::from(3u8).pow(200u32);
+    assert!(power.bits() > 254 && power.bits() < 320);
+    let low = |value: &BigUint| IntBits::from_biguint(64, &(value % (BigUint::from(1u8) << 64)));
+
+    for multiplied in [false, true] {
+        let ssa = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
+            let zero = e.int_const(IntBits::zero(32));
+            let one = e.int_const(IntBits::from_u128(bits, 1));
+            let (head, _) = e.add_block();
+            let (back, _) = e.add_block();
+            let (done, _) = e.add_block();
+            e.seal_and_switch(Terminator::Jmp(head, vec![zero, one]), head);
+            let count = e.add_parameter(Type::int(32));
+            let power = e.add_parameter(Type::int(bits));
+            let three = e.int_const(IntBits::from_u128(bits, 3));
+            let power = e.bin(BinaryArithOpKind::UMul, power, three);
+            let step = e.int_const(IntBits::from_u128(32, 1));
+            let count = e.bin(BinaryArithOpKind::UAdd, count, step);
+            let limit = e.int_const(IntBits::from_u128(32, 200));
+            let more = e.cmp(count, limit, CmpKind::ULt);
+            e.seal_and_switch(Terminator::JmpIf(more, back, done), back);
+            e.seal_and_switch(Terminator::Jmp(head, vec![count, power]), done);
+            let value = if multiplied {
+                let factor = e.cast_to(CastTarget::Int(bits), params[0]);
+                e.bin(BinaryArithOpKind::UMul, factor, power)
+            } else {
+                power
+            };
+            vec![e.cast_to(CastTarget::Int(64), value)]
+        });
+        let compiled = Compiled::new(ssa).unwrap_or_else(|error| {
+            panic!("the loop, multiplied: {multiplied}, does not compile: {error}")
+        });
+        let inputs = |factor: u64, answer: &IntBits| {
+            input_block(&[&IntBits::from_u128(64, u128::from(factor)), answer])
+        };
+
+        for factor in [1u64, 5] {
+            let answer = if multiplied {
+                low(&(&power * factor))
+            } else {
+                low(&power)
+            };
+            let verdict = compiled.run(&inputs(factor, &answer));
+            assert!(
+                verdict.is_accepted(),
+                "multiplied: {multiplied}, factor {factor}: {verdict:?}"
+            );
+            let verdict = compiled
+                .run_wasm(&inputs(factor, &answer))
+                .expect("the WASM lane builds");
+            assert!(
+                verdict.is_accepted(),
+                "multiplied: {multiplied}, factor {factor}, WASM: {verdict:?}"
+            );
+            let wrong = answer.xor(&IntBits::from_u128(64, 1));
+            assert!(
+                !compiled.run(&inputs(factor, &wrong)).is_accepted(),
+                "multiplied: {multiplied}, factor {factor} accepted a wrong answer"
+            );
+        }
+        if multiplied {
+            let verdict = compiled.run(&inputs(16, &IntBits::zero(64)));
+            assert!(verdict.is_refusal(), "16 * 3^200 overflows: {verdict:?}");
+        }
+    }
 }
 
-/// A 129-bit multiplication is refused for its witnessed operands and for nothing else.
+/// A witnessed sum, difference or product whose result nothing reads still rejects an overflow.
+///
+/// Noir rejects an overflowing checked operation whether or not anything reads it. The rejection of
+/// a witnessed one is a range check its lowering puts on the result, and dead-code elimination runs
+/// between taint inference and that lowering, so it has to keep the operation rather than delete
+/// the check with it. The left operand carries every bit above the byte, so at the wide widths the
+/// sum of two bytes past 255 overflows the whole value, and the byte widths are the control.
+#[test]
+fn a_dead_witnessed_operation_still_rejects_its_overflow() {
+    let one = IntBits::from_u128(1, 1);
+    for bits in [8usize, 200, 320] {
+        for kind in [
+            BinaryArithOpKind::UAdd,
+            BinaryArithOpKind::USub,
+            BinaryArithOpKind::UMul,
+        ] {
+            let ssa = main_program(
+                &[Type::int(8), Type::int(8)],
+                &[Type::int(1)],
+                move |e, params| {
+                    let lhs = e.cast_to(CastTarget::Int(bits), params[0]);
+                    let rhs = e.cast_to(CastTarget::Int(bits), params[1]);
+                    let lhs = if bits > 8 {
+                        let above_the_byte =
+                            IntBits::all_ones(bits).xor(&IntBits::all_ones(8).cast(bits));
+                        let above_the_byte = e.int_const(above_the_byte);
+                        e.bin(BinaryArithOpKind::Or, lhs, above_the_byte)
+                    } else {
+                        lhs
+                    };
+                    e.bin(kind, lhs, rhs);
+                    vec![e.int_const(IntBits::from_u128(1, 1))]
+                },
+            );
+            let compiled = Compiled::new(ssa).unwrap_or_else(|error| {
+                panic!("a dead int{bits} {kind:?} does not compile: {error}")
+            });
+            let run = |lhs: u128, rhs: u128| {
+                compiled.run(&input_block(&[
+                    &IntBits::from_u128(8, lhs),
+                    &IntBits::from_u128(8, rhs),
+                    &one,
+                ]))
+            };
+
+            // A wide difference cannot underflow from these operands, whose top bits are set, so
+            // only the byte has an overflowing difference to try.
+            let (fits, overflows) = match kind {
+                BinaryArithOpKind::USub if bits == 8 => ((2, 1), Some((1, 2))),
+                BinaryArithOpKind::USub => ((1, 2), None),
+                _ => ((1, 1), Some((200, 100))),
+            };
+            let verdict = run(fits.0, fits.1);
+            assert!(
+                verdict.is_accepted(),
+                "int{bits} {kind:?}{fits:?}: {verdict:?}"
+            );
+            if let Some((lhs, rhs)) = overflows {
+                let verdict = run(lhs, rhs);
+                assert!(
+                    verdict.is_refusal(),
+                    "int{bits} {kind:?}({lhs}, {rhs}) overflows, and nothing reads it: {verdict:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The same for the signed three, which reach a different lowering but owe the same rejection.
+///
+/// Each pair is two's complement at the width: at 8 bits `100 + 100`, `-100 - 100` and `16 * 16`
+/// each leave `-128..=127`, and at 64 bits `2^62 + 2^62`, `-2^63 - 1` and `2^32 * 2^31` leave the
+/// signed range the same way.
+#[test]
+fn a_dead_witnessed_signed_operation_still_rejects_its_overflow() {
+    let one = IntBits::from_u128(1, 1);
+    // Two's complement at a width no wider than a `u128` holds.
+    let negative = |bits: usize, magnitude: u128| (1u128 << bits) - magnitude;
+    for bits in [8usize, 64] {
+        let cases = [
+            (
+                BinaryArithOpKind::SAdd,
+                (1, 1),
+                if bits == 8 {
+                    (100, 100)
+                } else {
+                    (1 << 62, 1 << 62)
+                },
+            ),
+            (
+                BinaryArithOpKind::SSub,
+                (1, 2),
+                if bits == 8 {
+                    (negative(8, 100), 100)
+                } else {
+                    (negative(64, 1 << 63), 1)
+                },
+            ),
+            (
+                BinaryArithOpKind::SMul,
+                (3, 5),
+                if bits == 8 {
+                    (16, 16)
+                } else {
+                    (1 << 32, 1 << 31)
+                },
+            ),
+        ];
+        for (kind, fits, overflows) in cases {
+            let ssa = main_program(
+                &[Type::int(bits), Type::int(bits)],
+                &[Type::int(1)],
+                move |e, params| {
+                    e.bin(kind, params[0], params[1]);
+                    vec![e.int_const(IntBits::from_u128(1, 1))]
+                },
+            );
+            let compiled = Compiled::new(ssa).unwrap_or_else(|error| {
+                panic!("a dead int{bits} {kind:?} does not compile: {error}")
+            });
+            let run = |(lhs, rhs): (u128, u128)| {
+                compiled.run(&input_block(&[
+                    &IntBits::from_u128(bits, lhs),
+                    &IntBits::from_u128(bits, rhs),
+                    &one,
+                ]))
+            };
+            let verdict = run(fits);
+            assert!(
+                verdict.is_accepted(),
+                "int{bits} {kind:?}{fits:?}: {verdict:?}"
+            );
+            let verdict = run(overflows);
+            assert!(
+                verdict.is_refusal(),
+                "int{bits} {kind:?}{overflows:?} overflows, and nothing reads it: {verdict:?}"
+            );
+        }
+    }
+}
+
+/// A 129-bit division is refused for its witnessed operands and for nothing else.
 ///
 /// The program the oracle builds carries the operation twice: witness taint inference splits the
-/// entry point by context, so a **pure** copy of the multiply sits beside the witnessed one. Only
+/// entry point by context, so a **pure** copy of the division sits beside the witnessed one. Only
 /// the witnessed copy has no lowering, and that is what makes this the closest thing to end-to-end
-/// evidence that the pure multiply's overflow check is built at this width.
+/// evidence that the pure division's check is built at this width.
 ///
 /// The count is the assertion. The witness refusal's own second note tells the reader the operation
 /// is supported outside the witness domain, and a second refusal saying it is not would contradict
 /// it in the same compile.
 #[test]
-fn a_wide_multiplication_is_refused_for_its_witness_operands_alone() {
-    let refusal = refusal_for(BinaryArithOpKind::UMul, 129, 129);
+fn a_wide_division_is_refused_for_its_witness_operands_alone() {
+    let refusal = refusal_for(BinaryArithOpKind::UDiv, 129, 129);
     contains_all(
         &refusal,
         &[
-            "error: a witnessed int129 multiplication is not supported",
+            "error: a witnessed int129 division is not supported",
             "= note: the same operation is supported at this width outside the witness domain",
         ],
     );
     assert_eq!(
-        refusal.matches("multiplication is not supported").count(),
+        refusal.matches("division is not supported").count(),
         1,
-        "the pure copy of the same multiply is lowered, not refused:\n{refusal}"
+        "the pure copy of the same division is lowered, not refused:\n{refusal}"
     );
 }
 

@@ -12,11 +12,12 @@ use super::{InstructionLoweringRule, LoweringContext};
 
 /// Puts the bit window that truncates in front of a narrowing `Cast` of a witnessed operand.
 ///
-/// A witnessed integer **is** a field element, and a `Cast` carries it through unchanged as
-/// `hlssa_to_r1cs::Value::cast` is `self.clone()`. Narrowing one therefore discards nothing, while
-/// the result is declared at a width that excludes bits still in that field element. This means
-/// that the honest value fails a range-check that it should have passed, and results in a circuit
-/// that no witness satisfies, so we use a bit window to truncate it ahead of time.
+/// A witnessed integer **is** a field element, and a `Cast` carries it through unchanged, as
+/// `hlssa_to_r1cs::Value::cast` passes a linear combination through as it is. Narrowing one
+/// therefore discards nothing, while the result is declared at a width that excludes bits still in
+/// that field element. This means that the honest value fails a range-check that it should have
+/// passed, and results in a circuit that no witness satisfies, so we use a bit window to truncate
+/// it ahead of time.
 ///
 /// The window is emitted **in front of** the cast rather than in place of it, because a `BitRange`
 /// takes its result's type from its _source_: a window of the low 32 bits of an `int200` is an

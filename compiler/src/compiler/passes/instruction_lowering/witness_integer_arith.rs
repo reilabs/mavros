@@ -188,9 +188,11 @@ impl LowerWitnessIntegerArithOps {
     // only non-single-field path is the u128 fallback below, and it still packs
     // `lo + cross*2^h` — roughly `2^(3h+1)`, so ~2^193 at the bn254 limb — into one cell. That is a
     // strictly stronger demand than the limb width itself certifies, which is why the fallback asks
-    // `two_limb_product_packing_fits` rather than inferring it from `h`. On a small field u32/u64
-    // mul need a schoolbook multi-limb lowering with per-limb range checks and carries
-    // (see docs/field-agnosticism.md, Layer 6).
+    // `two_limb_product_packing_fits` rather than inferring it from `h`. A program's product that
+    // one cell cannot hold is lowered by the schoolbook in `WideWitnessInts` before this pass runs,
+    // routed by `single_cell_product_fits`. What can still arrive here past the cell is a product
+    // this pass emits itself, in `lower_unsigned_divmod`'s reconstruction, and the two refusals
+    // below are what meet it (see docs/field-agnosticism.md, Layer 6).
     fn lower_unsigned_mul(
         &self,
         b: &mut HLBlockEmitter<'_>,

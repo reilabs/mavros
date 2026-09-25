@@ -715,6 +715,9 @@ fn rewrite_function(
 ) {
     let mut replacement_tuple_map: HashMap<ValueId, ValueId> = HashMap::default();
 
+    // What the function reads, so that a rewrite need not build what nothing would read.
+    let used = read_values(function);
+
     let lifted_block_args: HashMap<BlockId, Vec<bool>> = function
         .get_blocks()
         .map(|(bid, block)| {
@@ -777,6 +780,7 @@ fn rewrite_function(
                 type_info,
                 affected,
                 lifts,
+                &used,
                 &mut replacement_tuple_map,
                 &mut new_instrs,
             );
@@ -871,6 +875,26 @@ fn rewrite_function(
     );
 }
 
+/// Every value an instruction or a terminator of `function` reads.
+fn read_values(function: &HLFunction) -> HashSet<ValueId> {
+    let mut used = HashSet::default();
+    for (_, block) in function.get_blocks() {
+        for op in block.get_instructions() {
+            used.extend(op.get_inputs().copied());
+        }
+        match block.get_terminator() {
+            Some(Terminator::Jmp(_, args)) | Some(Terminator::Return(args)) => {
+                used.extend(args.iter().copied());
+            }
+            Some(Terminator::JmpIf(condition, _, _)) => {
+                used.insert(*condition);
+            }
+            None => {}
+        }
+    }
+    used
+}
+
 /// Rewrites one instruction into `new_instrs`, recording any slice-tuple replacement it
 /// introduces.
 fn rewrite_instruction(
@@ -881,6 +905,7 @@ fn rewrite_instruction(
     type_info: &FunctionTypeInfo,
     affected: &HashMap<ValueId, Type>,
     lifts: &BoundaryLifts,
+    used: &HashSet<ValueId>,
     replacement_tuple_map: &mut HashMap<ValueId, ValueId>,
     new_instrs: &mut Vec<LocatedOpCode>,
 ) {
@@ -915,10 +940,15 @@ fn rewrite_instruction(
                         let one = b.int_const(IntBits::one(32));
                         let mut physical = p;
                         let mut cursor = b.uadd(st, ll);
-                        for value in &values {
+                        for (index, value) in values.iter().enumerate() {
+                            // Advanced between values only. A cursor past the last one is read by
+                            // nothing, and as a checked sum it would be kept alive for the overflow
+                            // check it owes, which a slot index cannot need.
+                            if index > 0 {
+                                cursor = b.uadd(cursor, one);
+                            }
                             let grown = b.slice_push(physical, vec![*value], SliceOpDir::Back);
                             physical = b.array_set(grown, cursor, *value);
-                            cursor = b.uadd(cursor, one);
                         }
                         (physical, b.uadd(ll, bump), st)
                     }
@@ -976,18 +1006,21 @@ fn rewrite_instruction(
             b.assert_cmp(CmpKind::ULt, zero, ll);
             let one = b.int_const(IntBits::one(32));
             let new_ll = b.usub(ll, one);
+            let read = used.contains(&result_elem);
             let (elem_index, new_st) = match dir {
-                SliceOpDir::Back => (b.uadd(st, new_ll), st),
-                SliceOpDir::Front => (st, b.uadd(st, one)),
+                SliceOpDir::Back => (read.then(|| b.uadd(st, new_ll)), st),
+                SliceOpDir::Front => (Some(st), b.uadd(st, one)),
             };
-            new_instrs.push(
-                OpCode::ArrayGet {
-                    result: result_elem,
-                    array: p,
-                    index: elem_index,
-                }
-                .locate(loc.clone()),
-            );
+            if read {
+                new_instrs.push(
+                    OpCode::ArrayGet {
+                        result: result_elem,
+                        array: p,
+                        index: elem_index.expect("an index is built for an element that is read"),
+                    }
+                    .locate(loc.clone()),
+                );
+            }
             let t = mk_slice_tuple(p, new_ll, new_st, phys_ty, function, ssa, new_instrs, loc);
             replacement_tuple_map.insert(result_slice, t);
         }
