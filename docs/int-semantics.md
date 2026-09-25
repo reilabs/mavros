@@ -234,10 +234,14 @@ only entry whose failure mode is a program Noir rejects producing a proof.
 
 Two of these rejections are stated twice, because a witness operand cannot be checked with a pure
 comparison: `witness_bitwise.rs` must provide the amount bound and `witness_integer_arith.rs`'s
-guarded rangechecks must overflow, both built out of constraints. A **witness** shift amount gets no
-check at all: the powers-of-two table's keys are exactly the legal amounts, so `emit_pow2_factor`'s
-lookup rejects an out-of-range one as a side effect of reading the factor it was going to need
-anyway.
+guarded rangechecks must overflow, both built out of constraints. Past `widest_cell_sum_bits`, the
+widest sum one field element holds, an unsigned sum or difference is rejected by the carry chain in
+`wide_witness_ints.rs` instead: it lets no carry out of the top limb, so an overflow fails the range
+check on that limb of the answer.
+
+A **witness** shift amount gets no check at all: the powers-of-two table's keys are exactly the
+legal amounts, so `emit_pow2_factor`'s lookup rejects an out-of-range one as a side effect of
+reading the factor it was going to need anyway.
 
 Two cases still pay the explicit `emit_shift_amount_check`. A **pure** amount pays it on either
 lowering — the constant-amount one when the left-hand side is unsigned, the general one when it is

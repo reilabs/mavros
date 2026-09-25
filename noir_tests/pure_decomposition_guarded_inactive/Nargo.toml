@@ -1,0 +1,6 @@
+[package]
+name = "pure_decomposition_guarded_inactive"
+type = "bin"
+authors = [""]
+
+[dependencies]

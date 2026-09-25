@@ -1155,7 +1155,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
         }
     }
 
-    fn expect_constant_bool(&self, _ctx: &mut CostAnalysis) -> bool {
+    fn try_constant_bool(&self, _ctx: &mut CostAnalysis) -> Result<bool, AssertionFailure> {
         let specialized = match &self.specialized {
             Value::Int(v) if v.bits() == 1 => !v.is_zero(),
             _ => ice!(
@@ -1179,7 +1179,7 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
             specialized, unspecialized,
             "ICE: branch condition diverged between the specialized and unspecialized cost-analysis worlds"
         );
-        specialized
+        Ok(specialized)
     }
 
     fn of_int(v: &IntBits, _ctx: &mut CostAnalysis) -> Self {

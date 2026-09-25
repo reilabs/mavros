@@ -4,6 +4,7 @@ pub mod instrumenter;
 pub mod liveness;
 pub mod lookup_sizing;
 pub mod points_to;
+pub mod return_reachability;
 pub mod shared;
 pub mod symbolic_executor;
 pub mod types;
