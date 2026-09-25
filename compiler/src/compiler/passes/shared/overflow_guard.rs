@@ -93,10 +93,10 @@ pub fn overflow_provably_impossible(
 /// `wrapped` is the operation's, the value it produces having wrapped, which is what the backends
 /// compute and what the add/sub tests below compare against.
 ///
-/// It is **required for `Add` and `Sub`, and ignored for `Mul`**, which decides which of the two
-/// groups DCE may rewrite a dead operation into. `bits` is the operand width. A signed operation is
-/// additionally bounded by [`assert_signed_op_width`], because the sign-bit and magnitude
-/// arithmetic below is built at that width.
+/// It is **required for `Add` and `Sub`, and ignored for `Mul`**, whose test is built from the
+/// operands alone. `bits` is the operand width. A signed operation is additionally bounded by
+/// [`assert_signed_op_width`], because the sign-bit and magnitude arithmetic below is built at
+/// that width.
 ///
 /// # Panics
 ///
@@ -117,7 +117,7 @@ pub fn emit_overflow_cond(
     match (signed, kind.group()) {
         (_, group @ (ArithGroup::Add | ArithGroup::Sub)) => {
             let wrapped = wrapped.expect(
-                "ICE: an add/sub overflow check compares against the operation's own result, so the caller must have emitted it; see `overflow_rewrite_saves_the_operation`",
+                "ICE: an add/sub overflow check compares against the operation's own result, so the caller must have emitted it",
             );
             if signed {
                 signed_add_sub_overflow(emitter, group, lhs, rhs, wrapped, bits)
@@ -133,10 +133,8 @@ pub fn emit_overflow_cond(
 
 /// Emit `assert(!overflows(lhs, rhs))`, the unguarded form of the check.
 ///
-/// The caller decides whether the operation itself accompanies it, and supplies `wrapped` on
-/// [`emit_overflow_cond`]'s terms: `LowerPureGuards` emits the operation first and passes its
-/// result, while `DCE` — which is deleting the operation — passes `None` and so may only do this
-/// for a `Mul`.
+/// The operation itself is not emitted here, and `wrapped` is supplied on [`emit_overflow_cond`]'s
+/// terms: `LowerPureGuards` emits the operation first and passes its result.
 ///
 /// # Panics
 ///
@@ -591,10 +589,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "the caller must have emitted it")]
     fn an_add_check_without_the_sum_is_a_compiler_bug() {
-        // The add/sub test is a comparison against the operation's own result, so there is nothing
-        // to build it from when the caller is deleting the operation. Rebuilding the sum here
-        // would resurrect what `DCE` came to remove, so `None` is refused rather than filled in --
-        // and `overflow_rewrite_saves_the_operation` is what keeps `DCE` off this path.
+        // The add/sub test is a comparison against the operation's own result, so without that
+        // result there is nothing to build it from. Rebuilding the sum here would emit a second
+        // copy of an operation the caller owns, so `None` is refused rather than filled in.
         with_emitter(|e| {
             let a = e.int_const(IntBits::one(8));
             let b = e.int_const(IntBits::from_u128(8, 2));
@@ -604,8 +601,7 @@ mod tests {
 
     #[test]
     fn a_multiply_check_needs_no_sum() {
-        // The other half of the same decision: a multiply's test is built from the operands alone,
-        // which is exactly why it is the group `DCE` may rewrite a dead operation into.
+        // The other half of the same contract: a multiply's test is built from the operands alone.
         with_emitter(|e| {
             let a = e.int_const(IntBits::one(8));
             let b = e.int_const(IntBits::from_u128(8, 2));
