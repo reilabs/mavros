@@ -48,9 +48,10 @@ const NARROW_HOST_BITS: usize = HOST_WORD_BITS;
 /// `passes::wide_witness_ints` acts on each limb past that. The unsigned sum, difference and
 /// ordering stay in one cell while the field holds their sum, and go through the carry chain in
 /// `passes::wide_witness_ints` beyond it; the unsigned product does the same with the schoolbook,
-/// past [`single_cell_product_fits`]; equality has no width at all.
+/// past [`single_cell_product_fits`], and so do the unsigned division and remainder, whose check is
+/// that product; equality has no width at all.
 ///
-/// The rest of the arithmetic (division, remainder and the shifts) is currently refused by
+/// The rest of the arithmetic (the shifts, and every signed operation) is currently refused by
 /// `passes::width_validation`, with the restrictions to be lifted by the remaining work.
 /// Past it too is everything that is not arithmetic: the multi-cell representation carries a value
 /// as limbs, and the bit window and the range check are bounded by the field rather than by this.
@@ -312,7 +313,8 @@ pub fn widest_cell_sum_bits(field: FieldConfig) -> usize {
 /// schoolbook at exactly a double host limb, which carries its own packing predicate.
 ///
 /// Past it, an unsigned product goes through the schoolbook in `passes::wide_witness_ints`, which
-/// runs first and so is the one that reads this.
+/// runs first and so is the one that reads this. So does an unsigned division or remainder, which
+/// the single-cell lowering checks by the same product, `q·d`, formed in one element.
 pub fn single_cell_product_fits(field: FieldConfig, bits: usize) -> bool {
     2 * bits <= widest_injective_int_bits(field)
         || (bits == 2 * HOST_LIMB_BITS && two_limb_product_packing_fits(field, bits))
