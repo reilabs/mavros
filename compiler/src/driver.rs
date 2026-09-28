@@ -48,6 +48,7 @@ use crate::{
             instruction_lowering::InstructionLowering,
             lookup_spilling::LookupSpilling,
             lower_map_casts::LowerMapCasts,
+            lower_reference_arguments::LowerReferenceArguments,
             mem2reg::Mem2Reg,
             merge_identical_functions::MergeIdenticalFunctions,
             normalize_asserts::NormalizeAsserts,
@@ -372,6 +373,7 @@ impl Driver {
             "make_struct_access_static".to_string(),
             self.draw_cfg,
             vec![
+                Box::new(LowerReferenceArguments),
                 Box::new(PrepareEntryPoint::new(self.main_is_unconstrained)),
                 // Eliminate all tuple types immediately after the entry point is prepared, so every
                 // subsequent pass operates on tuple-free IR.
