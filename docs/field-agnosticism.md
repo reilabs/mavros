@@ -569,7 +569,7 @@ A single-field arithmetic op assumes its exact result span fits one cell (one `b
 `two_pow`-based packing). Fix = multi-limb schoolbook / carry-chain lowering in the FALSE branch.
 
 - [ ] `witness_integer_arith.rs` — `lower_signed_mul` (no fallback), `lower_signed_addsub`,
-      `signed_value_from_encoded`/`encode_signed_value` (sign packing), `lower_unsigned_divmod`.
+      `signed_value_from_encoded`/`encode_signed_value` (sign packing).
 - [x] `witness_integer_arith.rs` — `lower_unsigned_mul` (single-field product + the `2³ʰ⁺¹` u128
       fallback packing). The FALSE case is the **schoolbook product** in `WideWitnessInts`, which
       takes every unsigned witnessed product `single_cell_product_fits` (`shared/limbs.rs`) says one
@@ -583,6 +583,17 @@ A single-field arithmetic op assumes its exact result span fits one cell (one `b
       fills the field, is the one known case, and `accumulated_products` is the knob that narrows
       the limb until it fits. `lower_unsigned_mul` keeps its two refusals for the product
       `lower_unsigned_divmod` re-emits after the schoolbook has run (see below).
+- [x] `witness_integer_arith.rs` — `lower_unsigned_divmod` (`q·divisor + r` in one field element).
+      The FALSE case is the **division** in `WideWitnessInts`, which takes every unsigned witnessed
+      division and remainder whose product `single_cell_product_fits` says one cell cannot hold. The
+      quotient and the remainder are witnessed as range-checked limbs, and `q·d + r == n` is one
+      schoolbook: the remainder is added to its columns, and each column is held to the dividend's
+      limb instead of being range-checked. `r < d` is the carry chain with its top borrow forced
+      out, which is also what refuses a zero divisor. A constant operand bounds both answers, so a
+      limb they cannot reach is never witnessed. The funnel asks `schoolbook_division_fits`, which
+      plans that same schoolbook, and refuses a signed division wherever the single cell cannot hold
+      its product, as the signed lowering reads its magnitudes through this one. What reaches the
+      single-cell lowering fits the cell, and it asserts so.
 - [x] `witness_integer_arith.rs` — `lower_unsigned_addsub`; `witness_compare.rs` —
       `lower_unsigned_lt` for an unsigned ordering; and `witness_assert.rs` —
       `lower_unsigned_assert_lt` for an asserted one. The FALSE case is the **carry chain** in
@@ -618,10 +629,9 @@ to the half-limb decomposition instead of refusing. What that site still refuses
 **The rest still carry the assumption unchecked**, with only a `FIELD-ASSUMPTION` comment on it, and
 are what to fix first if a narrow field is configured before P5's lowerings exist: the
 `signed_value_from_encoded`/`encode_signed_value` sign packing, and `lower_signed_lt`'s ordering.
-`lower_unsigned_divmod` is a mixture: its 128-bit path reconstructs `q·divisor + r` by emitting
-`UMul`/`UAdd` **ops**, which this same pass re-lowers after `WideWitnessInts` has run, so it
-inherits the single-cell mul's refusal rather than reaching the schoolbook; its narrow path
-multiplies in the field directly and has no check of its own.
+`lower_unsigned_divmod`'s 128-bit path reconstructs `q·divisor + r` by emitting `UMul`/`UAdd`
+**ops**, which this same pass re-lowers after `WideWitnessInts` has run, so that product meets the
+single-cell mul's refusals rather than the schoolbook.
 
 Note that the funnel's condition is per-site, because `witness_limb_bits` certifies only that a bare
 `a·b` fits. A lowering that additionally scales a column by a place value asks

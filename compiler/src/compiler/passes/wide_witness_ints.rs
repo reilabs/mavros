@@ -30,8 +30,8 @@
 //!   source value to agree with, so they are simply range-checked.
 //!
 //! Everything else either moves limbs around or, as the bitwise operations do, acts on each limb
-//! within its own width, and so they remain constrained. The exceptions are the carry chain and
-//! the schoolbook product.
+//! within its own width, and so they remain constrained. The exceptions are the carry chain, the
+//! schoolbook product and the division built from the two.
 //!
 //! # The Carry Chain
 //!
@@ -56,6 +56,17 @@
 //! range-checked at the top limb's width instead, and every partial product landing past it is
 //! held to zero, one constraint per left limb. [`plan_product`] decides where the reductions fall
 //! and states why each identity holds as integers rather than modulo `p`.
+//!
+//! # The Division
+//!
+//! An unsigned division or remainder runs here wherever its single-cell lowering could not form
+//! `q·d` in one element, which is where the product does. The quotient and the remainder are
+//! witnessed as limbs from the pure side's own division and pinned by two checks: `q·d + r == n`,
+//! which is the schoolbook with `r` as one more term in each column and every column **held to the
+//! dividend's limb** rather than range-checked, and `r < d`, which is the carry chain with its top
+//! borrow forced out and so also refuses a zero divisor. Together they admit exactly the pair
+//! Euclidean division gives. A constant operand bounds both answers, and a limb they cannot reach is
+//! a known zero rather than a column.
 //!
 //! # Strategy
 //!
@@ -145,8 +156,8 @@ impl Pass for WideWitnessInts {
                 .collect();
             let value_map = plan_function(ssa, fid, &reachable, type_info);
             // A function with no limbs can still hold an operation whose operands have an element
-            // each and whose sum or product does not, which the chain and the schoolbook lower all
-            // the same.
+            // each and whose sum or product does not, which the chain, the schoolbook and the
+            // division lower all the same.
             let fti = type_info.get_function(fid);
             let lowers_here = || {
                 reachable.iter().any(|bid| {
@@ -156,6 +167,7 @@ impl Pass for WideWitnessInts {
                         .any(|op| {
                             chained(op, fti, field).is_some()
                                 || multiplied(op, fti, field).is_some()
+                                || divided(op, fti, field).is_some()
                         })
                 })
             };
@@ -449,6 +461,7 @@ fn rewrite_function(
         }
     }
 
+    let mut known = HashMap::default();
     for bid in reachable {
         let block = function.get_block_mut(*bid);
 
@@ -475,6 +488,7 @@ fn rewrite_function(
                 types: fti,
                 field,
                 decomposed: &mut decomposed,
+                known: &mut known,
                 out: Vec::new(),
             };
             rewriter.lower(instr.as_ref());
@@ -515,6 +529,14 @@ struct Rewriter<'a> {
     /// rewritten in order, so an earlier decomposition is always in scope.
     decomposed: &'a mut HashMap<(ValueId, usize), Vec<ValueId>>,
 
+    /// The values this function's rewrite has minted whose pattern is known at compile time but
+    /// that are not constants themselves, by value.
+    ///
+    /// A witnessed constant is a cast of a constant, as [`Self::zero_limb`] makes one, and
+    /// `get_const` finds nothing behind a cast. [`Self::known`] reads both. Kept for the whole
+    /// function rather than per block, as a pattern holds wherever its value is in scope.
+    known: &'a mut HashMap<ValueId, IntBits>,
+
     out: Vec<OpCode>,
 }
 
@@ -530,7 +552,8 @@ impl Rewriter<'_> {
     /// The limbs of an operand, splitting a **pure** one that the plan never saw.
     ///
     /// `check_widths` makes both operands of a non-shift the same width, and a mixed pure/witness
-    /// pair is legal, so one witnessed operand is sufficient to require a witness lowering.
+    /// pair is legal, so one witnessed operand is sufficient to require a witness lowering. A
+    /// constant is split at compile time, so its limbs are constants too.
     fn operand_limbs(&mut self, value: ValueId, expected: usize) -> Vec<ValueId> {
         let mapped = self.limbs(value);
         if mapped.len() == expected {
@@ -552,12 +575,16 @@ impl Rewriter<'_> {
             "ICE: an int{bits} operand met a value of {expected} limbs"
         );
 
+        let constant = self.known(value);
         widths
             .into_iter()
             .enumerate()
-            .map(|(index, width)| {
-                let shifted = self.shifted_down(value, bits, index * self.limb_bits());
-                self.cast(shifted, CastTarget::Int(width))
+            .map(|(index, width)| match &constant {
+                Some(pattern) => self.int_const(pattern.bit_range(index * self.limb_bits(), width)),
+                None => {
+                    let shifted = self.shifted_down(value, bits, index * self.limb_bits());
+                    self.cast(shifted, CastTarget::Int(width))
+                }
             })
             .collect()
     }
@@ -574,6 +601,15 @@ impl Rewriter<'_> {
         single(self.value_map, value)
     }
 
+    /// The guard's condition, as its one limb, and the operation it wraps, or no condition and `op`
+    /// itself where there is no guard.
+    fn split_guard<'o>(&self, op: &'o OpCode) -> (Option<ValueId>, &'o OpCode) {
+        match op {
+            OpCode::Guard { condition, inner } => (Some(self.one(*condition)), inner.as_ref()),
+            other => (None, other),
+        }
+    }
+
     /// The declared width of a witnessed integer this pass represents as limbs.
     fn wide_width(&self, value: ValueId) -> Option<usize> {
         wide_witness_width(self.types.get_value_type(value), self.field)
@@ -584,7 +620,33 @@ impl Rewriter<'_> {
     }
 
     fn push(&mut self, op: OpCode) {
+        if let OpCode::Cast {
+            result,
+            value,
+            target,
+        } = &op
+            && let Some(pattern) = self.known(*value)
+        {
+            let pattern = match target {
+                CastTarget::WitnessOf | CastTarget::ValueOf | CastTarget::Nop => Some(pattern),
+                CastTarget::Int(bits) => Some(pattern.cast(*bits)),
+                _ => None,
+            };
+            if let Some(pattern) = pattern {
+                self.known.insert(*result, pattern);
+            }
+        }
         self.out.push(op);
+    }
+
+    /// The pattern of an integer known at compile time: a constant, or a value minted from one
+    /// through casts that keep or cut its pattern.
+    fn known(&self, value: ValueId) -> Option<IntBits> {
+        match self.ssa.get_const(value).as_deref() {
+            Some(Constant::Int(pattern)) => Some(pattern.clone()),
+            Some(_) => None,
+            None => self.known.get(&value).cloned(),
+        }
     }
 
     fn cast(&mut self, value: ValueId, target: CastTarget) -> ValueId {
@@ -705,21 +767,7 @@ impl Rewriter<'_> {
         let mut limbs = Vec::with_capacity(widths.len());
         let mut fields = Vec::with_capacity(widths.len());
         for (index, width) in widths.iter().enumerate() {
-            let low = index * self.limb_bits();
-            let hint = self.shifted_down(pure, bits, low);
-            let narrowed = self.cast(hint, CastTarget::Int(*width));
-
-            // A witness column written from the hint: the injection would keep the pure shadow as a
-            // live operand all the way into R1CS, where a witness strip is an ICE because a hint is
-            // not a constraint.
-            let hint_field = self.cast(narrowed, CastTarget::Field);
-            let written = self.write_witness(hint_field);
-            let limb = self.cast(written, CastTarget::Int(*width));
-            let limb_field = self.cast(limb, CastTarget::Field);
-            self.push(OpCode::Rangecheck {
-                value: limb_field,
-                max_bits: *width,
-            });
+            let (limb, limb_field) = self.witness_limb(pure, bits, index, *width, *width);
             limbs.push(limb);
             fields.push(limb_field);
         }
@@ -732,17 +780,37 @@ impl Rewriter<'_> {
         }
 
         let value_field = self.cast(value, CastTarget::Field);
-        let difference = self.bin(BinaryArithOpKind::USub, value_field, sum);
-        let zero = self.field_const(self.field.zero());
-        let one = self.field_const(self.field.one());
-        self.push(OpCode::Constrain {
-            a: one,
-            b: difference,
-            c: zero,
-        });
+        self.constrain_equal(value_field, sum, None);
 
         self.decomposed.insert((value, bits), limbs.clone());
         limbs
+    }
+
+    /// Limb `index` of a pure `value` of `bits`, at `width`, written to a witness column and
+    /// range-checked at `checked` bits, as the limb and its field element.
+    ///
+    /// The column is written from the hint rather than injected as an injection would keep the pure
+    /// shadow as a live operand all the way into R1CS, where a witness strip is an ICE because a
+    /// hint is not a constraint.
+    fn witness_limb(
+        &mut self,
+        value: ValueId,
+        bits: usize,
+        index: usize,
+        width: usize,
+        checked: usize,
+    ) -> (ValueId, ValueId) {
+        let hint = self.shifted_down(value, bits, index * self.limb_bits());
+        let narrowed = self.cast(hint, CastTarget::Int(width));
+        let hint_field = self.cast(narrowed, CastTarget::Field);
+        let written = self.write_witness(hint_field);
+        let limb = self.cast(written, CastTarget::Int(width));
+        let limb_field = self.cast(limb, CastTarget::Field);
+        self.push(OpCode::Rangecheck {
+            value: limb_field,
+            max_bits: checked,
+        });
+        (limb, limb_field)
     }
 
     /// A **pure** wide value injected into the representation as witnessed, range-checked limbs.
@@ -755,6 +823,9 @@ impl Rewriter<'_> {
     /// [`Self::decompose`] cannot be used here: it constrains the limbs against the source's field
     /// element, which a value wider than the modulus does not have. The limbs are written into
     /// `results`, so that entering the representation costs only the injection.
+    ///
+    /// A constant enters as witnessed constants, one per limb, which are pinned by being constants
+    /// and so need no range check.
     fn inject(&mut self, value: ValueId, bits: usize, results: &[ValueId]) {
         let widths = limb_widths(bits, self.limb_bits());
         assert_eq!(
@@ -764,6 +835,17 @@ impl Rewriter<'_> {
             widths.len(),
             results.len()
         );
+        if let Some(pattern) = self.known(value) {
+            for (index, (result, width)) in results.iter().zip(&widths).enumerate() {
+                let limb = self.int_const(pattern.bit_range(index * self.limb_bits(), *width));
+                self.push(OpCode::Cast {
+                    result: *result,
+                    value: limb,
+                    target: CastTarget::WitnessOf,
+                });
+            }
+            return;
+        }
         for (index, (result, width)) in results.iter().zip(&widths).enumerate() {
             let low = index * self.limb_bits();
             let hint = self.shifted_down(value, bits, low);
@@ -940,14 +1022,15 @@ enum CarryOut {
     Witnessed,
 }
 
-/// An operation the carry chain lowers, with the width it is lowered at.
-struct Chained {
+/// The operands of an operation one of the gadgets lowers, with the width it is lowered at.
+struct Operands {
     /// The width of both operands, which `check_widths` makes the same, and so of every limb list
-    /// the chain splits them into.
+    /// the gadget splits them into.
     bits: usize,
 
-    /// The left operand as the program names it: the minuend of a difference, and the side an
-    /// ordering asks is the smaller. One element or limbs, witnessed or pure.
+    /// The left operand as the program names it: the minuend of a difference, the side an ordering
+    /// asks is the smaller, and the dividend of a division. One element or limbs, witnessed or
+    /// pure.
     lhs: ValueId,
 
     /// The right operand as the program names it, in the same forms as `lhs`.
@@ -973,13 +1056,10 @@ impl Rewriter<'_> {
     /// All three are lowered using the carry [`Chain`] regardless of the operand format, as it is
     /// necessary to handle overflow properly.
     fn lower_through_chain(&mut self, op: &OpCode) -> bool {
-        let Some(Chained { bits, lhs, rhs }) = chained(op, self.types, self.field) else {
+        let Some(Operands { bits, lhs, rhs }) = chained(op, self.types, self.field) else {
             return false;
         };
-        let (guard, inner) = match op {
-            OpCode::Guard { condition, inner } => (Some(self.one(*condition)), inner.as_ref()),
-            other => (None, other),
-        };
+        let (guard, inner) = self.split_guard(op);
 
         match inner {
             OpCode::BinaryArithOp { kind, result, .. } => {
@@ -1027,6 +1107,9 @@ impl Rewriter<'_> {
     /// Under a guard each limb is zero where the guard is off. A result held as limbs takes them as
     /// they are; one still held as an element has one, as the operands do, and it is only their
     /// sum or product that lacks one, which the limbs have already carried.
+    ///
+    /// A limb the gadget knows at compile time is a constant, as every limb of `0 / d` is, and it is
+    /// delivered as a **witnessed** integer constant, as [`Self::zero_limb`] makes one.
     fn deliver(
         &mut self,
         result: ValueId,
@@ -1035,13 +1118,22 @@ impl Rewriter<'_> {
         bits: usize,
         guard: Option<ValueId>,
     ) {
+        let witnessed = self.is_witness(result);
         let kept: Vec<ValueId> = answer
             .into_iter()
-            .map(|limb| match guard {
+            .zip(widths)
+            .map(|(limb, width)| match guard {
                 Some(condition) => {
                     let zero = self.field_const(self.field.zero());
                     self.select(condition, limb, zero)
                 }
+                None if witnessed => match self.constant_limb(limb, *width) {
+                    Some(pattern) => {
+                        let constant = self.int_const(pattern);
+                        self.cast(constant, CastTarget::WitnessOf)
+                    }
+                    None => limb,
+                },
                 None => limb,
             })
             .collect();
@@ -1070,6 +1162,22 @@ impl Rewriter<'_> {
         }
     }
 
+    /// The pattern of an answer limb known at compile time, read at its limb's `width`.
+    fn constant_limb(&self, limb: ValueId, width: usize) -> Option<IntBits> {
+        match self.ssa.get_const(limb).as_deref() {
+            Some(Constant::Int(pattern)) => Some(pattern.cast(width)),
+            Some(Constant::Field(element)) => {
+                let limbs = element.into_bigint().0;
+                assert!(
+                    IntBits::field_limbs_fit(&limbs, width),
+                    "ICE: a known answer limb does not fit its width of {width} bits"
+                );
+                Some(IntBits::from_field_limbs(&limbs, width))
+            }
+            _ => None,
+        }
+    }
+
     /// `lhs + rhs` or `lhs - rhs` limb by limb, each limb's carry a witnessed bit.
     ///
     /// Per limb of width `w`, the answer is `a + b + c_in - 2^w * c_out` for a sum and
@@ -1091,9 +1199,36 @@ impl Rewriter<'_> {
         out: CarryOut,
         guard: Option<ValueId>,
     ) -> Chain {
+        let widths = limb_widths(bits, self.limb_bits());
+        let lhs = self.chain_limbs(lhs, bits, widths.len());
+        let rhs = self.chain_limbs(rhs, bits, widths.len());
+        self.carry_chain_over(subtract, &lhs, &rhs, widths, out, guard)
+    }
+
+    /// [`Self::carry_chain`] over operands already cut into limbs at `widths`, each limb with
+    /// whether it is witnessed, which decides how its hint is read.
+    ///
+    /// A limb list may mix the two: a limb that is a known constant is a pure value beside the
+    /// witnessed ones.
+    fn carry_chain_over(
+        &mut self,
+        subtract: bool,
+        lhs: &[(ValueId, bool)],
+        rhs: &[(ValueId, bool)],
+        widths: Vec<usize>,
+        out: CarryOut,
+        guard: Option<ValueId>,
+    ) -> Chain {
         assert!(
             subtract || out != CarryOut::One,
             "ICE: a sum whose top carry is forced out has no meaning"
+        );
+        assert!(
+            lhs.len() == widths.len() && rhs.len() == widths.len(),
+            "ICE: a chain of {} limbs met operands of {} and {}",
+            widths.len(),
+            lhs.len(),
+            rhs.len()
         );
         let (fold, unfold) = if subtract {
             (BinaryArithOpKind::USub, BinaryArithOpKind::UAdd)
@@ -1101,19 +1236,14 @@ impl Rewriter<'_> {
             (BinaryArithOpKind::UAdd, BinaryArithOpKind::USub)
         };
 
-        let widths = limb_widths(bits, self.limb_bits());
-        let (lhs_witnessed, rhs_witnessed) = (self.is_witness(lhs), self.is_witness(rhs));
-        let lhs = self.chain_operand(lhs, bits, widths.len());
-        let rhs = self.chain_operand(rhs, bits, widths.len());
-
         // The carry into the next limb: its hint, which the next hint is computed from, and its
         // column, which the next identity reads.
         let mut carry: Option<(ValueId, ValueId)> = None;
         let mut answer = Vec::with_capacity(widths.len());
         for (index, width) in widths.iter().enumerate() {
             let top = index + 1 == widths.len();
-            let a = self.cast(lhs[index], CastTarget::Field);
-            let b = self.cast(rhs[index], CastTarget::Field);
+            let a = self.cast(lhs[index].0, CastTarget::Field);
+            let b = self.cast(rhs[index].0, CastTarget::Field);
             let mut limb = self.bin(fold, a, b);
             if let Some((_, column)) = carry {
                 limb = self.bin(fold, limb, column);
@@ -1123,8 +1253,8 @@ impl Rewriter<'_> {
             let next = if !top || out == CarryOut::Witnessed {
                 let hint = self.carry_hint(
                     subtract,
-                    (lhs[index], lhs_witnessed),
-                    (rhs[index], rhs_witnessed),
+                    lhs[index],
+                    rhs[index],
                     carry.map(|(hint, _)| hint),
                     *width,
                 );
@@ -1227,16 +1357,21 @@ impl Rewriter<'_> {
         }
         self.operand_limbs(value, count)
     }
+
+    /// [`Self::chain_operand`], each limb paired with whether it is witnessed.
+    fn chain_limbs(&mut self, value: ValueId, bits: usize, count: usize) -> Vec<(ValueId, bool)> {
+        let witnessed = self.is_witness(value);
+        self.chain_operand(value, bits, count)
+            .into_iter()
+            .map(|limb| (limb, witnessed))
+            .collect()
+    }
 }
 
 /// The operation the carry chain lowers, if `op` is one: an unsigned sum, difference or ordering,
 /// guarded or not, with a witnessed operand, past [`widest_cell_sum_bits`].
-fn chained(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Option<Chained> {
-    let inner = match op {
-        OpCode::Guard { inner, .. } => inner.as_ref(),
-        other => other,
-    };
-    let (lhs, rhs) = match inner {
+fn chained(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Option<Operands> {
+    let (lhs, rhs) = match unguarded(op) {
         OpCode::BinaryArithOp {
             kind: BinaryArithOpKind::UAdd | BinaryArithOpKind::USub,
             lhs,
@@ -1256,24 +1391,12 @@ fn chained(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Option<
         } => (*lhs, *rhs),
         _ => return None,
     };
-    let bits = int_width(types.get_value_type(lhs))?;
-    let witnessed =
-        types.get_value_type(lhs).is_witness_of() || types.get_value_type(rhs).is_witness_of();
-    (witnessed && bits > widest_cell_sum_bits(field)).then_some(Chained { bits, lhs, rhs })
+    let bits = witnessed_width(types, lhs, rhs)?;
+    (bits > widest_cell_sum_bits(field)).then_some(Operands { bits, lhs, rhs })
 }
 
 // THE SCHOOLBOOK PRODUCT
 // ================================================================================================
-
-/// An unsigned product the schoolbook lowers, with the width it is lowered at.
-///
-/// Read as [`Chained`] is: `lhs` and `rhs` are the operands as the program names them, one element
-/// or limbs, witnessed or pure, and `check_widths` makes them the same width.
-struct Multiplied {
-    bits: usize,
-    lhs: ValueId,
-    rhs: ValueId,
-}
 
 /// One operand of the schoolbook, limb by limb.
 struct Factor {
@@ -1285,6 +1408,24 @@ struct Factor {
 
     /// The largest value each limb can take: its width's, or a constant limb's own.
     bounds: Vec<BigUint>,
+}
+
+impl Factor {
+    /// The largest value the whole operand can take, from its limbs' bounds at `limb_bits` apart.
+    fn largest(&self, limb_bits: usize) -> BigUint {
+        self.bounds
+            .iter()
+            .enumerate()
+            .map(|(index, bound)| bound << (index * limb_bits))
+            .sum()
+    }
+
+    /// Whether every limb is known, so that its bounds are its value.
+    fn is_constant(&self) -> bool {
+        self.limbs
+            .iter()
+            .all(|limb| matches!(limb, Limb::Constant(_)))
+    }
 }
 
 /// One limb of a [`Factor`].
@@ -1305,6 +1446,9 @@ enum Step {
     /// Add column `m` of the product whole: every partial product landing in it, as one witnessed
     /// value the evaluation identity pins.
     Column(usize),
+
+    /// Add limb `index` of the addend, which lands in the column of the same index.
+    Addend(usize),
 
     /// Add the next carry out of the column below, in the order that column made them.
     Carry,
@@ -1342,8 +1486,12 @@ struct ProductPlan {
     hint_bits: usize,
 }
 
-/// The schoolbook plan for operands whose limbs are bounded by `lhs` and `rhs`, at the answer's
-/// limb `widths`, on a field whose widest injective width is `injective`.
+/// The schoolbook plan for operands whose limbs are bounded by `lhs` and `rhs`, plus an `addend`
+/// whose limbs are bounded as given (empty for none), at the answer's limb `widths`, on a field
+/// whose widest injective width is `injective`.
+///
+/// The addend is what lets a division state `q·d + r` as one sum: limb `i` of `r` is one more
+/// non-negative term in column `i`, so every argument below holds of it unchanged.
 ///
 /// [`None`] where one partial product and the headroom it is reduced in do not fit an element.
 ///
@@ -1376,6 +1524,7 @@ struct ProductPlan {
 fn plan_product(
     lhs: &[BigUint],
     rhs: &[BigUint],
+    addend: &[BigUint],
     widths: &[usize],
     injective: usize,
     evaluate: bool,
@@ -1419,10 +1568,15 @@ fn plan_product(
                 })
                 .collect()
         };
+        let added = addend
+            .get(column)
+            .filter(|bound| !bound.is_zero())
+            .map(|bound| (Step::Addend(column), bound.clone()));
         let carries = std::mem::take(&mut incoming)
             .into_iter()
             .map(|bound| (Step::Carry, bound));
-        let terms: Vec<(Step, BigUint)> = products.into_iter().chain(carries).collect();
+        let terms: Vec<(Step, BigUint)> =
+            products.into_iter().chain(added).chain(carries).collect();
 
         let mut steps = Vec::new();
         let mut accumulated = BigUint::zero();
@@ -1499,14 +1653,28 @@ fn plan_product(
 /// The bound is the operands' full range; a constant operand only tightens it. An evaluation the
 /// field cannot hold falls back to summing, so it is the summing plan that decides.
 pub fn schoolbook_product_fits(field: FieldConfig, bits: usize) -> bool {
+    schoolbook_fits(field, bits, false)
+}
+
+/// Whether the representation takes an unsigned division or remainder of `bits`-wide operands on
+/// `field`: its `q·d + r` is the schoolbook with the remainder added to its columns.
+///
+/// The bound is every operand's full range, as in [`schoolbook_product_fits`]; a constant only
+/// tightens it.
+pub fn schoolbook_division_fits(field: FieldConfig, bits: usize) -> bool {
+    schoolbook_fits(field, bits, true)
+}
+
+/// Whether [`plan_product`] plans a `bits`-wide schoolbook on `field` at full operand ranges, with
+/// a full-range addend or without one.
+fn schoolbook_fits(field: FieldConfig, bits: usize, with_addend: bool) -> bool {
     let widths = limb_widths(bits, witness_limb_bits(field));
-    let bounds: Vec<BigUint> = widths
-        .iter()
-        .map(|width| (BigUint::one() << *width) - 1u8)
-        .collect();
+    let bounds = full_bounds(&widths);
+    let addend = if with_addend { &bounds[..] } else { &[] };
     plan_product(
         &bounds,
         &bounds,
+        addend,
         &widths,
         widest_injective_int_bits(field),
         true,
@@ -1514,11 +1682,40 @@ pub fn schoolbook_product_fits(field: FieldConfig, bits: usize) -> bool {
     .is_some()
 }
 
+/// The bound of each limb at `widths` that nothing narrower is known about: its width's own.
+fn full_bounds(widths: &[usize]) -> Vec<BigUint> {
+    widths
+        .iter()
+        .map(|width| (BigUint::one() << *width) - 1u8)
+        .collect()
+}
+
 /// A column being accumulated: its field element and its mirror on the pure side, or nothing while
 /// it is still zero.
 #[derive(Clone, Copy)]
 struct Accumulator {
     sum: Option<(ValueId, ValueId)>,
+}
+
+/// One schoolbook: `lhs · rhs`, plus `addend` where there is one, either range-checked into limbs
+/// or `pinned` to a target's.
+#[derive(Clone, Copy)]
+struct Schoolbook<'a> {
+    lhs: &'a Factor,
+    rhs: &'a Factor,
+    addend: Option<&'a Factor>,
+
+    /// The target's limbs as field elements, each already bounded at its width.
+    pinned: Option<&'a [ValueId]>,
+
+    /// The answer's limb widths, which are the operands' too.
+    widths: &'a [usize],
+
+    /// The width the operation is at, for a refusal.
+    bits: usize,
+
+    /// What the operation is called, for a refusal.
+    operation: &'static str,
 }
 
 impl Rewriter<'_> {
@@ -1533,13 +1730,10 @@ impl Rewriter<'_> {
     /// answer is zero there, for the reason [`Self::lower_add_sub`] gives. The carries are written
     /// either way.
     fn lower_product(&mut self, op: &OpCode) -> bool {
-        let Some(Multiplied { bits, lhs, rhs }) = multiplied(op, self.types, self.field) else {
+        let Some(Operands { bits, lhs, rhs }) = multiplied(op, self.types, self.field) else {
             return false;
         };
-        let (guard, inner) = match op {
-            OpCode::Guard { condition, inner } => (Some(self.one(*condition)), inner.as_ref()),
-            other => (None, other),
-        };
+        let (guard, inner) = self.split_guard(op);
         let OpCode::BinaryArithOp { result, .. } = inner else {
             ice_unreachable!("`multiplied` matches only a binary operation");
         };
@@ -1547,35 +1741,66 @@ impl Rewriter<'_> {
         let widths = limb_widths(bits, self.limb_bits());
         let lhs = self.factor(lhs, bits, &widths);
         let rhs = self.factor(rhs, bits, &widths);
+        let answer = self.schoolbook(
+            Schoolbook {
+                lhs: &lhs,
+                rhs: &rhs,
+                addend: None,
+                pinned: None,
+                widths: &widths,
+                bits,
+                operation: "multiplication",
+            },
+            guard,
+        );
+        self.deliver(*result, answer, &widths, bits, guard);
+        true
+    }
 
+    /// `lhs · rhs (+ addend)` at `widths`, following the plan [`plan_product`] makes for it, and
+    /// returning each limb of the answer as a field element.
+    ///
+    /// Where the schoolbook is `pinned`, each column's final value is constrained to equal that
+    /// limb of the target instead of being range-checked, as a limb of the target is already
+    /// bounded. That identity holds as integers for the reason a reduction's does, so it states
+    /// `lhs · rhs + addend == target` exactly, and the answer returned is the target's.
+    fn schoolbook(&mut self, product: Schoolbook<'_>, guard: Option<ValueId>) -> Vec<ValueId> {
+        let Schoolbook {
+            lhs,
+            rhs,
+            addend,
+            widths,
+            bits,
+            operation,
+            ..
+        } = product;
         let evaluate = lhs.witnessed && rhs.witnessed;
         let plan = plan_product(
             &lhs.bounds,
             &rhs.bounds,
-            &widths,
+            addend.map_or(&[][..], |addend| &addend.bounds),
+            widths,
             widest_injective_int_bits(self.field),
             evaluate,
         )
         .unwrap_or_else(|| {
             unsupported_on_this_field(
                 format_args!(
-                    "a {bits}-bit unsigned multiplication is a schoolbook product of witness limbs, which needs one partial product and the carry it is reduced into to fit a field element"
+                    "a {bits}-bit unsigned {operation} is a schoolbook product of witness limbs, which needs one partial product and the carry it is reduced into to fit a field element"
                 ),
                 self.field,
             )
         });
 
-        let mut fields = FactorForms::new(widths.len());
+        let mut forms = FactorForms::new(widths.len());
         let columns = if plan.evaluated {
-            self.evaluate_product(&plan, &lhs, &rhs, &mut fields, guard)
+            self.evaluate_product(&plan, lhs, rhs, &mut forms, guard)
         } else {
             Vec::new()
         };
-        let answer =
-            self.accumulate_columns(&plan, &widths, &lhs, &rhs, &columns, &mut fields, guard);
-        self.check_no_overflow(&plan, &lhs, &rhs, &mut fields, guard);
-        self.deliver(*result, answer, &widths, bits, guard);
-        true
+        let answer = self.accumulate_columns(&plan, &product, &columns, &mut forms, guard);
+        self.check_no_overflow(&plan, lhs, rhs, &mut forms, guard);
+        answer
     }
 
     /// An operand of the schoolbook as its limbs at `bits`, and what each of them can be.
@@ -1606,10 +1831,7 @@ impl Rewriter<'_> {
                 .map(Limb::Value)
                 .collect(),
             witnessed: self.is_witness(value),
-            bounds: widths
-                .iter()
-                .map(|width| (BigUint::one() << *width) - 1u8)
-                .collect(),
+            bounds: full_bounds(widths),
         }
     }
 
@@ -1704,25 +1926,36 @@ impl Rewriter<'_> {
     /// Every column of the answer, as field elements, following `plan`.
     ///
     /// `columns` are an evaluated product's witnessed columns, which a [`Step::Column`] adds.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// Where `product` is pinned, the range check that would bound a column's final value is
+    /// replaced by its equality with the target's limb, which bounds it as tightly, and a column
+    /// that never needed reducing is held to that limb all the same.
     fn accumulate_columns(
         &mut self,
         plan: &ProductPlan,
-        widths: &[usize],
-        lhs: &Factor,
-        rhs: &Factor,
+        product: &Schoolbook<'_>,
         columns: &[(ValueId, ValueId)],
         forms: &mut FactorForms,
         guard: Option<ValueId>,
     ) -> Vec<ValueId> {
+        let Schoolbook {
+            lhs,
+            rhs,
+            addend,
+            pinned,
+            widths,
+            ..
+        } = *product;
         let hint = CastTarget::Int(plan.hint_bits);
         let mut answer = Vec::with_capacity(widths.len());
         let mut incoming: std::collections::VecDeque<(ValueId, ValueId)> = Default::default();
 
-        for (steps, &width) in plan.columns.iter().zip(widths) {
+        for (index, (steps, &width)) in plan.columns.iter().zip(widths).enumerate() {
             let mut outgoing = Vec::new();
             let mut column = Accumulator { sum: None };
-            for step in steps {
+            for (position, step) in steps.iter().enumerate() {
+                // The one check a pinned column's equality takes the place of.
+                let bounds_the_answer = pinned.is_none() || position + 1 < steps.len();
                 match *step {
                     Step::Product {
                         lhs: left,
@@ -1740,6 +1973,12 @@ impl Rewriter<'_> {
                         let (value, hinted) = columns[index];
                         self.accumulate(&mut column, value, hinted);
                     }
+                    Step::Addend(index) => {
+                        let addend = addend.expect("the plan adds limbs of an addend it was given");
+                        let value = forms.field(self, Side::Addend, index, addend);
+                        let hinted = forms.pure(self, Side::Addend, index, addend, &hint);
+                        self.accumulate(&mut column, value, hinted);
+                    }
                     Step::Carry => {
                         let (carry, hinted) = incoming
                             .pop_front()
@@ -1751,13 +1990,17 @@ impl Rewriter<'_> {
                             .sum
                             .expect("the plan reduces only a column that has a bound");
                         match carry_bits {
-                            None => self.push_guarded(
-                                guard,
-                                OpCode::Rangecheck {
-                                    value: sum,
-                                    max_bits: width,
-                                },
-                            ),
+                            None => {
+                                if bounds_the_answer {
+                                    self.push_guarded(
+                                        guard,
+                                        OpCode::Rangecheck {
+                                            value: sum,
+                                            max_bits: width,
+                                        },
+                                    );
+                                }
+                            }
                             Some(carry_bits) => {
                                 let carry = self.shifted_down(hinted, plan.hint_bits, width);
                                 let carry = self.cast(carry, CastTarget::Int(carry_bits));
@@ -1773,13 +2016,15 @@ impl Rewriter<'_> {
                                 let place = self.field_const(self.field.two_pow(width));
                                 let scaled = self.bin(BinaryArithOpKind::UMul, written, place);
                                 let low = self.bin(BinaryArithOpKind::USub, sum, scaled);
-                                self.push_guarded(
-                                    guard,
-                                    OpCode::Rangecheck {
-                                        value: low,
-                                        max_bits: width,
-                                    },
-                                );
+                                if bounds_the_answer {
+                                    self.push_guarded(
+                                        guard,
+                                        OpCode::Rangecheck {
+                                            value: low,
+                                            max_bits: width,
+                                        },
+                                    );
+                                }
 
                                 let low_hint = self.cast(hinted, CastTarget::Int(width));
                                 let low_hint = self.cast(low_hint, hint.clone());
@@ -1790,9 +2035,16 @@ impl Rewriter<'_> {
                     }
                 }
             }
-            answer.push(match column.sum {
+            let value = match column.sum {
                 Some((sum, _)) => sum,
                 None => self.field_const(self.field.zero()),
+            };
+            answer.push(match pinned {
+                Some(target) => {
+                    self.constrain_equal(value, target[index], guard);
+                    target[index]
+                }
+                None => value,
             });
             incoming.extend(outgoing);
         }
@@ -1801,6 +2053,21 @@ impl Rewriter<'_> {
             "ICE: the top column of a product carried out of the answer"
         );
         answer
+    }
+
+    /// `lhs == rhs` as field elements, where `guard` holds.
+    fn constrain_equal(&mut self, lhs: ValueId, rhs: ValueId, guard: Option<ValueId>) {
+        let difference = self.bin(BinaryArithOpKind::USub, lhs, rhs);
+        let flag = match guard {
+            Some(condition) => self.cast(condition, CastTarget::Field),
+            None => self.field_const(self.field.one()),
+        };
+        let zero = self.field_const(self.field.zero());
+        self.push(OpCode::Constrain {
+            a: flag,
+            b: difference,
+            c: zero,
+        });
     }
 
     fn accumulate(&mut self, column: &mut Accumulator, term: ValueId, hinted: ValueId) {
@@ -1851,19 +2118,20 @@ impl Rewriter<'_> {
 enum Side {
     Lhs,
     Rhs,
+    Addend,
 }
 
 /// The field element and the widened pure hint of each operand limb.
 struct FactorForms {
-    field: [Vec<Option<ValueId>>; 2],
-    pure: [Vec<Option<ValueId>>; 2],
+    field: [Vec<Option<ValueId>>; 3],
+    pure: [Vec<Option<ValueId>>; 3],
 }
 
 impl FactorForms {
     fn new(count: usize) -> Self {
         Self {
-            field: [vec![None; count], vec![None; count]],
-            pure: [vec![None; count], vec![None; count]],
+            field: std::array::from_fn(|_| vec![None; count]),
+            pure: std::array::from_fn(|_| vec![None; count]),
         }
     }
 
@@ -1874,14 +2142,8 @@ impl FactorForms {
         index: usize,
         factor: &Factor,
     ) -> ValueId {
-        *self.field[side as usize][index].get_or_insert_with(|| match &factor.limbs[index] {
-            Limb::Value(limb) => rewriter.cast(*limb, CastTarget::Field),
-            // A witness limb is never wider than the host word, so its pattern is one host limb.
-            Limb::Constant(pattern) => {
-                let element = rewriter.field.constant(pattern.limbs()[0]);
-                rewriter.field_const(element)
-            }
-        })
+        *self.field[side as usize][index]
+            .get_or_insert_with(|| rewriter.limb_field(&factor.limbs[index]))
     }
 
     fn pure(
@@ -1909,28 +2171,281 @@ impl FactorForms {
 
 /// The product the schoolbook lowers, if `op` is one: an unsigned multiplication, guarded or not,
 /// with a witnessed operand, at a width the single cell does not take.
-fn multiplied(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Option<Multiplied> {
-    let inner = match op {
-        OpCode::Guard { inner, .. } => inner.as_ref(),
-        other => other,
-    };
-    let OpCode::BinaryArithOp {
-        kind: BinaryArithOpKind::UMul,
-        lhs,
-        rhs,
-        ..
-    } = inner
-    else {
+fn multiplied(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Option<Operands> {
+    past_the_single_cell_product(op, types, field, &[BinaryArithOpKind::UMul])
+}
+
+/// A binary operation of one of `kinds`, guarded or not, with a witnessed operand, at a width whose
+/// product [`single_cell_product_fits`] says one element cannot hold.
+fn past_the_single_cell_product(
+    op: &OpCode,
+    types: &FunctionTypeInfo,
+    field: FieldConfig,
+    kinds: &[BinaryArithOpKind],
+) -> Option<Operands> {
+    let OpCode::BinaryArithOp { kind, lhs, rhs, .. } = unguarded(op) else {
         return None;
     };
-    let bits = int_width(types.get_value_type(*lhs))?;
-    let witnessed =
-        types.get_value_type(*lhs).is_witness_of() || types.get_value_type(*rhs).is_witness_of();
-    (witnessed && !single_cell_product_fits(field, bits)).then_some(Multiplied {
+    if !kinds.contains(kind) {
+        return None;
+    }
+    let bits = witnessed_width(types, *lhs, *rhs)?;
+    (!single_cell_product_fits(field, bits)).then_some(Operands {
         bits,
         lhs: *lhs,
         rhs: *rhs,
     })
+}
+
+// THE DIVISION
+// ================================================================================================
+
+impl Rewriter<'_> {
+    /// An unsigned division or remainder whose product the single cell cannot hold, returning
+    /// `true` if `op` was one and was lowered.
+    ///
+    /// The quotient `q` and remainder `r` are witnessed as limbs from the pure side's own division,
+    /// and pinned by `q·d + r == n` and `r < d`. The first is one schoolbook, the remainder an
+    /// addend to its columns and the dividend's limbs the target each column is held to; the
+    /// second is the carry chain with its top borrow forced out, which a zero divisor cannot pass.
+    /// Together they admit exactly the one pair that Euclidean division gives.
+    ///
+    /// Under a guard the checks are off where it is, and the answer is zero there, for the reason
+    /// [`Self::lower_add_sub`] gives. The pure side divides zero by one there, so the hints are zero
+    /// and their range checks hold whatever the branch not taken left behind.
+    fn lower_division(&mut self, op: &OpCode) -> bool {
+        let Some(Operands {
+            bits,
+            lhs: dividend,
+            rhs: divisor,
+        }) = divided(op, self.types, self.field)
+        else {
+            return false;
+        };
+        let (guard, inner) = self.split_guard(op);
+        let OpCode::BinaryArithOp { kind, result, .. } = inner else {
+            ice_unreachable!("`divided` matches only a binary operation");
+        };
+
+        let widths = limb_widths(bits, self.limb_bits());
+        let (quotient, remainder) = if dividend == divisor {
+            self.divide_by_itself(divisor, bits, &widths, guard)
+        } else {
+            self.divide(dividend, divisor, bits, &widths, guard)
+        };
+        let answer = match kind {
+            BinaryArithOpKind::UDiv => quotient,
+            BinaryArithOpKind::URem => remainder,
+            _ => ice_unreachable!("`divided` matches only an unsigned division or remainder"),
+        };
+        self.deliver(*result, answer, &widths, bits, guard);
+        true
+    }
+
+    /// The quotient and the remainder of `dividend / divisor`, each as its limbs' field elements.
+    fn divide(
+        &mut self,
+        dividend: ValueId,
+        divisor: ValueId,
+        bits: usize,
+        widths: &[usize],
+        guard: Option<ValueId>,
+    ) -> (Vec<ValueId>, Vec<ValueId>) {
+        let n = self.factor(dividend, bits, widths);
+        let d = self.factor(divisor, bits, widths);
+
+        // What the answers can be, from what the operands can. Only a constant says more than the
+        // width does, and a constant divisor says the most: `q <= n / d` and `r < d`.
+        //
+        // A divisor of zero has neither answer, and the chain below refuses it, so the bounds only
+        // have to hold for a divisor of at least one.
+        let limb_bits = self.limb_bits();
+        let dividend_max = n.largest(limb_bits);
+        let divisor_max = d.largest(limb_bits);
+        let divisor_min = if d.is_constant() {
+            divisor_max.clone().max(BigUint::one())
+        } else {
+            BigUint::one()
+        };
+        let quotient_max = &dividend_max / divisor_min;
+        let remainder_max = if divisor_max.is_zero() {
+            BigUint::zero()
+        } else {
+            (&divisor_max - 1u8).min(dividend_max)
+        };
+
+        let mut pure_dividend = self.pure_whole(dividend, bits);
+        let mut pure_divisor = self.pure_whole(divisor, bits);
+        if let Some(condition) = guard {
+            let condition = self.pure_of(condition, self.is_witness(condition));
+            let zero = self.int_const(IntBits::zero(bits));
+            let one = self.int_const(IntBits::one(bits));
+            pure_dividend = self.select(condition, pure_dividend, zero);
+            pure_divisor = self.select(condition, pure_divisor, one);
+        }
+        let pure_divisor = self.nonzero_hint_divisor(pure_divisor, bits);
+        let quotient_hint = self.bin(BinaryArithOpKind::UDiv, pure_dividend, pure_divisor);
+        let remainder_hint = self.bin(BinaryArithOpKind::URem, pure_dividend, pure_divisor);
+        let q = self.witness_hinted(quotient_hint, bits, widths, &quotient_max);
+        let r = self.witness_hinted(remainder_hint, bits, widths, &remainder_max);
+
+        let target: Vec<ValueId> = n.limbs.iter().map(|limb| self.limb_field(limb)).collect();
+        self.schoolbook(
+            Schoolbook {
+                lhs: &q,
+                rhs: &d,
+                addend: Some(&r),
+                pinned: Some(&target),
+                widths,
+                bits,
+                operation: "division",
+            },
+            guard,
+        );
+
+        // `r < d` reads only the limbs either side can reach, as above them both are zero.
+        let reached = (0..widths.len())
+            .rev()
+            .find(|index| !r.bounds[*index].is_zero() || !d.bounds[*index].is_zero())
+            .map_or(1, |top| top + 1);
+        let remainder_limbs = self.chain_limbs_of(&r, reached);
+        let divisor_limbs = self.chain_limbs_of(&d, reached);
+        self.carry_chain_over(
+            true,
+            &remainder_limbs,
+            &divisor_limbs,
+            widths[..reached].to_vec(),
+            CarryOut::One,
+            guard,
+        );
+
+        let quotient = q.limbs.iter().map(|limb| self.limb_field(limb)).collect();
+        let remainder = r.limbs.iter().map(|limb| self.limb_field(limb)).collect();
+        (quotient, remainder)
+    }
+
+    /// `d / d` and `d % d`, which are one and zero wherever `d` is not zero, so only that is
+    /// checked: `0 < d`, the chain with its top borrow forced out.
+    fn divide_by_itself(
+        &mut self,
+        divisor: ValueId,
+        bits: usize,
+        widths: &[usize],
+        guard: Option<ValueId>,
+    ) -> (Vec<ValueId>, Vec<ValueId>) {
+        let divisor = self.chain_limbs(divisor, bits, widths.len());
+        let zero: Vec<(ValueId, bool)> = widths
+            .iter()
+            .map(|width| (self.int_const(IntBits::zero(*width)), false))
+            .collect();
+        self.carry_chain_over(true, &zero, &divisor, widths.to_vec(), CarryOut::One, guard);
+
+        let (zero, one) = (
+            self.field_const(self.field.zero()),
+            self.field_const(self.field.one()),
+        );
+        let mut quotient = vec![zero; widths.len()];
+        quotient[0] = one;
+        (quotient, vec![zero; widths.len()])
+    }
+
+    /// A pure `hint` of `bits` witnessed as limbs at `widths`, each range-checked no wider than
+    /// `max`, the largest value the hint can honestly take, lets it be.
+    ///
+    /// A limb `max` does not reach is not witnessed at all: it is a constant zero, which drops it
+    /// and every term against it out of the schoolbook's plan. The limbs are the value's
+    /// definition, and the constraints the caller builds on them are what tie them to anything.
+    fn witness_hinted(
+        &mut self,
+        hint: ValueId,
+        bits: usize,
+        widths: &[usize],
+        max: &BigUint,
+    ) -> Factor {
+        let mut limbs = Vec::with_capacity(widths.len());
+        let mut bounds = Vec::with_capacity(widths.len());
+        for (index, width) in widths.iter().enumerate() {
+            let low = index * self.limb_bits();
+            let checked = ((max >> low).bits() as usize).min(*width);
+            if checked == 0 {
+                limbs.push(Limb::Constant(IntBits::zero(*width)));
+                bounds.push(BigUint::zero());
+                continue;
+            }
+
+            let (limb, _) = self.witness_limb(hint, bits, index, *width, checked);
+            limbs.push(Limb::Value(limb));
+            bounds.push((BigUint::one() << checked) - 1u8);
+        }
+        Factor {
+            limbs,
+            witnessed: true,
+            bounds,
+        }
+    }
+
+    /// The divisor the pure side divides by: `divisor`, or one where it is zero.
+    fn nonzero_hint_divisor(&mut self, divisor: ValueId, bits: usize) -> ValueId {
+        let zero = self.int_const(IntBits::zero(bits));
+        let one = self.int_const(IntBits::one(bits));
+        let is_zero = self.fresh();
+        self.push(OpCode::Cmp {
+            kind: CmpKind::Eq,
+            result: is_zero,
+            lhs: divisor,
+            rhs: zero,
+        });
+        self.select(is_zero, one, divisor)
+    }
+
+    /// A value as one pure integer of `bits`, which is what the pure side divides.
+    fn pure_whole(&mut self, value: ValueId, bits: usize) -> ValueId {
+        if !self.is_witness(value) {
+            return value;
+        }
+        match self.wide_width(value) {
+            Some(_) => {
+                let limbs = self.pure_limbs_at(value, bits, bits);
+                self.recombine_pure(&limbs, bits)
+            }
+            None => self.cast(value, CastTarget::ValueOf),
+        }
+    }
+
+    /// A limb of a [`Factor`] as a field element.
+    fn limb_field(&mut self, limb: &Limb) -> ValueId {
+        match limb {
+            Limb::Value(limb) => self.cast(*limb, CastTarget::Field),
+            // A witness limb is never wider than the host word, so its pattern is one host limb.
+            Limb::Constant(pattern) => self.field_const(self.field.constant(pattern.limbs()[0])),
+        }
+    }
+
+    /// The low `count` limbs of a [`Factor`] as the carry chain reads them.
+    fn chain_limbs_of(&mut self, factor: &Factor, count: usize) -> Vec<(ValueId, bool)> {
+        factor.limbs[..count]
+            .iter()
+            .map(|limb| match limb {
+                Limb::Value(limb) => (*limb, factor.witnessed),
+                Limb::Constant(pattern) => (self.int_const(pattern.clone()), false),
+            })
+            .collect()
+    }
+}
+
+/// The division the representation lowers, if `op` is one: an unsigned division or remainder,
+/// guarded or not, with a witnessed operand, at a width whose product the single cell cannot hold.
+///
+/// That is where the single-cell lowering's `q·d` could wrap: it forms the product in one element,
+/// and a quotient range-checked at the width times a divisor of the width passes the modulus from
+/// the width [`single_cell_product_fits`] refuses.
+fn divided(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Option<Operands> {
+    past_the_single_cell_product(
+        op,
+        types,
+        field,
+        &[BinaryArithOpKind::UDiv, BinaryArithOpKind::URem],
+    )
 }
 
 // PER-INSTRUCTION REWRITING
@@ -1939,7 +2454,7 @@ fn multiplied(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Opti
 impl Rewriter<'_> {
     /// Rewrite one instruction into the limb-wise instructions that replace it.
     fn lower(&mut self, op: &OpCode) {
-        if self.lower_through_chain(op) || self.lower_product(op) {
+        if self.lower_through_chain(op) || self.lower_product(op) || self.lower_division(op) {
             return;
         }
 
@@ -2497,13 +3012,41 @@ impl Rewriter<'_> {
     }
 
     /// Equality, which is the conjunction of the limbs' own.
+    ///
+    /// A pair of limbs both known at compile time is decided here rather than compared, because a
+    /// witnessed constant is still a witness to the comparison's lowering, which would spend a
+    /// gadget on it. A pair known to differ decides the whole equality, and when every pair is
+    /// known equal so is the value.
     fn lower_compare(&mut self, kind: CmpKind, result: ValueId, lhs: ValueId, rhs: ValueId) {
         assert!(
             matches!(kind, CmpKind::Eq),
             "ICE: a {kind:?} of a wide witnessed integer reached the multi-cell representation; width validation should have refused the program"
         );
 
-        let pairs = self.operand_pair(lhs, rhs);
+        let mut pairs = Vec::new();
+        let mut decided = true;
+        for (lhs, rhs) in self.operand_pair(lhs, rhs) {
+            match self.known_equal(lhs, rhs) {
+                Some(true) => {}
+                Some(false) => decided = false,
+                None => pairs.push((lhs, rhs)),
+            }
+        }
+        if !decided || pairs.is_empty() {
+            let answer = self.int_const(IntBits::from_u128(1, u128::from(decided)));
+            let target = if self.is_witness(result) {
+                CastTarget::WitnessOf
+            } else {
+                CastTarget::Nop
+            };
+            self.push(OpCode::Cast {
+                result,
+                value: answer,
+                target,
+            });
+            return;
+        }
+
         let mut all = None;
         for (lhs, rhs) in pairs {
             let equal = self.fresh();
@@ -2525,7 +3068,17 @@ impl Rewriter<'_> {
         });
     }
 
+    /// Whether two limbs are equal, where both are known at compile time.
+    fn known_equal(&self, lhs: ValueId, rhs: ValueId) -> Option<bool> {
+        let lhs = self.known(lhs)?;
+        let rhs = self.known(rhs)?;
+        Some(BigUint::from(&lhs) == BigUint::from(&rhs))
+    }
+
     /// The assertion of a comparison, which is one assertion per limb.
+    ///
+    /// A pair of limbs known equal at compile time holds already and asserts nothing. One known to
+    /// differ is kept, so that the program is refused as any assertion of two unequal constants is.
     fn lower_assert_compare(
         &mut self,
         kind: CmpKind,
@@ -2540,6 +3093,9 @@ impl Rewriter<'_> {
 
         let pairs = self.operand_pair(lhs, rhs);
         for (lhs, rhs) in pairs {
+            if self.known_equal(lhs, rhs) == Some(true) {
+                continue;
+            }
             self.push_guarded(
                 guard,
                 OpCode::AssertCmp {
@@ -2550,6 +3106,22 @@ impl Rewriter<'_> {
             );
         }
     }
+}
+
+/// The operation a `Guard` wraps, or `op` itself where there is none.
+fn unguarded(op: &OpCode) -> &OpCode {
+    match op {
+        OpCode::Guard { inner, .. } => inner.as_ref(),
+        other => other,
+    }
+}
+
+/// The width of an integer operation with a witnessed operand, read off its left one, or [`None`]
+/// where both are pure or it is not an integer operation.
+fn witnessed_width(types: &FunctionTypeInfo, lhs: ValueId, rhs: ValueId) -> Option<usize> {
+    let bits = int_width(types.get_value_type(lhs))?;
+    (types.get_value_type(lhs).is_witness_of() || types.get_value_type(rhs).is_witness_of())
+        .then_some(bits)
 }
 
 /// The declared width of an integer type, looking through a witness wrapper.
@@ -3323,26 +3895,20 @@ mod tests {
     // THE SCHOOLBOOK
     // --------------------------------------------------------------------------------------------
 
-    /// Every limb at its width's full range, which is what a witnessed operand is held to.
-    fn full_range(widths: &[usize]) -> Vec<BigUint> {
-        widths
-            .iter()
-            .map(|width| (BigUint::one() << *width) - 1u8)
-            .collect()
-    }
-
     /// Re-derive what `plan` claims from its steps alone and hold it to the soundness argument
     /// [`plan_product`] states without reading how the plan was built.
     fn assert_plan_is_sound(
         plan: &ProductPlan,
         lhs: &[BigUint],
         rhs: &[BigUint],
+        addend: &[BigUint],
         widths: &[usize],
         injective: usize,
     ) {
         let limit = BigUint::one() << injective;
         let count = widths.len();
         let mut added = crate::collections::HashSet::default();
+        let mut added_addends = crate::collections::HashSet::default();
         let mut incoming: Vec<BigUint> = Vec::new();
 
         for (column, (steps, &width)) in plan.columns.iter().zip(widths).enumerate() {
@@ -3374,6 +3940,11 @@ mod tests {
                                 accumulated += &lhs[left] * &rhs[right];
                             }
                         }
+                    }
+                    Step::Addend(index) => {
+                        assert_eq!(index, column, "an addend limb in the wrong column");
+                        assert!(added_addends.insert(index), "an addend limb added twice");
+                        accumulated += &addend[index];
                     }
                     Step::Carry => {
                         accumulated += carries.next().expect("a carry the column below made");
@@ -3448,6 +4019,13 @@ mod tests {
             }
         }
 
+        for (index, bound) in addend.iter().enumerate() {
+            assert!(
+                bound.is_zero() || added_addends.contains(&index),
+                "addend limb {index} is never added"
+            );
+        }
+
         for left in 0..count {
             for right in 0..count {
                 if (&lhs[left] * &rhs[right]).is_zero() {
@@ -3477,7 +4055,7 @@ mod tests {
     fn the_schoolbook_plan_is_sound_on_any_field_that_holds_it() {
         let bn254 = widest_injective_int_bits(bn254());
         let sparse = |widths: &[usize]| -> Vec<BigUint> {
-            full_range(widths)
+            full_bounds(widths)
                 .into_iter()
                 .enumerate()
                 .map(|(index, bound)| match index % 3 {
@@ -3490,15 +4068,22 @@ mod tests {
         for limb_bits in [16usize, 32, 64] {
             for bits in [127usize, 200, 253, 254, 320, 1000] {
                 let widths = limb_widths(bits, limb_bits);
-                let full = full_range(&widths);
+                let full = full_bounds(&widths);
                 for injective in [bn254, 2 * limb_bits + 2, 2 * limb_bits + 1, 2 * limb_bits] {
                     for rhs in [full.clone(), sparse(&widths)] {
-                        for evaluate in [false, true] {
-                            match plan_product(&full, &rhs, &widths, injective, evaluate) {
-                                Some(plan) => {
-                                    assert_plan_is_sound(&plan, &full, &rhs, &widths, injective)
+                        for addend in [Vec::new(), full.clone(), sparse(&widths)] {
+                            for evaluate in [false, true] {
+                                let planned = plan_product(
+                                    &full, &rhs, &addend, &widths, injective, evaluate,
+                                );
+                                match planned {
+                                    Some(plan) => assert_plan_is_sound(
+                                        &plan, &full, &rhs, &addend, &widths, injective,
+                                    ),
+                                    None => {
+                                        assert_ne!(injective, bn254, "bn254 refuses int{bits}")
+                                    }
                                 }
-                                None => assert_ne!(injective, bn254, "bn254 refuses int{bits}"),
                             }
                         }
                     }
@@ -3513,19 +4098,19 @@ mod tests {
     #[test]
     fn bn254_reduces_each_column_once() {
         let widths = limb_widths(320, witness_limb_bits(bn254()));
-        let full = full_range(&widths);
+        let full = full_bounds(&widths);
         let injective = widest_injective_int_bits(bn254());
 
         for bits in [127usize, 254, 320, 1000, 16384] {
             let widths = limb_widths(bits, witness_limb_bits(bn254()));
-            let full = full_range(&widths);
-            let plan = plan_product(&full, &full, &widths, injective, true)
+            let full = full_bounds(&widths);
+            let plan = plan_product(&full, &full, &[], &widths, injective, true)
                 .unwrap_or_else(|| panic!("bn254 holds an int{bits} product"));
             assert!(plan.evaluated, "int{bits} is evaluated on bn254");
             assert!(plan.overflow.is_empty(), "int{bits} has no overflow terms");
         }
 
-        let plan = plan_product(&full, &full, &widths, injective, false)
+        let plan = plan_product(&full, &full, &[], &widths, injective, false)
             .expect("bn254 holds an int320 product");
 
         for (column, steps) in plan.columns.iter().enumerate() {
@@ -3548,15 +4133,16 @@ mod tests {
     #[test]
     fn a_narrow_field_reduces_more_often_or_refuses() {
         let widths = limb_widths(320, 64);
-        let full = full_range(&widths);
+        let full = full_bounds(&widths);
 
         // Goldilocks' 32-bit limb: `(2^32 - 1)^2` alone has 64 bits against an injective 63.
         let goldilocks = limb_widths(320, 32);
         for evaluate in [false, true] {
             assert!(
                 plan_product(
-                    &full_range(&goldilocks),
-                    &full_range(&goldilocks),
+                    &full_bounds(&goldilocks),
+                    &full_bounds(&goldilocks),
+                    &[],
                     &goldilocks,
                     63,
                     evaluate
@@ -3567,16 +4153,16 @@ mod tests {
 
         // Five products to a column do not fit 130 bits, so an evaluation falls back to summing.
         let injective = 2 * 64 + 2;
-        let fallback = plan_product(&full, &full, &widths, injective, true)
+        let fallback = plan_product(&full, &full, &[], &widths, injective, true)
             .expect("two products and a carry fit 130 bits");
         assert!(
             !fallback.evaluated,
             "a column past the modulus cannot be evaluated"
         );
 
-        let plan = plan_product(&full, &full, &widths, injective, false)
+        let plan = plan_product(&full, &full, &[], &widths, injective, false)
             .expect("two products and a carry fit 130 bits");
-        assert_plan_is_sound(&plan, &full, &full, &widths, injective);
+        assert_plan_is_sound(&plan, &full, &full, &[], &widths, injective);
         assert!(
             plan.columns.iter().any(|steps| {
                 steps
@@ -3599,6 +4185,11 @@ mod tests {
 
     /// `main(lhs: WitnessOf<int(bits)>, rhs: rhs_type) -> WitnessOf<int(bits)> { lhs * rhs }`.
     fn product_with(bits: usize, rhs_type: Type) -> HLSSA {
+        operation_with(BinaryArithOpKind::UMul, bits, rhs_type)
+    }
+
+    /// `main(lhs: WitnessOf<int(bits)>, rhs: rhs_type) -> WitnessOf<int(bits)> { lhs op rhs }`.
+    fn operation_with(kind: BinaryArithOpKind, bits: usize, rhs_type: Type) -> HLSSA {
         let mut ssa = HLSSA::with_main("main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let (lhs, rhs, result) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
@@ -3612,7 +4203,7 @@ mod tests {
                 .add_return_type(Type::witness_of(Type::int(bits)));
             let mut block = fb.test_block(entry);
             block.emit(OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::UMul,
+                kind,
                 result,
                 lhs,
                 rhs,
@@ -3644,7 +4235,7 @@ mod tests {
         for bits in [254usize, 320] {
             let widths = limb_widths(bits, h);
             let k = widths.len();
-            let full = full_range(&widths);
+            let full = full_bounds(&widths);
             for (what, rhs_type, evaluated) in [
                 ("evaluated", Type::witness_of(Type::int(bits)), true),
                 ("summed", Type::int(bits), false),
@@ -3652,6 +4243,7 @@ mod tests {
                 let plan = plan_product(
                     &full,
                     &full,
+                    &[],
                     &widths,
                     widest_injective_int_bits(bn254()),
                     evaluated,
@@ -4012,6 +4604,645 @@ mod tests {
         );
         // Per column: the partial product and its hint, then the carry's place value.
         assert_eq!(products, 2 * k + (k - 1), "one partial product per column");
+    }
+
+    // THE DIVISION
+    // --------------------------------------------------------------------------------------------
+
+    /// What a structural audit of one lowered program reads: every instruction by its results, and
+    /// every range check by the value it bounds, looking through casts on both sides.
+    struct Audit {
+        ops: Vec<OpCode>,
+        definitions: HashMap<ValueId, OpCode>,
+    }
+
+    impl Audit {
+        fn of(ssa: &HLSSA) -> Self {
+            let ops = emitted(ssa);
+            let definitions = ops
+                .iter()
+                .flat_map(|op| op.get_results().map(move |result| (*result, op.clone())))
+                .collect();
+            Self { ops, definitions }
+        }
+
+        /// `value` with every cast it went through taken off.
+        fn root(&self, mut value: ValueId) -> ValueId {
+            while let Some(OpCode::Cast { value: source, .. }) = self.definitions.get(&value) {
+                value = *source;
+            }
+            value
+        }
+
+        /// Every witness column written, in order.
+        fn written(&self) -> Vec<ValueId> {
+            self.ops
+                .iter()
+                .filter_map(|op| match op {
+                    OpCode::WriteWitness {
+                        result: Some(result),
+                        ..
+                    } => Some(*result),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Every range check as the root of what it bounds, its width, and its guard.
+        fn checks(&self) -> Vec<(ValueId, usize, Option<ValueId>)> {
+            self.ops
+                .iter()
+                .filter_map(|op| match op {
+                    OpCode::Rangecheck { value, max_bits } => {
+                        Some((self.root(*value), *max_bits, None))
+                    }
+                    OpCode::Guard { condition, inner } => match inner.as_ref() {
+                        OpCode::Rangecheck { value, max_bits } => {
+                            Some((self.root(*value), *max_bits, Some(*condition)))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The width each written column is checked at, in the order they are written, [`None`]
+        /// for a column nothing checks.
+        fn written_checks(&self) -> Vec<Option<usize>> {
+            let checks = self.checks();
+            self.written()
+                .into_iter()
+                .map(|column| {
+                    checks
+                        .iter()
+                        .find(|(root, _, _)| *root == column)
+                        .map(|(_, bits, _)| *bits)
+                })
+                .collect()
+        }
+
+        fn constraints(&self) -> usize {
+            self.ops
+                .iter()
+                .filter(|op| matches!(op, OpCode::Constrain { .. }))
+                .count()
+        }
+    }
+
+    /// The carries the division's schoolbook plans, at full operand ranges.
+    fn division_carries(widths: &[usize], evaluate: bool) -> Vec<usize> {
+        let full = full_bounds(widths);
+        let plan = plan_product(
+            &full,
+            &full,
+            &full,
+            widths,
+            widest_injective_int_bits(bn254()),
+            evaluate,
+        )
+        .expect("bn254 holds the division");
+        assert_eq!(plan.evaluated, evaluate);
+        plan.columns
+            .iter()
+            .flatten()
+            .filter_map(|step| match step {
+                Step::Reduce { carry_bits } => *carry_bits,
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every column a division witnesses is range-checked, and every column of `q·d + r` is held
+    /// to the dividend's limb instead of being checked, however the product is formed.
+    ///
+    /// In order: the quotient's limbs and the remainder's, each at its own width; the schoolbook's
+    /// carries at the widths its plan gives them; and the borrows of `r < d`, each a bit. The only
+    /// columns left unchecked are an evaluated product's, which its evaluations pin. What is left
+    /// over is the chain's own answer, one check per limb, and the constraints are the product's
+    /// (its evaluations or its overflow terms) plus one equality per limb of the dividend.
+    ///
+    /// Structural for the reason [`every_carry_and_every_limb_of_a_product_is_bounded`] gives, and
+    /// because a pinned column has no check left to perturb against: the equality is its bound.
+    #[test]
+    fn every_column_of_a_division_is_bounded_and_every_limb_pinned() {
+        let h = witness_limb_bits(bn254());
+        for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
+            for bits in [254usize, 320] {
+                let widths = limb_widths(bits, h);
+                let k = widths.len();
+                for (what, rhs_type, evaluated) in [
+                    ("evaluated", Type::witness_of(Type::int(bits)), true),
+                    ("summed", Type::int(bits), false),
+                ] {
+                    let mut ssa = operation_with(kind, bits, rhs_type);
+                    run_pass(&mut ssa);
+                    let audit = Audit::of(&ssa);
+                    let what = format!("int{bits} {kind:?}, {what}");
+
+                    let mut expected: Vec<Option<usize>> = Vec::new();
+                    expected.extend(widths.iter().map(|width| Some(*width)));
+                    expected.extend(widths.iter().map(|width| Some(*width)));
+                    if evaluated {
+                        expected.extend(std::iter::repeat_n(None, k));
+                    }
+                    expected.extend(division_carries(&widths, evaluated).into_iter().map(Some));
+                    expected.extend(std::iter::repeat_n(Some(1), k - 1));
+                    assert_eq!(audit.written_checks(), expected, "{what}");
+
+                    let written = audit.written();
+                    let rest: Vec<usize> = audit
+                        .checks()
+                        .into_iter()
+                        .filter(|(root, _, _)| !written.contains(root))
+                        .map(|(_, bits, _)| bits)
+                        .collect();
+                    assert_eq!(rest, widths, "{what}: the chain's limbs, and nothing else");
+
+                    let product = if evaluated { 2 * k - 1 } else { k - 1 };
+                    assert_eq!(audit.constraints(), product + k, "{what}");
+                }
+            }
+        }
+    }
+
+    /// A constant divisor bounds both answers, so they cost only the limbs they can reach: the
+    /// quotient's top limb is checked narrower, the remainder is one limb at the divisor's width,
+    /// and `r < d` reads only that limb.
+    #[test]
+    fn a_constant_divisor_narrows_the_quotient_and_the_remainder() {
+        let bits = 320usize;
+        let mut ssa = operation_with(BinaryArithOpKind::UDiv, bits, Type::int(bits));
+        let main = ssa.get_unique_entrypoint_id();
+        let ten = ssa.add_const(Constant::Int(IntBits::from_u128(bits, 10)));
+        {
+            let entry = ssa.get_function_mut(main).get_entry_mut();
+            let instructions: Vec<_> = entry
+                .take_instructions()
+                .into_iter()
+                .map(|op| {
+                    let OpCode::BinaryArithOp {
+                        kind, result, lhs, ..
+                    } = op.as_ref().clone()
+                    else {
+                        panic!("the program is one division")
+                    };
+                    let rewritten = OpCode::BinaryArithOp {
+                        kind,
+                        result,
+                        lhs,
+                        rhs: ten,
+                    };
+                    Located::new(rewritten, op.location().clone())
+                })
+                .collect();
+            entry.put_instructions(instructions);
+        }
+        run_pass(&mut ssa);
+        let audit = Audit::of(&ssa);
+
+        let h = witness_limb_bits(bn254());
+        let quotient_top = ((BigUint::one() << bits) - 1u8) / 10u8 >> (4 * h);
+        let checks = audit.written_checks();
+        assert_eq!(
+            checks[..6],
+            [
+                Some(h),
+                Some(h),
+                Some(h),
+                Some(h),
+                Some(quotient_top.bits() as usize),
+                Some(4)
+            ],
+            "the quotient's five limbs, the top one narrower, and a four-bit remainder"
+        );
+        assert!(
+            checks[6..]
+                .iter()
+                .all(|check| check.is_some_and(|bits| bits > 1)),
+            "carries only, and no borrow: `r < 10` is one limb"
+        );
+        assert_eq!(
+            audit.constraints(),
+            5,
+            "one equality per limb of the dividend, and nothing to hold to zero"
+        );
+    }
+
+    /// A guarded division checks nothing where the guard is off, and its answer is zero there.
+    ///
+    /// The quotient's and the remainder's own checks stay on: the pure side divides zero by one
+    /// where the guard is off, so the honest hints are zero and pass them whatever the operands.
+    /// Everything that reads the operands is under the guard, the equalities included.
+    #[test]
+    fn a_guarded_division_is_checked_only_under_its_guard() {
+        let bits = 320usize;
+        let k = limb_widths(bits, witness_limb_bits(bn254())).len();
+        let mut ssa = operation_with(
+            BinaryArithOpKind::URem,
+            bits,
+            Type::witness_of(Type::int(bits)),
+        );
+        let main = ssa.get_unique_entrypoint_id();
+        let condition = ssa.fresh_value();
+        {
+            let function = ssa.get_function_mut(main);
+            let entry = function.get_entry_mut();
+            entry.push_parameter(condition, Type::witness_of(Type::int(1)));
+            let instructions: Vec<_> = entry
+                .take_instructions()
+                .into_iter()
+                .map(|op| {
+                    let guarded = OpCode::Guard {
+                        condition,
+                        inner: Box::new(op.as_ref().clone()),
+                    };
+                    Located::new(guarded, op.location().clone())
+                })
+                .collect();
+            entry.put_instructions(instructions);
+        }
+        run_pass(&mut ssa);
+        let audit = Audit::of(&ssa);
+        let written = audit.written();
+
+        let (unguarded, guarded): (Vec<_>, Vec<_>) = audit
+            .checks()
+            .into_iter()
+            .partition(|(_, _, guard)| guard.is_none());
+        assert_eq!(
+            unguarded.len(),
+            2 * k,
+            "the quotient's and the remainder's limbs only"
+        );
+        assert!(unguarded.iter().all(|(root, _, _)| written.contains(root)));
+        assert!(
+            guarded
+                .iter()
+                .all(|(_, _, guard)| *guard == Some(condition)),
+            "every other check is under the division's own guard"
+        );
+
+        let flag: Vec<ValueId> = audit
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                OpCode::Cast {
+                    result,
+                    value,
+                    target: CastTarget::Field,
+                } if *value == condition => Some(*result),
+                _ => None,
+            })
+            .collect();
+        let pinned = audit
+            .ops
+            .iter()
+            .filter(|op| matches!(op, OpCode::Constrain { a, .. } if flag.contains(a)))
+            .count();
+        assert_eq!(pinned, k, "each equality holds only where the guard does");
+
+        let selected = audit
+            .ops
+            .iter()
+            .filter(|op| matches!(op, OpCode::Select { .. }))
+            .count();
+        assert_eq!(
+            selected,
+            3 + k,
+            "the dividend and divisor on the pure side, the divisor again away from zero, and each \
+             limb of the answer"
+        );
+    }
+
+    /// A division the single cell cannot hold is lowered here, on a decomposition of each operand
+    /// while they still have an element; one it can hold, and the double lane's width, are left
+    /// to the single-cell lowering.
+    #[test]
+    fn a_division_the_single_cell_cannot_hold_is_lowered_here() {
+        let field = bn254();
+        let widest = widest_injective_int_bits(field) / 2;
+        for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
+            for bits in [widest + 1, 2 * HOST_LIMB_BITS + 1] {
+                let mut ssa = operation_with(kind, bits, Type::witness_of(Type::int(bits)));
+                let main = ssa.get_unique_entrypoint_id();
+                let operands: Vec<ValueId> = ssa
+                    .get_function(main)
+                    .get_entry()
+                    .get_parameters()
+                    .map(|(value, _)| *value)
+                    .collect();
+                run_pass(&mut ssa);
+                assert!(
+                    !emitted(&ssa).iter().any(|op| matches!(
+                        op,
+                        OpCode::BinaryArithOp { lhs, rhs, .. }
+                            if operands.contains(lhs) && operands.contains(rhs)
+                    )),
+                    "int{bits} {kind:?}: the single-cell division is gone"
+                );
+            }
+            for bits in [widest, 2 * HOST_LIMB_BITS] {
+                let mut ssa = operation_with(kind, bits, Type::witness_of(Type::int(bits)));
+                let before = format!("{:?}", emitted(&ssa));
+                run_pass(&mut ssa);
+                assert_eq!(format!("{:?}", emitted(&ssa)), before, "int{bits} {kind:?}");
+            }
+        }
+    }
+
+    /// `d / d` needs no quotient or remainder column: it is one wherever `d` is not zero, so the
+    /// only thing checked is `0 < d`, the chain's borrows and limbs.
+    #[test]
+    fn a_value_divided_by_itself_checks_only_that_it_is_not_zero() {
+        let bits = 320usize;
+        let widths = limb_widths(bits, witness_limb_bits(bn254()));
+        let mut ssa = operation_with(
+            BinaryArithOpKind::UDiv,
+            bits,
+            Type::witness_of(Type::int(bits)),
+        );
+        let main = ssa.get_unique_entrypoint_id();
+        {
+            let entry = ssa.get_function_mut(main).get_entry_mut();
+            let lhs = entry
+                .get_parameters()
+                .next()
+                .map(|(value, _)| *value)
+                .unwrap();
+            let instructions: Vec<_> = entry
+                .take_instructions()
+                .into_iter()
+                .map(|op| {
+                    let OpCode::BinaryArithOp { kind, result, .. } = op.as_ref().clone() else {
+                        panic!("the program is one division")
+                    };
+                    let rewritten = OpCode::BinaryArithOp {
+                        kind,
+                        result,
+                        lhs,
+                        rhs: lhs,
+                    };
+                    Located::new(rewritten, op.location().clone())
+                })
+                .collect();
+            entry.put_instructions(instructions);
+        }
+        run_pass(&mut ssa);
+        let audit = Audit::of(&ssa);
+        assert_eq!(
+            audit.written_checks(),
+            vec![Some(1); widths.len() - 1],
+            "the borrows only"
+        );
+        assert_eq!(audit.checks().len(), 2 * widths.len() - 1);
+        assert_eq!(audit.constraints(), 0);
+    }
+
+    /// `main(a, b: WitnessOf<int64>) { (a as int(bits)) == rhs }`, where `rhs` is `b` widened the
+    /// same way or the given constant, compared or asserted.
+    fn program_comparing_widened(bits: usize, constant: Option<BigUint>, assert: bool) -> HLSSA {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let [a, b, wide_a, wide_b, result] = std::array::from_fn(|_| ssa.fresh_value());
+        let mut builder = HLSSABuilder::new(&mut ssa);
+        builder.modify_function(main, |fb| {
+            let entry = fb.function.get_entry_id();
+            for value in [a, b] {
+                fb.function
+                    .get_block_mut(entry)
+                    .push_parameter(value, Type::witness_of(Type::int(64)));
+            }
+            if !assert {
+                fb.function.add_return_type(Type::witness_of(Type::int(1)));
+            }
+            let rhs = match &constant {
+                Some(pattern) => fb
+                    .ssa
+                    .add_const(Constant::Int(IntBits::from_biguint(bits, pattern))),
+                None => wide_b,
+            };
+            let mut block = fb.test_block(entry);
+            for (result, value) in [(wide_a, a), (wide_b, b)] {
+                block.emit(OpCode::Cast {
+                    result,
+                    value,
+                    target: CastTarget::Int(bits),
+                });
+            }
+            if assert {
+                block.emit(OpCode::AssertCmp {
+                    kind: CmpKind::Eq,
+                    lhs: wide_a,
+                    rhs,
+                });
+                block.terminate_return(vec![]);
+            } else {
+                block.emit(OpCode::Cmp {
+                    kind: CmpKind::Eq,
+                    result,
+                    lhs: wide_a,
+                    rhs,
+                });
+                block.terminate_return(vec![result]);
+            }
+        });
+        ssa
+    }
+
+    /// An equality between limbs both known at compile time is decided here, and spends nothing.
+    ///
+    /// The limbs above a widened value's source are witnessed constants, which the comparison's
+    /// lowering would otherwise meet as witnesses and give a gadget each. Two values widened from
+    /// 64 bits into 320 therefore compare in their low limb alone, and a constant with a bit above
+    /// that limb decides the comparison without comparing anything.
+    #[test]
+    fn an_equality_of_limbs_known_at_compile_time_is_decided_here() {
+        let bits = 320usize;
+        let compared = |ssa: &HLSSA| {
+            emitted(ssa)
+                .iter()
+                .filter(|op| matches!(op, OpCode::Cmp { .. } | OpCode::AssertCmp { .. }))
+                .count()
+        };
+
+        for assert in [false, true] {
+            let mut ssa = program_comparing_widened(bits, None, assert);
+            run_pass(&mut ssa);
+            assert_eq!(
+                compared(&ssa),
+                1,
+                "two widened values compare in the low limb alone, assert={assert}"
+            );
+
+            let small = BigUint::from(7u8);
+            let mut ssa = program_comparing_widened(bits, Some(small), assert);
+            run_pass(&mut ssa);
+            assert_eq!(
+                compared(&ssa),
+                1,
+                "a small constant is compared in the low limb alone, assert={assert}"
+            );
+        }
+
+        let unreachable: BigUint = BigUint::from(1u8) << 300;
+        let mut ssa = program_comparing_widened(bits, Some(unreachable.clone()), false);
+        run_pass(&mut ssa);
+        assert_eq!(compared(&ssa), 0, "a limb known to differ decides it");
+        let ops = emitted(&ssa);
+        let Some(OpCode::Cast { value, target, .. }) = ops.last() else {
+            panic!("the answer is delivered last")
+        };
+        assert_eq!(*target, CastTarget::WitnessOf, "the answer stays witnessed");
+        assert!(
+            matches!(ssa.get_const(*value).as_deref(), Some(Constant::Int(pattern)) if pattern.is_zero()),
+            "the answer is false"
+        );
+
+        // An assertion that cannot hold is kept, to be refused as any other is.
+        let mut ssa = program_comparing_widened(bits, Some(unreachable), true);
+        run_pass(&mut ssa);
+        assert_eq!(
+            compared(&ssa),
+            2,
+            "the low limb and the one known to differ"
+        );
+    }
+
+    /// A division whose answer the lowering knows limb by limb hands those limbs on as known, so an
+    /// equality the answer reaches is decided here rather than compared.
+    ///
+    /// `0 / d` knows every limb of both answers, and `(0 / d) == 0` then compares nothing; the zero
+    /// divisor is still refused by the division's own `0 < d`.
+    #[test]
+    fn a_known_answer_limb_is_known_to_the_comparison_it_reaches() {
+        let bits = 320usize;
+        for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
+            let mut ssa = HLSSA::with_main("main".to_string());
+            let main = ssa.get_unique_entrypoint_id();
+            let [divisor, answer, result] = std::array::from_fn(|_| ssa.fresh_value());
+            let mut builder = HLSSABuilder::new(&mut ssa);
+            builder.modify_function(main, |fb| {
+                let entry = fb.function.get_entry_id();
+                fb.function
+                    .get_block_mut(entry)
+                    .push_parameter(divisor, Type::witness_of(Type::int(bits)));
+                fb.function.add_return_type(Type::witness_of(Type::int(1)));
+                let zero = fb.ssa.add_const(Constant::Int(IntBits::zero(bits)));
+                let mut block = fb.test_block(entry);
+                block.emit(OpCode::BinaryArithOp {
+                    kind,
+                    result: answer,
+                    lhs: zero,
+                    rhs: divisor,
+                });
+                block.emit(OpCode::Cmp {
+                    kind: CmpKind::Eq,
+                    result,
+                    lhs: answer,
+                    rhs: zero,
+                });
+                block.terminate_return(vec![result]);
+            });
+            run_pass(&mut ssa);
+
+            // The one equality left is the pure side's own zero test of the divisor, at the
+            // division's width; a limb comparison would be at a limb's.
+            let ops = emitted(&ssa);
+            let compared: Vec<&OpCode> = ops
+                .iter()
+                .filter(|op| {
+                    matches!(
+                        op,
+                        OpCode::Cmp {
+                            kind: CmpKind::Eq,
+                            ..
+                        }
+                    )
+                })
+                .collect();
+            let the_hints_own = |rhs: &ValueId| {
+                matches!(
+                    ssa.get_const(*rhs).as_deref(),
+                    Some(Constant::Int(pattern)) if pattern.bits() == bits && pattern.is_zero()
+                )
+            };
+            assert!(
+                matches!(compared[..], [OpCode::Cmp { rhs, .. }] if the_hints_own(rhs)),
+                "{kind:?}: the equality compared limbs it knew: {compared:?}"
+            );
+            let Some(OpCode::Cast { value, target, .. }) = ops.last() else {
+                panic!("{kind:?}: the answer is delivered last")
+            };
+            assert_eq!(
+                *target,
+                CastTarget::WitnessOf,
+                "{kind:?}: the answer stays witnessed"
+            );
+            assert!(
+                matches!(ssa.get_const(*value).as_deref(), Some(Constant::Int(pattern)) if pattern.is_one()),
+                "{kind:?}: the answer is true"
+            );
+            assert!(
+                ops.iter()
+                    .any(|op| matches!(op, OpCode::Rangecheck { max_bits: 1, .. })),
+                "{kind:?}: the chain for `0 < d` still borrows"
+            );
+        }
+    }
+
+    /// A constant entering the representation as witnessed is its limbs as witnessed constants,
+    /// with no column and no range check between them.
+    #[test]
+    fn a_constant_injected_into_the_representation_costs_nothing() {
+        let bits = 328usize;
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let result = ssa.fresh_value();
+        let pattern: BigUint = (BigUint::from(1u8) << 320) + 5u8;
+        let mut builder = HLSSABuilder::new(&mut ssa);
+        builder.modify_function(main, |fb| {
+            fb.function
+                .add_return_type(Type::witness_of(Type::int(bits)));
+            let entry = fb.function.get_entry_id();
+            let value = fb
+                .ssa
+                .add_const(Constant::Int(IntBits::from_biguint(bits, &pattern)));
+            let mut block = fb.test_block(entry);
+            block.emit(OpCode::Cast {
+                result,
+                value,
+                target: CastTarget::WitnessOf,
+            });
+            block.terminate_return(vec![result]);
+        });
+        run_pass(&mut ssa);
+
+        let ops = emitted(&ssa);
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, OpCode::Rangecheck { .. } | OpCode::WriteWitness { .. })),
+            "a constant is pinned by being one: {ops:?}"
+        );
+        let limbs: Vec<BigUint> = ops
+            .iter()
+            .map(|op| match op {
+                OpCode::Cast {
+                    value,
+                    target: CastTarget::WitnessOf,
+                    ..
+                } => match ssa.get_const(*value).as_deref() {
+                    Some(Constant::Int(limb)) => BigUint::from(limb),
+                    other => panic!("a limb that is not a constant: {other:?}"),
+                },
+                other => panic!("an injected constant emits {other:?}"),
+            })
+            .collect();
+        let limb_count = limb_widths(bits, witness_limb_bits(bn254())).len();
+        let mut expected = vec![BigUint::zero(); limb_count];
+        expected[0] = BigUint::from(5u8);
+        expected[limb_count - 1] = BigUint::from(1u8);
+        assert_eq!(limbs, expected);
     }
 
     fn run_pass(ssa: &mut HLSSA) {

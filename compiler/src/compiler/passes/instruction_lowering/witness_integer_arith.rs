@@ -10,8 +10,8 @@ use crate::compiler::{
         instruction_lowering::{InstructionLoweringRule, LoweringContext, integer_bits},
         shared::{
             limbs::{
-                WitnessLimbs, split_into_limbs, two_limb_product_packing_fits,
-                widest_cell_sum_bits, witness_limb_bits,
+                WitnessLimbs, single_cell_product_fits, split_into_limbs,
+                two_limb_product_packing_fits, widest_cell_sum_bits, witness_limb_bits,
             },
             unsupported::unsupported_on_this_field,
         },
@@ -819,8 +819,8 @@ fn split_u128_value(b: &mut impl HLEmitter, value: ValueId) -> WitnessLimbs {
 
 // FIELD-ASSUMPTION: L6-int-op-strategy
 // Reconstructs `dividend = q * divisor + r` in one field element; the u128 path recurses into
-// the u128 mul fallback. The reconstruction overflows a small field, and even the fragile
-// u32/u64 `+` fused into `q*divisor + r` can tip past p (needs the multi-limb mul engine).
+// the u128 mul fallback. Sound while `single_cell_product_fits`, which the assertion below holds it
+// to: a division that fails it is lowered by `passes::wide_witness_ints` before this pass runs.
 #[allow(clippy::too_many_arguments)]
 fn lower_unsigned_divmod(
     b: &mut HLBlockEmitter<'_>,
@@ -834,6 +834,12 @@ fn lower_unsigned_divmod(
     guard: Option<ValueId>,
     guard_is_witness: bool,
 ) -> DivModResult {
+    // A quotient range-checked at `bits` times a divisor of `bits` reaches `2^(2 * bits)`, and
+    // past the modulus the single product below could wrap onto a wrong quotient that passes.
+    assert!(
+        single_cell_product_fits(b.field(), bits),
+        "ICE: an int{bits} division reached the single-cell lowering, whose product the field cannot hold"
+    );
     if bits == 128 {
         if dividend == divisor {
             let active = if let Some(condition) = guard {
@@ -878,6 +884,7 @@ fn lower_unsigned_divmod(
             dividend_hint = b.select(condition, dividend_hint, zero);
             divisor_hint = b.select(condition, divisor_hint, one);
         }
+        let divisor_hint = nonzero_hint_divisor(b, divisor_hint, 128);
 
         let q_hint = b.udiv(dividend_hint, divisor_hint);
         let r_hint = b.urem(dividend_hint, divisor_hint);
@@ -990,6 +997,7 @@ fn lower_unsigned_divmod(
         dividend_hint = b.select(condition, dividend_hint, zero);
         divisor_hint = b.select(condition, divisor_hint, one);
     }
+    let divisor_hint = nonzero_hint_divisor(b, divisor_hint, bits);
     let q_hint = b.udiv(dividend_hint, divisor_hint);
     let q_hint_field = b.cast_to_field(q_hint);
     let q_wit = b.write_witness(q_hint_field);
@@ -1016,6 +1024,20 @@ fn lower_unsigned_divmod(
         q_is_witness: true,
         r_is_witness: true,
     }
+}
+
+/// The divisor a division's witness-generation hint divides by: `divisor`, or one where it is zero.
+///
+/// A zero divisor has no quotient, and the constraints the hint feeds refuse it, but the hint runs
+/// first. An unsigned division by a witness has no assertion ahead of it to trap there instead (see
+/// `divisor_checked_by_its_lowering`), and a guarded one reaches it whenever the guard holds, so
+/// without this the hint would be a compiled `udiv` by zero, which LLVM leaves undefined. Dividing
+/// by one changes nothing that an honest run can compute.
+fn nonzero_hint_divisor(b: &mut impl HLEmitter, divisor: ValueId, bits: usize) -> ValueId {
+    let zero = b.int_const(IntBits::zero(bits));
+    let one = b.int_const(IntBits::one(bits));
+    let is_zero = b.eq(divisor, zero);
+    b.select(is_zero, one, divisor)
 }
 
 fn quotient_bound(a_range: &Interval, b_range: &Interval) -> Interval {
