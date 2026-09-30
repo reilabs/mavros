@@ -55,6 +55,7 @@
 | noir_tests/field_lt | ✅ | ✅ | 0 | 3 | 1384 | 1228 | 25655 | 195317 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/higher_order_fns | ✅ | ✅ | 7 | 4 | 84352 | 88100 | 89169 | 290681 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/hint_black_box | ✅ | ✅ | 11 | 3 | 7568 | 15372 | 32113 | 203911 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/immutable_ref_boundary | ✅ | ✅ | 172 | 261 | 47272 | 45454 | 94786 | 281373 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/inactive_u128_shift_then_shift | ✅ | ✅ | 713 | 1321 | 64624 | 8505 | 119068 | 292374 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/inactive_witness_shift | ✅ | ✅ | 166 | 278 | 37008 | 13590 | 93647 | 268508 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/inclusive_for_range | ✅ | ✅ | 84 | 154 | 27768 | 22393 | 47504 | 220919 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -96,7 +97,7 @@
 | noir_tests/passport_05_check_dsc_signature | ✅ | ✅ | 138584 | 222827 | 751664 | 503222 | 1142231 | 1436225 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/passport_06_check_dsc_pubkey_in_cert | ✅ | ✅ | 8816 | 15301 | 39168 | 13945 | 74886 | 255283 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/passport_07_check_csc_signature | ✅ | ✅ | 414909 | 657400 | 890960 | 503615 | 1448429 | 1752564 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir_tests/passport_08_complete_age_check | ✅ | ✅ | 636206 | 1017170 | 1934896 | 898317 | 3133247 | 3545274 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/passport_08_complete_age_check | ✅ | ✅ | 636206 | 1017170 | 1934896 | 898317 | 3133273 | 3545223 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/pinned_witness_shift | ✅ | ✅ | 144 | 258 | 25304 | 7414 | 70597 | 244061 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/power | ✅ | ✅ | 1000001 | 1000003 | 3256 | 2397 | 28034 | 198122 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/pre_cross_branch_join | ✅ | ✅ | 55 | 101 | 10792 | 5234 | 42857 | 214539 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -316,7 +317,7 @@
 | noir/test_programs/execution_success/array_rc_regression_7842 | ✅ | ✅ | 0 | 1 | 216 | 505 | 24793 | 194081 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/array_set_not_deduplicated | ✅ | ✅ | 1 | 2 | 2192 | 4166 | 26869 | 197239 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/array_set_zero_length_element_brillig_input | ✅ | ✅ | 34 | 62 | 10808 | 3453 | 42524 | 214262 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/array_sort | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/array_sort | ✅ | ✅ | 144 | 225 | 39792 | 34192 | 88278 | 271420 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/array_to_vector | ✅ | ✅ | 111 | 161 | 32696 | 30218 | 77344 | 254129 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/array_to_vector_constant_length | ✅ | ✅ | 0 | 2 | 1352 | 1331 | 24942 | 194518 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/array_with_refs_from_param | ✅ | ✅ | 4 | 4 | 5096 | 4005 | 33555 | 204885 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -429,7 +430,7 @@
 | noir/test_programs/execution_success/ecdsa_secp256k1_msg_equals_order | ✅ | ✅ | 342244 | 619636 | 1120720 | 782099 | 1769433 | 2187573 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/ecdsa_secp256r1 | ✅ | ✅ | 342244 | 619636 | 1120488 | 782208 | 1768944 | 2187244 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/ecdsa_secp256r1_3x | ✅ | ✅ | 945329 | 1705826 | 1128472 | 781719 | 1776176 | 2194263 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/ecdsa_secp256r1_high_s | ✅ | ✅ | 345481 | 623132 | 1246608 | 800393 | 1995550 | 2419966 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir/test_programs/execution_success/ecdsa_secp256r1_high_s | ✅ | ✅ | 345481 | 623132 | 1246608 | 800021 | 1995556 | 2419974 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/ecdsa_secp256r1_invalid_inputs | ✅ | ✅ | 1238480 | 2230519 | 1122120 | 778757 | 1772990 | 2191508 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/ecdsa_secp256r1_invalid_pub_key_in_inactive_branch | ✅ | ✅ | 386618 | 632831 | 1223880 | 880297 | 1673784 | 2089498 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/embedded_curve_ops | ✅ | ✅ | 425601 | 700881 | 299960 | 209416 | 503322 | 722087 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -464,7 +465,7 @@
 | noir/test_programs/execution_success/higher_order_functions | ✅ | ✅ | 2 | 4 | 29344 | 29817 | 45817 | 227731 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/hint_black_box | ✅ | ✅ | 244 | 441 | 16480 | 15956 | 51213 | 225614 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/if_else_chain | ✅ | ✅ | 76 | 128 | 17416 | 8372 | 60135 | 232989 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/immutable_ref_to_unconstrained | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/immutable_ref_to_unconstrained | ✅ | ✅ | 43 | 83 | 10296 | 8938 | 40112 | 213271 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/import | ✅ | ✅ | 44409 | 75728 | 130968 | 116526 | 209871 | 409069 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/inactive_signed_bitshift | ✅ | ✅ | 72 | 126 | 16064 | 4599 | 56154 | 228537 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/inline_decompose_hint_brillig_call | ✅ | ✅ | 44477 | 75793 | 106856 | 70176 | 198328 | 390066 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
