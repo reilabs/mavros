@@ -683,7 +683,7 @@
 | noir/test_programs/execution_success/regression_unsafe_no_predicates | ✅ | ✅ | 22 | 37 | 13144 | 7860 | 46439 | 220203 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_unused_nested_array_get | ✅ | ✅ | 0 | 1 | 1936 | 2914 | 26748 | 198060 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_while_condition_alias | ✅ | ✅ | 23 | 43 | 10976 | 3951 | 43634 | 215451 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/regression_while_condition_break | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/regression_while_condition_break | ✅ | ✅ | 4 | 7 | 10144 | 7128 | 38474 | 210924 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/return_twice | ✅ | ✅ | 4 | 6 | 6488 | 3443 | 35630 | 207461 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/shift_left_rhs_value_casted_from_smaller_type | ✅ | ✅ | 137 | 267 | 22448 | 4688 | 61814 | 234318 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/shift_right_overflow | ✅ | ✅ | 8 | 9 | 6720 | 1683 | 36058 | 206521 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
