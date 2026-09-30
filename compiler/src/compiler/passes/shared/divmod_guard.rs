@@ -193,6 +193,22 @@ pub fn emit_divmod_is_defined_assert(
     });
 }
 
+/// The divisor a division's witness-generation hint divides by: `divisor`, or one where it is zero.
+///
+/// A zero divisor has no quotient (and the constraints the hint feeds refuse it) but the hint runs
+/// first. An unsigned division by a witness has no assertion ahead of it to trap there instead (see
+/// [`divisor_checked_by_its_lowering`]), and a guarded one reaches it whenever the guard holds, so
+/// without this the hint would be a compiled `udiv` by zero, which LLVM leaves undefined.
+///
+/// Dividing by one changes nothing that an honest run can compute. Both the single-cell division
+/// and `WideWitnessInts`' limb-wise one hint through it.
+pub fn nonzero_hint_divisor(b: &mut impl HLEmitter, divisor: ValueId, bits: usize) -> ValueId {
+    let zero = b.int_const(IntBits::zero(bits));
+    let one = b.int_const(IntBits::one(bits));
+    let is_zero = b.eq(divisor, zero);
+    b.select(is_zero, one, divisor)
+}
+
 #[cfg(test)]
 mod tests {
     use mavros_artifacts::FieldConfig;

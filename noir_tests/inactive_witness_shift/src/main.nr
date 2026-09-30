@@ -1,7 +1,7 @@
 // Guarded shifts on the witness path, taken with the guard inactive.
 //
 // Noir treats a shift amount at or above the width as a runtime error, so
-// `lower_general_shift` asserts the amount's high bits are clear. That assert
+// the witness lowering checks the amount against the width. That check
 // has to be *guarded*, or an inactive branch containing an out-of-range shift
 // fails a program that never performs the shift at all. `a >> n` below is that
 // case: `n` is 40 against a u32.
