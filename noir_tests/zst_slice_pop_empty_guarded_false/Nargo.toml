@@ -1,0 +1,6 @@
+[package]
+name = "zst_slice_pop_empty_guarded_false"
+type = "bin"
+authors = [""]
+
+[dependencies]
