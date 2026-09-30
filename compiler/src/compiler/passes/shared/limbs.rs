@@ -49,10 +49,12 @@ const NARROW_HOST_BITS: usize = HOST_WORD_BITS;
 /// ordering stay in one cell while the field holds their sum, and go through the carry chain in
 /// `passes::wide_witness_ints` beyond it; the unsigned product does the same with the schoolbook,
 /// past [`single_cell_product_fits`], and so do the unsigned division and remainder, whose check is
-/// that product; equality has no width at all.
+/// that product, and so do the unsigned shifts, past [`single_cell_shift_fits`]; equality has no
+/// width at all.
 ///
-/// The rest of the arithmetic (the shifts, and every signed operation) is currently refused by
-/// `passes::width_validation`, with the restrictions to be lifted by the remaining work.
+/// The rest of the arithmetic, every signed operation, is refused by `passes::width_validation`,
+/// with the restriction to be lifted by the remaining work.
+///
 /// Past it too is everything that is not arithmetic: the multi-cell representation carries a value
 /// as limbs, and the bit window and the range check are bounded by the field rather than by this.
 pub fn narrow_int_bits(field: FieldConfig) -> usize {
@@ -318,6 +320,22 @@ pub fn widest_cell_sum_bits(field: FieldConfig) -> usize {
 pub fn single_cell_product_fits(field: FieldConfig, bits: usize) -> bool {
     2 * bits <= widest_injective_int_bits(field)
         || (bits == 2 * HOST_LIMB_BITS && two_limb_product_packing_fits(field, bits))
+}
+
+/// Whether the single-cell shift takes a witnessed unsigned shift at `bits`, `left` for a `<<`.
+///
+/// A left shift forms `value · 2^n` in one field element, and `n` is at most `bits − 1`, so the
+/// product reaches `2^(2 · bits − 1)`. A right shift divides by `2^n` through the single-cell
+/// division, which reads its divisor at the full width.
+pub fn single_cell_shift_fits(field: FieldConfig, bits: usize, left: bool) -> bool {
+    let reach = if left { 2 * bits - 1 } else { 2 * bits };
+    reach <= widest_injective_int_bits(field)
+}
+
+/// `ceil(log2(n))`, the number of bits that count `0..n`: the width of a `bits`-wide shift's legal
+/// amounts, and the depth of a barrel over `n` limbs.
+pub fn ceil_log2(n: usize) -> usize {
+    (n - 1).checked_ilog2().map_or(0, |log| log as usize + 1)
 }
 
 // LIMB DECOMPOSITIONS
