@@ -378,6 +378,7 @@ impl<'a> ExpressionConverter<'a> {
             Expression::Break => {
                 let ctx = self.loop_stack.last().expect("break outside of loop");
                 let exit_block = ctx.exit_block;
+                assert!(!b.block(self.current_block).is_terminated());
                 b.block(self.current_block)
                     .terminate_jmp(exit_block, vec![]);
                 // Create a dead block for any subsequent code
@@ -404,10 +405,12 @@ impl<'a> ExpressionConverter<'a> {
                             one,
                         )
                     });
+                    assert!(!b.block(self.current_block).is_terminated());
                     b.block(self.current_block)
                         .terminate_jmp(loop_header, vec![next_index]);
                 } else {
                     // While/loop: just jump back to header with no args
+                    assert!(!b.block(self.current_block).is_terminated());
                     b.block(self.current_block)
                         .terminate_jmp(loop_header, vec![]);
                 }
@@ -765,11 +768,13 @@ impl<'a> ExpressionConverter<'a> {
             let mut header = b.block(loop_header).with_source_location(header_location);
             let loop_index = header.add_parameter(index_type);
             let cond = header.cmp(loop_index, end, CmpKind::lt(index_signed));
+            assert!(!header.is_terminated());
             header.terminate_jmp_if(cond, loop_body, exit_block);
             loop_index
         };
 
         // Jump from current block to loop header with start value
+        assert!(!b.block(self.current_block).is_terminated());
         b.block(self.current_block)
             .terminate_jmp(loop_header, vec![start]);
 
@@ -834,6 +839,7 @@ impl<'a> ExpressionConverter<'a> {
         let exit_block = b.add_block(|_| {});
 
         // Jump from current block to loop header
+        assert!(!b.block(self.current_block).is_terminated());
         b.block(self.current_block)
             .terminate_jmp(loop_header, vec![]);
 
@@ -842,6 +848,7 @@ impl<'a> ExpressionConverter<'a> {
         // rather than overwriting the header's terminator.
         self.current_block = loop_header;
         let cond = self.convert_expression(&while_expr.condition, b).unwrap();
+        assert!(!b.block(self.current_block).is_terminated());
         b.block(self.current_block)
             .terminate_jmp_if(cond, loop_body, exit_block);
 
@@ -883,6 +890,7 @@ impl<'a> ExpressionConverter<'a> {
         let exit_block = b.add_block(|_| {});
 
         // Jump from current block to loop block
+        assert!(!b.block(self.current_block).is_terminated());
         b.block(self.current_block)
             .terminate_jmp(loop_block, vec![]);
 
@@ -982,6 +990,7 @@ impl<'a> ExpressionConverter<'a> {
         let else_block = b.add_block(|_| {});
         let merge_block = b.add_block(|_| {});
 
+        assert!(!b.block(self.current_block).is_terminated());
         b.block(self.current_block)
             .terminate_jmp_if(condition, then_block, else_block);
 
@@ -997,6 +1006,8 @@ impl<'a> ExpressionConverter<'a> {
         let else_value = otherwise(self, b);
         let else_exit = self.current_block;
 
+        assert!(!b.block(then_exit).is_terminated());
+        assert!(!b.block(else_exit).is_terminated());
         if is_unit {
             b.block(then_exit).terminate_jmp(merge_block, vec![]);
             b.block(else_exit).terminate_jmp(merge_block, vec![]);

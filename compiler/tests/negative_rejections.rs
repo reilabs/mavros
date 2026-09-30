@@ -1,3 +1,5 @@
+mod common;
+
 use mavros_compiler::{Project, driver::Driver};
 
 #[test]
@@ -24,18 +26,9 @@ fn source_checks_survive_unused_results_and_respect_inactive_branches() {
         ),
     ];
     for (body, accepted) in cases {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("src")).unwrap();
-        std::fs::write(
-            dir.path().join("Nargo.toml"),
-            "[package]\nname = 'negative_rejections'\ntype = 'bin'\nauthors = []\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("src/main.nr"),
-            format!("fn index() -> u32 {{ 10 }} fn main() {{ {body} }}"),
-        )
-        .unwrap();
+        let dir = common::noir_project(&format!(
+            "fn index() -> u32 {{ 10 }} fn main() {{ {body} }}"
+        ));
         let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
         driver.run_noir_compiler().unwrap();
         let result = driver

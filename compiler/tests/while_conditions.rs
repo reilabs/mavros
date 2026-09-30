@@ -1,15 +1,10 @@
+mod common;
+
 use mavros_compiler::{abi_helpers, api, compiler::codegen::CodeGenOptions};
 
 /// Check actual execution and the declared return, not just successful SSA construction.
 fn check(source: &str, inputs: &[&str]) {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir(dir.path().join("src")).unwrap();
-    std::fs::write(
-        dir.path().join("Nargo.toml"),
-        "[package]\nname = 'while_conditions'\ntype = 'bin'\nauthors = []\n",
-    )
-    .unwrap();
-    std::fs::write(dir.path().join("src/main.nr"), source).unwrap();
+    let dir = common::noir_project(source);
     let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
     let mut binary = api::compile_bytecode(
         &mut driver,

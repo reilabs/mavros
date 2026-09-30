@@ -307,6 +307,7 @@ impl SSAConverter {
                 }
             }
 
+            assert!(!b.block(current_block).is_terminated());
             b.block(current_block).terminate_return(vec![]);
         });
 
@@ -322,6 +323,7 @@ impl SSAConverter {
                         .drop_global(i);
                 }
             }
+            assert!(!b.block(entry).is_terminated());
             b.block(entry).terminate_return(vec![]);
         });
 
@@ -385,6 +387,7 @@ impl SSAConverter {
 
         // Add return terminator
         let return_values = result.into_iter().collect();
+        assert!(!b.block(expr_converter.current_block()).is_terminated());
         b.block(expr_converter.current_block())
             .terminate_return(return_values);
 
