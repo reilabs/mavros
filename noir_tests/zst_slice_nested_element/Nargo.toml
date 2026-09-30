@@ -1,0 +1,6 @@
+[package]
+name = "zst_slice_nested_element"
+type = "bin"
+authors = [""]
+
+[dependencies]

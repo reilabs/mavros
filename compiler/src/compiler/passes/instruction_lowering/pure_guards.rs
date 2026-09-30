@@ -958,7 +958,7 @@ impl LowerPureGuards {
     ) -> ValueId {
         let seq_type = type_info.get_value_type(seq).clone();
         let idx_type = type_info.get_value_type(index).clone();
-        let (_, len_cmp, idx_cmp, _) =
+        let (_, idx_cmp, len_cmp, _) =
             seq_bounds_operands(emitter, seq, index, &seq_type, &idx_type);
         let in_bounds = emitter.ult(idx_cmp, len_cmp);
         emitter.not(in_bounds)

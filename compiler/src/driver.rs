@@ -48,6 +48,7 @@ use crate::{
             instruction_lowering::InstructionLowering,
             lookup_spilling::LookupSpilling,
             lower_map_casts::LowerMapCasts,
+            lower_zst_slices::LowerZstSlices,
             mem2reg::Mem2Reg,
             merge_identical_functions::MergeIdenticalFunctions,
             normalize_asserts::NormalizeAsserts,
@@ -373,7 +374,10 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(PrepareEntryPoint::new(self.main_is_unconstrained)),
-                // Eliminate all tuple types immediately after the entry point is prepared, so every
+                // Lower leaf-less slices to their `u32` length. Must precede the elision, which
+                // breaks on leaf-less slices.
+                Box::new(LowerZstSlices::new()),
+                // Eliminate all tuple types after the entry point is prepared, so every
                 // subsequent pass operates on tuple-free IR.
                 Box::new(ElideTuples::new()),
                 // Normalize `assert(a == b)` / `assert(a < b)` into `AssertCmp` (witness-agnostic,
