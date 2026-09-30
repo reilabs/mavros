@@ -9,6 +9,7 @@ use crate::compiler::{
     passes::{
         instruction_lowering::{InstructionLoweringRule, LoweringContext, integer_bits},
         shared::{
+            divmod_guard::nonzero_hint_divisor,
             limbs::{
                 WitnessLimbs, single_cell_product_fits, split_into_limbs,
                 two_limb_product_packing_fits, widest_cell_sum_bits, witness_limb_bits,
@@ -1024,20 +1025,6 @@ fn lower_unsigned_divmod(
         q_is_witness: true,
         r_is_witness: true,
     }
-}
-
-/// The divisor a division's witness-generation hint divides by: `divisor`, or one where it is zero.
-///
-/// A zero divisor has no quotient, and the constraints the hint feeds refuse it, but the hint runs
-/// first. An unsigned division by a witness has no assertion ahead of it to trap there instead (see
-/// `divisor_checked_by_its_lowering`), and a guarded one reaches it whenever the guard holds, so
-/// without this the hint would be a compiled `udiv` by zero, which LLVM leaves undefined. Dividing
-/// by one changes nothing that an honest run can compute.
-fn nonzero_hint_divisor(b: &mut impl HLEmitter, divisor: ValueId, bits: usize) -> ValueId {
-    let zero = b.int_const(IntBits::zero(bits));
-    let one = b.int_const(IntBits::one(bits));
-    let is_zero = b.eq(divisor, zero);
-    b.select(is_zero, one, divisor)
 }
 
 fn quotient_bound(a_range: &Interval, b_range: &Interval) -> Interval {

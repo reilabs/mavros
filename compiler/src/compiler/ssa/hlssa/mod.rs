@@ -2554,15 +2554,7 @@ pub enum LookupTarget<V> {
     DynRangecheck(V),
     Array(V),
     Spread(u8),
-    /// `(n, 2^n)` for every `n` a shift of a `2^s`-bit value can legally use.
-    ///
-    /// The payload is `s = log2(bits)`, _not_ the shifted operand's width: the rows are the
-    /// amounts `0..bits`, so the table holds `2^s == bits` of them and matches the `1 << s`
-    /// row-count convention every other width-keyed table here follows.
-    ///
-    /// Membership is therefore the shift-amount bound. A lookup that misses is an amount at or
-    /// past the width, which is exactly the rejection `shift_guard` builds out of a comparison
-    /// on the pure path.
+    /// `(n, 2^n)` for every `n` below `2^s`.
     Pow2(u8),
 }
 
