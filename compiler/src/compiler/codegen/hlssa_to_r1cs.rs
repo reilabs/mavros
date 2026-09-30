@@ -1,6 +1,7 @@
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use ark_ff::{AdditiveGroup, BigInteger, Field, PrimeField};
+use num_bigint::BigUint;
 use tracing::{instrument, warn};
 
 use mavros_artifacts::FieldConfig;
@@ -63,14 +64,32 @@ pub struct ArrayData {
     data: Vec<Value>,
 }
 
+/// What R1CS generation knows of one SSA value as it executes the program symbolically.
 #[derive(Clone, Debug)]
 // FIELD-ASSUMPTION: L4-eval
 pub enum Value {
+    /// A Field element value known at compile time.
     Const(ark_bn254::Fr),
+
+    /// A pure integer at or above the modulus.
+    Wide(IntBits),
+
+    /// A value that depends on the witness, as a linear combination of witness columns.
     LC(LC),
+
+    /// An array or slice, element by element.
     Array(Rc<RefCell<ArrayData>>),
+
+    /// A blob constant's elements, read only by `MkSeqOfBlob`, which turns them into an
+    /// [`Value::Array`].
     Blob(Vec<Value>),
+
+    /// A reference, as the cell it points to.
+    ///
+    /// Clones share the cell, so a write through one is seen by a read through any other.
     Ptr(Rc<RefCell<Value>>),
+
+    /// Never constructed, and matched nowhere.
     Invalid,
 }
 
@@ -92,15 +111,35 @@ impl Value {
         )
     }
 
-    /// Report a constant with no field element reaching this evaluator as a compiler bug.
+    /// Report a [`Value::Wide`] asked for a field element as a compiler bug.
     ///
-    /// This evaluator carries a number as **one field element**, for now, so a magnitude at or
-    /// above the modulus has no way of being held.
+    /// A pure integer past the modulus is held as its pattern, and only the integer operations
+    /// read it that way. Anything that needs an element from it would reduce it modulo `p`, which
+    /// is the cast `width_validation` refuses.
     #[track_caller]
-    fn ice_no_element(what: std::fmt::Arguments<'_>) -> ! {
+    fn ice_no_element(pattern: &IntBits) -> ! {
         ice!(
-            "{what} reached R1CS generation carrying a value at or above the modulus, which one field element cannot hold; width_validation should have refused the program, or the fold should have happened before here"
+            "an int{} value at or above the modulus reached a use in R1CS generation that needs its field element, which it does not have; width_validation should have refused the cast that put it there",
+            pattern.bits()
         )
+    }
+
+    /// An integer answer as an element where one holds it, and as its pattern where none does.
+    fn of_pattern(field: FieldConfig, pattern: IntBits) -> Value {
+        match field_constant(field, &pattern) {
+            Some(element) => Value::Const(element.to_ark()),
+            None => Value::Wide(pattern),
+        }
+    }
+
+    /// The magnitude of a constant, read as an integer.
+    fn magnitude(&self) -> BigUint {
+        match self {
+            // FIELD-ASSUMPTION: L4-decompose
+            Value::Const(c) => c.into_bigint().into(),
+            Value::Wide(pattern) => pattern.into(),
+            r => ice!("expected an integer constant, got {r:?}"),
+        }
     }
 
     // FIELD-ASSUMPTION: L4-eval
@@ -183,6 +222,7 @@ impl Value {
     pub fn expect_constant(&self) -> ark_bn254::Fr {
         match self {
             Value::Const(c) => *c,
+            Value::Wide(pattern) => Self::ice_no_element(pattern),
             _ => ice!("expected constant"),
         }
     }
@@ -224,6 +264,10 @@ impl Value {
                 IntBits::field_limbs_fit(&limbs, HOST_WORD_BITS)
                     .then(|| host_word(&IntBits::from_field_limbs(&limbs, HOST_WORD_BITS)))
             }
+            Value::Wide(pattern) => ice!(
+                "expected {what}, got an int{} at or above the modulus",
+                pattern.bits()
+            ),
             r => ice!("expected {what}, got {r:?}"),
         }
     }
@@ -262,10 +306,12 @@ impl Value {
 
     /// The canonical value as a `bits`-wide pattern.
     ///
-    /// This evaluator carries its integers as field elements, so a pattern exists only for the
-    /// length of a call into the model. Masking to `bits` enforces the reading as the model takes
-    /// its operands already normalized and does no masking of its own, so a bit above the declared
-    /// width is not part of the value being operated on whether it sits at index 60 or index 600.
+    /// This evaluator carries its integers as field elements wherever one holds them, so for those
+    /// a pattern exists only for the length of a call into the model; a [`Value::Wide`] is one
+    /// already, and is read at `bits` the same way. Masking to `bits` enforces the reading as the
+    /// model takes its operands already normalized and does no masking of its own, so a bit above
+    /// the declared width is not part of the value being operated on whether it sits at index 60 or
+    /// index 600.
     ///
     /// An element carrying more than `bits` is read as its low `bits` rather than refused, which is
     /// the cast semantics `docs/int-semantics.md` gives and the same reading `int_cast_bits` gives
@@ -275,6 +321,7 @@ impl Value {
         match self {
             // FIELD-ASSUMPTION: L4-decompose
             Value::Const(c) => IntBits::from_field_limbs(&c.into_bigint().0, bits),
+            Value::Wide(pattern) => pattern.cast(bits),
             r => ice!("expected an int{bits}, got {r:?}"),
         }
     }
@@ -330,6 +377,7 @@ impl Value {
     pub fn expect_linear_combination(&self) -> Vec<(usize, ark_bn254::Fr)> {
         match self {
             Value::Const(c) => vec![(0, *c)],
+            Value::Wide(pattern) => Self::ice_no_element(pattern),
             Value::LC(lc) => lc.clone(),
             _ => ice!("expected constant or linear combination"),
         }
@@ -568,6 +616,18 @@ impl symbolic_executor::Context<Value> for R1CGen {
 // FIELD-ASSUMPTION: L4-eval
 impl symbolic_executor::Value<R1CGen> for Value {
     fn cmp(&self, b: &Self, kind: CmpKind, bits: Option<usize>, _ctx: &mut R1CGen) -> Self {
+        if matches!(self, Value::Wide(_)) || matches!(b, Value::Wide(_)) {
+            let holds = match kind {
+                CmpKind::Eq => self.magnitude() == b.magnitude(),
+                CmpKind::ULt => self.magnitude() < b.magnitude(),
+                CmpKind::SLt => ice!("a signed comparison past the signed frontier"),
+            };
+            return Value::Const(if holds {
+                ark_bn254::Fr::ONE
+            } else {
+                ark_bn254::Fr::ZERO
+            });
+        }
         match kind {
             CmpKind::Eq => self.eq(b),
             // `ULt` compares the field encodings, which is the magnitude for an unsigned integer.
@@ -618,14 +678,20 @@ impl symbolic_executor::Value<R1CGen> for Value {
                 // answer, below, where it is a fact about a number rather than a guess from a
                 // type.
                 //
-                // Both operands are already below the modulus by construction: a constant reaches
-                // this evaluator through `of_int` or as a field element, and each is bounded there.
+                // An operand is an element or, past the modulus, a [`Value::Wide`], and either is
+                // read as a pattern at `bits` below.
                 assert!(bits > 0, "an int0 describes a value with no bits");
                 if binary_arith_op_kind.is_signed() {
                     assert_signed_op_width(bits, "R1CS constant arithmetic");
                 }
                 assert!(
-                    matches!((self, b), (Value::Const(_), Value::Const(_))),
+                    matches!(
+                        (self, b),
+                        (
+                            Value::Const(_) | Value::Wide(_),
+                            Value::Const(_) | Value::Wide(_)
+                        )
+                    ),
                     "Non-constant integer {:?} is not supported in R1CS arith",
                     binary_arith_op_kind
                 );
@@ -649,14 +715,9 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     )
                 });
 
-                // Operands below the modulus still combine into magnitudes at or above it and this
-                // evaluator has no second element to put one in for now.
-                let element = field_constant(ctx.field(), &raw).unwrap_or_else(|| {
-                    Value::ice_no_element(format_args!(
-                        "the answer of {binary_arith_op_kind:?} on int{bits}"
-                    ))
-                });
-                Value::Const(element.to_ark())
+                // Operands below the modulus still combine into magnitudes at or above it, which
+                // are carried as their patterns.
+                Value::of_pattern(ctx.field(), raw)
             }
             TypeExpr::Field | TypeExpr::WitnessOf(_) => match binary_arith_op_kind.group() {
                 ArithGroup::Add => self.add(b),
@@ -693,6 +754,22 @@ impl symbolic_executor::Value<R1CGen> for Value {
         bits: Option<usize>,
         _ctx: &mut R1CGen,
     ) -> Result<(), AssertionFailure> {
+        if matches!(a, Value::Wide(_)) || matches!(b, Value::Wide(_)) {
+            let holds = match kind {
+                CmpKind::Eq => a.magnitude() == b.magnitude(),
+                CmpKind::ULt => a.magnitude() < b.magnitude(),
+                CmpKind::SLt => ice!("a signed assertion past the signed frontier"),
+            };
+            return if holds {
+                Ok(())
+            } else {
+                Err(AssertionFailure::new(format!(
+                    "assert_cmp {kind:?} failed on {:?} and {:?}",
+                    a.magnitude(),
+                    b.magnitude()
+                )))
+            };
+        }
         match kind {
             CmpKind::Eq => {
                 let a_val = a.expect_constant();
@@ -758,23 +835,19 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::mk_array(new_array)
     }
 
-    /// The `width` bits starting at `offset`, as an element again.
+    /// The `width` bits starting at `offset`, as an element again where one holds them.
     ///
     /// The same reading as `click_cooper::lattice::eval_bit_range`'s field arm, through the same
     /// two calls. The source is read as a pattern at the window's own top, and the window is minted
-    /// back through [`field_constant`].
+    /// back through `Value::of_pattern`: a window of an element is below the modulus, and only a
+    /// window of a [`Value::Wide`] can be past it.
     // FIELD-ASSUMPTION: L4-decompose
     fn bit_range(&self, offset: usize, width: usize, _out_type: &Type, ctx: &mut R1CGen) -> Self {
         let read = offset
             .checked_add(width)
             .expect("ICE: a bit range whose top overflows a usize");
         let window = self.expect_pattern(read).bit_range(offset, width);
-
-        // Total, and not merely total so far: `window` is cut from a canonical element, so its
-        // magnitude is bounded by that element's and the element was below the modulus already.
-        let element = field_constant(ctx.field(), &window)
-            .expect("ICE: a window of a canonical field element is below the modulus");
-        Value::Const(element.to_ark())
+        Value::of_pattern(ctx.field(), window)
     }
 
     /// Widen `from` bits to `to`, replicating the sign bit using the integer semantic model.
@@ -786,13 +859,10 @@ impl symbolic_executor::Value<R1CGen> for Value {
         );
 
         let extended = self.expect_pattern(from).sign_extend(to);
-        let element = field_constant(ctx.field(), &extended).unwrap_or_else(|| {
-            Value::ice_no_element(format_args!("int{from} sign-extended to int{to}"))
-        });
-        Value::Const(element.to_ark())
+        Value::of_pattern(ctx.field(), extended)
     }
 
-    fn cast(&self, cast_target: &hlssa::CastTarget, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
+    fn cast(&self, cast_target: &hlssa::CastTarget, _out_type: &Type, ctx: &mut R1CGen) -> Self {
         // Witness strips (ValueOf, also under Maps) only feed hint chains and
         // unconstrained call arguments, so they must be dead (and DCE'd) by
         // R1CS generation. The remaining casts — witness injections and Maps
@@ -801,7 +871,18 @@ impl symbolic_executor::Value<R1CGen> for Value {
             !cast_target.is_value_of(),
             "ICE: witness strip {cast_target} should not reach R1CS gen"
         );
-        self.clone()
+        match (cast_target, self) {
+            // A constant cast to an integer is read at the target's width, which truncates a
+            // narrowing. The frontend puts a `BitRange` ahead of each narrowing cast it writes, so
+            // there the value already fits; `WideWitnessInts` does not, when it cuts a pure value
+            // into limbs, and a limb that kept the bits above it would reach a constraint as the
+            // wrong coefficient.
+            (hlssa::CastTarget::Int(bits), Value::Const(_) | Value::Wide(_)) => {
+                Value::of_pattern(ctx.field(), self.expect_pattern(*bits))
+            }
+            (hlssa::CastTarget::Field, Value::Wide(pattern)) => Self::ice_no_element(pattern),
+            _ => self.clone(),
+        }
     }
 
     fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut R1CGen) -> Result<(), AssertionFailure> {
@@ -856,16 +937,11 @@ impl symbolic_executor::Value<R1CGen> for Value {
     fn not(&self, out_type: &Type, ctx: &mut R1CGen) -> Self {
         let bits = out_type.get_bit_size(ctx.field());
         let complemented = self.expect_pattern(bits).complement();
-        let element = field_constant(ctx.field(), &complemented).unwrap_or_else(|| {
-            Value::ice_no_element(format_args!("the complement of an int{bits}"))
-        });
-        Value::Const(element.to_ark())
+        Value::of_pattern(ctx.field(), complemented)
     }
 
     fn of_int(v: &IntBits, ctx: &mut R1CGen) -> Self {
-        let element = field_constant(ctx.field(), v)
-            .unwrap_or_else(|| Value::ice_no_element(format_args!("an int{} constant", v.bits())));
-        Value::Const(element.to_ark())
+        Value::of_pattern(ctx.field(), v.clone())
     }
 
     fn of_field(f: crate::compiler::Field, _ctx: &mut R1CGen) -> Self {
@@ -910,6 +986,13 @@ impl symbolic_executor::Value<R1CGen> for Value {
     }
 
     fn select(&self, if_t: &Self, if_f: &Self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
+        if matches!(if_t, Value::Wide(_)) || matches!(if_f, Value::Wide(_)) {
+            return if self.expect_constant() == ark_bn254::Fr::ONE {
+                if_t.clone()
+            } else {
+                if_f.clone()
+            };
+        }
         self.mul(if_t)
             .add(&Value::Const(ark_bn254::Fr::ONE).sub(self).mul(if_f))
     }
@@ -2081,13 +2164,7 @@ mod int_semantics_conformance {
     fn fold_wide(op: BinaryArithOpKind, bits: usize, a: &IntBits, b: &IntBits) -> IntBits {
         let field = FieldConfig::bn254();
         let mut generator = R1CGen::new(field);
-        let operand = |p: &IntBits| {
-            Value::Const(
-                field_constant(field, p)
-                    .expect("an operand below the modulus has an element")
-                    .to_ark(),
-            )
-        };
+        let operand = |p: &IntBits| Value::of_pattern(field, p.clone());
 
         <Value as symbolic_executor::Value<R1CGen>>::arith(
             &operand(a),
@@ -2099,10 +2176,11 @@ mod int_semantics_conformance {
         .expect_pattern(bits)
     }
 
-    /// The exact relation again, at every wide width, skipping only what the field cannot hold.
+    /// The exact relation again, at every wide width, on both sides of the modulus.
     ///
-    /// Every width in the wide set runs, **16384 included**: the skip is per _pair_, because
-    /// whether a constant can be held here is a question about its value.
+    /// Every width in the wide set runs, **16384 included**. An operand or an answer past the
+    /// modulus is carried as its pattern, so nothing is skipped; the count of those is what shows
+    /// the corners reach past it.
     #[test]
     fn the_r1cs_fold_agrees_with_the_model_at_wide_widths() {
         let field = FieldConfig::bn254();
@@ -2121,14 +2199,11 @@ mod int_semantics_conformance {
                             continue;
                         };
 
-                        // An operand or an answer at or above the modulus is outside this
-                        // evaluator's domain.
                         if [a, b, &want]
                             .iter()
                             .any(|p| field_constant(field, p).is_none())
                         {
                             past_the_modulus += 1;
-                            continue;
                         }
 
                         assert_eq!(
@@ -2147,8 +2222,8 @@ mod int_semantics_conformance {
             "the wide sweep only reached {checked} specified points"
         );
 
-        // The corner set is meant to reach past the modulus. If it stopped, the skip above would be
-        // covering nothing and the pins below would be the only evidence the boundary exists.
+        // The corner set is meant to reach past the modulus. If it stopped, the sweep would say
+        // nothing about the values this evaluator carries as patterns.
         assert!(
             past_the_modulus > 0,
             "no wide corner reached past the modulus"
@@ -2172,16 +2247,59 @@ mod int_semantics_conformance {
     }
 
     /// `2^253` is below the modulus and `2^254` is above it, so this is a sum of two representable
-    /// operands with no element of its own.
+    /// operands with no element of its own, which is carried as its pattern.
     #[test]
-    #[should_panic(expected = "carrying a value at or above the modulus")]
-    fn an_answer_above_the_modulus_is_an_ice_though_its_operands_fit() {
+    fn an_answer_above_the_modulus_is_carried_as_its_pattern() {
         let half = IntBits::from_u128(256, 1).shifted_left(253);
         assert!(
             field_constant(FieldConfig::bn254(), &half).is_some(),
             "the operand must itself be representable, or this pins the wrong boundary"
         );
 
-        let _ = fold_wide(BinaryArithOpKind::UAdd, 256, &half, &half);
+        let sum = fold_wide(BinaryArithOpKind::UAdd, 256, &half, &half);
+        assert_eq!(sum, IntBits::from_u128(256, 1).shifted_left(254));
+    }
+
+    /// A value past the modulus is an ICE where it would have to become an element: a constraint,
+    /// or a cast to `Field`, which `width_validation` refuses before it could be written.
+    #[test]
+    #[should_panic(expected = "value at or above the modulus reached a use in R1CS generation")]
+    fn a_value_past_the_modulus_has_no_element_to_give() {
+        let past = Value::of_pattern(
+            FieldConfig::bn254(),
+            IntBits::from_u128(256, 1).shifted_left(254),
+        );
+        assert!(matches!(past, Value::Wide(_)));
+        let _ = past.expect_linear_combination();
+    }
+
+    /// A narrowing cast of a constant truncates it, whether the constant has an element or not, and
+    /// what comes back has one again.
+    #[test]
+    fn an_integer_cast_reads_a_constant_at_its_target_width() {
+        let field = FieldConfig::bn254();
+        let mut generator = R1CGen::new(field);
+        let cast = |value: &Value, generator: &mut R1CGen| {
+            <Value as symbolic_executor::Value<R1CGen>>::cast(
+                value,
+                &crate::compiler::ssa::hlssa::CastTarget::Int(64),
+                &Type::int(64),
+                generator,
+            )
+            .expect_constant()
+        };
+
+        let low = IntBits::from_u128(320, 0xdead_beef);
+        let past = IntBits::from_u128(320, 1).shifted_left(300).or(&low);
+        let within = IntBits::from_u128(200, 1)
+            .shifted_left(100)
+            .or(&low.cast(200));
+        for value in [past, within] {
+            let value = Value::of_pattern(field, value);
+            assert_eq!(
+                cast(&value, &mut generator),
+                ark_bn254::Fr::from(0xdead_beefu64)
+            );
+        }
     }
 }

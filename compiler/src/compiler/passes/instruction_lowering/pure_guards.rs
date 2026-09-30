@@ -34,8 +34,8 @@ use crate::compiler::{
         instruction_lowering::{InstructionLoweringRule, LoweringContext},
         shared::{
             divmod_guard::{
-                divmod_can_fail, divmod_provably_defined, emit_divmod_failure_cond,
-                emit_divmod_is_defined_assert,
+                divisor_checked_by_its_lowering, divmod_can_fail, divmod_provably_defined,
+                emit_divmod_failure_cond, emit_divmod_is_defined_assert,
             },
             overflow_guard::{
                 emit_no_overflow_assert, emit_overflow_cond, mul_overflows_nonzero,
@@ -77,7 +77,9 @@ impl InstructionLoweringRule for LowerPureGuards {
             // An unguarded div/mod still has to be checked as `Guard` only covers the ops that sit
             // under witness-dependent control flow. Witness operands are included: the comparisons
             // become ordinary constraints, lowered by the later witness passes just like any
-            // other, so one implementation covers both.
+            // other, so one implementation covers both. The one exception is an unsigned integer
+            // division by a witness, whose lowering rejects a zero divisor itself, and which `DCE`
+            // therefore keeps until that lowering has run; see `divisor_checked_by_its_lowering`.
             //
             // `Field` is in scope for the same reason the integers are, and needs it most, because
             // there the missing check is a _soundness_ hole rather than a wrong answer. `div_field`
@@ -108,7 +110,8 @@ impl InstructionLoweringRule for LowerPureGuards {
                 rhs,
             } if matches!(kind.group(), ArithGroup::Div | ArithGroup::Rem)
                 && divmod_can_fail(type_info.get_value_type(*lhs))
-                && !self.divmod_discharged(context, *kind, *lhs, *rhs) =>
+                && !self.divmod_discharged(context, *kind, *lhs, *rhs)
+                && !divisor_checked_by_its_lowering(*kind, type_info.get_value_type(*rhs)) =>
             {
                 let lhs_type = type_info.get_value_type(*lhs).strip_witness().clone();
 
@@ -410,7 +413,17 @@ impl LowerPureGuards {
                         );
                         true
                     }
-                    // Witness inputs: keep as Guard
+                    // A witness field division is left to `lower_field_div_guarded`, which pins
+                    // nothing at `0 / 0`, so its check is built here instead.
+                    TypeExpr::Field => {
+                        self.lower_witness_field_div_guard(
+                            emitter, condition, kind, result, lhs, rhs, lhs_type,
+                        );
+                        true
+                    }
+                    // A witness integer division stays guarded, as its lowering rejects every
+                    // execution this check would: a zero divisor, and `INT_MIN / -1`. `DCE` keeps a
+                    // dead one until that lowering has run; see its `owes_witness_check`.
                     _ => false,
                 }
             }
@@ -751,6 +764,58 @@ impl LowerPureGuards {
         );
     }
 
+    /// Lower `Guard(cond, lhs / rhs)` on field elements with a witness operand.
+    ///
+    /// The division stays guarded for `lower_field_div_guarded`, which constrains only
+    /// `result * rhs == lhs * cond`. At `0 / 0` that holds for every `result`, so where the branch
+    /// is taken the quotient would be pinned by nothing and a zero divisor would pass whenever the
+    /// dividend is zero too.
+    ///
+    /// The check the unguarded arm builds closes that, asserted under the same guard so an inactive
+    /// branch is not held to it. The operands are witnesses, so the branch `lower_divmod_guard`
+    /// builds out of them is not available, and the assertion is one of ordinary constraints
+    /// instead.
+    ///
+    /// An assertion is never dead, so a division that is dead survives as its check, which a
+    /// `DCE` after this point would otherwise delete with the division.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_witness_field_div_guard(
+        &self,
+        emitter: &mut HLBlockEmitter<'_>,
+        condition: ValueId,
+        kind: BinaryArithOpKind,
+        result: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        lhs_type: &Type,
+    ) {
+        let failure = emit_divmod_failure_cond(
+            emitter,
+            lhs,
+            rhs,
+            &lhs_type.strip_witness(),
+            kind.is_signed(),
+        );
+        let zero_u1 = emitter.int_const(IntBits::zero(1));
+        emitter.emit(OpCode::Guard {
+            condition,
+            inner: Box::new(OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs: failure,
+                rhs: zero_u1,
+            }),
+        });
+        emitter.emit(OpCode::Guard {
+            condition,
+            inner: Box::new(OpCode::BinaryArithOp {
+                kind,
+                result,
+                lhs,
+                rhs,
+            }),
+        });
+    }
+
     /// Lower `Guard(cond, ArraySet(array, idx, val) -> result)`.
     ///
     /// Pattern:
@@ -893,7 +958,7 @@ impl LowerPureGuards {
     ) -> ValueId {
         let seq_type = type_info.get_value_type(seq).clone();
         let idx_type = type_info.get_value_type(index).clone();
-        let (_, len_cmp, idx_cmp, _) =
+        let (_, idx_cmp, len_cmp, _) =
             seq_bounds_operands(emitter, seq, index, &seq_type, &idx_type);
         let in_bounds = emitter.ult(idx_cmp, len_cmp);
         emitter.not(in_bounds)
@@ -998,6 +1063,162 @@ mod tests {
         // one phase later, so a width one of them cannot build is not visible here without it.
         InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
         ssa
+    }
+
+    /// Whether an unguarded `lhs op rhs` over parameters of the given types leaves this pass carrying
+    /// an assertion.
+    fn unguarded_division_is_checked(
+        kind: BinaryArithOpKind,
+        lhs_type: Type,
+        rhs_type: Type,
+    ) -> bool {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let lhs = ssa.fresh_value();
+        let rhs = ssa.fresh_value();
+        let result = ssa.fresh_value();
+        let witnessed = lhs_type.is_witness_of() || rhs_type.is_witness_of();
+        let result_type = lhs_type.strip_witness().clone();
+        let function = ssa.get_unique_entrypoint_mut();
+        function.add_return_type(if witnessed {
+            Type::witness_of(result_type)
+        } else {
+            result_type
+        });
+        let entry = function.get_entry_mut();
+        entry.push_parameter(lhs, lhs_type);
+        entry.push_parameter(rhs, rhs_type);
+        entry.push_test_instruction(OpCode::BinaryArithOp {
+            kind,
+            result,
+            lhs,
+            rhs,
+        });
+        entry.set_terminator(Terminator::Return(vec![result]));
+
+        InstructionLowering::pure_guards().run(&mut ssa, &AnalysisStore::new());
+        ssa.get_unique_entrypoint()
+            .get_blocks()
+            .flat_map(|(_, block)| block.get_instructions())
+            .any(|op| matches!(op, OpCode::AssertCmp { .. }))
+    }
+
+    /// An unsigned division by a witness carries no check of its own, as both of its lowerings
+    /// refuse a zero divisor already; every other division keeps it.
+    #[test]
+    fn only_an_unsigned_division_by_a_witness_leaves_its_divisor_to_its_lowering() {
+        let int = |bits| Type::int(bits);
+        let witnessed = |ty| Type::witness_of(ty);
+        for bits in [64, 128, 320] {
+            for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
+                assert!(
+                    !unguarded_division_is_checked(kind, int(bits), witnessed(int(bits))),
+                    "an int{bits} {kind:?} by a witness is checked twice"
+                );
+                assert!(
+                    !unguarded_division_is_checked(
+                        kind,
+                        witnessed(int(bits)),
+                        witnessed(int(bits))
+                    ),
+                    "an int{bits} {kind:?} of two witnesses is checked twice"
+                );
+                assert!(
+                    unguarded_division_is_checked(kind, witnessed(int(bits)), int(bits)),
+                    "an int{bits} {kind:?} by a pure divisor is not checked before its hint"
+                );
+            }
+        }
+        for kind in [BinaryArithOpKind::SDiv, BinaryArithOpKind::SRem] {
+            assert!(
+                unguarded_division_is_checked(kind, int(64), witnessed(int(64))),
+                "a signed {kind:?} by a witness is not checked for `INT_MIN / -1`"
+            );
+        }
+        assert!(
+            unguarded_division_is_checked(
+                BinaryArithOpKind::UDiv,
+                Type::field(),
+                witnessed(Type::field())
+            ),
+            "a field division by a witness is not checked, and pins nothing at `0 / 0`"
+        );
+    }
+
+    /// Whether a `lhs op rhs` guarded by a witnessed condition, over parameters of the given types,
+    /// leaves this pass carrying an assertion, and whether the division itself is still guarded.
+    fn guarded_division_lowering(
+        kind: BinaryArithOpKind,
+        lhs_type: Type,
+        rhs_type: Type,
+    ) -> (bool, bool) {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let lhs = ssa.fresh_value();
+        let rhs = ssa.fresh_value();
+        let condition = ssa.fresh_value();
+        let result = ssa.fresh_value();
+        let function = ssa.get_unique_entrypoint_mut();
+        let entry = function.get_entry_mut();
+        entry.push_parameter(lhs, lhs_type);
+        entry.push_parameter(rhs, rhs_type);
+        entry.push_parameter(condition, Type::witness_of(Type::int(1)));
+        entry.push_test_instruction(OpCode::Guard {
+            condition,
+            inner: Box::new(OpCode::BinaryArithOp {
+                kind,
+                result,
+                lhs,
+                rhs,
+            }),
+        });
+        entry.set_terminator(Terminator::Return(vec![]));
+
+        InstructionLowering::pure_guards().run(&mut ssa, &AnalysisStore::new());
+        let ops: Vec<OpCode> = ssa
+            .get_unique_entrypoint()
+            .get_blocks()
+            .flat_map(|(_, block)| block.get_instructions().cloned().collect::<Vec<_>>())
+            .collect();
+        let asserted = ops.iter().any(|op| match op {
+            OpCode::Guard { inner, .. } => matches!(inner.as_ref(), OpCode::AssertCmp { .. }),
+            other => matches!(other, OpCode::AssertCmp { .. }),
+        });
+        let still_guarded = ops.iter().any(|op| {
+            matches!(op, OpCode::Guard { inner, .. }
+                if matches!(inner.as_ref(), OpCode::BinaryArithOp { result: r, .. } if *r == result))
+        });
+        (asserted, still_guarded)
+    }
+
+    /// A guarded field division with a witness operand is checked here, by an assertion under the
+    /// guard, as its lowering pins nothing at `0 / 0`; the division stays guarded for that
+    /// lowering. A guarded witness integer division is left to its lowering, which checks it.
+    #[test]
+    fn a_guarded_witness_field_division_is_checked_and_an_integer_one_is_left() {
+        let witnessed = |ty| Type::witness_of(ty);
+        for (lhs, rhs) in [
+            (witnessed(Type::field()), witnessed(Type::field())),
+            (Type::field(), witnessed(Type::field())),
+            (witnessed(Type::field()), Type::field()),
+        ] {
+            let what = format!("{lhs:?} / {rhs:?}");
+            assert_eq!(
+                guarded_division_lowering(BinaryArithOpKind::UDiv, lhs, rhs),
+                (true, true),
+                "{what}: asserted under the guard, and still divided under it"
+            );
+        }
+        for kind in [
+            BinaryArithOpKind::UDiv,
+            BinaryArithOpKind::URem,
+            BinaryArithOpKind::SDiv,
+            BinaryArithOpKind::SRem,
+        ] {
+            assert_eq!(
+                guarded_division_lowering(kind, witnessed(Type::int(64)), Type::int(64)),
+                (false, true),
+                "{kind:?}: a witness integer division is its lowering's to check"
+            );
+        }
     }
 
     /// The numerator of the sole division a lowered multiply's overflow check divides by, as the

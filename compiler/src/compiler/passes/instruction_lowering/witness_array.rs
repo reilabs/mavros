@@ -156,7 +156,7 @@ impl LowerWitnessArrayOps {
         // For an empty array, emit a guarded compare that is guaranteed to fail and return a
         // default value.
         if array_len(arr_type, "witness array get") == 0 {
-            let (_, len_cmp, idx_cmp, _) = seq_bounds_operands(b, arr, idx, arr_type, idx_type);
+            let (_, idx_cmp, len_cmp, _) = seq_bounds_operands(b, arr, idx, arr_type, idx_type);
             b.emit_guarded(
                 cond,
                 OpCode::AssertCmp {
@@ -178,7 +178,7 @@ impl LowerWitnessArrayOps {
         // Substitute a safe index (0) for the hint index so the VM never reads out of bounds; the
         // lookup below still rejects an out-of-range witness index, so this only changes *when*
         // it fails.
-        let (_, len_cmp, idx_cmp, _) = seq_bounds_operands(b, arr, pure_idx, arr_type, idx_type);
+        let (_, idx_cmp, len_cmp, _) = seq_bounds_operands(b, arr, pure_idx, arr_type, idx_type);
         let in_bounds = b.ult(idx_cmp, len_cmp);
         let zero = b.int_const(IntBits::zero(idx_bits));
         let hint_idx = b.select(in_bounds, pure_idx, zero);

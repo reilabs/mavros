@@ -21,6 +21,29 @@ unconstrained fn signed_continue() -> u32 {
     count
 }
 
+// Constant endpoints below the maximum use the exclusive-bound fast path.
+// Exercise several continue sites and fallthrough through its shared increment.
+unconstrained fn constant_endpoints() -> u32 {
+    let mut count = 0;
+    for i in 252u8..=254u8 {
+        count += 1;
+        if i == 252 {
+            continue;
+        }
+        if i == 254 {
+            continue;
+        }
+    }
+    for _ in 124i8..=126i8 {
+        count += 1;
+        continue;
+    }
+    for _ in -2i8..=0i8 {
+        count += 1;
+    }
+    count
+}
+
 unconstrained fn nested_break_continue() -> u32 {
     let mut count = 0;
     for _ in 254u8..=255u8 {
@@ -77,5 +100,6 @@ fn main(lo: u8, hi: u8) {
     assert(unsafe { count_range(hi, hi, true) } == 1);
     assert(unsafe { count_range(hi, lo, true) } == 0);
     assert(unsafe { signed_continue() } == 3);
+    assert(unsafe { constant_endpoints() } == 9);
     assert(unsafe { nested_break_continue() } == 4);
 }

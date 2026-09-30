@@ -1,21 +1,16 @@
 // `for` loops whose index is a signed integer.
 //
-// The frontend desugars a `for` into three operations on the index -- the exit
-// test in the header, the increment it falls off the end of the body into, and
-// the increment `continue` jumps through. All three have to be built at
-// the index's own signedness, and the constant `1` they step by has to be
-// tagged the same way the index is: `Types` gives a binary operation the type
-// `lhs.get_arithmetic_result_type(rhs)`, which has no mixed `U`/`I` case and
-// panics outright. A `u64` step against an `i64` index therefore did not
-// miscompile, it made the whole function untypeable, and every `for` over a
-// signed range died with `Cannot perform arithmetic on types i64 and u64`
-// before reaching any backend.
+// Lowering preserves the index's signedness in the header comparison and the
+// shared increment reached by both body fallthrough and `continue`. For an
+// inclusive range with a constant endpoint below the maximum, it also uses
+// signed arithmetic to compute the safe exclusive bound. The step constant
+// must have the index's width.
 //
-// Each group below reaches one of those sites, and the assertions pin the
-// arithmetic against Noir's own execution via the `Correct` lanes.
+// These cases exercise exclusive and inclusive signed header comparisons,
+// including the constant-endpoint fast path, and both routes to the increment.
+// The assertions check the arithmetic through the runner's `Correct` lanes.
 
-// `continue` is the second increment site, and Noir allows it only in
-// unconstrained code.
+// `continue` reaches the shared increment; Noir allows it only in unconstrained code.
 unconstrained fn skip_zero(lo: i64, hi: i64) -> i64 {
     let mut c: i64 = 0;
     for k in lo..hi {
@@ -38,7 +33,7 @@ fn main(x: i64, y: i8) {
     }
     assert(acc == 15);
 
-    // Inclusive range, with a signed endpoint comparison at a narrower width.
+    // The constant endpoint becomes 3i8, used by the header's signed `<` comparison.
     let mut n: i8 = 0;
     for j in -2i8..=2i8 {
         n += j + y;

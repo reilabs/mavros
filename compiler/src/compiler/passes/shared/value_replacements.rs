@@ -3,8 +3,8 @@
 use crate::{
     collections::HashMap,
     compiler::ssa::{
-        Instruction, Terminator, ValueId,
-        hlssa::{HLFunction, OpCode},
+        BlockId, Instruction, Terminator, ValueId,
+        hlssa::{HLBlock, HLFunction, OpCode},
     },
 };
 
@@ -90,17 +90,38 @@ impl ValueReplacements {
         keep: impl Fn(&OpCode) -> bool,
     ) {
         for (_, block) in function.get_blocks_mut() {
-            for instr in block.get_instructions_mut() {
-                if !keep(instr) {
-                    continue;
-                }
-                match scope {
-                    ReplaceScope::Inputs => self.replace_inputs(instr),
-                    ReplaceScope::Operands => self.replace_instruction(instr),
-                }
-            }
-            self.replace_terminator(block.get_terminator_mut());
+            self.apply_to_block(block, scope, &keep);
         }
+    }
+
+    /// [`Self::apply_to_function`] restricted to select `blocks`
+    pub fn apply_to_blocks(
+        &self,
+        function: &mut HLFunction,
+        scope: ReplaceScope,
+        blocks: impl IntoIterator<Item = BlockId>,
+    ) {
+        for bid in blocks {
+            self.apply_to_block(function.get_block_mut(bid), scope, &|_| true);
+        }
+    }
+
+    fn apply_to_block(
+        &self,
+        block: &mut HLBlock,
+        scope: ReplaceScope,
+        keep: &impl Fn(&OpCode) -> bool,
+    ) {
+        for instr in block.get_instructions_mut() {
+            if !keep(instr) {
+                continue;
+            }
+            match scope {
+                ReplaceScope::Inputs => self.replace_inputs(instr),
+                ReplaceScope::Operands => self.replace_instruction(instr),
+            }
+        }
+        self.replace_terminator(block.get_terminator_mut());
     }
 }
 
@@ -108,6 +129,7 @@ impl ValueReplacements {
 // ================================================================================================
 
 /// Selects which value references a [`ValueReplacements`] sweep rewrites.
+#[derive(Clone, Copy)]
 pub enum ReplaceScope {
     /// Only instruction _inputs_ (the values an instruction reads).
     Inputs,
