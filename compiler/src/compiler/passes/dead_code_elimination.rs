@@ -13,17 +13,16 @@ use crate::{
     compiler::{
         analysis::{
             flow_analysis::{CFG, FlowAnalysis},
-            types::{TypeInfo, Types},
+            types::{FunctionTypeInfo, TypeInfo, Types},
             value_range_analysis::{ValueRangeAnalysis, ValueRanges},
         },
         pass_manager::{AnalysisId, AnalysisStore, Pass},
         passes::shared::{
             divmod_guard::{
-                divmod_can_fail, divmod_provably_defined, emit_divmod_is_defined_assert,
+                divisor_checked_by_its_lowering, divmod_can_fail, divmod_provably_defined,
+                emit_divmod_is_defined_assert,
             },
-            overflow_guard::{
-                emit_no_overflow_assert, overflow_operand_bits, overflow_provably_impossible,
-            },
+            overflow_guard::{overflow_operand_bits, overflow_provably_impossible},
             seq_bounds::{SeqBoundsCheck, emit_bounds_assert, failable_bounds},
             shift_guard::{
                 emit_shift_amount_is_valid_assert, shift_amount_provably_in_range,
@@ -33,125 +32,13 @@ use crate::{
         ssa::{
             BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
-                ArithGroup, BinaryArithOpKind, CallTarget, Constant, HLFunction, HLSSA,
-                LocatedOpCode, OpCode, builder::HLEmitter,
+                ArithGroup, BinaryArithOpKind, CallTarget, CastTarget, Constant, HLFunction, HLSSA,
+                LocatedOpCode, OpCode, Type, TypeExpr, builder::HLEmitter,
             },
         },
         util::ice_non_elided_tuple,
     },
 };
-
-/// An [`HLEmitter`] that appends into a plain instruction vector.
-///
-/// DCE's sweep builds each block's new instruction list by hand rather than using `HLBlockEmitter`,
-/// but a partial op's failure check has to be built exactly the way every other pass builds it (see
-/// [`crate::compiler::passes::shared`]'s `divmod_guard` and `seq_bounds`). This adapter bridges the
-/// two so there is only ever one definition of each check.
-struct VecEmitter<'a, 'b> {
-    ssa: &'a HLSSA,
-    out: &'b mut Vec<LocatedOpCode>,
-    location: SourceLocation,
-}
-
-impl HLEmitter for VecEmitter<'_, '_> {
-    fn fresh_value(&mut self) -> ValueId {
-        self.ssa.fresh_value()
-    }
-
-    fn emit(&mut self, instruction: OpCode) {
-        let located = instruction.locate(self.location.clone());
-        self.out.push(located);
-    }
-
-    fn emit_located(&mut self, instruction: LocatedOpCode) {
-        self.out.push(instruction);
-    }
-
-    fn emit_constant(&mut self, value: Constant) -> ValueId {
-        self.ssa.add_const(value)
-    }
-
-    fn field(&self) -> FieldConfig {
-        self.ssa.field()
-    }
-}
-
-/// The operands of an unguarded `Div`/`Mod`, which with the failable sequence ops are the
-/// instructions DCE may not simply delete when their results go dead.
-///
-/// Deliberately matches only at the top level: a `Guard`-wrapped division must keep today's
-/// behavior, because inside an inactive branch it is required _not_ to fail and
-/// `lower_divmod_guard` already encodes that.
-fn unguarded_divmod_operands(
-    instruction: &OpCode,
-) -> Option<(BinaryArithOpKind, ValueId, ValueId)> {
-    match instruction {
-        OpCode::BinaryArithOp { kind, lhs, rhs, .. }
-            if matches!(kind.group(), ArithGroup::Div | ArithGroup::Rem) =>
-        {
-            Some((*kind, *lhs, *rhs))
-        }
-        _ => None,
-    }
-}
-
-/// The operands of an unguarded `Shl`/`Shr`.
-///
-/// This is the third instruction, alongside `Div`/`Mod` and the failable sequence ops, that DCE may
-/// not simply delete when its result goes dead. A shift's only failure mode comes from its
-/// **amount**, so we build the check based on that.
-///
-/// Deliberately matches only at the top level, for the reason [`unguarded_divmod_operands`] does: a
-/// `Guard`-wrapped shift inside an inactive branch is required _not_ to fail, and
-/// `lower_shift_guard` already encodes that.
-fn unguarded_shift_operands(instruction: &OpCode) -> Option<(BinaryArithOpKind, ValueId, ValueId)> {
-    match instruction {
-        OpCode::BinaryArithOp { kind, lhs, rhs, .. }
-            if matches!(kind.group(), ArithGroup::Shl | ArithGroup::Shr) =>
-        {
-            Some((*kind, *lhs, *rhs))
-        }
-        _ => None,
-    }
-}
-
-/// The operands of an unguarded `Add`/`Sub`/`Mul`.
-///
-/// This is the fourth instruction, alongside `Div`/`Mod`, `Shl`/`Shr` and the failable sequence
-/// ops, that DCE may not simply delete when its result goes dead: Noir rejects an overflowing one
-/// whether or not anything reads it (`die.rs:456` makes a `Binary` eliminable only when
-/// `!requires_acir_gen_predicate`, which is `true` for a checked `Add`/`Sub`/`Mul`).
-///
-/// Deliberately matches only at the top level, for the reason [`unguarded_divmod_operands`] does: a
-/// `Guard`-wrapped operation inside an inactive branch is required _not_ to fail, and
-/// `lower_overflow_guard` already encodes that.
-///
-/// The result comes back as well as the operands because the two groups are kept by opposite
-/// means; see [`overflow_rewrite_saves_the_operation`].
-fn unguarded_overflow_operands(
-    instruction: &OpCode,
-) -> Option<(BinaryArithOpKind, ValueId, ValueId, ValueId)> {
-    match instruction {
-        OpCode::BinaryArithOp {
-            kind,
-            result,
-            lhs,
-            rhs,
-        } if matches!(
-            kind.group(),
-            ArithGroup::Add | ArithGroup::Sub | ArithGroup::Mul
-        ) =>
-        {
-            Some((*kind, *result, *lhs, *rhs))
-        }
-        _ => None,
-    }
-}
-
-/// Whether replacing a dead operation of this group with its check is worth it.
-fn overflow_rewrite_saves_the_operation(kind: BinaryArithOpKind) -> bool {
-    matches!(kind.group(), ArithGroup::Mul)
-}
 
 pub struct DCE {
     config: Config,
@@ -192,16 +79,16 @@ pub struct Config {
     ///
     /// Restricting it this way loses nothing. Every *user* partial op is present from `initial_ssa`
     /// onward, so the early runs see them all; and any that survives to `spill_witness` gets its
-    /// check from `LowerPureGuards` or its instruction lowering, which run before anything there
-    /// can kill it.
+    /// check from `LowerPureGuards`, which runs before anything there can kill it, or else from its
+    /// instruction lowering, which runs after several runs of this pass that do not rewrite, and
+    /// which [`owes_witness_check`] keeps it alive for.
     pub rewrite_dead_partial_ops: bool,
 
-    /// Whether an `ArraySet` on a fixed-length array whose result is dead is replaced by its bounds
-    /// check instead of being deleted outright. Reads are excluded on cost grounds, see
-    /// [`SeqBoundsCheck::SeqAccess`].
+    /// Whether an `ArrayGet` or `ArraySet` on an array or vector whose result is dead is
+    /// replaced by its bounds check instead of being deleted outright.
     ///
     /// A witness-indexed array access does not get a bounds check until `LowerWitnessArrayOps`,
-    /// which runs at `driver.rs:484`. Deleting the access before that takes the only thing that
+    /// which runs in `Driver::spill_witness`. Deleting the access before that takes the only thing that
     /// could ever fail with it, and nothing downstream puts it back; a program whose out-of-range
     /// write happens to be unread would verify. Rewriting the dead access into the check keeps it.
     ///
@@ -218,7 +105,7 @@ pub struct Config {
     ///
     /// What is **not** covered is an access that is live pre-untaint and only becomes dead
     /// afterwards; that is the same residual the divmod rewrite carries, and closing it needs a
-    /// check emitted before `driver.rs:480` rather than a different DCE configuration.
+    /// check emitted before `UntaintControlFlow` in `Driver::monomorphize` rather than a different DCE configuration.
     ///
     /// Cheap where it does not matter: a check on an in-range constant index folds away downstream,
     /// and with a pure index and no guard `LowerWitnessAssertOps` leaves the `AssertCmp` alone, so
@@ -290,6 +177,84 @@ impl Pass for DCE {
 }
 
 impl DCE {
+    // Discharge bounds before marking operands live; otherwise a redundant check can
+    // retain an entire computation and interfere with specialization/witness inference.
+    fn bounds_proven(
+        sequence_lengths: &HashMap<ValueId, usize>,
+        ranges: Option<&ValueRanges>,
+        function: FunctionId,
+        block: BlockId,
+        seq: ValueId,
+        index: ValueId,
+        seq_type: Option<&Type>,
+    ) -> bool {
+        let (Some(ranges), Some(seq_type)) = (ranges, seq_type) else {
+            return false;
+        };
+        let len = match &seq_type.strip_witness().expr {
+            TypeExpr::Array(_, len) => *len,
+            TypeExpr::Slice(_) => match sequence_lengths.get(&seq) {
+                Some(len) => *len,
+                None => return false,
+            },
+            _ => return false,
+        };
+        let range = ranges.get_function(function).get_at(block, index);
+        range.unsigned().hi().is_some_and(|hi| hi < &len.into())
+            && range.unsigned().lo().is_some_and(|lo| lo >= &0.into())
+    }
+
+    /// Source slice lengths in dominance order, so cast/push chains see their definitions.
+    /// Block parameters and unknown lengths stay unknown rather than confusing capacity with
+    /// logical length. Arrays (including blobs) already carry their length in the type.
+    fn sequence_lengths(
+        ssa: &HLSSA,
+        cfg: &FlowAnalysis,
+        types: &TypeInfo,
+    ) -> HashMap<ValueId, usize> {
+        let mut lengths = HashMap::default();
+        for (id, function) in ssa.iter_functions() {
+            let types = types.get_function(*id);
+            for block in cfg.get_function_cfg(*id).get_domination_pre_order() {
+                for op in function.get_block(block).get_instructions() {
+                    let (result, len) = match op {
+                        OpCode::MkSeq { result, elems, .. } => (*result, Some(elems.len())),
+                        OpCode::MkRepeated { result, count, .. } => (*result, Some(*count)),
+                        OpCode::Cast {
+                            result,
+                            value,
+                            target: CastTarget::ArrayToSlice,
+                        } => {
+                            let len = types.try_get_value_type(*value).and_then(|ty| {
+                                match ty.strip_witness().expr {
+                                    TypeExpr::Array(_, len) => Some(len),
+                                    _ => None,
+                                }
+                            });
+                            (*result, len)
+                        }
+                        OpCode::SlicePush {
+                            result,
+                            slice,
+                            values,
+                            ..
+                        } => (
+                            *result,
+                            lengths
+                                .get(slice)
+                                .and_then(|len: &usize| len.checked_add(values.len())),
+                        ),
+                        _ => continue,
+                    };
+                    if let Some(len) = len {
+                        lengths.insert(result, len);
+                    }
+                }
+            }
+        }
+        lengths
+    }
+
     pub fn new(config: Config) -> Self {
         Self { config }
     }
@@ -372,14 +337,13 @@ impl DCE {
         (!shift_amount_provably_in_range(&amount, bits)).then_some(bits)
     }
 
-    /// Whether a dead unguarded `Add`/`Sub`/`Mul` still has to leave its overflow check behind,
-    /// returning the width to build it at.
+    /// Whether a dead unguarded `Add`/`Sub`/`Mul` still owes an overflow check, and so has to be
+    /// kept, returning the width the check is at.
     ///
     /// The overflow counterpart of [`Self::shift_check_survives`], answering the same questions in
     /// the same order, with one more: **both operands must be pure**. A witness operand's check is
     /// owned by `LowerWitnessIntegerArithOps`, which encodes it as a range check on the field
-    /// result rather than as a comparison, and this pass has no way to build that. So a dead
-    /// witness `Add`/`Sub`/`Mul` is still deleted with its rejection.
+    /// result rather than as a comparison.
     ///
     /// `None` means no check: either [`Config::rewrite_dead_partial_ops`] is off (the ranges are
     /// only computed when the flag is set, so this cannot silently re-enable itself), an operand is
@@ -497,6 +461,10 @@ impl DCE {
     }
 
     pub fn do_run(&self, ssa: &mut HLSSA, cfg: &FlowAnalysis) {
+        assert!(
+            !self.rewrites_dead_seq_access() || !ssa.witness_slices_purified(),
+            "cannot rewrite source sequence accesses after witness-slice purification"
+        );
         let function_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
 
         // Typed and ranged for the whole module whenever this run can rewrite, without first
@@ -511,16 +479,23 @@ impl DCE {
         // constant has just been pruned out from under it. Nothing between here and the sweep
         // touches the SSA, so running them at the top is strictly safer than running them later.
         //
-        // The types serve every rewrite path; only the arithmetic paths consult the ranges, as the
-        // bounds paths have nothing for them to discharge (see the sweep below).
-        let rewrite_types: Option<TypeInfo> = self
-            .needs_rewrite_types()
+        // Arithmetic and known-length sequence bounds checks can be discharged by the ranges.
+        //
+        // A run before the witness shape is frozen is typed as well, rewriting or not, because a
+        // witnessed operation that still owes its check is told apart from field arithmetic, and
+        // from an operation whose check is already built, by its operands' types; see
+        // [`owes_witness_check`].
+        let types: Option<TypeInfo> = (self.needs_rewrite_types()
+            || !self.config.witness_shape_frozen)
             .then(|| Types::new().run(ssa, cfg));
-        let partial_op_ranges: Option<ValueRanges> = rewrite_types
-            .as_ref()
-            .filter(|_| self.rewrites_dead_partial_ops())
+        let rewrite_types = types.as_ref().filter(|_| self.needs_rewrite_types());
+        let witness_types = types.as_ref().filter(|_| !self.config.witness_shape_frozen);
+        let rewrite_ranges: Option<ValueRanges> = rewrite_types
+            .filter(|_| self.rewrites_dead_partial_ops() || self.rewrites_dead_seq_access())
             .map(|types| ValueRangeAnalysis::new().run(ssa, cfg, types));
-        let partial_op_analyses = rewrite_types.as_ref().zip(partial_op_ranges.as_ref());
+        let partial_op_analyses = rewrite_types
+            .zip(rewrite_ranges.as_ref())
+            .filter(|_| self.rewrites_dead_partial_ops());
 
         debug_assert_eq!(
             partial_op_analyses.is_some(),
@@ -528,6 +503,11 @@ impl DCE {
             "`divmod_check_survives` and `shift_check_survives` read `None` as 'the partial-op rewrite is off'; the two must agree exactly or it silently re-enables itself"
         );
 
+        let sequence_lengths = rewrite_types
+            .filter(|_| self.rewrites_dead_seq_access())
+            .map(|types| Self::sequence_lengths(ssa, cfg, types))
+            .unwrap_or_default();
+        let mut proven_bounds = HashSet::default();
         let mut definitions_by_function: HashMap<FunctionId, HashMap<ValueId, ValueDefinition>> =
             HashMap::default();
         let mut static_calls_by_callee: HashMap<FunctionId, Vec<(FunctionId, BlockId, usize)>> =
@@ -603,8 +583,8 @@ impl DCE {
                     // computes them alive for nothing. This is where most of the saving is — the
                     // sweep only ever *avoids emitting* a few instructions, while the mark phase
                     // decides whether an entire dependency chain survives. There is no matching
-                    // exemption for the sequence bounds below: nothing here can prove such a check
-                    // away, so their operands are always seeded.
+                    // exemption for unknown vector lengths; known-length bounds use the same
+                    // range-based discharge before seeding their operands below.
                     if let Some((kind, lhs, rhs)) = unguarded_divmod_operands(instruction)
                         && self.divmod_check_survives(
                             partial_op_analyses,
@@ -636,18 +616,9 @@ impl DCE {
                         worklist.push(WorkItem::LiveValue(*function_id, rhs));
                     }
 
-                    // A dead `Add`/`Sub`/`Mul` is kept in one of two ways.
-                    //
-                    // A multiply is seeded like the shift and division above: its operands are held
-                    // live so the sweep can build the check out of them, and the op itself is left
-                    // dead, which is the signal that it should. Both operands, because unlike a
-                    // shift — whose width comes from a type — an overflow test is a question about
-                    // the two values.
-                    //
-                    // An `Add`/`Sub` instead keeps its *result* live, which keeps the instruction
-                    // verbatim and leaves the check to `LowerPureGuards`. Marking the result rather
-                    // than the operands is what stops the sweep below firing, so the two paths
-                    // cannot both run.
+                    // A dead `Add`/`Sub`/`Mul` keeps its *result* live, which keeps the instruction
+                    // verbatim and leaves the check to the lowering that owns it; see
+                    // [`unguarded_overflow_operands`].
                     if let Some((kind, result, lhs, rhs)) = unguarded_overflow_operands(instruction)
                         && self
                             .overflow_check_survives(
@@ -660,12 +631,13 @@ impl DCE {
                             )
                             .is_some()
                     {
-                        if overflow_rewrite_saves_the_operation(kind) {
-                            worklist.push(WorkItem::LiveValue(*function_id, lhs));
-                            worklist.push(WorkItem::LiveValue(*function_id, rhs));
-                        } else {
-                            worklist.push(WorkItem::LiveValue(*function_id, result));
-                        }
+                        worklist.push(WorkItem::LiveValue(*function_id, result));
+                    }
+
+                    if let Some(types) = &witness_types
+                        && owes_witness_check(instruction, types.get_function(*function_id))
+                    {
+                        worklist.push(WorkItem::LiveInstruction(*function_id, *block_id, i));
                     }
 
                     if self.rewrites_dead_partial_ops()
@@ -682,16 +654,35 @@ impl DCE {
                         }
                     }
 
-                    // A dead array write needs only its *index* held live: the bound it is checked
-                    // against comes from the array's type, not from the array value, so the
-                    // container itself and everything feeding it stay collectable. Noir's DIE keeps
-                    // exactly the same operand for the same reason. A slice access needs nothing,
-                    // since the sweep emits no check for one.
+                    // Arrays need only the index; vectors also need the value supplying their
+                    // logical length. Keep it alive until the sweep emits the check.
                     if self.rewrites_dead_seq_access()
-                        && let Some(SeqBoundsCheck::SeqAccess { index, .. }) =
+                        && let Some(SeqBoundsCheck::SeqAccess { seq, index }) =
                             failable_bounds(instruction)
                     {
-                        worklist.push(WorkItem::LiveValue(*function_id, index));
+                        // Types omit unreachable blocks. A missing type is no proof of safety,
+                        // and seeding the sequence conservatively avoids a second unchecked lookup.
+                        let ty = rewrite_types
+                            .map(|types| types.get_function(*function_id))
+                            .and_then(|types| types.try_get_value_type(seq));
+                        if Self::bounds_proven(
+                            &sequence_lengths,
+                            rewrite_ranges.as_ref(),
+                            *function_id,
+                            *block_id,
+                            seq,
+                            index,
+                            ty,
+                        ) {
+                            proven_bounds.insert((*function_id, *block_id, i));
+                        } else {
+                            worklist.push(WorkItem::LiveValue(*function_id, index));
+                            if ty.is_none_or(|ty| {
+                                matches!(ty.strip_witness().expr, TypeExpr::Slice(_))
+                            }) {
+                                worklist.push(WorkItem::LiveValue(*function_id, seq));
+                            }
+                        }
                     }
                 }
 
@@ -975,7 +966,7 @@ impl DCE {
                         // never sees Noir's SSA-level check, so deleting the op here would delete
                         // the only thing that could ever fail. Replace it with the check alone: the
                         // arithmetic still goes, which is the whole point of eliminating it.
-                        if let Some(types) = rewrite_types.as_ref() {
+                        if let Some(types) = rewrite_types {
                             if let Some((kind, lhs, rhs)) = unguarded_divmod_operands(&instruction)
                             {
                                 // `divmod_check_survives` subsumes the `divmod_can_fail` type gate
@@ -1036,50 +1027,15 @@ impl DCE {
                                         kind.is_signed(),
                                     );
                                 }
-                            } else if let Some((kind, _, lhs, rhs)) =
-                                unguarded_overflow_operands(&instruction)
-                                && overflow_rewrite_saves_the_operation(kind)
-                            {
-                                // As for the shift above, `overflow_check_survives` carries the
-                                // width as well as the verdict, so the assert is built at the width
-                                // the mark phase decided the check against.
-                                //
-                                // A multiply only, and the arithmetic is not left behind: the test
-                                // is built from the operands, which is why `emit_no_overflow_assert`
-                                // is given `None`. An `Add`/`Sub` never reaches here — the mark
-                                // phase keeps its result live, so it is not dead any more.
-                                if let Some(bits) = self.overflow_check_survives(
-                                    partial_op_analyses,
-                                    function_id,
-                                    block_id,
-                                    kind,
-                                    lhs,
-                                    rhs,
-                                ) {
-                                    let mut emitter = VecEmitter {
-                                        ssa,
-                                        out: &mut new_instructions,
-                                        location: instruction.location().clone(),
-                                    };
-                                    emit_no_overflow_assert(
-                                        &mut emitter,
-                                        kind,
-                                        lhs,
-                                        rhs,
-                                        None,
-                                        bits,
-                                    );
-                                }
                             } else if let Some(check) = failable_bounds(&instruction)
                                 && self.rewrites_bounds_of(&check)
+                                && !proven_bounds.contains(&(function_id, block_id, i))
                             {
-                                // No `can_fail` gate to mirror `divmod_can_fail`: whether a seq op
-                                // is in bounds turns on the index, and for a slice on the *length*,
-                                // neither of which is a type property, so nothing here can decide
-                                // it. The check is always emitted and folds away downstream
-                                // (Click-Cooper knows the constant lengths, `SimplifyAsserts` drops
-                                // the tautologies) whenever the op was in fact total — which is
-                                // also what keeps a constant in-range index free.
+                                // Unlike arithmetic partial ops, bounds depend on the index and
+                                // the sequence's logical length, not just operand types. Keep any
+                                // check the mark phase could not prove safe. Downstream constant
+                                // folding and SimplifyAsserts can still remove tautologies once
+                                // lengths/indices become known, keeping safe constant accesses free.
                                 let (seq, index) = check.operands();
                                 let function_types = types.get_function(function_id);
                                 let seq_ty = function_types.get_value_type(seq).clone();
@@ -1091,6 +1047,7 @@ impl DCE {
                                     location: instruction.location().clone(),
                                 };
                                 emit_bounds_assert(
+                                    ssa,
                                     &mut emitter,
                                     &check,
                                     Some(&seq_ty),
@@ -1350,5 +1307,436 @@ impl DCE {
             current_block = cfg.get_post_dominator(current_block);
         }
         current_block
+    }
+}
+
+// FAILURE-CHECK HELPERS
+// ================================================================================================
+
+/// An [`HLEmitter`] that appends into a plain instruction vector.
+///
+/// DCE's sweep builds each block's new instruction list by hand rather than using `HLBlockEmitter`,
+/// but a partial op's failure check has to be built exactly the way every other pass builds it (see
+/// [`crate::compiler::passes::shared`]'s `divmod_guard` and `seq_bounds`). This adapter bridges the
+/// two to avoid having multiple definitions of each check.
+struct VecEmitter<'a, 'b> {
+    ssa: &'a HLSSA,
+    out: &'b mut Vec<LocatedOpCode>,
+    location: SourceLocation,
+}
+
+impl HLEmitter for VecEmitter<'_, '_> {
+    fn fresh_value(&mut self) -> ValueId {
+        self.ssa.fresh_value()
+    }
+
+    fn emit(&mut self, instruction: OpCode) {
+        let located = instruction.locate(self.location.clone());
+        self.out.push(located);
+    }
+
+    fn emit_located(&mut self, instruction: LocatedOpCode) {
+        self.out.push(instruction);
+    }
+
+    fn emit_constant(&mut self, value: Constant) -> ValueId {
+        self.ssa.add_const(value)
+    }
+
+    fn field(&self) -> FieldConfig {
+        self.ssa.field()
+    }
+}
+
+/// The operands of an unguarded `Div`/`Mod`, which cannot be deleted when their results go dead.
+///
+/// Deliberately matches only at the top level: a `Guard`-wrapped division must keep today's
+/// behavior, because inside an inactive branch it is required not to fail and `lower_divmod_guard`
+/// already encodes that.
+fn unguarded_divmod_operands(
+    instruction: &OpCode,
+) -> Option<(BinaryArithOpKind, ValueId, ValueId)> {
+    match instruction {
+        OpCode::BinaryArithOp { kind, lhs, rhs, .. }
+            if matches!(kind.group(), ArithGroup::Div | ArithGroup::Rem) =>
+        {
+            Some((*kind, *lhs, *rhs))
+        }
+        _ => None,
+    }
+}
+
+/// The operands of an unguarded `Shl`/`Shr`.
+///
+/// This is the third instruction, alongside `Div`/`Mod` and the failable sequence ops, that DCE may
+/// not simply delete when its result goes dead. A shift's only failure mode comes from its amount,
+/// so we build the check based on that.
+///
+/// Deliberately matches only at the top level as a `Guard`-wrapped shift inside an inactive branch
+/// is required _not_ to fail, and `lower_shift_guard` already encodes that.
+fn unguarded_shift_operands(instruction: &OpCode) -> Option<(BinaryArithOpKind, ValueId, ValueId)> {
+    match instruction {
+        OpCode::BinaryArithOp { kind, lhs, rhs, .. }
+            if matches!(kind.group(), ArithGroup::Shl | ArithGroup::Shr) =>
+        {
+            Some((*kind, *lhs, *rhs))
+        }
+        _ => None,
+    }
+}
+
+/// The operands of an unguarded `Add`/`Sub`/`Mul`.
+///
+/// This is the fourth instruction, alongside `Div`/`Mod`, `Shl`/`Shr` and the failable sequence
+/// ops, that DCE may not simply delete when its result goes dead: Noir rejects an overflowing one
+/// whether or not anything reads it.
+///
+/// Deliberately matches only at the top level as a `Guard`-wrapped operation inside an inactive
+/// branch is required _not_ to fail, and `lower_overflow_guard` already encodes that.
+///
+/// A dead one is kept by holding its **result** live, which keeps the instruction verbatim for the
+/// lowering that owns its check. Replacing it with a check built from its operands would have to
+/// know their domain, and a rewriting run is before taint inference, where it cannot. The pure
+/// check is `MAX / rhs < lhs`, and a witnessed division costs far more than the multiply whose
+/// check it would be.
+fn unguarded_overflow_operands(
+    instruction: &OpCode,
+) -> Option<(BinaryArithOpKind, ValueId, ValueId, ValueId)> {
+    match instruction {
+        OpCode::BinaryArithOp {
+            kind,
+            result,
+            lhs,
+            rhs,
+        } if matches!(
+            kind.group(),
+            ArithGroup::Add | ArithGroup::Sub | ArithGroup::Mul
+        ) =>
+        {
+            Some((*kind, *result, *lhs, *rhs))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `instruction` is an integer operation with a witnessed operand, guarded or not, whose
+/// failure check its witness lowering has yet to emit.
+///
+/// Three kinds of operation need one:
+///
+/// - A checked `Add`/`Sub`/`Mul` rejects an overflow by the range check that
+///   `LowerWitnessIntegerArithOps` imposes on its result.
+/// - An unsigned `Div`/`Rem` by a witness rejects a zero divisor in its own lowering, and so is
+///   given no check by `LowerPureGuards`; see [`divisor_checked_by_its_lowering`].
+/// - A `Guard`-wrapped `Div`/`Rem` with any witness operand is given none either, whatever its
+///   sign. `LowerPureGuards` builds a guarded division's check as a branch on its operands, which
+///   needs them all pure, and otherwise leaves the check to the lowering, which rejects a zero
+///   divisor and `INT_MIN / -1` under the guard itself.
+///
+/// Those lowerings run well after taint inference, behind several runs of this pass. A run that
+/// deleted a dead one in between would delete the rejection with it, and an overflowing
+/// `let _ = a + b`, or a `let _ = a / b` by zero, would verify. Every run that can still see one
+/// keeps it as until the lowering replaces it, the operation **is** its check. A `Guard`-wrapped
+/// `Add`/`Sub`/`Mul` is kept too, since the guarded check still has to reject in the branch that is
+/// taken.
+///
+/// Field arithmetic has no lowering-built check and remains possible to delete: a field division
+/// has its check built by `LowerPureGuards` as an assertion, guarded or not, which is never dead.
+/// So do every other division and every pure integer op, before any run after taint inference can
+/// see them.
+fn owes_witness_check(instruction: &OpCode, types: &FunctionTypeInfo) -> bool {
+    let (guarded, instruction) = match instruction {
+        OpCode::Guard { inner, .. } => (true, inner.as_ref()),
+        other => (false, other),
+    };
+    let OpCode::BinaryArithOp { kind, lhs, rhs, .. } = instruction else {
+        return false;
+    };
+    let (Some(lhs), Some(rhs)) = (
+        types.try_get_value_type(*lhs),
+        types.try_get_value_type(*rhs),
+    ) else {
+        return false;
+    };
+    let witnessed_int = matches!(lhs.strip_witness().expr, TypeExpr::Int(_))
+        && (lhs.is_witness_of() || rhs.is_witness_of());
+    match kind.group() {
+        ArithGroup::Add | ArithGroup::Sub | ArithGroup::Mul => witnessed_int,
+        ArithGroup::Div | ArithGroup::Rem if guarded => witnessed_int,
+        ArithGroup::Div | ArithGroup::Rem => divisor_checked_by_its_lowering(*kind, rhs),
+        _ => false,
+    }
+}
+
+// TESTS
+// ================================================================================================
+
+#[cfg(test)]
+mod bounds_tests {
+    use super::*;
+    use crate::compiler::ssa::hlssa::{SequenceTargetType, Type, builder::HLSSABuilder};
+
+    #[test]
+    fn cast_and_push_lengths_discharge_bounds_independently_of_partial_ops() {
+        use crate::compiler::ssa::hlssa::SliceOpDir;
+        for partial_ops in [false, true] {
+            for (initial_len, push, safe) in [
+                (4, false, true),
+                (3, false, false),
+                (3, true, true),
+                (2, true, false),
+            ] {
+                let mut ssa = HLSSA::new();
+                let main = ssa.get_unique_entrypoint_id();
+                HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+                    // Allocate the consumer block first to make block-map order unsuitable for
+                    // length propagation. Definitions still dominate their uses.
+                    let consumer = b.add_block(|_| {});
+                    let producer = b.add_block(|_| {});
+                    b.test_block(b.function.get_entry_id())
+                        .terminate_jmp(producer, vec![]);
+                    let (slice, index, element) = {
+                        let mut e = b.test_block(producer);
+                        let input = e.emit_constant(Constant::int(32, 3));
+                        let array = e.mk_seq(
+                            vec![input; initial_len],
+                            SequenceTargetType::Array(initial_len),
+                            Type::int(32),
+                        );
+                        let slice = e.cast_to(CastTarget::ArrayToSlice, array);
+                        e.terminate_jmp(consumer, vec![]);
+                        (slice, input, input)
+                    };
+                    let mut e = b.test_block(consumer);
+                    let slice = if push {
+                        e.slice_push(slice, vec![element], SliceOpDir::Back)
+                    } else {
+                        slice
+                    };
+                    e.array_get(slice, index);
+                    e.terminate_return(vec![]);
+                });
+                let mut config = Config::preserve_blocks();
+                config.rewrite_dead_partial_ops = partial_ops;
+                let flow = FlowAnalysis::run(&ssa);
+                DCE::new(config).do_run(&mut ssa, &flow);
+                let ops: Vec<_> = ssa
+                    .get_unique_entrypoint()
+                    .get_blocks()
+                    .flat_map(|(_, b)| b.get_instructions())
+                    .collect();
+                assert_eq!(
+                    ops.iter().any(|op| matches!(op, OpCode::AssertCmp { .. })),
+                    !safe
+                );
+                if safe {
+                    assert!(
+                        ops.is_empty(),
+                        "a safe access must not pin the vector construction"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unreachable_sequence_definitions_do_not_require_types() {
+        let mut ssa = HLSSA::new();
+        let main = ssa.get_unique_entrypoint_id();
+        HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+            b.test_block(b.function.get_entry_id())
+                .terminate_return(vec![]);
+            let dead = b.add_block(|_| {});
+            let mut e = b.test_block(dead);
+            let zero = e.emit_constant(Constant::int(32, 0));
+            let array = e.mk_seq(vec![zero], SequenceTargetType::Array(1), Type::int(32));
+            e.array_get(array, zero);
+            e.terminate_return(vec![]);
+        });
+        let flow = FlowAnalysis::run(&ssa);
+        DCE::new(Config::preserve_blocks()).do_run(&mut ssa, &flow);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "cannot rewrite source sequence accesses after witness-slice purification"
+    )]
+    fn rejects_sequence_rewriting_after_purification_even_after_rebuild() {
+        let mut ssa = HLSSA::new();
+        ssa.get_unique_entrypoint_mut()
+            .get_entry_mut()
+            .set_terminator(Terminator::Return(vec![]));
+        ssa.mark_witness_slices_purified();
+        let (mut rebuilt, functions, _) = ssa.clone().prepare_rebuild();
+        for (id, function) in functions {
+            rebuilt.put_function(id, function);
+        }
+        let flow = FlowAnalysis::run(&rebuilt);
+        DCE::new(Config::preserve_blocks()).do_run(&mut rebuilt, &flow);
+    }
+
+    #[test]
+    fn discard_proven_safe_read_but_keep_possible_boundary_failure() {
+        for (len, vector) in [(3, false), (4, false), (3, true), (4, true)] {
+            let mut ssa = HLSSA::new();
+            let main = ssa.get_unique_entrypoint_id();
+            HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+                let mut e = b.test_block(b.function.get_entry_id());
+                let input = e.add_parameter(Type::int(32));
+                let mask = e.emit_constant(Constant::int(32, 3));
+                let index = e.and(input, mask);
+                let array = e.mk_seq(
+                    vec![mask; len],
+                    if vector {
+                        SequenceTargetType::Slice
+                    } else {
+                        SequenceTargetType::Array(len)
+                    },
+                    Type::int(32),
+                );
+                e.array_get(array, index);
+                e.terminate_return(vec![]);
+            });
+            let flow = FlowAnalysis::run(&ssa);
+            DCE::new(Config::preserve_blocks()).do_run(&mut ssa, &flow);
+            let ops: Vec<_> = ssa
+                .get_unique_entrypoint()
+                .get_entry()
+                .get_instructions()
+                .collect();
+            assert!(!ops.iter().any(|op| matches!(op, OpCode::ArrayGet { .. })));
+            assert_eq!(
+                ops.iter().any(|op| matches!(op, OpCode::AssertCmp { .. })),
+                len == 3
+            );
+            if len == 4 {
+                assert!(
+                    ops.is_empty(),
+                    "safe check must not retain its operand chain"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod witness_overflow_tests {
+    use super::*;
+    use crate::compiler::ssa::hlssa::builder::HLSSABuilder;
+
+    /// What a non-rewriting run leaves of a dead operation of each kind, by result.
+    fn survivors_of_a_run_after_taint_inference() -> (Vec<ValueId>, Vec<(&'static str, ValueId)>) {
+        let mut ssa = HLSSA::new();
+        let main = ssa.get_unique_entrypoint_id();
+        let mut dead = Vec::new();
+        HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let witness = e.add_parameter(Type::witness_of(Type::int(8)));
+            let pure = e.add_parameter(Type::int(8));
+            let field = e.add_parameter(Type::witness_of(Type::field()));
+            let condition = e.add_parameter(Type::witness_of(Type::int(1)));
+
+            for kind in [
+                BinaryArithOpKind::UAdd,
+                BinaryArithOpKind::USub,
+                BinaryArithOpKind::UMul,
+            ] {
+                dead.push(("witnessed", e.bin(kind, witness, pure)));
+            }
+            let guarded = e.fresh_value();
+            e.emit(OpCode::Guard {
+                condition,
+                inner: Box::new(OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::UAdd,
+                    result: guarded,
+                    lhs: witness,
+                    rhs: witness,
+                }),
+            });
+            dead.push(("guarded witnessed", guarded));
+            dead.push(("field", e.bin(BinaryArithOpKind::UAdd, field, field)));
+            dead.push(("pure", e.bin(BinaryArithOpKind::UAdd, pure, pure)));
+
+            for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
+                dead.push(("witnessed-divisor", e.bin(kind, pure, witness)));
+                dead.push(("witness-by-pure", e.bin(kind, witness, pure)));
+            }
+            let guarded = e.fresh_value();
+            e.emit(OpCode::Guard {
+                condition,
+                inner: Box::new(OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::UDiv,
+                    result: guarded,
+                    lhs: witness,
+                    rhs: witness,
+                }),
+            });
+            dead.push(("guarded witnessed-divisor", guarded));
+            for kind in [
+                BinaryArithOpKind::UDiv,
+                BinaryArithOpKind::SDiv,
+                BinaryArithOpKind::SRem,
+            ] {
+                let guarded = e.fresh_value();
+                e.emit(OpCode::Guard {
+                    condition,
+                    inner: Box::new(OpCode::BinaryArithOp {
+                        kind,
+                        result: guarded,
+                        lhs: witness,
+                        rhs: pure,
+                    }),
+                });
+                dead.push(("guarded witnessed-dividend", guarded));
+            }
+            for kind in [BinaryArithOpKind::SDiv, BinaryArithOpKind::SRem] {
+                dead.push(("signed", e.bin(kind, witness, witness)));
+            }
+            dead.push(("field", e.bin(BinaryArithOpKind::UDiv, field, field)));
+            let guarded = e.fresh_value();
+            e.emit(OpCode::Guard {
+                condition,
+                inner: Box::new(OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::UDiv,
+                    result: guarded,
+                    lhs: field,
+                    rhs: field,
+                }),
+            });
+            dead.push(("guarded field", guarded));
+            e.terminate_return(vec![]);
+        });
+
+        let flow = FlowAnalysis::run(&ssa);
+        DCE::new(Config::pre_r1c()).do_run(&mut ssa, &flow);
+        let survivors = ssa
+            .get_unique_entrypoint()
+            .get_entry()
+            .get_instructions()
+            .flat_map(|op| op.get_results().copied().collect::<Vec<_>>())
+            .collect();
+        (survivors, dead)
+    }
+
+    /// A dead integer operation with a witnessed operand survives a run after taint inference,
+    /// guarded or not, because its overflow check is still to be built from it. Field arithmetic
+    /// has no check and a pure operation has had its check built by then, so both go.
+    ///
+    /// A division is kept only where `LowerPureGuards` leaves its check to the lowering: unguarded,
+    /// where it is unsigned and its divisor a witness, and guarded, wherever an integer operand is
+    /// a witness. Every other division already carries its check.
+    #[test]
+    fn a_dead_witnessed_integer_operation_keeps_its_check() {
+        let (survivors, dead) = survivors_of_a_run_after_taint_inference();
+        for (what, result) in dead {
+            let kept = what.contains("witnessed");
+            assert_eq!(
+                survivors.contains(&result),
+                kept,
+                "a dead {what} operation {}",
+                if kept { "was deleted" } else { "survived" }
+            );
+        }
     }
 }

@@ -1,0 +1,6 @@
+[package]
+name = "guarded_dead_division_by_pure_zero_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]

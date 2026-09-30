@@ -234,10 +234,14 @@ only entry whose failure mode is a program Noir rejects producing a proof.
 
 Two of these rejections are stated twice, because a witness operand cannot be checked with a pure
 comparison: `witness_bitwise.rs` must provide the amount bound and `witness_integer_arith.rs`'s
-guarded rangechecks must overflow, both built out of constraints. A **witness** shift amount gets no
-check at all: the powers-of-two table's keys are exactly the legal amounts, so `emit_pow2_factor`'s
-lookup rejects an out-of-range one as a side effect of reading the factor it was going to need
-anyway.
+guarded rangechecks must overflow, both built out of constraints. Past `widest_cell_sum_bits`, the
+widest sum one field element holds, an unsigned sum or difference is rejected by the carry chain in
+`wide_witness_ints.rs` instead: it lets no carry out of the top limb, so an overflow fails the range
+check on that limb of the answer.
+
+A **witness** shift amount gets no check at all: the powers-of-two table's keys are exactly the
+legal amounts, so `emit_pow2_factor`'s lookup rejects an out-of-range one as a side effect of
+reading the factor it was going to need anyway.
 
 Two cases still pay the explicit `emit_shift_amount_check`. A **pure** amount pays it on either
 lowering — the constant-amount one when the left-hand side is unsigned, the general one when it is
@@ -302,27 +306,6 @@ currently implement Noir.
   why `SIGNED_WIDTHS` is narrower than `WIDTHS`. `passes::width_validation` reads the same constant
   and refuses a wider signed operation with a diagnostic, so a program meets this divergence as a
   compile error rather than as a panic.
-- **A _pure_ integer wider than the field carries injectively has no R1CS value.** The boundary
-  itself does not diverge: both lowering backends move an integer across it at every width the
-  modulus admits, filling every limb the element has, and `uN as Field` above that width is refused
-  for every program by `passes::width_validation` under the rule above. What is left is the third
-  lane, and only its pure half. `hlssa_to_r1cs::Value` carries a number as one field element, so
-  `Value::of_int` refuses a magnitude at or above the modulus — which is right for a value that has
-  to become an element, and leaves a _pure_ `int(N)` constant past that width unrepresentable there.
-  The **witnessed** half is closed: `passes::wide_witness_ints` splits such a value into limbs, each
-  of which does have an element, so a constant no element can carry still selects, moves and
-  narrows. Closing the pure half means carrying an integer there as a pattern — a `Value::Int`
-  variant — and becoming an element only at the boundary, where the modulus is the bound. Nothing
-  reaches it today. A wide sequence element is not refused: `passes::wide_witness_ints` transposes a
-  sequence into one per limb, so an `int320` array element compiles. What keeps a pure value that
-  wide out of a constraint is the shape of the read. A read from a transposed sequence yields its
-  **limbs**, each of which is one field element, and the only thing that reassembles them into a
-  whole value is a witness strip, whose operands are witnesses rather than constants and so do not
-  fold. A recombination that ran eagerly and let its consumer split the result again would fold for
-  a sequence of **constants**, and the intermediate has no element — which is why the read keeps its
-  limbs. `Value::ice_no_element` reports as a **compiler bug** rather than a refusal, which makes
-  this the one half of the field boundary held by an argument rather than by a rule, and the reason
-  to state the argument precisely here rather than as "nothing reaches it".
 - **A _witness_ shift at a non-power-of-two width does not compile**, and is refused with a
   diagnostic. All three total evaluators reduce the amount modulo the width, so they agree at every
   width and the gap is not a disagreement between backends; what is missing is the _guard IR_, and
@@ -336,6 +319,3 @@ currently implement Noir.
   overflowing shift rather than wrapping it.** This is a stopgap measure to keep the `passport_*`
   tests compiling while performing most size-based refusals at compile time, and will be lifted once
   the shift is computed limb-wise.
-- **A dead _witness_ `Add`/`Sub`/`Mul` loses its rejection.** DCE keeps the overflow check when it
-  deletes a dead operation, but only when both operands are pure. The check a live witness operation
-  gets is a range check on a field result rather than a comparison, and DCE cannot build that.

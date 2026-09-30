@@ -5,12 +5,15 @@ mod harness;
 use harness::{BinaryOpOracle, Compiled, Verdict, bytecode_listing, input_block, main_program};
 use mavros_artifacts::{Field, FieldConfig, InputValueOrdered};
 use mavros_compiler::{
-    compiler::ssa::{
-        SourceLocation, SourcePosition,
-        hlssa::{
-            BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, HLSSA, OpCode,
-            SequenceTargetType, SliceOpDir, Type,
-            builder::{HLEmitter as _, HLSSABuilder},
+    compiler::{
+        passes::shared::limbs::{widest_injective_int_bits, witness_limb_bits},
+        ssa::{
+            SourceLocation, SourcePosition, Terminator, ValueId,
+            hlssa::{
+                BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, HLSSA, OpCode,
+                SequenceTargetType, SliceOpDir, Type,
+                builder::{HLBlockEmitter, HLEmitter as _, HLSSABuilder},
+            },
         },
     },
     driver::{Driver, Error as DriverError},
@@ -38,12 +41,24 @@ fn corner_pairs(op: IntOp, bits: usize) -> Vec<(IntBits, IntBits)> {
         .collect()
 }
 
+/// [`corner_pairs`] from the wide corner set, which adds the limb boundaries.
+fn wide_corner_pairs(op: IntOp, bits: usize) -> Vec<(IntBits, IntBits)> {
+    let (lhs, rhs) = corners::wide_operands(op, bits);
+    lhs.iter()
+        .flat_map(|a| rhs.iter().map(move |b| (a.clone(), b.clone())))
+        .collect()
+}
+
 /// Sweeps one operation at one width, reporting the first disagreement.
 fn sweep(kind: BinaryArithOpKind, bits: usize) {
+    sweep_over(kind, bits, corner_pairs(IntOp::from(kind), bits));
+}
+
+/// [`sweep`] over the given operand pairs.
+fn sweep_over(kind: BinaryArithOpKind, bits: usize, pairs: Vec<(IntBits, IntBits)>) {
     let op = IntOp::from(kind);
     let oracle = BinaryOpOracle::new(kind, bits, bits)
         .unwrap_or_else(|e| panic!("{kind:?} at {bits} bits failed to compile: {e}"));
-    let pairs = corner_pairs(op, bits);
     for (lhs, rhs) in &pairs {
         if let Err(disagreement) = oracle.check(lhs, rhs) {
             panic!("{disagreement}");
@@ -63,6 +78,81 @@ fn non_shift_operations() -> impl Iterator<Item = BinaryArithOpKind> {
     BinaryArithOpKind::ALL
         .into_iter()
         .filter(|kind| !IntOp::from(*kind).is_shift())
+}
+
+/// Adds one to each column of an accepted witness in turn, and takes one from each column the
+/// program computes, requiring each to break a constraint.
+///
+/// `inputs` is the honest input block: the program's parameters followed by its declared returns.
+/// A column no constraint mentions survives the perturbation untouched, and that is the reading.
+///
+/// **An input column is only stepped up.** A different input with the same answer is a different
+/// honest run rather than an unconstrained column, so taking one from an input asks a question
+/// whose answer depends on the program, and [`assert_changing_an_input_breaks_the_witness`] is where
+/// a test asks it on purpose. Adding one has always sufficed for the inputs these tests use.
+fn assert_every_column_is_pinned(what: &str, compiled: &Compiled, inputs: &[&IntBits]) {
+    let verdict = compiled.run(&input_block(inputs));
+    let witness = verdict
+        .witness()
+        .unwrap_or_else(|| panic!("{what}: {verdict:?}"))
+        .to_vec();
+    let input_columns: Vec<usize> = (0..inputs.len())
+        .map(|index| compiled.input_column(index))
+        .chain(compiled.guard_column())
+        .collect();
+
+    for column in 0..witness.len() {
+        let steps: &[(Field, &str)] = if input_columns.contains(&column) {
+            &[(Field::from(1u64), "adding one to")]
+        } else {
+            &[
+                (Field::from(1u64), "adding one to"),
+                (-Field::from(1u64), "taking one from"),
+            ]
+        };
+        for &(step, direction) in steps {
+            let mut perturbed = witness.clone();
+            perturbed[column] += step;
+            assert!(
+                compiled.first_unsatisfied_constraint(&perturbed).is_some(),
+                "{what}: column {column} of {} is unconstrained — \
+                 {direction} it left every constraint satisfied",
+                witness.len()
+            );
+        }
+    }
+}
+
+/// Replaces input `index` of an accepted witness with `replacement`, leaving every other column as
+/// the honest run wrote it, and requires the result to break a constraint.
+///
+/// The test states that `replacement` has to change the answer, which is what makes the witness
+/// wrong: an operation whose constraints do not read that input would still accept it. It is the
+/// move a single perturbation cannot make, since here every column the operation computes stays
+/// put and only the operand moves.
+fn assert_changing_an_input_breaks_the_witness(
+    what: &str,
+    compiled: &Compiled,
+    inputs: &[&IntBits],
+    index: usize,
+    replacement: &IntBits,
+) {
+    let verdict = compiled.run(&input_block(inputs));
+    let mut witness = verdict
+        .witness()
+        .unwrap_or_else(|| panic!("{what}: {verdict:?}"))
+        .to_vec();
+    let column = compiled.input_column(index);
+    assert_eq!(
+        witness[column],
+        harness::input_field(inputs[index]),
+        "{what}: input {index} is written to column {column}"
+    );
+    witness[column] = harness::input_field(replacement);
+    assert!(
+        compiled.first_unsatisfied_constraint(&witness).is_some(),
+        "{what}: replacing input {index} with {replacement:?} left every constraint satisfied"
+    );
 }
 
 // FUNCTIONAL TESTS
@@ -98,13 +188,33 @@ fn arithmetic_agrees_at_thirty_seven_bits() {
     }
 }
 
-/// The current cap, which is the two-cell lane: `128` is where the VM stops using one frame cell
-/// per integer and `witness_bitwise` stops using one field element, so it is the only width at
-/// which today's code already does anything limb-wise.
+/// The top of the VM's two-cell lane, and the one width past a host word where a witnessed product
+/// has a lowering of its own: `lower_unsigned_mul` splits an `int128` into two limbs and multiplies
+/// them schoolbook, where every narrower product is one field multiplication. The division and the
+/// remainder are checked by that same product, `q·d`, so they take its path too.
 #[test]
-fn arithmetic_agrees_at_the_current_cap() {
-    for kind in [BinaryArithOpKind::UAdd, BinaryArithOpKind::UMul] {
+fn arithmetic_agrees_at_the_top_of_the_two_cell_lane() {
+    for kind in [
+        BinaryArithOpKind::UAdd,
+        BinaryArithOpKind::UMul,
+        BinaryArithOpKind::UDiv,
+        BinaryArithOpKind::URem,
+    ] {
         sweep(kind, 128);
+    }
+}
+
+/// A witnessed division and remainder past the host word and below the double lane, which the
+/// single cell checks with one field product: 65 is the first width past the host word, and 126 the
+/// widest whose `q·d` one bn254 element still holds.
+#[test]
+fn a_division_agrees_between_the_host_word_and_the_widest_single_cell_product() {
+    let widest = widest_injective_int_bits(FieldConfig::bn254()) / 2;
+    assert_eq!(widest, 126, "the widest single-cell product on bn254");
+    for bits in [HOST_LIMB_BITS + 1, 96, widest] {
+        for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
+            sweep(kind, bits);
+        }
     }
 }
 
@@ -162,38 +272,1194 @@ fn the_oracle_distinguishes_a_wrong_answer_from_a_refusal() {
 fn every_witness_column_is_pinned_by_a_constraint() {
     for (kind, bits) in [
         (BinaryArithOpKind::UAdd, 8usize),
+        (BinaryArithOpKind::UAdd, 200),
+        (BinaryArithOpKind::USub, 200),
+        (BinaryArithOpKind::UAdd, 253),
+        (BinaryArithOpKind::USub, 253),
         (BinaryArithOpKind::UMul, 32),
+        (BinaryArithOpKind::UMul, 127),
         (BinaryArithOpKind::UMul, 128),
+        (BinaryArithOpKind::UMul, 200),
+        (BinaryArithOpKind::UMul, 253),
         (BinaryArithOpKind::And, 40),
         (BinaryArithOpKind::And, 128),
         (BinaryArithOpKind::Xor, 200),
         (BinaryArithOpKind::UDiv, 16),
+        (BinaryArithOpKind::UDiv, 127),
+        (BinaryArithOpKind::URem, 127),
+        (BinaryArithOpKind::UDiv, 200),
+        (BinaryArithOpKind::URem, 200),
+        (BinaryArithOpKind::UDiv, 253),
+        (BinaryArithOpKind::URem, 253),
         (BinaryArithOpKind::SShr, 8),
     ] {
-        let oracle = BinaryOpOracle::new(kind, bits, bits).unwrap();
+        let oracle = BinaryOpOracle::new(kind, bits, bits)
+            .unwrap_or_else(|error| panic!("{kind:?} at {bits} bits does not compile: {error}"));
         let (lhs, rhs) = (IntBits::from_u128(bits, 7), IntBits::from_u128(bits, 3));
         let expected = mavros_int_semantics::eval(IntOp::from(kind), &lhs, &rhs)
             .value()
             .expect("7 op 3 is accepted for each operation swept here");
-        let verdict = oracle
-            .compiled()
-            .run(&input_block(&[&lhs, &rhs, &expected]));
-        let witness = verdict
-            .witness()
-            .unwrap_or_else(|| panic!("{kind:?} at {bits} bits: {verdict:?}"))
-            .to_vec();
+        assert_every_column_is_pinned(
+            &format!("{kind:?} at {bits} bits"),
+            oracle.compiled(),
+            &[&lhs, &rhs, &expected],
+        );
+    }
+}
 
-        for column in 0..witness.len() {
-            let mut perturbed = witness.clone();
-            perturbed[column] += Field::from(1u64);
+/// The same mutation test for the ordering the wide subtraction shares its borrow chain with.
+///
+/// `ULt` is a [`CmpKind`] and not a [`BinaryArithOpKind`], so the oracle does not build it and the
+/// program is stated here. The byte is a control: it holds on the single-cell lowering, so a red
+/// row beside it is the wide lowering's and not this test's. 253 is the chain on a decomposition,
+/// where the operands have an element each and their difference does not.
+#[test]
+fn every_witness_column_of_an_unsigned_ordering_is_pinned() {
+    for bits in [8usize, 200, 253] {
+        let ssa = main_program(
+            &[Type::int(bits), Type::int(bits)],
+            &[Type::int(1)],
+            |e, params| vec![e.cmp(params[0], params[1], CmpKind::ULt)],
+        );
+        let compiled = Compiled::new(ssa)
+            .unwrap_or_else(|error| panic!("ULt at {bits} bits does not compile: {error}"));
+
+        // 7 < 3 is false, declared as the return so that the entry point's own check tests it.
+        let (lhs, rhs) = (IntBits::from_u128(bits, 7), IntBits::from_u128(bits, 3));
+        let answer = IntBits::from_u128(1, 0);
+        assert_every_column_is_pinned(
+            &format!("ULt at {bits} bits"),
+            &compiled,
+            &[&lhs, &rhs, &answer],
+        );
+    }
+}
+
+/// The mutation test past the width one field element carries, where the operands are **limbs**.
+///
+/// An entry point writes each integer to a single witness column and range-checks it there, so no
+/// parameter is wider than the widest injectively-carried width, and neither is a declared return.
+/// A limbed operand is therefore built inside the program: a narrow parameter is widened, and its
+/// partner is a constant wide enough to reach the top limb. The sum and the difference leave
+/// through their low limb and the ordering as one bit.
+///
+/// Neither is read back with an equality. `lower_eq` witnesses the inverse of the difference as a
+/// hint, and that hint is free whenever the two sides are equal — which an honest check is — so an
+/// equality would be a column this test finds unpinned whatever the chain does.
+///
+/// Each pair is chosen so that the chain runs its whole length. `(2^256 - 1) + 3` carries out of
+/// every limb below the top one, as `2^300 - 3` borrows out of each, and `3 < 2^300` is decided
+/// only in the top limb: every limb below it borrows nothing, so each of their carries is read and
+/// found to be zero.
+#[test]
+fn every_witness_column_of_a_limbed_sum_difference_or_ordering_is_pinned() {
+    let bits = 320usize;
+    let high = BigUint::from(1u8) << 300;
+    let low_limbs_full = (BigUint::from(1u8) << (4 * 64usize)) - 1u8;
+    let parameter = IntBits::from_u128(64, 3);
+
+    let sum = main_program(&[Type::int(64)], &[Type::int(64)], |e, params| {
+        let addend = e.cast_to(CastTarget::Int(bits), params[0]);
+        let augend = e.int_const(IntBits::from_biguint(bits, &low_limbs_full));
+        let sum = e.bin(BinaryArithOpKind::UAdd, augend, addend);
+        vec![e.cast_to(CastTarget::Int(64), sum)]
+    });
+    let sum_low_limb = IntBits::from_u128(64, 2);
+
+    let difference = main_program(&[Type::int(64)], &[Type::int(64)], |e, params| {
+        let subtrahend = e.cast_to(CastTarget::Int(bits), params[0]);
+        let minuend = e.int_const(IntBits::from_biguint(bits, &high));
+        let difference = e.bin(BinaryArithOpKind::USub, minuend, subtrahend);
+        vec![e.cast_to(CastTarget::Int(64), difference)]
+    });
+    let low_limb = IntBits::from_u128(64, u128::from(u64::MAX - 2));
+
+    let ordering = main_program(&[Type::int(64)], &[Type::int(1)], |e, params| {
+        let left = e.cast_to(CastTarget::Int(bits), params[0]);
+        let right = e.int_const(IntBits::from_biguint(bits, &high));
+        vec![e.cmp(left, right, CmpKind::ULt)]
+    });
+    let less = IntBits::from_u128(1, 1);
+
+    for (operation, ssa, answer) in [
+        ("UAdd", sum, sum_low_limb),
+        ("USub", difference, low_limb),
+        ("ULt", ordering, less),
+    ] {
+        let compiled = Compiled::new(ssa)
+            .unwrap_or_else(|error| panic!("{operation} at {bits} bits does not compile: {error}"));
+        assert_every_column_is_pinned(
+            &format!("{operation} at {bits} bits"),
+            &compiled,
+            &[&parameter, &answer],
+        );
+    }
+}
+
+/// The mutation test for a product whose operands are limbs, with one operand witnessed and with
+/// both.
+///
+/// Built inside the program for the reason
+/// [`every_witness_column_of_a_limbed_sum_difference_or_ordering_is_pinned`] gives. The left
+/// operand is a widened parameter; the right one is a constant reaching the fourth limb, taken as
+/// it is and then selected by a witnessed bit, which makes it a witnessed value held as limbs. The
+/// two differ in what they cost: a partial product of a witnessed limb and a pure one is a linear
+/// term, while one of two witnessed limbs is a column of its own that only its product constraint
+/// pins.
+///
+/// The product leaves through its low limb. A missing range check on a limb of the answer or on a
+/// carry is invisible here, whichever limb leaves: raising a carry by one lowers its limb by `2^h`
+/// and raises the next by one, which the recombination cancels, so it takes two columns moving
+/// together to exploit, and the structural audit in `wide_witness_ints` is what sees it.
+#[test]
+fn every_witness_column_of_a_limbed_product_is_pinned() {
+    let bits = 320usize;
+    let factor: BigUint = (BigUint::from(1u8) << 200) + 5u8;
+    let parameter = IntBits::from_u128(64, 3);
+    let low_limb = IntBits::from_u128(64, 15);
+    let selected = IntBits::from_u128(1, 1);
+
+    let pure_factor = factor.clone();
+    let one_witnessed = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
+        let multiplicand = e.cast_to(CastTarget::Int(bits), params[0]);
+        let multiplier = e.int_const(IntBits::from_biguint(bits, &pure_factor));
+        let product = e.bin(BinaryArithOpKind::UMul, multiplicand, multiplier);
+        vec![e.cast_to(CastTarget::Int(64), product)]
+    });
+    let compiled = Compiled::new(one_witnessed)
+        .unwrap_or_else(|error| panic!("UMul at {bits} bits does not compile: {error}"));
+    assert_every_column_is_pinned(
+        &format!("UMul by a constant at {bits} bits"),
+        &compiled,
+        &[&parameter, &low_limb],
+    );
+
+    let both_witnessed = main_program(
+        &[Type::int(64), Type::int(1)],
+        &[Type::int(64)],
+        move |e, params| {
+            let multiplicand = e.cast_to(CastTarget::Int(bits), params[0]);
+            let constant = e.int_const(IntBits::from_biguint(bits, &factor));
+            let zero = e.int_const(IntBits::zero(bits));
+            let multiplier = e.select(params[1], constant, zero);
+            let product = e.bin(BinaryArithOpKind::UMul, multiplicand, multiplier);
+            vec![e.cast_to(CastTarget::Int(64), product)]
+        },
+    );
+    let compiled = Compiled::new(both_witnessed)
+        .unwrap_or_else(|error| panic!("UMul at {bits} bits does not compile: {error}"));
+    assert_every_column_is_pinned(
+        &format!("UMul of two witnessed values at {bits} bits"),
+        &compiled,
+        &[&parameter, &selected, &low_limb],
+    );
+}
+
+/// The mutation test for a division whose operands are limbs, by a constant and by a witnessed
+/// divisor.
+///
+/// Built inside the program for the reason
+/// [`every_witness_column_of_a_limbed_sum_difference_or_ordering_is_pinned`] gives. The dividend
+/// is a constant reaching the top limb, selected by a witnessed bit so that it is a witnessed
+/// value held as limbs; the divisor is either a constant reaching the fourth limb or a widened
+/// parameter. The two differ in how many limbs the answers reach: a large divisor leaves a short
+/// quotient and a long remainder, and a small one the other way round, so between them every limb
+/// of both answers is witnessed somewhere.
+///
+/// **Each operand the answers are checked against is also moved on its own**, by
+/// [`assert_changing_an_input_breaks_the_witness`], as neither check can be seen by perturbing one
+/// column: `q`, its partial products and its carries move together. Clearing the bit that selects
+/// the dividend sends it to zero, which only `q·d + r == n` can notice. The third program is the
+/// same move for `r < d`: its dividend is smaller than its divisor, so the honest answer is
+/// `q = 0, r = n`, and sending the divisor to zero leaves `q·0 + r == n` true. Only the ordering
+/// can refuse it.
+///
+/// Both answers leave through their low limb.
+#[test]
+fn every_witness_column_of_a_limbed_division_is_pinned() {
+    let bits = 320usize;
+    let dividend: BigUint = (BigUint::from(1u8) << 300) + (BigUint::from(1u8) << 200) + 12345u32;
+    let large_divisor: BigUint = (BigUint::from(1u8) << 200) + 5u8;
+    let small_divisor = BigUint::from(3u8);
+    let low = |value: BigUint| {
+        let limb = value % (BigUint::from(1u8) << 64);
+        IntBits::from_biguint(64, &limb)
+    };
+    let selected = IntBits::from_u128(1, 1);
+    let parameter = IntBits::from_u128(64, 3);
+
+    let pure_divisor = large_divisor.clone();
+    let pure_dividend = dividend.clone();
+    let by_a_constant = main_program(
+        &[Type::int(1)],
+        &[Type::int(64), Type::int(64)],
+        move |e, params| {
+            let constant = e.int_const(IntBits::from_biguint(bits, &pure_dividend));
+            let zero = e.int_const(IntBits::zero(bits));
+            let dividend = e.select(params[0], constant, zero);
+            let divisor = e.int_const(IntBits::from_biguint(bits, &pure_divisor));
+            let quotient = e.bin(BinaryArithOpKind::UDiv, dividend, divisor);
+            let remainder = e.bin(BinaryArithOpKind::URem, dividend, divisor);
+            vec![
+                e.cast_to(CastTarget::Int(64), quotient),
+                e.cast_to(CastTarget::Int(64), remainder),
+            ]
+        },
+    );
+    let compiled = Compiled::new(by_a_constant).unwrap_or_else(|error| {
+        panic!("UDiv by a constant at {bits} bits does not compile: {error}")
+    });
+    let inputs = [
+        &selected,
+        &low(&dividend / &large_divisor),
+        &low(&dividend % &large_divisor),
+    ];
+    let what = format!("UDiv and URem by a constant at {bits} bits");
+    assert_every_column_is_pinned(&what, &compiled, &inputs);
+    assert_changing_an_input_breaks_the_witness(
+        &format!("{what}, the dividend sent to zero"),
+        &compiled,
+        &inputs,
+        0,
+        &IntBits::zero(1),
+    );
+
+    let pure_dividend = dividend.clone();
+    let by_a_witness = main_program(
+        &[Type::int(1), Type::int(64)],
+        &[Type::int(64), Type::int(64)],
+        move |e, params| {
+            let constant = e.int_const(IntBits::from_biguint(bits, &pure_dividend));
+            let zero = e.int_const(IntBits::zero(bits));
+            let dividend = e.select(params[0], constant, zero);
+            let divisor = e.cast_to(CastTarget::Int(bits), params[1]);
+            let quotient = e.bin(BinaryArithOpKind::UDiv, dividend, divisor);
+            let remainder = e.bin(BinaryArithOpKind::URem, dividend, divisor);
+            vec![
+                e.cast_to(CastTarget::Int(64), quotient),
+                e.cast_to(CastTarget::Int(64), remainder),
+            ]
+        },
+    );
+    let compiled = Compiled::new(by_a_witness).unwrap_or_else(|error| {
+        panic!("UDiv by a witness at {bits} bits does not compile: {error}")
+    });
+    assert_every_column_is_pinned(
+        &format!("UDiv and URem by a witness at {bits} bits"),
+        &compiled,
+        &[
+            &selected,
+            &parameter,
+            &low(&dividend / &small_divisor),
+            &low(&dividend % &small_divisor),
+        ],
+    );
+
+    let pure_divisor = large_divisor.clone();
+    let smaller_than_the_divisor = main_program(
+        &[Type::int(1), Type::int(64)],
+        &[Type::int(64), Type::int(64)],
+        move |e, params| {
+            let dividend = e.cast_to(CastTarget::Int(bits), params[1]);
+            let constant = e.int_const(IntBits::from_biguint(bits, &pure_divisor));
+            let zero = e.int_const(IntBits::zero(bits));
+            let divisor = e.select(params[0], constant, zero);
+            let quotient = e.bin(BinaryArithOpKind::UDiv, dividend, divisor);
+            let remainder = e.bin(BinaryArithOpKind::URem, dividend, divisor);
+            vec![
+                e.cast_to(CastTarget::Int(64), quotient),
+                e.cast_to(CastTarget::Int(64), remainder),
+            ]
+        },
+    );
+    let compiled = Compiled::new(smaller_than_the_divisor).unwrap_or_else(|error| {
+        panic!("UDiv of a smaller dividend at {bits} bits does not compile: {error}")
+    });
+    let inputs = [&selected, &parameter, &IntBits::zero(64), &parameter];
+    let what = format!("UDiv and URem of a dividend smaller than the divisor at {bits} bits");
+    assert_every_column_is_pinned(&what, &compiled, &inputs);
+    assert_changing_an_input_breaks_the_witness(
+        &format!("{what}, the divisor sent to zero"),
+        &compiled,
+        &inputs,
+        0,
+        &IntBits::zero(1),
+    );
+}
+
+/// The mutation test for the asserted ordering, in the band and on limbs.
+///
+/// **This is the one chain shape the mutation test cannot fully judge.** An asserted ordering fixes
+/// its top borrow at one instead of witnessing it, so the top limb's identity has no column of its
+/// own: dropping that limb's range check leaves every column pinned and this test green.
+/// [`a_guarded_assertion_holds_only_where_its_guard_does`] is what fails then, by accepting a
+/// failing assertion, and so does `wide_witness_ints`'s structural audit,
+/// `every_carry_is_a_bit_and_every_limb_of_the_chain_is_bounded`. What this test pins is every
+/// carry below the top.
+#[test]
+fn every_witness_column_of_an_asserted_ordering_is_pinned() {
+    let accepted = IntBits::from_u128(1, 1);
+
+    let band = main_program(
+        &[Type::int(253), Type::int(253)],
+        &[Type::int(1)],
+        |e, params| {
+            e.emit(OpCode::AssertCmp {
+                kind: CmpKind::ULt,
+                lhs: params[0],
+                rhs: params[1],
+            });
+            vec![e.int_const(IntBits::from_u128(1, 1))]
+        },
+    );
+    let compiled = Compiled::new(band)
+        .unwrap_or_else(|error| panic!("an asserted int253 ordering does not compile: {error}"));
+    assert_every_column_is_pinned(
+        "an asserted ordering at 253 bits",
+        &compiled,
+        &[
+            &IntBits::from_u128(253, 3),
+            &IntBits::from_u128(253, 7),
+            &accepted,
+        ],
+    );
+
+    let bits = 320usize;
+    let high = BigUint::from(1u8) << 300;
+    let limbed = main_program(&[Type::int(64)], &[Type::int(1)], move |e, params| {
+        let left = e.cast_to(CastTarget::Int(bits), params[0]);
+        let right = e.int_const(IntBits::from_biguint(bits, &high));
+        e.emit(OpCode::AssertCmp {
+            kind: CmpKind::ULt,
+            lhs: left,
+            rhs: right,
+        });
+        vec![e.int_const(IntBits::from_u128(1, 1))]
+    });
+    let compiled = Compiled::new(limbed)
+        .unwrap_or_else(|error| panic!("an asserted int320 ordering does not compile: {error}"));
+    assert_every_column_is_pinned(
+        "an asserted ordering at 320 bits",
+        &compiled,
+        &[&IntBits::from_u128(64, 3), &accepted],
+    );
+}
+
+/// The unsigned sum and difference agree with the model where one element carries the operands.
+///
+/// 200 and 252 are the band past the funnel's narrow width that the single-cell lowering holds,
+/// because the sum still fits an element. 253 is the one width where the operands fit and the sum
+/// does not, so the chain runs there on a decomposition of each operand.
+#[test]
+fn a_sum_or_difference_agrees_with_the_model_at_the_limb_corners() {
+    for bits in [200usize, 252, 253] {
+        for kind in [BinaryArithOpKind::UAdd, BinaryArithOpKind::USub] {
+            sweep_over(kind, bits, wide_corner_pairs(IntOp::from(kind), bits));
+        }
+    }
+}
+
+/// The unsigned ordering agrees with the model over the same widths, and its declared return is
+/// bound to it.
+///
+/// The second half is the entry point's return check: witness generation is honest, so a run that
+/// declares the other answer computes the right one and fails where the two are compared. It says
+/// nothing about the ordering's own constraints, which
+/// [`every_witness_column_of_an_unsigned_ordering_is_pinned`] is what probes.
+///
+/// The byte is the single-cell lowering the rest are measured against.
+#[test]
+fn an_unsigned_ordering_agrees_with_the_model_at_the_limb_corners() {
+    for bits in [8usize, 200, 252, 253] {
+        let ssa = main_program(
+            &[Type::int(bits), Type::int(bits)],
+            &[Type::int(1)],
+            |e, params| vec![e.cmp(params[0], params[1], CmpKind::ULt)],
+        );
+        let compiled = Compiled::new(ssa)
+            .unwrap_or_else(|error| panic!("ULt at {bits} bits does not compile: {error}"));
+
+        let values = corners::wide_values(bits);
+        for lhs in &values {
+            for rhs in &values {
+                let less = Limbed::Ordering
+                    .model(lhs, rhs)
+                    .expect("an ordering is always answered");
+                let verdict = compiled.run(&input_block(&[lhs, rhs, &less]));
+                assert!(
+                    verdict.is_accepted(),
+                    "ULt({lhs:?}, {rhs:?}) at {bits} bits is {less:?}: {verdict:?}"
+                );
+                let wrong = less.xor(&IntBits::from_u128(1, 1));
+                assert!(
+                    !compiled
+                        .run(&input_block(&[lhs, rhs, &wrong]))
+                        .is_accepted(),
+                    "ULt({lhs:?}, {rhs:?}) at {bits} bits accepted the wrong answer {wrong:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The operations the representation computes on limbs: the carry chain's three and the
+/// schoolbook's product.
+#[derive(Clone, Copy, Debug)]
+enum Limbed {
+    Sum,
+    Difference,
+    Ordering,
+    Product,
+    Quotient,
+    Remainder,
+}
+
+impl Limbed {
+    fn emit(self, e: &mut HLBlockEmitter<'_>, lhs: ValueId, rhs: ValueId) -> ValueId {
+        match self {
+            Limbed::Sum => e.bin(BinaryArithOpKind::UAdd, lhs, rhs),
+            Limbed::Difference => e.bin(BinaryArithOpKind::USub, lhs, rhs),
+            Limbed::Ordering => e.cmp(lhs, rhs, CmpKind::ULt),
+            Limbed::Product => e.bin(BinaryArithOpKind::UMul, lhs, rhs),
+            Limbed::Quotient => e.bin(BinaryArithOpKind::UDiv, lhs, rhs),
+            Limbed::Remainder => e.bin(BinaryArithOpKind::URem, lhs, rhs),
+        }
+    }
+
+    /// The right operand a pair takes on a run that does not name it: one that every left operand
+    /// is accepted against, which is zero except for a divisor.
+    fn idle_rhs(self, bits: usize) -> IntBits {
+        match self {
+            Limbed::Quotient | Limbed::Remainder => IntBits::from_u128(bits, 1),
+            Limbed::Sum | Limbed::Difference | Limbed::Ordering | Limbed::Product => {
+                IntBits::zero(bits)
+            }
+        }
+    }
+
+    /// The model's answer, or [`None`] where it rejects the operands.
+    fn model(self, lhs: &IntBits, rhs: &IntBits) -> Option<IntBits> {
+        match self {
+            Limbed::Sum => mavros_int_semantics::eval(IntOp::UAdd, lhs, rhs).value(),
+            Limbed::Difference => mavros_int_semantics::eval(IntOp::USub, lhs, rhs).value(),
+            Limbed::Product => mavros_int_semantics::eval(IntOp::UMul, lhs, rhs).value(),
+            Limbed::Quotient => mavros_int_semantics::eval(IntOp::UDiv, lhs, rhs).value(),
+            Limbed::Remainder => mavros_int_semantics::eval(IntOp::URem, lhs, rhs).value(),
+            Limbed::Ordering => Some(IntBits::from_u128(
+                1,
+                u128::from(BigUint::from(lhs) < BigUint::from(rhs)),
+            )),
+        }
+    }
+}
+
+/// The chain on limbs, over the corners a carry chain turns on, on both lanes.
+///
+/// A carry or a borrow crosses a limb boundary where a limb is full or empty, and leaves the value
+/// at the top, so the corners are the ones either side of the lowest boundary and of the top limb's,
+/// and the extremes. 254 has a top limb narrower than the rest and 320 a full one. The limb is the
+/// **field's** witness limb, which is what the chain splits at; it is only on bn254 that it is also
+/// the host word.
+///
+/// Every corner [`corners::wide_values`] has is [`the_limbed_corner_matrix_agrees_with_the_model`].
+/// Those are placed at the host word, since the model knows no field, so they are the chain's
+/// corners only where the two limbs coincide — which the matrix asserts before it runs.
+#[test]
+fn limbed_sums_differences_and_orderings_agree_with_the_model() {
+    let limb = witness_limb_bits(FieldConfig::bn254());
+    for bits in [254usize, 320] {
+        let one = IntBits::from_u128(bits, 1);
+        let top_limb = (bits - 1) / limb * limb;
+        let values = [
+            IntBits::zero(bits),
+            one.clone(),
+            IntBits::all_ones(limb).cast(bits),
+            one.shifted_left(limb),
+            one.shifted_left(top_limb),
+            IntBits::all_ones(bits),
+        ];
+        for limbed in [Limbed::Sum, Limbed::Difference, Limbed::Ordering] {
+            check_limbed_corners(limbed, bits, &values, Rhs::Witnessed);
+        }
+    }
+}
+
+/// [`limbed_sums_differences_and_orderings_agree_with_the_model`] over every limb corner.
+#[test]
+#[ignore = "every limb corner of six operations; about an hour in a debug build"]
+fn the_limbed_corner_matrix_agrees_with_the_model() {
+    assert_eq!(
+        witness_limb_bits(FieldConfig::bn254()),
+        HOST_LIMB_BITS,
+        "the model's limb corners are the chain's only while the two limbs coincide"
+    );
+    for bits in [254usize, 320] {
+        let values = corners::wide_values(bits);
+        for limbed in [Limbed::Sum, Limbed::Difference, Limbed::Ordering] {
+            check_limbed_corners(limbed, bits, &values, Rhs::Witnessed);
+        }
+        let mut values = values;
+        values.extend(half_width_corners(bits));
+        let values = dedup(values);
+        for limbed in [Limbed::Product, Limbed::Quotient, Limbed::Remainder] {
+            check_limbed_corners(limbed, bits, &values, Rhs::Witnessed);
+        }
+    }
+}
+
+/// The corners a product turns on, which the model's wide set does not have: either side of half
+/// the width, so that the products of two of them land either side of `2^N`.
+///
+/// `2^⌊N/2⌋ · 2^⌈N/2⌉` is exactly `2^N`, the smallest product that overflows, and it overflows by
+/// nothing but a carry out of the top column. At an even width `(2^(N/2) + 1)(2^(N/2) - 1)` is the
+/// largest answer there is, which carries through every column on the way.
+fn half_width_corners(bits: usize) -> Vec<IntBits> {
+    let one = IntBits::from_u128(bits, 1);
+    let values = [bits / 2, bits.div_ceil(2)].into_iter().flat_map(|half| {
+        let power = one.shifted_left(half);
+        [
+            IntBits::all_ones(half).cast(bits),
+            power.clone(),
+            power.or(&one),
+        ]
+    });
+    dedup(values.collect())
+}
+
+/// `values` with repeats removed, in order.
+fn dedup(values: Vec<IntBits>) -> Vec<IntBits> {
+    let mut out: Vec<IntBits> = Vec::with_capacity(values.len());
+    for value in values {
+        if !out.contains(&value) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+/// A product agrees with the model where the operands have an element each and their product does
+/// not, which is where the schoolbook runs on a decomposition of each operand.
+///
+/// 127 is the one width below the double lane whose product the single cell cannot hold. 129 and
+/// 200 are past both narrow lanes, and 253 is the widest width an element carries.
+#[test]
+fn a_product_agrees_with_the_model_at_the_limb_corners() {
+    for bits in [127usize, 129, 200, 253] {
+        let mut values = corners::wide_values(bits);
+        values.extend(half_width_corners(bits));
+        let values = dedup(values);
+        let pairs = values
+            .iter()
+            .flat_map(|a| values.iter().map(move |b| (a.clone(), b.clone())))
+            .collect();
+        sweep_over(BinaryArithOpKind::UMul, bits, pairs);
+    }
+}
+
+/// A quotient and a remainder agree with the model where the operands have an element each and
+/// the product that checks them does not, which is where the representation divides on a
+/// decomposition of each operand.
+///
+/// The widths are the product's: 127 is the one width below the double lane the single cell
+/// cannot check, 129 and 200 are past both narrow lanes, and 253 is the widest an element carries.
+/// A zero divisor is among the corners, and the model rejects it; the oracle requires the pipeline
+/// to refuse it.
+///
+/// Witness taint inference splits the oracle's entry point by context, so each program also
+/// carries a **pure** copy of the division, whose zero check is built at the same width. Each
+/// program compiling is what says both copies are lowered and neither is refused.
+#[test]
+fn a_quotient_or_remainder_agrees_with_the_model_at_the_limb_corners() {
+    for bits in [127usize, 129, 200, 253] {
+        let mut values = corners::wide_values(bits);
+        values.extend(half_width_corners(bits));
+        let values = dedup(values);
+        let pairs: Vec<(IntBits, IntBits)> = values
+            .iter()
+            .flat_map(|a| values.iter().map(move |b| (a.clone(), b.clone())))
+            .collect();
+        for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
+            sweep_over(kind, bits, pairs.clone());
+        }
+    }
+}
+
+/// The product on limbs, over the corners its carries and its overflow check turn on, on both
+/// lanes, with both operands witnessed and with a constant multiplier.
+///
+/// A constant is cut into limbs at compile time, and a limb it does not reach drops out of the
+/// plan along with every partial product and overflow term against it. So the constant half is
+/// what checks that nothing needed dropped out with them: `2^top_limb` is a constant whose only
+/// limb is the top one, whose overflow terms are all that stand between a large operand and a
+/// wrong answer.
+#[test]
+fn limbed_products_agree_with_the_model() {
+    let limb = witness_limb_bits(FieldConfig::bn254());
+    for bits in [254usize, 320] {
+        let one = IntBits::from_u128(bits, 1);
+        let top_limb = (bits - 1) / limb * limb;
+        let mut values = vec![
+            IntBits::zero(bits),
+            one.clone(),
+            IntBits::all_ones(limb).cast(bits),
+            one.shifted_left(limb),
+            one.shifted_left(top_limb),
+            IntBits::all_ones(bits),
+        ];
+        values.extend(half_width_corners(bits));
+        let values = dedup(values);
+        for rhs in [Rhs::Witnessed, Rhs::Constant] {
+            check_limbed_corners(Limbed::Product, bits, &values, rhs);
+        }
+    }
+}
+
+/// The quotient and the remainder on limbs, over the corners the schoolbook and the chain turn on,
+/// on both lanes, with a witnessed divisor and with a constant one.
+///
+/// A constant divisor bounds both answers, so the limbs it puts out of their reach are never
+/// witnessed and `r < d` reads only the limbs below its top. `2^top_limb` is the constant that
+/// leaves the most out, and `2^N - 1` the one that leaves nothing. A constant zero divisor is its
+/// own test, [`a_constant_zero_divisor_is_refused_at_every_width`], as it refuses the program it
+/// sits in.
+#[test]
+fn limbed_quotients_and_remainders_agree_with_the_model() {
+    let limb = witness_limb_bits(FieldConfig::bn254());
+    for bits in [254usize, 320] {
+        let one = IntBits::from_u128(bits, 1);
+        let top_limb = (bits - 1) / limb * limb;
+        let mut values = vec![
+            IntBits::zero(bits),
+            one.clone(),
+            IntBits::from_u128(bits, 3),
+            IntBits::all_ones(limb).cast(bits),
+            one.shifted_left(limb),
+            one.shifted_left(top_limb),
+            IntBits::all_ones(bits),
+        ];
+        values.extend(half_width_corners(bits));
+        let values = dedup(values);
+        for limbed in [Limbed::Quotient, Limbed::Remainder] {
+            check_limbed_corners(limbed, bits, &values, Rhs::Witnessed);
+            let pairs: Vec<(IntBits, IntBits)> = values
+                .iter()
+                .flat_map(|a| {
+                    values
+                        .iter()
+                        .filter(|b| !b.is_zero())
+                        .map(move |b| (a.clone(), b.clone()))
+                })
+                .collect();
+            for pairs in pairs.chunks(20) {
+                check_limbed_pairs(limbed, bits, pairs.to_vec(), Rhs::Constant);
+            }
+        }
+    }
+}
+
+/// A division whose answer is known before it runs still refuses a zero divisor.
+///
+/// Zero divided by anything leaves every limb of both answers a known zero, so neither is
+/// witnessed and the schoolbook has nothing but the dividend's limbs to hold. A value divided by
+/// itself is one without a quotient or a remainder at all. In both, the lowering's own check of the
+/// divisor is all that stands between a zero divisor and an answer, as a division by a witness
+/// carries no other. Each runs both unguarded and in a taken branch, which are the two lowerings'
+/// two paths to that check.
+#[test]
+fn a_division_with_a_known_answer_still_refuses_a_zero_divisor() {
+    for bits in [200usize, 320] {
+        for (what, same) in [("zero by d", false), ("d by d", true)] {
+            for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
+                for guarded in [false, true] {
+                    let ssa = main_program(
+                        &[Type::int(1), Type::int(64)],
+                        &[Type::int(64)],
+                        move |e, params| {
+                            let divisor = e.cast_to(CastTarget::Int(bits), params[1]);
+                            let dividend = if same {
+                                divisor
+                            } else {
+                                e.int_const(IntBits::zero(bits))
+                            };
+                            if !guarded {
+                                let answer = e.bin(kind, dividend, divisor);
+                                return vec![e.cast_to(CastTarget::Int(64), answer)];
+                            }
+
+                            let (then_id, _) = e.add_block();
+                            let (else_id, _) = e.add_block();
+                            let (merge_id, _) = e.add_block();
+                            e.seal_and_switch(
+                                Terminator::JmpIf(params[0], then_id, else_id),
+                                then_id,
+                            );
+                            let answer = e.bin(kind, dividend, divisor);
+                            let low = e.cast_to(CastTarget::Int(64), answer);
+                            e.seal_and_switch(Terminator::Jmp(merge_id, vec![low]), else_id);
+                            let zero = e.int_const(IntBits::zero(64));
+                            e.seal_and_switch(Terminator::Jmp(merge_id, vec![zero]), merge_id);
+                            vec![e.add_parameter(Type::int(64))]
+                        },
+                    );
+                    let what = format!("int{bits} {kind:?}, {what}, guarded={guarded}");
+                    let compiled = Compiled::new(ssa)
+                        .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+
+                    let answer = u128::from(same && kind == BinaryArithOpKind::UDiv);
+                    let run = |divisor: u128, answer: u128| {
+                        compiled.run(&input_block(&[
+                            &IntBits::from_u128(1, 1),
+                            &IntBits::from_u128(64, divisor),
+                            &IntBits::from_u128(64, answer),
+                        ]))
+                    };
+                    let verdict = run(7, answer);
+                    assert!(verdict.is_accepted(), "{what}, by seven: {verdict:?}");
+                    let verdict = run(0, 0);
+                    assert!(verdict.is_refusal(), "{what}, by zero: {verdict:?}");
+                }
+            }
+        }
+    }
+}
+
+/// A division whose answers are known limb by limb still answers a witnessed value.
+///
+/// `0 / d` cannot be folded before it is lowered, since it must still refuse a zero divisor, and
+/// the lowering then knows every limb of both answers. The result reaching the return directly,
+/// through equalities that fold with it, is what makes a pure answer visible: the function declares
+/// a witnessed return, and a return that folded to a constant contradicts it.
+#[test]
+fn a_division_known_to_be_zero_keeps_a_witnessed_answer() {
+    for bits in [200usize, 320] {
+        for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
+            let ssa = main_program(&[Type::int(64)], &[Type::int(1)], move |e, params| {
+                let divisor = e.cast_to(CastTarget::Int(bits), params[0]);
+                let zero = e.int_const(IntBits::zero(bits));
+                let answer = e.bin(kind, zero, divisor);
+                vec![e.eq(answer, zero)]
+            });
+            let what = format!("int{bits} {kind:?} of zero");
+            let compiled = Compiled::new(ssa)
+                .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+            let one = IntBits::from_u128(1, 1);
+            let verdict = compiled.run(&input_block(&[&IntBits::from_u128(64, 7), &one]));
+            assert!(verdict.is_accepted(), "{what}, by seven: {verdict:?}");
+            let verdict = compiled.run(&input_block(&[&IntBits::zero(64), &one]));
+            assert!(verdict.is_refusal(), "{what}, by zero: {verdict:?}");
+        }
+    }
+}
+
+/// A constant zero divisor is refused when the program is compiled, at every width and as it is at
+/// the narrow ones.
+///
+/// It is `LowerPureGuards`' assertion that the divisor is not zero that refuses it: with a constant
+/// divisor that assertion is a constant, and R1CS generation reports a constant assertion that
+/// fails. The division itself never has to.
+#[test]
+fn a_constant_zero_divisor_is_refused_at_every_width() {
+    for bits in [64usize, 128, 200, 320] {
+        for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
+            let ssa = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
+                let dividend = e.cast_to(CastTarget::Int(bits), params[0]);
+                let zero = e.int_const(IntBits::zero(bits));
+                let answer = e.bin(kind, dividend, zero);
+                vec![e.cast_to(CastTarget::Int(64), answer)]
+            });
+            let Err(error) = Compiled::new(ssa) else {
+                panic!("int{bits} {kind:?} by a constant zero compiled");
+            };
+            contains_all(&error.to_string(), &["assert_cmp eq failed: 1 != 0"]);
+        }
+    }
+}
+
+/// Every pair of `values`, checked by [`check_limbed_pairs`] a program's worth at a time.
+///
+/// Split because of the host rather than the compiler. On aarch64, wasmtime's Cranelift (0.118)
+/// trips its own branch-range assertion, `(label_offset - offset) <= kind.max_pos_range()` in
+/// `machinst/buffer.rs`, compiling a function holding a few hundred pairs, while the VM lane runs
+/// the same program to acceptance. Fifty sums, differences or orderings per program stay clear of
+/// it. A product of two dense operands is several times their code, and fifty of those do not.
+fn check_limbed_corners(limbed: Limbed, bits: usize, values: &[IntBits], rhs: Rhs) {
+    let pairs: Vec<(IntBits, IntBits)> = values
+        .iter()
+        .flat_map(|a| values.iter().map(move |b| (a.clone(), b.clone())))
+        .collect();
+    let per_program = match limbed {
+        Limbed::Product | Limbed::Quotient | Limbed::Remainder => 20,
+        Limbed::Sum | Limbed::Difference | Limbed::Ordering => 50,
+    };
+    for pairs in pairs.chunks(per_program) {
+        check_limbed_pairs(limbed, bits, pairs.to_vec(), rhs);
+    }
+}
+
+/// How [`check_limbed_pairs`] builds its right operand.
+#[derive(Clone, Copy, Debug)]
+enum Rhs {
+    /// Selected by a witnessed bit, as the left one is: a witnessed value held as limbs.
+    Witnessed,
+
+    /// The corner constant itself, which a lowering sees as a constant and may cut at compile time.
+    Constant,
+}
+
+/// `limbed` over `pairs`, all in one program, against the model.
+///
+/// No parameter can be this wide, so each operand is a corner constant selected by a witnessed bit,
+/// one per side: a witnessed value held as limbs, whose value is the constant. Every pair is then
+/// one program's worth of arithmetic, and one program holds them all.
+///
+/// A pair the model rejects cannot sit beside the others unconditionally, since it would refuse
+/// every run. Its operands are selected by a second parameter naming the pair instead, and are
+/// idle on every run but the one that names it — where the pipeline has to refuse, and only there.
+/// Idle is zero, apart from a divisor, which is one ([`Limbed::idle_rhs`]). A constant right
+/// operand is not selected, so there it is the left one alone that goes to zero.
+fn check_limbed_pairs(limbed: Limbed, bits: usize, pairs: Vec<(IntBits, IntBits)>, rhs: Rhs) {
+    let answers: Vec<Option<IntBits>> = pairs.iter().map(|(a, b)| limbed.model(a, b)).collect();
+    let zero = IntBits::zero(bits);
+    let idle = limbed.idle_rhs(bits);
+    let unnamed: Vec<IntBits> = pairs
+        .iter()
+        .map(|(_, right)| {
+            let right = match rhs {
+                Rhs::Witnessed => &idle,
+                Rhs::Constant => right,
+            };
+            limbed
+                .model(&zero, right)
+                .expect("the operation accepts a zero left operand against this right one")
+        })
+        .collect();
+
+    let (program_pairs, program_answers) = (pairs.clone(), answers.clone());
+    let ssa = main_program(
+        &[Type::int(1), Type::int(32), Type::int(1)],
+        &[Type::int(1)],
+        move |e, params| {
+            let zero = e.int_const(IntBits::zero(bits));
+            let idle = e.int_const(idle);
+            let mut all = None;
+            for (index, (((lhs, right), answer), unnamed)) in program_pairs
+                .iter()
+                .zip(&program_answers)
+                .zip(&unnamed)
+                .enumerate()
+            {
+                // Each side has a selector of its own, so that `a op b` and `b op a` are different
+                // values to the optimiser. With one selector the two are the same product, CSE
+                // keeps one of them, and a lowering that treats its operands differently is only
+                // ever run one way round.
+                let (left_chosen, right_chosen, want) = match answer {
+                    Some(want) => (params[0], params[2], want.clone()),
+                    None => {
+                        let name = e.int_const(IntBits::from_u128(32, index as u128));
+                        let named = e.eq(params[1], name);
+                        (named, named, unnamed.clone())
+                    }
+                };
+                let lhs = e.int_const(lhs.clone());
+                let lhs = e.select(left_chosen, lhs, zero);
+                let right = e.int_const(right.clone());
+                let rhs = match rhs {
+                    Rhs::Witnessed => e.select(right_chosen, right, idle),
+                    Rhs::Constant => right,
+                };
+                let got = limbed.emit(e, lhs, rhs);
+                let want = e.int_const(want);
+                let same = e.eq(got, want);
+                all = Some(match all {
+                    None => same,
+                    Some(all) => e.bin(BinaryArithOpKind::And, all, same),
+                });
+            }
+            vec![all.expect("there is at least one corner pair")]
+        },
+    );
+    let compiled = Compiled::new(ssa).unwrap_or_else(|error| {
+        panic!("{limbed:?} at {bits} bits, {rhs:?} right operand, does not compile: {error}")
+    });
+
+    let one = IntBits::from_u128(1, 1);
+    let inputs =
+        |selected: u128| input_block(&[&one, &IntBits::from_u128(32, selected), &one, &one]);
+
+    let none = u128::from(u32::MAX);
+    let verdict = compiled.run(&inputs(none));
+    assert!(
+        verdict.is_accepted(),
+        "{limbed:?} at {bits} bits, {rhs:?} right operand, disagrees with the model on some pair it accepts: {verdict:?}"
+    );
+    let verdict = compiled
+        .run_wasm(&inputs(none))
+        .expect("the WASM lane builds");
+    assert!(
+        verdict.is_accepted(),
+        "{limbed:?} at {bits} bits, {rhs:?} right operand, disagrees with the model on the WASM lane: {verdict:?}"
+    );
+
+    for (index, ((lhs, rhs), answer)) in pairs.iter().zip(&answers).enumerate() {
+        if answer.is_some() {
+            continue;
+        }
+        let verdict = compiled.run(&inputs(index as u128));
+        assert!(
+            verdict.is_refusal(),
+            "{limbed:?}({lhs:?}, {rhs:?}) at {bits} bits is rejected by the model, but the \
+             pipeline answered {verdict:?}"
+        );
+    }
+}
+
+/// A difference under a witnessed condition is checked only where the condition holds.
+///
+/// Inside a branch on a witness the operation is guarded, and a guard that is off means the
+/// operands are whatever the branch not taken left behind — here a difference that would borrow
+/// out of the top limb. The chain's checks go off with the guard, and the answer is zero.
+///
+/// 253 is the chain on a decomposition of a single element, and 320 on limbs.
+#[test]
+fn a_guarded_difference_is_checked_only_where_its_guard_holds() {
+    for bits in [253usize, 320] {
+        // Both operands share their top bits, so the difference is decided in the lowest limb and
+        // a borrow out of it has to run the whole chain.
+        let high = IntBits::from_biguint(bits, &(BigUint::from(1u8) << (bits - 3)));
+        let ssa = main_program(
+            &[Type::int(1), Type::int(64), Type::int(64)],
+            &[Type::int(64)],
+            move |e, params| {
+                let lhs = e.cast_to(CastTarget::Int(bits), params[1]);
+                let top = e.int_const(high.clone());
+                let lhs = e.bin(BinaryArithOpKind::Or, lhs, top);
+                let rhs = e.cast_to(CastTarget::Int(bits), params[2]);
+                let rhs = e.bin(BinaryArithOpKind::Or, rhs, top);
+
+                let (then_id, _) = e.add_block();
+                let (else_id, _) = e.add_block();
+                let (merge_id, _) = e.add_block();
+                e.seal_and_switch(Terminator::JmpIf(params[0], then_id, else_id), then_id);
+                let difference = e.bin(BinaryArithOpKind::USub, lhs, rhs);
+                let low = e.cast_to(CastTarget::Int(64), difference);
+                e.seal_and_switch(Terminator::Jmp(merge_id, vec![low]), else_id);
+                let zero = e.int_const(IntBits::zero(64));
+                e.seal_and_switch(Terminator::Jmp(merge_id, vec![zero]), merge_id);
+                vec![e.add_parameter(Type::int(64))]
+            },
+        );
+        let compiled = Compiled::new(ssa)
+            .unwrap_or_else(|error| panic!("a guarded int{bits} USub does not compile: {error}"));
+
+        let run = |taken: u128, lhs: u128, rhs: u128, answer: u128| {
+            compiled.run(&input_block(&[
+                &IntBits::from_u128(1, taken),
+                &IntBits::from_u128(64, lhs),
+                &IntBits::from_u128(64, rhs),
+                &IntBits::from_u128(64, answer),
+            ]))
+        };
+
+        let verdict = run(1, 7, 3, 4);
+        assert!(
+            verdict.is_accepted(),
+            "int{bits}: taken, 7 - 3: {verdict:?}"
+        );
+        let verdict = run(1, 3, 7, 0);
+        assert!(verdict.is_refusal(), "int{bits}: taken, 3 - 7: {verdict:?}");
+        let verdict = run(0, 3, 7, 0);
+        assert!(
+            verdict.is_accepted(),
+            "int{bits}: not taken, 3 - 7: {verdict:?}"
+        );
+    }
+}
+
+/// A product under a witnessed condition is checked only where the condition holds.
+///
+/// The multiplier is `2^(N - 2)` or-ed onto a parameter, so a multiplicand of three fits and one of
+/// four overflows by exactly its top column. Where the branch is not taken that overflow is what the
+/// branch not taken left behind, and the schoolbook's checks go off with the guard.
+///
+/// 253 is the schoolbook on a decomposition of a single element, and 320 on limbs.
+#[test]
+fn a_guarded_product_is_checked_only_where_its_guard_holds() {
+    for bits in [253usize, 320] {
+        let high = IntBits::from_biguint(bits, &(BigUint::from(1u8) << (bits - 2)));
+        let ssa = main_program(
+            &[Type::int(1), Type::int(64), Type::int(64)],
+            &[Type::int(64)],
+            move |e, params| {
+                let lhs = e.cast_to(CastTarget::Int(bits), params[1]);
+                let rhs = e.cast_to(CastTarget::Int(bits), params[2]);
+                let top = e.int_const(high.clone());
+                let rhs = e.bin(BinaryArithOpKind::Or, rhs, top);
+
+                let (then_id, _) = e.add_block();
+                let (else_id, _) = e.add_block();
+                let (merge_id, _) = e.add_block();
+                e.seal_and_switch(Terminator::JmpIf(params[0], then_id, else_id), then_id);
+                let product = e.bin(BinaryArithOpKind::UMul, lhs, rhs);
+                let low = e.cast_to(CastTarget::Int(64), product);
+                e.seal_and_switch(Terminator::Jmp(merge_id, vec![low]), else_id);
+                let zero = e.int_const(IntBits::zero(64));
+                e.seal_and_switch(Terminator::Jmp(merge_id, vec![zero]), merge_id);
+                vec![e.add_parameter(Type::int(64))]
+            },
+        );
+        let compiled = Compiled::new(ssa)
+            .unwrap_or_else(|error| panic!("a guarded int{bits} UMul does not compile: {error}"));
+
+        let run = |taken: u128, lhs: u128, rhs: u128, answer: u128| {
+            compiled.run(&input_block(&[
+                &IntBits::from_u128(1, taken),
+                &IntBits::from_u128(64, lhs),
+                &IntBits::from_u128(64, rhs),
+                &IntBits::from_u128(64, answer),
+            ]))
+        };
+
+        // `3 * (2^(N - 2) + 5)`, whose low limb is fifteen.
+        let verdict = run(1, 3, 5, 15);
+        assert!(
+            verdict.is_accepted(),
+            "int{bits}: taken, 3 * (2^(N - 2) + 5): {verdict:?}"
+        );
+        let verdict = run(1, 4, 5, 20);
+        assert!(
+            verdict.is_refusal(),
+            "int{bits}: taken, 4 * (2^(N - 2) + 5): {verdict:?}"
+        );
+        let verdict = run(0, 4, 5, 0);
+        assert!(
+            verdict.is_accepted(),
+            "int{bits}: not taken, 4 * (2^(N - 2) + 5): {verdict:?}"
+        );
+    }
+}
+
+/// A division under a witnessed condition is checked only where the condition holds.
+///
+/// Where the branch is not taken the divisor is whatever that branch left behind, here zero, which
+/// no quotient or remainder satisfies. The checks go off with the guard, the pure side divides by
+/// one instead, and the answer is zero.
+///
+/// 253 is the division on a decomposition of each operand, and 320 on limbs.
+#[test]
+fn a_guarded_division_is_checked_only_where_its_guard_holds() {
+    for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
+        for bits in [253usize, 320] {
+            let high = BigUint::from(1u8) << (bits - 3);
+            let top = IntBits::from_biguint(bits, &high);
+            let ssa = main_program(
+                &[Type::int(1), Type::int(64), Type::int(64)],
+                &[Type::int(64)],
+                move |e, params| {
+                    let lhs = e.cast_to(CastTarget::Int(bits), params[1]);
+                    let top = e.int_const(top.clone());
+                    let lhs = e.bin(BinaryArithOpKind::Or, lhs, top);
+                    let rhs = e.cast_to(CastTarget::Int(bits), params[2]);
+
+                    let (then_id, _) = e.add_block();
+                    let (else_id, _) = e.add_block();
+                    let (merge_id, _) = e.add_block();
+                    e.seal_and_switch(Terminator::JmpIf(params[0], then_id, else_id), then_id);
+                    let answer = e.bin(kind, lhs, rhs);
+                    let low = e.cast_to(CastTarget::Int(64), answer);
+                    e.seal_and_switch(Terminator::Jmp(merge_id, vec![low]), else_id);
+                    let zero = e.int_const(IntBits::zero(64));
+                    e.seal_and_switch(Terminator::Jmp(merge_id, vec![zero]), merge_id);
+                    vec![e.add_parameter(Type::int(64))]
+                },
+            );
+            let what = format!("a guarded int{bits} {kind:?}");
+            let compiled = Compiled::new(ssa)
+                .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+
+            let run = |taken: u128, lhs: u128, rhs: u128, answer: u128| {
+                compiled.run(&input_block(&[
+                    &IntBits::from_u128(1, taken),
+                    &IntBits::from_u128(64, lhs),
+                    &IntBits::from_u128(64, rhs),
+                    &IntBits::from_u128(64, answer),
+                ]))
+            };
+
+            let dividend = &high | BigUint::from(12345u32);
+            let exact: BigUint = match kind {
+                BinaryArithOpKind::UDiv => &dividend / 7u8,
+                _ => &dividend % 7u8,
+            };
+            let low = u128::from(
+                u64::try_from(exact % (BigUint::from(1u8) << 64)).expect("a low limb fits"),
+            );
+            let verdict = run(1, 12345, 7, low);
             assert!(
-                oracle
-                    .compiled()
-                    .first_unsatisfied_constraint(&perturbed)
-                    .is_some(),
-                "{kind:?} at {bits} bits: column {column} of {} is unconstrained — \
-                 adding one to it left every constraint satisfied",
-                witness.len()
+                verdict.is_accepted(),
+                "{what}, taken, by seven: {verdict:?}"
+            );
+            let verdict = run(1, 12345, 0, 0);
+            assert!(verdict.is_refusal(), "{what}, taken, by zero: {verdict:?}");
+            let verdict = run(0, 12345, 0, 0);
+            assert!(
+                verdict.is_accepted(),
+                "{what}, not taken, by zero: {verdict:?}"
+            );
+        }
+    }
+}
+
+/// An assertion under a witnessed condition holds only where the condition does.
+///
+/// The ordering is the chain with its top borrow fixed at one, and equality one assertion per limb;
+/// a guard that is off turns every check of either off with it. 253 is the chain on a decomposition,
+/// where equality needs nothing of the representation, and 320 is both on limbs.
+#[test]
+fn a_guarded_assertion_holds_only_where_its_guard_does() {
+    for (kind, holds, fails) in [
+        (CmpKind::ULt, (3, 7), (7, 3)),
+        (CmpKind::Eq, (7, 7), (7, 3)),
+    ] {
+        for bits in [253usize, 320] {
+            let high = IntBits::from_biguint(bits, &(BigUint::from(1u8) << (bits - 3)));
+            let ssa = main_program(
+                &[Type::int(1), Type::int(64), Type::int(64)],
+                &[Type::int(1)],
+                move |e, params| {
+                    let lhs = e.cast_to(CastTarget::Int(bits), params[1]);
+                    let top = e.int_const(high.clone());
+                    let lhs = e.bin(BinaryArithOpKind::Or, lhs, top);
+                    let rhs = e.cast_to(CastTarget::Int(bits), params[2]);
+                    let rhs = e.bin(BinaryArithOpKind::Or, rhs, top);
+
+                    let (then_id, _) = e.add_block();
+                    let (merge_id, _) = e.add_block();
+                    e.seal_and_switch(Terminator::JmpIf(params[0], then_id, merge_id), then_id);
+                    e.emit(OpCode::AssertCmp { kind, lhs, rhs });
+                    e.seal_and_switch(Terminator::Jmp(merge_id, vec![]), merge_id);
+                    vec![params[0]]
+                },
+            );
+            let what = format!("a guarded int{bits} {kind:?} assertion");
+            let compiled = Compiled::new(ssa)
+                .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+
+            let run = |taken: u128, (lhs, rhs): (u128, u128)| {
+                compiled.run(&input_block(&[
+                    &IntBits::from_u128(1, taken),
+                    &IntBits::from_u128(64, lhs),
+                    &IntBits::from_u128(64, rhs),
+                    &IntBits::from_u128(1, taken),
+                ]))
+            };
+            let verdict = run(1, holds);
+            assert!(verdict.is_accepted(), "{what}, taken, holding: {verdict:?}");
+            let verdict = run(1, fails);
+            assert!(verdict.is_refusal(), "{what}, taken, failing: {verdict:?}");
+            let verdict = run(0, fails);
+            assert!(
+                verdict.is_accepted(),
+                "{what}, not taken, failing: {verdict:?}"
             );
         }
     }
@@ -361,47 +1627,228 @@ fn a_literal_shift_amount_is_admitted_only_while_its_own_product_fits() {
     }
 }
 
-/// A 127-bit witness `*` is the one width whose product the field cannot tell from a residue and
-/// which has no fallback: `int128` splits into two limbs, and `int126` and below fit one product.
+/// A **pure** wide value past the modulus that no fold can compute, alone and as a product's
+/// operand.
+///
+/// `3^200` built by a loop is an `int320` no fold answers, so R1CS generation computes it, and it
+/// has no field element. It is carried there as its pattern, which is what lets the loop run at
+/// all, and the schoolbook cuts it into limbs on the pure side, each an element again. A limb that
+/// kept the bits above it would be a wrong coefficient in the product's constraints, which is what
+/// the multiplied run checks, and a multiplier of sixteen overflows the width.
 #[test]
-fn a_witness_multiply_at_a_hundred_and_twenty_seven_bits_is_refused() {
-    contains_all(
-        &refusal_for(BinaryArithOpKind::UMul, 127, 127),
-        &[
-            "error: a witnessed int127 multiplication is not supported",
-            "= note: a witnessed multiplication is a single field product",
-        ],
-    );
+fn a_pure_wide_value_a_loop_computes_is_carried_to_its_limbs() {
+    let bits = 320usize;
+    let power: BigUint = BigUint::from(3u8).pow(200u32);
+    assert!(power.bits() > 254 && power.bits() < 320);
+    let low = |value: &BigUint| IntBits::from_biguint(64, &(value % (BigUint::from(1u8) << 64)));
+
+    for multiplied in [false, true] {
+        let ssa = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
+            let zero = e.int_const(IntBits::zero(32));
+            let one = e.int_const(IntBits::from_u128(bits, 1));
+            let (head, _) = e.add_block();
+            let (back, _) = e.add_block();
+            let (done, _) = e.add_block();
+            e.seal_and_switch(Terminator::Jmp(head, vec![zero, one]), head);
+            let count = e.add_parameter(Type::int(32));
+            let power = e.add_parameter(Type::int(bits));
+            let three = e.int_const(IntBits::from_u128(bits, 3));
+            let power = e.bin(BinaryArithOpKind::UMul, power, three);
+            let step = e.int_const(IntBits::from_u128(32, 1));
+            let count = e.bin(BinaryArithOpKind::UAdd, count, step);
+            let limit = e.int_const(IntBits::from_u128(32, 200));
+            let more = e.cmp(count, limit, CmpKind::ULt);
+            e.seal_and_switch(Terminator::JmpIf(more, back, done), back);
+            e.seal_and_switch(Terminator::Jmp(head, vec![count, power]), done);
+            let value = if multiplied {
+                let factor = e.cast_to(CastTarget::Int(bits), params[0]);
+                e.bin(BinaryArithOpKind::UMul, factor, power)
+            } else {
+                power
+            };
+            vec![e.cast_to(CastTarget::Int(64), value)]
+        });
+        let compiled = Compiled::new(ssa).unwrap_or_else(|error| {
+            panic!("the loop, multiplied: {multiplied}, does not compile: {error}")
+        });
+        let inputs = |factor: u64, answer: &IntBits| {
+            input_block(&[&IntBits::from_u128(64, u128::from(factor)), answer])
+        };
+
+        for factor in [1u64, 5] {
+            let answer = if multiplied {
+                low(&(&power * factor))
+            } else {
+                low(&power)
+            };
+            let verdict = compiled.run(&inputs(factor, &answer));
+            assert!(
+                verdict.is_accepted(),
+                "multiplied: {multiplied}, factor {factor}: {verdict:?}"
+            );
+            let verdict = compiled
+                .run_wasm(&inputs(factor, &answer))
+                .expect("the WASM lane builds");
+            assert!(
+                verdict.is_accepted(),
+                "multiplied: {multiplied}, factor {factor}, WASM: {verdict:?}"
+            );
+            let wrong = answer.xor(&IntBits::from_u128(64, 1));
+            assert!(
+                !compiled.run(&inputs(factor, &wrong)).is_accepted(),
+                "multiplied: {multiplied}, factor {factor} accepted a wrong answer"
+            );
+        }
+        if multiplied {
+            let verdict = compiled.run(&inputs(16, &IntBits::zero(64)));
+            assert!(verdict.is_refusal(), "16 * 3^200 overflows: {verdict:?}");
+        }
+    }
 }
 
-/// A 129-bit multiplication is refused for its witnessed operands and for nothing else.
+/// A witnessed sum, difference or product whose result nothing reads still rejects an overflow.
 ///
-/// The program the oracle builds carries the operation twice: witness taint inference splits the
-/// entry point by context, so a **pure** copy of the multiply sits beside the witnessed one. Only
-/// the witnessed copy has no lowering, and that is what makes this the closest thing to end-to-end
-/// evidence that the pure multiply's overflow check is built at this width.
-///
-/// The count is the assertion. The witness refusal's own second note tells the reader the operation
-/// is supported outside the witness domain, and a second refusal saying it is not would contradict
-/// it in the same compile.
+/// Noir rejects an overflowing checked operation whether or not anything reads it. The rejection of
+/// a witnessed one is a range check its lowering puts on the result, and dead-code elimination runs
+/// between taint inference and that lowering, so it has to keep the operation rather than delete
+/// the check with it. The left operand carries every bit above the byte, so at the wide widths the
+/// sum of two bytes past 255 overflows the whole value, and the byte widths are the control.
 #[test]
-fn a_wide_multiplication_is_refused_for_its_witness_operands_alone() {
-    let refusal = refusal_for(BinaryArithOpKind::UMul, 129, 129);
-    contains_all(
-        &refusal,
-        &[
-            "error: a witnessed int129 multiplication is not supported",
-            "= note: the same operation is supported at this width outside the witness domain",
-        ],
-    );
-    assert_eq!(
-        refusal.matches("multiplication is not supported").count(),
-        1,
-        "the pure copy of the same multiply is lowered, not refused:\n{refusal}"
-    );
+fn a_dead_witnessed_operation_still_rejects_its_overflow() {
+    let one = IntBits::from_u128(1, 1);
+    for bits in [8usize, 200, 320] {
+        for kind in [
+            BinaryArithOpKind::UAdd,
+            BinaryArithOpKind::USub,
+            BinaryArithOpKind::UMul,
+        ] {
+            let ssa = main_program(
+                &[Type::int(8), Type::int(8)],
+                &[Type::int(1)],
+                move |e, params| {
+                    let lhs = e.cast_to(CastTarget::Int(bits), params[0]);
+                    let rhs = e.cast_to(CastTarget::Int(bits), params[1]);
+                    let lhs = if bits > 8 {
+                        let above_the_byte =
+                            IntBits::all_ones(bits).xor(&IntBits::all_ones(8).cast(bits));
+                        let above_the_byte = e.int_const(above_the_byte);
+                        e.bin(BinaryArithOpKind::Or, lhs, above_the_byte)
+                    } else {
+                        lhs
+                    };
+                    e.bin(kind, lhs, rhs);
+                    vec![e.int_const(IntBits::from_u128(1, 1))]
+                },
+            );
+            let compiled = Compiled::new(ssa).unwrap_or_else(|error| {
+                panic!("a dead int{bits} {kind:?} does not compile: {error}")
+            });
+            let run = |lhs: u128, rhs: u128| {
+                compiled.run(&input_block(&[
+                    &IntBits::from_u128(8, lhs),
+                    &IntBits::from_u128(8, rhs),
+                    &one,
+                ]))
+            };
+
+            // A wide difference cannot underflow from these operands, whose top bits are set, so
+            // only the byte has an overflowing difference to try.
+            let (fits, overflows) = match kind {
+                BinaryArithOpKind::USub if bits == 8 => ((2, 1), Some((1, 2))),
+                BinaryArithOpKind::USub => ((1, 2), None),
+                _ => ((1, 1), Some((200, 100))),
+            };
+            let verdict = run(fits.0, fits.1);
+            assert!(
+                verdict.is_accepted(),
+                "int{bits} {kind:?}{fits:?}: {verdict:?}"
+            );
+            if let Some((lhs, rhs)) = overflows {
+                let verdict = run(lhs, rhs);
+                assert!(
+                    verdict.is_refusal(),
+                    "int{bits} {kind:?}({lhs}, {rhs}) overflows, and nothing reads it: {verdict:?}"
+                );
+            }
+        }
+    }
 }
 
-/// A witnessed bitwise operation computes at **every** width, which no other arithmetic does.
+/// The same for the signed three, which reach a different lowering but owe the same rejection.
+///
+/// Each pair is two's complement at the width: at 8 bits `100 + 100`, `-100 - 100` and `16 * 16`
+/// each leave `-128..=127`, and at 64 bits `2^62 + 2^62`, `-2^63 - 1` and `2^32 * 2^31` leave the
+/// signed range the same way.
+#[test]
+fn a_dead_witnessed_signed_operation_still_rejects_its_overflow() {
+    let one = IntBits::from_u128(1, 1);
+    // Two's complement at a width no wider than a `u128` holds.
+    let negative = |bits: usize, magnitude: u128| (1u128 << bits) - magnitude;
+    for bits in [8usize, 64] {
+        let cases = [
+            (
+                BinaryArithOpKind::SAdd,
+                (1, 1),
+                if bits == 8 {
+                    (100, 100)
+                } else {
+                    (1 << 62, 1 << 62)
+                },
+            ),
+            (
+                BinaryArithOpKind::SSub,
+                (1, 2),
+                if bits == 8 {
+                    (negative(8, 100), 100)
+                } else {
+                    (negative(64, 1 << 63), 1)
+                },
+            ),
+            (
+                BinaryArithOpKind::SMul,
+                (3, 5),
+                if bits == 8 {
+                    (16, 16)
+                } else {
+                    (1 << 32, 1 << 31)
+                },
+            ),
+        ];
+        for (kind, fits, overflows) in cases {
+            let ssa = main_program(
+                &[Type::int(bits), Type::int(bits)],
+                &[Type::int(1)],
+                move |e, params| {
+                    e.bin(kind, params[0], params[1]);
+                    vec![e.int_const(IntBits::from_u128(1, 1))]
+                },
+            );
+            let compiled = Compiled::new(ssa).unwrap_or_else(|error| {
+                panic!("a dead int{bits} {kind:?} does not compile: {error}")
+            });
+            let run = |(lhs, rhs): (u128, u128)| {
+                compiled.run(&input_block(&[
+                    &IntBits::from_u128(bits, lhs),
+                    &IntBits::from_u128(bits, rhs),
+                    &one,
+                ]))
+            };
+            let verdict = run(fits);
+            assert!(
+                verdict.is_accepted(),
+                "int{bits} {kind:?}{fits:?}: {verdict:?}"
+            );
+            let verdict = run(overflows);
+            assert!(
+                verdict.is_refusal(),
+                "int{bits} {kind:?}{overflows:?} overflows, and nothing reads it: {verdict:?}"
+            );
+        }
+    }
+}
+
+/// A witnessed bitwise operation computes at **every** width, as the unsigned sum, difference and
+/// ordering do, but by a different route: limb by limb with no carry between them.
 ///
 /// **The widths are the ones that used to be gaps, and each was a different gap.** `40` fell off
 /// the two limb cases into a spread at the operand's own width, which the VM's `SpreadU32ToU64`
@@ -469,8 +1916,8 @@ fn a_witnessed_bitwise_operation_computes_at_every_width() {
 fn a_wide_bitwise_operation_takes_one_pure_operand() {
     for bits in [96usize, 200, 254, 320] {
         let input = 0xDEAD_BEEF_0BAD_F00Du64;
-        // A bit in the **top** limb, placed on the witnessed operand with an `or` because bitwise
-        // is the only wide arithmetic a witnessed value admits. Without it every limb of the
+        // A bit in the **top** limb, placed on the witnessed operand with an `or`, which carries
+        // nothing between limbs and so sets that bit and no other. Without it every limb of the
         // operand above the first is zero, and a decomposition that dropped one would be invisible.
         let high = BigUint::from(1u8) << (bits - 8);
         let mask = &high + BigUint::from(0x0F0F_0F0Fu32);
@@ -860,6 +2307,40 @@ fn a_double_lane_shift_by_a_narrower_amount_is_an_ice_in_codegen() {
         |e, params| vec![e.bin(BinaryArithOpKind::UShl, params[0], params[1])],
     );
     let _ = bytecode_listing(&ssa);
+}
+
+/// `main(a: int(bits)) -> int(bits / 2) { unspread(a).odd }`, the inverse of a spread.
+fn program_unspreading(bits: usize) -> HLSSA {
+    main_program(
+        &[Type::int(bits)],
+        &[Type::int(bits / 2)],
+        move |e, params| {
+            let half = u8::try_from(bits / 2).expect("a spread half is at most 64 bits");
+            let (odd, _even) = e.unspread(params[0], half);
+            vec![odd]
+        },
+    )
+}
+
+/// An unspread wider than the spread it inverts is refused by the bytecode arm itself.
+///
+/// The type rule admits an operand up to 128 bits, and the opcode reads 64. Nothing emits a wider
+/// one — every spread the bitwise lowering makes is a half-limb or narrower — so this is a guard on
+/// a producer that does not exist yet, and drives codegen directly to reach it.
+#[test]
+#[should_panic(expected = "Unspread bytecode lowering for integer widths > 64 bits")]
+fn an_unspread_past_what_its_opcode_reads_is_refused_in_codegen() {
+    let _ = bytecode_listing(&program_unspreading(128));
+}
+
+/// The widest unspread the opcode reads still lowers to it.
+#[test]
+fn an_unspread_the_opcode_reads_lowers_to_it() {
+    let listing = bytecode_listing(&program_unspreading(64));
+    assert!(
+        listing.contains("unspread_u64_to_u32"),
+        "no unspread in:\n{listing}"
+    );
 }
 
 /// The **bytecode** cell lane keeps taking a narrower amount, which is what makes the bound above

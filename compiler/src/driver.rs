@@ -48,6 +48,7 @@ use crate::{
             instruction_lowering::InstructionLowering,
             lookup_spilling::LookupSpilling,
             lower_map_casts::LowerMapCasts,
+            lower_zst_slices::LowerZstSlices,
             mem2reg::Mem2Reg,
             merge_identical_functions::MergeIdenticalFunctions,
             normalize_asserts::NormalizeAsserts,
@@ -57,6 +58,7 @@ use crate::{
             rc_insertion::RCInsertion,
             remove_unreachable_blocks::RemoveUnreachableBlocks,
             remove_unreachable_functions::RemoveUnreachableFunctions,
+            return_reachability::ReturnReachabilityValidation,
             simplifier::Simplifier,
             simplify_asserts::SimplifyAsserts,
             sparse_conditional_simplification::SCS,
@@ -116,10 +118,11 @@ pub enum Error {
     /// The Noir compiler driver returned errors.
     NoirCompilerError(Vec<noirc_errors::reporter::CustomDiagnostic>),
 
-    /// The program contains an assertion (or range/equality constraint) that can never be
-    /// satisfied, discovered while symbolically executing the program to generate R1CS. Such a
-    /// program will never execute, so it is rejected rather than compiled into constraints.
-    UnsatisfiableProgram(String),
+    /// The program has no returning entry path (checked before optimization), or contains
+    /// an impossible assertion/range/equality constraint found during R1CS generation.
+    /// Static return validation carries source locations; R1CS failures currently use a
+    /// synthetic location because symbolic assertion failures do not retain their spans.
+    UnsatisfiableProgram(Vec<Diagnostic>),
 
     /// The requested `--logup-soundness` target needs more than one LogUp challenge on this
     /// field, but multi-challenge LogUp is not yet implemented (see `docs/field-agnosticism.md`,
@@ -141,8 +144,8 @@ impl std::fmt::Display for Error {
             Error::NoirCompilerError(diagnostics) => {
                 write!(f, "Noir compiler error ({} diagnostics)", diagnostics.len())
             }
-            Error::UnsatisfiableProgram(message) => {
-                write!(f, "program will never execute: {message}")
+            Error::UnsatisfiableProgram(diagnostics) => {
+                write!(f, "{}", diagnostic::render_all(diagnostics))
             }
             Error::LogupSoundnessUnsupported(message) => write!(f, "{message}"),
             Error::AssertConstantFailed(locations) => {
@@ -342,13 +345,39 @@ impl Driver {
         // We initially validate all integer widths for sound usage under the configured field.
         self.check_widths(&ssa)?;
 
+        let failures = Rc::new(RefCell::new(None));
+        let mut validation = PassManager::new(
+            "validate_return_reachability".to_string(),
+            self.draw_cfg,
+            vec![
+                Box::new(Defunctionalize::new()),
+                Box::new(ReturnReachabilityValidation::new(Rc::clone(&failures))),
+            ],
+        );
+        validation.set_debug_output_dir(self.get_debug_output_dir().clone());
+        validation.run(&mut ssa);
+        let failures = failures
+            .borrow_mut()
+            .take()
+            .expect("return reachability validation did not record a result");
+        if !failures.is_empty() {
+            return Err(Error::UnsatisfiableProgram(
+                failures
+                    .into_iter()
+                    .map(|diagnostic| self.attach_compiled_source(diagnostic))
+                    .collect(),
+            ));
+        }
+
         let mut pass_manager = PassManager::new(
             "make_struct_access_static".to_string(),
             self.draw_cfg,
             vec![
-                Box::new(Defunctionalize::new()),
                 Box::new(PrepareEntryPoint::new(self.main_is_unconstrained)),
-                // Eliminate all tuple types immediately after the entry point is prepared, so every
+                // Lower leaf-less slices to their `u32` length. Must precede the elision, which
+                // breaks on leaf-less slices.
+                Box::new(LowerZstSlices::new()),
+                // Eliminate all tuple types after the entry point is prepared, so every
                 // subsequent pass operates on tuple-free IR.
                 Box::new(ElideTuples::new()),
                 // Normalize `assert(a == b)` / `assert(a < b)` into `AssertCmp` (witness-agnostic,
@@ -584,6 +613,7 @@ impl Driver {
             "witness_spilling".to_string(),
             self.draw_cfg,
             vec![
+                Box::new(InstructionLowering::pure_bit_decompositions()),
                 // Lower the remaining (pure-length) slice pops/inserts/removes. The
                 // witness-length ones were already rewritten by `PurifyWitnessSlices`.
                 Box::new(InstructionLowering::slice_ops()),
@@ -679,9 +709,12 @@ impl Driver {
         if self.r1cs_profiling {
             r1cs_gen.enable_profile();
         }
-        r1cs_gen
-            .run(&r1cs_ssa, &type_info)
-            .map_err(|e| Error::UnsatisfiableProgram(e.message))?;
+        r1cs_gen.run(&r1cs_ssa, &type_info).map_err(|e| {
+            Error::UnsatisfiableProgram(vec![Diagnostic::error(
+                e.message,
+                SourceLocation::synthetic("r1cs_generation"),
+            )])
+        })?;
         // Captured before `seal` consumes `r1cs_gen`; feeds the LogUp soundness degree D.
         let num_lookups = r1cs_gen.num_lookups();
         // Captured before `r1cs_ssa` is stored away; sizes the LogUp per-challenge soundness.

@@ -408,9 +408,18 @@ impl Simplifier {
                         });
                     }
                 }
-                // ValueOf(WriteWitness(_, hint, _)) → hint (the slot's hint
-                // value IS what ValueOf strips back to). Sound by witgen
-                // semantics.
+                // ValueOf(x) → x for a pure x, which a fold earlier in this pass can make of an
+                // operand that was a witness when the strip was emitted.
+                if matches!(target, CastTarget::ValueOf)
+                    && !types.get_value_type(*value).is_witness_of()
+                {
+                    return Some(Rewrite::Alias {
+                        result: *result,
+                        target: *value,
+                    });
+                }
+                // ValueOf(WriteWitness(_, hint, _)) → hint (the slot's hint value IS what ValueOf
+                // strips back to). Sound by witgen's semantics.
                 if matches!(target, CastTarget::ValueOf)
                     && let Some(ValueDefinition::Instruction(
                         _,
@@ -589,5 +598,57 @@ fn const_as_usize(ssa: &HLSSA, v: ValueId) -> Option<usize> {
     match ssa.get_const(v).as_deref() {
         Some(Constant::Int(pattern)) => usize::try_from(pattern).ok(),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::ssa::{Terminator, hlssa::builder::HLEmitter};
+
+    /// A strip of a value a fold has made pure is that value, not an ICE.
+    ///
+    /// `w * 0` is the constant zero whatever `w` is, and the fold says so by aliasing the constant,
+    /// so a `ValueOf` emitted while the product was a witness is left stripping a pure value. It
+    /// types as that value, and is then folded away with it.
+    #[test]
+    fn a_strip_of_a_value_folded_pure_is_that_value() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let (witness, product, stripped) =
+            (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        let zero = ssa.add_const(Constant::Field(ssa.field().zero()));
+        let mut builder = HLSSABuilder::new(&mut ssa);
+        builder.modify_function(main, |fb| {
+            fb.function.add_return_type(Type::field());
+            let entry = fb.function.get_entry_id();
+            fb.function
+                .get_block_mut(entry)
+                .push_parameter(witness, Type::witness_of(Type::field()));
+            let mut block = fb.test_block(entry);
+            block.emit(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::UMul,
+                result: product,
+                lhs: witness,
+                rhs: zero,
+            });
+            block.emit(OpCode::Cast {
+                result: stripped,
+                value: product,
+                target: CastTarget::ValueOf,
+            });
+            block.terminate_return(vec![stripped]);
+        });
+
+        let flow = FlowAnalysis::run(&ssa);
+        Simplifier::new().do_run(&mut ssa, &flow);
+
+        let function = ssa.get_function(main);
+        let entry = function.get_block(function.get_entry_id());
+        assert_eq!(entry.get_instructions().count(), 0, "both fold away");
+        assert!(
+            matches!(entry.get_terminator(), Some(Terminator::Return(values)) if values == &vec![zero]),
+            "the strip is the zero it strips"
+        );
     }
 }

@@ -15,8 +15,12 @@ use crate::{
         analysis::types::{FunctionTypeInfo, TypeInfo},
         codegen::bytecode::layout::int_cell_count,
         diagnostic::Diagnostic,
-        passes::shared::limbs::{
-            narrow_int_bits, two_limb_product_packing_fits, widest_injective_int_bits,
+        passes::{
+            shared::limbs::{
+                narrow_int_bits, single_cell_product_fits, two_limb_product_packing_fits,
+                widest_injective_int_bits,
+            },
+            wide_witness_ints::{schoolbook_division_fits, schoolbook_product_fits},
         },
         ssa::{
             SourceLocation, ValueId,
@@ -225,7 +229,15 @@ impl Funnel {
                 kind.group(),
                 ArithGroup::And | ArithGroup::Or | ArithGroup::Xor
             );
-            if bits > self.narrow && !bitwise {
+
+            // So do the unsigned sum and difference: one element carries them while their sum fits
+            // it, and past that the representation runs them through the carry chain. The unsigned
+            // product likewise, with the schoolbook in place of the chain, and the unsigned
+            // division and remainder, which are a schoolbook and a chain.
+            let chained = matches!(kind, BinaryArithOpKind::UAdd | BinaryArithOpKind::USub);
+            let multiplied = kind == BinaryArithOpKind::UMul;
+            let divided = matches!(kind, BinaryArithOpKind::UDiv | BinaryArithOpKind::URem);
+            if bits > self.narrow && !bitwise && !chained && !multiplied && !divided {
                 refusals.push(self.witnessed_too_wide(operation, bits, location));
                 return;
             }
@@ -243,8 +255,13 @@ impl Funnel {
                     }
                 }
                 ArithGroup::Mul => {
-                    if !self.multiply_is_lowered(bits) {
-                        refusals.push(self.product_too_wide(operation, bits, location));
+                    if !self.multiply_is_lowered(kind, bits) {
+                        refusals.push(self.product_too_wide(kind, operation, bits, location));
+                    }
+                }
+                ArithGroup::Div | ArithGroup::Rem => {
+                    if !self.divide_is_lowered(kind, bits) {
+                        refusals.push(self.quotient_too_wide(kind, operation, bits, location));
                     }
                 }
                 // The groups with no rule of their own beyond the bound above.
@@ -252,9 +269,7 @@ impl Funnel {
                 | ArithGroup::Or
                 | ArithGroup::Xor
                 | ArithGroup::Add
-                | ArithGroup::Sub
-                | ArithGroup::Div
-                | ArithGroup::Rem => {}
+                | ArithGroup::Sub => {}
             }
         }
 
@@ -293,14 +308,17 @@ impl Funnel {
             return;
         }
 
-        // Equality is the one comparison with no width of its own: it is a field subtraction and
-        // an inverse, which say nothing about how wide the operands are, and above the field it is
-        // the conjunction of the limbs' own equalities. An _ordering_ needs the difference to be
-        // range-checked at the operands' width, which is where the single cell binds.
-        if matches!(kind, CmpKind::Eq) {
+        // Equality has no width of its own: it is a field subtraction and an inverse, which say
+        // nothing about how wide the operands are, and above the field it is the conjunction of the
+        // limbs' own equalities. The unsigned ordering has none either: it is the borrow out of the
+        // difference, which one element carries while the difference fits it and the carry chain
+        // carries past that.
+        if matches!(kind, CmpKind::Eq | CmpKind::ULt) {
             return;
         }
 
+        // What is left is a signed ordering inside the signed frontier, whose lowering reads it in
+        // one cell. That only binds on a field whose `narrow` is below the frontier.
         if (is_witness(types, lhs) || is_witness(types, rhs)) && bits > self.narrow {
             refusals.push(self.witnessed_too_wide(operation, bits, location));
         }
@@ -429,13 +447,23 @@ impl Funnel {
 
     /// Whether a witnessed multiplication at `bits` has a lowering.
     ///
-    /// `lower_unsigned_mul` forms the product in one field element, so `2^(2 * bits)` has to stay
-    /// below the modulus for the rangecheck on it to tell an honest product from a residue. Its one
-    /// escape is the two-limb schoolbook, keyed on a double limb exactly and carrying its own
-    /// packing predicate.
-    fn multiply_is_lowered(&self, bits: usize) -> bool {
-        2 * bits <= self.injective
-            || (bits == 2 * HOST_LIMB_BITS && two_limb_product_packing_fits(self.field, bits))
+    /// The single cell takes one where [`single_cell_product_fits`] says so. Past that, a product
+    /// goes through the representation's schoolbook, which asks its own question of the field.
+    fn multiply_is_lowered(&self, kind: BinaryArithOpKind, bits: usize) -> bool {
+        single_cell_product_fits(self.field, bits)
+            || (kind == BinaryArithOpKind::UMul && schoolbook_product_fits(self.field, bits))
+    }
+
+    /// Whether a witnessed division or remainder at `bits` has a lowering.
+    ///
+    /// The single cell forms `q·d` in one field element, so it takes the widths whose product it
+    /// takes. Past that an unsigned one goes through the representation, whose `q·d + r` is a
+    /// schoolbook. A signed one reads its magnitudes through the single cell and has no lowering
+    /// past it for now: on bn254 the signed frontier sits well inside that cell, but on a field as
+    /// narrow as goldilocks it does not, and this refuses the signed widths in between.
+    fn divide_is_lowered(&self, kind: BinaryArithOpKind, bits: usize) -> bool {
+        single_cell_product_fits(self.field, bits)
+            || (!kind.is_signed() && schoolbook_division_fits(self.field, bits))
     }
 
     /// Whether a witnessed left shift at `bits` by `amount` has a sound lowering.
@@ -461,7 +489,12 @@ impl Funnel {
     // THE DIAGNOSTICS
     // --------------------------------------------------------------------------------------------
 
-    /// A witnessed value too wide to be constrained as one field element.
+    /// A witnessed operation whose lowering reads its operands in one field cell and one host word.
+    ///
+    /// The **value** is not what is too wide: a witnessed integer is one element up to the widest
+    /// width the field carries injectively and limbs past it. This refuses an operation with no
+    /// lowering at the width, which is the shifts and, on a field narrower than the signed frontier,
+    /// a signed operation.
     fn witnessed_too_wide(
         &self,
         operation: &str,
@@ -472,11 +505,16 @@ impl Funnel {
             format!("a witnessed int{bits} {operation} is not supported"),
             location.clone(),
         )
-        .with_label(format!("int{bits} does not fit one witness cell"))
+        .with_label(format!(
+            "int{bits} is wider than this operation's witness lowering reads"
+        ))
         .with_note(format!(
-            "a witnessed integer is constrained as a single field element, so the widest one this field holds is int{}",
+            "a witnessed {operation} is lowered in one field cell and one host word, so the widest it takes on this field is int{}",
             self.narrow
         ))
+        .with_note(
+            "an unsigned sum, difference or ordering, an equality, and a bitwise operation are supported on a witnessed integer at every width, and an unsigned product, quotient or remainder at every width the field leaves their schoolbook room for",
+        )
         .with_note(
             "the same operation is supported at this width outside the witness domain, where the value is computed rather than constrained",
         )
@@ -522,6 +560,7 @@ impl Funnel {
     /// A witnessed multiplication whose product the field cannot tell from a residue.
     fn product_too_wide(
         &self,
+        kind: BinaryArithOpKind,
         operation: &str,
         bits: usize,
         location: &SourceLocation,
@@ -535,18 +574,69 @@ impl Funnel {
             2 * bits
         ))
         .with_note(format!(
-            "a witnessed multiplication is a single field product, so the widest one this field carries is int{}",
+            "a witnessed multiplication is a single field product up to int{}",
             self.injective / 2
         ));
 
         // The one width above that bound with a lowering of its own, where the field affords it.
-        if two_limb_product_packing_fits(self.field, 2 * HOST_LIMB_BITS) {
+        let diagnostic = if two_limb_product_packing_fits(self.field, 2 * HOST_LIMB_BITS) {
             diagnostic.with_note(format!(
                 "int{} is supported despite being wider, because it splits into two limbs and multiplies them schoolbook",
                 2 * HOST_LIMB_BITS
             ))
         } else {
             diagnostic
+        };
+
+        if kind.is_signed() {
+            diagnostic.with_note("a signed multiplication has no lowering past the single cell")
+        } else {
+            diagnostic.with_note(
+                "past it an unsigned multiplication is a schoolbook product of witness limbs, which needs one partial product and the carry it is reduced into to fit a field element, and this field's limb does not leave that room",
+            )
+        }
+    }
+
+    /// A witnessed division or remainder whose `q·d + r` the field cannot tell from a residue.
+    ///
+    /// Shaped as [`Self::product_too_wide`] is, since the product it is checked by is the one that
+    /// does not fit.
+    fn quotient_too_wide(
+        &self,
+        kind: BinaryArithOpKind,
+        operation: &str,
+        bits: usize,
+        location: &SourceLocation,
+    ) -> Diagnostic {
+        let diagnostic = Diagnostic::error(
+            format!("a witnessed int{bits} {operation} is not supported"),
+            location.clone(),
+        )
+        .with_label(format!(
+            "a quotient times a divisor of int{bits} reaches 2^{}",
+            2 * bits
+        ))
+        .with_note(format!(
+            "a witnessed division is checked as a single field product up to int{}",
+            self.injective / 2
+        ));
+
+        // The one width above that bound whose product has a lowering of its own.
+        let diagnostic = if two_limb_product_packing_fits(self.field, 2 * HOST_LIMB_BITS) {
+            diagnostic.with_note(format!(
+                "int{} is supported despite being wider, because its product splits into two limbs and multiplies them schoolbook",
+                2 * HOST_LIMB_BITS
+            ))
+        } else {
+            diagnostic
+        };
+
+        if kind.is_signed() {
+            diagnostic.with_note("a signed division has no lowering past the single cell")
+        } else {
+            diagnostic.with_note(
+                "past it an unsigned division is checked by a schoolbook product of witness limbs, which needs one partial product and the carry it is reduced into to fit a field element, and this field's limb does not leave that room",
+            )
         }
     }
 
@@ -991,8 +1081,72 @@ mod tests {
     /// representation stops rather than where the type system does.
     #[test]
     fn a_witnessed_operation_stops_at_one_cell() {
-        assert!(!refuses(&witnessed(BinaryArithOpKind::UAdd, narrow())));
-        assert!(refuses(&witnessed(BinaryArithOpKind::UAdd, narrow() + 1)));
+        assert!(!refuses(&witnessed(BinaryArithOpKind::UShr, narrow())));
+        assert!(refuses(&witnessed(BinaryArithOpKind::UShr, narrow() + 1)));
+    }
+
+    /// The refusal names the **operation's** lowering as the bound, not the value.
+    ///
+    /// A witnessed `int(narrow + 1)` is one field element, and its sum, ordering and bitwise
+    /// operations all compile. A diagnostic saying the value does not fit a witness cell would send
+    /// the reader after the wrong thing.
+    #[test]
+    fn a_refusal_past_the_narrow_bound_blames_the_operation_not_the_value() {
+        let refusals = funnel(&witnessed(BinaryArithOpKind::UShr, narrow() + 1));
+        assert_eq!(refusals.len(), 1, "{refusals:?}");
+        let rendered = refusals[0].to_string();
+        for expected in [
+            format!(
+                "a witnessed right shift is lowered in one field cell and one host word, so the widest it takes on this field is int{}",
+                narrow()
+            ),
+            "an unsigned sum, difference or ordering, an equality, and a bitwise operation are supported on a witnessed integer at every width, and an unsigned product, quotient or remainder at every width the field leaves their schoolbook room for".to_string(),
+        ] {
+            assert!(rendered.contains(&expected), "missing {expected:?} in:\n{rendered}");
+        }
+        assert!(
+            !rendered.contains("does not fit one witness cell"),
+            "the value is blamed in:\n{rendered}"
+        );
+    }
+
+    /// The unsigned sum, difference and ordering have a lowering at **every** width.
+    ///
+    /// One element carries them while their sum fits it, and the carry chain past that, whether the
+    /// operands are one element each or limbs. The widths are the edges of those regimes: the
+    /// funnel's own narrow bound and the width past it, where every other witnessed arithmetic
+    /// operation is refused; the last width whose sum fits; the one width whose operands fit and
+    /// sum does not; the first held as limbs; and the cap.
+    #[test]
+    fn a_witnessed_sum_difference_or_ordering_has_a_lowering_at_every_width() {
+        let widths = [
+            narrow(),
+            narrow() + 1,
+            injective() - 1,
+            injective(),
+            injective() + 1,
+            MAX_SUPPORTED_INT_BITS,
+        ];
+        let ordering = |bits: usize| {
+            let operand = Type::witness_of(Type::int(bits));
+            program_with(&[operand.clone(), operand], |values, result| OpCode::Cmp {
+                kind: CmpKind::ULt,
+                result,
+                lhs: values[0],
+                rhs: values[1],
+            })
+        };
+        for bits in widths {
+            assert!(
+                !refuses(&witnessed(BinaryArithOpKind::UAdd, bits)),
+                "int{bits} +"
+            );
+            assert!(
+                !refuses(&witnessed(BinaryArithOpKind::USub, bits)),
+                "int{bits} -"
+            );
+            assert!(!refuses(&ordering(bits)), "int{bits} <");
+        }
     }
 
     /// The pure lane is the interpreter and the compiled WASM, which have wide bodies for every
@@ -1023,19 +1177,18 @@ mod tests {
         let witness = Type::witness_of(Type::int(narrow() + 1));
 
         assert!(refuses(&binary(
-            BinaryArithOpKind::UAdd,
+            BinaryArithOpKind::UShr,
             wide,
             witness.clone()
         )));
         assert!(refuses(&binary(
-            BinaryArithOpKind::UAdd,
+            BinaryArithOpKind::UShr,
             witness.clone(),
             Type::int(8)
         )));
     }
 
-    /// A witnessed bitwise operation has a lowering at **every** width, which no other arithmetic
-    /// family does.
+    /// A witnessed bitwise operation has a lowering at **every** width.
     ///
     /// The widths named here are the ones that used to have none: the two bands between the three
     /// arms `lower_binary_bitwise` was keyed on, and the band between the narrow bound and the
@@ -1043,9 +1196,11 @@ mod tests {
     /// different reason — a spread past the instruction's width, a value that is neither one limb
     /// nor two, and a value too wide for the narrow lowerings but not yet split into limbs.
     ///
-    /// **Bitwise reaches them all because it has no cross-limb interaction.** Nothing else in this
-    /// funnel is unbounded, and a new arithmetic family should not be added to this test without
-    /// its own such argument.
+    /// **Bitwise reaches them all because it has no cross-limb interaction.** The other unbounded
+    /// operations reach every width for other reasons: equality has no width of its own, and the
+    /// unsigned sum, difference and ordering have the carry chain, which
+    /// [`a_witnessed_sum_difference_or_ordering_has_a_lowering_at_every_width`] holds them to. A new
+    /// family should not be admitted without its own such argument.
     #[test]
     fn a_witnessed_bitwise_operation_has_a_lowering_at_every_width() {
         let bands = [
@@ -1075,10 +1230,10 @@ mod tests {
         }
 
         // And the exemption is the family's, not a hole: a width past the narrow bound still
-        // refuses for an operation that carries between limbs. (Below that bound an addition is
+        // refuses for a shift, which has no lowering there. (Below that bound a shift is
         // supported too, so the control has to be taken from above it.)
         assert!(refuses(&witnessed(
-            BinaryArithOpKind::UAdd,
+            BinaryArithOpKind::UShr,
             2 * HOST_LIMB_BITS + 1
         )));
     }
@@ -1205,30 +1360,103 @@ mod tests {
         assert!(refuses(&witnessed(BinaryArithOpKind::UShl, bits)));
     }
 
-    /// A witnessed product lives in one field element too. `int128` is above that bound and
-    /// supported anyway, by the two-limb schoolbook.
+    /// A witnessed unsigned product is lowered at every width: in one field element while the
+    /// product fits one, by the two-limb schoolbook at `int128`, and by the representation's
+    /// schoolbook everywhere else. A signed one never gets that far, as the signed frontier is well
+    /// inside the single cell.
     #[test]
-    fn a_witnessed_multiplication_stops_where_its_product_leaves_the_field() {
+    fn a_witnessed_unsigned_multiplication_is_lowered_at_every_width() {
         let widest_product = widest() / 2;
+        for bits in [
+            widest_product,
+            widest_product + 1,
+            2 * HOST_LIMB_BITS,
+            narrow() + 1,
+            injective(),
+            injective() + 1,
+            MAX_SUPPORTED_INT_BITS,
+        ] {
+            assert!(
+                !refuses(&witnessed(BinaryArithOpKind::UMul, bits)),
+                "int{bits}"
+            );
+        }
 
         assert!(!refuses(&witnessed(
-            BinaryArithOpKind::UMul,
-            widest_product
+            BinaryArithOpKind::SMul,
+            MAX_LOWERED_SIGNED_BITS
         )));
         assert!(refuses(&witnessed(
-            BinaryArithOpKind::UMul,
-            widest_product + 1
-        )));
-        assert!(!refuses(&witnessed(
-            BinaryArithOpKind::UMul,
-            2 * HOST_LIMB_BITS
+            BinaryArithOpKind::SMul,
+            MAX_LOWERED_SIGNED_BITS + 1
         )));
     }
 
-    /// Neither bound reads the operands' range, which is what makes them predictable: the same
-    /// program answers the same way however much the analysis could prove about the values.
+    /// A witnessed unsigned division and remainder are lowered at every width, as the product they
+    /// are checked by is: in one field element while that product fits one, through the two-limb
+    /// product at `int128`, and by the representation everywhere else. A signed one is refused past
+    /// the signed frontier like every signed operation.
     #[test]
-    fn the_product_bounds_are_stated_on_the_program_and_not_on_a_range() {
+    fn a_witnessed_unsigned_division_is_lowered_at_every_width() {
+        let widest_product = widest() / 2;
+        for bits in [
+            widest_product,
+            widest_product + 1,
+            2 * HOST_LIMB_BITS,
+            narrow() + 1,
+            injective(),
+            injective() + 1,
+            MAX_SUPPORTED_INT_BITS,
+        ] {
+            for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
+                assert!(!refuses(&witnessed(kind, bits)), "int{bits} {kind:?}");
+            }
+        }
+
+        for kind in [BinaryArithOpKind::SDiv, BinaryArithOpKind::SRem] {
+            assert!(
+                !refuses(&witnessed(kind, MAX_LOWERED_SIGNED_BITS)),
+                "{kind:?}"
+            );
+            assert!(
+                refuses(&witnessed(kind, MAX_LOWERED_SIGNED_BITS + 1)),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// A division's refusal names the lowering the division would have had: the schoolbook for an
+    /// unsigned one, and none past the single cell for a signed one.
+    ///
+    /// Asked of the diagnostic directly, as no field this crate configures refuses a division: on
+    /// bn254 the schoolbook takes every unsigned width, and the signed frontier sits inside the
+    /// single cell.
+    #[test]
+    fn a_division_refusal_names_the_lowering_for_its_reading() {
+        let funnel = Funnel::new(FieldConfig::bn254());
+        let render = |kind| {
+            funnel
+                .quotient_too_wide(kind, "division", 200, &location(1))
+                .to_string()
+        };
+        let schoolbook = "past it an unsigned division is checked by a schoolbook product";
+        let signed = "a signed division has no lowering past the single cell";
+        let two_limbs = format!("int{} is supported despite being wider", 2 * HOST_LIMB_BITS);
+
+        let unsigned = render(BinaryArithOpKind::UDiv);
+        assert!(unsigned.contains(schoolbook), "{unsigned}");
+        assert!(!unsigned.contains(signed), "{unsigned}");
+        assert!(unsigned.contains(&two_limbs), "{unsigned}");
+
+        let refused = render(BinaryArithOpKind::SDiv);
+        assert!(refused.contains(signed), "{refused}");
+        assert!(!refused.contains(schoolbook), "{refused}");
+    }
+
+    /// The shift bound does not read the operands' range, which is what makes it predictable: the
+    /// same program answers the same way however much the analysis could prove about the values.
+    #[test]
+    fn the_shift_bound_is_stated_on_the_program_and_not_on_a_range() {
         let narrow_operand = Type::witness_of(Type::int(8));
         let wide = Type::witness_of(Type::int(2 * HOST_LIMB_BITS));
 
@@ -1239,14 +1467,6 @@ mod tests {
             BinaryArithOpKind::UShl,
             wide.clone(),
             narrow_operand
-        )));
-
-        // The same for a multiplication one bit above the bound, whatever its operands look like.
-        let past = Type::witness_of(Type::int(widest() / 2 + 1));
-        assert!(refuses(&binary(
-            BinaryArithOpKind::UMul,
-            past.clone(),
-            past
         )));
     }
 
@@ -1309,8 +1529,12 @@ mod tests {
         };
 
         assert!(refuses(&compare(CmpKind::SLt, Type::int(past))));
-        assert!(!refuses(&compare(CmpKind::ULt, Type::int(past))));
         assert!(refuses(&compare(
+            CmpKind::SLt,
+            Type::witness_of(Type::int(past))
+        )));
+        assert!(!refuses(&compare(CmpKind::ULt, Type::int(past))));
+        assert!(!refuses(&compare(
             CmpKind::ULt,
             Type::witness_of(Type::int(narrow() + 1))
         )));
@@ -1451,13 +1675,13 @@ mod tests {
     /// these has nothing else to go on.
     #[test]
     fn a_capability_refusal_names_the_operation_and_the_width() {
-        let refusals = funnel(&witnessed(BinaryArithOpKind::UMul, narrow() + 1));
+        let refusals = funnel(&witnessed(BinaryArithOpKind::UShr, narrow() + 1));
 
         assert_eq!(refusals.len(), 1, "{refusals:?}");
         assert_eq!(
             refusals[0].message(),
             format!(
-                "a witnessed int{} multiplication is not supported",
+                "a witnessed int{} right shift is not supported",
                 narrow() + 1
             )
         );
@@ -1476,27 +1700,26 @@ mod tests {
             })
         };
 
-        let refusals = funnel(&assertion(
-            CmpKind::ULt,
-            Type::witness_of(Type::int(narrow() + 1)),
-        ));
+        let past = MAX_LOWERED_SIGNED_BITS + 1;
+        let refusals = funnel(&assertion(CmpKind::SLt, Type::witness_of(Type::int(past))));
         assert_eq!(refusals.len(), 1, "{refusals:?}");
         assert_eq!(
             refusals[0].message(),
-            format!("a witnessed int{} assertion is not supported", narrow() + 1)
+            format!("a signed int{past} assertion is not supported")
         );
 
-        assert!(refuses(&assertion(
-            CmpKind::SLt,
-            Type::int(MAX_LOWERED_SIGNED_BITS + 1)
+        assert!(refuses(&assertion(CmpKind::SLt, Type::int(past))));
+        assert!(!refuses(&assertion(
+            CmpKind::ULt,
+            Type::witness_of(Type::int(narrow() + 1))
         )));
         assert!(!refuses(&assertion(CmpKind::Eq, Type::int(narrow() + 1))));
     }
 
     /// Compiler-generated code carries one synthetic location for the whole of it, so a rule that
     /// meets the same shape twice there says the same sentence twice about one point in the
-    /// program. The two additions below are separated by the subtraction after the sort, as this is
-    /// what a `dedup` would miss.
+    /// program. The two right shifts below are separated by the left shift after the sort, as this
+    /// is what a `dedup` would miss.
     #[test]
     fn refusals_repeated_at_one_location_are_reported_once() {
         let wide = Type::witness_of(Type::int(narrow() + 1));
@@ -1510,9 +1733,9 @@ mod tests {
         entry.push_parameter(rhs, wide);
 
         for kind in [
-            BinaryArithOpKind::UAdd,
-            BinaryArithOpKind::USub,
-            BinaryArithOpKind::UAdd,
+            BinaryArithOpKind::UShr,
+            BinaryArithOpKind::UShl,
+            BinaryArithOpKind::UShr,
         ] {
             let result = ssa.fresh_value();
             ssa.get_function_mut(main).get_entry_mut().push_instruction(
@@ -1537,9 +1760,12 @@ mod tests {
         assert_eq!(
             messages,
             [
-                format!("a witnessed int{} addition is not supported", narrow() + 1),
                 format!(
-                    "a witnessed int{} subtraction is not supported",
+                    "a witnessed int{} right shift is not supported",
+                    narrow() + 1
+                ),
+                format!(
+                    "a witnessed int{} left shift is not supported",
                     narrow() + 1
                 ),
             ]

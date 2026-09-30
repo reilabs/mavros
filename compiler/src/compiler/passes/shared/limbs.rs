@@ -1,8 +1,8 @@
 //! The witness limb: how wide a piece of an integer can be for a given field.
 //!
 //! This governs witness layout and the widths the spread-based bitwise lowering works at. It is
-//! also the width the schoolbook multiplier and its carry chain will be built at when P5 lands —
-//! see `docs/field-agnosticism.md`, Layer 6.
+//! also the width the carry chain and the schoolbook product in `passes::wide_witness_ints` work
+//! at — see `docs/field-agnosticism.md`, Layer 6.
 
 use num_bigint::BigInt;
 use num_traits::One;
@@ -41,16 +41,20 @@ const NARROW_HOST_BITS: usize = HOST_WORD_BITS;
 ///   [`NARROW_HOST_BITS`].
 ///
 /// This is a **dispatch** threshold and **not a soundness bound**: it only tells a lowering which
-/// shape to take, and it replaces none of the per-operation predicates —
-/// [`two_limb_product_packing_fits`], [`spread_sum_fits_field`], [`combined_limbs_fit_modulus`] and
-/// `witness_integer_arith::range_fits_field_injectively` each ask for strictly more than this
-/// does, and each is still the thing that decides whether a particular lowering is sound.
+/// shape to take, and it replaces none of the per-operation predicates.
 ///
-/// There is no limb-wise **arithmetic** on the other side of it yet: a witnessed operation above
-/// this width is refused by `passes::width_validation`, which is what the wide lowering units
-/// replace. What does reach past it is everything that is not arithmetic: the multi-cell rep
-/// (`passes::wide_witness_ints`) carries a value as limbs, and the bit window and the range check
-/// are bounded by the field rather than by this.
+/// Past it, what a witnessed operation meets depends on the operation. The bitwise operations reach
+/// every width as `witness_bitwise` decomposes into half-limbs while the value has an element, and
+/// `passes::wide_witness_ints` acts on each limb past that. The unsigned sum, difference and
+/// ordering stay in one cell while the field holds their sum, and go through the carry chain in
+/// `passes::wide_witness_ints` beyond it; the unsigned product does the same with the schoolbook,
+/// past [`single_cell_product_fits`], and so do the unsigned division and remainder, whose check is
+/// that product; equality has no width at all.
+///
+/// The rest of the arithmetic (the shifts, and every signed operation) is currently refused by
+/// `passes::width_validation`, with the restrictions to be lifted by the remaining work.
+/// Past it too is everything that is not arithmetic: the multi-cell representation carries a value
+/// as limbs, and the bit window and the range check are bounded by the field rather than by this.
 pub fn narrow_int_bits(field: FieldConfig) -> usize {
     narrow_int_bits_for_modulus(&field_modulus(field))
 }
@@ -115,8 +119,11 @@ pub struct LimbBudget {
     /// value and more partial products overall, but longer runs between witnessed, range-checked
     /// carry extractions as part of the reduction.
     ///
-    /// At `1` a schoolbook `acc += a·b` does not fit whenever this is the binding constraint, so
-    /// such a field's accumulator has to reduce after every product rather than per column.
+    /// At `1`, wherever this is the binding constraint, the schoolbook product in
+    /// `passes::wide_witness_ints` does not fit at all: even straight after a reduction its
+    /// accumulator holds a limb beside the next product, and it plans against the widest injective
+    /// width rather than the modulus. `schoolbook_product_fits` refuses such a field, and a larger
+    /// budget is what narrows the limb until the product fits.
     ///
     /// This counts **products**, not place-value headroom. A lowering that scales a column by `2^h`
     /// before adding it, spreads its operands, or recombines its limbs needs a strictly stronger
@@ -161,7 +168,8 @@ fn candidate_widths() -> Vec<usize> {
 /// - that a lowering which scales a limb column by a place value still fits
 ///   ([`two_limb_product_packing_fits`]);
 /// - that the sum of two spreads still fits ([`spread_sum_fits_field`]);
-/// - that the limbs recombine into one cell ([`combined_limbs_fit_modulus`]).
+/// - that the limbs recombine into one cell, which [`combine_limbs_of_value`] asks of the width of
+///   the value they came from.
 pub fn witness_limb_bits(field: FieldConfig) -> usize {
     limb_bits_for_modulus(&field_modulus(field), LimbBudget::DEFAULT)
 }
@@ -261,6 +269,10 @@ pub fn spread_sum_fits_modulus(bits: usize, modulus: &BigInt) -> bool {
 ///
 /// The limbs are bounded by their own width, so the recombination is below `2^(limb_count ·
 /// limb_bits)`; that bound is tight, since every limb may be all ones.
+///
+/// It is the question [`narrow_int_bits`] asks of one limb. A recombination does not ask it:
+/// [`combine_limbs_of_value`] bounds the value the limbs came from instead, since a top limb
+/// narrower than its stride makes this span refuse widths that fit.
 pub fn combined_limbs_fit_modulus(modulus: &BigInt, limb_bits: usize, limb_count: usize) -> bool {
     (BigInt::one() << (limb_bits * limb_count)) <= *modulus
 }
@@ -281,6 +293,31 @@ pub fn widest_injective_int_bits_for_modulus(modulus: &BigInt) -> usize {
     usize::try_from(modulus.bits())
         .unwrap_or(usize::MAX)
         .saturating_sub(1)
+}
+
+/// The widest unsigned integer whose sum or difference `field` holds in one element.
+///
+/// A sum of two `bits`-wide values reaches `2^(bits + 1) - 2`, and a difference that borrows lands
+/// on `p - d` for some `d < 2^bits`. A range check at `bits` tells both from an honest answer only
+/// while `2^(bits + 1)` stays below the modulus, which is one bit short of the widest width the
+/// field carries injectively. At that width the value still has an element, but its sum does not,
+/// so the operation goes limb-wise through the carry chain even though the operands do not.
+pub fn widest_cell_sum_bits(field: FieldConfig) -> usize {
+    widest_injective_int_bits(field) - 1
+}
+
+/// Whether the single-cell multiplier takes a witnessed unsigned product at `bits`.
+///
+/// It forms the product in one field element, so `2^(2 * bits)` has to stay below the modulus for
+/// the range check on it to tell an honest product from a residue. Its one escape is the two-limb
+/// schoolbook at exactly a double host limb, which carries its own packing predicate.
+///
+/// Past it, an unsigned product goes through the schoolbook in `passes::wide_witness_ints`, which
+/// runs first and so is the one that reads this. So does an unsigned division or remainder, which
+/// the single-cell lowering checks by the same product, `q·d`, formed in one element.
+pub fn single_cell_product_fits(field: FieldConfig, bits: usize) -> bool {
+    2 * bits <= widest_injective_int_bits(field)
+        || (bits == 2 * HOST_LIMB_BITS && two_limb_product_packing_fits(field, bits))
 }
 
 // LIMB DECOMPOSITIONS

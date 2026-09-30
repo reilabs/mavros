@@ -1,0 +1,6 @@
+[package]
+name = "returning_recursion_base_case"
+type = "bin"
+authors = [""]
+
+[dependencies]

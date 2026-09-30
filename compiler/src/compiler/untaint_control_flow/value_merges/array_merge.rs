@@ -695,7 +695,7 @@ impl<'a> SparseArrayMerge<'a> {
                 let index = if self.index_is_safe(write.index, *len) {
                     write.index
                 } else {
-                    let (_, len_cmp, idx_cmp, _) =
+                    let (_, idx_cmp, len_cmp, _) =
                         seq_bounds_operands(b, base, write.index, &plan.typ, index_type);
                     let in_bounds = b.ult(idx_cmp, len_cmp);
                     b.emit(OpCode::Guard {
