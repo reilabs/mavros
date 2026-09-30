@@ -1,0 +1,6 @@
+[package]
+name = "unused_be_bits_overflow"
+type = "bin"
+authors = [""]
+
+[dependencies]

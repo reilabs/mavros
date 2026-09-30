@@ -1,0 +1,6 @@
+[package]
+name = "unused_vector_read_safe"
+type = "bin"
+authors = [""]
+
+[dependencies]

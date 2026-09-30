@@ -1815,12 +1815,13 @@ fn integrated_dce_keeps_a_dead_add_itself() {
     );
 }
 
-/// A dead `Mul` **is** rewritten, which is the other half of the same decision.
+/// A dead `Mul` is kept itself too, for the same reason as the `Add`.
 ///
-/// A multiply's overflow test is built from the operands alone, so replacing the instruction with
-/// its check drops the multiply and keeps the rejection.
+/// Replacing it with its overflow test would have to choose the test's domain before taint
+/// inference has decided it: the pure test is `MAX / rhs < lhs`, and a witnessed division costs far
+/// more than the witnessed multiply whose check it would be.
 #[test]
-fn integrated_dce_rewrites_a_dead_mul_into_its_check() {
+fn integrated_dce_keeps_a_dead_mul_itself() {
     let mut ssa = HLSSA::with_main("main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 3));
     let (x, unused) = (ssa.fresh_value(), ssa.fresh_value());
@@ -1842,14 +1843,14 @@ fn integrated_dce_rewrites_a_dead_mul_into_its_check() {
     assert!(
         f.get_entry()
             .get_instructions()
-            .any(|i| matches!(i, OpCode::AssertCmp { .. })),
-        "a dead multiply must leave its overflow check behind"
+            .any(|i| matches!(i, OpCode::BinaryArithOp { result, .. } if *result == unused)),
+        "a dead multiply must survive, so that its lowering can plant its overflow check"
     );
     assert!(
         !f.get_entry()
             .get_instructions()
-            .any(|i| matches!(i, OpCode::BinaryArithOp { result, .. } if *result == unused)),
-        "the dead multiply itself must not survive; only its check"
+            .any(|i| matches!(i, OpCode::AssertCmp { .. })),
+        "the check belongs to the lowering, not to this pass"
     );
 }
 

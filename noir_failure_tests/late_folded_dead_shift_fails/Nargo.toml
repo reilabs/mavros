@@ -1,0 +1,6 @@
+[package]
+name = "late_folded_dead_shift_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]

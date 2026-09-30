@@ -77,6 +77,12 @@ fn main() {
 }
 
 const DEFAULT_IGNORED_TESTS: &[&str] = &[
+    // `array_refcount` and `vector_refcount` are intentionally unsupported: Mavros does not
+    // guarantee Noir's reference-count behavior, so these implementation-specific tests are ignored.
+    "reference_counts_inliner_0",
+    "reference_counts_inliner_min",
+    "reference_counts_inliner_max",
+    "reference_counts_vectors_inliner_0",
     // `func_1` recurses without ever decrementing `ctx_limit`, so it never terminates. The witgen
     // VM has no recursion/step/memory guard (frames are heap-allocated per call in `Frame::push`),
     // so running it grows memory without bound. Depending on the compiled circuit shape it either
@@ -175,7 +181,11 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             emit("END:COMPILED:reject");
             return;
         }
-        Err(error @ (DriverError::AssertConstantFailed(_) | DriverError::Refused(_))) => {
+        Err(
+            error @ (DriverError::AssertConstantFailed(_)
+            | DriverError::Refused(_)
+            | DriverError::UnsatisfiableProgram(_)),
+        ) => {
             eprintln!("Mavros compiler rejected program: {error}");
             emit("END:COMPILED:reject");
             return;
@@ -224,8 +234,8 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
         // R1CS. That is the _expected_ outcome for an execution_failure test, so it gets its own
         // `reject` marker — distinct from a plain `fail`, which signals a real problem (e.g. an
         // unsupported construct) that should never be silently accepted.
-        Err(DriverError::UnsatisfiableProgram(msg)) => {
-            eprintln!("R1CS rejected program as unsatisfiable: {msg}");
+        Err(error @ DriverError::UnsatisfiableProgram(_)) => {
+            eprintln!("R1CS rejected program as unsatisfiable: {error}");
             emit("END:R1CS:reject");
             None
         }

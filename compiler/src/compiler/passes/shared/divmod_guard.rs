@@ -4,13 +4,19 @@
 //! Three consumers, which must not drift:
 //!
 //! - `LowerPureGuards::lower_divmod_guard` — a _guarded_ division turns the condition into "this
-//!   branch must be inactive", so an inactive bad division is not an error.
+//!   branch must be inactive", so an inactive bad division is not an error. That needs pure
+//!   operands, as it branches on them. A guarded witness field division asserts the condition
+//!   false under the guard instead (`lower_witness_field_div_guard`), and a guarded witness integer
+//!   one is left to its lowering, which rejects the same executions.
 //! - `LowerPureGuards::lower_unguarded_divmod` — an unguarded division whose quotient is used
-//!   asserts the condition is false, then performs the division unchanged.
+//!   asserts the condition is false, then performs the division unchanged. An unsigned division by
+//!   a witness is the exception, as its lowering refuses a zero divisor itself
+//!   ([`divisor_checked_by_its_lowering`]).
 //! - `DCE` — an unguarded division whose quotient is _not_ used is replaced by the assertion
 //!   alone. Mavros builds HLSSA straight from Noir's monomorphized AST and never runs Noir's SSA
 //!   pipeline, so nothing upstream has already attached a failure to the division; if the division
-//!   is simply deleted, the failure Noir promises disappears with it.
+//!   is simply deleted, the failure Noir promises disappears with it. After taint inference, the
+//!   exception above is kept whole instead, as the division is then its own check.
 //!
 //! [`divmod_provably_defined`] is the fourth member of that set and must not drift either: it is
 //! the _discharge_ of the same condition, so a consumer that can prove it need emit nothing at all.
@@ -31,7 +37,9 @@ use crate::compiler::{
     analysis::value_range_analysis::ValueRange,
     ssa::{
         ValueId,
-        hlssa::{CmpKind, OpCode, Type, TypeExpr, builder::HLEmitter},
+        hlssa::{
+            ArithGroup, BinaryArithOpKind, CmpKind, OpCode, Type, TypeExpr, builder::HLEmitter,
+        },
     },
 };
 
@@ -42,6 +50,19 @@ use crate::compiler::{
 /// else is not a division operand type at all.
 pub fn divmod_can_fail(ty: &Type) -> bool {
     matches!(ty.strip_witness().expr, TypeExpr::Int(_) | TypeExpr::Field)
+}
+
+/// Whether the witness lowering a `kind` division by a `rhs_type` divisor is bound for rejects a
+/// zero divisor itself, so that no separate check is needed.
+///
+/// The check this answers for is only as good as the lowering being reached, so a dead division
+/// this answers `true` for has to be **kept** until then rather than deleted, which is what `DCE`'s
+/// `owes_witness_check` ensures.
+pub fn divisor_checked_by_its_lowering(kind: BinaryArithOpKind, rhs_type: &Type) -> bool {
+    matches!(kind.group(), ArithGroup::Div | ArithGroup::Rem)
+        && !kind.is_signed()
+        && rhs_type.is_witness_of()
+        && matches!(rhs_type.strip_witness().expr, TypeExpr::Int(_))
 }
 
 /// Whether the range domain **proves** this division is defined, so the check
@@ -170,6 +191,22 @@ pub fn emit_divmod_is_defined_assert(
         lhs: failure,
         rhs: zero_u1,
     });
+}
+
+/// The divisor a division's witness-generation hint divides by: `divisor`, or one where it is zero.
+///
+/// A zero divisor has no quotient (and the constraints the hint feeds refuse it) but the hint runs
+/// first. An unsigned division by a witness has no assertion ahead of it to trap there instead (see
+/// [`divisor_checked_by_its_lowering`]), and a guarded one reaches it whenever the guard holds, so
+/// without this the hint would be a compiled `udiv` by zero, which LLVM leaves undefined.
+///
+/// Dividing by one changes nothing that an honest run can compute. Both the single-cell division
+/// and `WideWitnessInts`' limb-wise one hint through it.
+pub fn nonzero_hint_divisor(b: &mut impl HLEmitter, divisor: ValueId, bits: usize) -> ValueId {
+    let zero = b.int_const(IntBits::zero(bits));
+    let one = b.int_const(IntBits::one(bits));
+    let is_zero = b.eq(divisor, zero);
+    b.select(is_zero, one, divisor)
 }
 
 #[cfg(test)]

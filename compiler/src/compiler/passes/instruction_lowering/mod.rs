@@ -1,6 +1,7 @@
 mod bit_range;
 mod degree_spilling;
 mod guards;
+mod pure_decompositions;
 mod pure_guards;
 mod side_effect_free_guards;
 mod slice_insert_remove;
@@ -168,6 +169,16 @@ pub(super) trait InstructionLoweringRule {
 }
 
 impl InstructionLowering {
+    /// Validate source bit decompositions before witness lowering creates raw hints.
+    /// Byte decompositions are checked by the radix lowerer after radix validation.
+    pub fn pure_bit_decompositions() -> Self {
+        Self::with_lowerers(
+            "instruction_lowering_pure_bit_decompositions",
+            vec![Box::new(pure_decompositions::LowerPureBitDecompositions)],
+            false,
+        )
+    }
+
     /// The narrowing witness casts the program itself states, rewritten into bit windows.
     ///
     /// A phase of its own, between the multi-cell representation and the lowerings below it: see
@@ -393,5 +404,142 @@ impl Pass for InstructionLowering {
 
     fn preserves(&self) -> Vec<AnalysisId> {
         vec![]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::{
+        passes::shared::limbs::widest_cell_sum_bits,
+        ssa::{
+            Terminator,
+            hlssa::{BinaryArithOpKind, CmpKind, LookupTarget},
+        },
+    };
+    use mavros_artifacts::FieldConfig;
+
+    /// The three shapes whose single-cell lowering holds only while their sum fits one element.
+    #[derive(Clone, Copy)]
+    enum SingleCell {
+        Sum,
+        Ordering,
+        Assertion,
+    }
+
+    /// `main(lhs, rhs: WitnessOf<int(bits)>) { shape }`, run through solely the integer lowerings
+    /// without the carry chain in front of them. Answers the lowered program and the instruction
+    /// that was lowered.
+    fn lower_alone(shape: SingleCell, bits: usize) -> (HLSSA, OpCode) {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let (lhs, rhs, result) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        let function = ssa.get_unique_entrypoint_mut();
+        let entry = function.get_entry_mut();
+        for value in [lhs, rhs] {
+            entry.push_parameter(value, Type::witness_of(Type::int(bits)));
+        }
+        let (op, returns) = match shape {
+            SingleCell::Sum => (
+                OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::UAdd,
+                    result,
+                    lhs,
+                    rhs,
+                },
+                Some(Type::witness_of(Type::int(bits))),
+            ),
+            SingleCell::Ordering => (
+                OpCode::Cmp {
+                    kind: CmpKind::ULt,
+                    result,
+                    lhs,
+                    rhs,
+                },
+                Some(Type::witness_of(Type::int(1))),
+            ),
+            SingleCell::Assertion => (
+                OpCode::AssertCmp {
+                    kind: CmpKind::ULt,
+                    lhs,
+                    rhs,
+                },
+                None,
+            ),
+        };
+        entry.push_test_instruction(op.clone());
+        let returned = match returns {
+            Some(returned) => {
+                function.add_return_type(returned);
+                vec![result]
+            }
+            None => vec![],
+        };
+        function
+            .get_entry_mut()
+            .set_terminator(Terminator::Return(returned));
+
+        InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
+        (ssa, op)
+    }
+
+    fn past_the_cell() -> usize {
+        widest_cell_sum_bits(FieldConfig::bn254()) + 1
+    }
+
+    /// At the widest width whose sum the field holds, each of the three lowers in one cell: its
+    /// operation is gone, and a range check at the full width stands in its place.
+    #[test]
+    fn the_single_cell_lowerings_hold_the_widest_sum_the_field_carries() {
+        let bits = widest_cell_sum_bits(FieldConfig::bn254());
+        for (name, shape) in [
+            ("sum", SingleCell::Sum),
+            ("ordering", SingleCell::Ordering),
+            ("assertion", SingleCell::Assertion),
+        ] {
+            let (ssa, lowered) = lower_alone(shape, bits);
+            let ops: Vec<&OpCode> = ssa
+                .get_unique_entrypoint()
+                .get_entry()
+                .get_instructions()
+                .collect();
+            let lowered = format!("{lowered:?}");
+            assert!(
+                !ops.iter().any(|op| format!("{op:?}") == lowered),
+                "the int{bits} {name} survived its lowering: {ops:?}"
+            );
+            // The same pass lowers a witnessed range check into its lookup, so it is found in
+            // either form.
+            assert!(
+                ops.iter().any(|op| match op {
+                    OpCode::Rangecheck { max_bits, .. } => *max_bits == bits,
+                    OpCode::Lookup {
+                        target: LookupTarget::Rangecheck(max_bits),
+                        ..
+                    } => *max_bits as usize == bits,
+                    _ => false,
+                }),
+                "the int{bits} {name} has no range check at its width: {ops:?}"
+            );
+        }
+    }
+
+    /// One bit wider is the carry chain's, and each lowering refuses it rather than emitting a
+    /// range check that a residue passes.
+    #[test]
+    #[should_panic(expected = "sum reached the single-cell lowering")]
+    fn a_sum_past_the_cell_is_refused_by_its_single_cell_lowering() {
+        lower_alone(SingleCell::Sum, past_the_cell());
+    }
+
+    #[test]
+    #[should_panic(expected = "ordering reached the single-cell lowering")]
+    fn an_ordering_past_the_cell_is_refused_by_its_single_cell_lowering() {
+        lower_alone(SingleCell::Ordering, past_the_cell());
+    }
+
+    #[test]
+    #[should_panic(expected = "ordering assertion reached the single-cell lowering")]
+    fn an_asserted_ordering_past_the_cell_is_refused_by_its_single_cell_lowering() {
+        lower_alone(SingleCell::Assertion, past_the_cell());
     }
 }

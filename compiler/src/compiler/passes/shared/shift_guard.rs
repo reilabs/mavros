@@ -1,13 +1,21 @@
 //! The failure condition of a shift and the decision on what 'in range' means.
 //!
-//! A shift with a **witness** operand is not handled here. `LowerWitnessBitwiseOps::lower_shift`
-//! must perform the same rejection but cannot build it out of a pure comparison. It emits its own
+//! A shift with a **witness** operand is not handled here. Its lowering performs the same rejection
+//! but cannot build it out of a pure comparison.
+//!
+//! Past the single cell that lowering is `WideWitnessInts`' limb-wise shift. A witnessed amount is
+//! bounded by its own decomposition into whole limbs and a remainder, or by an explicit check where
+//! that decomposition reaches past the width. A pure one is compared, as here, under the shift's
+//! guard where it has one, and a known amount past the width is an assertion that cannot hold.
+//!
+//! Within the single cell `LowerWitnessBitwiseOps::lower_shift` emits its own
 //! `emit_shift_amount_check`, hoisted above its two lowerings, except on the route that already
 //! carries the rejection.
 //!
-//! - A **witness amount the lowering keeps as one** gets the bound for free from the powers-of-two
-//!   lookup that reads its factor: the table's keys are exactly the legal amounts, so one out of
-//!   range one has no row. No check is emitted at all.
+//! - A **witness amount the lowering keeps as one** at a power-of-two width gets the bound for free
+//!   from the powers-of-two lookup that reads its factor: the table's keys are exactly the legal
+//!   amounts, so an out-of-range one has no row. No check is emitted at all. At any other width the
+//!   table has more rows than amounts, and the explicit check is emitted as well.
 //! - A **pure amount** pays the explicit check, down either lowering. An unsigned left-hand side
 //!   takes `lower_constant_amount_shift` and a signed one takes `lower_general_shift` (the former
 //!   is unsigned-only by construction), and the check is hoisted above that split precisely because
@@ -21,9 +29,10 @@
 //! since only the constant-amount lowering can use the literal, and so it takes the table and no
 //! check. In other words: it belongs to the first bullet, not the third.
 //!
-//! Those are separate implementations of the same contract, so we rely on a pair of tests to ensure
-//! they work the same: `noir_failure_tests/pure_shift_amount_oob_fails` and
-//! `witness_shift_amount_oob_fails`.
+//! Both witness lowerings compare a pure amount through [`emit_pure_shift_amount_check`], which
+//! reads the raw pattern where the guard IR reads the shift's own signedness. The witness amounts
+//! are checked by constraints instead, so the guard IR and the witness lowerings are separate
+//! implementations of the same contract, and we rely on tests to ensure they work the same.
 
 use mavros_int_semantics::IntBits;
 use num_traits::ToPrimitive;
@@ -43,13 +52,9 @@ use crate::compiler::{
 /// This is the shift's counterpart of [`super::divmod_guard::divmod_can_fail`], and it returns the
 /// width rather than a `bool`: the amount is checked against the shifted value's width.
 ///
-/// Any width is admitted as all evaluators reduce by `bits` now (`vm::shift_amount`,
-/// `llssa_to_llvm::reduce_shift_count`), so the agreement does not depend on the width's shape.
-///
-/// That does **not** mean a shift can be built at any width yet. The guard IR still needs one:
-/// `witness_bitwise::lower_shift` asserts a power of two because its amount check indexes bit
-/// `log2(bits)` and its `2^n` factor table is keyed by the same number. That assert is the live
-/// one; this is only about what the backends do with an amount that reaches them.
+/// Any width is admitted as all evaluators reduce by `bits` (`vm::shift_amount`,
+/// `llssa_to_llvm::reduce_shift_count`), so the agreement does not depend on the width's shape, and
+/// every witness lowering's amount check is a real `amount < bits`.
 pub fn shift_operand_bits(lhs_type: &Type) -> Option<usize> {
     match lhs_type.strip_witness().expr {
         TypeExpr::Int(bits) => Some(bits),
@@ -183,6 +188,47 @@ fn emit_valid_shift_cond(
         }
         None => tests.below_width,
     }
+}
+
+/// Whether every value a `rhs_bits`-wide amount can hold, read unsigned, is already below `bits`,
+/// so that a witness lowering owes it no check.
+///
+/// A signed shift has to ask more of such an amount, as it has a negative reading too.
+pub fn amount_type_stays_below(rhs_bits: usize, bits: usize) -> bool {
+    rhs_bits < usize::BITS as usize && (1usize << rhs_bits) <= bits
+}
+
+/// Assert, under `guard` where there is one, that a **pure** amount's raw pattern is below `bits`.
+///
+/// This is the check a pure amount pays where a witness lowering takes the shift rather than
+/// `LowerPureGuards`: `LowerWitnessBitwiseOps` within the single cell and `WideWitnessInts` past
+/// it. It reads the pattern unsigned at the amount's own width, which rejects a negative amount too
+/// wherever the smallest negative pattern, `2^(rhs_bits - 1)`, is at least `bits`.
+pub fn emit_pure_shift_amount_check(
+    emitter: &mut impl HLEmitter,
+    guard: Option<ValueId>,
+    rhs: ValueId,
+    rhs_bits: usize,
+    bits: usize,
+) {
+    if amount_type_stays_below(rhs_bits, bits) {
+        return;
+    }
+    let bound = emitter.int_const(IntBits::from_u128(rhs_bits, bits as u128));
+    let below = emitter.cmp(rhs, bound, CmpKind::ULt);
+    let one = emitter.int_const(IntBits::one(1));
+    let check = OpCode::AssertCmp {
+        kind: CmpKind::Eq,
+        lhs: below,
+        rhs: one,
+    };
+    emitter.emit(match guard {
+        Some(condition) => OpCode::Guard {
+            condition,
+            inner: Box::new(check),
+        },
+        None => check,
+    });
 }
 
 /// Emit `assert(valid(rhs))`: the unguarded form of the check.

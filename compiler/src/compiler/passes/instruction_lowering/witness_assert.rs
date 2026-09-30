@@ -1,8 +1,11 @@
-use crate::compiler::ssa::{
-    ValueId,
-    hlssa::{
-        CmpKind, OpCode, TypeExpr,
-        builder::{HLBlockEmitter, HLEmitter},
+use crate::compiler::{
+    passes::shared::limbs::widest_cell_sum_bits,
+    ssa::{
+        ValueId,
+        hlssa::{
+            CmpKind, OpCode, TypeExpr,
+            builder::{HLBlockEmitter, HLEmitter},
+        },
     },
 };
 
@@ -205,6 +208,11 @@ impl LowerWitnessAssertOps {
         self.lower_assert_field(b, context, guard, cmp_field);
     }
 
+    /// `assert(lhs < rhs)` as `rhs - lhs - 1` range-checked at `bits`.
+    ///
+    /// Sound while `2^(bits + 1) < p`, which is [`widest_cell_sum_bits`]: where `lhs >= rhs` the
+    /// difference is then an element no range check at `bits` admits. A wider assertion is lowered
+    /// through the carry chain before this pass runs.
     fn lower_unsigned_assert_lt(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -215,6 +223,10 @@ impl LowerWitnessAssertOps {
         bits: usize,
     ) {
         assert!(bits > 0, "rangecheck width must be at least 1 bit");
+        assert!(
+            bits <= widest_cell_sum_bits(b.field()),
+            "ICE: an int{bits} ordering assertion reached the single-cell lowering, whose field cannot hold its difference"
+        );
         let lhs_type = context.types().get_value_type(lhs);
         let rhs_type = context.types().get_value_type(rhs);
         let lhs_field = b.ensure_field(lhs, &lhs_type.strip_witness());

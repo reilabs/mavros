@@ -1,5 +1,6 @@
 //! The single definition of "this sequence op is out of bounds", shared by the slice lowerings,
-//! `LowerPureGuards`, `side_effect_free_guards`, and DCE's dead-op rewrite so they cannot drift.
+//! `LowerZstSlices`, `LowerPureGuards`, `side_effect_free_guards`, and DCE's dead-op rewrite so they
+//! cannot drift.
 //!
 //! Two shapes are needed because the consumers want different things from the same comparison: the
 //! lowerings and DCE want an `AssertCmp` to emit, while `LowerPureGuards` wants the *condition* as
@@ -8,7 +9,7 @@
 
 use crate::compiler::ssa::{
     ValueId,
-    hlssa::{CastTarget, CmpKind, OpCode, Type, TypeExpr, builder::HLEmitter},
+    hlssa::{CastTarget, CmpKind, HLSSA, OpCode, Type, TypeExpr, builder::HLEmitter},
 };
 use mavros_int_semantics::IntBits;
 
@@ -23,20 +24,11 @@ pub enum SeqBoundsCheck {
     /// Requires `index < len`.
     Remove { slice: ValueId, index: ValueId },
 
-    /// An `ArraySet`: requires `index < len`.
+    /// An `ArrayGet` or `ArraySet`: requires `index < len`.
     ///
-    /// Only *arrays* are checked through this variant. A witness-length slice access already
-    /// carries `index < log_len` from `PurifyWitnessSlices`, and a pure-length one is constrained
-    /// by its own lowering, so re-deriving a bound from the physical container here would be both
-    /// redundant and — for a purified slice, whose `slice_len` is the capacity rather than the
-    /// logical length — weaker than the check already present. Noir draws the same line: see
-    /// `should_insert_oob_check` in `noirc_evaluator/src/ssa/opt/die/array_oob_checks.rs`, which
-    /// notes that "vectors are expected to have explicit checks laid down in the initial SSA".
-    ///
-    /// `ArrayGet` is deliberately **not** matched, which is the one place this diverges from
-    /// Noir's `should_insert_oob_check`. A live witness-indexed read already gets its bound for
-    /// free from the lookup argument `gen_witness_array_get` emits, so the only thing at stake is
-    /// a read whose result nothing uses.
+    /// DCE emits this only before witness-slice purification, while a vector's `slice_len`
+    /// is still its logical length. A live witness-indexed read gets its bounds constraint
+    /// from lowering; an unused read must retain a check when its lookup is removed.
     SeqAccess { seq: ValueId, index: ValueId },
 }
 
@@ -53,10 +45,12 @@ pub fn failable_bounds(instruction: &OpCode) -> Option<SeqBoundsCheck> {
             slice: *slice,
             index: *index,
         }),
-        OpCode::ArraySet { array, index, .. } => Some(SeqBoundsCheck::SeqAccess {
-            seq: *array,
-            index: *index,
-        }),
+        OpCode::ArrayGet { array, index, .. } | OpCode::ArraySet { array, index, .. } => {
+            Some(SeqBoundsCheck::SeqAccess {
+                seq: *array,
+                index: *index,
+            })
+        }
         _ => None,
     }
 }
@@ -74,14 +68,8 @@ impl SeqBoundsCheck {
 
 /// The length of `seq` and the index, brought to a common comparison width.
 ///
-/// Returns `(len, len_cmp, index_cmp, cmp_bits)`; `len` is the un-widened length, which the insert
+/// Returns `(len, index_cmp, len_cmp, cmp_bits)`; `len` is the un-widened length, which the insert
 /// lowering needs for the slice it builds.
-///
-/// Compare at the wider of the two widths. Narrowing the index to u32 instead would alias an
-/// out-of-range wide index onto its low limb — `1 << 32` would read as in-bounds — so the narrow
-/// operand is always the one brought up. A non-integer index (a `Field` subscript) has no width to
-/// widen to; it keeps the historical narrowing cast rather than change behaviour for a case none of
-/// the consumers model.
 pub fn seq_bounds_operands(
     emitter: &mut impl HLEmitter,
     seq: ValueId,
@@ -89,20 +77,33 @@ pub fn seq_bounds_operands(
     seq_ty: &Type,
     index_ty: &Type,
 ) -> (ValueId, ValueId, ValueId, usize) {
-    let len = match &seq_ty.strip_witness().expr {
+    let len = seq_len(emitter, seq, seq_ty);
+    let (idx_cmp, len_cmp, cmp_bits) = index_bounds_operands(emitter, index, index_ty, len);
+    (len, idx_cmp, len_cmp, cmp_bits)
+}
+
+/// An array's length is in its type; a slice carries it as a value.
+pub fn seq_len(emitter: &mut impl HLEmitter, seq: ValueId, seq_ty: &Type) -> ValueId {
+    match &seq_ty.strip_witness().expr {
         TypeExpr::Array(_, n) => emitter.int_const(IntBits::from_u128(32, *n as u128)),
         TypeExpr::Slice(_) => emitter.slice_len(seq),
         other => ice!("seq bounds check on non-sequence type: {other:?}"),
-    };
+    }
+}
+
+/// For an `Int` index, compare at the wider of the two widths. A Field index is narrowed down to `Int(32)` since
+/// Noir unifies every subscript with `u32` during elaboration.
+pub fn index_bounds_operands(
+    emitter: &mut impl HLEmitter,
+    index: ValueId,
+    index_ty: &Type,
+    len: ValueId,
+) -> (ValueId, ValueId, usize) {
     match index_ty.strip_witness().expr {
-        TypeExpr::Int(idx_bits) => {
-            let (idx_cmp, len_cmp, cmp_bits) =
-                widen_comparison_operands(emitter, index, idx_bits, len, 32);
-            (len, len_cmp, idx_cmp, cmp_bits)
-        }
+        TypeExpr::Int(idx_bits) => widen_comparison_operands(emitter, index, idx_bits, len, 32),
         _ => {
             let idx_cmp = emitter.cast_to(CastTarget::Int(32), index);
-            (len, len, idx_cmp, 32)
+            (idx_cmp, len, 32)
         }
     }
 }
@@ -126,13 +127,17 @@ pub fn widen_comparison_operands(
 /// Returns `(assert, len)`; the caller emits the assert — bare, or under the op's guard.
 pub fn build_pop_bounds_assert(emitter: &mut impl HLEmitter, slice: ValueId) -> (OpCode, ValueId) {
     let len = emitter.slice_len(slice);
+    (build_pop_bounds_assert_on_len(emitter, len), len)
+}
+
+/// Returns `assert`.
+pub fn build_pop_bounds_assert_on_len(emitter: &mut impl HLEmitter, len: ValueId) -> OpCode {
     let zero = emitter.int_const(IntBits::zero(32));
-    let assert = OpCode::AssertCmp {
+    OpCode::AssertCmp {
         kind: CmpKind::ULt,
         lhs: zero,
         rhs: len,
-    };
-    (assert, len)
+    }
 }
 
 /// Returns `(assert, len, new_len, idx_cmp, cmp_bits)`; the insert lowering's rebuild scan reuses
@@ -143,17 +148,11 @@ pub fn build_insert_bounds_assert(
     index: ValueId,
     index_ty: &Type,
 ) -> (OpCode, ValueId, ValueId, ValueId, usize) {
-    let idx_bits = index_bits(index_ty, "slice insert");
     let len = emitter.slice_len(slice);
     let one = emitter.int_const(IntBits::one(32));
     let new_len = emitter.uadd(len, one);
-    let (idx_cmp, new_len_cmp, cmp_bits) =
-        widen_comparison_operands(emitter, index, idx_bits, new_len, 32);
-    let assert = OpCode::AssertCmp {
-        kind: CmpKind::ULt,
-        lhs: idx_cmp,
-        rhs: new_len_cmp,
-    };
+    let (assert, idx_cmp, cmp_bits) =
+        build_lt_bounds_assert_on_len(emitter, new_len, index, index_ty);
     (assert, len, new_len, idx_cmp, cmp_bits)
 }
 
@@ -164,30 +163,48 @@ pub fn build_remove_bounds_assert(
     index: ValueId,
     index_ty: &Type,
 ) -> (OpCode, ValueId, ValueId, usize) {
-    let idx_bits = index_bits(index_ty, "slice remove");
     let len = emitter.slice_len(slice);
-    let (idx_cmp, len_cmp, cmp_bits) = widen_comparison_operands(emitter, index, idx_bits, len, 32);
+    let (assert, idx_cmp, cmp_bits) = build_lt_bounds_assert_on_len(emitter, len, index, index_ty);
+    (assert, len, idx_cmp, cmp_bits)
+}
+
+/// Returns `(assert, idx_cmp, cmp_bits)`.
+pub fn build_lt_bounds_assert_on_len(
+    emitter: &mut impl HLEmitter,
+    len: ValueId,
+    index: ValueId,
+    index_ty: &Type,
+) -> (OpCode, ValueId, usize) {
+    let (idx_cmp, len_cmp, cmp_bits) = index_bounds_operands(emitter, index, index_ty, len);
     let assert = OpCode::AssertCmp {
         kind: CmpKind::ULt,
         lhs: idx_cmp,
         rhs: len_cmp,
     };
-    (assert, len, idx_cmp, cmp_bits)
+    (assert, idx_cmp, cmp_bits)
 }
 
-/// `index < len(seq)` for an array element access, or `None` when `seq` is not a fixed-length array
-/// — see [`SeqBoundsCheck::SeqAccess`] for why slices are excluded here.
+/// `index < len(seq)` for a user array/vector access, before witness-slice purification.
 pub fn build_seq_access_bounds_assert(
+    ssa: &HLSSA,
     emitter: &mut impl HLEmitter,
     seq: ValueId,
     index: ValueId,
     seq_ty: &Type,
     index_ty: &Type,
 ) -> Option<OpCode> {
-    if !matches!(seq_ty.strip_witness().expr, TypeExpr::Array(_, _)) {
+    if !matches!(
+        seq_ty.strip_witness().expr,
+        TypeExpr::Array(_, _) | TypeExpr::Slice(_)
+    ) {
         return None;
     }
-    let (_, len_cmp, idx_cmp, _) = seq_bounds_operands(emitter, seq, index, seq_ty, index_ty);
+    assert!(
+        !matches!(seq_ty.strip_witness().expr, TypeExpr::Slice(_))
+            || !ssa.witness_slices_purified(),
+        "cannot derive logical slice bounds after witness-slice purification"
+    );
+    let (_, idx_cmp, len_cmp, _) = seq_bounds_operands(emitter, seq, index, seq_ty, index_ty);
     Some(OpCode::AssertCmp {
         kind: CmpKind::ULt,
         lhs: idx_cmp,
@@ -197,6 +214,7 @@ pub fn build_seq_access_bounds_assert(
 
 /// The check alone — DCE's form, when the op itself is dead. Returns whether one was emitted.
 pub fn emit_bounds_assert(
+    ssa: &HLSSA,
     emitter: &mut impl HLEmitter,
     check: &SeqBoundsCheck,
     seq_ty: Option<&Type>,
@@ -213,7 +231,7 @@ pub fn emit_bounds_assert(
         }
         SeqBoundsCheck::SeqAccess { seq, index } => {
             let seq_ty = seq_ty.expect("a sequence access bounds check requires the sequence type");
-            match build_seq_access_bounds_assert(emitter, *seq, *index, seq_ty, index_ty()) {
+            match build_seq_access_bounds_assert(ssa, emitter, *seq, *index, seq_ty, index_ty()) {
                 Some(assert) => assert,
                 None => return false,
             }
@@ -221,11 +239,4 @@ pub fn emit_bounds_assert(
     };
     emitter.emit(assert);
     true
-}
-
-fn index_bits(ty: &Type, context: &str) -> usize {
-    match ty.strip_witness().expr {
-        TypeExpr::Int(n) => n,
-        _ => ice!("{context}: index must be an integer, got {ty}"),
-    }
 }

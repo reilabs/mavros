@@ -196,6 +196,31 @@ impl<'a> ExpressionConverter<'a> {
         Type::function_returning(self.type_converter.call_results(ret))
     }
 
+    /// Note: for `Definition::Function` idents, the Noir type may be
+    /// `Tuple([Function, Function])` (constrained + unconstrained pair), but `convert_ident`
+    /// produces a single scalar `FnPtr` value, so the pair is unwrapped rather than converted.
+    ///
+    /// Also, if the tuple element is itself a tuple, using `return_type` can be faulty, because
+    /// `return_type` recurses through tuple elements. That recursion can then read through the
+    /// tuple wrapping the function pair.
+    fn tuple_element_type(&self, expr: &Expression) -> Type {
+        match expr {
+            Expression::Ident(ident) if matches!(&ident.definition, Definition::Function(_)) => {
+                self.function_ident_type(ident)
+            }
+            Expression::Tuple(elements) => Type::tuple_of(
+                elements
+                    .iter()
+                    .map(|e| self.tuple_element_type(e))
+                    .collect(),
+            ),
+            other => {
+                let return_type = other.return_type().expect("Tuple element must have a type");
+                self.type_converter.convert_type(&return_type)
+            }
+        }
+    }
+
     /// Turn an optional Noir location into a definite `SourceLocation`.
     fn resolve_location(&self, location: Option<NoirLocation>) -> SourceLocation {
         location
@@ -378,6 +403,7 @@ impl<'a> ExpressionConverter<'a> {
             Expression::Break => {
                 let ctx = self.loop_stack.last().expect("break outside of loop");
                 let exit_block = ctx.exit_block;
+                assert!(!b.block(self.current_block).is_terminated());
                 b.block(self.current_block)
                     .terminate_jmp(exit_block, vec![]);
                 // Create a dead block for any subsequent code
@@ -404,10 +430,12 @@ impl<'a> ExpressionConverter<'a> {
                             one,
                         )
                     });
+                    assert!(!b.block(self.current_block).is_terminated());
                     b.block(self.current_block)
                         .terminate_jmp(loop_header, vec![next_index]);
                 } else {
                     // While/loop: just jump back to header with no args
+                    assert!(!b.block(self.current_block).is_terminated());
                     b.block(self.current_block)
                         .terminate_jmp(loop_header, vec![]);
                 }
@@ -576,16 +604,40 @@ impl<'a> ExpressionConverter<'a> {
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
         let new_value = self.convert_expression(&assign.expression, b).unwrap();
+        self.write_lvalue(&assign.lvalue, new_value, b);
+        None
+    }
+
+    /// Replace the whole destination without reading its old element. Partial updates such as
+    /// `a[i].field = value` still use `with_lvalue_ref` to preserve the other fields.
+    fn write_lvalue(&mut self, lvalue: &LValue, new_value: ValueId, b: &mut HLFunctionBuilder<'_>) {
+        match lvalue {
+            LValue::Clone(inner) => return self.write_lvalue(inner, new_value, b),
+            LValue::Index {
+                array,
+                index,
+                location,
+                ..
+            } => {
+                let array_value = self.read_lvalue(array, b);
+                let idx = self.convert_expression(index, b).unwrap();
+                let updated = self.emit_located(b, Some(*location), |e| {
+                    e.array_set(array_value, idx, new_value)
+                });
+                self.write_lvalue(array, updated, b);
+                return;
+            }
+            _ => {}
+        }
         self.with_lvalue_ref(
-            &assign.lvalue,
+            lvalue,
             b,
             &|this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
-                this.emit_located(b, Self::lvalue_location(&assign.lvalue), |e| {
+                this.emit_located(b, Self::lvalue_location(lvalue), |e| {
                     e.store(ptr, new_value)
                 });
             },
         );
-        None
     }
 
     fn with_lvalue_ref(
@@ -634,13 +686,7 @@ impl<'a> ExpressionConverter<'a> {
                 let updated = self.emit_located(b, Some(*location), |e| {
                     e.array_set(array_value, idx, element)
                 });
-                self.with_lvalue_ref(
-                    array,
-                    b,
-                    &|this: &mut Self, ptr, b: &mut HLFunctionBuilder<'_>| {
-                        this.emit_located(b, Some(*location), |e| e.store(ptr, updated));
-                    },
-                );
+                self.write_lvalue(array, updated, b);
             }
             LValue::Dereference { .. } => ice_unreachable!("dereference lvalues have refs"),
             LValue::Clone(inner) => self.with_lvalue_ref(inner, b, f),
@@ -747,11 +793,13 @@ impl<'a> ExpressionConverter<'a> {
             let mut header = b.block(loop_header).with_source_location(header_location);
             let loop_index = header.add_parameter(index_type);
             let cond = header.cmp(loop_index, end, CmpKind::lt(index_signed));
+            assert!(!header.is_terminated());
             header.terminate_jmp_if(cond, loop_body, exit_block);
             loop_index
         };
 
         // Jump from current block to loop header with start value
+        assert!(!b.block(self.current_block).is_terminated());
         b.block(self.current_block)
             .terminate_jmp(loop_header, vec![start]);
 
@@ -816,13 +864,17 @@ impl<'a> ExpressionConverter<'a> {
         let exit_block = b.add_block(|_| {});
 
         // Jump from current block to loop header
+        assert!(!b.block(self.current_block).is_terminated());
         b.block(self.current_block)
             .terminate_jmp(loop_header, vec![]);
 
-        // In loop header: evaluate condition, branch
+        // Evaluate the condition outside this loop's context: break/continue target the
+        // enclosing loop. Evaluation can change current_block, so branch from its exit
+        // rather than overwriting the header's terminator.
         self.current_block = loop_header;
         let cond = self.convert_expression(&while_expr.condition, b).unwrap();
-        b.block(loop_header)
+        assert!(!b.block(self.current_block).is_terminated());
+        b.block(self.current_block)
             .terminate_jmp_if(cond, loop_body, exit_block);
 
         // In loop body: push context, convert body, pop context, jump back to header
@@ -863,6 +915,7 @@ impl<'a> ExpressionConverter<'a> {
         let exit_block = b.add_block(|_| {});
 
         // Jump from current block to loop block
+        assert!(!b.block(self.current_block).is_terminated());
         b.block(self.current_block)
             .terminate_jmp(loop_block, vec![]);
 
@@ -962,6 +1015,7 @@ impl<'a> ExpressionConverter<'a> {
         let else_block = b.add_block(|_| {});
         let merge_block = b.add_block(|_| {});
 
+        assert!(!b.block(self.current_block).is_terminated());
         b.block(self.current_block)
             .terminate_jmp_if(condition, then_block, else_block);
 
@@ -977,6 +1031,8 @@ impl<'a> ExpressionConverter<'a> {
         let else_value = otherwise(self, b);
         let else_exit = self.current_block;
 
+        assert!(!b.block(then_exit).is_terminated());
+        assert!(!b.block(else_exit).is_terminated());
         if is_unit {
             b.block(then_exit).terminate_jmp(merge_block, vec![]);
             b.block(else_exit).terminate_jmp(merge_block, vec![]);
@@ -1713,22 +1769,7 @@ impl<'a> ExpressionConverter<'a> {
             .collect();
 
         // Get types for each element
-        // Note: For Definition::Function idents, the Noir type may be
-        // Tuple([Function, Function]) (constrained + unconstrained pair),
-        // but convert_ident produces a single scalar FnPtr value, so the pair
-        // is unwrapped rather than converted.
-        let types: Vec<_> = exprs
-            .iter()
-            .map(|e| {
-                if let Expression::Ident(ident) = e
-                    && matches!(&ident.definition, Definition::Function(_))
-                {
-                    return self.function_ident_type(ident);
-                }
-                let return_type = e.return_type().expect("Tuple element must have a type");
-                self.type_converter.convert_type(&return_type)
-            })
-            .collect();
+        let types: Vec<_> = exprs.iter().map(|e| self.tuple_element_type(e)).collect();
 
         // Always construct a materialized tuple
         let tuple = self.emit_located(b, exprs.first().and_then(Self::expression_location), |e| {
