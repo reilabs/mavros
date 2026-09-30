@@ -95,7 +95,11 @@ pub const EVALUATORS: &[Evaluator] = &[
             },
             Conformance {
                 path: "compiler/src/compiler/codegen/hlssa_to_r1cs.rs",
-                test: "an_answer_above_the_modulus_is_an_ice_though_its_operands_fit",
+                test: "an_answer_above_the_modulus_is_carried_as_its_pattern",
+            },
+            Conformance {
+                path: "compiler/src/compiler/codegen/hlssa_to_r1cs.rs",
+                test: "an_integer_cast_reads_a_constant_at_its_target_width",
             },
         ],
     },

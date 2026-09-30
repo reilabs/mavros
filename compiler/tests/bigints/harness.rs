@@ -414,6 +414,26 @@ impl Compiled {
             .then_some(self.debug_output_dir.as_path())
     }
 
+    /// The witness column the return guard is written to, where the entry blob has one.
+    ///
+    /// The witness opens with the constant one and then the input blob in order, so this is one
+    /// past the guard's place in the blob.
+    #[must_use]
+    pub fn guard_column(&self) -> Option<usize> {
+        self.guard_slot.map(|slot| slot + 1)
+    }
+
+    /// The witness column input `index` of a test's input block is written to: its place in the
+    /// blob [`Self::run`] builds, past the constant one and the return guard where that sits
+    /// before it.
+    #[must_use]
+    pub fn input_column(&self, index: usize) -> usize {
+        match self.guard_slot {
+            Some(slot) if slot <= index => index + 2,
+            _ => index + 1,
+        }
+    }
+
     /// `inputs` with the entry blob's return guard spliced in, set to check the declared return.
     ///
     /// The guard is the wrapper's own slot rather than a value of the program, so a test states

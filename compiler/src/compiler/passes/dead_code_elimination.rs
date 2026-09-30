@@ -13,17 +13,16 @@ use crate::{
     compiler::{
         analysis::{
             flow_analysis::{CFG, FlowAnalysis},
-            types::{TypeInfo, Types},
+            types::{FunctionTypeInfo, TypeInfo, Types},
             value_range_analysis::{ValueRangeAnalysis, ValueRanges},
         },
         pass_manager::{AnalysisId, AnalysisStore, Pass},
         passes::shared::{
             divmod_guard::{
-                divmod_can_fail, divmod_provably_defined, emit_divmod_is_defined_assert,
+                divisor_checked_by_its_lowering, divmod_can_fail, divmod_provably_defined,
+                emit_divmod_is_defined_assert,
             },
-            overflow_guard::{
-                emit_no_overflow_assert, overflow_operand_bits, overflow_provably_impossible,
-            },
+            overflow_guard::{overflow_operand_bits, overflow_provably_impossible},
             seq_bounds::{SeqBoundsCheck, emit_bounds_assert, failable_bounds},
             shift_guard::{
                 emit_shift_amount_is_valid_assert, shift_amount_provably_in_range,
@@ -40,118 +39,6 @@ use crate::{
         util::ice_non_elided_tuple,
     },
 };
-
-/// An [`HLEmitter`] that appends into a plain instruction vector.
-///
-/// DCE's sweep builds each block's new instruction list by hand rather than using `HLBlockEmitter`,
-/// but a partial op's failure check has to be built exactly the way every other pass builds it (see
-/// [`crate::compiler::passes::shared`]'s `divmod_guard` and `seq_bounds`). This adapter bridges the
-/// two so there is only ever one definition of each check.
-struct VecEmitter<'a, 'b> {
-    ssa: &'a HLSSA,
-    out: &'b mut Vec<LocatedOpCode>,
-    location: SourceLocation,
-}
-
-impl HLEmitter for VecEmitter<'_, '_> {
-    fn fresh_value(&mut self) -> ValueId {
-        self.ssa.fresh_value()
-    }
-
-    fn emit(&mut self, instruction: OpCode) {
-        let located = instruction.locate(self.location.clone());
-        self.out.push(located);
-    }
-
-    fn emit_located(&mut self, instruction: LocatedOpCode) {
-        self.out.push(instruction);
-    }
-
-    fn emit_constant(&mut self, value: Constant) -> ValueId {
-        self.ssa.add_const(value)
-    }
-
-    fn field(&self) -> FieldConfig {
-        self.ssa.field()
-    }
-}
-
-/// The operands of an unguarded `Div`/`Mod`, which with the failable sequence ops are the
-/// instructions DCE may not simply delete when their results go dead.
-///
-/// Deliberately matches only at the top level: a `Guard`-wrapped division must keep today's
-/// behavior, because inside an inactive branch it is required _not_ to fail and
-/// `lower_divmod_guard` already encodes that.
-fn unguarded_divmod_operands(
-    instruction: &OpCode,
-) -> Option<(BinaryArithOpKind, ValueId, ValueId)> {
-    match instruction {
-        OpCode::BinaryArithOp { kind, lhs, rhs, .. }
-            if matches!(kind.group(), ArithGroup::Div | ArithGroup::Rem) =>
-        {
-            Some((*kind, *lhs, *rhs))
-        }
-        _ => None,
-    }
-}
-
-/// The operands of an unguarded `Shl`/`Shr`.
-///
-/// This is the third instruction, alongside `Div`/`Mod` and the failable sequence ops, that DCE may
-/// not simply delete when its result goes dead. A shift's only failure mode comes from its
-/// **amount**, so we build the check based on that.
-///
-/// Deliberately matches only at the top level, for the reason [`unguarded_divmod_operands`] does: a
-/// `Guard`-wrapped shift inside an inactive branch is required _not_ to fail, and
-/// `lower_shift_guard` already encodes that.
-fn unguarded_shift_operands(instruction: &OpCode) -> Option<(BinaryArithOpKind, ValueId, ValueId)> {
-    match instruction {
-        OpCode::BinaryArithOp { kind, lhs, rhs, .. }
-            if matches!(kind.group(), ArithGroup::Shl | ArithGroup::Shr) =>
-        {
-            Some((*kind, *lhs, *rhs))
-        }
-        _ => None,
-    }
-}
-
-/// The operands of an unguarded `Add`/`Sub`/`Mul`.
-///
-/// This is the fourth instruction, alongside `Div`/`Mod`, `Shl`/`Shr` and the failable sequence
-/// ops, that DCE may not simply delete when its result goes dead: Noir rejects an overflowing one
-/// whether or not anything reads it (`die.rs:456` makes a `Binary` eliminable only when
-/// `!requires_acir_gen_predicate`, which is `true` for a checked `Add`/`Sub`/`Mul`).
-///
-/// Deliberately matches only at the top level, for the reason [`unguarded_divmod_operands`] does: a
-/// `Guard`-wrapped operation inside an inactive branch is required _not_ to fail, and
-/// `lower_overflow_guard` already encodes that.
-///
-/// The result comes back as well as the operands because the two groups are kept by opposite
-/// means; see [`overflow_rewrite_saves_the_operation`].
-fn unguarded_overflow_operands(
-    instruction: &OpCode,
-) -> Option<(BinaryArithOpKind, ValueId, ValueId, ValueId)> {
-    match instruction {
-        OpCode::BinaryArithOp {
-            kind,
-            result,
-            lhs,
-            rhs,
-        } if matches!(
-            kind.group(),
-            ArithGroup::Add | ArithGroup::Sub | ArithGroup::Mul
-        ) =>
-        {
-            Some((*kind, *result, *lhs, *rhs))
-        }
-        _ => None,
-    }
-}
-
-/// Whether replacing a dead operation of this group with its check is worth it.
-fn overflow_rewrite_saves_the_operation(kind: BinaryArithOpKind) -> bool {
-    matches!(kind.group(), ArithGroup::Mul)
-}
 
 pub struct DCE {
     config: Config,
@@ -192,8 +79,9 @@ pub struct Config {
     ///
     /// Restricting it this way loses nothing. Every *user* partial op is present from `initial_ssa`
     /// onward, so the early runs see them all; and any that survives to `spill_witness` gets its
-    /// check from `LowerPureGuards` or its instruction lowering, which run before anything there
-    /// can kill it.
+    /// check from `LowerPureGuards`, which runs before anything there can kill it, or else from its
+    /// instruction lowering, which runs after several runs of this pass that do not rewrite, and
+    /// which [`owes_witness_check`] keeps it alive for.
     pub rewrite_dead_partial_ops: bool,
 
     /// Whether an `ArrayGet` or `ArraySet` on an array or vector whose result is dead is
@@ -449,14 +337,13 @@ impl DCE {
         (!shift_amount_provably_in_range(&amount, bits)).then_some(bits)
     }
 
-    /// Whether a dead unguarded `Add`/`Sub`/`Mul` still has to leave its overflow check behind,
-    /// returning the width to build it at.
+    /// Whether a dead unguarded `Add`/`Sub`/`Mul` still owes an overflow check, and so has to be
+    /// kept, returning the width the check is at.
     ///
     /// The overflow counterpart of [`Self::shift_check_survives`], answering the same questions in
     /// the same order, with one more: **both operands must be pure**. A witness operand's check is
     /// owned by `LowerWitnessIntegerArithOps`, which encodes it as a range check on the field
-    /// result rather than as a comparison, and this pass has no way to build that. So a dead
-    /// witness `Add`/`Sub`/`Mul` is still deleted with its rejection.
+    /// result rather than as a comparison.
     ///
     /// `None` means no check: either [`Config::rewrite_dead_partial_ops`] is off (the ranges are
     /// only computed when the flag is set, so this cannot silently re-enable itself), an operand is
@@ -593,15 +480,20 @@ impl DCE {
         // touches the SSA, so running them at the top is strictly safer than running them later.
         //
         // Arithmetic and known-length sequence bounds checks can be discharged by the ranges.
-        let rewrite_types: Option<TypeInfo> = self
-            .needs_rewrite_types()
+        //
+        // A run before the witness shape is frozen is typed as well, rewriting or not, because a
+        // witnessed operation that still owes its check is told apart from field arithmetic, and
+        // from an operation whose check is already built, by its operands' types; see
+        // [`owes_witness_check`].
+        let types: Option<TypeInfo> = (self.needs_rewrite_types()
+            || !self.config.witness_shape_frozen)
             .then(|| Types::new().run(ssa, cfg));
+        let rewrite_types = types.as_ref().filter(|_| self.needs_rewrite_types());
+        let witness_types = types.as_ref().filter(|_| !self.config.witness_shape_frozen);
         let rewrite_ranges: Option<ValueRanges> = rewrite_types
-            .as_ref()
             .filter(|_| self.rewrites_dead_partial_ops() || self.rewrites_dead_seq_access())
             .map(|types| ValueRangeAnalysis::new().run(ssa, cfg, types));
         let partial_op_analyses = rewrite_types
-            .as_ref()
             .zip(rewrite_ranges.as_ref())
             .filter(|_| self.rewrites_dead_partial_ops());
 
@@ -612,7 +504,6 @@ impl DCE {
         );
 
         let sequence_lengths = rewrite_types
-            .as_ref()
             .filter(|_| self.rewrites_dead_seq_access())
             .map(|types| Self::sequence_lengths(ssa, cfg, types))
             .unwrap_or_default();
@@ -725,18 +616,9 @@ impl DCE {
                         worklist.push(WorkItem::LiveValue(*function_id, rhs));
                     }
 
-                    // A dead `Add`/`Sub`/`Mul` is kept in one of two ways.
-                    //
-                    // A multiply is seeded like the shift and division above: its operands are held
-                    // live so the sweep can build the check out of them, and the op itself is left
-                    // dead, which is the signal that it should. Both operands, because unlike a
-                    // shift — whose width comes from a type — an overflow test is a question about
-                    // the two values.
-                    //
-                    // An `Add`/`Sub` instead keeps its *result* live, which keeps the instruction
-                    // verbatim and leaves the check to `LowerPureGuards`. Marking the result rather
-                    // than the operands is what stops the sweep below firing, so the two paths
-                    // cannot both run.
+                    // A dead `Add`/`Sub`/`Mul` keeps its *result* live, which keeps the instruction
+                    // verbatim and leaves the check to the lowering that owns it; see
+                    // [`unguarded_overflow_operands`].
                     if let Some((kind, result, lhs, rhs)) = unguarded_overflow_operands(instruction)
                         && self
                             .overflow_check_survives(
@@ -749,12 +631,13 @@ impl DCE {
                             )
                             .is_some()
                     {
-                        if overflow_rewrite_saves_the_operation(kind) {
-                            worklist.push(WorkItem::LiveValue(*function_id, lhs));
-                            worklist.push(WorkItem::LiveValue(*function_id, rhs));
-                        } else {
-                            worklist.push(WorkItem::LiveValue(*function_id, result));
-                        }
+                        worklist.push(WorkItem::LiveValue(*function_id, result));
+                    }
+
+                    if let Some(types) = &witness_types
+                        && owes_witness_check(instruction, types.get_function(*function_id))
+                    {
+                        worklist.push(WorkItem::LiveInstruction(*function_id, *block_id, i));
                     }
 
                     if self.rewrites_dead_partial_ops()
@@ -780,7 +663,6 @@ impl DCE {
                         // Types omit unreachable blocks. A missing type is no proof of safety,
                         // and seeding the sequence conservatively avoids a second unchecked lookup.
                         let ty = rewrite_types
-                            .as_ref()
                             .map(|types| types.get_function(*function_id))
                             .and_then(|types| types.try_get_value_type(seq));
                         if Self::bounds_proven(
@@ -1084,7 +966,7 @@ impl DCE {
                         // never sees Noir's SSA-level check, so deleting the op here would delete
                         // the only thing that could ever fail. Replace it with the check alone: the
                         // arithmetic still goes, which is the whole point of eliminating it.
-                        if let Some(types) = rewrite_types.as_ref() {
+                        if let Some(types) = rewrite_types {
                             if let Some((kind, lhs, rhs)) = unguarded_divmod_operands(&instruction)
                             {
                                 // `divmod_check_survives` subsumes the `divmod_can_fail` type gate
@@ -1143,40 +1025,6 @@ impl DCE {
                                         rhs,
                                         bits,
                                         kind.is_signed(),
-                                    );
-                                }
-                            } else if let Some((kind, _, lhs, rhs)) =
-                                unguarded_overflow_operands(&instruction)
-                                && overflow_rewrite_saves_the_operation(kind)
-                            {
-                                // As for the shift above, `overflow_check_survives` carries the
-                                // width as well as the verdict, so the assert is built at the width
-                                // the mark phase decided the check against.
-                                //
-                                // A multiply only, and the arithmetic is not left behind: the test
-                                // is built from the operands, which is why `emit_no_overflow_assert`
-                                // is given `None`. An `Add`/`Sub` never reaches here — the mark
-                                // phase keeps its result live, so it is not dead any more.
-                                if let Some(bits) = self.overflow_check_survives(
-                                    partial_op_analyses,
-                                    function_id,
-                                    block_id,
-                                    kind,
-                                    lhs,
-                                    rhs,
-                                ) {
-                                    let mut emitter = VecEmitter {
-                                        ssa,
-                                        out: &mut new_instructions,
-                                        location: instruction.location().clone(),
-                                    };
-                                    emit_no_overflow_assert(
-                                        &mut emitter,
-                                        kind,
-                                        lhs,
-                                        rhs,
-                                        None,
-                                        bits,
                                     );
                                 }
                             } else if let Some(check) = failable_bounds(&instruction)
@@ -1462,6 +1310,167 @@ impl DCE {
     }
 }
 
+// FAILURE-CHECK HELPERS
+// ================================================================================================
+
+/// An [`HLEmitter`] that appends into a plain instruction vector.
+///
+/// DCE's sweep builds each block's new instruction list by hand rather than using `HLBlockEmitter`,
+/// but a partial op's failure check has to be built exactly the way every other pass builds it (see
+/// [`crate::compiler::passes::shared`]'s `divmod_guard` and `seq_bounds`). This adapter bridges the
+/// two to avoid having multiple definitions of each check.
+struct VecEmitter<'a, 'b> {
+    ssa: &'a HLSSA,
+    out: &'b mut Vec<LocatedOpCode>,
+    location: SourceLocation,
+}
+
+impl HLEmitter for VecEmitter<'_, '_> {
+    fn fresh_value(&mut self) -> ValueId {
+        self.ssa.fresh_value()
+    }
+
+    fn emit(&mut self, instruction: OpCode) {
+        let located = instruction.locate(self.location.clone());
+        self.out.push(located);
+    }
+
+    fn emit_located(&mut self, instruction: LocatedOpCode) {
+        self.out.push(instruction);
+    }
+
+    fn emit_constant(&mut self, value: Constant) -> ValueId {
+        self.ssa.add_const(value)
+    }
+
+    fn field(&self) -> FieldConfig {
+        self.ssa.field()
+    }
+}
+
+/// The operands of an unguarded `Div`/`Mod`, which cannot be deleted when their results go dead.
+///
+/// Deliberately matches only at the top level: a `Guard`-wrapped division must keep today's
+/// behavior, because inside an inactive branch it is required not to fail and `lower_divmod_guard`
+/// already encodes that.
+fn unguarded_divmod_operands(
+    instruction: &OpCode,
+) -> Option<(BinaryArithOpKind, ValueId, ValueId)> {
+    match instruction {
+        OpCode::BinaryArithOp { kind, lhs, rhs, .. }
+            if matches!(kind.group(), ArithGroup::Div | ArithGroup::Rem) =>
+        {
+            Some((*kind, *lhs, *rhs))
+        }
+        _ => None,
+    }
+}
+
+/// The operands of an unguarded `Shl`/`Shr`.
+///
+/// This is the third instruction, alongside `Div`/`Mod` and the failable sequence ops, that DCE may
+/// not simply delete when its result goes dead. A shift's only failure mode comes from its amount,
+/// so we build the check based on that.
+///
+/// Deliberately matches only at the top level as a `Guard`-wrapped shift inside an inactive branch
+/// is required _not_ to fail, and `lower_shift_guard` already encodes that.
+fn unguarded_shift_operands(instruction: &OpCode) -> Option<(BinaryArithOpKind, ValueId, ValueId)> {
+    match instruction {
+        OpCode::BinaryArithOp { kind, lhs, rhs, .. }
+            if matches!(kind.group(), ArithGroup::Shl | ArithGroup::Shr) =>
+        {
+            Some((*kind, *lhs, *rhs))
+        }
+        _ => None,
+    }
+}
+
+/// The operands of an unguarded `Add`/`Sub`/`Mul`.
+///
+/// This is the fourth instruction, alongside `Div`/`Mod`, `Shl`/`Shr` and the failable sequence
+/// ops, that DCE may not simply delete when its result goes dead: Noir rejects an overflowing one
+/// whether or not anything reads it.
+///
+/// Deliberately matches only at the top level as a `Guard`-wrapped operation inside an inactive
+/// branch is required _not_ to fail, and `lower_overflow_guard` already encodes that.
+///
+/// A dead one is kept by holding its **result** live, which keeps the instruction verbatim for the
+/// lowering that owns its check. Replacing it with a check built from its operands would have to
+/// know their domain, and a rewriting run is before taint inference, where it cannot. The pure
+/// check is `MAX / rhs < lhs`, and a witnessed division costs far more than the multiply whose
+/// check it would be.
+fn unguarded_overflow_operands(
+    instruction: &OpCode,
+) -> Option<(BinaryArithOpKind, ValueId, ValueId, ValueId)> {
+    match instruction {
+        OpCode::BinaryArithOp {
+            kind,
+            result,
+            lhs,
+            rhs,
+        } if matches!(
+            kind.group(),
+            ArithGroup::Add | ArithGroup::Sub | ArithGroup::Mul
+        ) =>
+        {
+            Some((*kind, *result, *lhs, *rhs))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `instruction` is an integer operation with a witnessed operand, guarded or not, whose
+/// failure check its witness lowering has yet to emit.
+///
+/// Three kinds of operation need one:
+///
+/// - A checked `Add`/`Sub`/`Mul` rejects an overflow by the range check that
+///   `LowerWitnessIntegerArithOps` imposes on its result.
+/// - An unsigned `Div`/`Rem` by a witness rejects a zero divisor in its own lowering, and so is
+///   given no check by `LowerPureGuards`; see [`divisor_checked_by_its_lowering`].
+/// - A `Guard`-wrapped `Div`/`Rem` with any witness operand is given none either, whatever its
+///   sign. `LowerPureGuards` builds a guarded division's check as a branch on its operands, which
+///   needs them all pure, and otherwise leaves the check to the lowering, which rejects a zero
+///   divisor and `INT_MIN / -1` under the guard itself.
+///
+/// Those lowerings run well after taint inference, behind several runs of this pass. A run that
+/// deleted a dead one in between would delete the rejection with it, and an overflowing
+/// `let _ = a + b`, or a `let _ = a / b` by zero, would verify. Every run that can still see one
+/// keeps it as until the lowering replaces it, the operation **is** its check. A `Guard`-wrapped
+/// `Add`/`Sub`/`Mul` is kept too, since the guarded check still has to reject in the branch that is
+/// taken.
+///
+/// Field arithmetic has no lowering-built check and remains possible to delete: a field division
+/// has its check built by `LowerPureGuards` as an assertion, guarded or not, which is never dead.
+/// So do every other division and every pure integer op, before any run after taint inference can
+/// see them.
+fn owes_witness_check(instruction: &OpCode, types: &FunctionTypeInfo) -> bool {
+    let (guarded, instruction) = match instruction {
+        OpCode::Guard { inner, .. } => (true, inner.as_ref()),
+        other => (false, other),
+    };
+    let OpCode::BinaryArithOp { kind, lhs, rhs, .. } = instruction else {
+        return false;
+    };
+    let (Some(lhs), Some(rhs)) = (
+        types.try_get_value_type(*lhs),
+        types.try_get_value_type(*rhs),
+    ) else {
+        return false;
+    };
+    let witnessed_int = matches!(lhs.strip_witness().expr, TypeExpr::Int(_))
+        && (lhs.is_witness_of() || rhs.is_witness_of());
+    match kind.group() {
+        ArithGroup::Add | ArithGroup::Sub | ArithGroup::Mul => witnessed_int,
+        ArithGroup::Div | ArithGroup::Rem if guarded => witnessed_int,
+        ArithGroup::Div | ArithGroup::Rem => divisor_checked_by_its_lowering(*kind, rhs),
+        _ => false,
+    }
+}
+
+// TESTS
+// ================================================================================================
+
 #[cfg(test)]
 mod bounds_tests {
     use super::*;
@@ -1606,6 +1615,128 @@ mod bounds_tests {
                     "safe check must not retain its operand chain"
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod witness_overflow_tests {
+    use super::*;
+    use crate::compiler::ssa::hlssa::builder::HLSSABuilder;
+
+    /// What a non-rewriting run leaves of a dead operation of each kind, by result.
+    fn survivors_of_a_run_after_taint_inference() -> (Vec<ValueId>, Vec<(&'static str, ValueId)>) {
+        let mut ssa = HLSSA::new();
+        let main = ssa.get_unique_entrypoint_id();
+        let mut dead = Vec::new();
+        HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let witness = e.add_parameter(Type::witness_of(Type::int(8)));
+            let pure = e.add_parameter(Type::int(8));
+            let field = e.add_parameter(Type::witness_of(Type::field()));
+            let condition = e.add_parameter(Type::witness_of(Type::int(1)));
+
+            for kind in [
+                BinaryArithOpKind::UAdd,
+                BinaryArithOpKind::USub,
+                BinaryArithOpKind::UMul,
+            ] {
+                dead.push(("witnessed", e.bin(kind, witness, pure)));
+            }
+            let guarded = e.fresh_value();
+            e.emit(OpCode::Guard {
+                condition,
+                inner: Box::new(OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::UAdd,
+                    result: guarded,
+                    lhs: witness,
+                    rhs: witness,
+                }),
+            });
+            dead.push(("guarded witnessed", guarded));
+            dead.push(("field", e.bin(BinaryArithOpKind::UAdd, field, field)));
+            dead.push(("pure", e.bin(BinaryArithOpKind::UAdd, pure, pure)));
+
+            for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
+                dead.push(("witnessed-divisor", e.bin(kind, pure, witness)));
+                dead.push(("witness-by-pure", e.bin(kind, witness, pure)));
+            }
+            let guarded = e.fresh_value();
+            e.emit(OpCode::Guard {
+                condition,
+                inner: Box::new(OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::UDiv,
+                    result: guarded,
+                    lhs: witness,
+                    rhs: witness,
+                }),
+            });
+            dead.push(("guarded witnessed-divisor", guarded));
+            for kind in [
+                BinaryArithOpKind::UDiv,
+                BinaryArithOpKind::SDiv,
+                BinaryArithOpKind::SRem,
+            ] {
+                let guarded = e.fresh_value();
+                e.emit(OpCode::Guard {
+                    condition,
+                    inner: Box::new(OpCode::BinaryArithOp {
+                        kind,
+                        result: guarded,
+                        lhs: witness,
+                        rhs: pure,
+                    }),
+                });
+                dead.push(("guarded witnessed-dividend", guarded));
+            }
+            for kind in [BinaryArithOpKind::SDiv, BinaryArithOpKind::SRem] {
+                dead.push(("signed", e.bin(kind, witness, witness)));
+            }
+            dead.push(("field", e.bin(BinaryArithOpKind::UDiv, field, field)));
+            let guarded = e.fresh_value();
+            e.emit(OpCode::Guard {
+                condition,
+                inner: Box::new(OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::UDiv,
+                    result: guarded,
+                    lhs: field,
+                    rhs: field,
+                }),
+            });
+            dead.push(("guarded field", guarded));
+            e.terminate_return(vec![]);
+        });
+
+        let flow = FlowAnalysis::run(&ssa);
+        DCE::new(Config::pre_r1c()).do_run(&mut ssa, &flow);
+        let survivors = ssa
+            .get_unique_entrypoint()
+            .get_entry()
+            .get_instructions()
+            .flat_map(|op| op.get_results().copied().collect::<Vec<_>>())
+            .collect();
+        (survivors, dead)
+    }
+
+    /// A dead integer operation with a witnessed operand survives a run after taint inference,
+    /// guarded or not, because its overflow check is still to be built from it. Field arithmetic
+    /// has no check and a pure operation has had its check built by then, so both go.
+    ///
+    /// A division is kept only where `LowerPureGuards` leaves its check to the lowering: unguarded,
+    /// where it is unsigned and its divisor a witness, and guarded, wherever an integer operand is
+    /// a witness. Every other division already carries its check.
+    #[test]
+    fn a_dead_witnessed_integer_operation_keeps_its_check() {
+        let (survivors, dead) = survivors_of_a_run_after_taint_inference();
+        for (what, result) in dead {
+            let kept = what.contains("witnessed");
+            assert_eq!(
+                survivors.contains(&result),
+                kept,
+                "a dead {what} operation {}",
+                if kept { "was deleted" } else { "survived" }
+            );
         }
     }
 }
