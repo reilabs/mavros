@@ -343,9 +343,8 @@ impl ValueRangeAnalysis {
         // The bound is [`HOST_WORD_BITS`] rather than a field-derived width because it has to
         // dominate `narrow_int_bits` on **every** field, and `narrow_int_bits` is
         // `min(widest injective, host word)`. Below that threshold a range decides whether a program
-        // _compiles_ — `wrap_shifted_product` and `lower_unsigned_mul` refuse where they cannot
-        // prove headroom — so losing precision there would change which programs are accepted.
-        // Above it the domain only decides how much code is emitted.
+        // _compiles_, so losing precision there would change which programs are accepted. Above it
+        // the domain only decides how much code is emitted.
         //
         // What it costs: a [`ValueRange`] carries [`BigInt`] bounds, so a range on an `int16384` is
         // arithmetic on 2 KB numbers and an interval multiply is four bignum multiplies. The
@@ -633,6 +632,23 @@ impl ValueRangeAnalysis {
                         let joined = match bounds.get(vid) {
                             Some(computed) => computed.join(&zero),
                             None => zero,
+                        };
+                        Self::overwrite(bounds, refinements, *vid, joined, &mut transient);
+                    }
+                }
+
+                // A shift with a witness operand is the exception to that: `LowerPureGuards` leaves
+                // it to its own lowering, which does not branch. Where the guard is off, several of
+                // those lowerings shift by an amount they have zeroed, so an inactive guard around
+                // one can produce its left operand.
+                if let Some(operand) = shift_passing_its_operand_through(inner, types) {
+                    let operand = range(bounds, operand);
+                    for vid in inner.get_results() {
+                        let joined = match bounds.get(vid) {
+                            Some(computed) if computed.width() == operand.width() => {
+                                computed.join(&operand)
+                            }
+                            _ => ValueRange::for_type(types.get_value_type(*vid), field),
                         };
                         Self::overwrite(bounds, refinements, *vid, joined, &mut transient);
                     }
@@ -1984,6 +2000,11 @@ fn decode_signed(bits: usize, raw: &BigInt) -> BigInt {
 /// (`pure_guards.rs::emit_guard_failure_default`, and the `TypeExpr::Field` arm of
 /// `lower_divmod_guard`).
 ///
+/// A shift with a witness operand is the one failable operation that pass leaves alone. It stays in
+/// the set, since its lowering can still answer zero where the guard is off: a known amount at or
+/// past the width is an assertion beside a zero, and every single-cell `>>` answers zero there
+/// (`witness_bitwise::lower_unsigned_shr` and `lower_signed_shr`).
+///
 /// Integer `Add`/`Sub`/`Mul` are in the set and their field counterparts are not, because field
 /// arithmetic cannot fail. `ArrayGet` and `ArraySet` also have failure branches, and their results
 /// _can_ be scalars — they are left out because the transfer does not model them either way: they
@@ -2001,6 +2022,35 @@ fn guard_may_produce_zero(inner: &OpCode, types: &FunctionTypeInfo) -> bool {
             And | Or | Xor => false,
         },
         _ => false,
+    }
+}
+
+/// The left operand of a guarded shift that can yield it where the guard is off, if `inner` is one.
+///
+/// A shift with a witness operand gets no failure branch from `LowerPureGuards`, and several of its
+/// lowerings neutralise the amount to zero on an inactive path instead, so the result there is the
+/// operand shifted by nothing: the powers-of-two table's amount in one cell
+/// (`witness_bitwise::emit_pow2_factor`), and past it `WideWitnessInts::shift_amount` wherever the
+/// amount is witnessed. A single-cell `>>` does not pass it on, as it answers zero there, and a pure
+/// amount is not zeroed on either side of the cell, so a shift by one shifts by it. The rule is
+/// stated on the operation rather than on the route its lowering takes, so it holds whichever route
+/// that is.
+///
+/// The operand is outside the computed range of a shift whose amount excludes zero, which a witness
+/// amount the domain has pinned to a literal does. A consumer that read the result's range to size
+/// a check that holds on every path would emit a constraint the inactive path cannot meet,
+/// rejecting an honest run that does not take the branch. No consumer reads such a range, so only
+/// `a_guarded_witness_shift_can_produce_its_operand` pins this.
+fn shift_passing_its_operand_through(inner: &OpCode, types: &FunctionTypeInfo) -> Option<ValueId> {
+    match inner {
+        OpCode::BinaryArithOp { kind, lhs, rhs, .. }
+            if matches!(kind.group(), ArithGroup::Shl | ArithGroup::Shr)
+                && (types.get_value_type(*lhs).is_witness_of()
+                    || types.get_value_type(*rhs).is_witness_of()) =>
+        {
+            Some(*lhs)
+        }
+        _ => None,
     }
 }
 
@@ -3590,6 +3640,59 @@ mod tests {
         // Without the fix, `known_sign` could read a range that excludes zero and hardcode a sign
         // bit the inactive branch contradicts.
         assert!(!guarded_u8_op(USub, 3, 4).unsigned().is_empty());
+    }
+
+    /// A guarded shift with a witness operand can yield that operand where the guard is off,
+    /// because several of its lowerings zero the amount there instead of branching to a zero.
+    ///
+    /// `(w & 0xf0) >> 4` computes into `[0, 15]`, and the operand reaches 240. At this width the
+    /// single cell's `>>` answers zero instead, but the rule is stated on the operation rather
+    /// than on the route its lowering takes, so the operand is joined in all the same. The same
+    /// shift of pure operands keeps its computed range, joined with the zero `LowerPureGuards`
+    /// gives it.
+    #[test]
+    fn a_guarded_witness_shift_can_produce_its_operand() {
+        for witnessed in [true, false] {
+            let mut ssa = HLSSA::with_main("main".to_string());
+            let main_id = ssa.get_unique_entrypoint_id();
+
+            let guarded;
+            {
+                let mut sb = HLSSABuilder::new(&mut ssa);
+                guarded = sb.modify_function(main_id, |b| {
+                    b.function.add_return_type(Type::int(8));
+                    let entry = b.function.get_entry_id();
+                    let mut e = b.test_block(entry);
+                    let x = e.add_parameter(Type::field());
+                    let w = e.write_witness(x);
+                    let cond = e.eq(w, x);
+                    let value = if witnessed {
+                        e.add_parameter(Type::witness_of(Type::int(8)))
+                    } else {
+                        e.add_parameter(Type::int(8))
+                    };
+                    let mask = e.int_const(IntBits::from_u128(8, 0xf0));
+                    let masked = e.and(value, mask);
+                    let amount = e.int_const(IntBits::from_u128(8, 4));
+                    let result = e.fresh_value();
+                    e.emit(OpCode::Guard {
+                        condition: cond,
+                        inner: Box::new(OpCode::BinaryArithOp {
+                            kind: BinaryArithOpKind::UShr,
+                            result,
+                            lhs: masked,
+                            rhs: amount,
+                        }),
+                    });
+                    e.terminate_return(vec![result]);
+                    result
+                });
+            }
+
+            let r = run_analysis(&mut ssa).get(guarded);
+            let expected = if witnessed { iv(0, 240) } else { iv(0, 15) };
+            assert_eq!(r.unsigned(), &expected, "witnessed: {witnessed}");
+        }
     }
 
     #[test]

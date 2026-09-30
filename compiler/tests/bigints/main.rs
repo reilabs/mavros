@@ -18,7 +18,9 @@ use mavros_compiler::{
     },
     driver::{Driver, Error as DriverError},
 };
-use mavros_int_semantics::{IntBits, IntOp, corners, int_bits::HOST_LIMB_BITS};
+use mavros_int_semantics::{
+    IntBits, IntOp, MAX_LOWERED_SIGNED_BITS, corners, int_bits::HOST_LIMB_BITS,
+};
 use num_bigint::BigUint;
 
 // UTILITIES
@@ -71,13 +73,6 @@ fn sweep_over(kind: BinaryArithOpKind, bits: usize, pairs: Vec<(IntBits, IntBits
     if let Err(unconstrained) = oracle.check_a_wrong_answer_is_refused(&accepted.0, &accepted.1) {
         panic!("{unconstrained}");
     }
-}
-
-/// The operations that reach the pipeline at any width.
-fn non_shift_operations() -> impl Iterator<Item = BinaryArithOpKind> {
-    BinaryArithOpKind::ALL
-        .into_iter()
-        .filter(|kind| !IntOp::from(*kind).is_shift())
 }
 
 /// Adds one to each column of an accepted witness in turn, and takes one from each column the
@@ -167,10 +162,11 @@ fn every_operation_agrees_with_the_model_at_a_byte() {
     }
 }
 
-/// The same claim at widths **no Noir program can name**.
+/// The same claim at widths **no Noir program can name**, the shifts included: a shift's amount
+/// check is a real `amount < bits`, and its table has more rows than there are amounts.
 #[test]
 fn every_operation_agrees_with_the_model_at_a_width_noir_cannot_express() {
-    for kind in non_shift_operations() {
+    for kind in BinaryArithOpKind::ALL {
         sweep(kind, 5);
     }
 }
@@ -712,6 +708,8 @@ enum Limbed {
     Product,
     Quotient,
     Remainder,
+    ShiftLeft,
+    ShiftRight,
 }
 
 impl Limbed {
@@ -723,6 +721,8 @@ impl Limbed {
             Limbed::Product => e.bin(BinaryArithOpKind::UMul, lhs, rhs),
             Limbed::Quotient => e.bin(BinaryArithOpKind::UDiv, lhs, rhs),
             Limbed::Remainder => e.bin(BinaryArithOpKind::URem, lhs, rhs),
+            Limbed::ShiftLeft => e.bin(BinaryArithOpKind::UShl, lhs, rhs),
+            Limbed::ShiftRight => e.bin(BinaryArithOpKind::UShr, lhs, rhs),
         }
     }
 
@@ -731,9 +731,12 @@ impl Limbed {
     fn idle_rhs(self, bits: usize) -> IntBits {
         match self {
             Limbed::Quotient | Limbed::Remainder => IntBits::from_u128(bits, 1),
-            Limbed::Sum | Limbed::Difference | Limbed::Ordering | Limbed::Product => {
-                IntBits::zero(bits)
-            }
+            Limbed::Sum
+            | Limbed::Difference
+            | Limbed::Ordering
+            | Limbed::Product
+            | Limbed::ShiftLeft
+            | Limbed::ShiftRight => IntBits::zero(bits),
         }
     }
 
@@ -745,6 +748,8 @@ impl Limbed {
             Limbed::Product => mavros_int_semantics::eval(IntOp::UMul, lhs, rhs).value(),
             Limbed::Quotient => mavros_int_semantics::eval(IntOp::UDiv, lhs, rhs).value(),
             Limbed::Remainder => mavros_int_semantics::eval(IntOp::URem, lhs, rhs).value(),
+            Limbed::ShiftLeft => mavros_int_semantics::eval(IntOp::Shl, lhs, rhs).value(),
+            Limbed::ShiftRight => mavros_int_semantics::eval(IntOp::UShr, lhs, rhs).value(),
             Limbed::Ordering => Some(IntBits::from_u128(
                 1,
                 u128::from(BigUint::from(lhs) < BigUint::from(rhs)),
@@ -786,7 +791,7 @@ fn limbed_sums_differences_and_orderings_agree_with_the_model() {
 
 /// [`limbed_sums_differences_and_orderings_agree_with_the_model`] over every limb corner.
 #[test]
-#[ignore = "every limb corner of six operations; about an hour in a debug build"]
+#[ignore = "every limb corner of eight operations; well over an hour in a debug build"]
 fn the_limbed_corner_matrix_agrees_with_the_model() {
     assert_eq!(
         witness_limb_bits(FieldConfig::bn254()),
@@ -803,6 +808,10 @@ fn the_limbed_corner_matrix_agrees_with_the_model() {
         let values = dedup(values);
         for limbed in [Limbed::Product, Limbed::Quotient, Limbed::Remainder] {
             check_limbed_corners(limbed, bits, &values, Rhs::Witnessed);
+        }
+        let amounts = limb_shift_amounts(bits, HOST_LIMB_BITS);
+        for limbed in [Limbed::ShiftLeft, Limbed::ShiftRight] {
+            check_limbed_shifts(limbed, bits, &values, &amounts, Rhs::Witnessed);
         }
     }
 }
@@ -957,6 +966,634 @@ fn limbed_quotients_and_remainders_agree_with_the_model() {
     }
 }
 
+/// A shift agrees with the model either side of where the single cell stops taking it.
+///
+/// 37 and 96 are single-cell widths of no special shape, where the amount check is a real
+/// `amount < bits` and the table has more rows than there are amounts. 126 is the widest right shift
+/// the single cell takes and 127 the widest left one; past each, and at 128 for both, the shift is
+/// limb-wise on a decomposition of the one element each operand still is.
+#[test]
+fn a_shift_agrees_with_the_model_either_side_of_the_single_cell() {
+    for bits in [37usize, 96, 126, 127, 128] {
+        for kind in [BinaryArithOpKind::UShl, BinaryArithOpKind::UShr] {
+            sweep(kind, bits);
+        }
+    }
+    for kind in [BinaryArithOpKind::SShl, BinaryArithOpKind::SShr] {
+        sweep(kind, 37);
+    }
+}
+
+/// A shift agrees with the model where the operands have an element each and the single cell
+/// cannot hold the shift, over the wide corners, which put the amount either side of a limb, of half
+/// the width and of the width.
+///
+/// 129 is the first width past the double lane. 192 is three limbs, so its amount's decomposition
+/// reaches past the width and the check is explicit. 200 has a narrow top limb, which a left shift
+/// cuts to its width. 253 is the widest width an element carries.
+#[test]
+fn a_shift_agrees_with_the_model_at_the_limb_corners() {
+    for bits in [129usize, 192, 200, 253] {
+        for kind in [BinaryArithOpKind::UShl, BinaryArithOpKind::UShr] {
+            sweep_over(kind, bits, wide_corner_pairs(IntOp::from(kind), bits));
+        }
+    }
+}
+
+/// The shift on limbs, by a witnessed amount and by a constant one, on both lanes.
+///
+/// The amounts are the wide corners plus every whole number of limbs and one either side of each,
+/// which is where a witnessed amount's barrel moves a limb and a constant one stops cutting any. 254
+/// has a narrow top limb and a limbed amount, 256 is four limbs, whose amount's decomposition is its
+/// own bound, and 320 is five, whose barrel has a stage it only ever half uses. The operands reach
+/// every limb, including one of alternating bits, so that a piece put in the wrong place is a
+/// different answer.
+#[test]
+fn limbed_shifts_agree_with_the_model() {
+    let limb = witness_limb_bits(FieldConfig::bn254());
+    for bits in [254usize, 256, 320] {
+        let values = limb_reaching_values(bits, limb);
+        let amounts = limb_shift_amounts(bits, limb);
+        let legal: Vec<IntBits> = amounts
+            .iter()
+            .filter(|amount| BigUint::from(*amount) < BigUint::from(bits))
+            .cloned()
+            .collect();
+        for limbed in [Limbed::ShiftLeft, Limbed::ShiftRight] {
+            check_limbed_shifts(limbed, bits, &values, &amounts, Rhs::Witnessed);
+            check_limbed_shifts(limbed, bits, &values, &legal, Rhs::Constant);
+        }
+    }
+}
+
+/// The shift at widths a program is unlikely to use but the type admits, where the barrel is at its
+/// deepest: 1000 is sixteen limbs with a narrow top one, 16383 two hundred and fifty-six with a
+/// narrow top one, and 16384 two hundred and fifty-six full ones, eight stages deep.
+///
+/// The two widest take one pair to a program and fewer pairs. That is the WASM lane's limit rather
+/// than the shift's: a function may hold at most 50 000 locals, and the AD entry point of a program
+/// holding four 16383-bit shifts by a witnessed amount has more.
+#[test]
+#[ignore = "shifts of up to 16384 bits; about half an hour in a debug build"]
+fn a_shift_agrees_with_the_model_at_the_widest_widths() {
+    let limb = witness_limb_bits(FieldConfig::bn254());
+    for bits in [1000usize, 16383, 16384] {
+        let one = IntBits::from_u128(bits, 1);
+        let every_other =
+            IntBits::from_biguint(bits, &(((BigUint::from(1u8) << bits) - 1u8) / 3u8));
+        let (values, amounts, per_program) = if bits <= 1000 {
+            let values = vec![one, IntBits::all_ones(bits), every_other];
+            (values, few_shift_amounts(bits, limb), 4)
+        } else {
+            let amounts = [1, limb - 1, limb + 1, bits / 2 + 3, bits - 1, bits]
+                .into_iter()
+                .map(|amount| IntBits::from_u128(bits, amount as u128))
+                .collect();
+            (vec![every_other], amounts, 1)
+        };
+        let legal: Vec<IntBits> = amounts[..amounts.len() - 1].to_vec();
+        for limbed in [Limbed::ShiftLeft, Limbed::ShiftRight] {
+            for (rhs, amounts) in [
+                (Rhs::Witnessed, &amounts),
+                (Rhs::Constant, &legal),
+                (Rhs::AgainstPure, &amounts),
+            ] {
+                let pairs: Vec<(IntBits, IntBits)> = values
+                    .iter()
+                    .flat_map(|value| {
+                        amounts
+                            .iter()
+                            .map(move |amount| (value.clone(), amount.clone()))
+                    })
+                    .collect();
+                for pairs in pairs.chunks(per_program) {
+                    check_limbed_pairs(limbed, bits, pairs.to_vec(), rhs);
+                }
+            }
+        }
+    }
+}
+
+/// A pure operand shifted by a witnessed amount, on both lanes: `1 << n`, and its kin.
+///
+/// The operand is split on the pure side, so a limb it does not reach is a known zero whose halves
+/// are never witnessed, and every split of the others is a pure limb times a witnessed power of
+/// two. `1` is `1 << n` itself, whose every limb but the lowest is skipped; alternating bits reach
+/// every limb, so a half in the wrong place is a wrong answer. 200 is the operand as one element,
+/// split into limbs on the pure side, and 320 is limbs. The amounts are [`few_shift_amounts`]:
+/// [`limbed_shifts_agree_with_the_model`] holds a witnessed operand to every limb corner, and what
+/// this adds is the operand's other form, not more amounts.
+#[test]
+fn a_pure_value_shifted_by_a_witnessed_amount_agrees_with_the_model() {
+    let limb = witness_limb_bits(FieldConfig::bn254());
+    for bits in [200usize, 320] {
+        let every_other = ((BigUint::from(1u8) << bits) - 1u8) / 3u8;
+        let values = [
+            IntBits::from_u128(bits, 1),
+            IntBits::from_biguint(bits, &every_other),
+        ];
+        let amounts = few_shift_amounts(bits, limb);
+        for limbed in [Limbed::ShiftLeft, Limbed::ShiftRight] {
+            check_limbed_shifts(limbed, bits, &values, &amounts, Rhs::AgainstPure);
+        }
+    }
+}
+
+/// A witnessed value shifted by a **pure** amount that a loop computes, which no fold answers.
+///
+/// Such an amount is known wherever the constraints are built, so the shift witnesses nothing about
+/// it: its check is a comparison, and each limb is split by a pure power of two. The loop shifts by
+/// every multiple of 37 below the width, which moves whole limbs and splits them at a different
+/// place each time, and accumulates the answers, which the program asserts equal to the model's.
+/// Clearing the bit that selects the operand makes every answer zero, which the assertion refuses.
+/// One more iteration reaches past the width, which the comparison refuses. 200 is the operand as
+/// one element, 320 as limbs.
+#[test]
+fn a_shift_by_a_pure_amount_a_loop_computes_agrees_with_the_model() {
+    let step = 37usize;
+    for bits in [200usize, 320] {
+        let every_other = ((BigUint::from(1u8) << bits) - 1u8) / 3u8;
+        let operand = IntBits::from_biguint(bits, &every_other);
+        let legal = (bits - 1) / step + 1;
+        for kind in [BinaryArithOpKind::UShl, BinaryArithOpKind::UShr] {
+            let program = |iterations: usize, expected: IntBits| {
+                let operand = operand.clone();
+                main_program(&[Type::int(1)], &[], move |e, params| {
+                    let pattern = e.int_const(operand);
+                    let zero = e.int_const(IntBits::zero(bits));
+                    let value = e.select(params[0], pattern, zero);
+                    let start = e.int_const(IntBits::zero(32));
+                    let (head, _) = e.add_block();
+                    let (body, _) = e.add_block();
+                    let (done, _) = e.add_block();
+                    e.seal_and_switch(Terminator::Jmp(head, vec![start, zero]), head);
+                    let count = e.add_parameter(Type::int(32));
+                    let sum = e.add_parameter(Type::int(bits));
+                    let limit = e.int_const(IntBits::from_u128(32, iterations as u128));
+                    let more = e.cmp(count, limit, CmpKind::ULt);
+                    e.seal_and_switch(Terminator::JmpIf(more, body, done), body);
+                    let index = e.cast_to(CastTarget::Int(bits), count);
+                    let stride = e.int_const(IntBits::from_u128(bits, step as u128));
+                    let amount = e.bin(BinaryArithOpKind::UMul, index, stride);
+                    let shifted = e.bin(kind, value, amount);
+                    let next_sum = e.bin(BinaryArithOpKind::Xor, sum, shifted);
+                    let one = e.int_const(IntBits::from_u128(32, 1));
+                    let next = e.bin(BinaryArithOpKind::UAdd, count, one);
+                    e.seal_and_switch(Terminator::Jmp(head, vec![next, next_sum]), done);
+                    let expected = e.int_const(expected);
+                    e.assert_eq(sum, expected);
+                    vec![]
+                })
+            };
+            let what = format!("int{bits} {kind:?} by a pure amount");
+
+            let expected = (0..legal).fold(IntBits::zero(bits), |sum, index| {
+                let amount = IntBits::from_u128(bits, (index * step) as u128);
+                let shifted = mavros_int_semantics::eval(IntOp::from(kind), &operand, &amount)
+                    .value()
+                    .expect("an amount below the width is accepted");
+                sum.xor(&shifted)
+            });
+            let compiled = Compiled::new(program(legal, expected))
+                .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+            let selected = |bit: u128| input_block(&[&IntBits::from_u128(1, bit)]);
+            let verdict = compiled.run(&selected(1));
+            assert!(verdict.is_accepted(), "{what}: {verdict:?}");
+            let verdict = compiled
+                .run_wasm(&selected(1))
+                .expect("the WASM lane builds");
+            assert!(verdict.is_accepted(), "{what}, WASM: {verdict:?}");
+            let verdict = compiled.run(&selected(0));
+            assert!(
+                !verdict.is_accepted(),
+                "{what}, the operand zero: {verdict:?}"
+            );
+
+            let past = Compiled::new(program(legal + 1, IntBits::zero(bits)));
+            let refused = match past {
+                Err(_) => true,
+                Ok(compiled) => !compiled.run(&selected(1)).is_accepted(),
+            };
+            assert!(refused, "{what} past the width is accepted");
+        }
+    }
+}
+
+/// A signed value at a width that is not a power of two, shifted by a pure amount a loop computes,
+/// under a witnessed condition.
+///
+/// Within the single cell a pure amount builds its factor on the pure side, where the amount is
+/// reduced modulo the width, so the out-of-range amount 40 against 37 bits leaves an untaken branch
+/// with a factor below the width that every constraint admits, and the check the lowering plants
+/// refuses it where the branch is taken. A legal amount agrees with the model either way.
+#[test]
+fn a_guarded_signed_shift_by_a_pure_amount_is_checked_where_the_guard_holds() {
+    let bits = 37usize;
+    let operand = IntBits::from_u128(bits, 0x1_2345_6789);
+    for kind in [BinaryArithOpKind::SShl, BinaryArithOpKind::SShr] {
+        for base in [3u128, 40] {
+            check_guarded_loop_shift(kind, &operand, base);
+        }
+    }
+}
+
+/// An unsigned value past the single cell, shifted by a pure amount a loop computes, under a
+/// witnessed condition.
+///
+/// The amount is known wherever the constraints are built, guard or not, so the limb-wise shift
+/// compares it under the guard and splits and moves the limbs by it on every path, without zeroing
+/// it where the guard is off. The comparison refuses the width and past it where the branch is
+/// taken, and the split and the barrel have to hold for those amounts where it is not. 128 is one
+/// element, 200 one element with a narrow top limb, and 320 limbs.
+#[test]
+fn a_pure_amount_under_a_witnessed_guard_is_checked_where_the_guard_holds() {
+    for bits in [128usize, 200, 320] {
+        let every_other = ((BigUint::from(1u8) << bits) - 1u8) / 3u8;
+        let operand = IntBits::from_biguint(bits, &every_other);
+        for kind in [BinaryArithOpKind::UShl, BinaryArithOpKind::UShr] {
+            for base in [70, bits as u128, bits as u128 + 50] {
+                check_guarded_loop_shift(kind, &operand, base);
+            }
+        }
+    }
+}
+
+/// `operand` shifted by `base` under a witnessed condition, inside a loop that makes the amount a
+/// pure value that is never a literal, checked against the model with the branch taken and not.
+///
+/// The operand is witnessed by folding it into a narrow input the run sets to zero, which lets it
+/// be wider than a program input, and the program answers whether the shift equals the model's.
+/// Not taken, it is accepted whatever the amount; taken, it answers yes, or is refused where the
+/// model rejects the shift.
+fn check_guarded_loop_shift(kind: BinaryArithOpKind, operand: &IntBits, base: u128) {
+    let bits = operand.bits();
+    let amount = IntBits::from_u128(bits, base);
+    let expected = mavros_int_semantics::eval(IntOp::from(kind), operand, &amount).value();
+    let pattern = operand.clone();
+    let model = expected.clone().unwrap_or_else(|| IntBits::zero(bits));
+    let ssa = main_program(
+        &[Type::int(1), Type::int(64)],
+        &[Type::int(1)],
+        move |e, params| {
+            let narrow = e.cast_to(CastTarget::Int(bits), params[1]);
+            let pattern = e.int_const(pattern.clone());
+            let operand = e.bin(BinaryArithOpKind::Xor, narrow, pattern);
+            let model = e.int_const(model.clone());
+            let no = e.int_const(IntBits::zero(1));
+            let start = e.int_const(IntBits::zero(32));
+            let (head, _) = e.add_block();
+            let (body, _) = e.add_block();
+            let (taken, _) = e.add_block();
+            let (skipped, _) = e.add_block();
+            let (merge, _) = e.add_block();
+            let (done, _) = e.add_block();
+            e.seal_and_switch(Terminator::Jmp(head, vec![start, no]), head);
+            let count = e.add_parameter(Type::int(32));
+            let last = e.add_parameter(Type::int(1));
+            let limit = e.int_const(IntBits::from_u128(32, 2));
+            let more = e.cmp(count, limit, CmpKind::ULt);
+            e.seal_and_switch(Terminator::JmpIf(more, body, done), body);
+
+            // Always `base`, but only once the loop has run, so never a literal.
+            let thousand = e.int_const(IntBits::from_u128(32, 1000));
+            let nothing = e.bin(BinaryArithOpKind::UDiv, count, thousand);
+            let nothing = e.cast_to(CastTarget::Int(bits), nothing);
+            let base = e.int_const(IntBits::from_u128(bits, base));
+            let amount = e.bin(BinaryArithOpKind::UAdd, nothing, base);
+            e.seal_and_switch(Terminator::JmpIf(params[0], taken, skipped), taken);
+            let shifted = e.bin(kind, operand, amount);
+            let agrees = e.cmp(shifted, model, CmpKind::Eq);
+            e.seal_and_switch(Terminator::Jmp(merge, vec![agrees]), skipped);
+            e.seal_and_switch(Terminator::Jmp(merge, vec![no]), merge);
+            let merged = e.add_parameter(Type::int(1));
+            let one = e.int_const(IntBits::from_u128(32, 1));
+            let next = e.bin(BinaryArithOpKind::UAdd, count, one);
+            e.seal_and_switch(Terminator::Jmp(head, vec![next, merged]), done);
+            vec![last]
+        },
+    );
+    let what = format!("int{bits} {kind:?} by the pure amount {base}");
+    let compiled =
+        Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+    let run = |taken: u128, answer: u128| {
+        compiled.run(&input_block(&[
+            &IntBits::from_u128(1, taken),
+            &IntBits::zero(64),
+            &IntBits::from_u128(1, answer),
+        ]))
+    };
+
+    let verdict = run(0, 0);
+    assert!(verdict.is_accepted(), "{what}, not taken: {verdict:?}");
+    let verdict = run(1, 1);
+    if expected.is_some() {
+        assert!(verdict.is_accepted(), "{what}, taken: {verdict:?}");
+    } else {
+        assert!(verdict.is_refusal(), "{what}, taken: {verdict:?}");
+    }
+}
+
+/// A few shift amounts at `bits`: none, either side of the first limb, one in the middle that moves
+/// limbs and cuts them, the widest legal one, and the width itself, which the model rejects. The
+/// last is last, so that dropping it leaves the legal ones.
+fn few_shift_amounts(bits: usize, limb: usize) -> Vec<IntBits> {
+    [0, 1, limb - 1, limb, limb + 1, bits / 2 + 3, bits - 1, bits]
+        .into_iter()
+        .map(|amount| IntBits::from_u128(bits, amount as u128))
+        .collect()
+}
+
+/// Operands of `bits` that reach every limb: the top bit alone, the lowest limb full, every bit,
+/// and every other bit.
+fn limb_reaching_values(bits: usize, limb: usize) -> Vec<IntBits> {
+    let one = IntBits::from_u128(bits, 1);
+    let top_limb = (bits - 1) / limb * limb;
+    let every_other = ((BigUint::from(1u8) << bits) - 1u8) / 3u8;
+    vec![
+        one.clone(),
+        IntBits::all_ones(limb).cast(bits),
+        one.shifted_left(top_limb),
+        one.shifted_left(bits - 1),
+        IntBits::all_ones(bits),
+        IntBits::from_biguint(bits, &every_other),
+    ]
+}
+
+/// The wide shift amounts at `bits`, and every whole number of `limb`-wide limbs with one either
+/// side of it.
+fn limb_shift_amounts(bits: usize, limb: usize) -> Vec<IntBits> {
+    let mut amounts = corners::wide_shift_amounts(bits, bits);
+    for whole in (limb..bits).step_by(limb) {
+        for amount in [whole - 1, whole, whole + 1] {
+            amounts.push(IntBits::from_u128(bits, amount as u128));
+        }
+    }
+    dedup(amounts)
+}
+
+/// Every value shifted by every amount, checked by [`check_limbed_pairs`] a program's worth at a
+/// time.
+fn check_limbed_shifts(
+    limbed: Limbed,
+    bits: usize,
+    values: &[IntBits],
+    amounts: &[IntBits],
+    rhs: Rhs,
+) {
+    let pairs: Vec<(IntBits, IntBits)> = values
+        .iter()
+        .flat_map(|value| {
+            amounts
+                .iter()
+                .map(move |amount| (value.clone(), amount.clone()))
+        })
+        .collect();
+    for pairs in pairs.chunks(20) {
+        check_limbed_pairs(limbed, bits, pairs.to_vec(), rhs);
+    }
+}
+
+/// A shift by a constant at or past the width is refused at compile time: the model rejects it
+/// whatever it shifts, so the lowering asserts what cannot hold. 128 is the element, 200 the element
+/// with a narrow top limb, and 320 limbs.
+#[test]
+fn a_constant_shift_amount_past_the_width_is_refused() {
+    for bits in [128usize, 200, 320] {
+        for kind in [BinaryArithOpKind::UShl, BinaryArithOpKind::UShr] {
+            for amount in [bits, bits + 1] {
+                let ssa = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
+                    let value = e.cast_to(CastTarget::Int(bits), params[0]);
+                    let amount = e.int_const(IntBits::from_u128(bits, amount as u128));
+                    let shifted = e.bin(kind, value, amount);
+                    vec![e.cast_to(CastTarget::Int(64), shifted)]
+                });
+                let Err(error) = Compiled::new(ssa) else {
+                    panic!("int{bits} {kind:?} by the constant {amount} compiled");
+                };
+                contains_all(&error.to_string(), &["assert_cmp eq failed"]);
+            }
+        }
+    }
+}
+
+/// A shift under a witnessed condition is checked only where the condition holds.
+///
+/// Where the branch is not taken the amount is whatever that branch left behind, here one past the
+/// width, and the lowering zeroes it rather than letting its checks see it. A constant amount past
+/// the width is the same case with an assertion instead of a split. 128 is the limb-wise shift on a
+/// decomposition of one element, 200 adds the explicit amount check a narrow top limb needs, and 320
+/// is limbs. The amount's upper limbs are a widening's known zeros here, so
+/// [`a_wide_amount_is_held_below_its_second_limb_only_where_its_guard_holds`] sets one.
+#[test]
+fn a_guarded_shift_is_checked_only_where_its_guard_holds() {
+    for bits in [128usize, 200, 320] {
+        let high = IntBits::from_u128(bits, 1).shifted_left(bits - 1);
+        for kind in [BinaryArithOpKind::UShl, BinaryArithOpKind::UShr] {
+            for constant in [None, Some(bits)] {
+                let top = high.clone();
+                let ssa = main_program(
+                    &[Type::int(1), Type::int(64), Type::int(64)],
+                    &[Type::int(64)],
+                    move |e, params| {
+                        let value = e.cast_to(CastTarget::Int(bits), params[1]);
+                        let top = e.int_const(top.clone());
+                        let value = e.bin(BinaryArithOpKind::Or, value, top);
+                        let amount = match constant {
+                            Some(amount) => e.int_const(IntBits::from_u128(bits, amount as u128)),
+                            None => e.cast_to(CastTarget::Int(bits), params[2]),
+                        };
+
+                        let (then_id, _) = e.add_block();
+                        let (else_id, _) = e.add_block();
+                        let (merge_id, _) = e.add_block();
+                        e.seal_and_switch(Terminator::JmpIf(params[0], then_id, else_id), then_id);
+                        let shifted = e.bin(kind, value, amount);
+                        let low = e.cast_to(CastTarget::Int(64), shifted);
+                        e.seal_and_switch(Terminator::Jmp(merge_id, vec![low]), else_id);
+                        let zero = e.int_const(IntBits::zero(64));
+                        e.seal_and_switch(Terminator::Jmp(merge_id, vec![zero]), merge_id);
+                        vec![e.add_parameter(Type::int(64))]
+                    },
+                );
+                let what = format!("a guarded int{bits} {kind:?} by {constant:?}");
+                let compiled = Compiled::new(ssa)
+                    .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+
+                let run = |taken: u128, amount: u128, answer: u128| {
+                    compiled.run(&input_block(&[
+                        &IntBits::from_u128(1, taken),
+                        &IntBits::from_u128(64, 5),
+                        &IntBits::from_u128(64, amount),
+                        &IntBits::from_u128(64, answer),
+                    ]))
+                };
+
+                let past = bits as u128;
+                let verdict = run(0, past, 0);
+                assert!(
+                    verdict.is_accepted(),
+                    "{what}: not taken, by {past}: {verdict:?}"
+                );
+                let verdict = run(1, past, 0);
+                assert!(
+                    verdict.is_refusal(),
+                    "{what}: taken, by {past}: {verdict:?}"
+                );
+                if constant.is_none() {
+                    let verdict = run(0, u128::from(u64::MAX), 0);
+                    assert!(
+                        verdict.is_accepted(),
+                        "{what}: not taken, by 2^64 - 1: {verdict:?}"
+                    );
+
+                    let value = IntBits::from_u128(bits, 5).or(&high);
+                    let amount = IntBits::from_u128(bits, 3);
+                    let answer = mavros_int_semantics::eval(IntOp::from(kind), &value, &amount)
+                        .value()
+                        .expect("a shift by three is accepted");
+                    let answer = usize::try_from(&answer.cast(64)).unwrap() as u128;
+                    let verdict = run(1, 3, answer);
+                    assert!(verdict.is_accepted(), "{what}: taken, by 3: {verdict:?}");
+                }
+            }
+        }
+    }
+}
+
+/// A witnessed amount held as limbs is held to zero above its lowest limb only where its guard holds.
+///
+/// A bit in an upper limb names a shift past any width, so where the branch is taken the program is
+/// refused; where it is not, the bit is whatever that branch left behind and has to be admitted. The
+/// amount is a small input with bit 200 set, which only a runtime value can put there: a widened
+/// input's upper limbs are known zeros, and the constraint on a known zero holds either way.
+#[test]
+fn a_wide_amount_is_held_below_its_second_limb_only_where_its_guard_holds() {
+    let bits = 320usize;
+    let high = IntBits::from_u128(bits, 1).shifted_left(200);
+    for kind in [BinaryArithOpKind::UShl, BinaryArithOpKind::UShr] {
+        let high = high.clone();
+        let ssa = main_program(
+            &[Type::int(1), Type::int(64), Type::int(64)],
+            &[Type::int(64)],
+            move |e, params| {
+                let value = e.cast_to(CastTarget::Int(bits), params[1]);
+                let amount = e.cast_to(CastTarget::Int(bits), params[2]);
+                let high = e.int_const(high.clone());
+                let amount = e.bin(BinaryArithOpKind::Xor, amount, high);
+
+                let (then_id, _) = e.add_block();
+                let (else_id, _) = e.add_block();
+                let (merge_id, _) = e.add_block();
+                e.seal_and_switch(Terminator::JmpIf(params[0], then_id, else_id), then_id);
+                let shifted = e.bin(kind, value, amount);
+                let low = e.cast_to(CastTarget::Int(64), shifted);
+                e.seal_and_switch(Terminator::Jmp(merge_id, vec![low]), else_id);
+                let zero = e.int_const(IntBits::zero(64));
+                e.seal_and_switch(Terminator::Jmp(merge_id, vec![zero]), merge_id);
+                vec![e.add_parameter(Type::int(64))]
+            },
+        );
+        let what = format!("a guarded int{bits} {kind:?} by an amount past its lowest limb");
+        let compiled =
+            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        let run = |taken: u128| {
+            compiled.run(&input_block(&[
+                &IntBits::from_u128(1, taken),
+                &IntBits::from_u128(64, 5),
+                &IntBits::from_u128(64, 3),
+                &IntBits::zero(64),
+            ]))
+        };
+
+        let verdict = run(0);
+        assert!(verdict.is_accepted(), "{what}, not taken: {verdict:?}");
+        let verdict = run(1);
+        assert!(verdict.is_refusal(), "{what}, taken: {verdict:?}");
+    }
+}
+
+/// The mutation test for the limb-wise shift, by a witnessed amount and by a constant one.
+///
+/// The operand is a constant reaching every limb, selected by a witnessed bit so that it is a
+/// witnessed value; the amount is a widened parameter, or the constant, 70, which moves every limb
+/// one place and splits each at six. The answer leaves through its low limb. 128 is one element,
+/// whose amount's decomposition is its own bound; 200 is one element that needs the explicit
+/// check, and 320 limbs.
+///
+/// A `>>` by the constant reaches the limb-wise shift only at 320. At the widths an element carries
+/// the `Simplifier` that runs before taint inference has made it a `BitRange`, so what is pinned
+/// there is that lowering instead, and the `<<` by the constant is what pins the cut.
+///
+/// **The amount is also moved on its own**, by [`assert_changing_an_input_breaks_the_witness`]:
+/// the split and the barrel read it only through its decomposition, so a decomposition left behind
+/// by a different amount is what `n = h·Σe_t·2^t + r` has to refuse, and no single column of the
+/// honest run moving shows that. So is the operand, which the split has to notice with the halves
+/// of the old one still in place.
+#[test]
+fn every_witness_column_of_a_limbed_shift_is_pinned() {
+    let selected = IntBits::from_u128(1, 1);
+    let amount = 70u128;
+    for bits in [128usize, 200, 320] {
+        let every_other = ((BigUint::from(1u8) << bits) - 1u8) / 3u8;
+        let operand = IntBits::from_biguint(bits, &every_other);
+        for kind in [BinaryArithOpKind::UShl, BinaryArithOpKind::UShr] {
+            let answer = mavros_int_semantics::eval(
+                IntOp::from(kind),
+                &operand,
+                &IntBits::from_u128(bits, amount),
+            )
+            .value()
+            .expect("a shift by 70 is accepted")
+            .cast(64);
+
+            for constant in [false, true] {
+                let pattern = operand.clone();
+                let ssa = main_program(
+                    &[Type::int(1), Type::int(64)],
+                    &[Type::int(64)],
+                    move |e, params| {
+                        let value = e.int_const(pattern.clone());
+                        let zero = e.int_const(IntBits::zero(bits));
+                        let value = e.select(params[0], value, zero);
+                        let by = if constant {
+                            e.int_const(IntBits::from_u128(bits, amount))
+                        } else {
+                            e.cast_to(CastTarget::Int(bits), params[1])
+                        };
+                        let shifted = e.bin(kind, value, by);
+                        vec![e.cast_to(CastTarget::Int(64), shifted)]
+                    },
+                );
+                let what = format!(
+                    "{kind:?} at {bits} bits by {}",
+                    if constant { "a constant" } else { "a witness" }
+                );
+                let compiled = Compiled::new(ssa)
+                    .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+                let by = IntBits::from_u128(64, amount);
+                let inputs = [&selected, &by, &answer];
+                assert_every_column_is_pinned(&what, &compiled, &inputs);
+                assert_changing_an_input_breaks_the_witness(
+                    &format!("{what}, the operand sent to zero"),
+                    &compiled,
+                    &inputs,
+                    0,
+                    &IntBits::zero(1),
+                );
+                if !constant {
+                    assert_changing_an_input_breaks_the_witness(
+                        &format!("{what}, the amount moved by one"),
+                        &compiled,
+                        &inputs,
+                        1,
+                        &IntBits::from_u128(64, amount + 1),
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// A division whose answer is known before it runs still refuses a zero divisor.
 ///
 /// Zero divided by anything leaves every limb of both answers a known zero, so neither is
@@ -1088,7 +1725,11 @@ fn check_limbed_corners(limbed: Limbed, bits: usize, values: &[IntBits], rhs: Rh
         .flat_map(|a| values.iter().map(move |b| (a.clone(), b.clone())))
         .collect();
     let per_program = match limbed {
-        Limbed::Product | Limbed::Quotient | Limbed::Remainder => 20,
+        Limbed::Product
+        | Limbed::Quotient
+        | Limbed::Remainder
+        | Limbed::ShiftLeft
+        | Limbed::ShiftRight => 20,
         Limbed::Sum | Limbed::Difference | Limbed::Ordering => 50,
     };
     for pairs in pairs.chunks(per_program) {
@@ -1104,6 +1745,10 @@ enum Rhs {
 
     /// The corner constant itself, which a lowering sees as a constant and may cut at compile time.
     Constant,
+
+    /// Selected by a witnessed bit, as [`Rhs::Witnessed`] is, against a left operand that is the
+    /// corner constant itself: a pure value put through a witnessed one, as `1 << n` is.
+    AgainstPure,
 }
 
 /// `limbed` over `pairs`, all in one program, against the model.
@@ -1116,21 +1761,23 @@ enum Rhs {
 /// every run. Its operands are selected by a second parameter naming the pair instead, and are
 /// idle on every run but the one that names it — where the pipeline has to refuse, and only there.
 /// Idle is zero, apart from a divisor, which is one ([`Limbed::idle_rhs`]). A constant right
-/// operand is not selected, so there it is the left one alone that goes to zero.
+/// operand is not selected, so there it is the left one alone that goes to zero, and a pure left one
+/// is not either, so there it is the right one alone.
 fn check_limbed_pairs(limbed: Limbed, bits: usize, pairs: Vec<(IntBits, IntBits)>, rhs: Rhs) {
     let answers: Vec<Option<IntBits>> = pairs.iter().map(|(a, b)| limbed.model(a, b)).collect();
     let zero = IntBits::zero(bits);
     let idle = limbed.idle_rhs(bits);
     let unnamed: Vec<IntBits> = pairs
         .iter()
-        .map(|(_, right)| {
-            let right = match rhs {
-                Rhs::Witnessed => &idle,
-                Rhs::Constant => right,
+        .map(|(left, right)| {
+            let (left, right) = match rhs {
+                Rhs::Witnessed => (&zero, &idle),
+                Rhs::Constant => (&zero, right),
+                Rhs::AgainstPure => (left, &idle),
             };
             limbed
-                .model(&zero, right)
-                .expect("the operation accepts a zero left operand against this right one")
+                .model(left, right)
+                .expect("the operation accepts an idle operand against this other one")
         })
         .collect();
 
@@ -1161,10 +1808,13 @@ fn check_limbed_pairs(limbed: Limbed, bits: usize, pairs: Vec<(IntBits, IntBits)
                     }
                 };
                 let lhs = e.int_const(lhs.clone());
-                let lhs = e.select(left_chosen, lhs, zero);
+                let lhs = match rhs {
+                    Rhs::AgainstPure => lhs,
+                    Rhs::Witnessed | Rhs::Constant => e.select(left_chosen, lhs, zero),
+                };
                 let right = e.int_const(right.clone());
                 let rhs = match rhs {
-                    Rhs::Witnessed => e.select(right_chosen, right, idle),
+                    Rhs::Witnessed | Rhs::AgainstPure => e.select(right_chosen, right, idle),
                     Rhs::Constant => right,
                 };
                 let got = limbed.emit(e, lhs, rhs);
@@ -1475,7 +2125,9 @@ fn the_whole_corner_matrix_agrees_with_the_model() {
     for kind in BinaryArithOpKind::ALL {
         let op = IntOp::from(kind);
         for &bits in corners::widths_for(op.is_signed()) {
-            if op.is_shift() && (!bits.is_power_of_two() || bits > 64) {
+            // A signed shift reads its sign in one cell, which the signed frontier bounds; past it
+            // the program is refused, which is unit 13's to lift.
+            if kind.is_signed() && bits > MAX_LOWERED_SIGNED_BITS {
                 continue;
             }
             sweep(kind, bits);
@@ -1520,45 +2172,13 @@ fn contains_all(text: &str, expected: &[&str]) {
     }
 }
 
-/// A witnessed shift bounds its amount by the low `log2(bits)` bits of it, which is the bound
-/// itself only at a power-of-two width. Retiring this means rebuilding the check as a real
-/// `amount < bits` comparison.
-#[test]
-fn a_witness_shift_at_a_non_power_of_two_width_is_refused() {
-    contains_all(
-        &refusal_for(BinaryArithOpKind::UShl, 5, 5),
-        &[
-            "error: a witnessed int5 left shift is not supported",
-            "= note: a witnessed shift bounds its amount by the low bits of it",
-        ],
-    );
-}
-
-/// A 128-bit witness `<<` lowers to the single field product `lhs * 2^n`, which reaches 2^255 and
-/// wraps. Retiring this means splitting the shift limb-wise.
+/// A 128-bit witness `<<` by a literal amount compiles and agrees, whatever the amount.
 ///
-/// The amount here is an entry-point parameter, so the program states none and the refusal is on
-/// the widest amount the width admits. An amount the program _does_ state is a different question,
-/// answered in [`a_witness_shift_left_by_a_literal_amount_that_fits_is_lowered`].
+/// This is `noir-bignum`'s `get_double_modulus`, which is what the three `passport` tests in the
+/// local corpus compile. The amount is known, so the shift is a relabelling of bits: the operand is
+/// cut where the discarded bits begin, and the piece below moves up.
 #[test]
-fn a_witness_shift_left_at_a_hundred_and_twenty_eight_bits_is_refused() {
-    contains_all(
-        &refusal_for(BinaryArithOpKind::UShl, 128, 128),
-        &[
-            "error: a witnessed int128 left shift is not supported",
-            "= note: a witnessed shift forms `value * 2^amount` in one field element",
-            "= note: an amount the program states as a literal is held to that amount",
-        ],
-    );
-}
-
-/// The same width, shifted by an amount written in the program, compiles and agrees.
-///
-/// `2^(128 + 120)` sits well inside the modulus, so the single field product is honest and its
-/// range check means what it says. This is `noir-bignum`'s `get_double_modulus`, which is what the
-/// three `passport` tests in the local corpus compile.
-#[test]
-fn a_witness_shift_left_by_a_literal_amount_that_fits_is_lowered() {
+fn a_witness_shift_left_by_a_literal_amount_is_lowered() {
     let bits = 128;
     let amount = 120;
     let value = IntBits::from_u128(bits, 0xab);
@@ -1567,62 +2187,32 @@ fn a_witness_shift_left_by_a_literal_amount_that_fits_is_lowered() {
         let literal = e.int_const(IntBits::from_u128(bits, amount as u128));
         vec![e.bin(BinaryArithOpKind::UShl, params[0], literal)]
     });
-    let compiled = Compiled::new(ssa).expect("a literal amount with headroom compiles");
+    let compiled = Compiled::new(ssa).expect("a shift by a literal compiles");
 
     let verdict = compiled.run(&input_block(&[&value, &value.shifted_left(amount)]));
     assert!(verdict.is_accepted(), "int{bits} << {amount}: {verdict:?}");
 }
 
-/// A shift admitted by its literal amount still meets the 128-bit lowering's own divergence: an
-/// operand whose shifted product leaves the width is **rejected at proving time** rather than
-/// wrapped.
+/// A 128-bit shift by a literal **wraps**, as Noir's `<<` does, at every amount below the width.
 ///
-/// `wrap_shifted_product` truncates through an `Int(2 * bits)` intermediate, which at 128 bits is
-/// an `Int(256)` nothing can express yet, so that width falls back to a trapping range check on the
-/// product. Admitting the literal amount neither causes this nor fixes it — it is the shift's other
-/// divergence, and a wide multiply is what retires it.
+/// A single field product `lhs * 2^n` cannot hold this: past 125 it wraps modulo the field. The
+/// shift is limb-wise instead, where the operand is cut where the discarded bits begin, and 126 and
+/// 127 are the amounts no single product reaches.
 #[test]
-fn a_literal_amount_does_not_make_the_hundred_and_twenty_eight_bit_shift_wrap() {
+fn a_literal_shift_at_a_hundred_and_twenty_eight_bits_wraps_at_every_amount() {
     let bits = 128;
-    let amount = 120;
-
-    // One bit too many to survive the shift: `2^8 << 120` is `2^128`, which the product's range
-    // check refuses where Noir's `<<` would have discarded it.
-    let value = IntBits::from_u128(bits, 1 << 8);
-
-    let ssa = main_program(&[Type::int(bits)], &[Type::int(bits)], |e, params| {
-        let literal = e.int_const(IntBits::from_u128(bits, amount as u128));
-        vec![e.bin(BinaryArithOpKind::UShl, params[0], literal)]
-    });
-    let compiled = Compiled::new(ssa).expect("a literal amount with headroom compiles");
-
-    let verdict = compiled.run(&input_block(&[&value, &value.shifted_left(amount)]));
-    assert!(
-        !verdict.is_accepted(),
-        "an overflowing int{bits} << {amount} is rejected rather than wrapped: {verdict:?}"
-    );
-}
-
-/// And the exemption stops where the product does: one bit more of amount leaves the field.
-///
-/// `widest_injective_int_bits` is 253 on bn254, so a 128-bit value shifts by up to 125 and no
-/// further.
-#[test]
-fn a_literal_shift_amount_is_admitted_only_while_its_own_product_fits() {
-    let bits = 128;
-    let widest_amount = first_width_past_the_field() - 1 - bits;
-
-    for (amount, refused) in [(widest_amount, false), (widest_amount + 1, true)] {
+    let value = IntBits::all_ones(bits);
+    for amount in [3usize, 120, 125, 126, 127] {
         let ssa = main_program(&[Type::int(bits)], &[Type::int(bits)], |e, params| {
             let literal = e.int_const(IntBits::from_u128(bits, amount as u128));
             vec![e.bin(BinaryArithOpKind::UShl, params[0], literal)]
         });
-
-        assert_eq!(
-            Compiled::new(ssa).is_err(),
-            refused,
-            "int{bits} << {amount} should {} be refused",
-            if refused { "" } else { "not" }
+        let compiled = Compiled::new(ssa)
+            .unwrap_or_else(|error| panic!("int{bits} << {amount} does not compile: {error}"));
+        let verdict = compiled.run(&input_block(&[&value, &value.shifted_left(amount)]));
+        assert!(
+            verdict.is_accepted(),
+            "int{bits} << {amount} wraps: {verdict:?}"
         );
     }
 }

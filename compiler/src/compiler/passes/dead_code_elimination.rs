@@ -635,7 +635,7 @@ impl DCE {
                     }
 
                     if let Some(types) = &witness_types
-                        && owes_witness_check(instruction, types.get_function(*function_id))
+                        && owes_witness_check(ssa, instruction, types.get_function(*function_id))
                     {
                         worklist.push(WorkItem::LiveInstruction(*function_id, *block_id, i));
                     }
@@ -1350,9 +1350,9 @@ impl HLEmitter for VecEmitter<'_, '_> {
 
 /// The operands of an unguarded `Div`/`Mod`, which cannot be deleted when their results go dead.
 ///
-/// Deliberately matches only at the top level: a `Guard`-wrapped division must keep today's
-/// behavior, because inside an inactive branch it is required not to fail and `lower_divmod_guard`
-/// already encodes that.
+/// Deliberately matches only at the top level. `Guard`-wrapped division is left to be handled in
+/// `lower_divmod_guard`, as inside an inactive branch it is required not to fail and that lowering
+/// already encodes the correct behavior.
 fn unguarded_divmod_operands(
     instruction: &OpCode,
 ) -> Option<(BinaryArithOpKind, ValueId, ValueId)> {
@@ -1422,10 +1422,14 @@ fn unguarded_overflow_operands(
 /// Whether `instruction` is an integer operation with a witnessed operand, guarded or not, whose
 /// failure check its witness lowering has yet to emit.
 ///
-/// Three kinds of operation need one:
+/// Four kinds of operation need one:
 ///
 /// - A checked `Add`/`Sub`/`Mul` rejects an overflow by the range check that
 ///   `LowerWitnessIntegerArithOps` imposes on its result.
+/// - A `Shl`/`Shr` rejects an amount at or past the width in its own lowering, whichever of
+///   `LowerWitnessBitwiseOps` and `WideWitnessInts` it reaches; `LowerPureGuards` gives a shift
+///   with a witness operand no check. One whose amount is a literal below the width has nothing to
+///   reject, and is left to be deleted.
 /// - An unsigned `Div`/`Rem` by a witness rejects a zero divisor in its own lowering, and so is
 ///   given no check by `LowerPureGuards`; see [`divisor_checked_by_its_lowering`].
 /// - A `Guard`-wrapped `Div`/`Rem` with any witness operand is given none either, whatever its
@@ -1436,15 +1440,15 @@ fn unguarded_overflow_operands(
 /// Those lowerings run well after taint inference, behind several runs of this pass. A run that
 /// deleted a dead one in between would delete the rejection with it, and an overflowing
 /// `let _ = a + b`, or a `let _ = a / b` by zero, would verify. Every run that can still see one
-/// keeps it as until the lowering replaces it, the operation **is** its check. A `Guard`-wrapped
+/// keeps it, as until the lowering replaces it the operation **is** its check. A `Guard`-wrapped
 /// `Add`/`Sub`/`Mul` is kept too, since the guarded check still has to reject in the branch that is
 /// taken.
 ///
 /// Field arithmetic has no lowering-built check and remains possible to delete: a field division
 /// has its check built by `LowerPureGuards` as an assertion, guarded or not, which is never dead.
-/// So do every other division and every pure integer op, before any run after taint inference can
-/// see them.
-fn owes_witness_check(instruction: &OpCode, types: &FunctionTypeInfo) -> bool {
+/// Every other division and every pure integer operation has its check built by `LowerPureGuards`
+/// too, before any run after taint inference can see it, and so remains possible to delete as well.
+fn owes_witness_check(ssa: &HLSSA, instruction: &OpCode, types: &FunctionTypeInfo) -> bool {
     let (guarded, instruction) = match instruction {
         OpCode::Guard { inner, .. } => (true, inner.as_ref()),
         other => (false, other),
@@ -1452,6 +1456,7 @@ fn owes_witness_check(instruction: &OpCode, types: &FunctionTypeInfo) -> bool {
     let OpCode::BinaryArithOp { kind, lhs, rhs, .. } = instruction else {
         return false;
     };
+    let amount = *rhs;
     let (Some(lhs), Some(rhs)) = (
         types.try_get_value_type(*lhs),
         types.try_get_value_type(*rhs),
@@ -1464,6 +1469,20 @@ fn owes_witness_check(instruction: &OpCode, types: &FunctionTypeInfo) -> bool {
         ArithGroup::Add | ArithGroup::Sub | ArithGroup::Mul => witnessed_int,
         ArithGroup::Div | ArithGroup::Rem if guarded => witnessed_int,
         ArithGroup::Div | ArithGroup::Rem => divisor_checked_by_its_lowering(*kind, rhs),
+        ArithGroup::Shl | ArithGroup::Shr => {
+            witnessed_int && !shift_amount_is_a_legal_literal(ssa, lhs, amount)
+        }
+        ArithGroup::And | ArithGroup::Or | ArithGroup::Xor => false,
+    }
+}
+
+/// Whether a shift of an `lhs` by `rhs` is by a literal below `lhs`'s width, so that it cannot fail.
+fn shift_amount_is_a_legal_literal(ssa: &HLSSA, lhs: &Type, rhs: ValueId) -> bool {
+    let Some(bits) = shift_operand_bits(lhs) else {
+        return false;
+    };
+    match ssa.get_const(rhs).as_deref() {
+        Some(Constant::Int(pattern)) => usize::try_from(pattern).is_ok_and(|amount| amount < bits),
         _ => false,
     }
 }

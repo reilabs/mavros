@@ -177,6 +177,31 @@ impl<'a> ExpressionConverter<'a> {
         Type::function_returning(self.type_converter.call_results(ret))
     }
 
+    /// Note: for `Definition::Function` idents, the Noir type may be
+    /// `Tuple([Function, Function])` (constrained + unconstrained pair), but `convert_ident`
+    /// produces a single scalar `FnPtr` value, so the pair is unwrapped rather than converted.
+    ///
+    /// Also, if the tuple element is itself a tuple, using `return_type` can be faulty, because
+    /// `return_type` recurses through tuple elements. That recursion can then read through the
+    /// tuple wrapping the function pair.
+    fn tuple_element_type(&self, expr: &Expression) -> Type {
+        match expr {
+            Expression::Ident(ident) if matches!(&ident.definition, Definition::Function(_)) => {
+                self.function_ident_type(ident)
+            }
+            Expression::Tuple(elements) => Type::tuple_of(
+                elements
+                    .iter()
+                    .map(|e| self.tuple_element_type(e))
+                    .collect(),
+            ),
+            other => {
+                let return_type = other.return_type().expect("Tuple element must have a type");
+                self.type_converter.convert_type(&return_type)
+            }
+        }
+    }
+
     /// Turn an optional Noir location into a definite `SourceLocation`.
     fn resolve_location(&self, location: Option<NoirLocation>) -> SourceLocation {
         location
@@ -1700,22 +1725,7 @@ impl<'a> ExpressionConverter<'a> {
             .collect();
 
         // Get types for each element
-        // Note: For Definition::Function idents, the Noir type may be
-        // Tuple([Function, Function]) (constrained + unconstrained pair),
-        // but convert_ident produces a single scalar FnPtr value, so the pair
-        // is unwrapped rather than converted.
-        let types: Vec<_> = exprs
-            .iter()
-            .map(|e| {
-                if let Expression::Ident(ident) = e
-                    && matches!(&ident.definition, Definition::Function(_))
-                {
-                    return self.function_ident_type(ident);
-                }
-                let return_type = e.return_type().expect("Tuple element must have a type");
-                self.type_converter.convert_type(&return_type)
-            })
-            .collect();
+        let types: Vec<_> = exprs.iter().map(|e| self.tuple_element_type(e)).collect();
 
         // Always construct a materialized tuple
         let tuple = self.emit_located(b, exprs.first().and_then(Self::expression_location), |e| {

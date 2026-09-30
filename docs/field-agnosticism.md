@@ -325,8 +325,8 @@ that gives each field its own implementation. Nothing here is outstanding P3 wor
       (`two_pow`).
 - [ ] `compiler/src/compiler/passes/instruction_lowering/witness_bitwise.rs` — bitmask/sign-extend
       via `b.field().two_pow(..)`. The helper is gone (see `L4-two-pow`); what remains is the
-      _strategy_, which wraps mod p once the shift reaches the field width (see also
-      `L6-int-op-strategy`).
+      _strategy_, one field product per shift, which `single_cell_shift_fits` keeps below the
+      modulus by sending every wider shift to the limb-wise one (see `L6-int-op-strategy`).
 
 ### `L4-low-limb` — Low-Limb Integer Extraction in Witgen (Representation, P4)
 
@@ -533,19 +533,16 @@ the field's modulus width and witness limb width to the caller's own description
 fit, so a refusal names both halves of the mismatch, and the set of its call sites **is** the
 machine-readable half of this register.
 
-The call sites: `witness_bitwise`'s `lower_integer_sext`, `lower_word_bitwise` (spread width) and
-`product_headroom_or_bail`; `witness_integer_arith`'s `lower_unsigned_mul` (both the single-field
-product and the two-limb packing, the latter covering the limb _count_ as well as the packing);
-`lower_signed_addsub` and `lower_signed_mul`; `shared/limbs.rs`'s `combine_limbs_of_value` (the
-recombination); `witness_field`'s `to_bits` and `to_radix`; and `shared::overflow_guard`'s
-`abs_as_u`.
+The call sites: `witness_bitwise`'s `lower_integer_sext` and `lower_word_bitwise` (spread width);
+`witness_integer_arith`'s `lower_unsigned_mul` (both the single-field product and the two-limb
+packing, the latter covering the limb _count_ as well as the packing); `lower_signed_addsub` and
+`lower_signed_mul`; `shared/limbs.rs`'s `combine_limbs_of_value` (the recombination);
+`witness_field`'s `to_bits` and `to_radix`; `shared::overflow_guard`'s `abs_as_u`; and
+`wide_witness_ints`' `schoolbook` (the product and the division) and `lower_shift` (the limb-wise
+shift).
 
-Two kinds of neighboring check deliberately stay out: an internal invariant no field choice can
-violate (`bit_range`'s "a field `BitRange` cannot exceed a field element"), and a branch whose
-condition is a representational threshold rather than a field width (`wrap_shifted_product`'s
-trapping fallback, which rejects a witness at proving time rather than refusing every 128-bit `<<`
-at compile time — its threshold is field-derived, which strengthens the case rather than weakening
-it, since a narrower field would make a funnel refusal reject more programs outright).
+One kind of neighboring check deliberately stays out: an internal invariant no field choice can
+violate (`bit_range`'s "a field `BitRange` cannot exceed a field element").
 
 **P5 target — integers wider than the field must be _supported_, not rejected.** The end state is a
 **multi-cell representation** (Option A): an integer whose type range is `≥ p` (`n > B`) is carried
@@ -594,6 +591,17 @@ A single-field arithmetic op assumes its exact result span fits one cell (one `b
       plans that same schoolbook, and refuses a signed division wherever the single cell cannot hold
       its product, as the signed lowering reads its magnitudes through this one. What reaches the
       single-cell lowering fits the cell, and it asserts so.
+- [x] `witness_bitwise.rs` — `lower_shift` (`value · 2^n` in one field element, or a division by
+      `2^n`). The FALSE case is the **limb-wise shift** in `WideWitnessInts`, which takes every
+      unsigned witnessed shift `single_cell_shift_fits` (`shared/limbs.rs`) says one cell cannot
+      hold: a left shift whose `2^(2·bits − 1)` passes the modulus, and a right shift whose division
+      has a product that does. A known amount cuts each limb where its bits land on a limb boundary
+      of the answer; any other is `q·h + r`, with `r` keyed into the powers-of-two table the narrow
+      shift already uses, every limb split at `2^r` into two range-checked halves, and a barrel over
+      the bits of `q`. `limb_shift_fits` has the funnel refuse a field whose limb times a power of
+      two below it passes an element — goldilocks at the default `LimbBudget` — and a signed shift
+      is refused wherever the single cell cannot hold it. What reaches `lower_shift` fits the cell,
+      and it asserts so.
 - [x] `witness_integer_arith.rs` — `lower_unsigned_addsub`; `witness_compare.rs` —
       `lower_unsigned_lt` for an unsigned ordering; and `witness_assert.rs` —
       `lower_unsigned_assert_lt` for an asserted one. The FALSE case is the **carry chain** in
@@ -629,9 +637,10 @@ to the half-limb decomposition instead of refusing. What that site still refuses
 **The rest still carry the assumption unchecked**, with only a `FIELD-ASSUMPTION` comment on it, and
 are what to fix first if a narrow field is configured before P5's lowerings exist: the
 `signed_value_from_encoded`/`encode_signed_value` sign packing, and `lower_signed_lt`'s ordering.
-`lower_unsigned_divmod`'s 128-bit path reconstructs `q·divisor + r` by emitting `UMul`/`UAdd`
-**ops**, which this same pass re-lowers after `WideWitnessInts` has run, so that product meets the
-single-cell mul's refusals rather than the schoolbook.
+
+`lower_unsigned_divmod`'s 128-bit path is checked, but indirectly: it reconstructs `q·divisor + r`
+by emitting `UMul`/`UAdd` **ops**, which this same pass re-lowers after `WideWitnessInts` has run,
+so that product meets the single-cell mul's refusals rather than the schoolbook.
 
 Note that the funnel's condition is per-site, because `witness_limb_bits` certifies only that a bare
 `a·b` fits. A lowering that additionally scales a column by a place value asks

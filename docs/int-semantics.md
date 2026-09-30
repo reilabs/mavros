@@ -239,15 +239,24 @@ widest sum one field element holds, an unsigned sum or difference is rejected by
 `wide_witness_ints.rs` instead: it lets no carry out of the top limb, so an overflow fails the range
 check on that limb of the answer.
 
-A **witness** shift amount gets no check at all: the powers-of-two table's keys are exactly the
-legal amounts, so `emit_pow2_factor`'s lookup rejects an out-of-range one as a side effect of
-reading the factor it was going to need anyway.
+A **witness** shift amount at a power-of-two width gets no check as the powers-of-two table's keys
+are exactly the legal amounts, so `emit_pow2_factor`'s lookup rejects an out-of-range one as a side
+effect of reading the factor. At any other width the table has more rows than amounts, and the
+amount pays the explicit check as well.
 
-Two cases still pay the explicit `emit_shift_amount_check`. A **pure** amount pays it on either
-lowering — the constant-amount one when the left-hand side is unsigned, the general one when it is
-signed — which is the common case, and the one `witness_shift_amount_oob_fails` covers. So does a
-witness amount the range domain has **pinned** to a literal, when the left-hand side is unsigned:
-there the check is emitted and then discharges itself against the same range that pinned the amount.
+Every other case pays the explicit `emit_shift_amount_check`, which is a comparison for a pure
+amount and `bits - 1 - amount` range-checked at `ceil(log2(bits))` for a witnessed one. A **pure**
+amount pays it on either lowering (as the constant-amount one when the left-hand side is unsigned,
+the general one when it is signed) which is the common case. So does a witness amount the range
+domain has **pinned** to a literal, when the left-hand side is unsigned: there the check is emitted
+and then discharges itself against the same range that pinned the amount.
+
+Past the single cell, which is from 128 bits for a `<<` and 127 for a `>>` on bn254, an unsigned
+shift is `wide_witness_ints.rs`' instead. A witnessed amount is decomposed into whole limbs and a
+remainder the table bounds below a limb, and that decomposition is the amount's bound where it
+reaches exactly the width; elsewhere `bits - 1 - amount` is range-checked there too. A pure amount
+is compared, as the guard IR compares one, under the shift's guard where it has one, and a known
+amount past the width is an assertion that cannot hold.
 
 Those restated rejections are registered alongside the `shared/` modules for that reason, and the
 pairs are held together by the corpus below, which renders every rejecting program with **witness**
@@ -306,16 +315,3 @@ currently implement Noir.
   why `SIGNED_WIDTHS` is narrower than `WIDTHS`. `passes::width_validation` reads the same constant
   and refuses a wider signed operation with a diagnostic, so a program meets this divergence as a
   compile error rather than as a panic.
-- **A _witness_ shift at a non-power-of-two width does not compile**, and is refused with a
-  diagnostic. All three total evaluators reduce the amount modulo the width, so they agree at every
-  width and the gap is not a disagreement between backends; what is missing is the _guard IR_, and
-  only on the witness path. `witness_bitwise::lower_shift` indexes bit `log2(bits)` to test "too
-  large" and keys its `2^n` factor table by the same number, and both are the amount bound only
-  where the width is a power of two, so it asserts rather than emitting a check it cannot express.
-  The _pure_ path has no such limit: `shift_guard::emit_shift_amount_tests` builds a real
-  `amount < bits` comparison, which is width-agnostic, and `shift_guard::shift_operand_bits`
-  accordingly admits any width. Admitting a witness one means rebuilding its check the same way.
-- **A _witness_ `<<` at 128 bits compiles only where the program writes its amount, and rejects an
-  overflowing shift rather than wrapping it.** This is a stopgap measure to keep the `passport_*`
-  tests compiling while performing most size-based refusals at compile time, and will be lifted once
-  the shift is computed limb-wise.
