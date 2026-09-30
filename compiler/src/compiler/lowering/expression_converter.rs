@@ -13,7 +13,7 @@ use noirc_frontend::{
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
-use mavros_int_semantics::MAX_LOWERED_SIGNED_BITS;
+use mavros_int_semantics::{IntBits, IntOp, MAX_LOWERED_SIGNED_BITS, Outcome, eval};
 
 use crate::{
     collections::{HashMap, HashSet},
@@ -32,30 +32,11 @@ use crate::{
 
 /// Loop context for break/continue support.
 struct LoopContext {
-    // The block containing the header of the current loop.
-    loop_header: BlockId,
+    /// The shared advance block for `for`, or the header for `while`/`loop`.
+    continue_target: BlockId,
 
-    // The block containing the exit of the current loop.
+    /// The block containing the exit of the current loop.
     exit_block: BlockId,
-
-    /// Source anchor for desugared instructions emitted on behalf of the loop body.
-    body_source_location: SourceLocation,
-
-    /// Only for `for` loops, used by Continue to increment.
-    for_loop_index: Option<ForLoopIndex>,
-}
-
-/// The loop index of a `for`, as everything that has to increment it needs to see it.
-///
-/// The signedness rides along deliberately. The index is incremented in two places — falling off
-/// the end of the body, and `continue` — and they must agree with each other _and_ with the exit
-/// test in the header, which is a comparison at the same signedness. Deriving it separately at
-/// each site is how those three drift apart.
-#[derive(Clone, Copy)]
-struct ForLoopIndex {
-    value: ValueId,
-    bit_size: usize,
-    signed: bool,
 }
 
 /// Converts expressions within a single function.
@@ -194,6 +175,31 @@ impl<'a> ExpressionConverter<'a> {
             )
         };
         Type::function_returning(self.type_converter.call_results(ret))
+    }
+
+    /// Note: for `Definition::Function` idents, the Noir type may be
+    /// `Tuple([Function, Function])` (constrained + unconstrained pair), but `convert_ident`
+    /// produces a single scalar `FnPtr` value, so the pair is unwrapped rather than converted.
+    ///
+    /// Also, if the tuple element is itself a tuple, using `return_type` can be faulty, because
+    /// `return_type` recurses through tuple elements. That recursion can then read through the
+    /// tuple wrapping the function pair.
+    fn tuple_element_type(&self, expr: &Expression) -> Type {
+        match expr {
+            Expression::Ident(ident) if matches!(&ident.definition, Definition::Function(_)) => {
+                self.function_ident_type(ident)
+            }
+            Expression::Tuple(elements) => Type::tuple_of(
+                elements
+                    .iter()
+                    .map(|e| self.tuple_element_type(e))
+                    .collect(),
+            ),
+            other => {
+                let return_type = other.return_type().expect("Tuple element must have a type");
+                self.type_converter.convert_type(&return_type)
+            }
+        }
     }
 
     /// Turn an optional Noir location into a definite `SourceLocation`.
@@ -378,6 +384,7 @@ impl<'a> ExpressionConverter<'a> {
             Expression::Break => {
                 let ctx = self.loop_stack.last().expect("break outside of loop");
                 let exit_block = ctx.exit_block;
+                assert!(!b.block(self.current_block).is_terminated());
                 b.block(self.current_block)
                     .terminate_jmp(exit_block, vec![]);
                 // Create a dead block for any subsequent code
@@ -386,31 +393,10 @@ impl<'a> ExpressionConverter<'a> {
                 None
             }
             Expression::Continue => {
-                let (loop_header, for_loop_index, body_source_location) = {
-                    let ctx = self.loop_stack.last().expect("continue outside of loop");
-                    (
-                        ctx.loop_header,
-                        ctx.for_loop_index,
-                        ctx.body_source_location.clone(),
-                    )
-                };
-                if let Some(index) = for_loop_index {
-                    // For loop: increment index and jump back to header
-                    let one = b.emit_const(index_step_one(index.bit_size));
-                    let next_index = self.emit_at_source_location(b, body_source_location, |e| {
-                        e.bin(
-                            BinaryArithOpKind::with_sign(ArithGroup::Add, index.signed),
-                            index.value,
-                            one,
-                        )
-                    });
-                    b.block(self.current_block)
-                        .terminate_jmp(loop_header, vec![next_index]);
-                } else {
-                    // While/loop: just jump back to header with no args
-                    b.block(self.current_block)
-                        .terminate_jmp(loop_header, vec![]);
-                }
+                let ctx = self.loop_stack.last().expect("continue outside of loop");
+                assert!(!b.block(self.current_block).is_terminated());
+                b.block(self.current_block)
+                    .terminate_jmp(ctx.continue_target, vec![]);
                 // Create a dead block for any subsequent code
                 let dead = b.add_block(|_| {});
                 self.current_block = dead;
@@ -726,98 +712,106 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn convert_for(&mut self, for_expr: &For, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
-        let body_source_location = self.expression_source_location(&for_expr.block);
-
-        // Evaluate start and end range in the current block
+        // Evaluate start and end range once, before entering the loop.
         let start = self.convert_expression(&for_expr.start_range, b).unwrap();
-        let end_raw = self.convert_expression(&for_expr.end_range, b).unwrap();
+        let end = self.convert_expression(&for_expr.end_range, b).unwrap();
 
         let index_type = self.type_converter.convert_type(&for_expr.index_type);
-        let field = b.field();
-
-        // The loop index carries the range's own signedness, and both the bump and the exit test
-        // are operations _on_ it, so they take their sign from it rather than defaulting. It is
-        // read from the Noir type, not from the converted one: an HLSSA integer type is a width.
+        let index_bit_size = index_type.get_bit_size(b.field());
+        // HLSSA integer types carry only width; comparisons and arithmetic take their
+        // signedness from the Noir index type.
         let index_signed = ast_type_is_signed(&for_expr.index_type);
 
-        // if range is inclusive, bump by one
-        let end = if for_expr.inclusive {
-            let one = b.emit_const(index_step_one(index_type.get_bit_size(field)));
-            self.emit_located(b, Some(for_expr.end_range_location), |e| {
-                e.bin(
-                    BinaryArithOpKind::with_sign(ArithGroup::Add, index_signed),
-                    end_raw,
-                    one,
-                )
+        // A constant endpoint can use the simpler exclusive header only when end + 1
+        // fits the index type. Delegate that check and addition to the integer model.
+        let exclusive_end = if for_expr.inclusive {
+            b.ssa().get_const(end).and_then(|constant| {
+                let Constant::Int(end) = &*constant else {
+                    return None;
+                };
+                let op = if index_signed {
+                    IntOp::SAdd
+                } else {
+                    IntOp::UAdd
+                };
+                match eval(op, end, &IntBits::one(index_bit_size)) {
+                    Outcome::Value(next) => Some(Constant::Int(next)),
+                    Outcome::Rejected(_) => None,
+                }
             })
         } else {
-            end_raw
+            None
         };
+        let inclusive = for_expr.inclusive && exclusive_end.is_none();
+        let end = exclusive_end.map(|end| b.emit_const(end)).unwrap_or(end);
 
-        // Create blocks for the loop structure
         let loop_header = b.add_block(|_| {});
         let loop_body = b.add_block(|_| {});
+        let loop_advance = b.add_block(|_| {});
         let exit_block = b.add_block(|_| {});
+        let end_location = self.resolve_location(Some(for_expr.end_range_location));
 
-        // Build header: parameter, condition, branch
         let loop_index = {
-            let header_location = self.resolve_location(Some(for_expr.end_range_location));
-            let mut header = b.block(loop_header).with_source_location(header_location);
+            let mut header = b
+                .block(loop_header)
+                .with_source_location(end_location.clone());
             let loop_index = header.add_parameter(index_type);
-            let cond = header.cmp(loop_index, end, CmpKind::lt(index_signed));
-            header.terminate_jmp_if(cond, loop_body, exit_block);
+            assert!(!header.is_terminated());
+            if inclusive {
+                // Test index <= end without computing end + 1, which may overflow.
+                let past_end = header.cmp(end, loop_index, CmpKind::lt(index_signed));
+                header.terminate_jmp_if(past_end, exit_block, loop_body);
+            } else {
+                let cond = header.cmp(loop_index, end, CmpKind::lt(index_signed));
+                header.terminate_jmp_if(cond, loop_body, exit_block);
+            }
             loop_index
         };
 
-        // Jump from current block to loop header with start value
+        // Both continue and body fallthrough use this advance path. Inclusive loops
+        // leave after processing the endpoint, before the shared increment can overflow.
+        let increment_block = if inclusive {
+            let increment_block = b.add_block(|_| {});
+            let mut advance = b.block(loop_advance).with_source_location(end_location);
+            let at_end = advance.cmp(loop_index, end, CmpKind::Eq);
+            assert!(!advance.is_terminated());
+            advance.terminate_jmp_if(at_end, exit_block, increment_block);
+            increment_block
+        } else {
+            loop_advance
+        };
+        {
+            let one = b.emit_const(index_step_one(index_bit_size));
+            let location = self.resolve_location(Some(for_expr.start_range_location));
+            let mut increment = b.block(increment_block).with_source_location(location);
+            let next_index = increment.bin(
+                BinaryArithOpKind::with_sign(ArithGroup::Add, index_signed),
+                loop_index,
+                one,
+            );
+            assert!(!increment.is_terminated());
+            increment.terminate_jmp(loop_header, vec![next_index]);
+        }
+
+        assert!(!b.block(self.current_block).is_terminated());
         b.block(self.current_block)
             .terminate_jmp(loop_header, vec![start]);
 
-        // In the loop body: bind the index variable and execute the block
         self.current_block = loop_body;
         self.bindings.insert(for_expr.index_variable, loop_index);
-
-        let index_bit_size = self
-            .type_converter
-            .convert_type(&for_expr.index_type)
-            .get_bit_size(field);
-
-        // Push loop context for break/continue
         self.loop_stack.push(LoopContext {
-            loop_header,
+            continue_target: loop_advance,
             exit_block,
-            body_source_location,
-            for_loop_index: Some(ForLoopIndex {
-                value: loop_index,
-                bit_size: index_bit_size,
-                signed: index_signed,
-            }),
         });
-
-        // Execute the loop body
         self.convert_expression(&for_expr.block, b);
-
         self.loop_stack.pop();
 
-        // Increment the index and jump back to header
-        // (only if current block is not already terminated by break/continue)
         if !b.block(self.current_block).is_terminated() {
-            let one = b.emit_const(index_step_one(index_bit_size));
-            let next_index = self.emit_located(b, Some(for_expr.start_range_location), |e| {
-                e.bin(
-                    BinaryArithOpKind::with_sign(ArithGroup::Add, index_signed),
-                    loop_index,
-                    one,
-                )
-            });
             b.block(self.current_block)
-                .terminate_jmp(loop_header, vec![next_index]);
+                .terminate_jmp(loop_advance, vec![]);
         }
 
-        // Continue in the exit block
         self.current_block = exit_block;
-
-        // For loops don't produce a value
         None
     }
 
@@ -826,30 +820,30 @@ impl<'a> ExpressionConverter<'a> {
         while_expr: &While,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        let body_source_location = self.expression_source_location(&while_expr.body);
-
         // Create blocks: loop_header evaluates condition, loop_body runs body, exit_block continues
         let loop_header = b.add_block(|_| {});
         let loop_body = b.add_block(|_| {});
         let exit_block = b.add_block(|_| {});
 
         // Jump from current block to loop header
+        assert!(!b.block(self.current_block).is_terminated());
         b.block(self.current_block)
             .terminate_jmp(loop_header, vec![]);
 
-        // In loop header: evaluate condition, branch
+        // Evaluate the condition outside this loop's context: break/continue target the
+        // enclosing loop. Evaluation can change current_block, so branch from its exit
+        // rather than overwriting the header's terminator.
         self.current_block = loop_header;
         let cond = self.convert_expression(&while_expr.condition, b).unwrap();
-        b.block(loop_header)
+        assert!(!b.block(self.current_block).is_terminated());
+        b.block(self.current_block)
             .terminate_jmp_if(cond, loop_body, exit_block);
 
         // In loop body: push context, convert body, pop context, jump back to header
         self.current_block = loop_body;
         self.loop_stack.push(LoopContext {
-            loop_header,
+            continue_target: loop_header,
             exit_block,
-            body_source_location,
-            for_loop_index: None,
         });
 
         self.convert_expression(&while_expr.body, b);
@@ -874,23 +868,20 @@ impl<'a> ExpressionConverter<'a> {
         body: &Expression,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        let body_source_location = self.expression_source_location(body);
-
         // loop { body } — only exits via break
         let loop_block = b.add_block(|_| {});
         let exit_block = b.add_block(|_| {});
 
         // Jump from current block to loop block
+        assert!(!b.block(self.current_block).is_terminated());
         b.block(self.current_block)
             .terminate_jmp(loop_block, vec![]);
 
         // In loop block: push context, convert body, pop context, jump back
         self.current_block = loop_block;
         self.loop_stack.push(LoopContext {
-            loop_header: loop_block,
+            continue_target: loop_block,
             exit_block,
-            body_source_location,
-            for_loop_index: None,
         });
 
         self.convert_expression(body, b);
@@ -980,6 +971,7 @@ impl<'a> ExpressionConverter<'a> {
         let else_block = b.add_block(|_| {});
         let merge_block = b.add_block(|_| {});
 
+        assert!(!b.block(self.current_block).is_terminated());
         b.block(self.current_block)
             .terminate_jmp_if(condition, then_block, else_block);
 
@@ -995,6 +987,8 @@ impl<'a> ExpressionConverter<'a> {
         let else_value = otherwise(self, b);
         let else_exit = self.current_block;
 
+        assert!(!b.block(then_exit).is_terminated());
+        assert!(!b.block(else_exit).is_terminated());
         if is_unit {
             b.block(then_exit).terminate_jmp(merge_block, vec![]);
             b.block(else_exit).terminate_jmp(merge_block, vec![]);
@@ -1731,22 +1725,7 @@ impl<'a> ExpressionConverter<'a> {
             .collect();
 
         // Get types for each element
-        // Note: For Definition::Function idents, the Noir type may be
-        // Tuple([Function, Function]) (constrained + unconstrained pair),
-        // but convert_ident produces a single scalar FnPtr value, so the pair
-        // is unwrapped rather than converted.
-        let types: Vec<_> = exprs
-            .iter()
-            .map(|e| {
-                if let Expression::Ident(ident) = e
-                    && matches!(&ident.definition, Definition::Function(_))
-                {
-                    return self.function_ident_type(ident);
-                }
-                let return_type = e.return_type().expect("Tuple element must have a type");
-                self.type_converter.convert_type(&return_type)
-            })
-            .collect();
+        let types: Vec<_> = exprs.iter().map(|e| self.tuple_element_type(e)).collect();
 
         // Always construct a materialized tuple
         let tuple = self.emit_located(b, exprs.first().and_then(Self::expression_location), |e| {

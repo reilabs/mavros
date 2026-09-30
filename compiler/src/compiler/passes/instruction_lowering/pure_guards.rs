@@ -134,9 +134,8 @@ impl InstructionLoweringRule for LowerPureGuards {
             // so an unconditional shift reached `lower_shift_guard` never.
             //
             // Pure inputs only, matching the guarded arm. A shift with a witness operand is left
-            // for `LowerWitnessBitwiseOps::lower_shift`, which emits the equivalent check itself
-            // (`emit_shift_amount_check`, on both of its lowerings) because it has to be able to
-            // build that check out of constraints rather than out of a pure comparison.
+            // to its own lowering, which emits the equivalent check itself because it has to be
+            // able to build that check out of constraints rather than out of a pure comparison.
             OpCode::BinaryArithOp {
                 kind,
                 result,
@@ -772,8 +771,8 @@ impl LowerPureGuards {
     /// dividend is zero too.
     ///
     /// The check the unguarded arm builds closes that, asserted under the same guard so an inactive
-    /// branch is not held to it. The operands are witnesses, so the branch `lower_divmod_guard`
-    /// builds out of them is not available, and the assertion is one of ordinary constraints
+    /// branch is not held to it. An operand is a witness, so the branch `lower_divmod_guard`
+    /// builds out of pure ones is not available, and the assertion is one of ordinary constraints
     /// instead.
     ///
     /// An assertion is never dead, so a division that is dead survives as its check, which a
@@ -958,7 +957,7 @@ impl LowerPureGuards {
     ) -> ValueId {
         let seq_type = type_info.get_value_type(seq).clone();
         let idx_type = type_info.get_value_type(index).clone();
-        let (_, len_cmp, idx_cmp, _) =
+        let (_, idx_cmp, len_cmp, _) =
             seq_bounds_operands(emitter, seq, index, &seq_type, &idx_type);
         let in_bounds = emitter.ult(idx_cmp, len_cmp);
         emitter.not(in_bounds)

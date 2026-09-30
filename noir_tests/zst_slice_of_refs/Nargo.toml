@@ -1,0 +1,6 @@
+[package]
+name = "zst_slice_of_refs"
+type = "bin"
+authors = [""]
+
+[dependencies]

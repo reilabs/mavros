@@ -12,7 +12,10 @@ use crate::{
             value_definitions::{FunctionValueDefinitions, ValueDefinition},
         },
         pass_manager::{AnalysisId, AnalysisStore, Pass},
-        passes::shared::value_replacements::{ReplaceScope, ValueReplacements},
+        passes::shared::{
+            limbs::widest_injective_int_bits,
+            value_replacements::{ReplaceScope, ValueReplacements},
+        },
         ssa::{
             FunctionId, Located, ValueId,
             hlssa::{
@@ -341,11 +344,16 @@ impl Simplifier {
                             // Only a _logical_ right shift is a bit-range extract: an arithmetic
                             // one fills the vacated top bits with the sign, not with zeros. The
                             // opcode is what says which this is.
+                            //
+                            // And only one the field carries: a bit window is cut out of one
+                            // element, so past that a shift stays a shift, which every lane has at
+                            // every width.
                             let signed = kind.is_signed();
                             let lhs_inner = lhs_type.strip_witness();
                             if !signed
                                 && let TypeExpr::Int(bits) = lhs_inner.expr
                                 && offset < bits
+                                && bits <= widest_injective_int_bits(fb.field())
                             {
                                 return Some(Rewrite::Replace(vec![OpCode::BitRange {
                                     result: *result,
