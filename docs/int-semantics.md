@@ -178,13 +178,14 @@ Everywhere the intended semantics _has_ an opinion, this agrees with it.
 
 ### `vm`: the Bytecode Interpreter's Opcodes
 
-`vm/src/bytecode.rs` and `vm/src/int_limbs.rs`. This one does **not** delegate because it's a hot
-dispatch loop over `u64` cells, while the model computes over heap-backed limbs. Delegating would
-mean an allocation per opcode to compute an `eval` that is then discarded, which is not great for
-performance. That argument holds for the `_intn` lane too as a wide value is a run of frame cells
-computed over in place, so delegating would allocate an `IntBits` for each operand and one more for
-the result, on every opcode, and also prevent optimizing for performance due to `IntBits`' focus on
-readability.
+`vm/src/bytecode.rs` and `vm/src/int_limbs.rs`, with the wide lane's sum, difference, product and
+divisions in `limb-arith/src/lib.rs`, which the WASM runtime's helpers share. This one does **not**
+delegate because it's a hot dispatch loop over `u64` cells, while the model computes over
+heap-backed limbs. Delegating would mean an allocation per opcode to compute an `eval` that is then
+discarded, which is not great for performance. That argument holds for the `_intn` lane too as a
+wide value is a run of frame cells computed over in place, so delegating would allocate an `IntBits`
+for each operand and one more for the result, on every opcode, and also prevent optimizing for
+performance due to `IntBits`' focus on readability.
 
 The relation is thus checked instead of enforced: **total, and equal to `residue` wherever the model
 specifies a pattern**. Total means no panic, no undefined behavior and no process abort — a witness
@@ -194,16 +195,19 @@ interpreter relies on.
 
 ### `llvm`: the LLVM Backend
 
-`codegen/llssa_to_llvm.rs` and `wasm-runtime/src/lib.rs`. It emits instructions and never computes a
-value, so a Rust mirror of its choices would only be checking a copy. Instead the lowering itself is
-called with two constant operands and we use LLVM's constant folder to check the answer.
+`codegen/llssa_to_llvm.rs` and `wasm-runtime/src/lib.rs`, with the wide helpers' bodies in
+`limb-arith/src/lib.rs`, which the VM shares. It emits instructions and never computes a value, so a
+Rust mirror of its choices would only be checking a copy. Instead the lowering itself is called with
+two constant operands and we use LLVM's constant folder to check the answer.
 
 Above 128 bits LLVM expands a multiply into quadratic straight-line code -- 7.2 MB at 16384 bits,
-and past around 5700 bits a module no WASM engine will load. `urem` and `srem` are built as
-`n - (n / d) * d`, so they contain a multiply of the same width and inherit the whole of that cost;
-`udiv` and `sdiv` expand to a bit-serial loop with no multiply in it and hence stay on LLVM's
-lowering. To that end, we provide `__int_mul` as part of the WASM runtime, which uses a limb-based
-evaluation to be much cheaper, and the three affected operations are emitted around a call to it.
+and past around 5700 bits a module no WASM engine will load. It expands a division into a bit-serial
+loop, which is linear but still about 20 000 WASM locals for one unoptimised `udiv` at 16384 bits,
+against an engine cap of 50 000 per function, and even an `add` or `sub` costs 3 500 to 4 400. To
+that end, the WASM runtime provides limb-based helpers: `__int_add`, `__int_sub` and `__int_mul` for
+the wrapping operations, and `__int_udivrem` and `__int_sdivrem`, which provide a quotient and a
+remainder together, for the four divisions. Above 128 bits each of those seven operations is emitted
+around a call to its helper, unless both operands are constants.
 
 ### `value-range`: the Interval Domain's Arithmetic
 
@@ -235,9 +239,21 @@ only entry whose failure mode is a program Noir rejects producing a proof.
 Two of these rejections are stated twice, because a witness operand cannot be checked with a pure
 comparison: `witness_bitwise.rs` must provide the amount bound and `witness_integer_arith.rs`'s
 guarded rangechecks must overflow, both built out of constraints. Past `widest_cell_sum_bits`, the
-widest sum one field element holds, an unsigned sum or difference is rejected by the carry chain in
-`wide_witness_ints.rs` instead: it lets no carry out of the top limb, so an overflow fails the range
-check on that limb of the answer.
+widest sum one field element holds, a sum or difference is rejected by the carry chain in
+`wide_witness_ints.rs` instead. An unsigned one lets no carry out of the top limb, so an overflow
+fails the range check on that limb of the answer. A signed one witnesses that carry and holds it to
+the sign bits of both operands and of the answer, `c + s_r == s_a + s_b` for a sum and
+`c + s_a == s_r + s_b` for a difference, which is exactly the answer's signed reading being the true
+result. Past the single cell's product, a signed product, quotient or remainder runs the unsigned
+gadgets on the operands' magnitudes: the schoolbook rejects a product of magnitudes past `2^N`, the
+division rejects a zero divisor, and one constraint on the top bit of the product's or quotient's
+magnitude holds it to `2^(N - 1) - 1 + s` for the sign `s` it takes, which rejects every other
+overflow and `INT_MIN / -1` with it, for the remainder too.
+
+A division by a witness is stated by its lowering: `divmod_guard.rs` builds it no check, because the
+`r < d` check of the unsigned division rejects a zero divisor and the range check on the signed
+quotient's magnitude rejects `INT_MIN / -1`, at every width. `DCE` keeps a dead one until that
+lowering has run, as until then the division is its own check.
 
 A **witness** shift amount at a power-of-two width gets no check as the powers-of-two table's keys
 are exactly the legal amounts, so `emit_pow2_factor`'s lookup rejects an out-of-range one as a side
@@ -251,12 +267,12 @@ the general one when it is signed) which is the common case. So does a witness a
 domain has **pinned** to a literal, when the left-hand side is unsigned: there the check is emitted
 and then discharges itself against the same range that pinned the amount.
 
-Past the single cell, which is from 128 bits for a `<<` and 127 for a `>>` on bn254, an unsigned
-shift is `wide_witness_ints.rs`' instead. A witnessed amount is decomposed into whole limbs and a
-remainder the table bounds below a limb, and that decomposition is the amount's bound where it
-reaches exactly the width; elsewhere `bits - 1 - amount` is range-checked there too. A pure amount
-is compared, as the guard IR compares one, under the shift's guard where it has one, and a known
-amount past the width is an assertion that cannot hold.
+Past the single cell, which is from 128 bits for a `<<` and 127 for a `>>` on bn254, every shift is
+`wide_witness_ints.rs`' instead. A witnessed amount is decomposed into whole limbs and a remainder
+the table bounds below a limb, and that decomposition is the amount's bound where it reaches exactly
+the width; elsewhere `bits - 1 - amount` is range-checked there. A pure amount is compared, as the
+guard IR compares one, under the shift's guard where it has one, and a known amount past the width
+is an assertion that cannot hold.
 
 Those restated rejections are registered alongside the `shared/` modules for that reason, and the
 pairs are held together by the corpus below, which renders every rejecting program with **witness**
@@ -305,13 +321,7 @@ semantic change arrives as a reviewable diff of Noir programs.
 These are conformance gaps, not deferred optimizations. Each is a place where mavros does not
 currently implement Noir.
 
-- **Signed integers wider than 64 bits are unsupported _by the lowerings_.** Noir has `i128`, and
-  the type is still rejected outright at the frontend. The _model_ does not cap a signed reading at
-  all, so the normative half of this document reads two's complement at any width. What remains of
-  the divergence is that no evaluator reads a signed pattern wider than one host limb, because the
-  signed lowerings and the VM's `sdiv_int`/`slt_int` are single-cell. That bound is
-  `mavros_int_semantics::MAX_LOWERED_SIGNED_BITS`, asserted at
-  `hlssa::type_system::assert_signed_op_width` and mirrored by `corners::signed_width_ok`, which is
-  why `SIGNED_WIDTHS` is narrower than `WIDTHS`. `passes::width_validation` reads the same constant
-  and refuses a wider signed operation with a diagnostic, so a program meets this divergence as a
-  compile error rather than as a panic.
+None is known. Every operation the model defines is computed at every width up to the type cap,
+under either reading, by every evaluator, the witness lowerings included. On a field narrower than
+bn254 `passes::width_validation` refuses, with a diagnostic, the witnessed shapes whose limbs that
+field leaves no room for, but no such field can be configured yet.

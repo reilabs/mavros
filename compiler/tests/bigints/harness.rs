@@ -23,7 +23,10 @@
 //! one program. It answers [`None`] only where no module came out of the linker; a lane that fails
 //! to compile fails the test rather than reporting itself absent.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 use ark_ff::UniformRand as _;
 use mavros_artifacts::{Field, InputValueOrdered};
@@ -51,7 +54,8 @@ use mavros_compiler::{
     },
     driver::{Driver, Error as DriverError},
     vm::bytecode::DebugInfo,
-    wasm_host, wasm_runtime,
+    wasm_host::{self, LoadedModule},
+    wasm_runtime,
 };
 
 // ---------------------------------------------------------------------------
@@ -185,6 +189,13 @@ impl Verdict {
         )
     }
 
+    /// Whether the run refused its operands: by trapping, or by producing a witness that a
+    /// constraint refuses.
+    #[must_use]
+    pub fn rejects(&self) -> bool {
+        matches!(self, Verdict::Trapped { .. } | Verdict::Unsatisfied { .. })
+    }
+
     /// The witness of an accepted run, for a caller that wants to perturb it.
     #[must_use]
     pub fn witness(&self) -> Option<&[Field]> {
@@ -235,6 +246,18 @@ pub struct Compiled {
 pub struct WasmArtifact {
     path: PathBuf,
     _scratch: TempDir,
+
+    /// The compiled module.
+    loaded: OnceLock<Result<LoadedModule, String>>,
+}
+
+impl WasmArtifact {
+    fn loaded(&self) -> Result<&LoadedModule, &str> {
+        self.loaded
+            .get_or_init(|| LoadedModule::load(&self.path).map_err(|error| error.to_string()))
+            .as_ref()
+            .map_err(String::as_str)
+    }
 }
 
 /// Environment variable naming a directory to keep the pipeline's per-stage dumps in.
@@ -340,8 +363,11 @@ impl Compiled {
         );
 
         if let Some(wasm) = &self.wasm {
+            let loaded = wasm.loaded().unwrap_or_else(|error| {
+                panic!("the WASM engine refused the module: {error}; {replay}")
+            });
             let result =
-                wasm_host::run_ad(&wasm.path, &self.r1cs, &coeffs).unwrap_or_else(|error| {
+                wasm_host::run_ad_loaded(loaded, &self.r1cs, &coeffs).unwrap_or_else(|error| {
                     panic!("the AD entry point trapped on WASM: {error}; {replay}")
                 });
             assert!(
@@ -371,11 +397,14 @@ impl Compiled {
     pub fn run_wasm(&self, inputs: &[InputValueOrdered]) -> Option<Verdict> {
         let wasm = self.wasm.as_ref()?;
         let inputs = self.with_guard(inputs);
-        let result = match wasm_host::run_witgen(&wasm.path, &self.r1cs, &inputs) {
+        let result = match wasm.loaded().map_err(str::to_string).and_then(|loaded| {
+            wasm_host::run_witgen_loaded(loaded, &self.r1cs, &inputs)
+                .map_err(|error| error.to_string())
+        }) {
             Ok(result) => result,
             Err(error) => {
                 return Some(Verdict::Trapped {
-                    message: error.to_string(),
+                    message: error,
                     // A WASM trap carries no mavros stack, so the return check cannot be told from
                     // any other refusal here. Callers that need the distinction use `run`.
                     in_return_check: false,
@@ -732,5 +761,6 @@ fn compile_wasm(driver: &mut Driver, r1cs: &R1CS) -> Option<WasmArtifact> {
     path.exists().then_some(WasmArtifact {
         path,
         _scratch: scratch,
+        loaded: OnceLock::new(),
     })
 }

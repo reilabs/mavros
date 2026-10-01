@@ -11,8 +11,9 @@ use crate::compiler::{
         shared::{
             divmod_guard::nonzero_hint_divisor,
             limbs::{
-                WitnessLimbs, single_cell_product_fits, split_into_limbs,
-                two_limb_product_packing_fits, widest_cell_sum_bits, witness_limb_bits,
+                WitnessLimbs, single_cell_product_fits, single_cell_signed_product_fits,
+                split_into_limbs, two_limb_product_packing_fits, widest_cell_sum_bits,
+                witness_limb_bits,
             },
             unsupported::unsupported_on_this_field,
         },
@@ -20,7 +21,7 @@ use crate::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            ArithGroup, BinaryArithOpKind, CastTarget, CmpKind, OpCode, assert_signed_op_width,
+            ArithGroup, BinaryArithOpKind, CastTarget, CmpKind, OpCode,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -274,11 +275,15 @@ impl LowerWitnessIntegerArithOps {
         });
     }
 
+    /// The signed sum or difference in one field element, re-encoded by [`encode_signed_value`].
+    ///
+    /// Sound while `2^(bits + 1) < p`, which is [`widest_cell_sum_bits`], as the unsigned one is.
+    /// The decoded result `v` is in `[-2^bits, 2^bits)`, and the prover's sign `s` makes the
+    /// `bits - 1`-bit check read `t = v + s·2^(bits - 1)`, which lies in `[-2^bits, 1.5·2^bits)`.
+    /// Its element lands in the check's window from outside it only where `t <= 2^(bits - 1) - p`
+    /// or `t >= p`, and that bound puts both out of reach. A wider one is lowered through the carry
+    /// chain before this pass runs, with the sign bits checked beside it.
     #[allow(clippy::too_many_arguments)]
-    // FIELD-ASSUMPTION: L6-int-op-strategy
-    // Operands are decoded to signed field values and added/subtracted in one field element,
-    // asserting the result range fits injectively. i64 breaks on a ~64-bit field because the
-    // `sign * 2^bits` re-encoding offset alone exceeds p (see `encode_signed_value`).
     fn lower_signed_addsub(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -290,7 +295,10 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
-        assert_signed_op_width(bits, "signed addition");
+        assert!(
+            bits <= widest_cell_sum_bits(b.field()),
+            "ICE: a signed int{bits} sum or difference reached the single-cell lowering, whose field cannot hold it"
+        );
         let lhs_range = context.srange(lhs);
         let rhs_range = context.srange(rhs);
         let sign_l = match known_sign(&lhs_range, bits) {
@@ -314,19 +322,13 @@ impl LowerWitnessIntegerArithOps {
         let lhs_signed = signed_value_from_encoded(b, lhs_field, sign_l, bits);
         let rhs_signed = signed_value_from_encoded(b, rhs_field, sign_r, bits);
 
+        // Only what the checks below may skip is read off this range. Its span is the assertion
+        // above's business, which bounds it by the width rather than by what the analysis knows.
         let result_range = match kind.group() {
             ArithGroup::Add => lhs_range.add(&rhs_range),
             ArithGroup::Sub => lhs_range.sub(&rhs_range),
             _ => ice_unreachable!(),
         };
-        if !range_fits_field_injectively(&result_range, b.field()) {
-            unsupported_on_this_field(
-                format_args!(
-                    "a {bits}-bit {kind:?} whose result spans {result_range:?} needs a multi-limb lowering: that span has representatives a single-field signed encoding cannot tell apart"
-                ),
-                b.field(),
-            );
-        }
 
         // `lhs_signed`/`rhs_signed` are decoded _field_ values, so this is field arithmetic and
         // takes the unsigned forms even though the operands it came from are signed integers.
@@ -360,10 +362,12 @@ impl LowerWitnessIntegerArithOps {
         });
     }
 
-    // FIELD-ASSUMPTION: L6-int-op-strategy
-    // Single field mul with no multi-limb fallback at all (unlike unsigned u128). Sound only
-    // while the signed product range fits the field; i32/i64 mul need a schoolbook lowering
-    // on a small field.
+    /// A signed product in one field element: the operands decoded to signed field values, their
+    /// product, and the answer re-encoded with its sign checked.
+    ///
+    /// The product spans `2^(2 · bits − 1)` around zero, which the assertion keeps inside the
+    /// modulus, so the encoding's range check tells an honest product from a residue. A wider one
+    /// is lowered by `passes::wide_witness_ints` before this pass runs.
     fn lower_signed_mul(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -374,18 +378,13 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
-        assert_signed_op_width(bits, "signed multiplication");
+        assert!(
+            single_cell_signed_product_fits(b.field(), bits),
+            "ICE: an int{bits} signed multiplication reached the single cell, whose product the field cannot hold"
+        );
         let lhs_range = context.srange(lhs);
         let rhs_range = context.srange(rhs);
         let product_range = lhs_range.mul(&rhs_range);
-        if !range_fits_field_injectively(&product_range, b.field()) {
-            unsupported_on_this_field(
-                format_args!(
-                    "a {bits}-bit signed multiplication whose product spans {product_range:?} needs a schoolbook multi-limb lowering: that span has representatives a single field product cannot tell apart"
-                ),
-                b.field(),
-            );
-        }
 
         let lhs_witness = context.types().get_value_type(lhs).is_witness_of();
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
@@ -485,7 +484,13 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
-        assert_signed_op_width(bits, "signed division");
+        // The magnitudes are divided by the unsigned single cell at `bits`, and the signed answers
+        // are encoded with `2^bits` as a place value; a wider division is lowered by
+        // `passes::wide_witness_ints` before this pass runs.
+        assert!(
+            single_cell_signed_product_fits(b.field(), bits),
+            "ICE: an int{bits} signed division reached the single cell, whose product the field cannot hold"
+        );
         let lhs_witness = context.types().get_value_type(lhs).is_witness_of();
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
         let lhs_range = context.srange(lhs);
@@ -729,7 +734,9 @@ fn range_fits_field_injectively(range: &Interval, field: FieldConfig) -> bool {
 // FIELD-ASSUMPTION: L6-int-op-strategy (signed encode/decode pair)
 // `signed_value_from_encoded`/`encode_signed_value` pack the sign with `field.two_pow(bits)` /
 // `field.two_pow(bits-1)` place-value shifts. These packings wrap mod p once the shift reaches the
-// field width, so i64 sign encoding is unsound on a small field.
+// field width. The sum and the difference are routed past `widest_cell_sum_bits` before that, and
+// assert it. The product and the division are held to `single_cell_signed_product_fits`, whose
+// bound puts `2^(2 · bits)` inside the modulus.
 fn signed_value_from_encoded(
     b: &mut HLBlockEmitter<'_>,
     encoded_field: ValueId,

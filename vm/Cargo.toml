@@ -16,6 +16,7 @@ vm-profile = []
 [dependencies]
 # Dependencies within the Mavros project
 mavros-artifacts.workspace = true
+mavros-limb-arith.workspace = true
 mavros-opcode-gen.workspace = true
 
 # All other dependencies

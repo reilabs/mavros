@@ -16,7 +16,7 @@ use crate::compiler::{
         BlockId, FunctionId,
         hlssa::{
             self, ArithGroup, BinaryArithOpKind, CmpKind, HLSSA, Radix, RefCountOp, SliceOpDir,
-            Type, TypeExpr, assert_signed_op_width,
+            Type, TypeExpr,
         },
     },
     util::{field_constant, host_word, spread_bits, unspread_bits},
@@ -616,25 +616,26 @@ impl symbolic_executor::Context<Value> for R1CGen {
 // FIELD-ASSUMPTION: L4-eval
 impl symbolic_executor::Value<R1CGen> for Value {
     fn cmp(&self, b: &Self, kind: CmpKind, bits: Option<usize>, _ctx: &mut R1CGen) -> Self {
-        if matches!(self, Value::Wide(_)) || matches!(b, Value::Wide(_)) {
-            let holds = match kind {
-                CmpKind::Eq => self.magnitude() == b.magnitude(),
-                CmpKind::ULt => self.magnitude() < b.magnitude(),
-                CmpKind::SLt => ice!("a signed comparison past the signed frontier"),
-            };
-            return Value::Const(if holds {
-                ark_bn254::Fr::ONE
-            } else {
-                ark_bn254::Fr::ZERO
-            });
-        }
+        let wide = matches!(self, Value::Wide(_)) || matches!(b, Value::Wide(_));
         match kind {
+            CmpKind::Eq | CmpKind::ULt if wide => {
+                let holds = if kind == CmpKind::Eq {
+                    self.magnitude() == b.magnitude()
+                } else {
+                    self.magnitude() < b.magnitude()
+                };
+                Value::Const(if holds {
+                    ark_bn254::Fr::ONE
+                } else {
+                    ark_bn254::Fr::ZERO
+                })
+            }
             CmpKind::Eq => self.eq(b),
             // `ULt` compares the field encodings, which is the magnitude for an unsigned integer.
             CmpKind::ULt => self.lt(b),
+            // Read as patterns, which holds an element and a [`Value::Wide`] alike.
             CmpKind::SLt => {
                 let bits = bits.expect("ICE: signed comparison without an operand width");
-                assert_signed_op_width(bits, "R1CS constant comparison");
                 let less = self
                     .expect_pattern(bits)
                     .compare(CmpOp::SLt, &b.expect_pattern(bits));
@@ -681,9 +682,6 @@ impl symbolic_executor::Value<R1CGen> for Value {
                 // An operand is an element or, past the modulus, a [`Value::Wide`], and either is
                 // read as a pattern at `bits` below.
                 assert!(bits > 0, "an int0 describes a value with no bits");
-                if binary_arith_op_kind.is_signed() {
-                    assert_signed_op_width(bits, "R1CS constant arithmetic");
-                }
                 assert!(
                     matches!(
                         (self, b),
@@ -754,11 +752,12 @@ impl symbolic_executor::Value<R1CGen> for Value {
         bits: Option<usize>,
         _ctx: &mut R1CGen,
     ) -> Result<(), AssertionFailure> {
-        if matches!(a, Value::Wide(_)) || matches!(b, Value::Wide(_)) {
-            let holds = match kind {
-                CmpKind::Eq => a.magnitude() == b.magnitude(),
-                CmpKind::ULt => a.magnitude() < b.magnitude(),
-                CmpKind::SLt => ice!("a signed assertion past the signed frontier"),
+        // The signed ordering reads both as patterns below, which holds a [`Value::Wide`] as well.
+        if kind != CmpKind::SLt && (matches!(a, Value::Wide(_)) || matches!(b, Value::Wide(_))) {
+            let holds = if kind == CmpKind::Eq {
+                a.magnitude() == b.magnitude()
+            } else {
+                a.magnitude() < b.magnitude()
             };
             return if holds {
                 Ok(())
@@ -792,15 +791,11 @@ impl symbolic_executor::Value<R1CGen> for Value {
             }
             CmpKind::SLt => {
                 let bits = bits.expect("ICE: signed comparison without an operand width");
-                let a_val = a.expect_constant();
-                let b_val = b.expect_constant();
+                let (a_val, b_val) = (a.expect_pattern(bits), b.expect_pattern(bits));
 
                 // Read as two's complement, by the same model call above, so an assertion and the
                 // comparison it asserts on cannot disagree.
-                if !a
-                    .expect_pattern(bits)
-                    .compare(CmpOp::SLt, &b.expect_pattern(bits))
-                {
+                if !a_val.compare(CmpOp::SLt, &b_val) {
                     return Err(AssertionFailure::new(format!(
                         "assert_cmp lt (signed) failed: {a_val:?} >= {b_val:?}"
                     )));
@@ -1876,6 +1871,8 @@ mod logup_soundness_tests {
 
 #[cfg(test)]
 mod comparison_tests {
+    use mavros_int_semantics::{CmpOp, corners};
+
     use super::{CmpKind, FieldConfig, R1CGen, Value, symbolic_executor};
 
     fn constant(v: u64) -> Value {
@@ -1923,6 +1920,48 @@ mod comparison_tests {
         );
         assert!(!assert_cmp_holds(&a, &b, CmpKind::Eq, Some(8)));
         assert!(assert_cmp_holds(&a, &a, CmpKind::Eq, Some(8)));
+    }
+
+    /// Both comparison paths agree with the model at every wide width, under every reading, on
+    /// either side of the modulus: an operand past it is carried as its pattern, and each of the
+    /// three orderings reads that as it reads an element.
+    #[test]
+    fn a_comparison_agrees_with_the_model_at_wide_widths() {
+        let field = FieldConfig::bn254();
+        let mut checked = 0usize;
+        for bits in corners::WIDE_WIDTHS {
+            let values = corners::wide_values(bits);
+            for a in &values {
+                for b in &values {
+                    let (x, y) = (
+                        Value::of_pattern(field, a.clone()),
+                        Value::of_pattern(field, b.clone()),
+                    );
+                    for (kind, op) in [
+                        (CmpKind::Eq, CmpOp::Eq),
+                        (CmpKind::ULt, CmpOp::ULt),
+                        (CmpKind::SLt, CmpOp::SLt),
+                    ] {
+                        let want = a.compare(op, b);
+                        assert_eq!(
+                            cmp(&x, &y, kind, Some(bits)),
+                            want,
+                            "{kind:?} at {bits} bits on {a:?}, {b:?}"
+                        );
+                        assert_eq!(
+                            assert_cmp_holds(&x, &y, kind, Some(bits)),
+                            want,
+                            "asserted {kind:?} at {bits} bits on {a:?}, {b:?}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 1_000,
+            "only {checked} wide comparisons were checked"
+        );
     }
 
     /// A field element has no width and no sign, and its comparisons say so.
@@ -2027,11 +2066,6 @@ mod int_semantics_conformance {
         .expect_u128()
     }
 
-    /// The widths this evaluator may be asked about, for one reading.
-    fn widths(op: BinaryArithOpKind) -> &'static [usize] {
-        corners::widths_for(op.is_signed())
-    }
-
     fn operand_pairs(op: BinaryArithOpKind, bits: usize) -> Vec<(u128, u128)> {
         let rhs = if IntOp::from(op).is_shift() {
             corners::shift_amounts(bits, bits)
@@ -2059,7 +2093,7 @@ mod int_semantics_conformance {
         let mut checked = 0usize;
 
         for op in ALL_ARITH {
-            for &bits in widths(op) {
+            for &bits in corners::widths() {
                 for (a, b) in operand_pairs(op, bits) {
                     let Some(want) = model(op, bits, a, b) else {
                         continue;
@@ -2093,7 +2127,7 @@ mod int_semantics_conformance {
         let mut found = 0usize;
 
         for op in ALL_ARITH {
-            for &bits in widths(op) {
+            for &bits in corners::widths() {
                 for (a, b) in operand_pairs(op, bits) {
                     if !unspecified(op, bits, a, b) {
                         continue;
@@ -2188,7 +2222,7 @@ mod int_semantics_conformance {
         let mut past_the_modulus = 0usize;
 
         for op in ALL_ARITH {
-            for bits in corners::wide_widths_for(op.is_signed()) {
+            for bits in corners::WIDE_WIDTHS {
                 let (values, rhs) = corners::wide_operands(op.into(), bits);
 
                 for a in &values {

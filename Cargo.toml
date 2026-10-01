@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "compiler",
   "int-semantics",
+  "limb-arith",
   "mavros-artifacts",
   "opcode-gen",
   "vm",
@@ -25,6 +26,7 @@ repository = "https://github.com/reilabs/mavros"
 mavros-artifacts = { path = "./mavros-artifacts/" }
 mavros-compiler = { path = "./compiler" }
 mavros-int-semantics = { path = "./int-semantics/" }
+mavros-limb-arith = { path = "./limb-arith/" }
 mavros-opcode-gen = { path = "./opcode-gen/" }
 mavros-vm = { path = "./vm/" }
 mavros-wasm-layout = { path = "./wasm-layout/" }

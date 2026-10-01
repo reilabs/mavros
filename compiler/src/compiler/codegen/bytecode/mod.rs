@@ -31,18 +31,6 @@ use crate::{
     vm::{self, bytecode},
 };
 
-/// Report an integer width with no bytecode lowering as a compiler bug.
-///
-/// Every shape that reaches one of these is refused by `passes::width_validation` first, with a
-/// source location and a sentence saying which lowering is missing: the signed arms by the
-/// two's-complement frontier, and the lookup element by the tape's own cell-count tags. Reaching
-/// here means a rule stopped covering a lowering it is written against.
-fn unsupported_int_width(operation: &str, bits: usize) -> ! {
-    ice!(
-        "{operation} on an int{bits} reached bytecode generation with no lowering; width_validation should have refused the program"
-    )
-}
-
 /// Report a binary arithmetic operation whose operands do not cover the cells it will read.
 ///
 /// Every integer opcode addresses its operands as [`int_cell_count`] cells of the **result's**
@@ -613,22 +601,35 @@ impl CodeGen {
                             }
                         }
                     }
-                    (true, TypeExpr::Int(bits)) => match int_lane(*bits) {
-                        Lane::Cell => {
-                            let result = layouter.alloc_int(*val, *bits);
-                            emitter.push_op(bytecode::OpCode::SdivInt {
-                                res: result,
-                                a: layouter.get_value(*op1),
-                                b: layouter.get_value(*op2),
-                                bits: *bits as u64,
-                            });
+                    (true, TypeExpr::Int(bits)) => {
+                        let result = layouter.alloc_int(*val, *bits);
+                        match int_lane(*bits) {
+                            Lane::Cell => {
+                                emitter.push_op(bytecode::OpCode::SdivInt {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            Lane::Double => {
+                                emitter.push_op(bytecode::OpCode::SdivInt128 {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            Lane::Wide => {
+                                emitter.push_op(bytecode::OpCode::SdivIntn {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
                         }
-                        // Signed lowering stops at one host limb, which is exactly the cell
-                        // lane, so no signed value reaches a wider one.
-                        Lane::Double | Lane::Wide => {
-                            unsupported_int_width("a signed division", *bits)
-                        }
-                    },
+                    }
                     (signed, t) => ice!(
                         "Unsupported type for {} division: {:?}",
                         if signed { "signed" } else { "unsigned" },
@@ -671,22 +672,35 @@ impl CodeGen {
                             }
                         }
                     }
-                    (true, TypeExpr::Int(bits)) => match int_lane(*bits) {
-                        Lane::Cell => {
-                            let result = layouter.alloc_int(*val, *bits);
-                            emitter.push_op(bytecode::OpCode::SremInt {
-                                res: result,
-                                a: layouter.get_value(*op1),
-                                b: layouter.get_value(*op2),
-                                bits: *bits as u64,
-                            });
+                    (true, TypeExpr::Int(bits)) => {
+                        let result = layouter.alloc_int(*val, *bits);
+                        match int_lane(*bits) {
+                            Lane::Cell => {
+                                emitter.push_op(bytecode::OpCode::SremInt {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            Lane::Double => {
+                                emitter.push_op(bytecode::OpCode::SremInt128 {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            Lane::Wide => {
+                                emitter.push_op(bytecode::OpCode::SremIntn {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
                         }
-                        // Signed lowering stops at one host limb, which is exactly the cell
-                        // lane, so no signed value reaches a wider one.
-                        Lane::Double | Lane::Wide => {
-                            unsupported_int_width("a signed remainder", *bits)
-                        }
-                    },
+                    }
                     (signed, t) => ice!(
                         "Unsupported type for {} modulo: {:?}",
                         if signed { "signed" } else { "unsigned" },
@@ -921,25 +935,37 @@ impl CodeGen {
                             }
                         }
                     }
-                    (true, TypeExpr::Int(bits)) => match int_lane(*bits) {
-                        // Sign-fill, matching Noir and `IntArithOp::AShr` on the LLVM side. Needs
-                        // `bits` both to mask the amount and because the sign lives at `bits - 1`,
-                        // not at 63.
-                        Lane::Cell => {
-                            let result = layouter.alloc_int(*val, *bits);
-                            emitter.push_op(bytecode::OpCode::AshrInt {
-                                res: result,
-                                a: layouter.get_value(*op1),
-                                b: layouter.get_value(*op2),
-                                bits: *bits as u64,
-                            });
+                    // Sign-fill, matching Noir and `IntArithOp::AShr` on the LLVM side. Needs
+                    // `bits` both to reduce the amount and because the sign lives at `bits - 1`.
+                    (true, TypeExpr::Int(bits)) => {
+                        let result = layouter.alloc_int(*val, *bits);
+                        match int_lane(*bits) {
+                            Lane::Cell => {
+                                emitter.push_op(bytecode::OpCode::AshrInt {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            Lane::Double => {
+                                emitter.push_op(bytecode::OpCode::AshrInt128 {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
+                            Lane::Wide => {
+                                emitter.push_op(bytecode::OpCode::AshrIntn {
+                                    res: result,
+                                    a: layouter.get_value(*op1),
+                                    b: layouter.get_value(*op2),
+                                    bits: *bits as u64,
+                                });
+                            }
                         }
-                        // Signed lowering stops at one host limb, which is exactly the cell
-                        // lane, so no signed value reaches a wider one.
-                        Lane::Double | Lane::Wide => {
-                            unsupported_int_width("a signed right shift", *bits)
-                        }
-                    },
+                    }
                     (signed, t) => ice!(
                         "Unsupported type for {} shift right: {:?}",
                         if signed { "signed" } else { "unsigned" },
@@ -965,43 +991,13 @@ impl CodeGen {
                         (signed, TypeExpr::Int(lhs_bits), TypeExpr::Int(rhs_bits))
                             if *lhs_bits == *rhs_bits =>
                         {
-                            match (signed, int_lane(*lhs_bits)) {
-                                (true, Lane::Cell) => {
-                                    emitter.push_op(bytecode::OpCode::SltInt {
-                                        res: result,
-                                        a: layouter.get_value(*op1),
-                                        b: layouter.get_value(*op2),
-                                        bits: *lhs_bits as u64,
-                                    });
-                                }
-                                (false, Lane::Cell) => {
-                                    emitter.push_op(bytecode::OpCode::UltInt {
-                                        res: result,
-                                        a: layouter.get_value(*op1),
-                                        b: layouter.get_value(*op2),
-                                    });
-                                }
-                                (false, Lane::Double) => {
-                                    emitter.push_op(bytecode::OpCode::UltInt128 {
-                                        res: result,
-                                        a: layouter.get_value(*op1),
-                                        b: layouter.get_value(*op2),
-                                    });
-                                }
-                                // Signed lowering stops at one host limb, which is exactly the
-                                // cell lane, so no signed value reaches a wider one.
-                                (true, Lane::Double | Lane::Wide) => {
-                                    unsupported_int_width("a signed comparison", *lhs_bits)
-                                }
-                                (false, Lane::Wide) => {
-                                    emitter.push_op(bytecode::OpCode::UltIntn {
-                                        res: result,
-                                        a: layouter.get_value(*op1),
-                                        b: layouter.get_value(*op2),
-                                        bits: *lhs_bits as u64,
-                                    });
-                                }
-                            }
+                            emitter.push_op(int_ordering(
+                                signed,
+                                *lhs_bits,
+                                result,
+                                layouter.get_value(*op1),
+                                layouter.get_value(*op2),
+                            ));
                         }
                         (false, TypeExpr::Field, TypeExpr::Field) => {
                             emitter.push_op(bytecode::OpCode::LtField {
@@ -1589,41 +1585,13 @@ impl CodeGen {
                             (signed, TypeExpr::Int(lhs_bits), TypeExpr::Int(rhs_bits))
                                 if *lhs_bits == *rhs_bits =>
                             {
-                                match (signed, int_lane(*lhs_bits)) {
-                                    (true, Lane::Cell) => {
-                                        emitter.push_op(bytecode::OpCode::SltInt {
-                                            res: cmp_result,
-                                            a: layouter.get_value(*lhs),
-                                            b: layouter.get_value(*rhs),
-                                            bits: *lhs_bits as u64,
-                                        });
-                                    }
-                                    (false, Lane::Cell) => {
-                                        emitter.push_op(bytecode::OpCode::UltInt {
-                                            res: cmp_result,
-                                            a: layouter.get_value(*lhs),
-                                            b: layouter.get_value(*rhs),
-                                        });
-                                    }
-                                    (false, Lane::Double) => {
-                                        emitter.push_op(bytecode::OpCode::UltInt128 {
-                                            res: cmp_result,
-                                            a: layouter.get_value(*lhs),
-                                            b: layouter.get_value(*rhs),
-                                        });
-                                    }
-                                    (true, Lane::Double | Lane::Wide) => {
-                                        unsupported_int_width("a signed assertion", *lhs_bits)
-                                    }
-                                    (false, Lane::Wide) => {
-                                        emitter.push_op(bytecode::OpCode::UltIntn {
-                                            res: cmp_result,
-                                            a: layouter.get_value(*lhs),
-                                            b: layouter.get_value(*rhs),
-                                            bits: *lhs_bits as u64,
-                                        });
-                                    }
-                                }
+                                emitter.push_op(int_ordering(
+                                    signed,
+                                    *lhs_bits,
+                                    cmp_result,
+                                    layouter.get_value(*lhs),
+                                    layouter.get_value(*rhs),
+                                ));
                             }
                             (false, TypeExpr::Field, TypeExpr::Field) => {
                                 emitter.push_op(bytecode::OpCode::LtField {
@@ -2102,6 +2070,46 @@ impl EmitterState {
 
     fn exit_block(&mut self, block: BlockId) {
         self.block_exits.insert(block, self.code.len());
+    }
+}
+
+/// The opcode writing `a < b` into `res` for two integers of `bits`, under the signed reading where
+/// necessary, in the lane that holds `bits`.
+fn int_ordering(
+    signed: bool,
+    bits: usize,
+    res: bytecode::FramePosition,
+    a: bytecode::FramePosition,
+    b: bytecode::FramePosition,
+) -> bytecode::OpCode {
+    let width = bits as u64;
+    match (signed, int_lane(bits)) {
+        (true, Lane::Cell) => bytecode::OpCode::SltInt {
+            res,
+            a,
+            b,
+            bits: width,
+        },
+        (false, Lane::Cell) => bytecode::OpCode::UltInt { res, a, b },
+        (true, Lane::Double) => bytecode::OpCode::SltInt128 {
+            res,
+            a,
+            b,
+            bits: width,
+        },
+        (false, Lane::Double) => bytecode::OpCode::UltInt128 { res, a, b },
+        (true, Lane::Wide) => bytecode::OpCode::SltIntn {
+            res,
+            a,
+            b,
+            bits: width,
+        },
+        (false, Lane::Wide) => bytecode::OpCode::UltIntn {
+            res,
+            a,
+            b,
+            bits: width,
+        },
     }
 }
 

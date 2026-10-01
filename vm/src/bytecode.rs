@@ -461,6 +461,16 @@ fn double_ushr(a: Int128, b: Int128, bits: u64) -> Int128 {
     a.wrapping_shr(shift_amount_128(b, bits))
 }
 
+/// `a >> b`, sign-filling, with the amount reduced against the operand width. The body of
+/// `ashr_int128`.
+///
+/// Re-masks, where [`double_ushr`] need not: the fill sets the bits above the width as well.
+#[inline(always)]
+fn double_ashr(a: Int128, b: Int128, bits: u64) -> Int128 {
+    let shifted = a.signed(bits) >> shift_amount_128(b, bits);
+    Int128::from_u128(shifted as u128).truncate(bits)
+}
+
 /// `!a`, masked back into the operand width.
 #[inline(always)]
 fn double_complement(a: Int128, bits: u64) -> Int128 {
@@ -603,7 +613,7 @@ fn cell_srem(a: u64, b: u64, bits: u64) -> u64 {
 ///
 /// `Eq`/`PartialEq` are derived because bit-pattern equality is the same question under either
 /// reading — which is why there is one `eq_int128` opcode and not a pair. The operations that
-/// _do_ depend on the reading are the `unsigned_*` methods below.
+/// _do_ depend on the reading are the `unsigned_*` and `signed_*` methods below.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Int128 {
@@ -663,9 +673,9 @@ impl Int128 {
 
     /// Order the pattern as an unsigned 128-bit integer.
     ///
-    /// This and the two below are deliberately inherent methods rather than `Ord`/`Div`/`Rem`: they
-    /// are the operations whose answer depends on how the bits are read, so each caller has to name
-    /// the reading. An operator would let `a < b` mean "unsigned" by default, which is
+    /// This and the methods below are deliberately inherent methods rather than `Ord`/`Div`/`Rem`:
+    /// they are the operations whose answer depends on how the bits are read, so each caller has to
+    /// name the reading. An operator would let `a < b` mean "unsigned" by default, which is
     /// mistake-prone.
     #[inline(always)]
     pub fn unsigned_lt(self, rhs: Self) -> bool {
@@ -691,6 +701,45 @@ impl Int128 {
             Self::default()
         } else {
             Self::from_u128(self.to_u128() % rhs)
+        }
+    }
+
+    /// Read a `bits`-wide pattern as two's complement, in the `i128` the host can compute with.
+    #[inline(always)]
+    pub fn signed(self, bits: u64) -> i128 {
+        let shift = 128 - bits;
+        ((self.to_u128() << shift) as i128) >> shift
+    }
+
+    /// Order the patterns as `bits`-wide two's-complement integers.
+    #[inline(always)]
+    pub fn signed_lt(self, rhs: Self, bits: u64) -> bool {
+        self.signed(bits) < rhs.signed(bits)
+    }
+
+    /// Divide, reading both patterns as `bits`-wide two's complement and truncating toward zero.
+    ///
+    /// Total, as `unsigned_div` is: a zero divisor answers zero, and the one quotient that leaves
+    /// the width, `MIN / -1`, wraps back into it.
+    #[inline(always)]
+    pub fn signed_div(self, rhs: Self, bits: u64) -> Self {
+        let (a, b) = (self.signed(bits), rhs.signed(bits));
+        if b == 0 {
+            Self::default()
+        } else {
+            Self::from_u128(a.wrapping_div(b) as u128).truncate(bits)
+        }
+    }
+
+    /// Remainder, reading both patterns as `bits`-wide two's complement; the sign follows the
+    /// dividend. Total, as [`Int128::signed_div`] is.
+    #[inline(always)]
+    pub fn signed_rem(self, rhs: Self, bits: u64) -> Self {
+        let (a, b) = (self.signed(bits), rhs.signed(bits));
+        if b == 0 {
+            Self::default()
+        } else {
+            Self::from_u128(a.wrapping_rem(b) as u128).truncate(bits)
         }
     }
 }
@@ -1652,6 +1701,18 @@ mod def {
         unsafe { *res = a.unsigned_rem(b) };
     }
 
+    /// Divide, reading both pairs as `bits`-wide two's complement. Total.
+    #[opcode]
+    fn sdiv_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128, bits: u64) {
+        unsafe { *res = a.signed_div(b, bits) };
+    }
+
+    /// Remainder, reading both pairs as `bits`-wide two's complement. Total.
+    #[opcode]
+    fn srem_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128, bits: u64) {
+        unsafe { *res = a.signed_rem(b, bits) };
+    }
+
     #[opcode]
     fn and_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64) {
         unsafe {
@@ -1730,16 +1791,23 @@ mod def {
 
     /// Left shift in the 128-bit lane.
     ///
-    /// The amount is masked by [`shift_amount_128`].
+    /// The amount is reduced modulo the width by [`shift_amount_128`].
     #[opcode]
     fn shl_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128, bits: u64) {
         unsafe { *res = double_shl(a, b, bits) };
     }
 
-    /// Logical right shift in the 128-bit lane; zero-fill, masked as `shl_int128` is.
+    /// Logical right shift in the 128-bit lane; zero-fill, its amount reduced as `shl_int128`'s is.
     #[opcode]
     fn ushr_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128, bits: u64) {
         unsafe { *res = double_ushr(a, b, bits) };
+    }
+
+    /// Arithmetic right shift in the 128-bit lane; sign-fill, its amount reduced as `shl_int128`'s
+    /// is.
+    #[opcode]
+    fn ashr_int128(#[out] res: *mut Int128, #[frame] a: Int128, #[frame] b: Int128, bits: u64) {
+        unsafe { *res = double_ashr(a, b, bits) };
     }
 
     /// Bitwise complement, re-masked to the operand width.
@@ -1828,6 +1896,13 @@ mod def {
     }
 
     #[opcode]
+    fn slt_int128(#[out] res: *mut u64, #[frame] a: Int128, #[frame] b: Int128, bits: u64) {
+        unsafe {
+            *res = a.signed_lt(b, bits) as u64;
+        }
+    }
+
+    #[opcode]
     fn truncate_int(#[out] res: *mut u64, #[frame] a: u64, to_bits: u64) {
         unsafe {
             let mask = cell_mask(to_bits);
@@ -1909,6 +1984,30 @@ mod def {
         int_limbs::udivrem(&mut discarded, res, a, b, bits);
     }
 
+    /// Divide, reading both operands as two's complement. Total, as [`udiv_intn`] is.
+    #[opcode]
+    fn sdiv_intn(
+        bits: u64,
+        #[frame_slice(bits)] res: &mut [u64],
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) {
+        let mut discarded = vec![0u64; res.len()];
+        int_limbs::sdivrem(res, &mut discarded, a, b, bits);
+    }
+
+    /// Remainder, reading both operands as two's complement. Total, as [`udiv_intn`] is.
+    #[opcode]
+    fn srem_intn(
+        bits: u64,
+        #[frame_slice(bits)] res: &mut [u64],
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) {
+        let mut discarded = vec![0u64; res.len()];
+        int_limbs::sdivrem(&mut discarded, res, a, b, bits);
+    }
+
     #[opcode]
     fn and_intn(
         bits: u64,
@@ -1969,6 +2068,17 @@ mod def {
         int_limbs::ushr_by(res, a, int_limbs::shift_amount(b, bits), bits);
     }
 
+    /// Arithmetic right shift: sign-fill, the lowering for a signed `>>`.
+    #[opcode]
+    fn ashr_intn(
+        bits: u64,
+        #[frame_slice(bits)] res: &mut [u64],
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) {
+        int_limbs::ashr_by(res, a, int_limbs::shift_amount(b, bits), bits);
+    }
+
     #[opcode]
     fn eq_intn(
         bits: u64,
@@ -1990,6 +2100,18 @@ mod def {
     ) {
         unsafe {
             *res = u64::from(int_limbs::ult(a, b));
+        }
+    }
+
+    #[opcode]
+    fn slt_intn(
+        bits: u64,
+        #[out] res: *mut u64,
+        #[frame_slice(bits)] a: &[u64],
+        #[frame_slice(bits)] b: &[u64],
+    ) {
+        unsafe {
+            *res = u64::from(int_limbs::slt(a, b, bits));
         }
     }
 
@@ -4804,6 +4926,19 @@ mod tests {
     }
 
     #[test]
+    fn a_double_lane_pattern_is_read_at_its_own_width() {
+        // The preamble `sdiv_int128`, `srem_int128`, `slt_int128` and `ashr_int128` share.
+        let pair = |value: u128| Int128::from_u128(value);
+        assert_eq!(pair(1 << 64).signed(65), -(1 << 64));
+        assert_eq!(pair((1 << 64) - 1).signed(65), (1 << 64) - 1);
+        assert_eq!(pair(u128::MAX).signed(128), -1);
+        assert_eq!(pair(1 << 127).signed(128), i128::MIN);
+        assert_eq!(pair((1 << 99) | 5).signed(100), 5 - (1 << 99));
+        // Dirty bits above the width are discarded by the up-shift, as `signed_cell`'s are.
+        assert_eq!(pair(u128::MAX << 99 | 5).signed(99), 5);
+    }
+
+    #[test]
     fn a_complement_stays_inside_its_declared_width() {
         // An unmasked `!a` sets all 64 host bits, so an 8-bit `!0` would leave
         // `0xFFFF_FFFF_FFFF_FFFF` in a cell every later reader treats as 8 bits wide -- and, at
@@ -4853,9 +4988,7 @@ mod tests {
 /// which is what makes those inputs safe rather than merely unspecified.
 #[cfg(test)]
 mod int_semantics_conformance {
-    use mavros_int_semantics::{
-        CmpOp, IntBits, IntOp, Sign, corners, int_bits::HOST_LIMB_BITS, residue,
-    };
+    use mavros_int_semantics::{CmpOp, IntBits, IntOp, corners, int_bits::HOST_LIMB_BITS, residue};
 
     use super::*;
 
@@ -4866,8 +4999,8 @@ mod int_semantics_conformance {
     /// widths Noir can name. Shifts share the set: `shift_amount` reduces the amount modulo the
     /// width rather than masking it by `bits - 1`, which is the model's reduction at every width
     /// and not only at a power of two.
-    fn lane_widths(sign: Sign) -> Vec<u64> {
-        corners::widths_for(sign.is_signed())
+    fn lane_widths() -> Vec<u64> {
+        corners::widths()
             .iter()
             .copied()
             .filter(|bits| *bits <= HOST_LIMB_BITS)
@@ -4905,31 +5038,28 @@ mod int_semantics_conformance {
         }
     }
 
-    /// Run one operation through the 128-bit lane's opcode bodies.
-    ///
-    /// Unsigned only, and that is the lane's contract rather than a gap in the sweep:
-    /// `MAX_LOWERED_SIGNED_BITS` is 64, so no signed opcode ever reads a pattern this wide, which
-    /// is why there is no `ashr_int128` or `sdiv_int128` to call.
+    /// Run one operation through the 128-bit lane's opcode bodies, as [`int_lane`] does for the
+    /// `_int` lane.
     fn int128_lane(op: IntOp, bits: u64, a: Int128, b: Int128) -> Int128 {
         match op {
-            IntOp::UAdd => double_add(a, b, bits),
-            IntOp::USub => double_sub(a, b, bits),
-            IntOp::UMul => double_mul(a, b, bits),
-            // Division and the bitwise three carry no width, and that is the masked-cell
-            // invariant being used: a quotient cannot exceed its dividend, and neither can a
-            // bitwise result set a bit its operands did not have.
+            // One body for each signed pair, for the reason `int_lane` gives.
+            IntOp::UAdd | IntOp::SAdd => double_add(a, b, bits),
+            IntOp::USub | IntOp::SSub => double_sub(a, b, bits),
+            IntOp::UMul | IntOp::SMul => double_mul(a, b, bits),
+            // The unsigned division and the bitwise three carry no width, and that is the
+            // masked-cell invariant being used: an unsigned quotient cannot exceed its dividend,
+            // and neither can a bitwise result set a bit its operands did not have. The signed
+            // division reads its sign at `bits - 1`, so it does need the width.
             IntOp::UDiv => a.unsigned_div(b),
+            IntOp::SDiv => a.signed_div(b, bits),
             IntOp::URem => a.unsigned_rem(b),
+            IntOp::SRem => a.signed_rem(b, bits),
             IntOp::And => a & b,
             IntOp::Or => a | b,
             IntOp::Xor => a ^ b,
             IntOp::Shl => double_shl(a, b, bits),
             IntOp::UShr => double_ushr(a, b, bits),
-            // The signed forms have no 128-bit opcode to sweep, which the caller enforces by
-            // sweeping this lane unsigned; naming them here keeps a new variant a compile error.
-            IntOp::SAdd | IntOp::SSub | IntOp::SMul | IntOp::SDiv | IntOp::SRem | IntOp::SShr => {
-                unreachable!("{op:?} has no 128-bit lane: MAX_LOWERED_SIGNED_BITS is 64")
-            }
+            IntOp::SShr => double_ashr(a, b, bits),
         }
     }
 
@@ -4983,12 +5113,8 @@ mod int_semantics_conformance {
         let mut checked = 0usize;
 
         for op in IntOp::ALL {
-            // The reading is the operation's own, so the width set it admits comes off it rather
-            // than off a sign swept beside it. One set covers the shifts too — see `lane_widths`.
-            let sign = op.sign().unwrap_or(Sign::Unsigned);
-            let widths = lane_widths(sign);
-
-            for bits in widths {
+            // One set covers every operation, the shifts included — see `lane_widths`.
+            for bits in lane_widths() {
                 for (a, b) in operand_pairs(op, bits as usize) {
                     let (a, b) = (a as u64, b as u64);
                     let got = int_lane(op, bits, a, b);
@@ -5030,12 +5156,8 @@ mod int_semantics_conformance {
 
     #[test]
     fn the_int128_lane_agrees_with_the_model() {
-        let mut checked = 0usize;
-
-        // Unsigned only: `MAX_LOWERED_SIGNED_BITS` is 64, so no signed opcode reads a pattern
-        // this wide and there is none to sweep. The filter is what the lane's own `unreachable!`
-        // arms rely on.
-        for op in IntOp::ALL.into_iter().filter(|op| !op.is_signed()) {
+        for op in IntOp::ALL {
+            let mut checked = 0usize;
             // Every width the lane holds, not only its widest — see `double_lane_widths`.
             for bits in double_lane_widths() {
                 for (a, b) in operand_pairs(op, bits as usize) {
@@ -5059,19 +5181,20 @@ mod int_semantics_conformance {
                     }
                 }
             }
-        }
 
-        assert!(
-            checked > 2_000,
-            "the sweep only reached {checked} specified points"
-        );
+            // Per operation, so that losing one, a signed one say, cannot hide behind the others.
+            assert!(
+                checked > 1_000,
+                "the sweep only reached {checked} specified points of {op:?}"
+            );
+        }
     }
 
     #[test]
     fn the_comparison_opcodes_agree_with_the_model() {
         // `eq_int` and `ult_int` take no width — they read the raw cell — so the model is asked at
         // the width the operands were masked to, which is the same question.
-        for bits in lane_widths(Sign::Unsigned) {
+        for bits in lane_widths() {
             for a in corners::values(bits as usize) {
                 for b in corners::values(bits as usize) {
                     let (au, bu) = (a as u64, b as u64);
@@ -5080,13 +5203,28 @@ mod int_semantics_conformance {
                     assert_eq!(au == bu, compare(CmpOp::Eq, at, a, b));
                     assert_eq!(au < bu, compare(CmpOp::ULt, at, a, b));
 
-                    if corners::signed_width_ok(at) {
-                        assert_eq!(
-                            signed_cell(au, bits) < signed_cell(bu, bits),
-                            compare(CmpOp::SLt, at, a, b),
-                            "slt_int disagreed at {bits} bits on {a:#x} {b:#x}"
-                        );
-                    }
+                    assert_eq!(
+                        signed_cell(au, bits) < signed_cell(bu, bits),
+                        compare(CmpOp::SLt, at, a, b),
+                        "slt_int disagreed at {bits} bits on {a:#x} {b:#x}"
+                    );
+                }
+            }
+        }
+
+        // The double lane's orderings, at every width it holds, as the complement's below are.
+        for bits in double_lane_widths() {
+            for a in corners::values(bits as usize) {
+                for b in corners::values(bits as usize) {
+                    let (ad, bd) = (Int128::from_u128(a), Int128::from_u128(b));
+                    let at = bits as usize;
+
+                    assert_eq!(ad.unsigned_lt(bd), compare(CmpOp::ULt, at, a, b));
+                    assert_eq!(
+                        ad.signed_lt(bd, bits),
+                        compare(CmpOp::SLt, at, a, b),
+                        "slt_int128 disagreed at {bits} bits on {a:#x} {b:#x}"
+                    );
                 }
             }
         }
@@ -5094,7 +5232,7 @@ mod int_semantics_conformance {
 
     #[test]
     fn the_complement_opcode_agrees_with_the_model() {
-        for bits in lane_widths(Sign::Unsigned) {
+        for bits in lane_widths() {
             for a in corners::values(bits as usize) {
                 assert_eq!(
                     u128::from(cell_complement(a as u64, bits)),

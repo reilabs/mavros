@@ -122,9 +122,35 @@ fn read_field_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr:
     ark_bn254::Fr::new_unchecked(BigInt::new([l0, l1, l2, l3]))
 }
 
+/// A compiled artifact, retained so a module run many times is handed to the engine once as
+/// compilation is expensive.
+pub struct LoadedModule {
+    engine: Engine,
+    module: wasmtime::Module,
+}
+
+impl LoadedModule {
+    /// Compile the artifact at `wasm_path`, following its debug sidecar as
+    /// [`wasm_runtime::load_wasmtime_module`] does.
+    pub fn load(wasm_path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let engine = wasm_engine()?;
+        let module = wasm_runtime::load_wasmtime_module(&engine, wasm_path)?;
+        Ok(Self { engine, module })
+    }
+}
+
 /// Run a compiled module's witgen entry point and read its outputs back out of linear memory.
 pub fn run_witgen(
     wasm_path: &Path,
+    r1cs: &R1CS,
+    params: &[interpreter::InputValueOrdered],
+) -> Result<WasmResult, Box<dyn std::error::Error>> {
+    run_witgen_loaded(&LoadedModule::load(wasm_path)?, r1cs, params)
+}
+
+/// [`run_witgen`] on a module that is already compiled.
+pub fn run_witgen_loaded(
+    loaded: &LoadedModule,
     r1cs: &R1CS,
     params: &[interpreter::InputValueOrdered],
 ) -> Result<WasmResult, Box<dyn std::error::Error>> {
@@ -140,19 +166,15 @@ pub fn run_witgen(
     let tables_cap = r1cs.constraints_layout.tables_data_size as u32;
     let table_info_bytes = tables_cap * TABLE_INFO_SLOT_SIZE;
 
-    // Create wasmtime engine and store
-    let engine = wasm_engine()?;
-    let mut store = Store::new(&engine, ());
+    let LoadedModule { engine, module } = loaded;
+    let mut store = Store::new(engine, ());
 
-    // Load the WASM module
-    let module = wasm_runtime::load_wasmtime_module(&engine, wasm_path)?;
-
-    let memory = Memory::new(&mut store, imported_memory_type(&module)?)?;
+    let memory = Memory::new(&mut store, imported_memory_type(module)?)?;
 
     // Create linker, register imported memory, and instantiate
-    let mut linker = Linker::new(&engine);
+    let mut linker = Linker::new(engine);
     linker.define(&store, "env", "memory", memory)?;
-    let instance = linker.instantiate(&mut store, &module)?;
+    let instance = linker.instantiate(&mut store, module)?;
 
     // Read __data_end from the WASM module to find where the module's static data ends. Our VM
     // struct and buffers must be placed AFTER this to avoid colliding with the module's data
@@ -438,6 +460,15 @@ pub fn run_ad(
     r1cs: &R1CS,
     coeffs: &[RawField],
 ) -> Result<AdWasmResult, Box<dyn std::error::Error>> {
+    run_ad_loaded(&LoadedModule::load(wasm_path)?, r1cs, coeffs)
+}
+
+/// [`run_ad`] on a module that is already compiled.
+pub fn run_ad_loaded(
+    loaded: &LoadedModule,
+    r1cs: &R1CS,
+    coeffs: &[RawField],
+) -> Result<AdWasmResult, Box<dyn std::error::Error>> {
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
 
@@ -449,16 +480,14 @@ pub fn run_ad(
     // FIELD-ASSUMPTION: L3-field-size
     let coeffs_bytes = (constraint_count * FIELD_SIZE) as u32;
 
-    let engine = wasm_engine()?;
-    let mut store = Store::new(&engine, ());
+    let LoadedModule { engine, module } = loaded;
+    let mut store = Store::new(engine, ());
 
-    let module = wasm_runtime::load_wasmtime_module(&engine, wasm_path)?;
+    let memory = Memory::new(&mut store, imported_memory_type(module)?)?;
 
-    let memory = Memory::new(&mut store, imported_memory_type(&module)?)?;
-
-    let mut linker = Linker::new(&engine);
+    let mut linker = Linker::new(engine);
     linker.define(&store, "env", "memory", memory)?;
-    let instance = linker.instantiate(&mut store, &module)?;
+    let instance = linker.instantiate(&mut store, module)?;
 
     let data_end_global = instance
         .get_global(&mut store, "__data_end")

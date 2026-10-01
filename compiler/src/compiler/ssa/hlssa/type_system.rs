@@ -1,7 +1,6 @@
 use std::fmt::{Debug, Display, Formatter};
 
 use mavros_artifacts::FieldConfig;
-use mavros_int_semantics::MAX_LOWERED_SIGNED_BITS;
 
 use crate::compiler::ssa::SSAType;
 
@@ -18,18 +17,6 @@ const _: () = assert!(
     MAX_SUPPORTED_INT_BITS == mavros_int_semantics::MAX_BITS,
     "the integer type cap and `mavros-int-semantics`'s width bound have drifted apart"
 );
-
-/// Reject a signed _operation_ on a pattern no lowering can read as two's complement.
-///
-/// `what` names the operation for the panic, e.g. `"division"`. Call this from the arm that has
-/// already decided the operation is signed — the width alone is never the problem, and an
-/// `int128` that no signed opcode touches is perfectly legal.
-pub fn assert_signed_op_width(bits: usize, what: &str) {
-    assert!(
-        bits <= MAX_LOWERED_SIGNED_BITS,
-        "signed integers wider than i{MAX_LOWERED_SIGNED_BITS} are unsupported: {what} on a {bits}-bit value"
-    );
-}
 
 /// A type expression.
 ///
@@ -591,37 +578,11 @@ impl SSAType for Type {}
 mod tests {
     use super::*;
 
-    // --- the signed width bound ---
+    // --- the type cap ---
 
+    /// The widest width is an ordinary type carrying its own bit size.
     #[test]
-    fn the_signed_width_bound_is_about_the_operation_not_the_type() {
-        // An `int128` is a perfectly ordinary type: only asking a _signed_ operation to read one
-        // is unsupported. Nothing here may inspect a type to decide that -- a type is a width.
-        assert_signed_op_width(64, "division");
-        assert_signed_op_width(1, "division");
-        assert_eq!(Type::int(128).get_bit_size(FieldConfig::bn254()), 128);
-    }
-
-    #[test]
-    #[should_panic(expected = "signed integers wider than i64 are unsupported")]
-    fn a_signed_operation_wider_than_i64_is_rejected() {
-        assert_signed_op_width(128, "division");
-    }
-
-    /// The tripwire on [`assert_signed_op_width`] pointing at a support frontier.
-    ///
-    /// Strict, not `<=`: the two constants answer different questions, and the day someone
-    /// re-points the funnel at the type cap to "simplify" it, this is what says no. See
-    /// [`assert_signed_op_width`]'s doc for the argument. The unit that widens the signed
-    /// lowerings retires the funnel and this test together.
-    #[test]
-    fn the_signed_frontier_sits_strictly_below_the_type_cap() {
-        assert!(MAX_LOWERED_SIGNED_BITS < MAX_SUPPORTED_INT_BITS);
-    }
-
-    /// A width past the signed frontier is an ordinary type carrying its own bit size.
-    #[test]
-    fn a_width_far_above_the_signed_frontier_is_still_an_ordinary_type() {
+    fn the_widest_width_is_an_ordinary_type() {
         assert_eq!(
             Type::int(MAX_SUPPORTED_INT_BITS).get_bit_size(FieldConfig::bn254()),
             MAX_SUPPORTED_INT_BITS

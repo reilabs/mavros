@@ -52,7 +52,7 @@ use crate::compiler::{
     ssa::{
         Instruction, ValueId,
         hlssa::{
-            ArithGroup, BinaryArithOpKind, CmpKind, OpCode, Type, TypeExpr, assert_signed_op_width,
+            ArithGroup, BinaryArithOpKind, CmpKind, OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -77,9 +77,10 @@ impl InstructionLoweringRule for LowerPureGuards {
             // An unguarded div/mod still has to be checked as `Guard` only covers the ops that sit
             // under witness-dependent control flow. Witness operands are included: the comparisons
             // become ordinary constraints, lowered by the later witness passes just like any
-            // other, so one implementation covers both. The one exception is an unsigned integer
-            // division by a witness, whose lowering rejects a zero divisor itself, and which `DCE`
-            // therefore keeps until that lowering has run; see `divisor_checked_by_its_lowering`.
+            // other, so one implementation covers both. The one exception is an integer division by
+            // a witness, whose lowering rejects a zero divisor, and a signed one `INT_MIN / -1`,
+            // itself, and which `DCE` therefore keeps until that lowering has run; see
+            // `divisor_checked_by_its_lowering`.
             //
             // `Field` is in scope for the same reason the integers are, and needs it most, because
             // there the missing check is a _soundness_ hole rather than a wrong answer. `div_field`
@@ -476,10 +477,6 @@ impl LowerPureGuards {
         bits: usize,
         signed: bool,
     ) {
-        if signed {
-            assert_signed_op_width(bits, "guarded overflow check");
-        }
-
         match kind.group() {
             // The operation is performed first and unconditionally. It wraps rather than trapping,
             // so an overflowing one in an inactive branch is harmless, and the check needs the
@@ -1016,7 +1013,7 @@ mod tests {
             hlssa::{Constant, HLSSA, type_system::MAX_SUPPORTED_INT_BITS},
         },
     };
-    use mavros_int_semantics::{MAX_LOWERED_SIGNED_BITS, int_bits::HOST_WORD_BITS};
+    use mavros_int_semantics::int_bits::HOST_WORD_BITS;
 
     /// `main(lhs: int(bits), rhs: int(bits)) -> int(bits) { lhs op rhs }`, lowered by this pass.
     ///
@@ -1101,14 +1098,20 @@ mod tests {
             .any(|op| matches!(op, OpCode::AssertCmp { .. }))
     }
 
-    /// An unsigned division by a witness carries no check of its own, as both of its lowerings
-    /// refuse a zero divisor already; every other division keeps it.
+    /// An integer division by a witness carries no check of its own, as both of its lowerings
+    /// refuse a zero divisor, and a signed one `INT_MIN / -1`, already; every other division keeps
+    /// it.
     #[test]
-    fn only_an_unsigned_division_by_a_witness_leaves_its_divisor_to_its_lowering() {
+    fn only_an_integer_division_by_a_witness_leaves_its_check_to_its_lowering() {
         let int = |bits| Type::int(bits);
         let witnessed = |ty| Type::witness_of(ty);
         for bits in [64, 128, 320] {
-            for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
+            for kind in [
+                BinaryArithOpKind::UDiv,
+                BinaryArithOpKind::URem,
+                BinaryArithOpKind::SDiv,
+                BinaryArithOpKind::SRem,
+            ] {
                 assert!(
                     !unguarded_division_is_checked(kind, int(bits), witnessed(int(bits))),
                     "an int{bits} {kind:?} by a witness is checked twice"
@@ -1126,12 +1129,6 @@ mod tests {
                     "an int{bits} {kind:?} by a pure divisor is not checked before its hint"
                 );
             }
-        }
-        for kind in [BinaryArithOpKind::SDiv, BinaryArithOpKind::SRem] {
-            assert!(
-                unguarded_division_is_checked(kind, int(64), witnessed(int(64))),
-                "a signed {kind:?} by a witness is not checked for `INT_MIN / -1`"
-            );
         }
         assert!(
             unguarded_division_is_checked(
@@ -1275,15 +1272,11 @@ mod tests {
 
     /// Every failable pure operation builds its check at every width `width_validation` admits.
     ///
-    /// The companion of that pass's `the_same_operation_outside_the_witness_domain_is_not_bounded`
-    /// and `a_signed_reading_stops_at_the_frontier`, from the lowering's side. The funnel refuses no
-    /// _unsigned_ operation on this lane at all, so a constant minted here in a host word would be a
-    /// panic several passes past the only point that could have named the width — which is what a
-    /// pure multiply above 128 bits was. Sweeping the kinds is what says the rest are not.
-    ///
-    /// The signed half stops at [`MAX_LOWERED_SIGNED_BITS`] because the funnel does: each of these
-    /// checks reads a sign bit, and `overflow_guard` and `divmod_guard` state that in one integer
-    /// cell.
+    /// The companion of that pass's `the_same_operation_outside_the_witness_domain_is_not_bounded`,
+    /// from the lowering's side. The funnel refuses no operation on this lane at all, under either
+    /// reading, so a constant minted here in a host word would be a panic several passes past the
+    /// only point that could have named the width — which is what a pure multiply above 128 bits
+    /// was. Sweeping the kinds is what says the rest are not.
     #[test]
     fn every_pure_guard_is_built_at_every_width() {
         let unsigned = [
@@ -1311,12 +1304,9 @@ mod tests {
             200,
             MAX_SUPPORTED_INT_BITS,
         ];
-        for (kinds, widths) in [
-            (unsigned.as_slice(), widths.as_slice()),
-            (signed.as_slice(), [MAX_LOWERED_SIGNED_BITS].as_slice()),
-        ] {
+        for kinds in [unsigned.as_slice(), signed.as_slice()] {
             for kind in kinds {
-                for bits in widths {
+                for bits in &widths {
                     for guarded in [false, true] {
                         let _ = lowered_pure_op(*kind, *bits, guarded);
                     }
