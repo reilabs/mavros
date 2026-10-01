@@ -707,9 +707,10 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
 /// - **`break`/`continue`.** Rejected by the frontend in *constrained* functions ("break is only
 ///   allowed in unconstrained functions"), pinned by `noir_failure_tests/{break,continue}_in_
 ///   constrained_loop`. Where they *are* legal — unconstrained functions — they do not escape the
-///   rule either: both jump to a block still inside the enclosing loop's region (the latch for
-///   `continue`, the loop exit for `break`), so the arms still reconverge and that join is exactly
-///   what `get_merge_point`'s reverse-CFG immediate dominator returns.
+///   rule either: `continue` targets the loop's header or shared advance block, which can also
+///   exit an inclusive loop at its endpoint; `break` targets the loop exit directly. These paths
+///   stay within the enclosing loop's region, so the arms still reconverge and that join is
+///   exactly what `get_merge_point`'s reverse-CFG immediate dominator returns.
 ///
 /// Should the first ever change, the backstop is a panic rather than a silent miscompile: this
 /// analysis reaches every witness `JmpIf` through [`CFG::get_merge_point`], which unwraps

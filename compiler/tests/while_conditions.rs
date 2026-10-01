@@ -130,3 +130,28 @@ unconstrained fn main(skip: u32) -> pub u32 {
         ],
     );
 }
+
+#[test]
+fn continue_in_while_condition_exits_inclusive_for_at_integer_maximum() {
+    check(
+        r#"
+unconstrained fn main(skip: u8) -> pub u32 {
+    let mut count = 0;
+    for i in 254u8..=255u8 {
+        let mut j = 0;
+        while { if i == skip { continue; } j < 2 } {
+            count += 1;
+            j += 1;
+        }
+        count += 10;
+    }
+    count
+}
+"#,
+        &[
+            "skip = 254\nreturn = 12",
+            "skip = 255\nreturn = 12",
+            "skip = 253\nreturn = 24",
+        ],
+    );
+}
