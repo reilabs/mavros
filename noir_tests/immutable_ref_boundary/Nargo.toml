@@ -1,0 +1,6 @@
+[package]
+name = "immutable_ref_boundary"
+type = "bin"
+authors = [""]
+
+[dependencies]
