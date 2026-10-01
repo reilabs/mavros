@@ -1,0 +1,6 @@
+[package]
+name = "dead_division_chain_by_zero_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]

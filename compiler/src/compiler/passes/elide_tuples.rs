@@ -12,11 +12,14 @@
 //! list of tuple-free "leaf" values, so a single `ValueId` is represented by a `Vec<ValueId>`.
 //! After this pass runs, no [`TypeExpr::Tuple`], `MkTuple`, `TupleProj` or `TupleRefProj` reaches
 //! any subsequent pass: the IR is tuple-free from here through the rest of HLSSA. Several downstream
-//! passes still _contain_ tuple-handling arms (`untaint_control_flow`, `witness_lowering`,
-//! `rc_insertion`, codegen); those are now dead and can be removed as follow-up.
+//! passes still _contain_ tuple-handling arms only to assert `ice_non_elided_tuple`.
 //!
-//! This pass is intended to run directly after `PrepareEntryPoint` (which itself synthesizes tuples
-//! while reconstructing the entry-point ABI).
+//! This pass runs twice:
+//!
+//! - after `PrepareEntryPoint`, which synthesizes tuples while reconstructing the entry-point ABI;
+//! - after `PurifyWitnessSlices`, which synthesizes tuples while lowering witness-length slices.
+//!
+//! `LowerZstSlices` is a precondition since leaf-less slice breaks the elision.
 //!
 //! ## Strategy
 //!
@@ -540,11 +543,9 @@ fn lower_instruction(
             // Every component slice shares the original slice's length, so read it off the first
             // leaf. The result is a scalar `u32`, hence a single component.
             let slices = components(value_map, *slice);
-            debug_assert!(
-                !slices.is_empty(),
-                "elide_tuples: SliceLen on a leaf-less slice (e.g. Slice<()>); \
-                 the length is unrepresentable after scalarization"
-            );
+            if slices.is_empty() {
+                ice!("SliceLen on a leaf-less slice during elision. LowerZstSlices must run first");
+            }
             let r = single(value_map, *result);
             out.push(OpCode::SliceLen {
                 result: r,
@@ -717,10 +718,13 @@ pub fn contains_tuple(ty: &Type) -> bool {
 fn slot_count(ty: &Type) -> usize {
     match &ty.expr {
         TypeExpr::Tuple(elements) => elements.iter().map(slot_count).sum(),
-        TypeExpr::Array(inner, _)
-        | TypeExpr::Slice(inner)
-        | TypeExpr::Ref(inner)
-        | TypeExpr::WitnessOf(inner) => slot_count(inner),
+        TypeExpr::Slice(inner) => match slot_count(inner) {
+            0 => ice!("Leaf-less slice in elision. LowerZstSlices must run first"),
+            n => n,
+        },
+        TypeExpr::Array(inner, _) | TypeExpr::Ref(inner) | TypeExpr::WitnessOf(inner) => {
+            slot_count(inner)
+        }
         TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => 1,
     }
 }
@@ -749,7 +753,7 @@ fn leaf_types(ty: &Type) -> Vec<Type> {
         TypeExpr::Slice(inner) => {
             let leaves = leaf_types(inner);
             if leaves.is_empty() {
-                ice!("Leaf-less slice {ty} reached in elision. LowerZstSlices must run first");
+                ice!("Leaf-less slice in elision. LowerZstSlices must run first");
             }
             leaves.into_iter().map(|leaf| leaf.slice_of()).collect()
         }
@@ -889,6 +893,13 @@ mod tests {
         // Aggregates of unit collapse to zero leaves too.
         assert_eq!(slot_count(&unit.clone().array_of(4)), 0);
         assert_eq!(leaf_types(&unit.ref_of()), Vec::<Type>::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "Leaf-less slice")]
+    fn leafless_slice_is_an_ice() {
+        // `LowerZstSlices` must have replaced it before the elision runs.
+        slot_count(&Type::tuple_of(vec![]).slice_of());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 [package]
-name = "zst_slice_pop_oob_fails"
+name = "zst_slice_pop_empty_guarded_false"
 type = "bin"
 authors = [""]
 

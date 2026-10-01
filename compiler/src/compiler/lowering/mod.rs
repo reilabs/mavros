@@ -321,6 +321,7 @@ impl SSAConverter {
                 }
             }
 
+            assert!(!b.block(current_block).is_terminated());
             b.block(current_block).terminate_return(vec![]);
         });
 
@@ -336,6 +337,7 @@ impl SSAConverter {
                         .drop_global(i);
                 }
             }
+            assert!(!b.block(entry).is_terminated());
             b.block(entry).terminate_return(vec![]);
         });
 
@@ -394,6 +396,7 @@ impl SSAConverter {
 
         // Function bodies follow the same one-value contract as call expressions.
         let result = expr_converter.convert_value(&ast_func.body, &mut b);
+        assert!(!b.block(expr_converter.current_block()).is_terminated());
         b.block(expr_converter.current_block())
             .terminate_return(vec![result]);
 

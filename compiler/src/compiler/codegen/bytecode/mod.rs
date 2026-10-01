@@ -1924,6 +1924,20 @@ impl CodeGen {
                     value,
                     ..
                 } => {
+                    // The inverse of the arm above: a spread `SPREAD_MAX_BITS` value, which is
+                    // twice as wide. The type rule admits an operand twice that again, and the
+                    // opcode would read only its low 64 bits.
+                    let value_type = type_info.get_value_type(*value);
+                    let value_bits = match value_type.strip_witness().expr {
+                        TypeExpr::Int(bits) => bits,
+                        t => ice!("Unsupported unspread value type: {:?}", t),
+                    };
+                    if value_bits > 2 * SPREAD_MAX_BITS {
+                        todo!(
+                            "Unspread bytecode lowering for integer widths > {} bits",
+                            2 * SPREAD_MAX_BITS
+                        );
+                    }
                     let odd_type = type_info.get_value_type(*result_odd);
                     let even_type = type_info.get_value_type(*result_even);
                     let res_and = match odd_type.strip_witness().expr {

@@ -46,6 +46,8 @@ fn abi_return_guards_match_the_generated_entry_blob() {
 fn nested_statement_tuples_preserve_projection_offsets() {
     run(
         r#"
+        fn check(value: Field) { assert(value != 0); }
+
         fn main(x: Field) {
             let t = ((x, { assert(x != 0); }), 7);
             assert_eq(t.1, 7);
@@ -56,6 +58,27 @@ fn nested_statement_tuples_preserve_projection_offsets() {
             let blocked = ({ (x, { assert(x != 0); }) }, 13);
             assert_eq(blocked.1, 13);
             assert_eq(blocked.0.0, x);
+            let callbacks = ((check, { assert(x != 0); }), 17);
+            callbacks.0.0(x);
+            assert_eq(callbacks.1, 17);
+        }
+        "#,
+        "x = '3'",
+        1,
+        true,
+    );
+}
+
+#[test]
+fn unconstrained_unit_returns_preserve_reference_argument_lowering() {
+    run(
+        r#"
+        unconstrained fn check(value: &Field) { assert(*value == 3); }
+        fn main(x: Field) {
+            // Safety: the input is constrained to the checked value.
+            let result = unsafe { check(&x) };
+            assert_eq(result, ());
+            assert_eq(x, 3);
         }
         "#,
         "x = '3'",

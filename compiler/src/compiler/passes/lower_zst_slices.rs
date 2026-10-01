@@ -7,8 +7,15 @@
 //! This pass runs before the first `ElideTuples` and rewrites `Slice<T>` with leaf-less `T` to a
 //! plain `u32`, its length. Each op on such a slice becomes arithmetic on the length plus an
 //! explicit bounds check built through [`seq_bounds`]. For every op but `ArrayGet` that is the
-//! check the op normally has; `ArrayGet` is normally bounded by the lookup argument of a real
-//! read, and a leaf-less read has no lookup, so the check is asserted here instead:
+//! check the op normally has. A leafy `ArrayGet` is instead bounded downstream, by a different
+//! mechanism per shape:
+//!
+//! - a dead read, by DCE's `rewrite_dead_seq_access`
+//! - a witness-indexed read, by the lookup argument `gen_witness_array_get` emits
+//! - a guarded pure read, by the OOB check `LowerPureGuards` lowers it into
+//!
+//! A leaf-less read gets none of them — there is no data to look up, and the elision drops the op
+//! before DCE runs — so the check is asserted here instead:
 //!
 //! - `MkSeq`/`MkRepeated`/`ArrayToSlice` cast: the constant element count.
 //! - `SliceLen`: alias the operand (the slice *is* its length).
@@ -23,7 +30,10 @@
 //! asserts `index < n` for both `ArrayGet` and `ArraySet`, again through [`seq_bounds`], and
 //! leaves the op for the elision to drop.
 //!
-//! `Map` casts and guards are generated later so reaching them in this pass is an ICE.
+//! `Map` casts and guards are generated later so reaching them in this pass is an ICE. Witness
+//! types are generated later too, but are carried through instead. Here, the wrapper lands
+//! only on scalar leaves and ref tops, so `Witness<Ref<T>>` is the one witnessed shape that is
+//! leaf-less.
 
 use crate::compiler::{
     analysis::{
@@ -32,9 +42,7 @@ use crate::compiler::{
     },
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::shared::{
-        seq_bounds::{
-            build_lt_bounds_assert_on_len, build_pop_bounds_assert_on_len, seq_bounds_operands,
-        },
+        seq_bounds::{build_lt_bounds_assert_on_len, build_pop_bounds_assert_on_len, seq_len},
         value_replacements::{ReplaceScope, ValueReplacements},
     },
     ssa::{
@@ -70,7 +78,7 @@ impl Pass for LowerZstSlices {
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {
-        // No block or terminator is added, removed or edited.
+        // CFG is preserved
         vec![FlowAnalysis::id()]
     }
 }
@@ -205,8 +213,10 @@ fn lower_instruction(
         } if is_zst_slice(slice) => {
             let assert = build_pop_bounds_assert_on_len(b, slice);
             b.emit(assert);
-            let one = len_const(b, 1);
-            let new_len = b.usub(slice, one);
+            let zero = len_const(b, 0);
+            let nonempty = b.ult(zero, slice);
+            let nonempty = b.cast_to(CastTarget::Int(32), nonempty);
+            let new_len = b.usub(slice, nonempty);
             aliases.insert(result_slice, new_len);
             let elem = synthesize_leafless(b, ty_of(result_elem));
             aliases.insert(result_elem, elem);
@@ -231,8 +241,10 @@ fn lower_instruction(
         } if is_zst_slice(slice) => {
             let (assert, _, _) = build_lt_bounds_assert_on_len(b, slice, index, ty_of(index));
             b.emit(assert);
-            let one = len_const(b, 1);
-            let new_len = b.usub(slice, one);
+            let zero = len_const(b, 0);
+            let nonempty = b.ult(zero, slice);
+            let nonempty = b.cast_to(CastTarget::Int(32), nonempty);
+            let new_len = b.usub(slice, nonempty);
             aliases.insert(result_slice, new_len);
             let elem = synthesize_leafless(b, ty_of(result_elem));
             aliases.insert(result_elem, elem);
@@ -243,13 +255,9 @@ fn lower_instruction(
         OpCode::ArrayGet { array, index, .. } | OpCode::ArraySet { array, index, .. }
             if is_zero_leaf(ty_of(array)) =>
         {
-            let (_, len, index, _) =
-                seq_bounds_operands(b, array, index, ty_of(array), ty_of(index));
-            b.emit(OpCode::AssertCmp {
-                kind: crate::compiler::ssa::hlssa::CmpKind::ULt,
-                lhs: index,
-                rhs: len,
-            });
+            let len = seq_len(b, array, ty_of(array));
+            let (assert, _, _) = build_lt_bounds_assert_on_len(b, len, index, ty_of(index));
+            b.emit(assert);
             b.emit(op);
         }
 
@@ -498,6 +506,18 @@ mod tests {
             .unwrap_or_else(|| panic!("{value:?} is not instruction-defined"))
     }
 
+    fn block_param_types(function: &HLFunction) -> Vec<(BlockId, Vec<Type>)> {
+        let mut params: Vec<(BlockId, Vec<Type>)> = function
+            .get_blocks()
+            .map(|(id, block)| {
+                let types = block.get_parameters().map(|(_, ty)| ty.clone()).collect();
+                (*id, types)
+            })
+            .collect();
+        params.sort_by_key(|(id, _)| *id);
+        params
+    }
+
     fn int_const(ssa: &HLSSA, value: ValueId) -> Option<IntBits> {
         match ssa.get_const(value).as_deref() {
             Some(Constant::Int(pattern)) => Some(pattern.clone()),
@@ -618,10 +638,9 @@ mod tests {
         let (zero, len) = get_the_bounds_assert(&ssa);
         assert_eq!(int_const(&ssa, zero), Some(u32_const(0)), "0 < len");
         assert_eq!(len, s);
-        assert_eq!(
-            arith(&ssa, returned(&ssa)[0]),
-            (BinaryArithOpKind::USub, s, Some(u32_const(1)))
-        );
+        let (kind, lhs, rhs) = arith(&ssa, returned(&ssa)[0]);
+        assert_eq!((kind, lhs), (BinaryArithOpKind::USub, s));
+        assert_eq!(rhs, None, "`len - (0 < len)`, never `len - 1`");
     }
 
     #[test]
@@ -631,10 +650,9 @@ mod tests {
             vec![rest]
         });
         assert_eq!(get_the_bounds_assert(&ssa), (i, s));
-        assert_eq!(
-            arith(&ssa, returned(&ssa)[0]),
-            (BinaryArithOpKind::USub, s, Some(u32_const(1)))
-        );
+        let (kind, lhs, rhs) = arith(&ssa, returned(&ssa)[0]);
+        assert_eq!((kind, lhs), (BinaryArithOpKind::USub, s));
+        assert_eq!(rhs, None, "`len - (0 < len)`, never `len - 1`");
     }
 
     #[test]
@@ -683,5 +701,159 @@ mod tests {
         lower(&mut ssa);
         assert_eq!(entry_ops_text(&ssa), before);
         assert_eq!(ssa.get_unique_entrypoint().get_param_types(), params_before);
+    }
+
+    #[test]
+    fn global_types_become_lengths() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        ssa.set_global_types(vec![zst_slice(), Type::field()]);
+        program(&mut ssa, vec![], |_| vec![]);
+        lower(&mut ssa);
+
+        assert_eq!(
+            ssa.get_global_types(),
+            [Type::int(32), Type::field()],
+            "a leafy global is left alone"
+        );
+    }
+
+    #[test]
+    fn read_global_result_types_become_lengths() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        ssa.set_global_types(vec![zst_slice()]);
+        program(&mut ssa, vec![zst_slice()], |e| {
+            vec![e.read_global(0, zst_slice())]
+        });
+        lower(&mut ssa);
+
+        let OpCode::ReadGlobal { result_type, .. } = def_of(&ssa, returned(&ssa)[0]) else {
+            panic!("The global must survive the pass");
+        };
+        assert_eq!(result_type, Type::int(32));
+    }
+
+    #[test]
+    fn signatures_and_block_parameters_become_lengths() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut successor = BlockId(0);
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |b| {
+            b.function.add_return_type(zst_slice());
+
+            let mut carried = ValueId(0);
+            successor = b.add_block(|blk| carried = blk.add_parameter(zst_slice()));
+            b.test_block(successor).terminate_return(vec![carried]);
+
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let s = e.add_parameter(zst_slice());
+            e.terminate_jmp(successor, vec![s]);
+        });
+        lower(&mut ssa);
+
+        let main = ssa.get_unique_entrypoint();
+        assert_eq!(main.get_returns(), [Type::int(32)]);
+
+        assert_eq!(
+            block_param_types(main),
+            [
+                (main.get_entry_id(), vec![Type::int(32)]),
+                (successor, vec![Type::int(32)]),
+            ],
+        );
+    }
+
+    #[test]
+    fn mk_tuple_element_types_become_lengths() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let elements = vec![zst_slice(), Type::field()];
+        program(&mut ssa, vec![Type::tuple_of(elements.clone())], |e| {
+            let s = e.add_parameter(zst_slice());
+            let x = e.add_parameter(Type::field());
+            vec![e.mk_tuple(vec![s, x], elements.clone())]
+        });
+        lower(&mut ssa);
+
+        let OpCode::MkTuple { element_types, .. } = def_of(&ssa, returned(&ssa)[0]) else {
+            panic!("the tuple survives the pass");
+        };
+        assert_eq!(element_types, [Type::int(32), Type::field()]);
+    }
+
+    #[test]
+    fn a_leaf_less_element_is_synthesized_shape_by_shape() {
+        let element = Type::tuple_of(vec![
+            empty_type().array_of(3),
+            empty_type().ref_of(),
+            Type::witness_of(empty_type().ref_of()),
+        ]);
+        let mut ssa = HLSSA::with_main("main".to_string());
+        program(&mut ssa, vec![element.clone()], |e| {
+            let s = e.add_parameter(element.clone().slice_of());
+            let i = e.add_parameter(Type::int(32));
+            vec![e.array_get(s, i)]
+        });
+        lower(&mut ssa);
+
+        let OpCode::MkTuple { elems, .. } = def_of(&ssa, returned(&ssa)[0]) else {
+            panic!("a tuple element is synthesized as a tuple");
+        };
+        assert!(
+            matches!(def_of(&ssa, elems[0]), OpCode::MkRepeated { count: 3, .. }),
+            "an array of leaf-less elements is repeated, not read"
+        );
+        assert!(
+            matches!(def_of(&ssa, elems[1]), OpCode::Alloc { .. }),
+            "a ref is a fresh allocation"
+        );
+        assert!(
+            matches!(
+                def_of(&ssa, elems[2]),
+                OpCode::Cast {
+                    target: CastTarget::WitnessOf,
+                    ..
+                }
+            ),
+            "a witnessed ref is allocated, then cast into the witness domain"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_block_is_left_to_the_elision() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let mut orphan = BlockId(0);
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        sb.modify_function(main_id, |b| {
+            let mut stranded = ValueId(0);
+            orphan = b.add_block(|blk| stranded = blk.add_parameter(zst_slice()));
+            {
+                let mut e = b.test_block(orphan);
+                let i = e.add_parameter(Type::int(32));
+                e.array_get(stranded, i);
+                e.terminate_return(vec![]);
+            }
+
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let s = e.add_parameter(zst_slice());
+            e.slice_len(s);
+            e.terminate_return(vec![]);
+        });
+        lower(&mut ssa);
+
+        let main = ssa.get_unique_entrypoint();
+        assert_eq!(
+            block_param_types(main),
+            [
+                (main.get_entry_id(), vec![Type::int(32)]),
+                (orphan, vec![zst_slice(), Type::int(32)]),
+            ],
+        );
+        assert!(
+            asserts(&ssa).is_empty(),
+            "no bound is emitted for an unreachable block"
+        );
     }
 }
