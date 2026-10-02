@@ -83,6 +83,23 @@ const DEFAULT_IGNORED_TESTS: &[&str] = &[
     "reference_counts_inliner_min",
     "reference_counts_inliner_max",
     "reference_counts_vectors_inliner_0",
+    // Separate folded circuits and oracle functions are intentionally unsupported. Lowering
+    // rejects these with user diagnostics; compiler/tests/unsupported_features.rs covers that.
+    // `print`/`println` remain ignored, so tests that only print are still exercised.
+    "fold_2_to_17",
+    "fold_after_inlined_calls",
+    "fold_basic",
+    "fold_basic_nested_call",
+    "fold_call_witness_condition",
+    "fold_complex_outputs",
+    "fold_distinct_return",
+    "fold_dyn_index_fail",
+    "fold_fibonacci",
+    "fold_nested_brillig_assert_fail",
+    "fold_numeric_generic_poseidon",
+    "range_check_before_acir_call",
+    "regression_10156",
+    "unknown_oracle",
     // `func_1` recurses without ever decrementing `ctx_limit`, so it never terminates. The witgen
     // VM has no recursion/step/memory guard (frames are heap-allocated per call in `Frame::push`),
     // so running it grows memory without bound. Depending on the compiled circuit shape it either
