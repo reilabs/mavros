@@ -1,4 +1,4 @@
-//! Makes a dynamic index into a degenerate array of references constant.
+//! Makes a dynamic index into a degenerate array constant.
 //!
 //! Nothing below HLSSA can represent a dynamically selected *handle* so such an array has to be gone before untaint runs.
 //!
@@ -113,7 +113,7 @@ fn get_degenerate_ref_read(
     let TypeExpr::Array(elem, cells) = &fti.get_value_type(*array).strip_witness().expr else {
         return None;
     };
-    if *cells > 1 || (*cells == 0 && !elem.contains_ptrs()) {
+    if *cells > 1 {
         return None;
     }
     Some(DegenerateRefRead {
