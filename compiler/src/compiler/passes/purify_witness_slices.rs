@@ -63,41 +63,53 @@ impl Pass for PurifyWitnessSlices {
 
         let mut lifts = BoundaryLifts::default();
         let mut affected: HashMap<FunctionId, HashMap<ValueId, Type>> = HashMap::default();
+        let mut purified_returns: HashMap<FunctionId, Vec<Type>> = HashMap::default();
         for &function_id in &function_ids {
             if !types.has_function(function_id) {
                 continue;
             }
-            let Some(value_shapes) = approx.value_shapes(function_id) else {
-                continue;
-            };
+            // Unconstrained-only callees aren't reached in the ApproximateWitnessTaint analysis. But their
+            // boundaries might be lifted.
+            let value_shapes = approx.value_shapes(function_id);
+            let return_shapes = approx.return_shapes(function_id);
+
             let function = ssa.get_function(function_id);
             let params = function
                 .get_entry()
                 .get_parameters()
                 .map(|(v, ty)| {
                     value_shapes
-                        .get(v)
+                        .and_then(|shapes| shapes.get(v))
                         .is_some_and(|shape| is_slice_tuple(&purify_type(ty, shape)))
                 })
                 .collect();
-            let return_shapes = approx.return_shapes(function_id).unwrap();
 
-            debug_assert_eq!(
-                function.get_returns().len(),
-                return_shapes.len(),
-                "purify_witness_slices: {function_id:?} has {} return slots but {} shapes; the zip below would silently drop the excess",
-                function.get_returns().len(),
-                return_shapes.len()
-            );
+            // Loudly, and in release too: the `zip` below would otherwise leave the excess slots
+            // silently un-purified.
+            if let Some(shapes) = return_shapes
+                && shapes.len() != function.get_returns().len()
+            {
+                ice!(
+                    "purify_witness_slices: {function_id:?} has {} return slots but {} shapes",
+                    function.get_returns().len(),
+                    shapes.len()
+                )
+            }
 
-            let returns = function
-                .get_returns()
-                .iter()
-                .zip(return_shapes)
-                .map(|(ty, shape)| is_slice_tuple(&purify_type(ty, shape)))
-                .collect();
+            let returns: Vec<Type> = match return_shapes {
+                Some(shapes) => function
+                    .get_returns()
+                    .iter()
+                    .zip(shapes)
+                    .map(|(ty, shape)| purify_type(ty, shape))
+                    .collect(),
+                None => function.get_returns().to_vec(),
+            };
             lifts.params.insert(function_id, params);
-            lifts.returns.insert(function_id, returns);
+            lifts
+                .returns
+                .insert(function_id, returns.iter().map(is_slice_tuple).collect());
+            purified_returns.insert(function_id, returns);
             affected.insert(
                 function_id,
                 affected_values(types.get_function(function_id), value_shapes),
@@ -111,7 +123,6 @@ impl Pass for PurifyWitnessSlices {
                 continue;
             };
             let type_info = types.get_function(function_id);
-            let returns_witness = approx.return_shapes(function_id).unwrap().to_vec();
 
             let block_order: Vec<BlockId> = flow
                 .get_function_cfg(function_id)
@@ -124,32 +135,11 @@ impl Pass for PurifyWitnessSlices {
                 type_info,
                 &affected,
                 &block_order,
-                &returns_witness,
+                &purified_returns[&function_id],
                 &lifts.returns[&function_id],
                 &lifts,
             );
             ssa.put_function(function_id, function);
-        }
-
-        for function_id in ssa.get_function_ids().collect::<Vec<_>>() {
-            if types.has_function(function_id) && approx.value_shapes(function_id).is_some() {
-                continue;
-            }
-            let no_lifted_slots = |m: &HashMap<FunctionId, Vec<bool>>, callee: FunctionId| {
-                !m.get(&callee).is_some_and(|l| l.iter().any(|&x| x))
-            };
-            let function = ssa.get_function(function_id);
-            for (_, block) in function.get_blocks() {
-                for instr in block.get_instructions() {
-                    for callee in instr.get_static_call_targets() {
-                        assert!(
-                            no_lifted_slots(&lifts.params, callee)
-                                && no_lifted_slots(&lifts.returns, callee),
-                            "ICE: purify_witness_slices: skipped function {function_id:?} calls {callee:?}, whose purified signature exposes slice tuples"
-                        );
-                    }
-                }
-            }
         }
     }
 }
@@ -214,10 +204,10 @@ fn ice_on_nested_window(purified_elem: Type) -> Type {
 
 fn affected_values(
     type_info: &FunctionTypeInfo,
-    value_shapes: &HashMap<ValueId, WitnessShape>,
+    value_shapes: Option<&HashMap<ValueId, WitnessShape>>,
 ) -> HashMap<ValueId, Type> {
     let mut affected: HashMap<ValueId, Type> = HashMap::default();
-    for (&v, shape) in value_shapes.iter() {
+    for (&v, shape) in value_shapes.into_iter().flatten() {
         let ty = type_info.get_value_type(v);
         let pty = purify_type(ty, shape);
         if pty != *ty {
@@ -341,7 +331,7 @@ fn plan_windows(
                         function: CallTarget::Static(callee),
                         ..
                     } => {
-                        let lifted = lifts.returns.get(callee).map(Vec::as_slice).unwrap_or(&[]);
+                        let lifted = &lifts.returns[callee];
                         for (i, result) in results.iter().enumerate() {
                             if lifted.get(i).copied().unwrap_or(false) {
                                 changed |= windows.insert(*result);
@@ -500,11 +490,6 @@ fn close_boundaries(
                     else {
                         continue;
                     };
-                    // A callee this pass skipped has no lifted slot to reconcile: `run`'s closing
-                    // assert refuses the reverse (a skipped function calling a lifted one).
-                    if !affected.contains_key(callee) {
-                        continue;
-                    }
                     let formals: Vec<ValueId> = ssa
                         .get_function(*callee)
                         .get_entry()
@@ -709,7 +694,7 @@ fn rewrite_function(
     type_info: &FunctionTypeInfo,
     affected: &HashMap<ValueId, Type>,
     block_order: &[BlockId],
-    returns_witness: &[WitnessShape],
+    purified_returns: &[Type],
     lifted_returns: &[bool],
     lifts: &BoundaryLifts,
 ) {
@@ -729,27 +714,18 @@ fn rewrite_function(
         })
         .collect();
 
-    debug_assert_eq!(
-        function.get_returns().len(),
-        returns_witness.len(),
-        "purify_witness_slices: {} return slots but {} shapes; the zip below would silently leave the excess slots un-purified",
-        function.get_returns().len(),
-        returns_witness.len()
-    );
-
     // `lifted_returns` comes from the closed [`BoundaryLifts`], not from this function's own
     // shapes: a slot the closure raised carries a window here even though `purify_type` alone
     // would leave it a bare slice (see [`close_boundaries`]).
-    for ((ty, shape), lifted) in function
+    for ((ty, pty), lifted) in function
         .iter_returns_mut()
-        .zip(returns_witness)
+        .zip(purified_returns)
         .zip(lifted_returns)
     {
-        let pty = purify_type(ty, shape);
-        *ty = if *lifted && !is_slice_tuple(&pty) {
-            window_type(pty)
+        *ty = if *lifted && !is_slice_tuple(pty) {
+            window_type(pty.clone())
         } else {
-            pty
+            pty.clone()
         };
     }
 
@@ -1208,7 +1184,7 @@ fn rewrite_instruction(
             let CallTarget::Static(g) = &callee else {
                 ice!("dynamic call survived to purify_witness_slices")
             };
-            let lifted_params = lifts.params.get(g).map(Vec::as_slice).unwrap_or(&[]);
+            let lifted_params = &lifts.params[g];
             let args = args
                 .into_iter()
                 .enumerate()
@@ -1241,7 +1217,7 @@ fn rewrite_instruction(
             // The converse cannot happen (the join dominates every site) and would be unsound: a wl
             // result with no tuple behind it. Do not "symmetrise" this into an `assert_eq!`. It is
             // written as is to ensure soundness.
-            let lifted_returns = lifts.returns.get(g).map(Vec::as_slice).unwrap_or(&[]);
+            let lifted_returns = &lifts.returns[g];
             for (i, &r) in results.iter().enumerate() {
                 if lifted_returns.get(i).copied().unwrap_or(false) {
                     replacement_tuple_map.insert(r, r);
@@ -1682,6 +1658,45 @@ mod tests {
         assert!(
             allocs_a_window,
             "the caller's pure-length cell must be initialized with a materialized window"
+        );
+    }
+
+    #[test]
+    fn window_into_an_unconstrained_only_callee_lifts_its_param() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let sink_id = ssa.add_function("sink".to_string());
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        sb.modify_function(sink_id, |b| {
+            b.function.add_return_type(Type::int(32));
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let s = e.add_parameter(Type::field().slice_of());
+            let len = e.slice_len(s);
+            e.terminate_return(vec![len]);
+        });
+        build_differing_length_merge(&mut ssa, |e, merged| {
+            e.call_unconstrained(sink_id, vec![merged], 1)[0]
+        });
+        run_pass(&mut ssa);
+
+        assert!(
+            has_tuple_param(&ssa),
+            "merge param should become the wl tuple"
+        );
+        let sink = ssa.get_function(sink_id);
+        assert_eq!(
+            sink.get_entry()
+                .get_parameters()
+                .map(|(_, ty)| ty.clone())
+                .collect::<Vec<_>>(),
+            vec![wl_tuple_type()],
+            "the unconstrained-only callee's parameter must be lifted to a window"
+        );
+        assert!(
+            sink.get_blocks()
+                .flat_map(|(_, block)| block.get_instructions())
+                .any(|op| matches!(op, OpCode::TupleProj { idx: 1, .. })),
+            "its length read must project log_len off the window"
         );
     }
 
