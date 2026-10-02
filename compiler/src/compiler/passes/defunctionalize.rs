@@ -12,12 +12,13 @@
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
+        analysis::{flow_analysis::FlowAnalysis, types::Types},
         pass_manager::{AnalysisStore, Pass},
         passes::shared::value_replacements::ValueReplacements,
         ssa::{
             BlockId, FunctionId, Located, SourceLocation, Terminator, ValueId,
             hlssa::{
-                CallTarget, Constant, HLSSA, OpCode, Type, TypeExpr,
+                CallTarget, CastTarget, Constant, HLSSA, OpCode, Type, TypeExpr,
                 builder::{HLEmitter, HLSSABuilder},
             },
         },
@@ -53,9 +54,28 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         .const_snapshot()
         .values()
         .any(|cv| cv.as_ref().contains_fn_ptr());
-    if !has_fn_ptrs {
+    // An empty function array can still be indexed and called, even though there are no
+    // concrete function pointers anywhere in the program.
+    let has_dynamic_calls = ssa.iter_functions().any(|(_, function)| {
+        function.get_blocks().any(|(_, block)| {
+            block.get_instructions().any(|op| {
+                matches!(
+                    op,
+                    OpCode::Call {
+                        function: CallTarget::Dynamic(_),
+                        ..
+                    }
+                )
+            })
+        })
+    });
+    if !has_fn_ptrs && !has_dynamic_calls {
         return;
     }
+
+    // Keep the original signatures for calls with no reaching targets. Compute them before
+    // pruning functions, while constants referring to unused functions still have signatures.
+    let types = Types::new().run(ssa, &FlowAnalysis::run(ssa));
 
     // Phase 1: Compute reaching definitions (which FnPtrs can reach each value) and delete the
     // functions nothing can call, to a fixpoint.
@@ -86,52 +106,56 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
 
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
     // Collect all call sites first, then build dispatch functions
-    let mut call_sites: Vec<(FunctionId, ValueId)> = Vec::new();
+    let mut call_sites: Vec<(FunctionId, ValueId, Vec<ValueId>)> = Vec::new();
     for &fid in &func_ids {
         let func = ssa.get_function(fid);
         for (_bid, block) in func.get_blocks() {
             for instr in block.get_instructions() {
                 if let OpCode::Call {
                     function: CallTarget::Dynamic(fn_ptr_val),
+                    args,
                     ..
                 } = instr
                 {
-                    call_sites.push((fid, *fn_ptr_val));
+                    call_sites.push((fid, *fn_ptr_val, args.clone()));
                 }
             }
         }
     }
 
-    for (fid, fn_ptr_val) in &call_sites {
+    for (fid, fn_ptr_val, args) in &call_sites {
         // Skip if we already built a dispatch for this exact (func, value) pair
         if call_site_dispatch.contains_key(&(*fid, *fn_ptr_val)) {
             continue;
         }
         let mut targets: Vec<FunctionId> = reaching
             .get(&(*fid, *fn_ptr_val))
-            .unwrap_or_else(|| {
-                ice!(
-                    "no reaching FnPtrs for v{} in {fid:?} at defunctionalization",
-                    fn_ptr_val.0
-                )
-            })
-            .flatten()
+            .map(Reach::flatten)
+            .unwrap_or_default()
             .into_iter()
             .collect();
         targets.sort_by_key(|f| f.0);
 
-        if targets.is_empty() {
-            ice!(
-                "empty target set for v{} in {fid:?} at defunctionalization",
-                fn_ptr_val.0
-            );
-        }
-        // Get param/return types from the first target
-        let representative = ssa.get_function(targets[0]);
-        let param_types = representative.get_param_types();
-        let return_types = representative.get_returns().to_vec();
+        let (param_types, return_types) = if let Some(target) = targets.first() {
+            let representative = ssa.get_function(*target);
+            (
+                representative.get_param_types(),
+                representative.get_returns().to_vec(),
+            )
+        } else {
+            let types = types.get_function(*fid);
+            let TypeExpr::Function(returns) = &types.get_value_type(*fn_ptr_val).expr else {
+                ice!("dynamic call target v{} is not a function", fn_ptr_val.0);
+            };
+            (
+                args.iter()
+                    .map(|arg| types.get_value_type(*arg).clone())
+                    .collect(),
+                returns.clone(),
+            )
+        };
         // All signatures must match
-        for &target in &targets[1..] {
+        for &target in targets.iter().skip(1) {
             let candidate = ssa.get_function(target);
             if candidate.get_param_types() != param_types
                 || candidate.get_returns() != return_types.as_slice()
@@ -737,6 +761,15 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                         OpCode::MkSeqOfBlob { result, blob, .. } => {
                             changed |= propagate(&mut reaching, (fid, *blob), (fid, *result));
                         }
+                        // Array-to-slice conversion preserves the elements, including the
+                        // tuple paths that distinguish closure entry points and environments.
+                        OpCode::Cast {
+                            result,
+                            value,
+                            target: CastTarget::ArrayToSlice,
+                        } => {
+                            changed |= propagate(&mut reaching, (fid, *value), (fid, *result));
+                        }
                         OpCode::MkRepeated {
                             result, element, ..
                         } => {
@@ -880,6 +913,25 @@ fn build_dispatch_function(
             }
         }
 
+        if variants.is_empty() {
+            // No function value can reach this call (for example, it was read from an empty
+            // array). Fail only if executed; rejecting the whole program would also reject
+            // valid code whose branch skips the call. Placeholder returns keep the IR typed.
+            let mut entry = b.block(entry_block).with_source_location(location.clone());
+            let false_value = entry.int_const(IntBits::zero(1));
+            entry.emit(OpCode::Assert { value: false_value });
+            let results = return_types
+                .iter()
+                .map(|typ| {
+                    let mut typ = typ.clone();
+                    replace_function_type(&mut typ);
+                    entry.default_value(&typ)
+                })
+                .collect();
+            entry.terminate_return(results);
+            return;
+        }
+
         let mut merge_results: Vec<ValueId> = Vec::new();
         let merge_block = b.add_block(|merge| {
             for ret_type in return_types {
@@ -1000,6 +1052,52 @@ fn replace_function_types_in_instruction(instr: &mut OpCode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::ssa::hlssa::SequenceTargetType;
+
+    #[test]
+    fn array_to_slice_preserves_function_targets_by_tuple_field() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let f = ssa.add_function("f".to_string());
+        let g = ssa.add_function("g".to_string());
+        let other = ssa.add_function("other".to_string());
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        let (first, second) = sb.modify_function(main_id, |b| {
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let index = e.add_parameter(Type::int32());
+            let fn_type = Type::function_returning(vec![]);
+            let field_types = vec![fn_type.clone(), fn_type];
+            let f = e.emit_constant(Constant::FnPtr(f));
+            let g = e.emit_constant(Constant::FnPtr(g));
+            let other = e.emit_constant(Constant::FnPtr(other));
+            let pair_a = e.mk_tuple(vec![f, other], field_types.clone());
+            let pair_b = e.mk_tuple(vec![g, other], field_types.clone());
+            let array = e.mk_seq(
+                vec![pair_a, pair_b],
+                SequenceTargetType::Array(2),
+                Type::tuple_of(field_types),
+            );
+            let slice = e.cast_to(CastTarget::ArrayToSlice, array);
+            let pair = e.array_get(slice, index);
+            let first = e.tuple_proj(pair, 0);
+            let second = e.tuple_proj(pair, 1);
+            e.call_indirect(first, vec![], 0);
+            e.call_indirect(second, vec![], 0);
+            e.terminate_return(vec![]);
+            (first, second)
+        });
+
+        let reaching = compute_reaching_fn_ptrs(&ssa);
+        assert_eq!(
+            reaching.get(&(main_id, first)).map(Reach::flatten),
+            Some(HashSet::from_iter([f, g])),
+        );
+        assert_eq!(
+            reaching.get(&(main_id, second)).map(Reach::flatten),
+            Some(HashSet::from_iter([other])),
+        );
+    }
 
     #[test]
     fn inject_widens_paths_at_threshold_by_truncation() {

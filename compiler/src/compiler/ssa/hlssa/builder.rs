@@ -768,6 +768,13 @@ impl HLBlockEmitter<'_> {
                 self.cast_to_witness_of(inner_default)
             }
             TypeExpr::Array(inner, size) => self.default_array(inner, *size),
+            TypeExpr::Slice(inner) => {
+                self.mk_seq(Vec::new(), SequenceTargetType::Slice, *inner.clone())
+            }
+            TypeExpr::Ref(inner) => {
+                let value = self.default_value(inner);
+                self.alloc(value)
+            }
             TypeExpr::Tuple(element_types) => {
                 let elems = element_types
                     .iter()
@@ -775,7 +782,7 @@ impl HLBlockEmitter<'_> {
                     .collect();
                 self.mk_tuple(elems, element_types.clone())
             }
-            TypeExpr::Slice(_) | TypeExpr::Ref(_) | TypeExpr::Function(_) | TypeExpr::Blob(..) => {
+            TypeExpr::Function(_) | TypeExpr::Blob(..) => {
                 ice!("cannot build a default value for type {}", typ)
             }
         }
