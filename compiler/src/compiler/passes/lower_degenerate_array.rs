@@ -117,7 +117,6 @@ fn get_degenerate_ref_read(
     if *cells > 1 {
         return None;
     }
-    // Only a handle is unrepresentable below HLSSA, so a reference-free element is left alone.
     if !elem.contains_ptrs() {
         return None;
     }
