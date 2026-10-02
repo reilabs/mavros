@@ -1,6 +1,7 @@
-//! Makes a dynamic index into a degenerate array constant.
+//! Makes a dynamic index into a degenerate array of references constant.
 //!
 //! Nothing below HLSSA can represent a dynamically selected *handle* so such an array has to be gone before untaint runs.
+//! Arrays whose element type holds no reference are left for the usual dynamic-index lowering.
 //!
 //! At two lengths the index carries no information, so it can simply be replaced.
 //!
@@ -114,6 +115,10 @@ fn get_degenerate_ref_read(
         return None;
     };
     if *cells > 1 {
+        return None;
+    }
+    // Only a handle is unrepresentable below HLSSA, so a reference-free element is left alone.
+    if !elem.contains_ptrs() {
         return None;
     }
     Some(DegenerateRefRead {
