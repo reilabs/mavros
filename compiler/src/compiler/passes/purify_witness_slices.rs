@@ -63,6 +63,7 @@ impl Pass for PurifyWitnessSlices {
 
         let mut lifts = BoundaryLifts::default();
         let mut affected: HashMap<FunctionId, HashMap<ValueId, Type>> = HashMap::default();
+        let mut purified_returns: HashMap<FunctionId, Vec<Type>> = HashMap::default();
         for &function_id in &function_ids {
             if !types.has_function(function_id) {
                 continue;
@@ -83,24 +84,32 @@ impl Pass for PurifyWitnessSlices {
                 })
                 .collect();
 
-            if let Some(shapes) = return_shapes {
-                debug_assert_eq!(
-                    function.get_returns().len(),
-                    shapes.len(),
+            // Loudly, and in release too: the `zip` below would otherwise leave the excess slots
+            // silently un-purified.
+            if let Some(shapes) = return_shapes
+                && shapes.len() != function.get_returns().len()
+            {
+                ice!(
                     "purify_witness_slices: {function_id:?} has {} return slots but {} shapes",
                     function.get_returns().len(),
                     shapes.len()
-                );
+                )
             }
 
-            let returns = function
-                .get_returns()
-                .iter()
-                .enumerate()
-                .map(|(slot, ty)| is_slice_tuple(&purified_return(ty, return_shapes, slot)))
-                .collect();
+            let returns: Vec<Type> = match return_shapes {
+                Some(shapes) => function
+                    .get_returns()
+                    .iter()
+                    .zip(shapes)
+                    .map(|(ty, shape)| purify_type(ty, shape))
+                    .collect(),
+                None => function.get_returns().to_vec(),
+            };
             lifts.params.insert(function_id, params);
-            lifts.returns.insert(function_id, returns);
+            lifts
+                .returns
+                .insert(function_id, returns.iter().map(is_slice_tuple).collect());
+            purified_returns.insert(function_id, returns);
             affected.insert(
                 function_id,
                 affected_values(types.get_function(function_id), value_shapes),
@@ -114,7 +123,6 @@ impl Pass for PurifyWitnessSlices {
                 continue;
             };
             let type_info = types.get_function(function_id);
-            let returns_witness = approx.return_shapes(function_id);
 
             let block_order: Vec<BlockId> = flow
                 .get_function_cfg(function_id)
@@ -127,7 +135,7 @@ impl Pass for PurifyWitnessSlices {
                 type_info,
                 &affected,
                 &block_order,
-                returns_witness,
+                &purified_returns[&function_id],
                 &lifts.returns[&function_id],
                 &lifts,
             );
@@ -169,10 +177,6 @@ fn purify_type(ty: &Type, shape: &WitnessShape) -> Type {
         }
         _ => ty.clone(),
     }
-}
-
-fn purified_return(ty: &Type, shapes: Option<&[WitnessShape]>, slot: usize) -> Type {
-    shapes.map_or_else(|| ty.clone(), |shapes| purify_type(ty, &shapes[slot]))
 }
 
 /// Refuse an array/slice *element* that purified into a window.
@@ -690,7 +694,7 @@ fn rewrite_function(
     type_info: &FunctionTypeInfo,
     affected: &HashMap<ValueId, Type>,
     block_order: &[BlockId],
-    returns_witness: Option<&[WitnessShape]>,
+    purified_returns: &[Type],
     lifted_returns: &[bool],
     lifts: &BoundaryLifts,
 ) {
@@ -710,25 +714,18 @@ fn rewrite_function(
         })
         .collect();
 
-    if let Some(shapes) = returns_witness {
-        debug_assert_eq!(
-            function.get_returns().len(),
-            shapes.len(),
-            "purify_witness_slices: {} return slots but {} shapes",
-            function.get_returns().len(),
-            shapes.len()
-        );
-    }
-
     // `lifted_returns` comes from the closed [`BoundaryLifts`], not from this function's own
     // shapes: a slot the closure raised carries a window here even though `purify_type` alone
     // would leave it a bare slice (see [`close_boundaries`]).
-    for (slot, (ty, lifted)) in function.iter_returns_mut().zip(lifted_returns).enumerate() {
-        let pty = purified_return(ty, returns_witness, slot);
-        *ty = if *lifted && !is_slice_tuple(&pty) {
-            window_type(pty)
+    for ((ty, pty), lifted) in function
+        .iter_returns_mut()
+        .zip(purified_returns)
+        .zip(lifted_returns)
+    {
+        *ty = if *lifted && !is_slice_tuple(pty) {
+            window_type(pty.clone())
         } else {
-            pty
+            pty.clone()
         };
     }
 
