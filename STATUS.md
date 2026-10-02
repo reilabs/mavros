@@ -161,6 +161,7 @@
 | noir_tests/slice_wl_push_struct | ✅ | ✅ | 128 | 202 | 33064 | 12607 | 85443 | 259530 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/slice_wl_push_through_ref | ✅ | ✅ | 194 | 315 | 40576 | 13800 | 97120 | 272351 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/slice_wl_struct_pop_insert_remove | ✅ | ✅ | 208 | 328 | 41264 | 14798 | 102486 | 277582 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/slice_wl_unc_nested | ✅ | ✅ | 5 | 8 | 12296 | 8118 | 44005 | 216064 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/sparse_array_merge | ✅ | ✅ | 30335 | 29657 | 336296 | 80348 | 707244 | 922965 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/sparse_array_merge_inactive_oob | ✅ | ✅ | 565 | 575 | 192792 | 15978 | 408128 | 587299 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/specialized_shl_wrap | ✅ | ✅ | 132 | 122 | 11512 | 10569 | 39004 | 210917 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -666,7 +667,7 @@
 | noir/test_programs/execution_success/regression_9439 | ✅ | ✅ | 21 | 40 | 8072 | 1447 | 39520 | 210123 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_9455 | ✅ | ✅ | 1 | 2 | 2504 | 962 | 27673 | 197675 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_9467 | ✅ | ✅ | 61 | 104 | 26368 | 8481 | 63281 | 236726 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/regression_9496 | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/regression_9496 | ✅ | ✅ | 93 | 170 | 26384 | 13247 | 61538 | 237004 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_9538 | ✅ | ✅ | 46 | 84 | 15432 | 8509 | 51521 | 226336 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_9541 | ✅ | ✅ | 90 | 172 | 15328 | 4660 | 52834 | 225418 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_9544 | ✅ | ✅ | 233 | 431 | 27816 | 7806 | 76864 | 249380 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
