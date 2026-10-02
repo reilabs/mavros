@@ -82,17 +82,14 @@
 //!   _contents_. A future whole-program global-constants pre-pass (`InitGlobal` → `Global` cells
 //!   seeded into every `ReadGlobal`) would tighten loads through global-derived refs. As Globals
 //!   are init-time constants and program-wide escaped this rarely unblocks a split.
-//! - **Unconstrained-Boundary Refs:** Noir guarantees an unconstrained call cannot return a
-//!   reference and only accepts read-only references as inputs. We use the no-ref-return half only
-//!   as documentation — a `debug_assert` in [`builder`]'s `instantiate_call` while `seed_external`
-//!   stays unconditional, so the model is sound even if the invariant is ever violated. We do NOT
-//!   exploit the read-only-input half to stop escaping ref arguments at an unconstrained call:
-//!   doing so would let objects reached only through such an argument stay non-escaped (a narrow
-//!   precision win, since mem2reg already declines an alloc whose ref is a call argument), but the
-//!   read-only property is unenforceable here (HLSSA `Ref<T>` carries no mutability — see
-//!   `type_converter.rs`) and lives entirely in upstream `noirc_frontend`, so escaping the argument
-//!   keeps the analysis sound by construction rather than load-bearing on an external,
-//!   silently-relaxable invariant.
+//! - **Unconstrained-Boundary Refs:** `PrepareEntryPoint` materializes the supported immutable
+//!   reference arguments as values before this analysis runs. That lowering relies on Noir's
+//!   monomorphizer rejecting mutable, nested, and container references at the boundary; HLSSA's
+//!   `Ref<T>` does not retain mutability. Thus no reference-bearing argument may reach an
+//!   unconstrained call here, which [`builder`]'s `instantiate_call` checks with an ICE. Noir also
+//!   forbids reference-bearing returns; a `debug_assert` documents that half of the invariant.
+//!   Opaque results still receive unconditional `seed_external`, and the fallback escape model
+//!   remains in place for ordinary calls without summaries.
 //! - **Context Depth (1-CFA):** The context-sensitive layer is currently `k = 1` as the splitting
 //!   decision is context-independent and uses the join over the contexts. This means that deeper
 //!   `k` would only sharpen the per-context `*_in` and `may_alias` queries, while risking call
@@ -571,7 +568,7 @@ mod tests {
     use crate::compiler::{
         analysis::{flow_analysis::FlowAnalysis, types::Types},
         ssa::hlssa::{
-            Blob, Constant, SequenceTargetType, Type,
+            Blob, Constant, SequenceTargetType, Type, TypeExpr,
             builder::{HLEmitter, HLSSABuilder},
         },
         util::test::{falloc, fr},
@@ -586,6 +583,47 @@ mod tests {
         let flow = FlowAnalysis::run(ssa);
         let types = Types::new().run(ssa, &flow);
         PointsTo::run(ssa, &flow, &types)
+    }
+
+    fn solve_unlowered_boundary(param_type: Type) {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        let (callee, ()) = sb.add_function("sink".to_string(), |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.test_block(entry);
+            e.add_parameter(param_type.clone());
+            e.terminate_return(vec![]);
+        });
+        sb.modify_function(main, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.test_block(entry);
+            let ptr = falloc(&mut e);
+            let arg = if let TypeExpr::Array(_, len) = param_type.expr {
+                e.mk_seq(
+                    vec![ptr; len],
+                    SequenceTargetType::Array(len),
+                    Type::field().ref_of(),
+                )
+            } else {
+                ptr
+            };
+            e.call_unconstrained(callee, vec![arg], 0);
+            e.terminate_return(vec![]);
+        });
+        solve(&ssa);
+    }
+
+    #[test]
+    #[should_panic(expected = "PrepareEntryPoint must lower reference arguments")]
+    fn unconstrained_reference_argument_requires_boundary_lowering() {
+        solve_unlowered_boundary(Type::field().ref_of());
+    }
+
+    #[test]
+    #[should_panic(expected = "PrepareEntryPoint must lower reference arguments")]
+    fn unconstrained_container_reference_argument_is_rejected() {
+        solve_unlowered_boundary(Type::field().ref_of().array_of(2));
     }
 
     /// The headline precision gain over Steensgaard unification.
