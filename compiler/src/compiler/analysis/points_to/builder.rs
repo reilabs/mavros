@@ -674,6 +674,12 @@ impl FnBuilder<'_> {
         let Some(summary) = summary else {
             for arg in args {
                 let ty = self.value_type(*arg).clone();
+                if unconstrained && !ref_levels(&ty).is_empty() {
+                    ice!(
+                        "Unconstrained call {g:?} has a reference-bearing argument {arg:?}; \
+                         PrepareEntryPoint must lower reference arguments before points-to analysis"
+                    );
+                }
                 self.escape_value(*arg, &ty);
             }
             for result in results {
