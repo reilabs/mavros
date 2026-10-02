@@ -1229,11 +1229,11 @@ impl<'a> ExpressionConverter<'a> {
                 let value = self.convert_expression(&unary.rhs, b).unwrap();
                 let zero_const = if matches!(unary.operator, noirc_frontend::ast::UnaryOp::Minus) {
                     use noirc_frontend::monomorphization::ast::Type as AstType;
-                    Some(match unary.rhs.return_type().as_deref() {
-                        Some(AstType::Integer(signedness, bit_size)) => {
+                    Some(match Self::expression_type(&unary.rhs) {
+                        AstType::Integer(signedness, bit_size) => {
                             // Only for the width gate: zero is zero under either reading, and the
                             // negation that consumes it takes its sign from its own opcode.
-                            let (_, bits) = checked_int_cast_target(*signedness, *bit_size);
+                            let (_, bits) = checked_int_cast_target(signedness, bit_size);
                             Constant::int(bits, 0)
                         }
                         _ => Constant::Field(b.field().constant(0u64)),
@@ -1386,6 +1386,7 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn convert_index(&mut self, index: &Index, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
+        let idx = self.convert_expression(&index.index, b).unwrap();
         let mut collection = self.convert_expression(&index.collection, b).unwrap();
         // If the collection is a reference, load through it first
         if matches!(
@@ -1394,7 +1395,6 @@ impl<'a> ExpressionConverter<'a> {
         ) {
             collection = self.emit_located(b, Some(index.location), |e| e.load(collection));
         }
-        let idx = self.convert_expression(&index.index, b).unwrap();
         let result = self.emit_located(b, Some(index.location), |e| e.array_get(collection, idx));
         Some(result)
     }
@@ -1435,13 +1435,13 @@ impl<'a> ExpressionConverter<'a> {
         // A Noir `Field` is as wide as the configured field's modulus.
         let field_bits = b.field().field_bit_size() as usize;
 
-        let (src_bits, src_signed) = match cast.lhs.return_type().as_deref() {
-            Some(AstType::Field) => (field_bits, false),
-            Some(AstType::Integer(signedness, bit_size)) => (
+        let (src_bits, src_signed) = match Self::expression_type(&cast.lhs) {
+            AstType::Field => (field_bits, false),
+            AstType::Integer(signedness, bit_size) => (
                 bit_size.bit_size() as usize,
-                *signedness == Signedness::Signed,
+                signedness == Signedness::Signed,
             ),
-            Some(AstType::Bool) => (1, false),
+            AstType::Bool => (1, false),
             _ => (0, false),
         };
 
@@ -1856,10 +1856,8 @@ impl<'a> ExpressionConverter<'a> {
                 None
             }
             "array_len" => {
-                let arg_type = call.arguments[0]
-                    .return_type()
-                    .expect("array_len argument must have a known type");
-                match arg_type.as_ref() {
+                let arg_type = Self::expression_type(&call.arguments[0]);
+                match &arg_type {
                     noirc_frontend::monomorphization::ast::Type::Array(len, _) => {
                         // Evaluate the argument for side effects (e.g., it may be a
                         // function call that emits constraints), then return the
@@ -1957,10 +1955,8 @@ impl<'a> ExpressionConverter<'a> {
                 None
             }
             "str_as_bytes" => {
-                let string_type = call.arguments[0]
-                    .return_type()
-                    .expect("str_as_bytes argument must have a known type");
-                let input_type = self.type_converter.convert_type(string_type.as_ref());
+                let string_type = Self::expression_type(&call.arguments[0]);
+                let input_type = self.type_converter.convert_type(&string_type);
                 let output_type = self.type_converter.convert_type(&call.return_type);
                 assert_eq!(
                     input_type, output_type,
@@ -1971,10 +1967,8 @@ impl<'a> ExpressionConverter<'a> {
                 self.convert_expression(&call.arguments[0], b)
             }
             "array_as_str_unchecked" => {
-                let array_type = call.arguments[0]
-                    .return_type()
-                    .expect("array_as_str_unchecked argument must have a known type");
-                let input_type = self.type_converter.convert_type(array_type.as_ref());
+                let array_type = Self::expression_type(&call.arguments[0]);
+                let input_type = self.type_converter.convert_type(&array_type);
                 let output_type = self.type_converter.convert_type(&call.return_type);
                 assert_eq!(
                     input_type, output_type,
@@ -2194,21 +2188,10 @@ fn index_step_one(bit_size: usize) -> Constant {
 }
 
 /// Whether a Noir expression's value is read as two's complement.
-///
-/// This is the frontend's _only_ signedness source for the sign-carrying opcodes, so the whole
-/// refactor's correctness reduces to it. `return_type()` already serves exactly this purpose in
-/// `convert_cast` and in `convert_unary`'s `Minus`, so no new mechanism is involved.
-///
-/// `Field` and `bool` answer `false` — they take the unsigned forms, which is what every consumer
-/// already does with them. `None` is returned only for the statement-shaped expressions
-/// (`For`, `Loop`, `While`, `Let`, `Constrain`, `Assign`, `Semi`, `Drop`, `Break`, `Continue`),
-/// which are unit- or never-typed and so cannot be an arithmetic operand; they fall to `false`,
-/// matching the existing `_ => (0, false)` fallback in `convert_cast`.
-///
-/// That `None` is unreachable for anything this is asked about, and the enumeration above is the
-/// proof: a well-typed Noir program cannot make a statement the operand of an arithmetic operator.
+/// Recover the type recursively: Noir's `return_type()` can lose a scalar's type
+/// when it is projected from a tuple containing a statement-shaped unit field.
 fn operand_is_signed(e: &Expression) -> bool {
-    matches!(e.return_type().as_deref(), Some(t) if ast_type_is_signed(t))
+    ast_type_is_signed(&ExpressionConverter::expression_type(e))
 }
 
 /// Whether a Noir type is a signed integer.

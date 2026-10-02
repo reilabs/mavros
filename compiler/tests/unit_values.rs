@@ -87,6 +87,92 @@ fn unconstrained_unit_returns_preserve_reference_argument_lowering() {
     );
 }
 
+#[test]
+fn statement_tuple_operands_keep_signed_arithmetic() {
+    for assertion in [
+        "assert(((x, { assert(x != 0); }), 7).0.0 > -1);",
+        "assert_eq(((-x, { assert(x != 0); }), 7).0.0 / 2, -4);",
+        "assert_eq(((-x, { assert(x != 0); }), 7).0.0 >> 1, -4);",
+        "assert_eq(((-x, { assert(x != 0); }), 7).0.0 as i16, -8);",
+        "assert_eq(-((x, { assert(x != 0); }), 7).0.0, -8);",
+    ] {
+        run(
+            &format!("fn main(x: i8) {{ {assertion} }}"),
+            "x = '8'",
+            1,
+            true,
+        );
+    }
+}
+
+#[test]
+fn statement_tuple_signed_comparison_rejects_one_less_than_negative_one() {
+    run(
+        "fn main(x: i8) { assert(((x, { assert(x != 0); }), 7).0.0 < -1); }",
+        "x = '1'",
+        1,
+        false,
+    );
+}
+
+#[test]
+fn statement_tuple_operands_keep_array_and_string_types() {
+    for body in [
+        "assert_eq((([x, x], { assert(x != 0); }), 7).0.0.len(), 2);",
+        "assert_eq(((\"hi\", { assert(x != 0); }), 7).0.0.as_bytes(), [104, 105]);",
+        "assert_eq((([104 as u8, 105], { assert(x != 0); }), 7).0.0.as_str_unchecked(), \"hi\");",
+    ] {
+        run(&format!("fn main(x: u8) {{ {body} }}"), "x = '1'", 1, true);
+    }
+}
+
+#[test]
+fn empty_array_unconstrained_returns_are_prepared() {
+    for (typ, value, check) in [
+        (
+            "[Field; 0]",
+            "[]",
+            "let extended = result.as_vector().push_back(x); assert_eq(extended[0], x);",
+        ),
+        (
+            "([Field; 0], Field)",
+            "([], x)",
+            "assert_eq(result.0.len(), 0); assert_eq(result.1, x);",
+        ),
+    ] {
+        run(
+            &format!(
+                "unconstrained fn empty(x: Field) -> {typ} {{ assert(x != 0); {value} }}
+                fn main(x: Field) {{ let result = unsafe {{ empty(x) }}; {check} }}"
+            ),
+            "x = '1'",
+            1,
+            true,
+        );
+    }
+}
+
+#[test]
+fn zero_field_entry_parameters_need_no_witness_slots() {
+    for (params, inputs, fields, body) in [
+        ("e: Empty", "e = {}", 0, "let _ = e;"),
+        (
+            "e: Empty, x: Field",
+            "e = {}\nx = '3'",
+            1,
+            "let _ = e; assert_eq(x, 3);",
+        ),
+        ("e: [Empty; 2]", "e = [{}, {}]", 0, "assert_eq(e.len(), 2);"),
+    ] {
+        run(
+            &format!("struct Empty {{}} fn main({params}) {{ {body} }}"),
+            inputs,
+            fields,
+            true,
+        );
+    }
+}
+
 fn run(source: &str, inputs: &str, expected_fields: usize, accepted: bool) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("src")).unwrap();

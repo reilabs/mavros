@@ -175,6 +175,9 @@ impl PrepareEntryPoint {
         // Reconstruct functions rebuild each typed input value from its
         // flattened field representation, range-checking integers on the way.
         let has_return = abi_has_return.unwrap_or(!return_types.is_empty());
+        if !has_return && !return_types.iter().all(Self::is_leafless_result) {
+            ice!("ABI without a return cannot discard nonempty SSA results");
+        }
         let guard_type = Type::int(1);
         let mut reconstruct_fns = Vec::new();
         for typ in param_types
@@ -227,9 +230,12 @@ impl PrepareEntryPoint {
             // Rebuild each typed input value from its slice of the witness array.
             let mut offset = 0usize;
             let mut input_value = |e: &mut HLBlockEmitter<'_>, typ: &Type| {
-                let witness_inputs =
-                    witness_inputs.expect("a typed input implies a non-empty input blob");
                 let width = Self::flattened_field_count(typ);
+                if width == 0 {
+                    return Self::emit_default_witness_value(e, typ);
+                }
+                let witness_inputs =
+                    witness_inputs.expect("a nonempty typed input requires witness fields");
                 let value = match &typ.expr {
                     TypeExpr::Field => {
                         let index = e.int_const(IntBits::from_u128(32, offset as u128));
@@ -371,7 +377,7 @@ impl PrepareEntryPoint {
         let mut prepare_fns = Vec::new();
         for return_types in callee_return_types.values() {
             for return_type in return_types {
-                if !Self::is_zero_width(return_type) {
+                if !Self::is_leafless_result(return_type) {
                     Self::get_or_create_prepare_fn(return_type, ssa, &mut prepare_fns);
                 }
             }
@@ -439,7 +445,7 @@ impl PrepareEntryPoint {
                                 .iter()
                                 .zip(return_types)
                                 .map(|(original, typ)| {
-                                    if Self::is_zero_width(typ) {
+                                    if Self::is_leafless_result(typ) {
                                         *original
                                     } else {
                                         fb.fresh_value()
@@ -454,9 +460,9 @@ impl PrepareEntryPoint {
                                 .zip(fresh_results)
                                 .zip(return_types.iter())
                             {
-                                // Keep the original call result for zero-width values:
+                                // Keep the original call result for leafless values:
                                 // it is already defined, and has no witness fields to prepare.
-                                if Self::is_zero_width(return_type) {
+                                if Self::is_leafless_result(return_type) {
                                     continue;
                                 }
                                 let prepare_fn = Self::find_prepare_fn(return_type, &prepare_fns);
@@ -482,13 +488,14 @@ impl PrepareEntryPoint {
         }
     }
 
-    /// Unlike ABI field counting, this also accepts internal types. Slices retain
-    /// their length even with zero-width elements, so they cannot be skipped here.
-    fn is_zero_width(typ: &Type) -> bool {
+    /// Whether tuple elision will erase this result entirely. Array length does
+    /// not affect the number of SSA leaves: `[Field; 0]` still has one array leaf.
+    /// Slices retain their length through `LowerZstSlices`, so they need preparation.
+    fn is_leafless_result(typ: &Type) -> bool {
         match &typ.expr {
-            TypeExpr::Tuple(fields) => fields.iter().all(Self::is_zero_width),
-            TypeExpr::Array(inner, size) => *size == 0 || Self::is_zero_width(inner),
-            TypeExpr::WitnessOf(inner) => Self::is_zero_width(inner),
+            TypeExpr::Tuple(fields) => fields.iter().all(Self::is_leafless_result),
+            TypeExpr::Array(inner, _) => Self::is_leafless_result(inner),
+            TypeExpr::WitnessOf(inner) => Self::is_leafless_result(inner),
             _ => false,
         }
     }
@@ -569,7 +576,7 @@ impl PrepareEntryPoint {
             TypeExpr::Tuple(element_types) => element_types
                 .iter()
                 .map(|elem_type| {
-                    (!Self::is_zero_width(elem_type))
+                    (!Self::is_leafless_result(elem_type))
                         .then(|| Self::get_or_create_prepare_fn(elem_type, ssa, prepare_fns))
                 })
                 .collect(),
@@ -1153,15 +1160,15 @@ mod tests {
         PrepareEntryPoint::process_unconstrained_calls(&mut ssa);
     }
     #[test]
-    fn zero_width_unconstrained_results_keep_their_definitions_without_preparation() {
+    fn only_leafless_unconstrained_results_skip_preparation() {
         let unit = Type::tuple_of(vec![]);
-        for return_type in [
-            unit.clone(),
-            unit.clone().array_of(2),
-            Type::field().array_of(0),
-            unit.clone().slice_of(),
-            Type::field().slice_of(),
-            Type::tuple_of(vec![unit, Type::field()]),
+        for (return_type, needs_preparation) in [
+            (unit.clone(), false),
+            (unit.clone().array_of(2), false),
+            (Type::field().array_of(0), true),
+            (unit.clone().slice_of(), true),
+            (Type::field().slice_of(), true),
+            (Type::tuple_of(vec![unit, Type::field()]), true),
         ] {
             let mut ssa = HLSSA::with_main("main".into());
             let main = ssa.get_unique_entrypoint_id();
@@ -1194,8 +1201,7 @@ mod tests {
                 .get_entry()
                 .get_instructions()
                 .collect();
-            let zero_width = PrepareEntryPoint::is_zero_width(&return_type);
-            assert_eq!(ops.len(), if zero_width { 1 } else { 2 });
+            assert_eq!(ops.len(), if needs_preparation { 2 } else { 1 });
             let OpCode::Call {
                 results,
                 function: CallTarget::Static(target),
@@ -1206,7 +1212,7 @@ mod tests {
                 panic!("original unconstrained call must survive");
             };
             assert_eq!(*target, callee);
-            if zero_width {
+            if !needs_preparation {
                 assert_eq!(results, &[result.unwrap()]);
             }
             let Some(Terminator::Return(values)) =
@@ -1217,7 +1223,9 @@ mod tests {
             assert_eq!(values, &[result.unwrap()]);
             for (_, f) in ssa.iter_functions() {
                 if f.get_name().starts_with("prepare_") {
-                    assert!(!PrepareEntryPoint::is_zero_width(&f.get_param_types()[0]));
+                    assert!(!PrepareEntryPoint::is_leafless_result(
+                        &f.get_param_types()[0]
+                    ));
                 }
             }
         }
@@ -1228,12 +1236,12 @@ mod tests {
         let mut ssa = HLSSA::with_main("main".into());
         let main = ssa.get_unique_entrypoint_id();
         HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
-            b.function.add_return_type(Type::int(8));
+            b.function.add_return_type(Type::tuple_of(vec![]));
             let entry = b.function.get_entry_id();
             let mut e = b
                 .block(entry)
                 .with_source_location(SourceLocation::synthetic("test"));
-            let value = e.int_const(IntBits::zero(8));
+            let value = e.mk_tuple(vec![], vec![]);
             e.terminate_return(vec![value]);
         });
         PrepareEntryPoint::wrap_main(&mut ssa, false, Some(false));
@@ -1246,5 +1254,30 @@ mod tests {
             2,
             "unused return reconstruction should not be generated"
         );
+    }
+
+    #[test]
+    fn absent_abi_return_rejects_live_ssa_results() {
+        for typ in [Type::int(8), Type::field().array_of(0)] {
+            let failure = std::panic::catch_unwind(|| {
+                let mut ssa = HLSSA::with_main("main".into());
+                let main = ssa.get_unique_entrypoint_id();
+                HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+                    b.function.add_return_type(typ.clone());
+                    let entry = b.function.get_entry_id();
+                    let mut e = b.test_block(entry);
+                    let value = e.add_parameter(typ);
+                    e.terminate_return(vec![value]);
+                });
+                PrepareEntryPoint::wrap_main(&mut ssa, false, Some(false));
+            })
+            .expect_err("the wrapper must reject a nonempty result without an ABI return");
+            let message = failure
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| failure.downcast_ref::<&str>().copied())
+                .unwrap();
+            assert!(message.contains("ABI without a return cannot discard nonempty SSA results"));
+        }
     }
 }
