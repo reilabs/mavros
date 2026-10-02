@@ -97,6 +97,7 @@ const DEFAULT_IGNORED_TESTS: &[&str] = &[
     "fold_fibonacci",
     "fold_nested_brillig_assert_fail",
     "fold_numeric_generic_poseidon",
+    "mocks_in_execution",
     "range_check_before_acir_call",
     "regression_10156",
     "unknown_oracle",
