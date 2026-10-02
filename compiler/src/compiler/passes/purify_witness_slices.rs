@@ -133,27 +133,6 @@ impl Pass for PurifyWitnessSlices {
             );
             ssa.put_function(function_id, function);
         }
-
-        for function_id in ssa.get_function_ids().collect::<Vec<_>>() {
-            if lifts.params.contains_key(&function_id) {
-                continue;
-            }
-            let no_lifted_slots = |m: &HashMap<FunctionId, Vec<bool>>, callee: FunctionId| {
-                !m.get(&callee).is_some_and(|l| l.iter().any(|&x| x))
-            };
-            let function = ssa.get_function(function_id);
-            for (_, block) in function.get_blocks() {
-                for instr in block.get_instructions() {
-                    for callee in instr.get_static_call_targets() {
-                        assert!(
-                            no_lifted_slots(&lifts.params, callee)
-                                && no_lifted_slots(&lifts.returns, callee),
-                            "ICE: purify_witness_slices: skipped function {function_id:?} calls {callee:?}, whose purified signature exposes slice tuples"
-                        );
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -348,7 +327,7 @@ fn plan_windows(
                         function: CallTarget::Static(callee),
                         ..
                     } => {
-                        let lifted = lifts.returns.get(callee).map(Vec::as_slice).unwrap_or(&[]);
+                        let lifted = &lifts.returns[callee];
                         for (i, result) in results.iter().enumerate() {
                             if lifted.get(i).copied().unwrap_or(false) {
                                 changed |= windows.insert(*result);
@@ -507,11 +486,6 @@ fn close_boundaries(
                     else {
                         continue;
                     };
-                    // A callee this pass skipped has no lifted slot to reconcile: `run`'s closing
-                    // assert refuses the reverse (a skipped function calling a lifted one).
-                    if !affected.contains_key(callee) {
-                        continue;
-                    }
                     let formals: Vec<ValueId> = ssa
                         .get_function(*callee)
                         .get_entry()
@@ -1213,7 +1187,7 @@ fn rewrite_instruction(
             let CallTarget::Static(g) = &callee else {
                 ice!("dynamic call survived to purify_witness_slices")
             };
-            let lifted_params = lifts.params.get(g).map(Vec::as_slice).unwrap_or(&[]);
+            let lifted_params = &lifts.params[g];
             let args = args
                 .into_iter()
                 .enumerate()
@@ -1246,7 +1220,7 @@ fn rewrite_instruction(
             // The converse cannot happen (the join dominates every site) and would be unsound: a wl
             // result with no tuple behind it. Do not "symmetrise" this into an `assert_eq!`. It is
             // written as is to ensure soundness.
-            let lifted_returns = lifts.returns.get(g).map(Vec::as_slice).unwrap_or(&[]);
+            let lifted_returns = &lifts.returns[g];
             for (i, &r) in results.iter().enumerate() {
                 if lifted_returns.get(i).copied().unwrap_or(false) {
                     replacement_tuple_map.insert(r, r);
