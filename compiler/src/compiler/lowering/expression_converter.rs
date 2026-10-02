@@ -1354,6 +1354,7 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn convert_index(&mut self, index: &Index, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
+        let idx = self.convert_expression(&index.index, b).unwrap();
         let mut collection = self.convert_expression(&index.collection, b).unwrap();
         // If the collection is a reference, load through it first
         if matches!(
@@ -1362,7 +1363,6 @@ impl<'a> ExpressionConverter<'a> {
         ) {
             collection = self.emit_located(b, Some(index.location), |e| e.load(collection));
         }
-        let idx = self.convert_expression(&index.index, b).unwrap();
         let result = self.emit_located(b, Some(index.location), |e| e.array_get(collection, idx));
         Some(result)
     }
