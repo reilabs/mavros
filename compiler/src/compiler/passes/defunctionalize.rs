@@ -889,6 +889,7 @@ fn build_dispatch_function(
         });
 
         let mut current_block = entry_block;
+        let mut current_merge = merge_block;
 
         if variants.len() == 1 {
             let variant_id = variants[0];
@@ -898,7 +899,7 @@ fn build_dispatch_function(
             let const_val = cb.int_const(IntBits::from_u128(32, variant_id.0 as u128));
             cb.assert_eq(fn_id_param, const_val);
             let call_results = cb.call(variant_id, forwarded_params.clone(), return_types.len());
-            cb.terminate_jmp(merge_block, call_results);
+            cb.terminate_jmp(current_merge, call_results);
         } else {
             for (i, &variant_id) in variants.iter().enumerate() {
                 let is_last = i == variants.len() - 1;
@@ -911,7 +912,7 @@ fn build_dispatch_function(
                     cb.assert_eq(fn_id_param, const_val);
                     let call_results =
                         cb.call(variant_id, forwarded_params.clone(), return_types.len());
-                    cb.terminate_jmp(merge_block, call_results);
+                    cb.terminate_jmp(current_merge, call_results);
                 } else {
                     let call_block = b.add_block(|_| {});
                     let next_check_block = b.add_block(|_| {});
@@ -929,7 +930,18 @@ fn build_dispatch_function(
                         let mut cb = b.block(call_block).with_source_location(location.clone());
                         let call_results =
                             cb.call(variant_id, forwarded_params.clone(), return_types.len());
-                        cb.terminate_jmp(merge_block, call_results);
+                        cb.terminate_jmp(current_merge, call_results);
+                    }
+
+                    if variants.len() - (i + 1) >= 2 {
+                        let mut inner_results: Vec<ValueId> = Vec::new();
+                        let enclosing_merge = current_merge;
+                        current_merge = b.add_block(|inner| {
+                            for ret_type in return_types {
+                                inner_results.push(inner.add_parameter(ret_type.clone()));
+                            }
+                            inner.terminate_jmp(enclosing_merge, inner_results.clone());
+                        });
                     }
 
                     current_block = next_check_block;
