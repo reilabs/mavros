@@ -47,6 +47,7 @@ use crate::{
             fix_double_jumps::FixDoubleJumps,
             instruction_lowering::InstructionLowering,
             lookup_spilling::LookupSpilling,
+            lower_degenerate_array::LowerDegenerateArray,
             lower_map_casts::LowerMapCasts,
             lower_zst_slices::LowerZstSlices,
             mem2reg::Mem2Reg,
@@ -473,6 +474,12 @@ impl Driver {
             "pre_wti".to_string(),
             self.draw_cfg,
             vec![
+                // Make constant the index of a dynamic read out of a zero- or one-cell array of
+                // references, which is the only thing standing between such an array and the
+                // ArraySroa / Mem2Reg cluster below: a `Split` array must be constant-indexed, and
+                // nothing beneath HLSSA can represent a dynamically selected handle. Must precede
+                // them to be of any use.
+                Box::new(LowerDegenerateArray::new()),
                 // The initial mem2reg handles the obvious conversions of heap traffic to SSA
                 // variables using the points-to analysis.
                 Box::new(Mem2Reg::new()),
