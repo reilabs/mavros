@@ -516,14 +516,21 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
     }
 
     // Pre-compute which values are Refs containing Functions (need bidirectional propagation)
-    // These come from: Alloc results, block parameters with Ref<...Function...> type
+    // These come from: Alloc results, `TupleRefProj` results, block parameters with
+    // Ref<...Function...> type
     let mut is_ref_with_fn: HashSet<(FunctionId, ValueId)> = HashSet::default();
     for &fid in &func_ids {
         let func = ssa.get_function(fid);
         for (_bid, block) in func.get_blocks() {
             for instr in block.get_instructions() {
-                if let OpCode::Alloc { result, .. } = instr {
-                    is_ref_with_fn.insert((fid, *result));
+                match instr {
+                    OpCode::Alloc { result, .. } => {
+                        is_ref_with_fn.insert((fid, *result));
+                    }
+                    OpCode::TupleRefProj { result, .. } => {
+                        is_ref_with_fn.insert((fid, *result));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -882,6 +889,7 @@ fn build_dispatch_function(
         });
 
         let mut current_block = entry_block;
+        let mut current_merge = merge_block;
 
         if variants.len() == 1 {
             let variant_id = variants[0];
@@ -891,7 +899,7 @@ fn build_dispatch_function(
             let const_val = cb.int_const(IntBits::from_u128(32, variant_id.0 as u128));
             cb.assert_eq(fn_id_param, const_val);
             let call_results = cb.call(variant_id, forwarded_params.clone(), return_types.len());
-            cb.terminate_jmp(merge_block, call_results);
+            cb.terminate_jmp(current_merge, call_results);
         } else {
             for (i, &variant_id) in variants.iter().enumerate() {
                 let is_last = i == variants.len() - 1;
@@ -904,7 +912,7 @@ fn build_dispatch_function(
                     cb.assert_eq(fn_id_param, const_val);
                     let call_results =
                         cb.call(variant_id, forwarded_params.clone(), return_types.len());
-                    cb.terminate_jmp(merge_block, call_results);
+                    cb.terminate_jmp(current_merge, call_results);
                 } else {
                     let call_block = b.add_block(|_| {});
                     let next_check_block = b.add_block(|_| {});
@@ -922,7 +930,18 @@ fn build_dispatch_function(
                         let mut cb = b.block(call_block).with_source_location(location.clone());
                         let call_results =
                             cb.call(variant_id, forwarded_params.clone(), return_types.len());
-                        cb.terminate_jmp(merge_block, call_results);
+                        cb.terminate_jmp(current_merge, call_results);
+                    }
+
+                    if variants.len() - (i + 1) >= 2 {
+                        let mut inner_results: Vec<ValueId> = Vec::new();
+                        let enclosing_merge = current_merge;
+                        current_merge = b.add_block(|inner| {
+                            for ret_type in return_types {
+                                inner_results.push(inner.add_parameter(ret_type.clone()));
+                            }
+                            inner.terminate_jmp(enclosing_merge, inner_results.clone());
+                        });
                     }
 
                     current_block = next_check_block;
@@ -1094,6 +1113,40 @@ mod tests {
         let reaching = compute_reaching_fn_ptrs(&ssa);
         assert!(reaching[&(main_id, fp)].flatten().contains(&f));
         assert!(compute_callable_functions(&ssa, &reaching).contains(&f));
+    }
+
+    #[test]
+    fn fn_ptr_stored_through_a_field_reference_reaches_its_call_site() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let (bar, qux, callee) = {
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            let bar = sb.ssa().add_function("bar".to_string());
+            let qux = sb.ssa().add_function("qux".to_string());
+            let callee = sb.modify_function(main_id, |b| {
+                let entry = b.function.get_entry_id();
+                let mut e = b.test_block(entry);
+
+                let bar_ptr = e.emit_constant(Constant::FnPtr(bar));
+                let context = e.mk_tuple(vec![bar_ptr], vec![Type::function_returning(vec![])]);
+                let context_ref = e.alloc(context);
+
+                let qux_ptr = e.emit_constant(Constant::FnPtr(qux));
+                let field_ref = e.tuple_ref_proj(context_ref, 0);
+                e.store(field_ref, qux_ptr);
+
+                let loaded = e.load(context_ref);
+                let callee = e.tuple_proj(loaded, 0);
+                e.call_indirect(callee, vec![], 0);
+                e.terminate_return(vec![]);
+                callee
+            });
+            (bar, qux, callee)
+        };
+
+        let targets = compute_reaching_fn_ptrs(&ssa)[&(main_id, callee)].flatten();
+        assert!(targets.contains(&bar));
+        assert!(targets.contains(&qux));
     }
 
     #[test]

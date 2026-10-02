@@ -16,10 +16,24 @@
 //!    values into an array.
 //! 3. **Input Reconstruction:** The original typed input values are rebuilt from slices of that
 //!    witness array via per-type reconstruct functions (which also range-check integers).
-//! 4. **Handling of Unconstrained Calls:** Any calls that are unconstrained are modified to write
-//!    the unconstrained result to the witness. It also handles range-checking of integers, and
-//!    recurses into arrays and tuples. This ensures that we bind the untrusted/unconstrained
-//!    results into the constraint system.
+//! 4. **Handling of Unconstrained Calls:** Reference arguments are loaded and passed by value to
+//!    wrappers that reconstruct local references. Results are written to the witness, with
+//!    range-checking of integers and recursive conversion of arrays and tuples. This ensures
+//!    that we bind the untrusted/unconstrained results into the constraint system.
+//!
+//! # Reference Arguments
+//!
+//! Argument lowering relies on Noir's monomorphizer rejecting mutable references with
+//! `ConstrainedReferenceToUnconstrained`, and nested references and references inside tuples,
+//! structs, arrays, or closure environments with `NestedOrContainerReferenceToUnconstrained`.
+//! Only a direct immutable `&T` with reference-free `T` can cross this boundary. That guarantee
+//! makes copying the pointee sound and checking only top-level `Ref` parameters complete:
+//! HLSSA's `Ref<T>` itself does not retain mutability. Ordinary calls keep their original
+//! signatures and reference identity.
+//!
+//! This runs before witness inference and points-to analysis, so neither needs to convert or
+//! reason about references crossing an unconstrained boundary. Only static calls carry the
+//! `unconstrained` flag; dynamic calls are not boundary calls in this IR.
 //!
 //! # Return Guard
 //!
@@ -35,6 +49,8 @@
 //!
 //! Cost: one witness column, one blob slot, and one booleanity row per program; each leaf check
 //! stays a single R1C (see `assert_eq_deep_guarded`).
+
+use std::collections::BTreeSet;
 
 use crate::{
     collections::HashMap,
@@ -56,6 +72,7 @@ pub const RETURN_CHECK_ORIGIN: &str = "public return value check";
 
 pub struct PrepareEntryPoint {
     main_is_unconstrained: bool,
+    abi_has_return: Option<bool>,
 }
 
 struct PrepareFnEntry {
@@ -68,25 +85,82 @@ struct ReconstructFnEntry {
     fn_id: FunctionId,
 }
 
+struct ReferenceArgumentWrapper {
+    function: FunctionId,
+    ref_params: Vec<bool>,
+}
+
+impl ReferenceArgumentWrapper {
+    fn new(ssa: &mut HLSSA, callee: FunctionId) -> Option<Self> {
+        let function = ssa.get_function(callee);
+        let params = function.get_param_types();
+        let ref_params: Vec<_> = params
+            .iter()
+            .map(|ty| matches!(ty.expr, TypeExpr::Ref(_)))
+            .collect();
+        if !ref_params.iter().any(|is_ref| *is_ref) {
+            return None;
+        }
+        let returns = function.get_returns().to_vec();
+        let name = format!("{}_ref_wrapper", function.get_name());
+        let (function, ()) = HLSSABuilder::new(ssa).add_function(name, |fb| {
+            for ty in &returns {
+                fb.function.add_return_type(ty.clone());
+            }
+            let entry = fb.function.get_entry_id();
+            let mut e = fb
+                .block(entry)
+                .with_source_location(SourceLocation::synthetic("lower_reference_arguments"));
+            let args = params
+                .iter()
+                .map(|ty| match &ty.expr {
+                    TypeExpr::Ref(inner) => {
+                        let value = e.add_parameter(inner.as_ref().clone());
+                        e.alloc(value)
+                    }
+                    _ => e.add_parameter(ty.clone()),
+                })
+                .collect();
+            let results = e.call(callee, args, returns.len());
+            e.terminate_return(results);
+        });
+        Some(Self {
+            function,
+            ref_params,
+        })
+    }
+}
+
 impl Pass for PrepareEntryPoint {
     fn name(&self) -> &'static str {
         "prepare_entry_point"
     }
 
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
-        Self::wrap_main(ssa, self.main_is_unconstrained);
+        Self::wrap_main(ssa, self.main_is_unconstrained, self.abi_has_return);
         Self::process_unconstrained_calls(ssa);
     }
 }
 
 impl PrepareEntryPoint {
+    /// Defaults to signature-based return presence for hand-built SSA only.
+    /// Noir lowering materializes unit as one result, so callers compiling Noir
+    /// must also supply `with_abi_return` (as `Driver` does).
     pub fn new(main_is_unconstrained: bool) -> Self {
         Self {
             main_is_unconstrained,
+            abi_has_return: None,
         }
     }
 
-    fn wrap_main(ssa: &mut HLSSA, main_is_unconstrained: bool) {
+    /// The Noir ABI distinguishes unit (no public return) from an empty struct even
+    /// though both have an empty-tuple HLSSA result. Hand-built SSA defaults to its signature.
+    pub fn with_abi_return(mut self, has_return: bool) -> Self {
+        self.abi_has_return = Some(has_return);
+        self
+    }
+
+    fn wrap_main(ssa: &mut HLSSA, main_is_unconstrained: bool, abi_has_return: Option<bool>) {
         let original_main_id = ssa.get_unique_entrypoint_id();
         let original_main = ssa.get_unique_entrypoint();
         let param_types = original_main.get_param_types();
@@ -100,17 +174,23 @@ impl PrepareEntryPoint {
 
         // Reconstruct functions rebuild each typed input value from its
         // flattened field representation, range-checking integers on the way.
-        let has_return = !return_types.is_empty();
+        let has_return = abi_has_return.unwrap_or(!return_types.is_empty());
+        if !has_return && !return_types.iter().all(Self::is_leafless_result) {
+            ice!("ABI without a return cannot discard nonempty SSA results");
+        }
         let guard_type = Type::int(1);
         let mut reconstruct_fns = Vec::new();
-        for typ in param_types.iter().chain(return_types.iter()) {
+        for typ in param_types
+            .iter()
+            .chain(return_types.iter().filter(|_| has_return))
+        {
             Self::get_or_create_reconstruct_fn(typ, ssa, &mut reconstruct_fns);
         }
         if has_return {
             Self::get_or_create_reconstruct_fn(&guard_type, ssa, &mut reconstruct_fns);
         }
 
-        let total_fields = Self::entry_blob_field_count(&param_types, &return_types);
+        let total_fields = Self::entry_blob_field_count(&param_types, &return_types, has_return);
 
         let wrapper_id = ssa.add_function("wrapper_main".to_string());
         let mut sb = HLSSABuilder::new(ssa);
@@ -150,9 +230,12 @@ impl PrepareEntryPoint {
             // Rebuild each typed input value from its slice of the witness array.
             let mut offset = 0usize;
             let mut input_value = |e: &mut HLBlockEmitter<'_>, typ: &Type| {
-                let witness_inputs =
-                    witness_inputs.expect("a typed input implies a non-empty input blob");
                 let width = Self::flattened_field_count(typ);
+                if width == 0 {
+                    return Self::emit_default_witness_value(e, typ);
+                }
+                let witness_inputs =
+                    witness_inputs.expect("a nonempty typed input requires witness fields");
                 let value = match &typ.expr {
                     TypeExpr::Field => {
                         let index = e.int_const(IntBits::from_u128(32, offset as u128));
@@ -182,8 +265,10 @@ impl PrepareEntryPoint {
             let return_guard = has_return.then(|| input_value(&mut e, &guard_type));
 
             let mut return_input_values = Vec::new();
-            for typ in &return_types {
-                return_input_values.push(input_value(&mut e, typ));
+            if has_return {
+                for typ in &return_types {
+                    return_input_values.push(input_value(&mut e, typ));
+                }
             }
 
             if let Some(init_fn) = globals_init_fn {
@@ -262,33 +347,39 @@ impl PrepareEntryPoint {
         }
     }
 
-    /// Process unconstrained call results: flatten to Fields, WriteWitness,
-    /// rangecheck + reconstruct, and replace original results.
+    /// Lower reference arguments and prepare witness results in one call-site sweep.
     fn process_unconstrained_calls(ssa: &mut HLSSA) {
-        // Pre-collect callee return types (need immutable ssa access)
-        let mut callee_return_types: HashMap<FunctionId, Vec<Type>> = HashMap::default();
+        // Collect distinct callees once, including those without reference parameters.
+        // Snapshot callers before adding wrappers and result preparation functions.
         let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
-        for &fid in &func_ids {
-            for (_, block) in ssa.get_function(fid).get_blocks() {
-                for instr in block.get_instructions() {
-                    if let OpCode::Call {
-                        unconstrained: true,
-                        function: CallTarget::Static(callee_id),
-                        ..
-                    } = instr
-                    {
-                        callee_return_types
-                            .entry(*callee_id)
-                            .or_insert_with(|| ssa.get_function(*callee_id).get_returns().to_vec());
-                    }
-                }
+        let callees: BTreeSet<_> = ssa
+            .iter_functions()
+            .flat_map(|(_, function)| function.get_blocks())
+            .flat_map(|(_, block)| block.get_instructions())
+            .filter_map(|instruction| match instruction {
+                OpCode::Call {
+                    function: CallTarget::Static(callee),
+                    unconstrained: true,
+                    ..
+                } => Some(*callee),
+                _ => None,
+            })
+            .collect();
+        let mut callee_return_types: HashMap<FunctionId, Vec<Type>> = HashMap::default();
+        let mut ref_wrappers = HashMap::default();
+        for callee in callees {
+            callee_return_types.insert(callee, ssa.get_function(callee).get_returns().to_vec());
+            if let Some(wrapper) = ReferenceArgumentWrapper::new(ssa, callee) {
+                ref_wrappers.insert(callee, wrapper);
             }
         }
 
         let mut prepare_fns = Vec::new();
         for return_types in callee_return_types.values() {
             for return_type in return_types {
-                Self::get_or_create_prepare_fn(return_type, ssa, &mut prepare_fns);
+                if !Self::is_leafless_result(return_type) {
+                    Self::get_or_create_prepare_fn(return_type, ssa, &mut prepare_fns);
+                }
             }
         }
 
@@ -315,7 +406,7 @@ impl PrepareEntryPoint {
                             unconstrained: true,
                             results,
                             function: CallTarget::Static(callee_id),
-                            ..
+                            args,
                         } = &mut *instr
                         {
                             let return_types = callee_return_types
@@ -327,10 +418,39 @@ impl PrepareEntryPoint {
                                 "ICE: unconstrained call result count does not match callee return count"
                             );
 
+                            if let Some(wrapper) = ref_wrappers.get(callee_id) {
+                                if args.len() != wrapper.ref_params.len() {
+                                    ice!(
+                                        "Unconstrained call to {callee_id:?} has {} arguments, \
+                                         but its reference wrapper expects {}",
+                                        args.len(),
+                                        wrapper.ref_params.len(),
+                                    );
+                                }
+                                for (arg, is_ref) in args.iter_mut().zip(&wrapper.ref_params) {
+                                    if *is_ref {
+                                        let result = fb.fresh_value();
+                                        new_instructions.push(
+                                            OpCode::Load { result, ptr: *arg }
+                                                .locate(location.clone()),
+                                        );
+                                        *arg = result;
+                                    }
+                                }
+                                *callee_id = wrapper.function;
+                            }
+
                             let original_results = results.clone();
                             let fresh_results = original_results
                                 .iter()
-                                .map(|_| fb.ssa.fresh_value())
+                                .zip(return_types)
+                                .map(|(original, typ)| {
+                                    if Self::is_leafless_result(typ) {
+                                        *original
+                                    } else {
+                                        fb.fresh_value()
+                                    }
+                                })
                                 .collect::<Vec<_>>();
                             *results = fresh_results.clone();
 
@@ -340,6 +460,11 @@ impl PrepareEntryPoint {
                                 .zip(fresh_results)
                                 .zip(return_types.iter())
                             {
+                                // Keep the original call result for leafless values:
+                                // it is already defined, and has no witness fields to prepare.
+                                if Self::is_leafless_result(return_type) {
+                                    continue;
+                                }
                                 let prepare_fn = Self::find_prepare_fn(return_type, &prepare_fns);
                                 new_instructions.push(Located::new(
                                     OpCode::Call {
@@ -363,6 +488,18 @@ impl PrepareEntryPoint {
         }
     }
 
+    /// Whether tuple elision will erase this result entirely. Array length does
+    /// not affect the number of SSA leaves: `[Field; 0]` still has one array leaf.
+    /// Slices retain their length through `LowerZstSlices`, so they need preparation.
+    fn is_leafless_result(typ: &Type) -> bool {
+        match &typ.expr {
+            TypeExpr::Tuple(fields) => fields.iter().all(Self::is_leafless_result),
+            TypeExpr::Array(inner, _) => Self::is_leafless_result(inner),
+            TypeExpr::WitnessOf(inner) => Self::is_leafless_result(inner),
+            _ => false,
+        }
+    }
+
     fn find_prepare_fn(typ: &Type, prepare_fns: &[PrepareFnEntry]) -> FunctionId {
         prepare_fns
             .iter()
@@ -379,13 +516,17 @@ impl PrepareEntryPoint {
         format!("reconstruct_{}", reconstruct_fns.len())
     }
 
-    pub(crate) fn entry_blob_field_count(param_types: &[Type], return_types: &[Type]) -> usize {
+    pub(crate) fn entry_blob_field_count(
+        param_types: &[Type],
+        return_types: &[Type],
+        has_return: bool,
+    ) -> usize {
         param_types
             .iter()
-            .chain(return_types.iter())
+            .chain(return_types.iter().filter(|_| has_return))
             .map(Self::flattened_field_count)
             .sum::<usize>()
-            + usize::from(!return_types.is_empty())
+            + usize::from(has_return)
     }
 
     /// How many elements of the entry point's input blob a value of `typ` occupies.
@@ -426,11 +567,18 @@ impl PrepareEntryPoint {
 
         let child_fns = match &typ.expr {
             TypeExpr::Array(inner, _) => {
-                vec![Self::get_or_create_prepare_fn(inner, ssa, prepare_fns)]
+                vec![Some(Self::get_or_create_prepare_fn(
+                    inner,
+                    ssa,
+                    prepare_fns,
+                ))]
             }
             TypeExpr::Tuple(element_types) => element_types
                 .iter()
-                .map(|elem_type| Self::get_or_create_prepare_fn(elem_type, ssa, prepare_fns))
+                .map(|elem_type| {
+                    (!Self::is_leafless_result(elem_type))
+                        .then(|| Self::get_or_create_prepare_fn(elem_type, ssa, prepare_fns))
+                })
                 .collect(),
             _ => Vec::new(),
         };
@@ -453,7 +601,7 @@ impl PrepareEntryPoint {
         e: &mut HLBlockEmitter<'_>,
         value_id: ValueId,
         typ: &Type,
-        child_fns: &[FunctionId],
+        child_fns: &[Option<FunctionId>],
     ) -> ValueId {
         match &typ.expr {
             TypeExpr::Field => e.write_witness(value_id),
@@ -478,6 +626,7 @@ impl PrepareEntryPoint {
                 let child_fn = child_fns
                     .first()
                     .copied()
+                    .flatten()
                     .expect("array prepare function should have child function");
                 let initial_array = Self::emit_default_witness_array(e, inner, *size);
                 let prepared_array = e.build_counted_loop(
@@ -497,8 +646,11 @@ impl PrepareEntryPoint {
                 let mut elems = Vec::with_capacity(element_types.len());
                 for (i, child_fn) in child_fns.iter().enumerate() {
                     let elem = e.tuple_proj(value_id, i);
-                    let prepared = e.call(*child_fn, vec![elem], 1);
-                    elems.push(prepared[0]);
+                    let prepared = match child_fn {
+                        Some(child_fn) => e.call(*child_fn, vec![elem], 1)[0],
+                        None => elem,
+                    };
+                    elems.push(prepared);
                 }
                 e.mk_tuple(elems, element_types.clone())
             }
@@ -740,5 +892,392 @@ impl PrepareEntryPoint {
             },
         );
         copied[0]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::ssa::{DefaultSSAAnnotator, Terminator};
+
+    fn add_sink(ssa: &mut HLSSA, params: &[Type]) -> FunctionId {
+        HLSSABuilder::new(ssa)
+            .add_function("sink".to_string(), |fb| {
+                let entry = fb.function.get_entry_id();
+                let mut e = fb.test_block(entry);
+                for ty in params {
+                    e.add_parameter(ty.clone());
+                }
+                e.terminate_return(vec![]);
+            })
+            .0
+    }
+
+    fn snapshot(ssa: &HLSSA) -> String {
+        ssa.to_string(&DefaultSSAAnnotator)
+    }
+
+    #[test]
+    fn reference_arguments_preserve_mixed_order_and_call_location() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let params = vec![Type::field().ref_of(), Type::int(8), Type::int(32).ref_of()];
+        let callee = add_sink(&mut ssa, &params);
+        let location = SourceLocation::synthetic("reference boundary test");
+        let args = HLSSABuilder::new(&mut ssa).modify_function(main, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.block(entry).with_source_location(location.clone());
+            let args: Vec<_> = params
+                .iter()
+                .map(|ty| e.add_parameter(ty.clone()))
+                .collect();
+            e.call_unconstrained(callee, args.clone(), 0);
+            e.terminate_return(vec![]);
+            args
+        });
+
+        PrepareEntryPoint::process_unconstrained_calls(&mut ssa);
+
+        let entry = ssa.get_function(main).get_entry();
+        let instructions: Vec<_> = entry.get_instructions().collect();
+        let [
+            OpCode::Load {
+                result: first,
+                ptr: first_ptr,
+            },
+            OpCode::Load {
+                result: last,
+                ptr: last_ptr,
+            },
+            OpCode::Call {
+                function: CallTarget::Static(wrapper),
+                args: lowered,
+                unconstrained: true,
+                ..
+            },
+        ] = instructions.as_slice()
+        else {
+            panic!("expected two loads followed by the boundary call: {instructions:?}")
+        };
+        assert_eq!((*first_ptr, *last_ptr), (args[0], args[2]));
+        assert_eq!(*lowered, vec![*first, args[1], *last]);
+        assert!(
+            entry
+                .get_instructions_with_source_locations()
+                .all(|(_, source)| source == &location)
+        );
+
+        let wrapper = ssa.get_function(*wrapper);
+        assert_eq!(
+            wrapper.get_param_types(),
+            vec![Type::field(), Type::int(8), Type::int(32)]
+        );
+        let values: Vec<_> = wrapper
+            .get_entry()
+            .get_parameter_values()
+            .copied()
+            .collect();
+        let instructions: Vec<_> = wrapper.get_entry().get_instructions().collect();
+        let [
+            OpCode::Alloc {
+                result: first_ref,
+                value: first_value,
+            },
+            OpCode::Alloc {
+                result: last_ref,
+                value: last_value,
+            },
+            OpCode::Call {
+                function: CallTarget::Static(target),
+                args: reconstructed,
+                unconstrained: false,
+                ..
+            },
+        ] = instructions.as_slice()
+        else {
+            panic!("expected local refs and an ordinary call: {instructions:?}")
+        };
+        assert_eq!((*first_value, *last_value), (values[0], values[2]));
+        assert_eq!(*target, callee);
+        assert_eq!(*reconstructed, vec![*first_ref, values[1], *last_ref]);
+        assert_eq!(ssa.get_function(callee).get_param_types(), params);
+    }
+
+    #[test]
+    fn reference_wrapper_is_shared_across_callers_and_ordinary_calls_stay_intact() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let callee = add_sink(&mut ssa, &[Type::field().ref_of()]);
+        let other = ssa.add_function("other".to_string());
+        for caller in [main, other] {
+            HLSSABuilder::new(&mut ssa).modify_function(caller, |fb| {
+                let entry = fb.function.get_entry_id();
+                let mut e = fb.test_block(entry);
+                let arg = e.add_parameter(Type::field().ref_of());
+                e.call_unconstrained(callee, vec![arg], 0);
+                e.call(callee, vec![arg], 0);
+                e.call_unconstrained(callee, vec![arg], 0);
+                e.terminate_return(vec![]);
+            });
+        }
+        let functions_before = ssa.get_function_ids().count();
+        PrepareEntryPoint::process_unconstrained_calls(&mut ssa);
+        assert_eq!(ssa.get_function_ids().count(), functions_before + 1);
+
+        let mut wrappers = Vec::new();
+        for caller in [main, other] {
+            let entry = ssa.get_function(caller).get_entry();
+            let original_arg = *entry.get_parameter_values().next().unwrap();
+            let mut ordinary_calls = 0;
+            for instruction in entry.get_instructions() {
+                if let OpCode::Call {
+                    function: CallTarget::Static(target),
+                    args,
+                    unconstrained,
+                    ..
+                } = instruction
+                {
+                    if *unconstrained {
+                        wrappers.push(*target);
+                        assert_ne!(*target, callee);
+                        assert_ne!(args[0], original_arg);
+                    } else {
+                        ordinary_calls += 1;
+                        assert_eq!(*target, callee);
+                        assert_eq!(*args, vec![original_arg]);
+                    }
+                }
+            }
+            assert_eq!(ordinary_calls, 1);
+        }
+        assert_eq!(wrappers.len(), 4);
+        assert!(wrappers.iter().all(|wrapper| *wrapper == wrappers[0]));
+    }
+
+    #[test]
+    fn ordinary_reference_calls_are_unchanged() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let callee = add_sink(&mut ssa, &[Type::field().ref_of()]);
+        HLSSABuilder::new(&mut ssa).modify_function(main, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.test_block(entry);
+            let arg = e.add_parameter(Type::field().ref_of());
+            e.call(callee, vec![arg], 0);
+            e.terminate_return(vec![]);
+        });
+        let before = snapshot(&ssa);
+        PrepareEntryPoint::process_unconstrained_calls(&mut ssa);
+        assert_eq!(snapshot(&ssa), before);
+    }
+
+    #[test]
+    fn reference_free_boundary_calls_need_no_wrapper_or_loads() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let callee = add_sink(&mut ssa, &[Type::field(), Type::int(8).array_of(3)]);
+        HLSSABuilder::new(&mut ssa).modify_function(main, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.test_block(entry);
+            let field = e.add_parameter(Type::field());
+            let array = e.add_parameter(Type::int(8).array_of(3));
+            e.call_unconstrained(callee, vec![field, array], 0);
+            e.call_unconstrained(callee, vec![field, array], 0);
+            e.terminate_return(vec![]);
+        });
+        // Void returns isolate argument lowering from the independent result preparation.
+        let before = snapshot(&ssa);
+        PrepareEntryPoint::process_unconstrained_calls(&mut ssa);
+        assert_eq!(snapshot(&ssa), before);
+    }
+
+    #[test]
+    fn reference_wrapper_preserves_returns_and_witness_preparation() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let callee = HLSSABuilder::new(&mut ssa)
+            .add_function("read".to_string(), |fb| {
+                fb.function.add_return_type(Type::field());
+                let entry = fb.function.get_entry_id();
+                let mut e = fb.test_block(entry);
+                let arg = e.add_parameter(Type::field().ref_of());
+                let value = e.load(arg);
+                e.terminate_return(vec![value]);
+            })
+            .0;
+        let result = HLSSABuilder::new(&mut ssa).modify_function(main, |fb| {
+            fb.function.add_return_type(Type::field());
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.test_block(entry);
+            let arg = e.add_parameter(Type::field().ref_of());
+            let result = e.call_unconstrained(callee, vec![arg], 1)[0];
+            e.terminate_return(vec![result]);
+            result
+        });
+        PrepareEntryPoint::process_unconstrained_calls(&mut ssa);
+        let entry = ssa.get_function(main).get_entry();
+        let instructions: Vec<_> = entry.get_instructions().collect();
+        let [
+            OpCode::Load { .. },
+            OpCode::Call {
+                function: CallTarget::Static(wrapper),
+                results: raw_results,
+                unconstrained: true,
+                ..
+            },
+            OpCode::Call {
+                results: prepared,
+                args: prepare_args,
+                unconstrained: false,
+                ..
+            },
+        ] = instructions.as_slice()
+        else {
+            panic!("expected load, boundary call, and result preparation: {instructions:?}")
+        };
+        assert_eq!(*prepared, vec![result]);
+        assert_eq!(prepare_args, raw_results);
+        assert_ne!(raw_results[0], result);
+        assert_eq!(ssa.get_function(*wrapper).get_returns(), &[Type::field()]);
+        assert!(matches!(
+            entry.get_terminator(),
+            Some(Terminator::Return(values)) if *values == vec![result]
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "reference wrapper expects 1")]
+    fn malformed_reference_call_reports_arity_as_an_ice() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let callee = add_sink(&mut ssa, &[Type::field().ref_of()]);
+        HLSSABuilder::new(&mut ssa).modify_function(main, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.test_block(entry);
+            e.call_unconstrained(callee, vec![], 0);
+            e.terminate_return(vec![]);
+        });
+        PrepareEntryPoint::process_unconstrained_calls(&mut ssa);
+    }
+    #[test]
+    fn only_leafless_unconstrained_results_skip_preparation() {
+        let unit = Type::tuple_of(vec![]);
+        for (return_type, needs_preparation) in [
+            (unit.clone(), false),
+            (unit.clone().array_of(2), false),
+            (Type::field().array_of(0), true),
+            (unit.clone().slice_of(), true),
+            (Type::field().slice_of(), true),
+            (Type::tuple_of(vec![unit, Type::field()]), true),
+        ] {
+            let mut ssa = HLSSA::with_main("main".into());
+            let main = ssa.get_unique_entrypoint_id();
+            let callee = ssa.add_function("callee".into());
+            let mut sb = HLSSABuilder::new(&mut ssa);
+            sb.modify_function(callee, |b| {
+                b.function.add_return_type(return_type.clone());
+                let entry = b.function.get_entry_id();
+                let mut e = b
+                    .block(entry)
+                    .with_source_location(SourceLocation::synthetic("test"));
+                let value = e.add_parameter(return_type.clone());
+                e.terminate_return(vec![value]);
+            });
+            let mut result = None;
+            sb.modify_function(main, |b| {
+                b.function.add_return_type(return_type.clone());
+                let entry = b.function.get_entry_id();
+                let mut e = b
+                    .block(entry)
+                    .with_source_location(SourceLocation::synthetic("test"));
+                let arg = e.add_parameter(return_type.clone());
+                let value = e.call_unconstrained(callee, vec![arg], 1)[0];
+                result = Some(value);
+                e.terminate_return(vec![value]);
+            });
+            PrepareEntryPoint::process_unconstrained_calls(&mut ssa);
+            let ops: Vec<_> = ssa
+                .get_function(main)
+                .get_entry()
+                .get_instructions()
+                .collect();
+            assert_eq!(ops.len(), if needs_preparation { 2 } else { 1 });
+            let OpCode::Call {
+                results,
+                function: CallTarget::Static(target),
+                unconstrained: true,
+                ..
+            } = ops[0]
+            else {
+                panic!("original unconstrained call must survive");
+            };
+            assert_eq!(*target, callee);
+            if !needs_preparation {
+                assert_eq!(results, &[result.unwrap()]);
+            }
+            let Some(Terminator::Return(values)) =
+                ssa.get_function(main).get_entry().get_terminator()
+            else {
+                panic!("missing return");
+            };
+            assert_eq!(values, &[result.unwrap()]);
+            for (_, f) in ssa.iter_functions() {
+                if f.get_name().starts_with("prepare_") {
+                    assert!(!PrepareEntryPoint::is_leafless_result(
+                        &f.get_param_types()[0]
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn absent_abi_return_has_no_slots_or_return_reconstruction() {
+        let mut ssa = HLSSA::with_main("main".into());
+        let main = ssa.get_unique_entrypoint_id();
+        HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+            b.function.add_return_type(Type::tuple_of(vec![]));
+            let entry = b.function.get_entry_id();
+            let mut e = b
+                .block(entry)
+                .with_source_location(SourceLocation::synthetic("test"));
+            let value = e.mk_tuple(vec![], vec![]);
+            e.terminate_return(vec![value]);
+        });
+        PrepareEntryPoint::wrap_main(&mut ssa, false, Some(false));
+        assert_eq!(
+            ssa.get_unique_entrypoint().get_param_types(),
+            vec![Type::blob(Type::field(), 0)]
+        );
+        assert_eq!(
+            ssa.iter_functions().count(),
+            2,
+            "unused return reconstruction should not be generated"
+        );
+    }
+
+    #[test]
+    fn absent_abi_return_rejects_live_ssa_results() {
+        for typ in [Type::int(8), Type::field().array_of(0)] {
+            let failure = std::panic::catch_unwind(|| {
+                let mut ssa = HLSSA::with_main("main".into());
+                let main = ssa.get_unique_entrypoint_id();
+                HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+                    b.function.add_return_type(typ.clone());
+                    let entry = b.function.get_entry_id();
+                    let mut e = b.test_block(entry);
+                    let value = e.add_parameter(typ);
+                    e.terminate_return(vec![value]);
+                });
+                PrepareEntryPoint::wrap_main(&mut ssa, false, Some(false));
+            })
+            .expect_err("the wrapper must reject a nonempty result without an ABI return");
+            let message = failure
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| failure.downcast_ref::<&str>().copied())
+                .unwrap();
+            assert!(message.contains("ABI without a return cannot discard nonempty SSA results"));
+        }
     }
 }

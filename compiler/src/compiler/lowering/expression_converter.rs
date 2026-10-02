@@ -8,12 +8,12 @@ use noirc_frontend::{
     hir_def::expr::Constructor,
     monomorphization::ast::{
         Assign, Binary, Definition, Expression, For, FuncId as AstFuncId, GlobalId, Ident, If,
-        Index, LValue, Let, LocalId, Match, MatchCase, Type as AstType, While,
+        Index, LValue, Let, Literal, LocalId, Match, MatchCase, Type as AstType, While,
     },
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
-use mavros_int_semantics::MAX_LOWERED_SIGNED_BITS;
+use mavros_int_semantics::{IntBits, IntOp, MAX_LOWERED_SIGNED_BITS, Outcome, eval};
 
 use crate::{
     collections::{HashMap, HashSet},
@@ -32,30 +32,11 @@ use crate::{
 
 /// Loop context for break/continue support.
 struct LoopContext {
-    // The block containing the header of the current loop.
-    loop_header: BlockId,
+    /// The shared advance block for `for`, or the header for `while`/`loop`.
+    continue_target: BlockId,
 
-    // The block containing the exit of the current loop.
+    /// The block containing the exit of the current loop.
     exit_block: BlockId,
-
-    /// Source anchor for desugared instructions emitted on behalf of the loop body.
-    body_source_location: SourceLocation,
-
-    /// Only for `for` loops, used by Continue to increment.
-    for_loop_index: Option<ForLoopIndex>,
-}
-
-/// The loop index of a `for`, as everything that has to increment it needs to see it.
-///
-/// The signedness rides along deliberately. The index is incremented in two places — falling off
-/// the end of the body, and `continue` — and they must agree with each other _and_ with the exit
-/// test in the header, which is a comparison at the same signedness. Deriving it separately at
-/// each site is how those three drift apart.
-#[derive(Clone, Copy)]
-struct ForLoopIndex {
-    value: ValueId,
-    bit_size: usize,
-    signed: bool,
 }
 
 /// Converts expressions within a single function.
@@ -69,7 +50,7 @@ pub struct ExpressionConverter<'a> {
     /// Tracks which LocalIds are mutable (their binding is a pointer)
     mutable_locals: HashSet<LocalId>,
 
-    /// The Noir type of every `let`-bound local whose type `expression_type` can recover, plus
+    /// The Noir type of every `let`-bound local, plus
     /// every match case argument, since nested patterns match on those.
     ///
     /// The map only has to be complete for match scrutinees. The elaborator wraps the scrutinee
@@ -193,7 +174,7 @@ impl<'a> ExpressionConverter<'a> {
                 ident.name
             )
         };
-        Type::function_returning(self.type_converter.call_results(ret))
+        Type::function_returning(vec![self.type_converter.convert_type(ret)])
     }
 
     /// Note: for `Definition::Function` idents, the Noir type may be
@@ -214,10 +195,9 @@ impl<'a> ExpressionConverter<'a> {
                     .map(|e| self.tuple_element_type(e))
                     .collect(),
             ),
-            other => {
-                let return_type = other.return_type().expect("Tuple element must have a type");
-                self.type_converter.convert_type(&return_type)
-            }
+            other => self
+                .type_converter
+                .convert_type(&Self::expression_type(other)),
         }
     }
 
@@ -349,11 +329,6 @@ impl<'a> ExpressionConverter<'a> {
         self.mutable_locals.insert(local_id);
     }
 
-    /// Calculate return size for function calls (tuples count as 1, unit as 0)
-    fn return_size(&self, typ: &noirc_frontend::monomorphization::ast::Type) -> usize {
-        usize::from(TypeConverter::call_returns_a_value(typ))
-    }
-
     /// Convert an expression to SSA instructions.
     pub fn convert_expression(
         &mut self,
@@ -366,6 +341,25 @@ impl<'a> ExpressionConverter<'a> {
         let result = self.convert_expression_inner(expr, b);
         self.current_source_location = previous_source_location;
         result
+    }
+
+    /// Evaluate an expression where storage or an operand requires an SSA value.
+    /// Unit literals, statements and effect-only builtins run for their side effects,
+    /// then materialize an empty tuple here when they have no SSA result.
+    pub(super) fn convert_value(
+        &mut self,
+        expr: &Expression,
+        b: &mut HLFunctionBuilder<'_>,
+    ) -> ValueId {
+        self.convert_expression(expr, b).unwrap_or_else(|| {
+            assert!(
+                matches!(Self::expression_type(expr), AstType::Unit),
+                "non-unit expression did not produce an SSA value"
+            );
+            self.emit_located(b, Self::expression_location(expr), |e| {
+                e.mk_tuple(vec![], vec![])
+            })
+        })
     }
 
     fn convert_expression_inner(
@@ -412,33 +406,10 @@ impl<'a> ExpressionConverter<'a> {
                 None
             }
             Expression::Continue => {
-                let (loop_header, for_loop_index, body_source_location) = {
-                    let ctx = self.loop_stack.last().expect("continue outside of loop");
-                    (
-                        ctx.loop_header,
-                        ctx.for_loop_index,
-                        ctx.body_source_location.clone(),
-                    )
-                };
-                if let Some(index) = for_loop_index {
-                    // For loop: increment index and jump back to header
-                    let one = b.emit_const(index_step_one(index.bit_size));
-                    let next_index = self.emit_at_source_location(b, body_source_location, |e| {
-                        e.bin(
-                            BinaryArithOpKind::with_sign(ArithGroup::Add, index.signed),
-                            index.value,
-                            one,
-                        )
-                    });
-                    assert!(!b.block(self.current_block).is_terminated());
-                    b.block(self.current_block)
-                        .terminate_jmp(loop_header, vec![next_index]);
-                } else {
-                    // While/loop: just jump back to header with no args
-                    assert!(!b.block(self.current_block).is_terminated());
-                    b.block(self.current_block)
-                        .terminate_jmp(loop_header, vec![]);
-                }
+                let ctx = self.loop_stack.last().expect("continue outside of loop");
+                assert!(!b.block(self.current_block).is_terminated());
+                b.block(self.current_block)
+                    .terminate_jmp(ctx.continue_target, vec![]);
                 // Create a dead block for any subsequent code
                 let dead = b.add_block(|_| {});
                 self.current_block = dead;
@@ -512,8 +483,8 @@ impl<'a> ExpressionConverter<'a> {
         binary: &Binary,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        let lhs = self.convert_expression(&binary.lhs, b).unwrap();
-        let rhs = self.convert_expression(&binary.rhs, b).unwrap();
+        let lhs = self.convert_value(&binary.lhs, b);
+        let rhs = self.convert_value(&binary.rhs, b);
 
         // This is where signedness enters the compiler, and after it there is no second source: the
         // HLSSA type carries no sign, so every downstream decision reads the opcode this line ends
@@ -559,13 +530,7 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn convert_let(&mut self, let_expr: &Let, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
-        let result = self.convert_expression(&let_expr.expression, b);
-        let value = result.unwrap_or_else(|| {
-            // Unit binding (e.g., `let unit = ()`) — create an empty tuple
-            self.emit_located(b, Self::expression_location(&let_expr.expression), |e| {
-                e.mk_tuple(vec![], vec![])
-            })
-        });
+        let value = self.convert_value(&let_expr.expression, b);
 
         if let_expr.mutable {
             // Use a single pointer for the whole value.
@@ -580,9 +545,8 @@ impl<'a> ExpressionConverter<'a> {
             // Immutable - store single materialized value
             self.bindings.insert(let_expr.id, value);
         }
-        if let Some(typ) = Self::expression_type(&let_expr.expression) {
-            self.local_types.insert(let_expr.id, typ);
-        }
+        self.local_types
+            .insert(let_expr.id, Self::expression_type(&let_expr.expression));
         None
     }
 
@@ -603,7 +567,7 @@ impl<'a> ExpressionConverter<'a> {
         assign: &Assign,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        let new_value = self.convert_expression(&assign.expression, b).unwrap();
+        let new_value = self.convert_value(&assign.expression, b);
         self.write_lvalue(&assign.lvalue, new_value, b);
         None
     }
@@ -754,100 +718,106 @@ impl<'a> ExpressionConverter<'a> {
     }
 
     fn convert_for(&mut self, for_expr: &For, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
-        let body_source_location = self.expression_source_location(&for_expr.block);
-
-        // Evaluate start and end range in the current block
+        // Evaluate start and end range once, before entering the loop.
         let start = self.convert_expression(&for_expr.start_range, b).unwrap();
-        let end_raw = self.convert_expression(&for_expr.end_range, b).unwrap();
+        let end = self.convert_expression(&for_expr.end_range, b).unwrap();
 
         let index_type = self.type_converter.convert_type(&for_expr.index_type);
-        let field = b.field();
-
-        // The loop index carries the range's own signedness, and both the bump and the exit test
-        // are operations _on_ it, so they take their sign from it rather than defaulting. It is
-        // read from the Noir type, not from the converted one: an HLSSA integer type is a width.
+        let index_bit_size = index_type.get_bit_size(b.field());
+        // HLSSA integer types carry only width; comparisons and arithmetic take their
+        // signedness from the Noir index type.
         let index_signed = ast_type_is_signed(&for_expr.index_type);
 
-        // if range is inclusive, bump by one
-        let end = if for_expr.inclusive {
-            let one = b.emit_const(index_step_one(index_type.get_bit_size(field)));
-            self.emit_located(b, Some(for_expr.end_range_location), |e| {
-                e.bin(
-                    BinaryArithOpKind::with_sign(ArithGroup::Add, index_signed),
-                    end_raw,
-                    one,
-                )
+        // A constant endpoint can use the simpler exclusive header only when end + 1
+        // fits the index type. Delegate that check and addition to the integer model.
+        let exclusive_end = if for_expr.inclusive {
+            b.ssa().get_const(end).and_then(|constant| {
+                let Constant::Int(end) = &*constant else {
+                    return None;
+                };
+                let op = if index_signed {
+                    IntOp::SAdd
+                } else {
+                    IntOp::UAdd
+                };
+                match eval(op, end, &IntBits::one(index_bit_size)) {
+                    Outcome::Value(next) => Some(Constant::Int(next)),
+                    Outcome::Rejected(_) => None,
+                }
             })
         } else {
-            end_raw
+            None
         };
+        let inclusive = for_expr.inclusive && exclusive_end.is_none();
+        let end = exclusive_end.map(|end| b.emit_const(end)).unwrap_or(end);
 
-        // Create blocks for the loop structure
         let loop_header = b.add_block(|_| {});
         let loop_body = b.add_block(|_| {});
+        let loop_advance = b.add_block(|_| {});
         let exit_block = b.add_block(|_| {});
+        let end_location = self.resolve_location(Some(for_expr.end_range_location));
 
-        // Build header: parameter, condition, branch
         let loop_index = {
-            let header_location = self.resolve_location(Some(for_expr.end_range_location));
-            let mut header = b.block(loop_header).with_source_location(header_location);
+            let mut header = b
+                .block(loop_header)
+                .with_source_location(end_location.clone());
             let loop_index = header.add_parameter(index_type);
-            let cond = header.cmp(loop_index, end, CmpKind::lt(index_signed));
             assert!(!header.is_terminated());
-            header.terminate_jmp_if(cond, loop_body, exit_block);
+            if inclusive {
+                // Test index <= end without computing end + 1, which may overflow.
+                let past_end = header.cmp(end, loop_index, CmpKind::lt(index_signed));
+                header.terminate_jmp_if(past_end, exit_block, loop_body);
+            } else {
+                let cond = header.cmp(loop_index, end, CmpKind::lt(index_signed));
+                header.terminate_jmp_if(cond, loop_body, exit_block);
+            }
             loop_index
         };
 
-        // Jump from current block to loop header with start value
+        // Both continue and body fallthrough use this advance path. Inclusive loops
+        // leave after processing the endpoint, before the shared increment can overflow.
+        let increment_block = if inclusive {
+            let increment_block = b.add_block(|_| {});
+            let mut advance = b.block(loop_advance).with_source_location(end_location);
+            let at_end = advance.cmp(loop_index, end, CmpKind::Eq);
+            assert!(!advance.is_terminated());
+            advance.terminate_jmp_if(at_end, exit_block, increment_block);
+            increment_block
+        } else {
+            loop_advance
+        };
+        {
+            let one = b.emit_const(index_step_one(index_bit_size));
+            let location = self.resolve_location(Some(for_expr.start_range_location));
+            let mut increment = b.block(increment_block).with_source_location(location);
+            let next_index = increment.bin(
+                BinaryArithOpKind::with_sign(ArithGroup::Add, index_signed),
+                loop_index,
+                one,
+            );
+            assert!(!increment.is_terminated());
+            increment.terminate_jmp(loop_header, vec![next_index]);
+        }
+
         assert!(!b.block(self.current_block).is_terminated());
         b.block(self.current_block)
             .terminate_jmp(loop_header, vec![start]);
 
-        // In the loop body: bind the index variable and execute the block
         self.current_block = loop_body;
         self.bindings.insert(for_expr.index_variable, loop_index);
-
-        let index_bit_size = self
-            .type_converter
-            .convert_type(&for_expr.index_type)
-            .get_bit_size(field);
-
-        // Push loop context for break/continue
         self.loop_stack.push(LoopContext {
-            loop_header,
+            continue_target: loop_advance,
             exit_block,
-            body_source_location,
-            for_loop_index: Some(ForLoopIndex {
-                value: loop_index,
-                bit_size: index_bit_size,
-                signed: index_signed,
-            }),
         });
-
-        // Execute the loop body
         self.convert_expression(&for_expr.block, b);
-
         self.loop_stack.pop();
 
-        // Increment the index and jump back to header
-        // (only if current block is not already terminated by break/continue)
         if !b.block(self.current_block).is_terminated() {
-            let one = b.emit_const(index_step_one(index_bit_size));
-            let next_index = self.emit_located(b, Some(for_expr.start_range_location), |e| {
-                e.bin(
-                    BinaryArithOpKind::with_sign(ArithGroup::Add, index_signed),
-                    loop_index,
-                    one,
-                )
-            });
             b.block(self.current_block)
-                .terminate_jmp(loop_header, vec![next_index]);
+                .terminate_jmp(loop_advance, vec![]);
         }
 
-        // Continue in the exit block
         self.current_block = exit_block;
-
-        // For loops don't produce a value
         None
     }
 
@@ -856,8 +826,6 @@ impl<'a> ExpressionConverter<'a> {
         while_expr: &While,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        let body_source_location = self.expression_source_location(&while_expr.body);
-
         // Create blocks: loop_header evaluates condition, loop_body runs body, exit_block continues
         let loop_header = b.add_block(|_| {});
         let loop_body = b.add_block(|_| {});
@@ -880,10 +848,8 @@ impl<'a> ExpressionConverter<'a> {
         // In loop body: push context, convert body, pop context, jump back to header
         self.current_block = loop_body;
         self.loop_stack.push(LoopContext {
-            loop_header,
+            continue_target: loop_header,
             exit_block,
-            body_source_location,
-            for_loop_index: None,
         });
 
         self.convert_expression(&while_expr.body, b);
@@ -908,8 +874,6 @@ impl<'a> ExpressionConverter<'a> {
         body: &Expression,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        let body_source_location = self.expression_source_location(body);
-
         // loop { body } — only exits via break
         let loop_block = b.add_block(|_| {});
         let exit_block = b.add_block(|_| {});
@@ -922,10 +886,8 @@ impl<'a> ExpressionConverter<'a> {
         // In loop block: push context, convert body, pop context, jump back
         self.current_block = loop_block;
         self.loop_stack.push(LoopContext {
-            loop_header: loop_block,
+            continue_target: loop_block,
             exit_block,
-            body_source_location,
-            for_loop_index: None,
         });
 
         self.convert_expression(body, b);
@@ -1254,7 +1216,7 @@ impl<'a> ExpressionConverter<'a> {
                 }
 
                 // General case: evaluate the expression, alloc a fresh Ref, store into it.
-                let value = self.convert_expression(&unary.rhs, b).unwrap();
+                let value = self.convert_value(&unary.rhs, b);
                 let ptr = self.emit_located(b, Some(unary.location), |e| e.alloc(value));
                 Some(ptr)
             }
@@ -1267,11 +1229,11 @@ impl<'a> ExpressionConverter<'a> {
                 let value = self.convert_expression(&unary.rhs, b).unwrap();
                 let zero_const = if matches!(unary.operator, noirc_frontend::ast::UnaryOp::Minus) {
                     use noirc_frontend::monomorphization::ast::Type as AstType;
-                    Some(match unary.rhs.return_type().as_deref() {
-                        Some(AstType::Integer(signedness, bit_size)) => {
+                    Some(match Self::expression_type(&unary.rhs) {
+                        AstType::Integer(signedness, bit_size) => {
                             // Only for the width gate: zero is zero under either reading, and the
                             // negation that consumes it takes its sign from its own opcode.
-                            let (_, bits) = checked_int_cast_target(*signedness, *bit_size);
+                            let (_, bits) = checked_int_cast_target(signedness, bit_size);
                             Constant::int(bits, 0)
                         }
                         _ => Constant::Field(b.field().constant(0u64)),
@@ -1342,7 +1304,7 @@ impl<'a> ExpressionConverter<'a> {
             }
             Expression::Clone(inner) => self.try_expression_ref(inner.as_ref(), b),
             _ => {
-                if Self::reference_pointee_type(&Self::expression_type(expr)?).is_some() {
+                if Self::reference_pointee_type(&Self::expression_type(expr)).is_some() {
                     self.convert_expression(expr, b)
                 } else {
                     None
@@ -1356,7 +1318,7 @@ impl<'a> ExpressionConverter<'a> {
         expr: &Expression,
         b: &mut HLFunctionBuilder<'_>,
     ) -> Option<ValueId> {
-        match Self::expression_type(expr)? {
+        match Self::expression_type(expr) {
             AstType::Reference(inner, _) if matches!(inner.as_ref(), AstType::Tuple(_)) => {
                 self.convert_expression(expr, b)
             }
@@ -1372,41 +1334,67 @@ impl<'a> ExpressionConverter<'a> {
         }
     }
 
-    fn expression_type(expr: &Expression) -> Option<AstType> {
+    /// Recover aggregate types recursively: Noir's optional `return_type` can lose
+    /// statement-shaped unit fields inside tuples, projections and format captures.
+    fn expression_type(expr: &Expression) -> AstType {
         match expr {
-            Expression::Clone(inner) => Self::expression_type(inner.as_ref()),
-            Expression::Block(exprs) => exprs.last().and_then(Self::expression_type),
-            Expression::Tuple(exprs) => exprs
-                .iter()
-                .map(Self::expression_type)
-                .collect::<Option<Vec<_>>>()
-                .map(AstType::Tuple),
-            Expression::ExtractTupleField(tuple_expr, idx) => {
-                match Self::expression_type(tuple_expr.as_ref())? {
-                    AstType::Reference(inner, mutable) => match inner.as_ref() {
-                        AstType::Tuple(fields) => {
-                            Some(AstType::Reference(Rc::new(fields[*idx].clone()), mutable))
-                        }
-                        _ => None,
-                    },
-                    AstType::Tuple(fields) => Some(fields[*idx].clone()),
-                    _ => None,
+            Expression::Clone(inner) => Self::expression_type(inner),
+            Expression::Binary(binary) => {
+                if binary.operator.is_comparator() {
+                    AstType::Bool
+                } else {
+                    Self::expression_type(&binary.lhs)
                 }
             }
-            _ => expr.return_type().map(|typ| typ.into_owned()),
+            Expression::Block(exprs) => exprs
+                .last()
+                .map(Self::expression_type)
+                .unwrap_or(AstType::Unit),
+            Expression::Tuple(exprs) => {
+                AstType::Tuple(exprs.iter().map(Self::expression_type).collect())
+            }
+            Expression::Literal(Literal::FmtStr(_, size, captures)) => {
+                AstType::FmtString(*size as u32, Rc::new(Self::expression_type(captures)))
+            }
+            Expression::ExtractTupleField(tuple_expr, idx) => {
+                match Self::expression_type(tuple_expr) {
+                    AstType::Reference(inner, mutable) => match inner.as_ref() {
+                        AstType::Tuple(fields) => {
+                            AstType::Reference(Rc::new(fields[*idx].clone()), mutable)
+                        }
+                        other => ice!("Expected tuple reference, got {other:?}"),
+                    },
+                    AstType::Tuple(fields) => fields[*idx].clone(),
+                    other => ice!("Expected tuple, got {other:?}"),
+                }
+            }
+            Expression::Let(_)
+            | Expression::Constrain(..)
+            | Expression::Assign(_)
+            | Expression::Semi(_)
+            | Expression::Drop(_)
+            | Expression::For(_)
+            | Expression::Loop(_)
+            | Expression::While(_)
+            | Expression::Break
+            | Expression::Continue => AstType::Unit,
+            _ => expr
+                .return_type()
+                .expect("value expression must have a type")
+                .into_owned(),
         }
     }
 
     fn convert_index(&mut self, index: &Index, b: &mut HLFunctionBuilder<'_>) -> Option<ValueId> {
+        let idx = self.convert_expression(&index.index, b).unwrap();
         let mut collection = self.convert_expression(&index.collection, b).unwrap();
         // If the collection is a reference, load through it first
         if matches!(
             Self::expression_type(&index.collection),
-            Some(noirc_frontend::monomorphization::ast::Type::Reference(_, _))
+            AstType::Reference(_, _)
         ) {
             collection = self.emit_located(b, Some(index.location), |e| e.load(collection));
         }
-        let idx = self.convert_expression(&index.index, b).unwrap();
         let result = self.emit_located(b, Some(index.location), |e| e.array_get(collection, idx));
         Some(result)
     }
@@ -1420,7 +1408,7 @@ impl<'a> ExpressionConverter<'a> {
         let value = self.convert_expression(tuple_expr, b).unwrap();
         if matches!(
             Self::expression_type(tuple_expr),
-            Some(AstType::Reference(inner, _)) if matches!(inner.as_ref(), AstType::Tuple(_))
+            AstType::Reference(inner, _) if matches!(inner.as_ref(), AstType::Tuple(_))
         ) {
             return Some(
                 self.emit_located(b, Self::expression_location(tuple_expr), |e| {
@@ -1447,13 +1435,13 @@ impl<'a> ExpressionConverter<'a> {
         // A Noir `Field` is as wide as the configured field's modulus.
         let field_bits = b.field().field_bit_size() as usize;
 
-        let (src_bits, src_signed) = match cast.lhs.return_type().as_deref() {
-            Some(AstType::Field) => (field_bits, false),
-            Some(AstType::Integer(signedness, bit_size)) => (
+        let (src_bits, src_signed) = match Self::expression_type(&cast.lhs) {
+            AstType::Field => (field_bits, false),
+            AstType::Integer(signedness, bit_size) => (
                 bit_size.bit_size() as usize,
-                *signedness == Signedness::Signed,
+                signedness == Signedness::Signed,
             ),
-            Some(AstType::Bool) => (1, false),
+            AstType::Bool => (1, false),
             _ => (0, false),
         };
 
@@ -1536,7 +1524,7 @@ impl<'a> ExpressionConverter<'a> {
                         typ
                     ),
                 };
-                let element_val = self.convert_expression(element, b).unwrap();
+                let element_val = self.convert_value(element, b);
                 let len = *length as usize;
                 let seq_type = if *is_vector {
                     SequenceTargetType::Slice
@@ -1591,10 +1579,12 @@ impl<'a> ExpressionConverter<'a> {
                 let mut elem_types = vec![Type::int(32).array_of(cp_len)];
                 if let Expression::Tuple(capture_exprs) = captures.as_ref() {
                     for expr in capture_exprs {
-                        let val = self.convert_expression(expr, b).unwrap();
+                        let val = self.convert_value(expr, b);
                         tuple_elems.push(val);
-                        let typ = expr.return_type().expect("FmtStr capture must have a type");
-                        elem_types.push(self.type_converter.convert_type(&typ));
+                        elem_types.push(
+                            self.type_converter
+                                .convert_type(&Self::expression_type(expr)),
+                        );
                     }
                 }
 
@@ -1648,7 +1638,7 @@ impl<'a> ExpressionConverter<'a> {
         let elements: Vec<ValueId> = array_lit
             .contents
             .iter()
-            .map(|e| self.convert_expression(e, b).unwrap())
+            .map(|e| self.convert_value(e, b))
             .collect();
 
         let result = self.emit_located(
@@ -1763,10 +1753,7 @@ impl<'a> ExpressionConverter<'a> {
         }
 
         // Convert each element to a single materialized value
-        let values: Vec<ValueId> = exprs
-            .iter()
-            .map(|e| self.convert_expression(e, b).unwrap())
-            .collect();
+        let values: Vec<ValueId> = exprs.iter().map(|e| self.convert_value(e, b)).collect();
 
         // Get types for each element
         let types: Vec<_> = exprs.iter().map(|e| self.tuple_element_type(e)).collect();
@@ -1778,6 +1765,8 @@ impl<'a> ExpressionConverter<'a> {
         Some(tuple)
     }
 
+    // Ordinary calls always produce one value. Builtins and ignored print oracles
+    // may only have effects, so the dispatcher keeps an optional result.
     fn convert_call(
         &mut self,
         call: &noirc_frontend::monomorphization::ast::Call,
@@ -1787,7 +1776,9 @@ impl<'a> ExpressionConverter<'a> {
         match call.func.as_ref() {
             Expression::Ident(ident) => {
                 match &ident.definition {
-                    Definition::Function(func_id) => self.convert_static_call(func_id, call, b),
+                    Definition::Function(func_id) => {
+                        Some(self.convert_static_call(func_id, call, b))
+                    }
                     // Builtin/LowLevel calls handle their own argument conversion
                     // since some arguments (e.g. string messages) must be skipped
                     Definition::Builtin(name) => self.convert_builtin_call(name, call, b),
@@ -1801,23 +1792,14 @@ impl<'a> ExpressionConverter<'a> {
                 let args: Vec<ValueId> = call
                     .arguments
                     .iter()
-                    .map(|arg| self.convert_expression(arg, b).unwrap())
+                    .map(|arg| self.convert_value(arg, b))
                     .collect();
 
                 let fn_ptr = self.convert_expression(&call.func, b).unwrap();
-                let return_type = &call.return_type;
-                let return_size = self.return_size(return_type);
+                let results =
+                    self.emit_located(b, Some(call.location), |e| e.call_indirect(fn_ptr, args, 1));
 
-                let results = self.emit_located(b, Some(call.location), |e| {
-                    e.call_indirect(fn_ptr, args, return_size)
-                });
-
-                if results.is_empty() {
-                    None
-                } else {
-                    // Always a single value (tuples are materialized)
-                    Some(results[0])
-                }
+                Some(results[0])
             }
         }
     }
@@ -1827,11 +1809,11 @@ impl<'a> ExpressionConverter<'a> {
         func_id: &AstFuncId,
         call: &noirc_frontend::monomorphization::ast::Call,
         b: &mut HLFunctionBuilder<'_>,
-    ) -> Option<ValueId> {
+    ) -> ValueId {
         let args: Vec<ValueId> = call
             .arguments
             .iter()
-            .map(|arg| self.convert_expression(arg, b).unwrap())
+            .map(|arg| self.convert_value(arg, b))
             .collect();
 
         let ssa_func_id = self
@@ -1839,28 +1821,19 @@ impl<'a> ExpressionConverter<'a> {
             .get(func_id)
             .unwrap_or_else(|| ice!("Undefined function: {:?}", func_id));
 
-        // Return size is 1 for tuples (they're returned as a single value)
-        // and 0 for unit
-        let return_size = self.return_size(&call.return_type);
-
         // Constrained calling unconstrained: emit unconstrained call
         let is_unconstrained_call =
             !self.in_unconstrained && self.natively_unconstrained.contains(func_id);
         let ssa_func_id = *ssa_func_id;
         let results = self.emit_located(b, Some(call.location), |e| {
             if is_unconstrained_call {
-                e.call_unconstrained(ssa_func_id, args, return_size)
+                e.call_unconstrained(ssa_func_id, args, 1)
             } else {
-                e.call(ssa_func_id, args, return_size)
+                e.call(ssa_func_id, args, 1)
             }
         });
 
-        if results.is_empty() {
-            None
-        } else {
-            // Always a single value (tuples are materialized)
-            Some(results[0])
-        }
+        results[0]
     }
 
     fn convert_builtin_call(
@@ -1871,8 +1844,8 @@ impl<'a> ExpressionConverter<'a> {
     ) -> Option<ValueId> {
         match name {
             "assert_eq" => {
-                let lhs = self.convert_expression(&call.arguments[0], b).unwrap();
-                let rhs = self.convert_expression(&call.arguments[1], b).unwrap();
+                let lhs = self.convert_value(&call.arguments[0], b);
+                let rhs = self.convert_value(&call.arguments[1], b);
                 self.emit_located(b, Some(call.location), |e| e.assert_eq(lhs, rhs));
                 None
             }
@@ -1883,10 +1856,8 @@ impl<'a> ExpressionConverter<'a> {
                 None
             }
             "array_len" => {
-                let arg_type = call.arguments[0]
-                    .return_type()
-                    .expect("array_len argument must have a known type");
-                match arg_type.as_ref() {
+                let arg_type = Self::expression_type(&call.arguments[0]);
+                match &arg_type {
                     noirc_frontend::monomorphization::ast::Type::Array(len, _) => {
                         // Evaluate the argument for side effects (e.g., it may be a
                         // function call that emits constraints), then return the
@@ -1965,8 +1936,9 @@ impl<'a> ExpressionConverter<'a> {
             "black_box" => {
                 // `black_box` is an identity with a best-effort optimization hint, which Mavros
                 // currently ignores. Evaluate the argument exactly once, preserving its side
-                // effects, and return its value (or None for unit). This does not promise an
-                // optimization barrier or depend on whether calls are inlined or eliminated.
+                // effects, and return its value. Statement-shaped arguments may produce None.
+                // This does not promise an optimization barrier or depend on whether calls
+                // are inlined or eliminated.
                 self.convert_expression(&call.arguments[0], b)
             }
             "as_witness" => {
@@ -1975,17 +1947,16 @@ impl<'a> ExpressionConverter<'a> {
                 None
             }
             "assert_constant" => {
-                // Unit-valued expressions have no SSA value and are trivially constant.
+                // Statement-shaped unit expressions may have no SSA result. Their effects
+                // still run; materialized empty tuples are trivially constant as well.
                 if let Some(value) = self.convert_expression(&call.arguments[0], b) {
                     self.emit_located(b, Some(call.location), |e| e.assert_constant(value));
                 }
                 None
             }
             "str_as_bytes" => {
-                let string_type = call.arguments[0]
-                    .return_type()
-                    .expect("str_as_bytes argument must have a known type");
-                let input_type = self.type_converter.convert_type(string_type.as_ref());
+                let string_type = Self::expression_type(&call.arguments[0]);
+                let input_type = self.type_converter.convert_type(&string_type);
                 let output_type = self.type_converter.convert_type(&call.return_type);
                 assert_eq!(
                     input_type, output_type,
@@ -1996,10 +1967,8 @@ impl<'a> ExpressionConverter<'a> {
                 self.convert_expression(&call.arguments[0], b)
             }
             "array_as_str_unchecked" => {
-                let array_type = call.arguments[0]
-                    .return_type()
-                    .expect("array_as_str_unchecked argument must have a known type");
-                let input_type = self.type_converter.convert_type(array_type.as_ref());
+                let array_type = Self::expression_type(&call.arguments[0]);
+                let input_type = self.type_converter.convert_type(&array_type);
                 let output_type = self.type_converter.convert_type(&call.return_type);
                 assert_eq!(
                     input_type, output_type,
@@ -2047,14 +2016,14 @@ impl<'a> ExpressionConverter<'a> {
             }
             "vector_push_back" => {
                 let slice = self.convert_expression(&call.arguments[0], b).unwrap();
-                let elem = self.convert_expression(&call.arguments[1], b).unwrap();
+                let elem = self.convert_value(&call.arguments[1], b);
                 Some(self.emit_located(b, Some(call.location), |e| {
                     e.slice_push(slice, vec![elem], SliceOpDir::Back)
                 }))
             }
             "vector_push_front" => {
                 let slice = self.convert_expression(&call.arguments[0], b).unwrap();
-                let elem = self.convert_expression(&call.arguments[1], b).unwrap();
+                let elem = self.convert_value(&call.arguments[1], b);
                 Some(self.emit_located(b, Some(call.location), |e| {
                     e.slice_push(slice, vec![elem], SliceOpDir::Front)
                 }))
@@ -2080,7 +2049,7 @@ impl<'a> ExpressionConverter<'a> {
             "vector_insert" => {
                 let slice = self.convert_expression(&call.arguments[0], b).unwrap();
                 let index = self.convert_expression(&call.arguments[1], b).unwrap();
-                let elem = self.convert_expression(&call.arguments[2], b).unwrap();
+                let elem = self.convert_value(&call.arguments[2], b);
                 Some(self.emit_located(b, Some(call.location), |e| {
                     e.slice_insert(slice, index, elem)
                 }))
@@ -2219,21 +2188,10 @@ fn index_step_one(bit_size: usize) -> Constant {
 }
 
 /// Whether a Noir expression's value is read as two's complement.
-///
-/// This is the frontend's _only_ signedness source for the sign-carrying opcodes, so the whole
-/// refactor's correctness reduces to it. `return_type()` already serves exactly this purpose in
-/// `convert_cast` and in `convert_unary`'s `Minus`, so no new mechanism is involved.
-///
-/// `Field` and `bool` answer `false` — they take the unsigned forms, which is what every consumer
-/// already does with them. `None` is returned only for the statement-shaped expressions
-/// (`For`, `Loop`, `While`, `Let`, `Constrain`, `Assign`, `Semi`, `Drop`, `Break`, `Continue`),
-/// which are unit- or never-typed and so cannot be an arithmetic operand; they fall to `false`,
-/// matching the existing `_ => (0, false)` fallback in `convert_cast`.
-///
-/// That `None` is unreachable for anything this is asked about, and the enumeration above is the
-/// proof: a well-typed Noir program cannot make a statement the operand of an arithmetic operator.
+/// Recover the type recursively: Noir's `return_type()` can lose a scalar's type
+/// when it is projected from a tuple containing a statement-shaped unit field.
 fn operand_is_signed(e: &Expression) -> bool {
-    matches!(e.return_type().as_deref(), Some(t) if ast_type_is_signed(t))
+    ast_type_is_signed(&ExpressionConverter::expression_type(e))
 }
 
 /// Whether a Noir type is a signed integer.

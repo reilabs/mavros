@@ -2,9 +2,23 @@
 //!
 //! This module converts the monomorphized program directly to mavros SSA format,
 //! bypassing the intermediate Noir SSA representation.
+//!
+//! At the lowering boundary each Noir value occupies one HLSSA value: tuples and structs
+//! are materialized, and unit is the empty tuple, just like an empty struct. Ordinary calls
+//! and function signatures therefore have one result even for unit. Statement-shaped
+//! expressions and effect-only builtins may internally produce no result; `convert_value`
+//! evaluates them before supplying the empty tuple at a value boundary, and `expression_type`
+//! supplies the matching unit type. Tuple elision later removes empty tuples from parameters,
+//! results, and storage. Sequence lowering must preserve bounds checks and slice lengths
+//! before that erasure; materializing unit alone is not sufficient. The entry-point wrapper
+//! uses the Noir ABI to decide whether a public return guard exists: an internal unit result
+//! does not add an ABI return slot.
 
 mod expression_converter;
 mod type_converter;
+
+#[cfg(test)]
+mod tests;
 
 use noirc_frontend::monomorphization::ast::{
     Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, Program,
@@ -295,7 +309,7 @@ impl SSAConverter {
                     file_manager,
                 );
                 let (_name, _typ, init_expr) = &program.globals[gid];
-                let value = expr_converter.convert_expression(init_expr, b).unwrap();
+                let value = expr_converter.convert_value(init_expr, b);
                 current_block = expr_converter.current_block();
                 let idx = self.global_slots[gid];
                 let location = expr_converter.expression_source_location(init_expr);
@@ -349,10 +363,8 @@ impl SSAConverter {
         let mut function = HLFunction::empty(name);
         let entry_block = function.get_entry_id();
 
-        // Add return types
-        for return_type in self.type_converter.call_results(&ast_func.return_type) {
-            function.add_return_type(return_type);
-        }
+        // Every Noir function returns one materialized value, including unit.
+        function.add_return_type(self.type_converter.convert_type(&ast_func.return_type));
 
         let mut b = HLFunctionBuilder::new(&mut function, ssa);
 
@@ -382,14 +394,11 @@ impl SSAConverter {
             }
         }
 
-        // Convert the function body
-        let result = expr_converter.convert_expression(&ast_func.body, &mut b);
-
-        // Add return terminator
-        let return_values = result.into_iter().collect();
+        // Function bodies follow the same one-value contract as call expressions.
+        let result = expr_converter.convert_value(&ast_func.body, &mut b);
         assert!(!b.block(expr_converter.current_block()).is_terminated());
         b.block(expr_converter.current_block())
-            .terminate_return(return_values);
+            .terminate_return(vec![result]);
 
         function
     }
