@@ -1,0 +1,6 @@
+[package]
+name = "empty_struct_return"
+type = "bin"
+authors = [""]
+
+[dependencies]

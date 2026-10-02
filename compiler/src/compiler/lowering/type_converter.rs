@@ -15,20 +15,6 @@ impl TypeConverter {
         Self
     }
 
-    /// Whether a call returning `ret` produces a value at all, with `Unit` as the sole exception.
-    pub fn call_returns_a_value(ret: &NoirType) -> bool {
-        !matches!(ret, NoirType::Unit)
-    }
-
-    /// The values a call returning `ret` produces: none for `Unit`, and one otherwise.
-    pub fn call_results(&self, ret: &NoirType) -> Vec<Type> {
-        if Self::call_returns_a_value(ret) {
-            vec![self.convert_type(ret)]
-        } else {
-            Vec::new()
-        }
-    }
-
     /// Convert a monomorphized AST type to an SSA type.
     pub fn convert_type(&self, ast_type: &NoirType) -> Type {
         match ast_type {
@@ -70,7 +56,9 @@ impl TypeConverter {
             // not the arity of the call this value appears in -- see [`TypeExpr::Function`]. The
             // results are the same either way, and they are what lets an indirect call be typed
             // before defunctionalization has run.
-            NoirType::Function(_, ret, _, _) => Type::function_returning(self.call_results(ret)),
+            NoirType::Function(_, ret, _, _) => {
+                Type::function_returning(vec![self.convert_type(ret)])
+            }
             NoirType::String(len) => {
                 // str<N>: N is UTF-8 byte count, represented as Array(U(8), N)
                 Type::int(8).array_of(*len as usize)
@@ -123,7 +111,7 @@ mod tests {
         );
         assert_eq!(
             converter.convert_type(&function_type(NoirType::Unit)),
-            Type::function_returning(Vec::new())
+            Type::function_returning(vec![Type::tuple_of(vec![])])
         );
     }
 

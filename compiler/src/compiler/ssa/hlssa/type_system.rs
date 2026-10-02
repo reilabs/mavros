@@ -49,8 +49,9 @@ pub enum TypeExpr {
     Slice(Box<Type>),
     Ref(Box<Type>),
     Tuple(Vec<Type>),
-    /// A callable value, described by **the types a call through it produces**, or an empty vector
-    /// for a `Unit` return.
+    /// A callable value, described by **the types a call through it produces**. Noir unit
+    /// produces one empty tuple. Defunctionalization removes callable types before
+    /// tuple elision removes empty tuples from concrete function signatures.
     Function(Vec<Type>),
     Blob(Box<Type>, usize),
 }
