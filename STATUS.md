@@ -110,6 +110,11 @@
 | noir_tests/pure_decomposition_guarded_inactive | ✅ | ✅ | 9 | 2 | 8088 | 7133 | 36164 | 207085 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/pure_guarded_shift | ✅ | ✅ | 11 | 2 | 11520 | 7781 | 38193 | 209341 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/recursion | ✅ | ✅ | 5 | 9 | 12512 | 13144 | 34538 | 206502 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/ref_array_witness_get_empty_guarded_false | ✅ | ✅ | 26 | 45 | 11080 | 3655 | 47088 | 218487 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/ref_array_witness_get_empty_nested_guarded_false | ✅ | ✅ | 38 | 67 | 17208 | 5126 | 54960 | 226776 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/ref_array_witness_get_oob_guarded_false | ✅ | ✅ | 26 | 45 | 11112 | 3173 | 47226 | 218559 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/ref_array_witness_write_empty_guarded_false | ✅ | ✅ | 27 | 46 | 11728 | 3657 | 48299 | 219923 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/ref_array_witness_write_one_cell | ✅ | ✅ | 23 | 41 | 9336 | 2450 | 41912 | 213122 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/ref_param_witness_store | ✅ | ✅ | 2 | 3 | 3096 | 3770 | 27047 | 197962 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/ref_return_alias | ✅ | ✅ | 1 | 2 | 2696 | 3125 | 26848 | 197367 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/ref_return_chain | ✅ | ✅ | 1 | 2 | 2808 | 3055 | 26453 | 197152 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -261,6 +266,10 @@
 | noir_failure_tests/pure_shift_amount_oob_fails | ✅ | ✅ | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
 | noir_failure_tests/pure_sub_underflow_fails | ✅ | ✅ | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
 | noir_failure_tests/rangecheck_lookup_oob_fails | ✅ | ✅ | 22 | 41 | 5584 | 2218 | 37636 | 209037 | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ✅ | ✅ | N/A | N/A | ✅ | ✅ | ✅ |
+| noir_failure_tests/ref_array_witness_get_empty_fails | ✅ | ✅ | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| noir_failure_tests/ref_array_witness_get_oob_fails | ✅ | ✅ | 23 | 41 | 9336 | 2460 | 41909 | 213117 | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ✅ | ✅ | N/A | N/A | ✅ | ✅ | ✅ |
+| noir_failure_tests/ref_array_witness_write_empty_fails | ✅ | ✅ | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| noir_failure_tests/ref_array_witness_write_oob_fails | ✅ | ✅ | 23 | 41 | 9336 | 2459 | 41912 | 213122 | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ✅ | ✅ | N/A | N/A | ✅ | ✅ | ✅ |
 | noir_failure_tests/return_guard_wrong_value | ✅ | ✅ | 2 | 4 | 3712 | 2000 | 32873 | 203553 | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ✅ | ✅ | N/A | N/A | ✅ | ✅ | ✅ |
 | noir_failure_tests/signed_add_overflow_fails | ✅ | ✅ | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
 | noir_failure_tests/signed_unsigned_vn_merge | ✅ | ✅ | 323 | 592 | 67104 | 9690 | 171914 | 346873 | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ✅ | ✅ | N/A | N/A | ✅ | ✅ | ✅ |
@@ -646,7 +655,7 @@
 | noir/test_programs/execution_success/regression_8739 | ✅ | ✅ | 0 | 1 | 304 | 742 | 24793 | 194186 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_8755 | ✅ | ✅ | 2 | 4 | 5560 | 5309 | 34508 | 206435 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_8761 | ✅ | ✅ | 2 | 3 | 3944 | 2536 | 32528 | 203714 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/regression_8779 | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/regression_8779 | ✅ | ✅ | 25 | 42 | 11016 | 2980 | 44257 | 215781 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_8874 | ✅ | ✅ | 34 | 63 | 15560 | 3429 | 48954 | 220685 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_8890 | ✅ | ✅ | 5 | 7 | 6640 | 3938 | 37148 | 208434 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_8926 | ✅ | ✅ | 33 | 59 | 12240 | 7572 | 46377 | 220265 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -683,7 +692,7 @@
 | noir/test_programs/execution_success/regression_9725_1 | ✅ | ✅ | 0 | 1 | 216 | 505 | 24793 | 194081 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_9725_2 | ✅ | ✅ | 2 | 2 | 3632 | 3606 | 30863 | 201396 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_9758 | ✅ | ✅ | 4 | 4 | 6160 | 5448 | 33930 | 205568 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/regression_9764 | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/regression_9764 | ✅ | ✅ | 28 | 46 | 12824 | 4307 | 48893 | 220568 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_9804 | ✅ | ✅ | 39 | 64 | 14496 | 6169 | 53263 | 226211 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_9860 | ✅ | ✅ | 358 | 620 | 34168 | 10898 | 93786 | 270203 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/regression_9888 | ✅ | ✅ | 10 | 11 | 8920 | 5261 | 43902 | 215576 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
