@@ -51,6 +51,13 @@ debug = true
 opt-level = "z"
 lto = true
 
+# The bigint integration tests run compiler pipelines, field arithmetic and Wasmtime. Running
+# those unoptimized dominates CI time. Keep the test profile's debug assertions and overflow
+# checks, but optimize both the workspace and its dependencies without release-mode LTO.
+[profile.test]
+opt-level = 2
+debug = 1
+
 # These should be inherited in workspace packages using `[lints] workspace = true`
 [workspace.lints.clippy]
 # Allow all except performance and correctness by default.
