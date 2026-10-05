@@ -54,6 +54,34 @@ fn lower(functions: Vec<AstFunction>) -> HLSSA {
     .0
 }
 
+#[test]
+#[should_panic(
+    expected = "Unhandled error from user input: error: oracle functions are not supported by Mavros: `barnacle`"
+)]
+fn oracle_identifiers_are_refused_without_a_call() {
+    lower(vec![function(
+        0,
+        ident(
+            Definition::Oracle {
+                name: "barnacle".into(),
+                pure: true,
+            },
+            AstType::Unit,
+        ),
+        AstType::Unit,
+    )]);
+}
+
+#[test]
+#[should_panic(
+    expected = "Unhandled error from user input: error: #[fold] functions are not supported by Mavros"
+)]
+fn empty_folded_functions_are_refused_without_source_locations() {
+    let mut folded = function(0, unit(), AstType::Unit);
+    folded.inline_type = InlineType::Fold;
+    lower(vec![folded]);
+}
+
 fn assert_return_shape(ssa: &HLSSA, expected: &[Type]) {
     let types = Types::new().run(ssa, &FlowAnalysis::run(ssa));
     for (fid, function) in ssa.iter_functions() {

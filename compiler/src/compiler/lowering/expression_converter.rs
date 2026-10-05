@@ -18,6 +18,7 @@ use mavros_int_semantics::{IntBits, IntOp, MAX_LOWERED_SIGNED_BITS, Outcome, eva
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
+        diagnostic::Diagnostic,
         lowering::type_converter::TypeConverter,
         ssa::{
             BlockId, FunctionId, SourceLocation, ValueId,
@@ -243,7 +244,27 @@ impl<'a> ExpressionConverter<'a> {
         Some(source_file)
     }
 
-    fn expression_location(expr: &Expression) -> Option<NoirLocation> {
+    /// Render unsupported source constructs through the diagnostic infrastructure. These remain
+    /// user-error panics until lowering can propagate diagnostics to the driver.
+    pub(super) fn reject_unsupported(&self, message: String, location: Option<NoirLocation>) -> ! {
+        // Noir's wrappers for higher-order oracles carry dummy locations. File id zero is a
+        // real stdlib file, so resolving one would blame unrelated source text.
+        let source_location = if location == Some(NoirLocation::dummy()) {
+            SourceLocation::synthetic("Noir generated")
+        } else {
+            self.resolve_location(location)
+        };
+        let mut diagnostic = Diagnostic::error(message, source_location);
+        if let Some(source) = location
+            .filter(|location| *location != NoirLocation::dummy())
+            .and_then(|location| self.file_manager?.fetch_file(location.file))
+        {
+            diagnostic = diagnostic.with_source(Arc::from(source));
+        }
+        ice_usr!("{diagnostic}");
+    }
+
+    pub(super) fn expression_location(expr: &Expression) -> Option<NoirLocation> {
         match expr {
             Expression::Ident(ident) => ident.location,
             Expression::Literal(lit) => Self::literal_location(lit),
@@ -459,9 +480,10 @@ impl<'a> ExpressionConverter<'a> {
             }
             // TODO: When oracle calls are supported, preserve their purity so optimizations such
             // as CSE and DCE can distinguish pure calls from calls with side effects.
-            Definition::Oracle { name, .. } => {
-                todo!("Oracle function not yet supported: {}", name)
-            }
+            Definition::Oracle { name, .. } => self.reject_unsupported(
+                format!("oracle functions are not supported by Mavros: `{name}`"),
+                ident.location,
+            ),
             Definition::Global(global_id) => {
                 if let Some(value) = self.global_constants.get(global_id) {
                     return Some(*value);
@@ -1784,6 +1806,10 @@ impl<'a> ExpressionConverter<'a> {
                     Definition::Builtin(name) => self.convert_builtin_call(name, call, b),
                     Definition::LowLevel(name) => self.convert_lowlevel_call(name, call, b),
                     Definition::Oracle { name, .. } if name == "print" => None,
+                    Definition::Oracle { name, .. } => self.reject_unsupported(
+                        format!("oracle functions are not supported by Mavros: `{name}`"),
+                        Some(call.location),
+                    ),
                     _ => todo!("Call to {:?} not yet supported", ident.definition),
                 }
             }
