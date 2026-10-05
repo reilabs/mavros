@@ -1,13 +1,24 @@
 //! Makes a dynamic index into a degenerate array of references constant.
 //!
-//! Nothing below HLSSA can represent a dynamically selected *handle* so such an array has to be gone before untaint runs.
-//! Arrays whose element type holds no reference are left for the usual dynamic-index lowering.
+//! Noir accepts `d[i]` on a `[&mut T; N]`. Its own optimization passes dissolve degenerate cases
+//! and then reject every dynamic one that is left. Thus, mavros needs to handle these too.
 //!
-//! At two lengths the index carries no information, so it can simply be replaced.
+//! Only a witnessed index needs to be handled. `UntaintControlFlow` stamps `WitnessOf` onto the
+//! selected handle and `Types` then refuses to `Load` through it, because nothing below HLSSA can
+//! represent a dynamically selected *handle*.
 //!
-//! - **One cell.** An in-bounds index can only be `0`, so the access becomes `d[0]`.
-//! - **No cells.** Every index is out of bounds. The read is given a stand-in value of the
-//!   element type instead, with a freshly allocated cell for every reference in it.
+//! A pure index leaves the handle an ordinary value, so the usual dynamic-index lowering can
+//! handle it. The pass nevertheless fires on every non-constant index at this point, as
+//! witness-ness can't be determined yet.
+//!
+//! At two lengths the index carries no information, so it can simply be replaced. The assert each
+//! case emits is what keeps that sound.
+//!
+//! - **One cell.** An in-bounds index can only be `0`, so the access becomes `d[0]` under
+//!   `assert(i == 0)`.
+//! - **No cells.** Every index is out of bounds, so the read is given a stand-in value of the
+//!   element type instead — with a freshly allocated cell for every reference in it — under an
+//!   assert that always fails.
 
 use crate::compiler::{
     analysis::{
