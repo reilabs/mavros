@@ -21,7 +21,8 @@ mod type_converter;
 mod tests;
 
 use noirc_frontend::monomorphization::ast::{
-    Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, Program,
+    Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, InlineType,
+    Program,
 };
 
 use crate::{
@@ -378,6 +379,18 @@ impl SSAConverter {
             entry_block,
             file_manager,
         );
+
+        // Folding requires separate circuits and recursive circuit calls. Refuse it before
+        // lowering the body can feed recursive calls into cost analysis.
+        if matches!(ast_func.inline_type, InlineType::Fold) {
+            expr_converter.reject_unsupported(
+                format!(
+                    "#[fold] functions are not supported by Mavros: `{}`",
+                    ast_func.name
+                ),
+                ExpressionConverter::expression_location(&ast_func.body),
+            );
+        }
 
         // Add function parameters as block parameters
         for (local_id, mutable, _name, param_type, _visibility) in &ast_func.parameters {
