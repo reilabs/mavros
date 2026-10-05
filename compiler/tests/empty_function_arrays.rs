@@ -14,15 +14,39 @@ fn calling_an_empty_function_array_is_rejected_without_a_compiler_panic() {
         );
         let dir = common::noir_project(&source);
         match api::compile_to_r1cs(dir.path().to_path_buf(), false) {
-            Err(error) => assert!(
-                matches!(
-                    error.downcast_ref::<Error>(),
-                    Some(Error::UnsatisfiableProgram(_))
-                ),
-                "expected an unsatisfiable program: {error}",
-            ),
+            Err(error) => {
+                let Some(Error::UnsatisfiableProgram(diagnostics)) = error.downcast_ref::<Error>()
+                else {
+                    panic!("expected an unsatisfiable program: {error}");
+                };
+                assert_eq!(diagnostics.len(), 1);
+                assert!(
+                    diagnostics[0].location().file.ends_with("src/main.nr"),
+                    "{error}"
+                );
+                assert_eq!(diagnostics[0].location().start.line, 3, "{error}");
+            }
             Ok(_) => panic!("an empty function array cannot be indexed"),
         }
+    }
+}
+
+#[test]
+fn empty_calls_after_break_and_continue_are_removed() {
+    for exit in ["break", "continue"] {
+        let dir = common::noir_project(&format!(
+            "unconstrained fn main(x: u32) {{
+                for i in 0..2 {{
+                    let _ = i;
+                    {exit};
+                    let callbacks: [fn(()) -> (); 0] = [];
+                    callbacks[x](());
+                }}
+                assert(x == 1);
+            }}"
+        ));
+        api::compile_to_r1cs(dir.path().to_path_buf(), false)
+            .unwrap_or_else(|error| panic!("{exit}: {error:?}"));
     }
 }
 
