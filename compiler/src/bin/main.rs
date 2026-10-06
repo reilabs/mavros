@@ -11,7 +11,7 @@ use mavros_compiler::{
     Project, api,
     compiler::codegen::{CodeGenOptions, hlssa_to_r1cs::R1CS, llssa_to_llvm::WasmCompileOpts},
     driver::{DEFAULT_LOGUP_SOUNDNESS_BITS, Driver},
-    plotting,
+    panic_handler, plotting,
 };
 
 use tracing::{error, info, warn};
@@ -98,6 +98,8 @@ pub enum Command {
 /// The main function for the CLI utility, responsible for parsing program
 /// options and handing them off to the actual execution of the tool.
 fn main() -> ExitCode {
+    panic_handler::install();
+
     // Parse args and hand-off immediately.
     let args = ProgramOptions::parse();
 
