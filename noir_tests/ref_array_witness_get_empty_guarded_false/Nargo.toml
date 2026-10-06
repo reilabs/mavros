@@ -1,0 +1,6 @@
+[package]
+name = "ref_array_witness_get_empty_guarded_false"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -1,0 +1,6 @@
+[package]
+name = "ref_array_witness_write_one_cell"
+type = "bin"
+authors = [""]
+
+[dependencies]
