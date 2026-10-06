@@ -24,38 +24,8 @@
 //! and nowhere else. A corpus written by hand records what someone believed; a corpus rendered here
 //! records what the specification says, and regenerating it after a semantic change produces a
 //! reviewable diff of exactly which programs changed meaning.
-//!
-//! Noir's own type system bounds this, and the gaps are as follows:
-//!
-//! - **Widths:** Noir's `IntegerBitSize` is exactly `{8, 16, 32, 64, 128}`, so [`NOIR_WIDTHS`] is
-//!   the whole set. The model's width `1` and its [`corners::ODD_WIDTHS`] are unwritable in a Noir
-//!   program and stay unit-test-only.
-//! - **Mixed Operand Widths:** Noir's elaborator unifies a shift's amount with its value, so
-//!   `rhs_bits == bits` in every program here. The `s2 > s1` axis arises only from shifts the
-//!   compiler builds itself.
-//! - **`i128`:** Noir has it while no Mavros lowering reads a signed pattern above
-//!   [`crate::MAX_LOWERED_SIGNED_BITS`], so a signed 128-bit program is rejected at compile time
-//!   rather than run. See that constant's doc for more info.
-//! - **`u128 <<`:** every operand here is a witness, amounts included, so `width_validation`'s
-//!   static shift bound refuses it — `2^(128 + 127)` is past what the field carries — and the left
-//!   shift stops at 64 bits while every other operation runs the full unsigned set. The
-//!   literal-amount exemption cannot apply, there being no literal amount.
-//!
-//! The **rejecting** half renders one program per `(operation, reading, reason)` at the narrowest
-//! width the model rejects at — see [`first_rejection`] — because a rejection reason is a property
-//! of the operation while a program is a `STATUS.md` row. On its own that covers the _reasons_ and
-//! not the width-dependent arithmetic each check is built out of. [`Case::Widest`] closes that, for
-//! the checks whose bound is _derived from_ the width. [`Case::NegativeAmount`] covers a check
-//! whose only live width is one neither of the other two would pick.
-//!
-//! The accepting half is what checks every width for the operations themselves, and
-//! `overflow_guard`'s own conformance sweep is what covers the one predicate no corpus can reach,
-//! the discharge that deletes a check outright.
 
-use crate::{
-    IntBits, IntOp, MAX_LOWERED_SIGNED_BITS, Outcome, Reject, Sign, SignedValue, corners, eval,
-    residue,
-};
+use crate::{IntBits, IntOp, Outcome, Reject, Sign, SignedValue, corners, eval, residue};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -68,6 +38,12 @@ use std::collections::{BTreeMap, BTreeSet};
 /// deliberately _not_ [`corners::WIDTHS`]: the model sweeps widths that no source program can ask
 /// for, and a generated test at one of those would not compile.
 pub const NOIR_WIDTHS: [usize; 5] = [8, 16, 32, 64, 128];
+
+/// The integer widths a Noir program can name a **signed** type at.
+///
+/// `IntegerBitSize` has a 128-bit variant under either sign, but the elaborator's
+/// `PrimitiveType::lookup_by_name` resolves no `i128`, so a source program cannot name one.
+pub const NOIR_SIGNED_WIDTHS: [usize; 4] = [8, 16, 32, 64];
 
 /// How many operand pairs each `(op, sign, width)` cell contributes.
 ///
@@ -214,9 +190,9 @@ fn accepting_test(ops: &[IntOp]) -> GeneratedTest {
         .iter()
         .flat_map(|&op| renderings(op).into_iter().map(move |sign| (op, sign)))
         .flat_map(|(op, sign)| {
-            widths_for(op, sign)
-                .into_iter()
-                .filter_map(move |bits| accepting_cell(op, sign, bits))
+            widths_for(sign)
+                .iter()
+                .filter_map(move |&bits| accepting_cell(op, sign, bits))
         })
         .collect();
     let op = ops[0];
@@ -398,7 +374,7 @@ fn widest_rejection(op: IntOp, sign: Sign, reason: Reject) -> Option<(usize, u12
     }
 
     let narrowest = first_rejection(op, sign, reason)?.0;
-    let mut widths = widths_for(op, sign);
+    let mut widths = widths_for(sign).to_vec();
     widths.reverse();
     let (bits, lhs, rhs) = search_rejection(op, reason, &widths)?;
     (bits != narrowest).then_some((bits, lhs, rhs))
@@ -414,7 +390,7 @@ fn negative_amount_rejection(op: IntOp, sign: Sign, reason: Reject) -> Option<(u
         return None;
     }
 
-    let bits = *widths_for(op, sign).last()?;
+    let bits = *widths_for(sign).last()?;
     let amounts: Vec<u128> = corners::shift_amounts(bits, bits)
         .into_iter()
         .filter(|&a| pattern(bits, a).to_signed() < SignedValue::from(0u8))
@@ -440,7 +416,7 @@ fn negative_amount_rejection(op: IntOp, sign: Sign, reason: Reject) -> Option<(u
 /// so a `Reject` variant that gains or loses a reachable input changes the set of generated
 /// directories instead of drifting away from a hand-written list.
 fn first_rejection(op: IntOp, sign: Sign, reason: Reject) -> Option<(usize, u128, u128)> {
-    search_rejection(op, reason, &widths_for(op, sign))
+    search_rejection(op, reason, widths_for(sign))
 }
 
 /// The first corner pair rejected for `reason`, scanning `widths` in the order given.
@@ -628,23 +604,15 @@ fn renderings(op: IntOp) -> Vec<Sign> {
         .map_or_else(|| Sign::ALL.to_vec(), |sign| vec![sign])
 }
 
-/// The widths a generated program may use for `(op, sign)`.
-fn widths_for(op: IntOp, sign: Sign) -> Vec<usize> {
-    NOIR_WIDTHS
-        .iter()
-        .copied()
-        .filter(|&bits| {
-            // No Mavros lowering reads a signed pattern above one host limb, so `i128` is rejected
-            // at compile time.
-            if sign == Sign::Signed && bits > MAX_LOWERED_SIGNED_BITS {
-                return false;
-            }
-
-            // A 128-bit left shift by a witness amount is refused by `width_validation`, so the
-            // program would not compile. Every other operation covers the full unsigned set.
-            !(op == IntOp::Shl && bits == 128)
-        })
-        .collect()
+/// The widths a generated program may use for an operation rendered under `sign`.
+///
+/// Every operation has a witness lowering at every width under either reading, so only the
+/// language bounds this: Noir names no `i128`.
+fn widths_for(sign: Sign) -> &'static [usize] {
+    match sign {
+        Sign::Unsigned => &NOIR_WIDTHS,
+        Sign::Signed => &NOIR_SIGNED_WIDTHS,
+    }
 }
 
 /// Shift amounts this model accepts at `bits`, taken from the corner set rather than `0..bits`.
@@ -784,7 +752,7 @@ mod tests {
         let mut checked = 0;
         for &op in &IntOp::ALL {
             for sign in renderings(op) {
-                for bits in widths_for(op, sign) {
+                for &bits in widths_for(sign) {
                     let Some(cell) = accepting_cell(op, sign, bits) else { continue };
                     for (lhs, rhs, expected) in cell.pairs {
                         assert_eq!(
@@ -850,10 +818,9 @@ mod tests {
         for op in [IntOp::Shl, IntOp::SShr] {
             let (bits, _, rhs) = negative_amount_rejection(op, Sign::Signed, Reject::ShiftAmount)
                 .unwrap_or_else(|| panic!("{op:?} generates no negative-amount program"));
-            assert_eq!(
-                bits, MAX_LOWERED_SIGNED_BITS,
-                "the conjunct is dead below {MAX_LOWERED_SIGNED_BITS} bits"
-            );
+            // `shift_guard` compares at no fewer than 64 bits, and a narrower amount's widening
+            // clears the sign bit that the conjunct reads.
+            assert!(bits >= 64, "the conjunct is dead below 64 bits");
             assert!(
                 pattern(bits, rhs).to_signed() < SignedValue::from(0u8),
                 "the amount is not negative"
@@ -884,21 +851,18 @@ mod tests {
         assert_eq!(names.len(), total, "two generated tests share a name");
     }
 
-    /// No generated program names a width Noir does not have, or a signed width Mavros cannot read.
+    /// No generated program names a width Noir does not have, or a signed width it cannot name.
     #[test]
     fn no_program_names_a_width_that_does_not_exist() {
         for &op in &IntOp::ALL {
             for sign in renderings(op) {
-                for bits in widths_for(op, sign) {
+                for &bits in widths_for(sign) {
                     assert!(
                         NOIR_WIDTHS.contains(&bits),
                         "{bits} is not a Noir integer width"
                     );
                     if sign == Sign::Signed {
-                        assert!(
-                            bits <= MAX_LOWERED_SIGNED_BITS,
-                            "i{bits} is wider than any Mavros lowering can read"
-                        );
+                        assert!(bits != 128, "Noir has no i128");
                     }
                 }
             }

@@ -1,4 +1,5 @@
 use std::{
+    cell::OnceCell,
     env, fs,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -456,6 +457,15 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
         }
     });
 
+    // The module is compiled once, by whichever of the two runs below reaches it first.
+    let loaded_module = OnceCell::new();
+    let load = |wasm_path: &Path| -> Result<&wasm_host::LoadedModule, Box<dyn std::error::Error>> {
+        loaded_module
+            .get_or_init(|| wasm_host::LoadedModule::load(wasm_path).map_err(|e| format!("{e:?}")))
+            .as_ref()
+            .map_err(|e| e.clone().into())
+    };
+
     // 11. Run witgen WASM  (depends on WASM_COMPILE)
     let wasm_result = wasm_path.as_ref().and_then(|wasm_path| {
         emit("START:WITGEN_WASM_RUN");
@@ -468,16 +478,15 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
                 return None;
             }
         };
-        // The blob the module reads is sized from the ABI, so inputs that do not flatten to it
-        // would be laid out against the wrong layout. Checked here rather than inside the runner
-        // because `wasm_host` is also driven from a `Driver::from_ssa`, which has no ABI to size
-        // against and builds both sides of this from one signature.
+
         if interpreter::flattened_param_count(params) != driver.entry_point_flattened_io_count() {
             eprintln!("WASM run error: Unexpected number of inputs supplied");
             emit("END:WITGEN_WASM_RUN:fail");
             return None;
         }
-        match wasm_host::run_witgen(wasm_path, r1cs, params) {
+
+        match load(wasm_path).and_then(|loaded| wasm_host::run_witgen_loaded(loaded, r1cs, params))
+        {
             Ok(result) => {
                 emit("END:WITGEN_WASM_RUN:ok");
                 Some(result)
@@ -527,7 +536,8 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
         let ad_coeffs: Vec<RawField> = (0..r1cs.constraints.len())
             .map(|_| ark_bn254::Fr::rand(&mut rng))
             .collect();
-        match wasm_host::run_ad(wasm_path, r1cs, &ad_coeffs) {
+        match load(wasm_path).and_then(|loaded| wasm_host::run_ad_loaded(loaded, r1cs, &ad_coeffs))
+        {
             Ok(result) => {
                 emit("END:AD_WASM_RUN:ok");
                 Some((ad_coeffs, result))
