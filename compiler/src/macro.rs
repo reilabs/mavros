@@ -29,11 +29,12 @@ macro_rules! ice_unreachable {
 #[macro_export]
 macro_rules! ice_usr {
     () => {
-        ::std::panic!("Unhandled error from user input")
+        ::std::panic!("{}", $crate::panic_handler::USER_ERROR_PREFIX)
     };
     ($($arg:tt)+) => {
         ::std::panic!(
-            "Unhandled error from user input: {}",
+            "{}: {}",
+            $crate::panic_handler::USER_ERROR_PREFIX,
             ::std::format_args!($($arg)+)
         )
     };
