@@ -2537,9 +2537,6 @@ mod tests {
     /// so nothing in the integer arm is width-specific. What the sweep pins is that this stays
     /// true: a reading that narrowed the operands on the way in, or the result on the way out,
     /// would price an operation the program does not perform.
-    ///
-    /// The signed operations run **zero** cases, `wide_widths_for` being filtered by the lowering
-    /// frontier, and turn on when that frontier moves.
     #[test]
     fn the_integer_arm_delegates_at_wide_widths_too() {
         use BinaryArithOpKind::{SDiv, SRem, SShr, SSub, UDiv, URem, UShr, USub};
@@ -2547,7 +2544,6 @@ mod tests {
         let mut dummy = DummyInstrumenter {
             field: FieldConfig::bn254(),
         };
-        let mut checked = 0usize;
 
         for (kind, op) in [
             (USub, IntOp::USub),
@@ -2559,7 +2555,8 @@ mod tests {
             (UShr, IntOp::UShr),
             (SShr, IntOp::SShr),
         ] {
-            for bits in corners::wide_widths_for(kind.is_signed()) {
+            let mut checked = 0usize;
+            for bits in corners::WIDE_WIDTHS {
                 let (values, rhs) = corners::wide_operands(kind.into(), bits);
 
                 for a in &values {
@@ -2587,11 +2584,14 @@ mod tests {
                     }
                 }
             }
-        }
 
-        // The unsigned half alone is thousands of pairs; a count this size cannot be reached by a
-        // filter that quietly emptied the sweep.
-        assert!(checked > 1_000, "only {checked} wide pairs were checked");
+            // Per operation, so that a filter that quietly emptied one reading's half of the sweep
+            // cannot hide behind the other's.
+            assert!(
+                checked > 1_000,
+                "only {checked} wide pairs of {kind:?} were checked"
+            );
+        }
     }
 
     /// `ToBits` always produces an array, including when the input's concrete value is unknown.

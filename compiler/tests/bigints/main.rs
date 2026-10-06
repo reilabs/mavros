@@ -18,9 +18,7 @@ use mavros_compiler::{
     },
     driver::{Driver, Error as DriverError},
 };
-use mavros_int_semantics::{
-    IntBits, IntOp, MAX_LOWERED_SIGNED_BITS, corners, int_bits::HOST_LIMB_BITS,
-};
+use mavros_int_semantics::{CmpOp, IntBits, IntOp, SignedValue, corners, int_bits::HOST_LIMB_BITS};
 use num_bigint::BigUint;
 
 // UTILITIES
@@ -698,8 +696,8 @@ fn an_unsigned_ordering_agrees_with_the_model_at_the_limb_corners() {
     }
 }
 
-/// The operations the representation computes on limbs: the carry chain's three and the
-/// schoolbook's product.
+/// The operations the representation computes on limbs: the carry chain's three, the schoolbook's
+/// product, the division built from it, and the shifts, each under either reading.
 #[derive(Clone, Copy, Debug)]
 enum Limbed {
     Sum,
@@ -710,6 +708,14 @@ enum Limbed {
     Remainder,
     ShiftLeft,
     ShiftRight,
+    SignedSum,
+    SignedDifference,
+    SignedOrdering,
+    SignedProduct,
+    SignedQuotient,
+    SignedRemainder,
+    SignedShiftLeft,
+    SignedShiftRight,
 }
 
 impl Limbed {
@@ -723,6 +729,14 @@ impl Limbed {
             Limbed::Remainder => e.bin(BinaryArithOpKind::URem, lhs, rhs),
             Limbed::ShiftLeft => e.bin(BinaryArithOpKind::UShl, lhs, rhs),
             Limbed::ShiftRight => e.bin(BinaryArithOpKind::UShr, lhs, rhs),
+            Limbed::SignedSum => e.bin(BinaryArithOpKind::SAdd, lhs, rhs),
+            Limbed::SignedDifference => e.bin(BinaryArithOpKind::SSub, lhs, rhs),
+            Limbed::SignedOrdering => e.cmp(lhs, rhs, CmpKind::SLt),
+            Limbed::SignedProduct => e.bin(BinaryArithOpKind::SMul, lhs, rhs),
+            Limbed::SignedQuotient => e.bin(BinaryArithOpKind::SDiv, lhs, rhs),
+            Limbed::SignedRemainder => e.bin(BinaryArithOpKind::SRem, lhs, rhs),
+            Limbed::SignedShiftLeft => e.bin(BinaryArithOpKind::SShl, lhs, rhs),
+            Limbed::SignedShiftRight => e.bin(BinaryArithOpKind::SShr, lhs, rhs),
         }
     }
 
@@ -730,13 +744,22 @@ impl Limbed {
     /// is accepted against, which is zero except for a divisor.
     fn idle_rhs(self, bits: usize) -> IntBits {
         match self {
-            Limbed::Quotient | Limbed::Remainder => IntBits::from_u128(bits, 1),
+            Limbed::Quotient
+            | Limbed::Remainder
+            | Limbed::SignedQuotient
+            | Limbed::SignedRemainder => IntBits::from_u128(bits, 1),
             Limbed::Sum
             | Limbed::Difference
             | Limbed::Ordering
             | Limbed::Product
             | Limbed::ShiftLeft
-            | Limbed::ShiftRight => IntBits::zero(bits),
+            | Limbed::ShiftRight
+            | Limbed::SignedSum
+            | Limbed::SignedDifference
+            | Limbed::SignedOrdering
+            | Limbed::SignedProduct
+            | Limbed::SignedShiftLeft
+            | Limbed::SignedShiftRight => IntBits::zero(bits),
         }
     }
 
@@ -748,11 +771,23 @@ impl Limbed {
             Limbed::Product => mavros_int_semantics::eval(IntOp::UMul, lhs, rhs).value(),
             Limbed::Quotient => mavros_int_semantics::eval(IntOp::UDiv, lhs, rhs).value(),
             Limbed::Remainder => mavros_int_semantics::eval(IntOp::URem, lhs, rhs).value(),
-            Limbed::ShiftLeft => mavros_int_semantics::eval(IntOp::Shl, lhs, rhs).value(),
+            Limbed::ShiftLeft | Limbed::SignedShiftLeft => {
+                mavros_int_semantics::eval(IntOp::Shl, lhs, rhs).value()
+            }
             Limbed::ShiftRight => mavros_int_semantics::eval(IntOp::UShr, lhs, rhs).value(),
+            Limbed::SignedSum => mavros_int_semantics::eval(IntOp::SAdd, lhs, rhs).value(),
+            Limbed::SignedDifference => mavros_int_semantics::eval(IntOp::SSub, lhs, rhs).value(),
+            Limbed::SignedProduct => mavros_int_semantics::eval(IntOp::SMul, lhs, rhs).value(),
+            Limbed::SignedQuotient => mavros_int_semantics::eval(IntOp::SDiv, lhs, rhs).value(),
+            Limbed::SignedRemainder => mavros_int_semantics::eval(IntOp::SRem, lhs, rhs).value(),
+            Limbed::SignedShiftRight => mavros_int_semantics::eval(IntOp::SShr, lhs, rhs).value(),
             Limbed::Ordering => Some(IntBits::from_u128(
                 1,
                 u128::from(BigUint::from(lhs) < BigUint::from(rhs)),
+            )),
+            Limbed::SignedOrdering => Some(IntBits::from_u128(
+                1,
+                u128::from(lhs.compare(CmpOp::SLt, rhs)),
             )),
         }
     }
@@ -813,6 +848,44 @@ fn the_limbed_corner_matrix_agrees_with_the_model() {
         for limbed in [Limbed::ShiftLeft, Limbed::ShiftRight] {
             check_limbed_shifts(limbed, bits, &values, &amounts, Rhs::Witnessed);
         }
+    }
+}
+
+/// The sign-magnitude gadgets over every signed limb corner, and the powers of two whose product
+/// lands either side of `INT_MIN`.
+///
+/// 127 is the gadgets on a decomposition of each operand, 128 an `i128`, 254 limbs with a narrow
+/// top limb, and 320 a full one.
+#[test]
+#[ignore = "every signed limb corner of four operations at four widths; over an hour in a debug build"]
+fn the_signed_limbed_corner_matrix_agrees_with_the_model() {
+    for bits in [127usize, 128, 254, 320] {
+        let signed = |v: SignedValue| IntBits::from_signed(bits, &v);
+        let power = |place: usize| SignedValue::from(BigUint::from(1u8) << place);
+        let (low, high) = (bits / 2, bits - 1 - bits / 2);
+        let mut values = signed_limb_corners(bits);
+        values.extend([
+            signed(power(low)),
+            signed(-power(low)),
+            signed(power(high)),
+            signed(-power(high)),
+            signed(power(high) + SignedValue::from(1)),
+        ]);
+        let values = dedup(values);
+        for limbed in [
+            Limbed::SignedProduct,
+            Limbed::SignedQuotient,
+            Limbed::SignedRemainder,
+        ] {
+            check_limbed_corners(limbed, bits, &values, Rhs::Witnessed);
+        }
+        check_limbed_shifts(
+            Limbed::SignedShiftRight,
+            bits,
+            &values,
+            &limb_shift_amounts(bits, HOST_LIMB_BITS),
+            Rhs::Witnessed,
+        );
     }
 }
 
@@ -1724,13 +1797,24 @@ fn check_limbed_corners(limbed: Limbed, bits: usize, values: &[IntBits], rhs: Rh
         .iter()
         .flat_map(|a| values.iter().map(move |b| (a.clone(), b.clone())))
         .collect();
+    // A sign-magnitude gadget is the unsigned one plus a negation of each operand and of the
+    // answer, and twenty of them at 320 bits make a WASM function past the reach of an aarch64
+    // branch, which Cranelift refuses.
     let per_program = match limbed {
+        Limbed::SignedProduct | Limbed::SignedQuotient | Limbed::SignedRemainder => 8,
         Limbed::Product
         | Limbed::Quotient
         | Limbed::Remainder
         | Limbed::ShiftLeft
-        | Limbed::ShiftRight => 20,
-        Limbed::Sum | Limbed::Difference | Limbed::Ordering => 50,
+        | Limbed::ShiftRight
+        | Limbed::SignedShiftLeft
+        | Limbed::SignedShiftRight => 20,
+        Limbed::Sum
+        | Limbed::Difference
+        | Limbed::Ordering
+        | Limbed::SignedSum
+        | Limbed::SignedDifference
+        | Limbed::SignedOrdering => 50,
     };
     for pairs in pairs.chunks(per_program) {
         check_limbed_pairs(limbed, bits, pairs.to_vec(), rhs);
@@ -1859,6 +1943,14 @@ fn check_limbed_pairs(limbed: Limbed, bits: usize, pairs: Vec<(IntBits, IntBits)
             verdict.is_refusal(),
             "{limbed:?}({lhs:?}, {rhs:?}) at {bits} bits is rejected by the model, but the \
              pipeline answered {verdict:?}"
+        );
+        let verdict = compiled
+            .run_wasm(&inputs(index as u128))
+            .expect("the WASM lane builds");
+        assert!(
+            verdict.rejects(),
+            "{limbed:?}({lhs:?}, {rhs:?}) at {bits} bits is rejected by the model, but the WASM \
+             lane answered {verdict:?}"
         );
     }
 }
@@ -2117,48 +2209,1126 @@ fn a_guarded_assertion_holds_only_where_its_guard_does() {
 
 /// The whole matrix: every operation at every width the model sweeps, over every corner pair.
 ///
-/// Around 32 000 operand pairs and half a minute and hence not default. Run it with
-/// `cargo test -p mavros-compiler --test bigints -- --ignored`.
+/// Every corner pair of every operation, under both readings, at every width the model sweeps, and
+/// hence not default. Run it with `cargo test -p mavros-compiler --test bigints -- --ignored`.
 #[test]
-#[ignore = "around 32 000 compiled-and-run operand pairs; roughly half a minute"]
+#[ignore = "every corner pair of every operation, compiled and run"]
 fn the_whole_corner_matrix_agrees_with_the_model() {
     for kind in BinaryArithOpKind::ALL {
-        let op = IntOp::from(kind);
-        for &bits in corners::widths_for(op.is_signed()) {
-            // A signed shift reads its sign in one cell, which the signed frontier bounds; past it
-            // the program is refused, which is unit 13's to lift.
-            if kind.is_signed() && bits > MAX_LOWERED_SIGNED_BITS {
-                continue;
-            }
+        for &bits in corners::widths() {
             sweep(kind, bits);
         }
     }
 }
 
-// KNOWN DIVERGENCES
+// THE WITNESSED SIGNED FAMILY
 // ================================================================================================
-//
-// Each of these pins a refusal the pipeline makes today to make it clear when they are fixed.
-// Every one of them is a width the type system admits and no lowering builds, so the compiler owes
-// the program a diagnostic rather than a panic; the assertions are on the diagnostic's own text,
-// which is what a reader of the refusal actually gets.
 
-/// The rendered refusal for a program the pipeline declines to compile.
-///
-/// # Panics
-///
-/// If the program compiles, or fails for any reason other than a refusal — a crash reports as a
-/// crash, and reading one as a refusal is the distinction this whole family of tests is about.
-fn refusal_for(kind: BinaryArithOpKind, lhs_bits: usize, rhs_bits: usize) -> String {
-    let Err(error) = BinaryOpOracle::new(kind, lhs_bits, rhs_bits) else {
-        panic!("an int{lhs_bits} {kind:?} compiled rather than being refused");
-    };
-    assert!(
-        matches!(error, DriverError::Refused(_)),
-        "a width no lowering builds is a refusal rather than a crash: {error}"
-    );
-    error.to_string()
+/// The signed corners a carry chain turns on at `bits`: [`signed_corners`], and either sign of a
+/// value at the lowest limb boundary and at the top limb's, so that a carry or a borrow crosses a
+/// limb and leaves the top under every combination of signs.
+fn signed_limb_corners(bits: usize) -> Vec<IntBits> {
+    let limb = witness_limb_bits(FieldConfig::bn254());
+    let top_limb = (bits - 1) / limb * limb;
+    let signed = |v: SignedValue| IntBits::from_signed(bits, &v);
+    let power = |place: usize| SignedValue::from(BigUint::from(1u8) << place);
+    let mut values = signed_corners(bits);
+    values.extend([
+        IntBits::all_ones(limb).cast(bits),
+        signed(power(limb)),
+        signed(-power(limb)),
+        signed(power(top_limb)),
+        signed(-power(top_limb)),
+    ]);
+    dedup(values)
 }
+
+/// The signed sum, difference and ordering agree with the model either side of the carry chain.
+///
+/// 200 is the single cell past the host word, and 252 the last width it takes, where its sign
+/// packing comes closest to the modulus; 253 is the chain on a decomposition of each operand; 257
+/// has a top limb of one bit, which is its own sign bit; and 320 is limbs with a full top limb.
+#[test]
+fn a_signed_sum_difference_or_ordering_agrees_with_the_model_either_side_of_the_chain() {
+    for bits in [200usize, 252, 253, 257, 320] {
+        let values = signed_limb_corners(bits);
+        for limbed in [
+            Limbed::SignedSum,
+            Limbed::SignedDifference,
+            Limbed::SignedOrdering,
+        ] {
+            check_limbed_corners(limbed, bits, &values, Rhs::Witnessed);
+        }
+    }
+}
+
+/// A known operand of the signed chain is read at compile time: its top limb's sign and the flip an
+/// ordering applies to it are constants, whichever side it is on.
+///
+/// A constant right operand stays put on a run that does not name its pair, against a left one of
+/// zero, so the smallest value is not one: `0 - INT_MIN` overflows.
+#[test]
+fn a_signed_chain_reads_a_known_operand_at_compile_time() {
+    let bits = 320;
+    let values = signed_corners(bits);
+    let min = IntBits::from_signed(bits, &IntBits::signed_min(bits));
+    let constants: Vec<IntBits> = values.iter().filter(|v| **v != min).cloned().collect();
+    for limbed in [
+        Limbed::SignedSum,
+        Limbed::SignedDifference,
+        Limbed::SignedOrdering,
+    ] {
+        check_limbed_corners(limbed, bits, &constants, Rhs::Constant);
+        check_limbed_corners(limbed, bits, &values, Rhs::AgainstPure);
+    }
+}
+
+/// The signed chain against a **pure** operand that a loop computes, which no fold answers.
+///
+/// Such an operand is known wherever the constraints are built but not at compile time, so its
+/// sign and the flip an ordering applies to it are pure arithmetic rather than cuts. Each iteration
+/// takes a negative value `INT_MIN + i·2^(N - 10)` against a positive witnessed one, adding and
+/// subtracting them and ordering them both ways, and the program asserts what the model says of
+/// every iteration. Clearing the bit that selects the witnessed value changes every sum and
+/// difference, which the assertion refuses. 253 is the chain on a decomposition, and 320 limbs.
+#[test]
+fn a_signed_chain_against_a_pure_operand_a_loop_computes_agrees_with_the_model() {
+    let iterations = 3u128;
+    for bits in [253usize, 320] {
+        let witnessed = IntBits::from_biguint(bits, &((BigUint::from(1u8) << (bits - 60)) + 5u8));
+        let stride = IntBits::from_biguint(bits, &(BigUint::from(1u8) << (bits - 10)));
+        let sign = IntBits::from_signed(bits, &IntBits::signed_min(bits));
+        let pure_at = |index: u128| {
+            let index = IntBits::from_u128(bits, index);
+            let scaled = mavros_int_semantics::eval(IntOp::UMul, &index, &stride)
+                .value()
+                .expect("the stride times the index fits");
+            scaled.xor(&sign)
+        };
+        let model = |op, lhs: &IntBits, rhs: &IntBits| {
+            mavros_int_semantics::eval(op, lhs, rhs)
+                .value()
+                .expect("every iteration fits")
+        };
+        let expected = (1..=iterations).fold(IntBits::zero(bits), |acc, index| {
+            let pure = pure_at(index);
+            acc.xor(&model(IntOp::SAdd, &witnessed, &pure)).xor(&model(
+                IntOp::SSub,
+                &pure,
+                &witnessed,
+            ))
+        });
+
+        let (program_witnessed, program_stride) = (witnessed.clone(), stride.clone());
+        let ssa = main_program(&[Type::int(1)], &[], move |e, params| {
+            let chosen = e.int_const(program_witnessed);
+            let zero = e.int_const(IntBits::zero(bits));
+            let value = e.select(params[0], chosen, zero);
+            let stride = e.int_const(program_stride);
+            let sign = e.int_const(sign);
+            let start = e.int_const(IntBits::from_u128(32, 1));
+            let yes = e.int_const(IntBits::one(1));
+            let no = e.int_const(IntBits::zero(1));
+            let (head, _) = e.add_block();
+            let (body, _) = e.add_block();
+            let (done, _) = e.add_block();
+            e.seal_and_switch(Terminator::Jmp(head, vec![start, zero, yes, no]), head);
+            let count = e.add_parameter(Type::int(32));
+            let acc = e.add_parameter(Type::int(bits));
+            let every_less = e.add_parameter(Type::int(1));
+            let any_greater = e.add_parameter(Type::int(1));
+            let limit = e.int_const(IntBits::from_u128(32, iterations + 1));
+            let more = e.cmp(count, limit, CmpKind::ULt);
+            e.seal_and_switch(Terminator::JmpIf(more, body, done), body);
+            let index = e.cast_to(CastTarget::Int(bits), count);
+            let scaled = e.bin(BinaryArithOpKind::UMul, index, stride);
+            let pure = e.bin(BinaryArithOpKind::Xor, scaled, sign);
+            let sum = e.bin(BinaryArithOpKind::SAdd, value, pure);
+            let difference = e.bin(BinaryArithOpKind::SSub, pure, value);
+            let next_acc = e.bin(BinaryArithOpKind::Xor, acc, sum);
+            let next_acc = e.bin(BinaryArithOpKind::Xor, next_acc, difference);
+            let less = e.cmp(pure, value, CmpKind::SLt);
+            let next_less = e.bin(BinaryArithOpKind::And, every_less, less);
+            let greater = e.cmp(value, pure, CmpKind::SLt);
+            let next_greater = e.bin(BinaryArithOpKind::Or, any_greater, greater);
+            let one = e.int_const(IntBits::from_u128(32, 1));
+            let next = e.bin(BinaryArithOpKind::UAdd, count, one);
+            e.seal_and_switch(
+                Terminator::Jmp(head, vec![next, next_acc, next_less, next_greater]),
+                done,
+            );
+            let expected = e.int_const(expected);
+            e.assert_eq(acc, expected);
+            e.assert_eq(every_less, yes);
+            e.assert_eq(any_greater, no);
+            vec![]
+        });
+        let what = format!("int{bits} signed chain against a pure operand");
+        let compiled =
+            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        let selected = |bit: u128| input_block(&[&IntBits::from_u128(1, bit)]);
+        let verdict = compiled.run(&selected(1));
+        assert!(verdict.is_accepted(), "{what}: {verdict:?}");
+        let verdict = compiled
+            .run_wasm(&selected(1))
+            .expect("the WASM lane builds");
+        assert!(verdict.is_accepted(), "{what}, WASM: {verdict:?}");
+        let verdict = compiled.run(&selected(0));
+        assert!(
+            !verdict.is_accepted(),
+            "{what}, the witnessed value zero: {verdict:?}"
+        );
+    }
+}
+
+/// A signed left shift is the unsigned one: one map on the pattern, its amount read unsigned. 100
+/// is the single cell, and 320 the limbs.
+#[test]
+fn a_signed_shift_left_agrees_with_the_model_past_the_host_word() {
+    for bits in [100usize, 320] {
+        let amounts = few_shift_amounts(bits, HOST_LIMB_BITS);
+        check_limbed_shifts(
+            Limbed::SignedShiftLeft,
+            bits,
+            &signed_corners(bits),
+            &amounts,
+            Rhs::Witnessed,
+        );
+    }
+}
+
+/// A signed product, quotient, remainder and right shift agree with the model past the host word.
+///
+/// 100 is the single cell. 128 is past it, as the signed single cell has no two-limb escape, so a
+/// 128-bit operation takes the sign-magnitude gadgets over a decomposition of each operand; and 320 is limbs,
+/// against a constant right operand as well as a witnessed one, which for a shift is a known amount.
+/// A constant zero divisor is refused whatever it divides, so it has no idle operand to run beside
+/// the others.
+#[test]
+fn a_signed_product_quotient_or_right_shift_agrees_with_the_model_past_the_host_word() {
+    for bits in [100usize, 128, 320] {
+        let values = signed_corners(bits);
+        for limbed in [
+            Limbed::SignedProduct,
+            Limbed::SignedQuotient,
+            Limbed::SignedRemainder,
+        ] {
+            check_limbed_corners(limbed, bits, &values, Rhs::Witnessed);
+            if bits == 320 {
+                let pairs: Vec<(IntBits, IntBits)> = values
+                    .iter()
+                    .flat_map(|a| {
+                        values
+                            .iter()
+                            .filter(|b| matches!(limbed, Limbed::SignedProduct) || !b.is_zero())
+                            .map(move |b| (a.clone(), b.clone()))
+                    })
+                    .collect();
+                for pairs in pairs.chunks(8) {
+                    check_limbed_pairs(limbed, bits, pairs.to_vec(), Rhs::Constant);
+                }
+            }
+        }
+        let mut amounts = few_shift_amounts(bits, HOST_LIMB_BITS);
+        check_limbed_shifts(
+            Limbed::SignedShiftRight,
+            bits,
+            &values,
+            &amounts,
+            Rhs::Witnessed,
+        );
+        // A known amount fills the vacated bits with the sign rather than complementing around the
+        // unsigned shift. One at the width is refused at compile time, and so is left out.
+        if bits == 320 {
+            amounts.pop();
+            check_limbed_shifts(
+                Limbed::SignedShiftRight,
+                bits,
+                &values,
+                &amounts,
+                Rhs::Constant,
+            );
+        }
+    }
+}
+
+/// A signed product's magnitude is held to `2^(N - 1)` exactly where its sign is negative, and
+/// below it otherwise, as is a quotient's, whose one way past is `INT_MIN / -1`.
+///
+/// `2^h · 2^(N - 1 - h)` is `2^(N - 1)`, which fits only negated, and one more than the second factor
+/// passes it under either sign. 126 is the single cell's last width, 127 the gadgets' first, 128 the
+/// width the unsigned single cell takes and the signed one does not, and 254 limbs.
+#[test]
+fn a_signed_product_or_quotient_is_held_to_its_sign_at_int_min() {
+    for bits in [126usize, 127, 128, 254] {
+        let signed = |v: SignedValue| IntBits::from_signed(bits, &v);
+        let power = |place: usize| SignedValue::from(BigUint::from(1u8) << place);
+        let (low, high) = (bits / 2, bits - 1 - bits / 2);
+        let min = signed(IntBits::signed_min(bits));
+        let one = signed(SignedValue::from(1));
+        let minus_one = signed(SignedValue::from(-1));
+        let products = vec![
+            (signed(power(low)), signed(-power(high))),
+            (signed(-power(low)), signed(power(high))),
+            (signed(power(low)), signed(power(high))),
+            (signed(-power(low)), signed(-power(high))),
+            (signed(-power(low)), signed(power(high) + 1)),
+            (min.clone(), one.clone()),
+            (min.clone(), minus_one.clone()),
+            (signed(IntBits::signed_min(bits) + 1), minus_one.clone()),
+        ];
+        check_limbed_pairs(Limbed::SignedProduct, bits, products, Rhs::Witnessed);
+
+        let divisions = vec![
+            (min.clone(), minus_one.clone()),
+            (min.clone(), one),
+            (min.clone(), min.clone()),
+            (signed(IntBits::signed_min(bits) + 1), minus_one),
+        ];
+        for limbed in [Limbed::SignedQuotient, Limbed::SignedRemainder] {
+            check_limbed_pairs(limbed, bits, divisions.clone(), Rhs::Witnessed);
+        }
+    }
+}
+
+/// A signed product, quotient and remainder whose signs are known at compile time.
+///
+/// The witnessed operand is a widened 64-bit parameter, whose limbs above it are known zeros, so
+/// its sign is known to be clear; the other is a constant. The answer's sign is then known too, and
+/// a negative one complements the answer's limbs linearly rather than by a product with a cut bit.
+/// The program asserts the model's answers for one input, and so refuses another.
+#[test]
+fn a_signed_operation_on_operands_of_known_sign_agrees_with_the_model() {
+    let bits = 320usize;
+    let signed = |v: SignedValue| IntBits::from_signed(bits, &v);
+    let power = |place: usize| SignedValue::from(BigUint::from(1u8) << place);
+    let input = (1u128 << 40) + 9;
+    let x = IntBits::from_u128(bits, input);
+    let constants = [
+        signed(SignedValue::from(-3)),
+        signed(-(power(200) + SignedValue::from(7))),
+        signed(SignedValue::from(5)),
+    ];
+    let mut checks = Vec::new();
+    for c in &constants {
+        for (kind, lhs, rhs) in [
+            (BinaryArithOpKind::SMul, &x, c),
+            (BinaryArithOpKind::SDiv, &x, c),
+            (BinaryArithOpKind::SRem, &x, c),
+            (BinaryArithOpKind::SDiv, c, &x),
+            (BinaryArithOpKind::SRem, c, &x),
+        ] {
+            let want = mavros_int_semantics::eval(IntOp::from(kind), lhs, rhs)
+                .value()
+                .expect("the model accepts every pair");
+            checks.push((kind, lhs == &x, c.clone(), want));
+        }
+    }
+
+    let ssa = main_program(&[Type::int(64)], &[], move |e, params| {
+        let x = e.cast_to(CastTarget::Int(bits), params[0]);
+        for (kind, x_first, constant, want) in &checks {
+            let constant = e.int_const(constant.clone());
+            let (lhs, rhs) = if *x_first {
+                (x, constant)
+            } else {
+                (constant, x)
+            };
+            let got = e.bin(*kind, lhs, rhs);
+            let want = e.int_const(want.clone());
+            e.assert_eq(got, want);
+        }
+        vec![]
+    });
+    let what = format!("int{bits} signed operations of known sign");
+    let compiled =
+        Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+    let run = |value: u128| input_block(&[&IntBits::from_u128(64, value)]);
+    let verdict = compiled.run(&run(input));
+    assert!(verdict.is_accepted(), "{what}: {verdict:?}");
+    let verdict = compiled
+        .run_wasm(&run(input))
+        .expect("the WASM lane builds");
+    assert!(verdict.is_accepted(), "{what}, WASM: {verdict:?}");
+    let verdict = compiled.run(&run(input + 1));
+    assert!(!verdict.is_accepted(), "{what}, another input: {verdict:?}");
+}
+
+/// A signed answer the gadgets know at compile time is still a witnessed result.
+///
+/// Every limb of `0 % x`, `0 / x` and `x * 0` is a known zero, which is delivered as a witnessed
+/// constant. Returned as it is, a result that reached the program as a pure value would disagree
+/// with the witnessed return the function declares. A zero `x` is still a zero divisor.
+#[test]
+fn a_signed_answer_known_at_compile_time_stays_witnessed() {
+    let bits = 320usize;
+    let ssa = main_program(
+        &[Type::int(64)],
+        &[Type::int(64), Type::int(64), Type::int(64)],
+        move |e, params| {
+            let x = e.cast_to(CastTarget::Int(bits), params[0]);
+            let zero = e.int_const(IntBits::zero(bits));
+            [
+                (BinaryArithOpKind::SRem, zero, x),
+                (BinaryArithOpKind::SDiv, zero, x),
+                (BinaryArithOpKind::SMul, x, zero),
+            ]
+            .into_iter()
+            .map(|(kind, lhs, rhs)| {
+                let answer = e.bin(kind, lhs, rhs);
+                e.cast_to(CastTarget::Int(64), answer)
+            })
+            .collect()
+        },
+    );
+    let what = format!("int{bits} signed answers known to be zero");
+    let compiled =
+        Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+    let zero = IntBits::zero(64);
+    let run = |value: u128| input_block(&[&IntBits::from_u128(64, value), &zero, &zero, &zero]);
+    let verdict = compiled.run(&run(5));
+    assert!(verdict.is_accepted(), "{what}: {verdict:?}");
+    let verdict = compiled.run_wasm(&run(5)).expect("the WASM lane builds");
+    assert!(verdict.is_accepted(), "{what}, WASM: {verdict:?}");
+    let verdict = compiled.run(&run(0));
+    assert!(verdict.is_refusal(), "{what}, a zero divisor: {verdict:?}");
+}
+
+/// A negative value the gadgets know at compile time, shifted right by a known amount, is still a
+/// witnessed result.
+///
+/// The operand is a constant put into the witness domain, so every limb is known and its sign is
+/// known to be set. An answer limb that is one piece of it, or that the shift empties, is then a
+/// constant before the sign fills it, and has to be one afterwards too: arithmetic on two
+/// constants would reach the result as a pure value where the function returns a witnessed one.
+#[test]
+fn a_known_negative_value_shifted_right_by_a_known_amount_stays_witnessed() {
+    let bits = 320usize;
+    let power = SignedValue::from(BigUint::from(1u8) << 310);
+    let value = IntBits::from_signed(bits, &(-(power + SignedValue::from(5))));
+    for amount in [70u128, 250, 300, 319] {
+        let shift = IntBits::from_u128(bits, amount);
+        let want = mavros_int_semantics::eval(IntOp::SShr, &value, &shift)
+            .value()
+            .expect("the model accepts the shift")
+            .cast(64);
+        let (program_value, program_shift) = (value.clone(), shift.clone());
+        let ssa = main_program(&[Type::int(1)], &[Type::int(64)], move |e, params| {
+            let constant = e.int_const(program_value);
+            let witnessed = e.cast_to(CastTarget::WitnessOf, constant);
+            let amount = e.int_const(program_shift);
+            let answer = e.bin(BinaryArithOpKind::SShr, witnessed, amount);
+            let one = e.int_const(IntBits::one(1));
+            e.assert_eq(params[0], one);
+            vec![e.cast_to(CastTarget::Int(64), answer)]
+        });
+        let what = format!("int{bits} SShr of a known negative value by {amount}");
+        let compiled =
+            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        let verdict = compiled.run(&input_block(&[&IntBits::one(1), &want]));
+        assert!(verdict.is_accepted(), "{what}: {verdict:?}");
+    }
+}
+
+/// The mutation test for the sign-magnitude gadgets: the product, the quotient and remainder, and
+/// the right shift by a witnessed amount and by a known one, each on limbs.
+///
+/// Each operand is a constant selected by a witnessed bit, so that it is a witnessed value held as
+/// limbs: a negative left one, and a right one of either sign. Between them every magnitude is
+/// negated, the answers take either sign, and each sign bit is cut. Every answer leaves through its
+/// low limb.
+///
+/// A division also carries the guard IR's checks against a zero divisor and `INT_MIN / -1`, which
+/// compare limb by limb, and an equality's inverse is free where the two limbs agree. So no limb of
+/// a divisor here is zero or all ones, and no limb of its dividend is `INT_MIN`'s.
+#[test]
+fn every_witness_column_of_a_signed_product_quotient_or_right_shift_is_pinned() {
+    let bits = 320usize;
+    let signed = |v: SignedValue| IntBits::from_signed(bits, &v);
+    let power = |place: usize| SignedValue::from(BigUint::from(1u8) << place);
+    let small = power(70) + SignedValue::from(3);
+    let lhs = signed(-(power(200) + SignedValue::from(12345)));
+    let dividend = signed(-(power(300) + power(200) + SignedValue::from(12345)));
+    let divisor = power(260) + power(200) + power(130) + power(70) + SignedValue::from(3);
+    let low = |value: &IntBits| value.cast(64);
+    let selected = IntBits::from_u128(1, 1);
+    let amount = IntBits::from_u128(64, 67);
+
+    for (kind, lhs, rhs) in [
+        (BinaryArithOpKind::SMul, lhs.clone(), signed(-small.clone())),
+        (BinaryArithOpKind::SMul, lhs.clone(), signed(small)),
+        (
+            BinaryArithOpKind::SDiv,
+            dividend.clone(),
+            signed(-divisor.clone()),
+        ),
+        (BinaryArithOpKind::SRem, dividend, signed(divisor)),
+    ] {
+        let want = mavros_int_semantics::eval(IntOp::from(kind), &lhs, &rhs)
+            .value()
+            .expect("the model accepts the pair");
+        let (program_lhs, program_rhs) = (lhs, rhs);
+        let ssa = main_program(
+            &[Type::int(1), Type::int(1)],
+            &[Type::int(64)],
+            move |e, params| {
+                let zero = e.int_const(IntBits::zero(bits));
+                let one = e.int_const(IntBits::one(bits));
+                let left = e.int_const(program_lhs);
+                let left = e.select(params[0], left, zero);
+                let right = e.int_const(program_rhs);
+                let right = e.select(params[1], right, one);
+                let answer = e.bin(kind, left, right);
+                vec![e.cast_to(CastTarget::Int(64), answer)]
+            },
+        );
+        let what = format!("{kind:?} at {bits} bits");
+        let compiled =
+            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        assert_every_column_is_pinned(&what, &compiled, &[&selected, &selected, &low(&want)]);
+    }
+
+    let shifted = mavros_int_semantics::eval(IntOp::SShr, &lhs, &IntBits::from_u128(bits, 67))
+        .value()
+        .expect("the model accepts the shift");
+    for witnessed_amount in [true, false] {
+        let program_lhs = lhs.clone();
+        let ssa = main_program(
+            &[Type::int(1), Type::int(64)],
+            &[Type::int(64)],
+            move |e, params| {
+                let zero = e.int_const(IntBits::zero(bits));
+                let left = e.int_const(program_lhs);
+                let left = e.select(params[0], left, zero);
+                let amount = if witnessed_amount {
+                    e.cast_to(CastTarget::Int(bits), params[1])
+                } else {
+                    e.int_const(IntBits::from_u128(bits, 67))
+                };
+                let answer = e.bin(BinaryArithOpKind::SShr, left, amount);
+                vec![e.cast_to(CastTarget::Int(64), answer)]
+            },
+        );
+        let what = format!("SShr at {bits} bits, witnessed amount: {witnessed_amount}");
+        let compiled =
+            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        assert_every_column_is_pinned(&what, &compiled, &[&selected, &amount, &low(&shifted)]);
+    }
+}
+
+/// A signed product, quotient, remainder or right shift under a witnessed condition is checked only
+/// where the condition holds.
+///
+/// Where the branch is not taken the operands are whatever it left behind, and each run here leaves
+/// something the taken branch refuses: a product whose magnitudes overflow even unsigned, which
+/// leaves the schoolbook's top column past its width, a zero divisor, `INT_MIN / -1`, and an amount
+/// at the width. 253 is the gadgets on a decomposition of each operand, and 320 on limbs.
+#[test]
+fn a_guarded_signed_operation_is_checked_only_where_its_guard_holds() {
+    for bits in [253usize, 320] {
+        let signed = |v: i128| IntBits::from_signed(bits, &SignedValue::from(v));
+        let min = IntBits::from_signed(bits, &IntBits::signed_min(bits));
+        let high = BigUint::from(1u8) << (bits - 3);
+        let low = |value: &IntBits| value.cast(64);
+        for (kind, holds, fails) in [
+            (
+                BinaryArithOpKind::SMul,
+                (
+                    signed(-3),
+                    IntBits::from_biguint(bits, &(high.clone() + 5u8)),
+                ),
+                (
+                    signed(-16),
+                    IntBits::from_biguint(bits, &(high.clone() + 5u8)),
+                ),
+            ),
+            (
+                BinaryArithOpKind::SDiv,
+                (signed(-7), signed(2)),
+                (signed(-7), signed(0)),
+            ),
+            (
+                BinaryArithOpKind::SRem,
+                (signed(-7), signed(2)),
+                (min.clone(), signed(-1)),
+            ),
+            (
+                BinaryArithOpKind::SDiv,
+                (min.clone(), signed(1)),
+                (min.clone(), signed(-1)),
+            ),
+            (
+                BinaryArithOpKind::SShr,
+                (signed(-7), signed(1)),
+                (signed(-7), IntBits::from_u128(bits, bits as u128)),
+            ),
+        ] {
+            let want = mavros_int_semantics::eval(IntOp::from(kind), &holds.0, &holds.1)
+                .value()
+                .expect("the model accepts the holding pair");
+            let ssa = main_program(
+                &[Type::int(1), Type::int(1)],
+                &[Type::int(64)],
+                move |e, params| {
+                    let pair = |e: &mut HLBlockEmitter<'_>, (lhs, rhs): &(IntBits, IntBits)| {
+                        (e.int_const(lhs.clone()), e.int_const(rhs.clone()))
+                    };
+                    let (holds_lhs, holds_rhs) = pair(e, &holds);
+                    let (fails_lhs, fails_rhs) = pair(e, &fails);
+                    let lhs = e.select(params[1], holds_lhs, fails_lhs);
+                    let rhs = e.select(params[1], holds_rhs, fails_rhs);
+
+                    let (then_id, _) = e.add_block();
+                    let (else_id, _) = e.add_block();
+                    let (merge_id, _) = e.add_block();
+                    e.seal_and_switch(Terminator::JmpIf(params[0], then_id, else_id), then_id);
+                    let answer = e.bin(kind, lhs, rhs);
+                    let answer = e.cast_to(CastTarget::Int(64), answer);
+                    e.seal_and_switch(Terminator::Jmp(merge_id, vec![answer]), else_id);
+                    let zero = e.int_const(IntBits::zero(64));
+                    e.seal_and_switch(Terminator::Jmp(merge_id, vec![zero]), merge_id);
+                    vec![e.add_parameter(Type::int(64))]
+                },
+            );
+            let what = format!("a guarded int{bits} {kind:?}");
+            let compiled = Compiled::new(ssa)
+                .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+            let zero = IntBits::zero(64);
+            for wasm in [false, true] {
+                // A refusal is a trap on the VM, and a witness the constraints refuse on WASM.
+                let refused = |verdict: &Verdict| {
+                    if wasm {
+                        verdict.rejects()
+                    } else {
+                        verdict.is_refusal()
+                    }
+                };
+                let run = |taken: u128, holding: u128, answer: &IntBits| {
+                    let inputs = input_block(&[
+                        &IntBits::from_u128(1, taken),
+                        &IntBits::from_u128(1, holding),
+                        answer,
+                    ]);
+                    if wasm {
+                        compiled.run_wasm(&inputs).expect("the WASM lane builds")
+                    } else {
+                        compiled.run(&inputs)
+                    }
+                };
+                let lane = if wasm { "WASM" } else { "VM" };
+                let verdict = run(1, 1, &low(&want));
+                assert!(
+                    verdict.is_accepted(),
+                    "{what}, {lane}, taken, holding: {verdict:?}"
+                );
+                let verdict = run(1, 0, &zero);
+                assert!(
+                    refused(&verdict),
+                    "{what}, {lane}, taken, failing: {verdict:?}"
+                );
+                let verdict = run(0, 0, &zero);
+                assert!(
+                    verdict.is_accepted(),
+                    "{what}, {lane}, not taken, failing: {verdict:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A signed product, quotient, remainder and right shift against a **pure** operand a loop
+/// computes, which no fold answers.
+///
+/// Such an operand is known wherever the constraints are built but not at compile time, so its
+/// magnitude and its sign are pure arithmetic rather than a negation through the chain and a cut.
+/// Each iteration takes the negative `-(i·2^(N/2) + 3)` against a positive witnessed value, as
+/// each side of a product and of a division, and shifts it by a witnessed amount; the program
+/// asserts what the model says of every iteration. Clearing the bit that selects the witnessed
+/// value changes every answer, which the assertion refuses. 253 is a decomposition, and 320 limbs.
+#[test]
+fn a_signed_product_or_quotient_against_a_pure_operand_a_loop_computes_agrees_with_the_model() {
+    let iterations = 3u128;
+    for bits in [253usize, 320] {
+        let witnessed =
+            IntBits::from_biguint(bits, &((BigUint::from(1u8) << (bits / 2 - 5)) + 5u8));
+        let stride = IntBits::from_biguint(bits, &(BigUint::from(1u8) << (bits / 2)));
+        let amount = IntBits::from_u128(bits, 67);
+        let pure_at = |index: u128| {
+            let magnitude: SignedValue =
+                SignedValue::from(index) * IntBits::to_signed(&stride) + SignedValue::from(3);
+            IntBits::from_signed(bits, &-magnitude)
+        };
+        let model = |op, lhs: &IntBits, rhs: &IntBits| {
+            mavros_int_semantics::eval(op, lhs, rhs)
+                .value()
+                .expect("every iteration fits")
+        };
+        let expected = (1..=iterations).fold(IntBits::zero(bits), |acc, index| {
+            let pure = pure_at(index);
+            [
+                model(IntOp::SMul, &witnessed, &pure),
+                model(IntOp::SDiv, &pure, &witnessed),
+                model(IntOp::SRem, &pure, &witnessed),
+                model(IntOp::SDiv, &witnessed, &pure),
+                model(IntOp::SShr, &pure, &amount),
+            ]
+            .iter()
+            .fold(acc, |acc, answer| acc.xor(answer))
+        });
+
+        let (program_witnessed, program_stride) = (witnessed.clone(), stride.clone());
+        let ssa = main_program(&[Type::int(1), Type::int(64)], &[], move |e, params| {
+            let chosen = e.int_const(program_witnessed);
+            let zero = e.int_const(IntBits::zero(bits));
+            let value = e.select(params[0], chosen, zero);
+            let amount = e.cast_to(CastTarget::Int(bits), params[1]);
+            let stride = e.int_const(program_stride);
+            let three = e.int_const(IntBits::from_u128(bits, 3));
+            let start = e.int_const(IntBits::from_u128(32, 1));
+            let (head, _) = e.add_block();
+            let (body, _) = e.add_block();
+            let (done, _) = e.add_block();
+            e.seal_and_switch(Terminator::Jmp(head, vec![start, zero]), head);
+            let count = e.add_parameter(Type::int(32));
+            let acc = e.add_parameter(Type::int(bits));
+            let limit = e.int_const(IntBits::from_u128(32, iterations + 1));
+            let more = e.cmp(count, limit, CmpKind::ULt);
+            e.seal_and_switch(Terminator::JmpIf(more, body, done), body);
+            let index = e.cast_to(CastTarget::Int(bits), count);
+            let scaled = e.bin(BinaryArithOpKind::UMul, index, stride);
+            let magnitude = e.bin(BinaryArithOpKind::UAdd, scaled, three);
+            let pure = e.bin(BinaryArithOpKind::SSub, zero, magnitude);
+            let mut next_acc = acc;
+            for (kind, lhs, rhs) in [
+                (BinaryArithOpKind::SMul, value, pure),
+                (BinaryArithOpKind::SDiv, pure, value),
+                (BinaryArithOpKind::SRem, pure, value),
+                (BinaryArithOpKind::SDiv, value, pure),
+                (BinaryArithOpKind::SShr, pure, amount),
+            ] {
+                let answer = e.bin(kind, lhs, rhs);
+                next_acc = e.bin(BinaryArithOpKind::Xor, next_acc, answer);
+            }
+            let one = e.int_const(IntBits::from_u128(32, 1));
+            let next = e.bin(BinaryArithOpKind::UAdd, count, one);
+            e.seal_and_switch(Terminator::Jmp(head, vec![next, next_acc]), done);
+            let expected = e.int_const(expected);
+            e.assert_eq(acc, expected);
+            vec![]
+        });
+        let what = format!("int{bits} signed product and quotient against a pure operand");
+        let compiled =
+            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        let amount = IntBits::from_u128(64, 67);
+        let selected = |bit: u128| input_block(&[&IntBits::from_u128(1, bit), &amount]);
+        let verdict = compiled.run(&selected(1));
+        assert!(verdict.is_accepted(), "{what}: {verdict:?}");
+        let verdict = compiled
+            .run_wasm(&selected(1))
+            .expect("the WASM lane builds");
+        assert!(verdict.is_accepted(), "{what}, WASM: {verdict:?}");
+        let verdict = compiled.run(&selected(0));
+        assert!(
+            !verdict.is_accepted(),
+            "{what}, the witnessed value zero: {verdict:?}"
+        );
+    }
+}
+
+/// The mutation test for the signed chain, whose columns past the unsigned one's are the carry out
+/// of the top limb and the sign bits of both operands and of the answer.
+///
+/// The left operand is negative and the right one positive, so the two sign bits the check reads
+/// differ, and the sum is negative while the difference is not. Both are built from a sign
+/// extension of the parameter, so neither top limb is known at compile time and both operands' sign
+/// bits are columns. 253 is the chain on a decomposition and 320 on limbs.
+#[test]
+fn every_witness_column_of_a_signed_sum_difference_or_ordering_is_pinned() {
+    for bits in [253usize, 320] {
+        let negative = IntBits::from_signed(bits, &-(SignedValue::from(1u8) << (bits - 2)));
+        let parameter = IntBits::from_u128(64, 3);
+        let operands = move |e: &mut HLBlockEmitter<'_>, param: ValueId| {
+            let positive = e.fresh_value();
+            e.emit(OpCode::SExt {
+                result: positive,
+                value: param,
+                from_bits: 64,
+                to_bits: bits,
+            });
+            let high = e.int_const(negative.clone());
+            (e.bin(BinaryArithOpKind::Or, positive, high), positive)
+        };
+
+        let sum = main_program(&[Type::int(64)], &[Type::int(64)], |e, params| {
+            let (lhs, rhs) = operands(e, params[0]);
+            let sum = e.bin(BinaryArithOpKind::SAdd, lhs, rhs);
+            vec![e.cast_to(CastTarget::Int(64), sum)]
+        });
+        let difference = main_program(&[Type::int(64)], &[Type::int(64)], |e, params| {
+            let (lhs, rhs) = operands(e, params[0]);
+            let difference = e.bin(BinaryArithOpKind::SSub, rhs, lhs);
+            vec![e.cast_to(CastTarget::Int(64), difference)]
+        });
+        let ordering = main_program(&[Type::int(64)], &[Type::int(1)], |e, params| {
+            let (lhs, rhs) = operands(e, params[0]);
+            vec![e.cmp(lhs, rhs, CmpKind::SLt)]
+        });
+
+        // `(-2^(N-2) | 3) + 3` and `3 - (-2^(N-2) | 3)`, read at their low limb.
+        for (operation, ssa, answer) in [
+            ("SAdd", sum, IntBits::from_u128(64, 6)),
+            ("SSub", difference, IntBits::from_u128(64, 0)),
+            ("SLt", ordering, IntBits::from_u128(1, 1)),
+        ] {
+            let what = format!("{operation} at {bits} bits");
+            let compiled = Compiled::new(ssa)
+                .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+            assert_every_column_is_pinned(&what, &compiled, &[&parameter, &answer]);
+        }
+    }
+}
+
+/// A signed sum or difference under a witnessed condition is checked only where the condition
+/// holds.
+///
+/// Its overflow is the one check relating the top carry to the sign bits, which goes off with the
+/// guard; the answer is zero there. The constant sits five inside a boundary, so three fits and
+/// seven overflows, out of the top for a sum and below the bottom for a difference.
+#[test]
+fn a_guarded_signed_sum_or_difference_is_checked_only_where_its_guard_holds() {
+    for bits in [253usize, 320] {
+        let max = IntBits::signed_max(bits);
+        let min = IntBits::signed_min(bits);
+        for (kind, base, low) in [
+            (
+                BinaryArithOpKind::SAdd,
+                max.clone() - 5,
+                IntBits::from_signed(bits, &(max - 2)).cast(64),
+            ),
+            (
+                BinaryArithOpKind::SSub,
+                min.clone() + 5,
+                IntBits::from_signed(bits, &(min + 2)).cast(64),
+            ),
+        ] {
+            let base = IntBits::from_signed(bits, &base);
+            let ssa = main_program(
+                &[Type::int(1), Type::int(64), Type::int(1)],
+                &[Type::int(64)],
+                move |e, params| {
+                    // Both operands' top limbs are unknown at compile time, so both sign bits are
+                    // cut: the left one a selection, and the right one a sign extension.
+                    let lhs = e.int_const(base.clone());
+                    let zero = e.int_const(IntBits::zero(bits));
+                    let lhs = e.select(params[2], lhs, zero);
+                    let rhs = e.fresh_value();
+                    e.emit(OpCode::SExt {
+                        result: rhs,
+                        value: params[1],
+                        from_bits: 64,
+                        to_bits: bits,
+                    });
+
+                    let (then_id, _) = e.add_block();
+                    let (else_id, _) = e.add_block();
+                    let (merge_id, _) = e.add_block();
+                    e.seal_and_switch(Terminator::JmpIf(params[0], then_id, else_id), then_id);
+                    let answer = e.bin(kind, lhs, rhs);
+                    let answer = e.cast_to(CastTarget::Int(64), answer);
+                    e.seal_and_switch(Terminator::Jmp(merge_id, vec![answer]), else_id);
+                    let zero = e.int_const(IntBits::zero(64));
+                    e.seal_and_switch(Terminator::Jmp(merge_id, vec![zero]), merge_id);
+                    vec![e.add_parameter(Type::int(64))]
+                },
+            );
+            let what = format!("a guarded int{bits} {kind:?}");
+            let compiled = Compiled::new(ssa)
+                .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+
+            let zero = IntBits::zero(64);
+            for wasm in [false, true] {
+                // A refusal is a trap on the VM, and a witness the constraints refuse on WASM.
+                let refused = |verdict: &Verdict| {
+                    if wasm {
+                        verdict.rejects()
+                    } else {
+                        verdict.is_refusal()
+                    }
+                };
+                let run = |taken: u128, rhs: u128, answer: &IntBits| {
+                    let inputs = input_block(&[
+                        &IntBits::from_u128(1, taken),
+                        &IntBits::from_u128(64, rhs),
+                        &IntBits::from_u128(1, 1),
+                        answer,
+                    ]);
+                    if wasm {
+                        compiled.run_wasm(&inputs).expect("the WASM lane builds")
+                    } else {
+                        compiled.run(&inputs)
+                    }
+                };
+                let lane = if wasm { "WASM" } else { "VM" };
+                let verdict = run(1, 3, &low);
+                assert!(
+                    verdict.is_accepted(),
+                    "{what}, {lane}, taken, fits: {verdict:?}"
+                );
+                let verdict = run(1, 7, &zero);
+                assert!(
+                    refused(&verdict),
+                    "{what}, {lane}, taken, overflows: {verdict:?}"
+                );
+                let verdict = run(0, 7, &zero);
+                assert!(
+                    verdict.is_accepted(),
+                    "{what}, {lane}, not taken, overflows: {verdict:?}"
+                );
+            }
+        }
+    }
+}
+
+/// An asserted signed ordering is the opposite of the unsigned one wherever the signs differ, and
+/// under a witnessed condition holds only where the condition does.
+///
+/// The left operand is negative and the right one positive, so `lhs < rhs` holds signed and fails
+/// unsigned, and the reverse fails signed and holds unsigned. 200 is the single cell, 253 the chain
+/// on a decomposition, and 320 limbs.
+#[test]
+fn a_guarded_signed_assertion_holds_only_where_its_guard_does() {
+    for bits in [200usize, 253, 320] {
+        let sign = IntBits::from_signed(bits, &-(SignedValue::from(1u8) << (bits - 1)));
+        for swapped in [false, true] {
+            let sign = sign.clone();
+            let ssa = main_program(
+                &[Type::int(1), Type::int(64)],
+                &[Type::int(1)],
+                move |e, params| {
+                    let positive = e.cast_to(CastTarget::Int(bits), params[1]);
+                    let top = e.int_const(sign.clone());
+                    let negative = e.bin(BinaryArithOpKind::Or, positive, top);
+                    let (lhs, rhs) = if swapped {
+                        (positive, negative)
+                    } else {
+                        (negative, positive)
+                    };
+
+                    let (then_id, _) = e.add_block();
+                    let (merge_id, _) = e.add_block();
+                    e.seal_and_switch(Terminator::JmpIf(params[0], then_id, merge_id), then_id);
+                    e.emit(OpCode::AssertCmp {
+                        kind: CmpKind::SLt,
+                        lhs,
+                        rhs,
+                    });
+                    e.seal_and_switch(Terminator::Jmp(merge_id, vec![]), merge_id);
+                    vec![params[0]]
+                },
+            );
+            let what = format!("a guarded int{bits} signed assertion, swapped: {swapped}");
+            let compiled = Compiled::new(ssa)
+                .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+
+            for wasm in [false, true] {
+                // A refusal is a trap on the VM, and a witness the constraints refuse on WASM.
+                let refused = |verdict: &Verdict| {
+                    if wasm {
+                        verdict.rejects()
+                    } else {
+                        verdict.is_refusal()
+                    }
+                };
+                let run = |taken: u128| {
+                    let inputs = input_block(&[
+                        &IntBits::from_u128(1, taken),
+                        &IntBits::from_u128(64, 7),
+                        &IntBits::from_u128(1, taken),
+                    ]);
+                    if wasm {
+                        compiled.run_wasm(&inputs).expect("the WASM lane builds")
+                    } else {
+                        compiled.run(&inputs)
+                    }
+                };
+                let lane = if wasm { "WASM" } else { "VM" };
+                let verdict = run(1);
+                if swapped {
+                    assert!(refused(&verdict), "{what}, {lane}, taken: {verdict:?}");
+                } else {
+                    assert!(verdict.is_accepted(), "{what}, {lane}, taken: {verdict:?}");
+                }
+                let verdict = run(0);
+                assert!(
+                    verdict.is_accepted(),
+                    "{what}, {lane}, not taken: {verdict:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A witnessed sign extension agrees with the model at every target width.
+///
+/// Each source is a corner constant selected by a witnessed bit against its neighbour, so one
+/// program holds them all and the two runs reach every one; the answer is compared whole, so every
+/// limb of it is read. 64 to 200 and 100 to 253 add the sign as a place value in one element; 253
+/// to 254 fills limbs from a decomposition; 64 to 257 fills a one-bit top limb; 257 to 320 reads
+/// the sign out of a one-bit top limb; and 300 to 1000 fills eleven limbs past the source.
+#[test]
+fn a_witnessed_sign_extension_agrees_with_the_model() {
+    for (from, to) in [
+        (64usize, 200usize),
+        (100, 253),
+        (253, 254),
+        (64, 257),
+        (257, 320),
+        (300, 1000),
+    ] {
+        let values = signed_corners(from);
+        let program_values = values.clone();
+        let ssa = main_program(&[Type::int(1)], &[Type::int(1)], move |e, params| {
+            let mut all = None;
+            for (index, value) in program_values.iter().enumerate() {
+                let next = &program_values[(index + 1) % program_values.len()];
+                let chosen = e.int_const(value.clone());
+                let other = e.int_const(next.clone());
+                let source = e.select(params[0], other, chosen);
+                let extended = e.fresh_value();
+                e.emit(OpCode::SExt {
+                    result: extended,
+                    value: source,
+                    from_bits: from,
+                    to_bits: to,
+                });
+                let want = e.int_const(value.sign_extend(to));
+                let other_want = e.int_const(next.sign_extend(to));
+                let want = e.select(params[0], other_want, want);
+                let same = e.eq(extended, want);
+                all = Some(match all {
+                    None => same,
+                    Some(all) => e.bin(BinaryArithOpKind::And, all, same),
+                });
+            }
+            vec![all.expect("there is at least one corner")]
+        });
+        let what = format!("a witnessed sign extension from int{from} to int{to}");
+        let compiled =
+            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+
+        let one = IntBits::from_u128(1, 1);
+        for flag in [0u128, 1] {
+            let flag = IntBits::from_u128(1, flag);
+            let verdict = compiled.run(&input_block(&[&flag, &one]));
+            assert!(
+                verdict.is_accepted(),
+                "{what}, selector {flag:?}: {verdict:?}"
+            );
+            let wrong = compiled.run(&input_block(&[&flag, &IntBits::zero(1)]));
+            assert!(
+                !wrong.is_accepted(),
+                "{what}, selector {flag:?}: a wrong answer was accepted"
+            );
+        }
+        let verdict = compiled
+            .run_wasm(&input_block(&[&IntBits::zero(1), &one]))
+            .expect("the WASM lane builds");
+        assert!(
+            verdict.is_accepted(),
+            "{what} on the WASM lane: {verdict:?}"
+        );
+    }
+}
+
+/// A witnessed sign extension whose source's top limb is known at compile time agrees with the
+/// model, and so with what the same extension of the same value computes elsewhere.
+///
+/// Its sign is then known, and the fill is constants rather than a cut: clear for a value widened
+/// from a parameter, whose limbs above the parameter are known zeros, and set for a witnessed
+/// negative constant, every limb of which is known. The answer is read whole and through a shift,
+/// so that every limb of it reaches a constraint.
+#[test]
+fn a_sign_extension_of_a_known_top_limb_agrees_with_the_model() {
+    let (from, to) = (320usize, 1000usize);
+    let negative = IntBits::from_signed(from, &-(SignedValue::from(5u8) << 200usize));
+    for set in [false, true] {
+        let constant = negative.clone();
+        let ssa = main_program(&[Type::int(64)], &[Type::int(1)], move |e, params| {
+            let source = if set {
+                let constant = e.int_const(constant.clone());
+                e.cast_to(CastTarget::WitnessOf, constant)
+            } else {
+                e.cast_to(CastTarget::Int(from), params[0])
+            };
+            let extended = e.fresh_value();
+            e.emit(OpCode::SExt {
+                result: extended,
+                value: source,
+                from_bits: from,
+                to_bits: to,
+            });
+            // The parameter is or-ed into both sides, so that the witnessed constant meets a
+            // witnessed value limb by limb.
+            let low = e.cast_to(CastTarget::Int(to), params[0]);
+            let (extended, want) = if set {
+                let want = e.int_const(constant.sign_extend(to));
+                (
+                    e.bin(BinaryArithOpKind::Or, extended, low),
+                    e.bin(BinaryArithOpKind::Or, want, low),
+                )
+            } else {
+                (extended, low)
+            };
+            let same = e.eq(extended, want);
+            let amount = e.int_const(IntBits::from_u128(to, 900));
+            let top = e.bin(BinaryArithOpKind::UShr, extended, amount);
+            let top_want = e.bin(BinaryArithOpKind::UShr, want, amount);
+            let top_same = e.eq(top, top_want);
+            vec![e.bin(BinaryArithOpKind::And, same, top_same)]
+        });
+        let what = format!("a sign extension of a known top limb, sign set: {set}");
+        let compiled =
+            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        let parameter = IntBits::all_ones(64);
+        let one = IntBits::from_u128(1, 1);
+        let verdict = compiled.run(&input_block(&[&parameter, &one]));
+        assert!(verdict.is_accepted(), "{what}: {verdict:?}");
+        let verdict = compiled
+            .run_wasm(&input_block(&[&parameter, &one]))
+            .expect("the WASM lane builds");
+        assert!(verdict.is_accepted(), "{what}, WASM: {verdict:?}");
+    }
+}
+
+/// The mutation test for a sign extension into the representation, whose one column of its own is
+/// the source's sign bit: every target limb above the source is that bit times all ones.
+#[test]
+fn every_witness_column_of_a_sign_extension_is_pinned() {
+    let to = 320usize;
+    let ssa = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
+        let extended = e.fresh_value();
+        e.emit(OpCode::SExt {
+            result: extended,
+            value: params[0],
+            from_bits: 64,
+            to_bits: to,
+        });
+        let amount = e.int_const(IntBits::from_u128(to, (to - 64) as u128));
+        let top = e.bin(BinaryArithOpKind::UShr, extended, amount);
+        vec![e.cast_to(CastTarget::Int(64), top)]
+    });
+    let compiled = Compiled::new(ssa)
+        .unwrap_or_else(|error| panic!("a sign extension to int{to} does not compile: {error}"));
+    let negative = IntBits::from_signed(64, &SignedValue::from(-3));
+    assert_every_column_is_pinned(
+        "a sign extension from int64 to int320",
+        &compiled,
+        &[&negative, &IntBits::all_ones(64)],
+    );
+}
+
+// THE REST OF THE WITNESS LANE
+// ================================================================================================
 
 /// Assert that `text` contains every one of `expected`.
 ///
@@ -2437,6 +3607,160 @@ fn a_dead_witnessed_signed_operation_still_rejects_its_overflow() {
     }
 }
 
+/// The same for the signed five past the single cell, whose rejections are built by the carry
+/// chain's sign relation and the sign-magnitude gadgets rather than in one element.
+///
+/// Each operand is a witnessed selection between the pair that fits and the pair that fails, so
+/// both are witnessed with neither sign known at compile time. A sum and a product leave the top,
+/// a difference the bottom, a division is `INT_MIN / -1`, and a remainder is by zero. 200 is the
+/// gadgets on a decomposition of each operand, and 320 on limbs.
+#[test]
+fn a_dead_wide_witnessed_signed_operation_still_rejects_its_failure() {
+    let one = IntBits::from_u128(1, 1);
+    for bits in [200usize, 320] {
+        let signed = |v: i128| IntBits::from_signed(bits, &SignedValue::from(v));
+        let power = |n: usize| IntBits::from_biguint(bits, &(BigUint::from(1u8) << n));
+        let min = IntBits::from_signed(bits, &IntBits::signed_min(bits));
+        let cases = [
+            (
+                BinaryArithOpKind::SAdd,
+                (signed(1), signed(1)),
+                (power(bits - 2), power(bits - 2)),
+            ),
+            (
+                BinaryArithOpKind::SSub,
+                (signed(1), signed(2)),
+                (min.clone(), signed(1)),
+            ),
+            (
+                BinaryArithOpKind::SMul,
+                (signed(3), signed(-5)),
+                (power(bits / 2), power(bits / 2 - 1)),
+            ),
+            (
+                BinaryArithOpKind::SDiv,
+                (signed(-7), signed(2)),
+                (min.clone(), signed(-1)),
+            ),
+            (
+                BinaryArithOpKind::SRem,
+                (signed(-7), signed(2)),
+                (signed(-7), signed(0)),
+            ),
+        ];
+        for (kind, fits, fails) in cases {
+            let (program_fits, program_fails) = (fits.clone(), fails.clone());
+            let ssa = main_program(&[Type::int(1)], &[Type::int(1)], move |e, params| {
+                let operand = |e: &mut HLBlockEmitter<'_>, fits: &IntBits, fails: &IntBits| {
+                    let fits = e.int_const(fits.clone());
+                    let fails = e.int_const(fails.clone());
+                    e.select(params[0], fits, fails)
+                };
+                let lhs = operand(e, &program_fits.0, &program_fails.0);
+                let rhs = operand(e, &program_fits.1, &program_fails.1);
+                e.bin(kind, lhs, rhs);
+                vec![e.int_const(IntBits::from_u128(1, 1))]
+            });
+            let what = format!("a dead int{bits} {kind:?}");
+            let compiled = Compiled::new(ssa)
+                .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+            assert!(
+                mavros_int_semantics::eval(IntOp::from(kind), &fits.0, &fits.1)
+                    .value()
+                    .is_some(),
+                "{what}: the model refuses the pair meant to fit"
+            );
+            assert!(
+                mavros_int_semantics::eval(IntOp::from(kind), &fails.0, &fails.1)
+                    .value()
+                    .is_none(),
+                "{what}: the model accepts the pair meant to fail"
+            );
+            for wasm in [false, true] {
+                // A refusal is a trap on the VM, and a witness the constraints refuse on WASM.
+                let refused = |verdict: &Verdict| {
+                    if wasm {
+                        verdict.rejects()
+                    } else {
+                        verdict.is_refusal()
+                    }
+                };
+                let run = |selected: u128| {
+                    let inputs = input_block(&[&IntBits::from_u128(1, selected), &one]);
+                    if wasm {
+                        compiled.run_wasm(&inputs).expect("the WASM lane builds")
+                    } else {
+                        compiled.run(&inputs)
+                    }
+                };
+                let lane = if wasm { "WASM" } else { "VM" };
+                let verdict = run(1);
+                assert!(verdict.is_accepted(), "{what}, {lane}, fits: {verdict:?}");
+                let verdict = run(0);
+                assert!(
+                    refused(&verdict),
+                    "{what}, {lane}, fails, and nothing reads it: {verdict:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A pure `INT_MIN` divided by a witnessed `-1` is refused, as is its remainder.
+///
+/// A division by a witness carries no check of its own from the guard IR, as its lowering refuses
+/// a zero divisor and `INT_MIN / -1` itself, and a known dividend is the case that leaves the
+/// lowering the least to read: its sign and magnitude are taken at compile time. 64 and 126 are
+/// the single cell, 127 the sign-magnitude gadgets on a decomposition, and 320 on limbs, whose
+/// divisor is a sign extension of the parameter.
+#[test]
+fn a_pure_int_min_over_a_witnessed_minus_one_is_refused() {
+    for (param, bits) in [(64usize, 64usize), (126, 126), (127, 127), (64, 320)] {
+        for kind in [BinaryArithOpKind::SDiv, BinaryArithOpKind::SRem] {
+            let ssa = main_program(&[Type::int(param)], &[Type::int(1)], move |e, params| {
+                let divisor = if param == bits {
+                    params[0]
+                } else {
+                    let extended = e.fresh_value();
+                    e.emit(OpCode::SExt {
+                        result: extended,
+                        value: params[0],
+                        from_bits: param,
+                        to_bits: bits,
+                    });
+                    extended
+                };
+                let min = e.int_const(IntBits::one(bits).shifted_left(bits - 1));
+                let answer = e.bin(kind, min, divisor);
+                let zero = e.int_const(IntBits::zero(bits));
+                vec![e.eq(answer, zero)]
+            });
+            let what = format!("int{bits} INT_MIN {kind:?} a witnessed divisor");
+            let compiled = Compiled::new(ssa)
+                .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+
+            // Refused whichever answer is declared, so it is the division that fails rather than
+            // the return check.
+            let minus_one = IntBits::all_ones(param);
+            for declared in [0u128, 1] {
+                let inputs = input_block(&[&minus_one, &IntBits::from_u128(1, declared)]);
+                let verdict = compiled.run(&inputs);
+                assert!(verdict.is_refusal(), "{what} of -1: {verdict:?}");
+                let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
+                assert!(verdict.rejects(), "{what} of -1, WASM: {verdict:?}");
+            }
+
+            // `INT_MIN / 1` is `INT_MIN`, which is not zero, and `INT_MIN % 1` is zero.
+            let declared = IntBits::from_u128(1, u128::from(kind == BinaryArithOpKind::SRem));
+            let inputs = input_block(&[&IntBits::one(param), &declared]);
+            let verdict = compiled.run(&inputs);
+            assert!(verdict.is_accepted(), "{what} of 1: {verdict:?}");
+            let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
+            assert!(verdict.is_accepted(), "{what} of 1, WASM: {verdict:?}");
+        }
+    }
+}
+
 /// A witnessed bitwise operation computes at **every** width, as the unsigned sum, difference and
 /// ordering do, but by a different route: limb by limb with no carry between them.
 ///
@@ -2619,17 +3943,531 @@ fn a_complement_outside_the_witness_domain_computes_at_every_width() {
     }
 }
 
-/// Every signed operation is capped at one host word, which is the frontier unit 13 moves.
-#[test]
-fn a_signed_operation_above_sixty_four_bits_is_refused() {
-    contains_all(
-        &refusal_for(BinaryArithOpKind::SShl, 128, 128),
-        &[
-            "error: a signed int128 left shift is not supported",
-            "= note: a signed operand is read as two's complement in one integer cell",
-        ],
-    );
+// THE PURE SIGNED LANE
+// ================================================================================================
+
+/// What a pure signed sweep computes: a signed arithmetic operation, or the signed ordering.
+#[derive(Clone, Copy, Debug)]
+enum PureSigned {
+    Arith(BinaryArithOpKind),
+    Ordering,
 }
+
+impl PureSigned {
+    /// Every signed operation there is, the ordering included.
+    const ALL: [PureSigned; 8] = [
+        PureSigned::Arith(BinaryArithOpKind::SAdd),
+        PureSigned::Arith(BinaryArithOpKind::SSub),
+        PureSigned::Arith(BinaryArithOpKind::SMul),
+        PureSigned::Arith(BinaryArithOpKind::SDiv),
+        PureSigned::Arith(BinaryArithOpKind::SRem),
+        PureSigned::Arith(BinaryArithOpKind::SShl),
+        PureSigned::Arith(BinaryArithOpKind::SShr),
+        PureSigned::Ordering,
+    ];
+
+    fn emit(self, e: &mut HLBlockEmitter<'_>, lhs: ValueId, rhs: ValueId) -> ValueId {
+        match self {
+            PureSigned::Arith(kind) => e.bin(kind, lhs, rhs),
+            PureSigned::Ordering => e.cmp(lhs, rhs, CmpKind::SLt),
+        }
+    }
+
+    /// The model's answer, or [`None`] where it rejects the operands.
+    fn model(self, lhs: &IntBits, rhs: &IntBits) -> Option<IntBits> {
+        match self {
+            PureSigned::Arith(kind) => {
+                mavros_int_semantics::eval(IntOp::from(kind), lhs, rhs).value()
+            }
+            PureSigned::Ordering => Some(IntBits::from_u128(
+                1,
+                u128::from(lhs.compare(CmpOp::SLt, rhs)),
+            )),
+        }
+    }
+
+    /// The right operand a triple takes on a run that does not name it: zero, except for a divisor.
+    fn idle_rhs(self, bits: usize) -> IntBits {
+        match self {
+            PureSigned::Arith(BinaryArithOpKind::SDiv | BinaryArithOpKind::SRem) => {
+                IntBits::from_u128(bits, 1)
+            }
+            PureSigned::Arith(_) | PureSigned::Ordering => IntBits::zero(bits),
+        }
+    }
+}
+
+/// The signed corners of a `bits`-wide value: both boundaries and one step inside the lower, zero
+/// and one either side of it, and a positive value with its low half set.
+fn signed_corners(bits: usize) -> Vec<IntBits> {
+    let signed = |v: SignedValue| IntBits::from_signed(bits, &v);
+    let (min, max) = (IntBits::signed_min(bits), IntBits::signed_max(bits));
+    dedup(vec![
+        signed(SignedValue::from(0)),
+        signed(SignedValue::from(1)),
+        signed(SignedValue::from(-1)),
+        signed(min.clone()),
+        signed(min + 1),
+        signed(max),
+        IntBits::all_ones(bits / 2).cast(bits),
+    ])
+}
+
+/// How many operations one pure program holds: compiling one grows faster than linearly in its
+/// length, so a sweep is many small programs rather than one large one.
+const PURE_TRIPLES_PER_PROGRAM: usize = 25;
+
+/// A few operand pairs per signed operation at `bits`: each combination of signs, the boundaries,
+/// and every reason the model has to reject the operation, each at least once.
+fn signed_spot_triples(bits: usize) -> Vec<(PureSigned, IntBits, IntBits)> {
+    use BinaryArithOpKind::{SAdd, SDiv, SMul, SRem, SShl, SShr, SSub};
+    let v = |v: i64| IntBits::from_signed(bits, &SignedValue::from(v));
+    let min = IntBits::from_signed(bits, &IntBits::signed_min(bits));
+    let max = IntBits::from_signed(bits, &IntBits::signed_max(bits));
+    let half = IntBits::all_ones(bits / 2).cast(bits);
+    let amount = |a: usize| IntBits::from_u128(bits, a as u128);
+    let arith = PureSigned::Arith;
+    vec![
+        (arith(SAdd), max.clone(), v(1)),
+        (arith(SAdd), min.clone(), v(-1)),
+        (arith(SAdd), min.clone(), max.clone()),
+        (arith(SAdd), half.clone(), v(-5)),
+        (arith(SSub), min.clone(), v(1)),
+        (arith(SSub), max.clone(), v(-1)),
+        (arith(SSub), v(-1), min.clone()),
+        (arith(SSub), v(0), max.clone()),
+        (arith(SMul), min.clone(), v(-1)),
+        (arith(SMul), min.clone(), v(1)),
+        (arith(SMul), max.clone(), v(-1)),
+        (arith(SMul), half.clone(), half.clone()),
+        (arith(SMul), half.clone(), v(-3)),
+        (arith(SMul), v(-1), v(-1)),
+        (arith(SDiv), min.clone(), v(-1)),
+        (arith(SDiv), v(7), v(0)),
+        (arith(SDiv), min.clone(), v(2)),
+        (arith(SDiv), v(-7), v(2)),
+        (arith(SDiv), v(7), v(-2)),
+        (arith(SDiv), min.clone(), min.clone()),
+        (arith(SRem), min.clone(), v(-1)),
+        (arith(SRem), v(7), v(0)),
+        (arith(SRem), v(-7), v(2)),
+        (arith(SRem), v(7), v(-2)),
+        (arith(SRem), min.clone(), max.clone()),
+        (arith(SShl), v(-3), amount(bits - 1)),
+        (arith(SShl), half.clone(), amount(HOST_LIMB_BITS)),
+        (arith(SShl), v(1), amount(bits)),
+        (arith(SShl), v(1), v(-1)),
+        (arith(SShr), min.clone(), amount(bits - 1)),
+        (arith(SShr), min.clone(), amount(HOST_LIMB_BITS)),
+        (arith(SShr), max.clone(), amount(1)),
+        (arith(SShr), v(-1), amount(bits)),
+        (arith(SShr), v(-1), v(-1)),
+        (PureSigned::Ordering, min.clone(), max.clone()),
+        (PureSigned::Ordering, max, min),
+        (PureSigned::Ordering, v(-1), v(0)),
+        (PureSigned::Ordering, v(0), v(-1)),
+        (PureSigned::Ordering, v(-1), v(-1)),
+    ]
+}
+
+/// `cond ? if_t : if_f` at `bits`, computed rather than selected: the AD half of a program keeps a
+/// copy of each unconstrained function, and nothing there lowers a `Select`. The condition is
+/// broadcast into a mask by moving it to the sign bit and back arithmetically.
+fn pure_choice(
+    e: &mut HLBlockEmitter<'_>,
+    cond: ValueId,
+    if_t: ValueId,
+    if_f: ValueId,
+    bits: usize,
+) -> ValueId {
+    let top = e.int_const(IntBits::from_u128(bits, (bits - 1) as u128));
+    let cond = e.cast_to(CastTarget::Int(bits), cond);
+    let raised = e.bin(BinaryArithOpKind::UShl, cond, top);
+    let mask = e.bin(BinaryArithOpKind::SShr, raised, top);
+    let unmask = e.not(mask);
+    let kept = e.bin(BinaryArithOpKind::And, if_t, mask);
+    let other = e.bin(BinaryArithOpKind::And, if_f, unmask);
+    e.bin(BinaryArithOpKind::Or, kept, other)
+}
+
+/// `main(chosen: u1, name: u32, also_chosen: u1) -> u1`, which hands its parameters to an
+/// **unconstrained** function whose body `body` builds, and answers what that answers.
+///
+/// Every value in the body is pure, and the parameters are not literals, so it is the
+/// interpreter's and the compiled WASM's own arithmetic that answers, behind the guard IR in front
+/// of it, with no constraint anywhere and no constant folder able to answer first.
+fn unconstrained_program(
+    body: impl FnOnce(&mut HLBlockEmitter<'_>, &[ValueId]) -> ValueId,
+) -> HLSSA {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let body_id = ssa.add_function("pure_body".to_string());
+    let mut sb = HLSSABuilder::new(&mut ssa);
+    let parameters = [Type::int(1), Type::int(32), Type::int(1)];
+    sb.modify_function(body_id, |b| {
+        b.function.add_return_type(Type::int(1));
+        let entry = b.function.get_entry_id();
+        let mut e = b
+            .block(entry)
+            .with_source_location(SourceLocation::synthetic("pure_body"));
+        let params: Vec<ValueId> = parameters
+            .iter()
+            .map(|t| e.add_parameter(t.clone()))
+            .collect();
+        let answer = body(&mut e, &params);
+        e.terminate_return(vec![answer]);
+    });
+    sb.modify_function(main_id, |b| {
+        b.function.add_return_type(Type::int(1));
+        let entry = b.function.get_entry_id();
+        let mut e = b
+            .block(entry)
+            .with_source_location(SourceLocation::synthetic("oracle_main"));
+        let params: Vec<ValueId> = parameters
+            .iter()
+            .map(|t| e.add_parameter(t.clone()))
+            .collect();
+        let results = e.call_unconstrained(body_id, params, 1);
+        e.terminate_return(results);
+    });
+    ssa
+}
+
+/// The inputs an [`unconstrained_program`] runs on: both choices made, `name` named, and the answer
+/// `1` expected.
+fn unconstrained_inputs(name: u128) -> Vec<InputValueOrdered> {
+    let one = IntBits::from_u128(1, 1);
+    input_block(&[&one, &IntBits::from_u128(32, name), &one, &one])
+}
+
+/// `triples`, computed outside the witness domain, against the model, on both lanes.
+///
+/// The operations live in an [`unconstrained_program`]. Each operand is a corner constant chosen by
+/// a parameter, and the pairs the model rejects are chosen by a second parameter naming them, as
+/// [`check_limbed_pairs`] does.
+fn check_pure_signed_triples(bits: usize, triples: Vec<(PureSigned, IntBits, IntBits)>) {
+    let answers: Vec<Option<IntBits>> = triples.iter().map(|(op, a, b)| op.model(a, b)).collect();
+    let zero = IntBits::zero(bits);
+    let unnamed: Vec<IntBits> = triples
+        .iter()
+        .map(|(op, _, _)| {
+            op.model(&zero, &op.idle_rhs(bits))
+                .expect("the operation accepts zero against its idle right operand")
+        })
+        .collect();
+
+    let (program_triples, program_answers) = (triples.clone(), answers.clone());
+    let ssa = unconstrained_program(move |e, params| {
+        let zero = e.int_const(IntBits::zero(bits));
+        let mut all = None;
+        for (index, (((op, lhs, rhs), answer), unnamed)) in program_triples
+            .iter()
+            .zip(&program_answers)
+            .zip(&unnamed)
+            .enumerate()
+        {
+            let (left_chosen, right_chosen, want) = match answer {
+                Some(want) => (params[0], params[2], want.clone()),
+                None => {
+                    let name = e.int_const(IntBits::from_u128(32, index as u128));
+                    let named = e.eq(params[1], name);
+                    (named, named, unnamed.clone())
+                }
+            };
+            let lhs = e.int_const(lhs.clone());
+            let lhs = pure_choice(e, left_chosen, lhs, zero, bits);
+            let rhs = e.int_const(rhs.clone());
+            let idle = e.int_const(op.idle_rhs(bits));
+            let rhs = pure_choice(e, right_chosen, rhs, idle, bits);
+            let got = op.emit(e, lhs, rhs);
+            let want = e.int_const(want);
+            let same = e.eq(got, want);
+            all = Some(match all {
+                None => same,
+                Some(all) => e.bin(BinaryArithOpKind::And, all, same),
+            });
+        }
+        all.expect("there is at least one triple")
+    });
+    let compiled = Compiled::new(ssa)
+        .unwrap_or_else(|error| panic!("pure signed int{bits} does not compile: {error}"));
+
+    let inputs = unconstrained_inputs;
+    let none = u128::from(u32::MAX);
+    let verdict = compiled.run(&inputs(none));
+    assert!(
+        verdict.is_accepted(),
+        "pure signed int{bits} disagrees with the model on some triple it accepts: {verdict:?}"
+    );
+    let verdict = compiled
+        .run_wasm(&inputs(none))
+        .expect("the WASM lane builds");
+    assert!(
+        verdict.is_accepted(),
+        "pure signed int{bits} disagrees with the model on the WASM lane: {verdict:?}"
+    );
+
+    for (index, ((op, lhs, rhs), answer)) in triples.iter().zip(&answers).enumerate() {
+        if answer.is_some() {
+            continue;
+        }
+        let verdict = compiled.run(&inputs(index as u128));
+        assert!(
+            verdict.is_refusal(),
+            "pure {op:?}({lhs:?}, {rhs:?}) at {bits} bits is rejected by the model, but the \
+             pipeline answered {verdict:?}"
+        );
+        let verdict = compiled
+            .run_wasm(&inputs(index as u128))
+            .expect("the WASM lane builds");
+        assert!(
+            verdict.is_refusal(),
+            "pure {op:?}({lhs:?}, {rhs:?}) at {bits} bits is rejected by the model, but the \
+             WASM lane answered {verdict:?}"
+        );
+    }
+}
+
+/// Every signed operation outside the witness domain agrees with the model past the host limb:
+/// at 100 bits in the double lane, whose sign bit is not the lane's top bit, and at 200 in the
+/// wide one, whose top limb is partial.
+#[test]
+fn a_pure_signed_operation_agrees_with_the_model_past_the_host_limb() {
+    for bits in [100usize, 200] {
+        for chunk in signed_spot_triples(bits).chunks(PURE_TRIPLES_PER_PROGRAM) {
+            check_pure_signed_triples(bits, chunk.to_vec());
+        }
+    }
+}
+
+/// A pure sign extension agrees with the model on both lanes: within the narrow range, where it is
+/// a place value added in one field element, from a source past the host limb, and past the narrow
+/// range, where it is two shifts at the target width.
+#[test]
+fn a_pure_sign_extension_agrees_with_the_model() {
+    let extensions = [(100usize, 128usize), (100, 1000), (128, 129), (200, 16384)];
+    let ssa = unconstrained_program(move |e, params| {
+        let mut all = None;
+        for (from, to) in extensions {
+            let zero = e.int_const(IntBits::zero(from));
+            for value in signed_corners(from) {
+                let want = e.int_const(value.sign_extend(to));
+                let value = e.int_const(value);
+                let value = pure_choice(e, params[0], value, zero, from);
+                let extended = e.sext(value, from, to);
+                let same = e.eq(extended, want);
+                all = Some(match all {
+                    None => same,
+                    Some(all) => e.bin(BinaryArithOpKind::And, all, same),
+                });
+            }
+        }
+        all.expect("there is at least one extension")
+    });
+    let compiled = Compiled::new(ssa)
+        .unwrap_or_else(|error| panic!("a pure sign extension does not compile: {error}"));
+    let inputs = unconstrained_inputs(0);
+    let verdict = compiled.run(&inputs);
+    assert!(verdict.is_accepted(), "{verdict:?}");
+    let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
+    assert!(verdict.is_accepted(), "WASM: {verdict:?}");
+}
+
+/// A pure signed operation under a witnessed condition is checked only where the condition holds.
+///
+/// Inside a branch on a witness a pure operation is guarded, so its rejection is an assertion under
+/// the guard, built by `LowerPureGuards`' guarded arms from the same sign bits and magnitudes as
+/// the unguarded ones. Each operand is a pure value a loop computes, so that it is never a literal
+/// and no folder answers first, and each triple sits under a condition of its own: with every
+/// condition off the program is accepted whatever the operands, and with one on it agrees with the
+/// model or is refused where the model rejects.
+#[test]
+fn a_guarded_pure_signed_operation_is_checked_only_where_its_guard_holds() {
+    for bits in [100usize, 200] {
+        let signed = |v: i64| IntBits::from_signed(bits, &SignedValue::from(v));
+        let min = IntBits::from_signed(bits, &IntBits::signed_min(bits));
+        let max = IntBits::from_signed(bits, &IntBits::signed_max(bits));
+        let amount = |v: usize| IntBits::from_u128(bits, v as u128);
+        let arith = PureSigned::Arith;
+        use BinaryArithOpKind::{SAdd, SDiv, SMul, SRem, SShl, SShr, SSub};
+        let triples = vec![
+            (arith(SAdd), max.clone(), signed(1)),
+            (arith(SAdd), max.clone(), signed(-1)),
+            (arith(SSub), min.clone(), signed(1)),
+            (arith(SSub), min.clone(), signed(-1)),
+            (arith(SMul), min.clone(), signed(-1)),
+            (arith(SMul), min.clone(), signed(1)),
+            (arith(SMul), max.clone(), signed(-1)),
+            (arith(SDiv), min.clone(), signed(-1)),
+            (arith(SDiv), min.clone(), signed(2)),
+            (arith(SDiv), signed(7), signed(0)),
+            (arith(SRem), min.clone(), signed(-1)),
+            (arith(SRem), signed(-7), signed(2)),
+            (arith(SShl), signed(-3), amount(bits)),
+            (arith(SShl), signed(-3), amount(bits - 1)),
+            (arith(SShr), min.clone(), signed(-1)),
+            (arith(SShr), min.clone(), amount(bits - 1)),
+            (PureSigned::Ordering, min.clone(), max.clone()),
+        ];
+        check_guarded_pure_signed(bits, &triples);
+    }
+}
+
+/// `triples` as pure operations a loop computes the operands of, each under a witnessed condition
+/// of its own, against the model — see
+/// [`a_guarded_pure_signed_operation_is_checked_only_where_its_guard_holds`].
+fn check_guarded_pure_signed(bits: usize, triples: &[(PureSigned, IntBits, IntBits)]) {
+    let answers: Vec<Option<IntBits>> = triples.iter().map(|(op, a, b)| op.model(a, b)).collect();
+    let (program_triples, program_answers) = (triples.to_vec(), answers.clone());
+    let mut parameters = vec![Type::int(1); triples.len()];
+    parameters.push(Type::int(8));
+    let ssa = main_program(&parameters, &[Type::int(1)], move |e, params| {
+        let yes = e.int_const(IntBits::from_u128(1, 1));
+        let start = e.int_const(IntBits::zero(8));
+        let (head, _) = e.add_block();
+        let (body, _) = e.add_block();
+        let (done, _) = e.add_block();
+        e.seal_and_switch(Terminator::Jmp(head, vec![start, yes]), head);
+        let count = e.add_parameter(Type::int(8));
+        let last = e.add_parameter(Type::int(1));
+        let limit = e.int_const(IntBits::from_u128(8, 2));
+        let more = e.cmp(count, limit, CmpKind::ULt);
+        e.seal_and_switch(Terminator::JmpIf(more, body, done), body);
+
+        // Zero, but only once the loop has run, so every operand below is never a literal.
+        let hundred = e.int_const(IntBits::from_u128(8, 100));
+        let nothing = e.bin(BinaryArithOpKind::UDiv, count, hundred);
+        let nothing = e.cast_to(CastTarget::Int(bits), nothing);
+
+        let mut all = yes;
+        for (index, ((op, lhs, rhs), answer)) in
+            program_triples.iter().zip(&program_answers).enumerate()
+        {
+            let lhs = e.int_const(lhs.clone());
+            let lhs = e.bin(BinaryArithOpKind::Xor, nothing, lhs);
+            let rhs = e.int_const(rhs.clone());
+            let rhs = e.bin(BinaryArithOpKind::Xor, nothing, rhs);
+            let (taken, _) = e.add_block();
+            let (skipped, _) = e.add_block();
+            let (merge, _) = e.add_block();
+            e.seal_and_switch(Terminator::JmpIf(params[index], taken, skipped), taken);
+            let got = op.emit(e, lhs, rhs);
+            let agrees = match answer {
+                Some(want) => {
+                    let want = e.int_const(want.clone());
+                    e.cmp(got, want, CmpKind::Eq)
+                }
+                None => yes,
+            };
+            e.seal_and_switch(Terminator::Jmp(merge, vec![agrees]), skipped);
+            e.seal_and_switch(Terminator::Jmp(merge, vec![yes]), merge);
+            let merged = e.add_parameter(Type::int(1));
+            all = e.bin(BinaryArithOpKind::And, all, merged);
+        }
+        let one = e.int_const(IntBits::from_u128(8, 1));
+        let next = e.bin(BinaryArithOpKind::UAdd, count, one);
+        e.seal_and_switch(Terminator::Jmp(head, vec![next, all]), done);
+        vec![last]
+    });
+    let compiled = Compiled::new(ssa)
+        .unwrap_or_else(|error| panic!("guarded pure signed int{bits} does not compile: {error}"));
+
+    let one = IntBits::from_u128(1, 1);
+    let off = IntBits::zero(1);
+    let run = |taken: Option<usize>, wasm: bool| {
+        let conditions: Vec<IntBits> = (0..triples.len())
+            .map(|i| {
+                if Some(i) == taken {
+                    one.clone()
+                } else {
+                    off.clone()
+                }
+            })
+            .collect();
+        let mut inputs: Vec<&IntBits> = conditions.iter().collect();
+        let zero = IntBits::zero(8);
+        inputs.push(&zero);
+        inputs.push(&one);
+        let inputs = input_block(&inputs);
+        if wasm {
+            compiled.run_wasm(&inputs).expect("the WASM lane builds")
+        } else {
+            compiled.run(&inputs)
+        }
+    };
+
+    for wasm in [false, true] {
+        let verdict = run(None, wasm);
+        assert!(
+            verdict.is_accepted(),
+            "int{bits}, nothing taken, WASM {wasm}: {verdict:?}"
+        );
+        for (index, ((op, lhs, rhs), answer)) in triples.iter().zip(&answers).enumerate() {
+            let verdict = run(Some(index), wasm);
+            let what = format!("int{bits} {op:?}({lhs:?}, {rhs:?}) taken, WASM {wasm}");
+            if answer.is_some() {
+                assert!(verdict.is_accepted(), "{what}: {verdict:?}");
+            } else if wasm {
+                // The check under a witnessed condition is a constraint, which the WASM witness
+                // generator does not evaluate, so there the witness it writes is what fails.
+                assert!(verdict.rejects(), "{what}: {verdict:?}");
+            } else {
+                assert!(verdict.is_refusal(), "{what}: {verdict:?}");
+            }
+        }
+    }
+}
+
+/// The same, over every corner pair, at every width the double lane holds and every width the wide
+/// corner set names but 16383, which takes the spot triples.
+///
+/// 16383 and 16384 differ only in their top limb's fill, which 1000 already covers for a width that
+/// is not a whole number of limbs, so the full product at 16384 alone is enough.
+///
+/// The cost of a program at these widths is the WASM engine compiling its module, which grows
+/// faster than linearly in a function's length: at 16384 bits the debug test build takes about half
+/// a minute over a 25-triple module and about a second over a 3-triple one. Past 1000 bits a
+/// program therefore holds [`WIDEST_TRIPLES_PER_PROGRAM`] triples rather than
+/// [`PURE_TRIPLES_PER_PROGRAM`].
+#[test]
+#[ignore = "every corner pair at every wide width but 16383; around twenty-five minutes"]
+fn the_pure_signed_corner_matrix_agrees_with_the_model() {
+    for bits in [65usize, 96, 127, 128]
+        .into_iter()
+        .chain(corners::WIDE_WIDTHS)
+    {
+        let triples: Vec<(PureSigned, IntBits, IntBits)> = if bits == 16383 {
+            signed_spot_triples(bits)
+        } else {
+            PureSigned::ALL
+                .into_iter()
+                .flat_map(|op| {
+                    let kind = match op {
+                        PureSigned::Arith(kind) => IntOp::from(kind),
+                        PureSigned::Ordering => IntOp::SSub,
+                    };
+                    let (values, rhs) = corners::wide_operands(kind, bits);
+                    values
+                        .into_iter()
+                        .flat_map(move |a| rhs.clone().into_iter().map(move |b| (op, a.clone(), b)))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        let per_program = if bits > 1000 {
+            WIDEST_TRIPLES_PER_PROGRAM
+        } else {
+            PURE_TRIPLES_PER_PROGRAM
+        };
+        for chunk in triples.chunks(per_program) {
+            check_pure_signed_triples(bits, chunk.to_vec());
+        }
+    }
+}
+
+/// How many operations one pure program holds past 1000 bits, where the WASM engine's compile
+/// time is what bounds a sweep; see `the_pure_signed_corner_matrix_agrees_with_the_model`.
+const WIDEST_TRIPLES_PER_PROGRAM: usize = 3;
 
 /// `main(a: int(from)) -> int(to) { a as int(to) }`, the narrowing written as a bare cast.
 fn program_casting_down(from: usize, to: usize) -> HLSSA {

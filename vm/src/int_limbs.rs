@@ -22,6 +22,8 @@
 //! stay legible, while this needs to be optimized for performance wherever possible. It is
 //! nevertheless checked against that model of the semantics.
 
+use mavros_limb_arith::{divide_by_limb, knuth_divide, significant_limbs};
+
 use crate::interpreter::Frame;
 
 // UTILITIES
@@ -92,15 +94,7 @@ fn is_negative(value: &[u64], bits: u64) -> bool {
 pub fn add(res: &mut [u64], a: &[u64], b: &[u64], bits: u64) {
     debug_extent(a, bits);
     debug_extent(b, bits);
-    let mut carry = false;
-    for i in 0..res.len() {
-        let (sum, overflowed) = a[i].overflowing_add(b[i]);
-        let (sum, carried) = sum.overflowing_add(u64::from(carry));
-        res[i] = sum;
-        // Two additions, so two chances to overflow — but never both at once: the second addend is
-        // at most one, and a sum that already wrapped is small enough to absorb it.
-        carry = overflowed | carried;
-    }
+    mavros_limb_arith::add(res, a, b);
     normalize(res, bits);
 }
 
@@ -108,13 +102,7 @@ pub fn add(res: &mut [u64], a: &[u64], b: &[u64], bits: u64) {
 pub fn sub(res: &mut [u64], a: &[u64], b: &[u64], bits: u64) {
     debug_extent(a, bits);
     debug_extent(b, bits);
-    let mut borrow = false;
-    for i in 0..res.len() {
-        let (difference, underflowed) = a[i].overflowing_sub(b[i]);
-        let (difference, borrowed) = difference.overflowing_sub(u64::from(borrow));
-        res[i] = difference;
-        borrow = underflowed | borrowed;
-    }
+    mavros_limb_arith::sub(res, a, b);
     normalize(res, bits);
 }
 
@@ -313,28 +301,12 @@ fn extend_by(res: &mut [u64], a: &[u64], from_bits: u64, to_bits: u64, fill: u64
 // MULTIPLICATION
 // ================================================================================================
 
-/// `a * b`, wrapping at the width.
-///
-/// Schoolbook, accumulating straight into the result rather than into a `2k`-limb product and
-/// truncating after: the columns at or above `k` are exactly the ones the wrap discards, so the
-/// high half is never computed and the lane needs no scratch buffer. The carry leaving column
-/// `k-1` is dropped for the same reason.
+/// `a * b`, wrapping at the width: [`mavros_limb_arith::mul`], which needs no scratch buffer, masked
+/// back to the width.
 pub fn mul(res: &mut [u64], a: &[u64], b: &[u64], bits: u64) {
     debug_extent(a, bits);
     debug_extent(b, bits);
-    let k = res.len();
-    res.fill(0);
-    for i in 0..k {
-        let mut carry = 0u64;
-        for j in 0..(k - i) {
-            // A limb product plus two limb-sized addends is exactly a `u128` at its widest:
-            // `(2^64-1)^2 + 2*(2^64-1)` is `2^128 - 1`.
-            let column =
-                u128::from(a[i]) * u128::from(b[j]) + u128::from(res[i + j]) + u128::from(carry);
-            res[i + j] = column as u64;
-            carry = (column >> 64) as u64;
-        }
-    }
+    mavros_limb_arith::mul(res, a, b);
     normalize(res, bits);
 }
 
@@ -357,25 +329,14 @@ pub fn udivrem(quotient: &mut [u64], remainder: &mut [u64], a: &[u64], b: &[u64]
     quotient.fill(0);
     remainder.fill(0);
 
-    let n = significant_limbs(b);
-    if n == 0 {
-        return;
-    }
-    if n == 1 {
-        let divisor = u128::from(b[0]);
-        let mut rest = 0u128;
-        for i in (0..a.len()).rev() {
-            let dividend = (rest << 64) | u128::from(a[i]);
-            quotient[i] = (dividend / divisor) as u64;
-            rest = dividend % divisor;
+    match significant_limbs(b) {
+        0 => return,
+        1 => remainder[0] = divide_by_limb(quotient, a, b[0]),
+        n => {
+            let (mut divisor, mut dividend) = (vec![0u64; n], vec![0u64; a.len() + 1]);
+            knuth_divide(quotient, remainder, a, &b[..n], &mut divisor, &mut dividend);
         }
-        remainder[0] = rest as u64;
-        normalize(quotient, bits);
-        normalize(remainder, bits);
-        return;
     }
-
-    knuth_divide(quotient, remainder, a, b, n);
     normalize(quotient, bits);
     normalize(remainder, bits);
 }
@@ -410,122 +371,8 @@ pub fn sdivrem(quotient: &mut [u64], remainder: &mut [u64], a: &[u64], b: &[u64]
 
 /// Replace `value` with its two's complement negation at `bits`.
 fn negate(value: &mut [u64], bits: u64) {
-    let mut carry = true;
-    for limb in value.iter_mut() {
-        let (complemented, carried) = (!*limb).overflowing_add(u64::from(carry));
-        *limb = complemented;
-        carry = carried;
-    }
+    mavros_limb_arith::negate(value);
     normalize(value, bits);
-}
-
-/// The index one past the highest non-zero limb, so zero answers zero.
-fn significant_limbs(value: &[u64]) -> usize {
-    value
-        .iter()
-        .rposition(|&limb| limb != 0)
-        .map_or(0, |i| i + 1)
-}
-
-/// Knuth's algorithm D, for a divisor of two limbs or more.
-///
-/// The estimate `qhat` for each quotient limb comes from dividing the top two limbs of the running
-/// dividend by the top limb of the divisor, which is why the divisor is first shifted left until
-/// its top bit is set: the estimate is then within one of the truth, and the correction below
-/// closes that gap. `u128` division supplies the two-limb-by-one-limb step a 64-bit host does not
-/// have as an operator.
-fn knuth_divide(quotient: &mut [u64], remainder: &mut [u64], a: &[u64], b: &[u64], n: usize) {
-    const BASE: u128 = 1 << 64;
-
-    let m = significant_limbs(a);
-    if m < n {
-        remainder[..a.len()].copy_from_slice(a);
-        return;
-    }
-
-    // Normalise so the divisor's top bit is set. The same shift on the dividend leaves the
-    // quotient unchanged and scales the remainder, which is undone at the end.
-    let shift = b[n - 1].leading_zeros();
-    let mut divisor = vec![0u64; n];
-    shift_left_into(&mut divisor, &b[..n], shift);
-
-    // One limb wider than the dividend: the shift can carry out of the top, and the algorithm
-    // reads `dividend[j + n]` at the highest `j`.
-    let mut dividend = vec![0u64; m + 1];
-    shift_left_into(&mut dividend, &a[..m], shift);
-
-    for j in (0..=(m - n)).rev() {
-        let top = (u128::from(dividend[j + n]) << 64) | u128::from(dividend[j + n - 1]);
-        let mut estimate = top / u128::from(divisor[n - 1]);
-        let mut rest = top % u128::from(divisor[n - 1]);
-
-        // Bring the estimate down to at most one above the true limb. The first disjunct is
-        // checked first so the product below is only ever formed for an estimate that fits a limb.
-        while estimate >= BASE
-            || estimate * u128::from(divisor[n - 2])
-                > (rest << 64) | u128::from(dividend[j + n - 2])
-        {
-            estimate -= 1;
-            rest += u128::from(divisor[n - 1]);
-            if rest >= BASE {
-                break;
-            }
-        }
-
-        // Subtract `estimate * divisor` from the window, keeping a signed borrow: the estimate may
-        // still be one too large, and that is the case the add-back below repairs.
-        let mut borrow = 0i128;
-        for i in 0..n {
-            let product = estimate * u128::from(divisor[i]);
-            let column = i128::from(dividend[i + j]) - borrow - i128::from(product as u64);
-            dividend[i + j] = column as u64;
-            borrow = (product >> 64) as i128 - (column >> 64);
-        }
-        let column = i128::from(dividend[j + n]) - borrow;
-        dividend[j + n] = column as u64;
-
-        quotient[j] = estimate as u64;
-        if column < 0 {
-            quotient[j] -= 1;
-            let mut carry = false;
-            for i in 0..n {
-                let (sum, overflowed) = dividend[i + j].overflowing_add(divisor[i]);
-                let (sum, carried) = sum.overflowing_add(u64::from(carry));
-                dividend[i + j] = sum;
-                carry = overflowed | carried;
-            }
-            dividend[j + n] = dividend[j + n].wrapping_add(u64::from(carry));
-        }
-    }
-
-    // Undo the normalising shift to recover the true remainder.
-    shift_right_into(&mut remainder[..n], &dividend[..n], shift);
-}
-
-/// `source << shift` written into `target`, where `shift` is under 64 and `target` may be longer.
-fn shift_left_into(target: &mut [u64], source: &[u64], shift: u32) {
-    for i in (0..target.len()).rev() {
-        let low = source.get(i).copied().unwrap_or(0);
-        let carried = if shift > 0 && i > 0 {
-            source.get(i - 1).copied().unwrap_or(0) >> (64 - shift)
-        } else {
-            0
-        };
-        target[i] = (low << shift) | carried;
-    }
-}
-
-/// `source >> shift` written into `target`, where `shift` is under 64 and the two are equal length.
-fn shift_right_into(target: &mut [u64], source: &[u64], shift: u32) {
-    for i in 0..target.len() {
-        let high = source[i];
-        let carried = if shift > 0 && i + 1 < source.len() {
-            source[i + 1] << (64 - shift)
-        } else {
-            0
-        };
-        target[i] = (high >> shift) | carried;
-    }
 }
 
 // TESTS
@@ -563,19 +410,13 @@ mod tests {
 
     /// The widths this engine is swept at, which is more than the widths it is dispatched for.
     ///
-    /// [`corners::wide_widths_for`] starts at 129, so nothing in the shared set has **two** limbs
+    /// [`corners::WIDE_WIDTHS`] starts at 129, so nothing in the shared set has **two** limbs
     /// — the shape where a carry chain first has a carry, a Knuth divisor first has two limbs, and
     /// a shift first crosses a limb boundary. The interpreter sends those widths to its double
     /// lane, so this engine never sees one in production.
-    ///
-    /// Swept here regardless, for the reason the signed operations are: a body is either right at
-    /// a width or it is not, and which widths a _dispatch_ sends here is a separate question that
-    /// can change under it. It changed once already — the double lane grew from one width to a
-    /// range — and an engine tested only at the widths that reached it that day would have had to
-    /// be re-argued rather than re-run.
     fn swept_widths() -> Vec<usize> {
         let mut widths = vec![65, 96, 127];
-        widths.extend(corners::wide_widths_for(false));
+        widths.extend(corners::WIDE_WIDTHS);
         widths
     }
 
@@ -593,12 +434,6 @@ mod tests {
         let mut checked = 0usize;
 
         for op in IntOp::ALL {
-            // Every operation is swept at every wide width, the signed ones included, even though
-            // `corners::wide_widths_for(true)` is empty and no lowering will reach a signed wide
-            // opcode until `MAX_LOWERED_SIGNED_BITS` moves. That constant gates which widths a
-            // _lowering_ may emit; a body is either right at a width or it is not, and these are
-            // written here. Sweeping only what is currently reachable would leave `sdivrem` and
-            // `ashr_by` unchecked at every width they exist for.
             for bits in swept_widths() {
                 for (a, b) in operand_pairs(op, bits) {
                     let got = intn_lane(op, bits as u64, a.limbs(), b.limbs());
@@ -648,9 +483,6 @@ mod tests {
                         a.compare(CmpOp::ULt, b),
                         "ult disagreed at {bits} bits"
                     );
-                    // `slt` is swept at every wide width even though no lowering reaches one yet:
-                    // the reading is this lane's own, and `corners::signed_width_ok` gates which
-                    // widths a _lowering_ may use rather than which ones a body must be right at.
                     assert_eq!(
                         slt(a.limbs(), b.limbs(), bits as u64),
                         a.compare(CmpOp::SLt, b),

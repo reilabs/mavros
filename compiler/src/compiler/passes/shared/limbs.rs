@@ -50,10 +50,11 @@ const NARROW_HOST_BITS: usize = HOST_WORD_BITS;
 /// `passes::wide_witness_ints` beyond it; the unsigned product does the same with the schoolbook,
 /// past [`single_cell_product_fits`], and so do the unsigned division and remainder, whose check is
 /// that product, and so do the unsigned shifts, past [`single_cell_shift_fits`]; equality has no
-/// width at all.
-///
-/// The rest of the arithmetic, every signed operation, is refused by `passes::width_validation`,
-/// with the restriction to be lifted by the remaining work.
+/// width at all. The signed sum, difference and ordering take the unsigned ones' route with their
+/// sign bits checked beside it, a signed left shift is the unsigned one, and a sign extension fills
+/// limbs past the element. The signed product, division and remainder stay in one cell while
+/// [`single_cell_signed_product_fits`] holds and take the unsigned gadgets over their operands'
+/// magnitudes beyond it, and a signed right shift is the unsigned one with its sign filled in.
 ///
 /// Past it too is everything that is not arithmetic: the multi-cell representation carries a value
 /// as limbs, and the bit window and the range check are bounded by the field rather than by this.
@@ -320,6 +321,15 @@ pub fn widest_cell_sum_bits(field: FieldConfig) -> usize {
 pub fn single_cell_product_fits(field: FieldConfig, bits: usize) -> bool {
     2 * bits <= widest_injective_int_bits(field)
         || (bits == 2 * HOST_LIMB_BITS && two_limb_product_packing_fits(field, bits))
+}
+
+/// Whether the single cell takes a witnessed **signed** product, quotient or remainder at `bits`.
+///
+/// It forms the signed product in one element, which spans `2^(2 · bits − 1)` around zero, and it
+/// divides magnitudes of up to `2^(bits − 1)` with the unsigned single cell's `q·d`, so it needs
+/// `2^(2 · bits)` below the modulus like the unsigned one.
+pub fn single_cell_signed_product_fits(field: FieldConfig, bits: usize) -> bool {
+    2 * bits <= widest_injective_int_bits(field)
 }
 
 /// Whether the single-cell shift takes a witnessed unsigned shift at `bits`, `left` for a `<<`.

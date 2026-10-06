@@ -129,7 +129,11 @@ pub const EVALUATORS: &[Evaluator] = &[
         what: "the bytecode interpreter's integer opcodes",
         relation: "total, and equal to `residue` wherever the model specifies a pattern: no \
                    panic, no process abort, and every answer inside the operand width",
-        files: &["vm/src/bytecode.rs", "vm/src/int_limbs.rs"],
+        files: &[
+            "vm/src/bytecode.rs",
+            "vm/src/int_limbs.rs",
+            "limb-arith/src/lib.rs",
+        ],
         conformance: &[
             Conformance {
                 path: "vm/src/bytecode.rs",
@@ -169,13 +173,15 @@ pub const EVALUATORS: &[Evaluator] = &[
         tag: "llvm",
         what: "the LLVM backend, used for WASM",
         relation: "the VM's, read three ways because no one reading reaches the whole backend: \
-                   LLVM's own constant folder for the instructions it emits, the runtime helper's \
-                   body directly for the wide multiply the folder cannot see through a call, and a \
-                   wasm engine for the lowering built around that call, which is the one shape the \
-                   folder is deliberately never handed",
+                   LLVM's own constant folder for the instructions it emits, the runtime helpers' \
+                   bodies directly for the wide sum, difference, multiply and divisions the \
+                   folder cannot see through a call, and a wasm engine for the lowering built \
+                   around those calls, which is the one shape the folder is deliberately never \
+                   handed",
         files: &[
             "compiler/src/compiler/codegen/llssa_to_llvm.rs",
             "wasm-runtime/src/lib.rs",
+            "limb-arith/src/lib.rs",
         ],
         conformance: &[
             Conformance {
@@ -193,6 +199,14 @@ pub const EVALUATORS: &[Evaluator] = &[
             Conformance {
                 path: "wasm-runtime/src/lib.rs",
                 test: "the_helper_multiply_agrees_with_the_model",
+            },
+            Conformance {
+                path: "wasm-runtime/src/lib.rs",
+                test: "the_helper_divisions_agree_with_the_model",
+            },
+            Conformance {
+                path: "wasm-runtime/src/lib.rs",
+                test: "the_helper_sums_and_differences_agree_with_the_model",
             },
         ],
     },

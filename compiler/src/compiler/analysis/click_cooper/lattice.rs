@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 
 use mavros_artifacts::FieldConfig;
 
-use mavros_int_semantics::{self as semantics, CmpOp, IntBits, MAX_LOWERED_SIGNED_BITS, Sign};
+use mavros_int_semantics::{self as semantics, CmpOp, IntBits};
 
 use crate::compiler::{
     ssa::hlssa::{
@@ -114,28 +114,14 @@ pub(crate) fn eval_binary(
     }
 }
 
-/// The widest pattern an operation of this reading may act on.
-///
-/// The unsigned arm is the integer type cap, so a fold here can mint a pattern wider than any host
-/// type — which is correct, since [`semantics::eval`] runs on [`IntBits`] limbs throughout.
-fn width_cap(sign: Sign) -> usize {
-    match sign {
-        Sign::Signed => MAX_LOWERED_SIGNED_BITS,
-        Sign::Unsigned => MAX_SUPPORTED_INT_BITS,
-    }
-}
-
 /// Whether a fold may act on this pair of widths at all.
 ///
 /// The two operands must already be at one width, shifts included. That is not a restriction
 /// invented by this analysis: `hlssa_to_llssa::assert_int_arith_widths` requires _every_ integer
 /// `BinaryArithOp`'s operands to be exactly the width of its result, so a mixed-width pair is IR
 /// that panics downstream, and folding one would mint a constant for a shape nothing may build.
-///
-/// This is a gate and nothing more: the width a fold happens at is the one its operands carry. The
-/// model panics on a pair it does not admit, and this analysis declines instead.
-fn foldable_widths(sign: Sign, s1: usize, s2: usize) -> bool {
-    (1..=width_cap(sign)).contains(&s1) && s1 == s2
+fn foldable_widths(s1: usize, s2: usize) -> bool {
+    (1..=MAX_SUPPORTED_INT_BITS).contains(&s1) && s1 == s2
 }
 
 /// Fold a pair of raw patterns under one reading.
@@ -149,7 +135,7 @@ fn foldable_widths(sign: Sign, s1: usize, s2: usize) -> bool {
 /// **wraps**, and Noir reports an error only when the _amount_ reaches the width, so the model
 /// accepts it and returns the truncated value.
 fn fold_int(kind: BinaryArithOpKind, x: &IntBits, y: &IntBits) -> Option<Constant> {
-    if !foldable_widths(kind.sign(), x.bits(), y.bits()) {
+    if !foldable_widths(x.bits(), y.bits()) {
         return None;
     }
     let v = semantics::eval(kind.into(), x, y).value()?;
@@ -169,8 +155,7 @@ pub(crate) fn eval_cmp(kind: CmpKind, a: &Constant, b: &Constant) -> Option<Cons
         // "how are two patterns compared" has exactly one answer in this compiler.
         (kind, Constant::Int(x), Constant::Int(y)) if x.bits() == y.bits() => {
             let op = CmpOp::from(kind);
-            let cap = width_cap(op.sign().unwrap_or(Sign::Unsigned));
-            (1..=cap)
+            (1..=MAX_SUPPORTED_INT_BITS)
                 .contains(&x.bits())
                 .then(|| x.compare(op, y))
                 .and_then(res)
@@ -498,9 +483,9 @@ mod tests {
     }
 
     #[test]
-    fn an_unsigned_fold_runs_above_the_old_integer_cap() {
-        // `width_cap`'s unsigned arm is the type cap, so the fold is in reach at every width the
-        // type system admits. Checked at a width that carries a set bit no host word has.
+    fn a_fold_runs_at_every_width_the_type_system_admits() {
+        // The fold is in reach at every width the type system admits, under either reading. Checked
+        // at a width that carries a set bit no host word has.
         let bits = 256;
         let high = Constant::Int(IntBits::from_u128(bits, 1).shifted_left(200));
         let one = Constant::Int(IntBits::from_u128(bits, 1));
@@ -514,21 +499,21 @@ mod tests {
         assert_eq!(sum.bits(), bits);
         assert!(sum.bit(200) == Some(true) && sum.bit(0) == Some(true));
 
-        // And the signed arm still stops at the frontier, because folding above it would mint a
-        // constant for IR that `assert_signed_op_width` refuses.
+        // The signed reading folds at the same width, and still declines what the model rejects:
+        // `2^200 + 1` is in range at 256 bits, and the signed maximum plus one is not.
         assert_eq!(
             eval_binary(BinaryArithOpKind::SAdd, &high, &one, field),
+            Some(Constant::Int(sum)),
+        );
+        let max = Constant::Int(IntBits::from_signed(bits, &IntBits::signed_max(bits)));
+        assert_eq!(
+            eval_binary(BinaryArithOpKind::SAdd, &max, &one, field),
             None,
-            "a signed fold above the lowering frontier must decline"
+            "a signed fold must decline an overflow at a wide width too"
         );
     }
 
-    /// The other half of the widened unsigned fold: what the rest of this analysis does with one.
-    ///
-    /// A cast to `Field` answers wherever the pattern has an element, which is a question about the
-    /// **value** rather than the width — so the 256-bit patterns the fold above produces are folded
-    /// rather than given up on, and the refusal lands exactly where minting one would answer a
-    /// residue in place of the value.
+    /// The other half of the wide fold.
     #[test]
     fn a_cast_to_field_is_bounded_by_the_modulus_and_not_by_a_host_word() {
         let field = FieldConfig::bn254();
@@ -598,7 +583,7 @@ mod tests {
             for signed in [false, true] {
                 let kind = BinaryArithOpKind::with_sign(group, signed);
 
-                for &bits in corners::widths_for(kind.is_signed()) {
+                for &bits in corners::widths() {
                     for &x in &corners::values(bits) {
                         for &y in &corners::values(bits) {
                             // `corners` deals in host words, so the pair is built once and both the
@@ -677,7 +662,7 @@ mod tests {
             for signed in [false, true] {
                 let kind = BinaryArithOpKind::with_sign(group, signed);
 
-                for bits in corners::wide_widths_for(kind.is_signed()) {
+                for bits in corners::WIDE_WIDTHS {
                     let (values, rhs) = corners::wide_operands(kind.into(), bits);
 
                     for x in &values {

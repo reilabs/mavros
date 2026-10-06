@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use num_bigint::BigUint;
 
 use crate::{
-    IntBits, IntOp, MAX_LOWERED_SIGNED_BITS,
+    IntBits, IntOp,
     int_bits::{HOST_LIMB_BITS, HOST_WORD_BITS},
     mask,
 };
@@ -32,9 +32,6 @@ const HOST_CORNER_BITS: usize = HOST_WORD_BITS;
 /// `1` is `bool`, and a corner in its own right: it is the only width where the sole negative value
 /// is `1`, and where `bits - 1` is `0` so every shift amount masks away.
 pub const WIDTHS: [usize; 6] = [1, 8, 16, 32, 64, 128];
-
-/// The widths a signed sweep covers — [`WIDTHS`] without the ones no signed operation may touch.
-pub const SIGNED_WIDTHS: [usize; 5] = [1, 8, 16, 32, 64];
 
 /// Widths small enough to sweep _every_ operand pair at.
 ///
@@ -136,9 +133,9 @@ pub fn shift_amounts(bits: usize, rhs_bits: usize) -> Vec<u128> {
 /// why that is safe. The constant folders do not: `lattice::fold_width` declines a mixed pair
 /// outright, because `assert_int_arith_widths` would panic on the IR one would have to come from.
 #[must_use]
-pub fn shift_width_pairs(signed: bool) -> Vec<(usize, usize)> {
+pub fn shift_width_pairs() -> Vec<(usize, usize)> {
     let mut out = Vec::new();
-    for &bits in widths_for(signed) {
+    for &bits in widths() {
         for &rhs_bits in &[bits, 8, 32, 64, HOST_CORNER_BITS] {
             out.push((bits, rhs_bits));
         }
@@ -148,42 +145,20 @@ pub fn shift_width_pairs(signed: bool) -> Vec<(usize, usize)> {
     out
 }
 
-/// The widths a sweep should use for `sign`.
+/// The widths every narrow sweep covers, under either reading.
 ///
-/// This is [`WIDTHS`] (or [`SIGNED_WIDTHS`]) **plus [`ODD_WIDTHS`]**. The union lives here rather
-/// than in each sweep on purpose to avoid width assumptions.
-///
-/// Built once per reading rather than per call, and borrowed rather than cloned: every caller is a
-/// sweep that asks for this from inside a loop.
+/// This is [`WIDTHS`] **plus [`ODD_WIDTHS`]**. The union lives here rather than in each sweep on
+/// purpose to avoid width assumptions.
 #[must_use]
-pub fn widths_for(signed: bool) -> &'static [usize] {
-    static UNSIGNED: LazyLock<Vec<usize>> = LazyLock::new(|| union_with_odd(false));
-    static SIGNED: LazyLock<Vec<usize>> = LazyLock::new(|| union_with_odd(true));
+pub fn widths() -> &'static [usize] {
+    static WIDTHS_WITH_ODD: LazyLock<Vec<usize>> = LazyLock::new(|| {
+        let mut out: Vec<usize> = WIDTHS.iter().copied().chain(ODD_WIDTHS).collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    });
 
-    if signed { &SIGNED } else { &UNSIGNED }
-}
-
-/// The body of [`widths_for`], run once per reading.
-fn union_with_odd(signed: bool) -> Vec<usize> {
-    let base: &[usize] = if signed { &SIGNED_WIDTHS } else { &WIDTHS };
-    let mut out: Vec<usize> = base
-        .iter()
-        .copied()
-        .chain(ODD_WIDTHS)
-        .filter(|bits| !signed || signed_width_ok(*bits))
-        .collect();
-    out.sort_unstable();
-    out.dedup();
-    out
-}
-
-/// Whether a width is one a signed operation may be _lowered_ at.
-///
-/// Intentionally mirrors [`MAX_LOWERED_SIGNED_BITS`], so a sweep covers only the widths each
-/// evaluator can currently answer for.
-#[must_use]
-pub fn signed_width_ok(bits: usize) -> bool {
-    (1..=MAX_LOWERED_SIGNED_BITS).contains(&bits)
+    &WIDTHS_WITH_ODD
 }
 
 // THE WIDE CORNER SET
@@ -193,11 +168,10 @@ pub fn signed_width_ok(bits: usize) -> bool {
 // [`IntBits`] end to end, which is the only way to name a corner of a 16384-bit type at all.
 //
 // It is a **separate** set rather than wider entries in [`WIDTHS`], and that is the load-bearing
-// decision here. All nine registered evaluators drive their sweeps off [`widths_for`] and most
-// take it unfiltered, so a wide entry there would ask every evaluator to answer at 16384 bits at
-// once — here, in the unit that only moves a cap, before any lane can. Opting in per evaluator
-// makes "turn my sweep's wide set on" the first act of each later unit, which is precisely the
-// demonstration that unit owes.
+// decision here. All nine registered evaluators drive their sweeps off [`widths`] and most
+// take it unfiltered, so a wide entry there would ask every evaluator to answer at 16384 bits
+// whether or not its lane has a wide body. Opting in per evaluator keeps "this lane answers at the
+// wide widths" a claim each sweep makes for itself, by naming [`WIDE_WIDTHS`].
 //
 // One registered evaluator cannot opt in at all: the interval domain's relation quantifies over the
 // _concretisation_ of its ranges rather than over corners, and the concretisation of a 16384-bit
@@ -221,20 +195,6 @@ pub fn signed_width_ok(bits: usize) -> bool {
 ///   special case disappears, and `16383` is the one that exercises all of them. Testing either
 ///   alone is the single easiest way to ship a top-limb bug.
 pub const WIDE_WIDTHS: [usize; 6] = [129, 192, 256, 1000, 16383, 16384];
-
-/// The wide widths a sweep should use for `sign`.
-///
-/// Filtered by [`signed_width_ok`], so today this is the whole of [`WIDE_WIDTHS`] for an unsigned
-/// sweep and **empty** for a signed one — no lowering reads a signed pattern above one host limb.
-/// The signed wide sweeps therefore exist, compile and run zero cases, and P5's signed unit turns
-/// every one of them on by moving [`MAX_LOWERED_SIGNED_BITS`] rather than by editing nine sweeps.
-#[must_use]
-pub fn wide_widths_for(signed: bool) -> Vec<usize> {
-    WIDE_WIDTHS
-        .into_iter()
-        .filter(|bits| !signed || signed_width_ok(*bits))
-        .collect()
-}
 
 /// Corner patterns for a `bits`-wide operand, deduplicated.
 ///
@@ -449,21 +409,11 @@ mod tests {
         assert!(corners.contains(&IntBits::zero(bits)));
     }
 
-    /// The signed wide sweeps are switched off by one constant, not by nine edits.
+    /// Every wide width is inside the model's domain, so no sweep driven off the set is quietly
+    /// narrower than it reads.
     #[test]
-    fn the_wide_signed_sweep_is_empty_until_the_frontier_moves() {
-        assert!(
-            wide_widths_for(true).is_empty(),
-            "no lowering reads a signed pattern above one host limb yet"
-        );
-        assert_eq!(wide_widths_for(false).len(), WIDE_WIDTHS.len());
-
-        // What P5's signed unit changes, stated as the thing it changes: every wide width becomes
-        // signed-legal the moment `MAX_LOWERED_SIGNED_BITS` reaches the cap, with no edit here.
-        assert!(
-            WIDE_WIDTHS.iter().all(|&b| b <= crate::MAX_BITS),
-            "a wide width outside the model's domain would stay filtered out even then"
-        );
+    fn every_wide_width_is_inside_the_model() {
+        assert!(WIDE_WIDTHS.iter().all(|&b| b <= crate::MAX_BITS));
     }
 
     /// The narrow generators are untouched by any of this, which is what keeps the split honest.

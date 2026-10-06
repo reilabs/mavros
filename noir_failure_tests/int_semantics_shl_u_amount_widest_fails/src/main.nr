@@ -4,7 +4,7 @@
 // `MAVROS_BLESS=1 cargo test -p mavros-int-semantics`, and read the diff: a program whose
 // expected answer moved is a program whose *meaning* moved.
 //
-// This program must be REJECTED. `<<` on unsigned 64-bit operands `1` and `64` is
+// This program must be REJECTED. `<<` on unsigned 128-bit operands `1` and `128` is
 // `Reject::ShiftAmount` in the model, so a run that produces a proof means the guard that owes
 // this rejection is missing.
 //
@@ -20,6 +20,6 @@
 // The assertion is written against the answer a total backend produces anyway, so removing
 // the guard makes this program PASS -- which an expect-failure row reports as a failure.
 
-fn main(a: u64, b: u64) {
+fn main(a: u128, b: u128) {
     assert_eq(a << b, 1);
 }

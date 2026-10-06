@@ -93,21 +93,7 @@ use num_bigint::{BigInt, BigUint};
 // ================================================================================================
 
 /// The widest integer any operation may act on.
-///
-/// The model's own domain, mirrored by `MAX_SUPPORTED_INT_BITS` in `hlssa::type_system`. Nothing
-/// here is bounded by a host word: every operation runs on [`IntBits`] limbs or on a `BigInt`
-/// reading of them, so this is a policy about what widths are worth admitting rather than a limit
-/// anything ran into. It is emphatically **not** a bound on how wide a value any given _evaluator_
-/// can lower — see [`MAX_LOWERED_SIGNED_BITS`] for the one place that distinction is still live.
 pub const MAX_BITS: usize = 1 << 14;
-
-/// The widest pattern any Mavros lowering currently reads as two's complement.
-///
-/// **Not a bound on this model**, which reads a signed value at any width: [`IntBits::to_signed`]
-/// and its inverse work through [`SignedValue`], and the boundaries [`IntBits::signed_min`] and
-/// [`IntBits::signed_max`] never had a cap at all. It is a bound on the _implementations_ the
-/// sweeps measure.
-pub const MAX_LOWERED_SIGNED_BITS: usize = int_bits::HOST_LIMB_BITS;
 
 // PAYLOAD TYPES
 // ================================================================================================

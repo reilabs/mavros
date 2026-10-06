@@ -1430,8 +1430,8 @@ fn unguarded_overflow_operands(
 ///   `LowerWitnessBitwiseOps` and `WideWitnessInts` it reaches; `LowerPureGuards` gives a shift
 ///   with a witness operand no check. One whose amount is a literal below the width has nothing to
 ///   reject, and is left to be deleted.
-/// - An unsigned `Div`/`Rem` by a witness rejects a zero divisor in its own lowering, and so is
-///   given no check by `LowerPureGuards`; see [`divisor_checked_by_its_lowering`].
+/// - A `Div`/`Rem` by a witness rejects a zero divisor, and a signed one `INT_MIN / -1`, in its
+///   own lowering and is given no check by `LowerPureGuards` ([`divisor_checked_by_its_lowering`]).
 /// - A `Guard`-wrapped `Div`/`Rem` with any witness operand is given none either, whatever its
 ///   sign. `LowerPureGuards` builds a guarded division's check as a branch on its operands, which
 ///   needs them all pure, and otherwise leaves the check to the lowering, which rejects a zero
@@ -1677,8 +1677,14 @@ mod witness_overflow_tests {
             dead.push(("field", e.bin(BinaryArithOpKind::UAdd, field, field)));
             dead.push(("pure", e.bin(BinaryArithOpKind::UAdd, pure, pure)));
 
-            for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
+            for kind in [
+                BinaryArithOpKind::UDiv,
+                BinaryArithOpKind::URem,
+                BinaryArithOpKind::SDiv,
+                BinaryArithOpKind::SRem,
+            ] {
                 dead.push(("witnessed-divisor", e.bin(kind, pure, witness)));
+                dead.push(("two witnessed", e.bin(kind, witness, witness)));
                 dead.push(("witness-by-pure", e.bin(kind, witness, pure)));
             }
             let guarded = e.fresh_value();
@@ -1708,9 +1714,6 @@ mod witness_overflow_tests {
                     }),
                 });
                 dead.push(("guarded witnessed-dividend", guarded));
-            }
-            for kind in [BinaryArithOpKind::SDiv, BinaryArithOpKind::SRem] {
-                dead.push(("signed", e.bin(kind, witness, witness)));
             }
             dead.push(("field", e.bin(BinaryArithOpKind::UDiv, field, field)));
             let guarded = e.fresh_value();
@@ -1743,8 +1746,8 @@ mod witness_overflow_tests {
     /// has no check and a pure operation has had its check built by then, so both go.
     ///
     /// A division is kept only where `LowerPureGuards` leaves its check to the lowering: unguarded,
-    /// where it is unsigned and its divisor a witness, and guarded, wherever an integer operand is
-    /// a witness. Every other division already carries its check.
+    /// where its divisor is a witness, and guarded, wherever an integer operand is a witness. Every
+    /// other division already carries its check.
     #[test]
     fn a_dead_witnessed_integer_operation_keeps_its_check() {
         let (survivors, dead) = survivors_of_a_run_after_taint_inference();

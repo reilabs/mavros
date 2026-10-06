@@ -121,20 +121,22 @@ impl LowerWitnessCompareOps {
             ice!("Cmp Lt rhs is not an integer type");
         };
 
+        // Either reading orders through `lower_unsigned_lt` at `bits`, so both are held to its
+        // bound. An ordering wider than that is lowered through the carry chain before this pass
+        // runs.
+        assert!(
+            bits <= widest_cell_sum_bits(b.field()),
+            "ICE: an int{bits} ordering reached the single-cell lowering, whose field cannot hold its difference"
+        );
         if kind.is_signed() {
             self.lower_signed_lt(b, context, result, lhs, rhs, bits, lhs_witness, rhs_witness)
         } else {
-            assert!(
-                bits <= widest_cell_sum_bits(b.field()),
-                "ICE: an int{bits} ordering reached the single-cell lowering, whose field cannot hold its difference"
-            );
             self.lower_unsigned_lt(b, context, result, lhs, rhs, bits, lhs_witness, rhs_witness)
         }
     }
 
-    // FIELD-ASSUMPTION: L6-int-op-strategy
-    // Reads the magnitudes through `lower_unsigned_lt` at any width up to the signed frontier, which
-    // is sound only while that is at most `widest_cell_sum_bits`.
+    /// The signed ordering: where the sign bits differ the negative operand is the smaller, and
+    /// where they agree the two's complement patterns order as their unsigned readings do.
     #[allow(clippy::too_many_arguments)]
     fn lower_signed_lt(
         &self,
@@ -175,10 +177,9 @@ impl LowerWitnessCompareOps {
     /// `bits`.
     ///
     /// Sound while `2^(bits + 1) < p`, which is [`widest_cell_sum_bits`]: the difference on the
-    /// wrong side of the answer is then an element no range check at `bits` admits. An unsigned
-    /// ordering wider than that is lowered through the carry chain before this pass runs, and
-    /// [`Self::lower_lt`] asserts it. A signed one comes here through [`Self::lower_signed_lt`] and
-    /// is bounded by the signed frontier instead.
+    /// wrong side of the answer is then an element no range check at `bits` admits. An ordering
+    /// wider than that, under either reading, is lowered through the carry chain before this pass
+    /// runs, and [`Self::lower_lt`] asserts it.
     #[allow(clippy::too_many_arguments)]
     fn lower_unsigned_lt(
         &self,
