@@ -10,6 +10,7 @@ pub mod elide_tuples;
 pub mod fix_double_jumps;
 pub mod instruction_lowering;
 pub mod lookup_spilling;
+pub mod lower_degenerate_array;
 pub mod lower_map_casts;
 pub mod lower_zst_slices;
 pub mod mem2reg;

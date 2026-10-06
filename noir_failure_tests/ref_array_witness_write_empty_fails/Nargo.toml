@@ -1,0 +1,6 @@
+[package]
+name = "ref_array_witness_write_empty_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]
