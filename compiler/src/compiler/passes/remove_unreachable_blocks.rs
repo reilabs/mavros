@@ -1,6 +1,4 @@
-//! Removes blocks in the SSA that are unreachable as Noir's compiler generates these.
-//!
-//! TODO Check if we need this once we do our own SSA generation (#169).
+//! Removes disconnected SSA blocks, including those left after lowering `break` and `continue`.
 
 use crate::{
     collections::HashSet,
@@ -29,16 +27,18 @@ impl Pass for RemoveUnreachableBlocks {
     }
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        let cfg = store.get::<FlowAnalysis>();
+        remove_unreachable_blocks(ssa, store.get::<FlowAnalysis>());
+    }
+}
 
-        for (function_id, function) in ssa.iter_functions_mut() {
-            let function_cfg = cfg.get_function_cfg(*function_id);
-            let reachable: HashSet<BlockId> = function_cfg.get_domination_pre_order().collect();
-            let all_blocks: Vec<BlockId> = function.get_blocks().map(|(id, _)| *id).collect();
-            for block_id in all_blocks {
-                if !reachable.contains(&block_id) {
-                    _ = function.take_block(block_id);
-                }
+pub(crate) fn remove_unreachable_blocks(ssa: &mut HLSSA, cfg: &FlowAnalysis) {
+    for (function_id, function) in ssa.iter_functions_mut() {
+        let function_cfg = cfg.get_function_cfg(*function_id);
+        let reachable: HashSet<BlockId> = function_cfg.get_domination_pre_order().collect();
+        let all_blocks: Vec<BlockId> = function.get_blocks().map(|(id, _)| *id).collect();
+        for block_id in all_blocks {
+            if !reachable.contains(&block_id) {
+                _ = function.take_block(block_id);
             }
         }
     }
