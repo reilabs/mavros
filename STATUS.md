@@ -73,6 +73,7 @@
 | noir_tests/int_semantics_xor | ✅ | ✅ | 931 | 1675 | 77624 | 16623 | 151081 | 328454 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/just_add | ✅ | ✅ | 1 | 4 | 2408 | 1489 | 28031 | 198121 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/lambda_array | ✅ | ✅ | 1 | 3 | 6608 | 4385 | 31195 | 203158 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| noir_tests/lambda_vector | ✅ | ✅ | 339 | 517 | 38496 | 25706 | 91573 | 267678 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/match_bool | ✅ | ✅ | 9 | 8 | 7024 | 6415 | 37503 | 208686 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/match_enum | ✅ | ✅ | 25 | 43 | 14808 | 10519 | 46033 | 218805 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir_tests/match_enum_default | ✅ | ✅ | 1 | 3 | 5872 | 8865 | 28317 | 199426 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -486,7 +487,7 @@
 | noir/test_programs/execution_success/inline_never_basic | ✅ | ✅ | 3 | 5 | 3384 | 1861 | 34282 | 204509 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/integer_array_indexing | ✅ | ✅ | 23 | 45 | 14264 | 5714 | 47008 | 219830 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/lambda_env_is_copied | ✅ | ✅ | 0 | 1 | 664 | 1440 | 24793 | 194383 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| noir/test_programs/execution_success/lambda_from_array | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_success/lambda_from_array | ✅ | ✅ | 452 | 660 | 43632 | 27091 | 112556 | 290984 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/lambda_from_dynamic_if | ✅ | ✅ | 142 | 218 | 27664 | 10654 | 71053 | 244216 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/lambda_from_global_array | ✅ | ✅ | 45 | 75 | 12928 | 4494 | 53809 | 225996 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_success/lambda_from_global_tuple | ✅ | ✅ | 4 | 4 | 4080 | 2932 | 34206 | 204561 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -840,7 +841,7 @@
 | noir/test_programs/execution_failure/immutable_ref_call_reads_store | ✅ | ✅ | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
 | noir/test_programs/execution_failure/invalid_comptime_bits_decomposition | ✅ | ✅ | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
 | noir/test_programs/execution_failure/invalid_comptime_bytes_decomposition | ✅ | ✅ | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
-| noir/test_programs/execution_failure/lambda_from_empty_array_dyn_index | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | N/A | N/A | N/A | N/A | N/A | ➖ | ➖ | N/A | N/A | ➖ | ➖ | ➖ |
+| noir/test_programs/execution_failure/lambda_from_empty_array_dyn_index | ✅ | ✅ | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
 | noir/test_programs/execution_failure/mocks_in_execution | ➖ | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
 | noir/test_programs/execution_failure/mod_by_zero_witness | ✅ | ✅ | 68 | 130 | 10024 | 2984 | 42498 | 214133 | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ✅ | ✅ | N/A | N/A | ✅ | ✅ | ✅ |
 | noir/test_programs/execution_failure/mod_by_zero_witness_signed | ✅ | ✅ | 126 | 215 | 25720 | 3488 | 73097 | 245138 | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ✅ | ✅ | N/A | N/A | ✅ | ✅ | ✅ |
