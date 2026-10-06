@@ -4,21 +4,36 @@
 //!
 //! It does this as follows:
 //!
-//! 1. Analyses the whole program to determine which functions are reachable from each call target.
+//! 1. Drops disconnected blocks and computes function targets through aggregates, calls, globals
+//!    and mutable aliases, pruning uncallable functions to a fixed point.
 //! 2. Synthesizes dispatch functions for each call target that takes the function identifier and
 //!    params, dispatches to the right call, and then merges into a single return.
 //! 3. Rewrites the original call site to use this dispatch function.
+//! 4. Replaces function values and types with integer dispatch tags, even in empty containers.
+//!
+//! An empty target set produces a failing dispatcher at the original call location, with typed
+//! placeholder returns. This preserves code that never executes the call. The transfer match is
+//! exhaustive: unsupported function-producing operations must fail internally, not silently turn
+//! an incomplete analysis into an empty-set proof.
 
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
+        analysis::{
+            flow_analysis::FlowAnalysis,
+            types::{TypeInfo, Types},
+        },
         pass_manager::{AnalysisStore, Pass},
-        passes::shared::value_replacements::ValueReplacements,
+        passes::{
+            remove_unreachable_blocks::remove_unreachable_blocks,
+            shared::value_replacements::ValueReplacements,
+        },
         ssa::{
-            BlockId, FunctionId, Located, SourceLocation, Terminator, ValueId,
+            BlockId, FunctionId, Instruction, Located, SourceLocation, Terminator, ValueId,
             hlssa::{
-                CallTarget, Constant, HLSSA, OpCode, Type, TypeExpr,
-                builder::{HLEmitter, HLSSABuilder},
+                CallTarget, CastTarget, Constant, HLFunction, HLSSA, OpCode, SequenceTargetType,
+                Type, TypeExpr,
+                builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
             },
         },
     },
@@ -48,14 +63,21 @@ impl Pass for Defunctionalize {
 type ReachingFns = HashMap<(FunctionId, ValueId), Reach>;
 
 fn run_defunctionalize(ssa: &mut HLSSA) {
-    // Check if there are any FnPtrs at all
-    let has_fn_ptrs = ssa
+    // The frontend leaves disconnected blocks after break/continue. Drop them before
+    // gathering calls or requesting types, which only exist in reachable blocks.
+    remove_unreachable_blocks(ssa, &FlowAnalysis::run(ssa));
+    if !ssa
         .const_snapshot()
         .values()
-        .any(|cv| cv.as_ref().contains_fn_ptr());
-    if !has_fn_ptrs {
+        .any(|value| value.contains_fn_ptr())
+        && !ssa
+            .iter_functions()
+            .any(|(_, function)| has_dynamic_calls(function))
+    {
+        rewrite_function_types(ssa);
         return;
     }
+    let mut types = None;
 
     // Phase 1: Compute reaching definitions (which FnPtrs can reach each value) and delete the
     // functions nothing can call, to a fixpoint.
@@ -65,7 +87,34 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
     // number of loops can't the initial number of functions plus one times.
 
     let reaching = loop {
-        let reaching = compute_reaching_fn_ptrs(ssa);
+        let mut reaching = compute_reaching_fn_ptrs(ssa, types.as_ref());
+        // Request types in the first round that needs empty-call signatures or precise
+        // alias edges for stores carrying function values. Earlier rounds may already have
+        // pruned functions. Reuse the snapshot in later rounds: pruning removes functions
+        // but does not rewrite values in surviving functions.
+        if types.is_none() {
+            let needs_types = ssa.iter_functions().any(|(fid, function)| {
+                let has_targets = |value| {
+                    reaching
+                        .get(&(*fid, value))
+                        .is_some_and(|reach| reach.0.values().any(|targets| !targets.is_empty()))
+                };
+                function.get_blocks().any(|(_, block)| {
+                    block.get_instructions().any(|op| match op {
+                        OpCode::Call {
+                            function: CallTarget::Dynamic(value),
+                            ..
+                        } => !has_targets(*value),
+                        OpCode::Store { ptr, value } => has_targets(*ptr) || has_targets(*value),
+                        _ => false,
+                    })
+                })
+            });
+            if needs_types {
+                types = Some(Types::new().run(ssa, &FlowAnalysis::run(ssa)));
+                reaching = compute_reaching_fn_ptrs(ssa, types.as_ref());
+            }
+        }
         let callable = compute_callable_functions(ssa, &reaching);
         let previous_function_count = ssa.get_function_ids().count();
         ssa.retain_functions(|id, _| callable.contains(&id));
@@ -86,52 +135,60 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
 
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
     // Collect all call sites first, then build dispatch functions
-    let mut call_sites: Vec<(FunctionId, ValueId)> = Vec::new();
+    let mut call_sites: Vec<(FunctionId, ValueId, Vec<ValueId>, SourceLocation)> = Vec::new();
     for &fid in &func_ids {
         let func = ssa.get_function(fid);
         for (_bid, block) in func.get_blocks() {
-            for instr in block.get_instructions() {
+            for (instr, location) in block.get_instructions_with_source_locations() {
                 if let OpCode::Call {
                     function: CallTarget::Dynamic(fn_ptr_val),
+                    args,
                     ..
                 } = instr
                 {
-                    call_sites.push((fid, *fn_ptr_val));
+                    call_sites.push((fid, *fn_ptr_val, args.clone(), location.clone()));
                 }
             }
         }
     }
 
-    for (fid, fn_ptr_val) in &call_sites {
+    for (fid, fn_ptr_val, args, location) in &call_sites {
         // Skip if we already built a dispatch for this exact (func, value) pair
         if call_site_dispatch.contains_key(&(*fid, *fn_ptr_val)) {
             continue;
         }
         let mut targets: Vec<FunctionId> = reaching
             .get(&(*fid, *fn_ptr_val))
-            .unwrap_or_else(|| {
-                ice!(
-                    "no reaching FnPtrs for v{} in {fid:?} at defunctionalization",
-                    fn_ptr_val.0
-                )
-            })
-            .flatten()
+            .map(Reach::flatten)
+            .unwrap_or_default()
             .into_iter()
             .collect();
         targets.sort_by_key(|f| f.0);
 
-        if targets.is_empty() {
-            ice!(
-                "empty target set for v{} in {fid:?} at defunctionalization",
-                fn_ptr_val.0
-            );
-        }
-        // Get param/return types from the first target
-        let representative = ssa.get_function(targets[0]);
-        let param_types = representative.get_param_types();
-        let return_types = representative.get_returns().to_vec();
+        let (param_types, return_types) = if let Some(target) = targets.first() {
+            let representative = ssa.get_function(*target);
+            (
+                representative.get_param_types(),
+                representative.get_returns().to_vec(),
+            )
+        } else {
+            let function_types = types
+                .as_ref()
+                .expect("empty call requires types")
+                .get_function(*fid);
+            let TypeExpr::Function(returns) = &function_types.get_value_type(*fn_ptr_val).expr
+            else {
+                ice!("dynamic call target v{} is not a function", fn_ptr_val.0);
+            };
+            (
+                args.iter()
+                    .map(|arg| function_types.get_value_type(*arg).clone())
+                    .collect(),
+                returns.clone(),
+            )
+        };
         // All signatures must match
-        for &target in &targets[1..] {
+        for &target in targets.iter().skip(1) {
             let candidate = ssa.get_function(target);
             if candidate.get_param_types() != param_types
                 || candidate.get_returns() != return_types.as_slice()
@@ -145,8 +202,14 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
             }
         }
 
-        let dispatch_fn_id =
-            build_dispatch_function(ssa, dispatch_counter, &param_types, &return_types, &targets);
+        let dispatch_fn_id = build_dispatch_function(
+            ssa,
+            dispatch_counter,
+            &param_types,
+            &return_types,
+            &targets,
+            Some(location),
+        );
         call_site_dispatch.insert((*fid, *fn_ptr_val), dispatch_fn_id);
         dispatch_counter += 1;
     }
@@ -181,18 +244,7 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
     for fid in func_ids {
         let func = ssa.get_function(fid);
-        let has_dynamic = func.get_blocks().any(|(_, block)| {
-            block.get_instructions().any(|instr| {
-                matches!(
-                    instr,
-                    OpCode::Call {
-                        function: CallTarget::Dynamic(_),
-                        ..
-                    }
-                )
-            })
-        });
-        if !has_dynamic {
+        if !has_dynamic_calls(func) {
             continue;
         }
 
@@ -256,7 +308,25 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
         }
     }
 
-    // 3c. Replace TypeExpr::Function → TypeExpr::Int(32) everywhere
+    // 3c. Normalize types even when no concrete function values were present.
+    rewrite_function_types(ssa);
+}
+
+fn has_dynamic_calls(function: &HLFunction) -> bool {
+    function.get_blocks().any(|(_, block)| {
+        block.get_instructions().any(|op| {
+            matches!(
+                op,
+                OpCode::Call {
+                    function: CallTarget::Dynamic(_),
+                    ..
+                }
+            )
+        })
+    })
+}
+
+fn rewrite_function_types(ssa: &mut HLSSA) {
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
     for fid in func_ids {
         let func = ssa.get_function_mut(fid);
@@ -361,9 +431,6 @@ fn compute_callable_functions(ssa: &HLSSA, reaching: &ReachingFns) -> HashSet<Fu
         let func = ssa.get_function(fid);
         for (_bid, block) in func.get_blocks() {
             for instr in block.get_instructions() {
-                if matches!(instr, OpCode::Guard { .. }) {
-                    ice!("Guard encountered in {fid:?} before defunctionalization");
-                }
                 let OpCode::Call { function, .. } = instr else {
                     continue;
                 };
@@ -490,14 +557,14 @@ fn extend_set(dest: &mut HashSet<FunctionId>, set: &HashSet<FunctionId>) -> bool
     dest.len() > initial_length
 }
 
-/// Compute, for each (function, value) pair, the set of FunctionIds that
-/// the value can point to. Uses fixpoint iteration over:
-///   - FnPtr constants (seeds)
-///   - Jmp block-parameter edges (intra-function)
-///   - Static call argument edges (caller → callee params)
-///   - Static call return edges (callee returns → caller results)
-///   - Dynamic call return edges (resolved target returns → caller results)
-fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
+/// Compute possible function targets to a fixed point, preserving tuple-field paths and erasing
+/// sequence indices. Constants seed the analysis; block arguments, calls (including dynamically
+/// resolved arguments and returns), all sequence operations, references and globals transport it.
+/// Reference-containing values carry stores back across alias edges. When supplied, `types`
+/// identifies references even inside aggregates. It is computed in the first pruning round
+/// that needs types and reused in subsequent rounds.
+/// Unsupported operations that might produce functions are errors, so an empty set is meaningful.
+fn compute_reaching_fn_ptrs(ssa: &HLSSA, types: Option<&TypeInfo>) -> ReachingFns {
     let mut reaching: ReachingFns = HashMap::default();
     let func_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
 
@@ -505,13 +572,13 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
     fn contains_function(typ: &Type) -> bool {
         match &typ.expr {
             TypeExpr::Function(_) => true,
-            TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) | TypeExpr::Ref(inner) => {
-                contains_function(inner)
-            }
+            TypeExpr::Array(inner, _)
+            | TypeExpr::Slice(inner)
+            | TypeExpr::Ref(inner)
+            | TypeExpr::WitnessOf(inner)
+            | TypeExpr::Blob(inner, _) => contains_function(inner),
             TypeExpr::Tuple(elems) => elems.iter().any(contains_function),
-            TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::WitnessOf(_) | TypeExpr::Blob(..) => {
-                false
-            }
+            TypeExpr::Field | TypeExpr::Int(_) => false,
         }
     }
 
@@ -540,6 +607,41 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                 if let TypeExpr::Ref(inner) = &typ.expr {
                     if contains_function(inner) {
                         is_ref_with_fn.insert((fid, *vid));
+                    }
+                }
+            }
+        }
+    }
+
+    // A store can update an allocation through references retrieved from arrays, tuples,
+    // calls or globals. Include aggregates containing references, not just direct Refs.
+    // Exact types avoid confusing an immutable function snapshot with its mutable source.
+    if let Some(types) = types {
+        fn contains_function_ref(typ: &Type) -> bool {
+            match &typ.expr {
+                TypeExpr::Ref(inner) => contains_function(inner),
+                TypeExpr::Array(inner, _)
+                | TypeExpr::Slice(inner)
+                | TypeExpr::WitnessOf(inner)
+                | TypeExpr::Blob(inner, _) => contains_function_ref(inner),
+                TypeExpr::Tuple(fields) => fields.iter().any(contains_function_ref),
+                TypeExpr::Function(_) | TypeExpr::Field | TypeExpr::Int(_) => false,
+            }
+        }
+        is_ref_with_fn.clear();
+        for &fid in &func_ids {
+            let function_types = types.get_function(fid);
+            for (_, block) in ssa.get_function(fid).get_blocks() {
+                let values = block
+                    .get_parameters()
+                    .map(|(value, _)| value)
+                    .chain(block.get_instructions().flat_map(Instruction::get_results));
+                for value in values {
+                    if function_types
+                        .try_get_value_type(*value)
+                        .is_some_and(contains_function_ref)
+                    {
+                        is_ref_with_fn.insert((fid, *value));
                     }
                 }
             }
@@ -701,6 +803,13 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                                                 (target_fn, *ret_val),
                                                 (fid, results[i]),
                                             );
+                                            if is_ref_with_fn.contains(&(fid, results[i])) {
+                                                changed |= propagate(
+                                                    &mut reaching,
+                                                    (fid, results[i]),
+                                                    (target_fn, *ret_val),
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -737,6 +846,23 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                         OpCode::MkSeqOfBlob { result, blob, .. } => {
                             changed |= propagate(&mut reaching, (fid, *blob), (fid, *result));
                         }
+                        // Array-to-slice conversion preserves the elements, including the
+                        // tuple paths that distinguish closure entry points and environments.
+                        OpCode::Cast {
+                            result,
+                            value,
+                            target:
+                                CastTarget::ArrayToSlice
+                                | CastTarget::Nop
+                                | CastTarget::WitnessOf
+                                | CastTarget::ValueOf
+                                | CastTarget::Map(_),
+                        } => {
+                            changed |= propagate(&mut reaching, (fid, *value), (fid, *result));
+                            if is_ref_with_fn.contains(&(fid, *value)) {
+                                changed |= propagate(&mut reaching, (fid, *result), (fid, *value));
+                            }
+                        }
                         OpCode::MkRepeated {
                             result, element, ..
                         } => {
@@ -757,11 +883,19 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                             array,
                             value,
                             ..
+                        }
+                        | OpCode::SliceInsert {
+                            result,
+                            slice: array,
+                            value,
+                            ..
                         } => {
                             changed |= propagate(&mut reaching, (fid, *array), (fid, *result));
                             changed |= propagate(&mut reaching, (fid, *value), (fid, *result));
-                            if is_ref_with_fn.contains(&(fid, *value)) {
+                            if is_ref_with_fn.contains(&(fid, *array)) {
                                 changed |= propagate(&mut reaching, (fid, *result), (fid, *array));
+                            }
+                            if is_ref_with_fn.contains(&(fid, *value)) {
                                 changed |= propagate(&mut reaching, (fid, *result), (fid, *value));
                             }
                         }
@@ -788,12 +922,41 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                         }
                         OpCode::Load { result, ptr } => {
                             changed |= propagate(&mut reaching, (fid, *ptr), (fid, *result));
+                            if is_ref_with_fn.contains(&(fid, *result)) {
+                                changed |= propagate(&mut reaching, (fid, *result), (fid, *ptr));
+                            }
                         }
                         OpCode::Alloc { result, value, .. } => {
                             changed |= propagate(&mut reaching, (fid, *value), (fid, *result));
+                            if is_ref_with_fn.contains(&(fid, *value)) {
+                                changed |= propagate(&mut reaching, (fid, *result), (fid, *value));
+                            }
                         }
                         OpCode::Store { ptr, value } => {
                             changed |= propagate(&mut reaching, (fid, *value), (fid, *ptr));
+                            if is_ref_with_fn.contains(&(fid, *value)) {
+                                changed |= propagate(&mut reaching, (fid, *ptr), (fid, *value));
+                            }
+                        }
+                        OpCode::SlicePop {
+                            result_slice,
+                            result_elem,
+                            slice,
+                            ..
+                        }
+                        | OpCode::SliceRemove {
+                            result_slice,
+                            result_elem,
+                            slice,
+                            ..
+                        } => {
+                            for result in [result_slice, result_elem] {
+                                changed |= propagate(&mut reaching, (fid, *slice), (fid, *result));
+                                if is_ref_with_fn.contains(&(fid, *result)) {
+                                    changed |=
+                                        propagate(&mut reaching, (fid, *result), (fid, *slice));
+                                }
+                            }
                         }
                         OpCode::SlicePush {
                             result,
@@ -829,6 +992,14 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                                 changed |=
                                     global_slots.entry(*global).or_default().join_into(targets);
                             }
+                            if is_ref_with_fn.contains(&(fid, *value)) {
+                                if let Some(targets) = global_slots.get(global) {
+                                    changed |= reaching
+                                        .entry((fid, *value))
+                                        .or_default()
+                                        .join_into(targets);
+                                }
+                            }
                         }
                         OpCode::ReadGlobal { result, offset, .. } => {
                             if let Some(targets) = global_slots.get(&(*offset as usize)) {
@@ -837,9 +1008,57 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA) -> ReachingFns {
                                     .or_default()
                                     .join_into(targets);
                             }
+                            if is_ref_with_fn.contains(&(fid, *result)) {
+                                if let Some(targets) = reaching.get(&(fid, *result)) {
+                                    changed |= global_slots
+                                        .entry(*offset as usize)
+                                        .or_default()
+                                        .join_into(targets);
+                                }
+                            }
                         }
-                        // TODO Make exhaustive (#175).
-                        _ => {}
+                        // These source operations cannot produce or transfer function values.
+                        OpCode::Cmp { .. }
+                        | OpCode::BinaryArithOp { .. }
+                        | OpCode::Cast {
+                            target: CastTarget::Field | CastTarget::Int(_),
+                            ..
+                        }
+                        | OpCode::SExt { .. }
+                        | OpCode::BitRange { .. }
+                        | OpCode::Not { .. }
+                        | OpCode::Assert { .. }
+                        | OpCode::AssertConstant { .. }
+                        | OpCode::AssertCmp { .. }
+                        | OpCode::SliceLen { .. }
+                        | OpCode::ToBits { .. }
+                        | OpCode::ToRadix { .. }
+                        | OpCode::MemOp { .. }
+                        | OpCode::MulConst { .. }
+                        | OpCode::Rangecheck { .. }
+                        | OpCode::DropGlobal { .. }
+                        | OpCode::Spread { .. }
+                        | OpCode::Unspread { .. } => {}
+                        OpCode::Todo { result_types, .. } => {
+                            if result_types.iter().any(contains_function) {
+                                ice!(
+                                    "unsupported function-valued instruction before defunctionalization: {instr:?}"
+                                );
+                            }
+                        }
+                        // Later-pipeline operations have no transfer rule here. Never treat an
+                        // analysis gap as proof that a call has an empty target set.
+                        OpCode::Guard { .. }
+                        | OpCode::AssertR1C { .. }
+                        | OpCode::WriteWitness { .. }
+                        | OpCode::FreshWitness { .. }
+                        | OpCode::NextDCoeff { .. }
+                        | OpCode::BumpD { .. }
+                        | OpCode::Constrain { .. }
+                        | OpCode::Lookup { .. }
+                        | OpCode::DLookup { .. } => {
+                            ice!("unexpected instruction before defunctionalization: {instr:?}");
+                        }
                     }
                 }
             }
@@ -856,6 +1075,7 @@ fn build_dispatch_function(
     param_types: &[Type],
     return_types: &[Type],
     variants: &[FunctionId],
+    call_location: Option<&SourceLocation>,
 ) -> FunctionId {
     let name = format!("apply_dispatch@{counter}");
     // Counter-free on purpose: merge_identical_functions compares locations, so dispatchers with
@@ -878,6 +1098,27 @@ fn build_dispatch_function(
             for param_type in param_types {
                 forwarded_params.push(entry.add_parameter(param_type.clone()));
             }
+        }
+
+        if variants.is_empty() {
+            // No function value can reach this call (for example, it was read from an empty
+            // array). Fail only if executed; rejecting the whole program would also reject
+            // valid code whose branch skips the call. Placeholder returns keep the IR typed.
+            let mut entry = b
+                .block(entry_block)
+                .with_source_location(call_location.unwrap_or(&location).clone());
+            let false_value = entry.int_const(IntBits::zero(1));
+            entry.emit(OpCode::Assert { value: false_value });
+            let results = return_types
+                .iter()
+                .map(|typ| {
+                    let mut typ = typ.clone();
+                    replace_function_type(&mut typ);
+                    unreachable_default(&mut entry, &typ)
+                })
+                .collect();
+            entry.terminate_return(results);
+            return;
         }
 
         let mut merge_results: Vec<ValueId> = Vec::new();
@@ -953,6 +1194,36 @@ fn build_dispatch_function(
     dispatch_fn_id
 }
 
+/// Placeholder for a return that follows an unconditional failure. This deliberately stays
+/// local: ordinary lowering must not invent empty slices or allocate references as defaults.
+fn unreachable_default(entry: &mut HLBlockEmitter<'_>, typ: &Type) -> ValueId {
+    match &typ.expr {
+        TypeExpr::Slice(inner) => {
+            entry.mk_seq(Vec::new(), SequenceTargetType::Slice, *inner.clone())
+        }
+        TypeExpr::Ref(inner) => {
+            let value = unreachable_default(entry, inner);
+            entry.alloc(value)
+        }
+        TypeExpr::Tuple(fields) => {
+            let values = fields
+                .iter()
+                .map(|field| unreachable_default(entry, field))
+                .collect();
+            entry.mk_tuple(values, fields.clone())
+        }
+        TypeExpr::Array(inner, len) => {
+            if *len == 0 {
+                entry.mk_seq(Vec::new(), SequenceTargetType::Array(0), *inner.clone())
+            } else {
+                let value = unreachable_default(entry, inner);
+                entry.mk_repeated(value, SequenceTargetType::Array(*len), *len, *inner.clone())
+            }
+        }
+        _ => entry.default_value(typ),
+    }
+}
+
 /// Recursively replace `TypeExpr::Function` with `TypeExpr::Int(32)` in a type.
 ///
 /// The return types it carries are dropped rather than rewritten: after this pass a function value
@@ -963,15 +1234,17 @@ fn replace_function_type(typ: &mut Type) {
         TypeExpr::Function(_) => {
             typ.expr = TypeExpr::Int(32);
         }
-        TypeExpr::Array(inner, _) => replace_function_type(inner),
-        TypeExpr::Slice(inner) => replace_function_type(inner),
-        TypeExpr::Ref(inner) => replace_function_type(inner),
+        TypeExpr::Array(inner, _)
+        | TypeExpr::Slice(inner)
+        | TypeExpr::Ref(inner)
+        | TypeExpr::WitnessOf(inner)
+        | TypeExpr::Blob(inner, _) => replace_function_type(inner),
         TypeExpr::Tuple(elements) => {
             for elem in elements.iter_mut() {
                 replace_function_type(elem);
             }
         }
-        TypeExpr::Field | TypeExpr::Int(_) | TypeExpr::WitnessOf(_) | TypeExpr::Blob(..) => {}
+        TypeExpr::Field | TypeExpr::Int(_) => {}
     }
 }
 
@@ -1000,6 +1273,131 @@ fn replace_function_types_in_instruction(instr: &mut OpCode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn function_types_are_normalized_without_any_function_values_or_calls() {
+        let mut ssa = HLSSA::new();
+        let main = ssa.get_unique_entrypoint_id();
+        HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+            let function_type = Type::function_returning(vec![Type::field()]);
+            b.function
+                .add_return_type(function_type.clone().array_of(0));
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            e.add_parameter(function_type.clone().ref_of());
+            let empty = e.mk_seq(vec![], SequenceTargetType::Array(0), function_type);
+            e.terminate_return(vec![empty]);
+        });
+        run_defunctionalize(&mut ssa);
+        assert_eq!(
+            ssa.get_function(main).get_returns(),
+            &[Type::int32().array_of(0)]
+        );
+        assert_eq!(
+            ssa.get_function(main).get_param_types(),
+            vec![Type::int32().ref_of()]
+        );
+        #[cfg(debug_assertions)]
+        assert!(surviving_function_type(&ssa).is_none());
+    }
+
+    #[test]
+    fn storing_through_a_dynamically_indexed_reference_updates_the_original_target() {
+        let mut ssa = HLSSA::new();
+        let main = ssa.get_unique_entrypoint_id();
+        let f = ssa.add_function("f".into());
+        let g = ssa.add_function("g".into());
+        let callee = HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let index = e.add_parameter(Type::int32());
+            let f = e.emit_constant(Constant::FnPtr(f));
+            let g = e.emit_constant(Constant::FnPtr(g));
+            let original = e.alloc(f);
+            let array = e.mk_seq(
+                vec![original],
+                SequenceTargetType::Array(1),
+                Type::function_returning(vec![]).ref_of(),
+            );
+            let alias = e.array_get(array, index);
+            e.store(alias, g);
+            let callee = e.load(original);
+            e.call_indirect(callee, vec![], 0);
+            e.terminate_return(vec![]);
+            callee
+        });
+        let types = Types::new().run(&ssa, &FlowAnalysis::run(&ssa));
+        let reaching = compute_reaching_fn_ptrs(&ssa, Some(&types));
+        assert_eq!(
+            reaching[&(main, callee)].flatten(),
+            HashSet::from_iter([f, g])
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported function-valued instruction")]
+    fn an_unsupported_producer_is_not_mistaken_for_an_empty_target_set() {
+        let mut ssa = HLSSA::new();
+        let main = ssa.get_unique_entrypoint_id();
+        HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let result = e.fresh_value();
+            e.emit(OpCode::Todo {
+                payload: "unsupported function producer".to_string(),
+                results: vec![result],
+                result_types: vec![Type::function_returning(vec![])],
+            });
+            e.call_indirect(result, vec![], 0);
+            e.terminate_return(vec![]);
+        });
+        run_defunctionalize(&mut ssa);
+    }
+
+    #[test]
+    fn array_to_slice_preserves_function_targets_by_tuple_field() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let f = ssa.add_function("f".to_string());
+        let g = ssa.add_function("g".to_string());
+        let other = ssa.add_function("other".to_string());
+        let mut sb = HLSSABuilder::new(&mut ssa);
+        let (first, second) = sb.modify_function(main_id, |b| {
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let index = e.add_parameter(Type::int32());
+            let fn_type = Type::function_returning(vec![]);
+            let field_types = vec![fn_type.clone(), fn_type];
+            let f = e.emit_constant(Constant::FnPtr(f));
+            let g = e.emit_constant(Constant::FnPtr(g));
+            let other = e.emit_constant(Constant::FnPtr(other));
+            let pair_a = e.mk_tuple(vec![f, other], field_types.clone());
+            let pair_b = e.mk_tuple(vec![g, other], field_types.clone());
+            let array = e.mk_seq(
+                vec![pair_a, pair_b],
+                SequenceTargetType::Array(2),
+                Type::tuple_of(field_types),
+            );
+            let slice = e.cast_to(CastTarget::ArrayToSlice, array);
+            let pair = e.array_get(slice, index);
+            let first = e.tuple_proj(pair, 0);
+            let second = e.tuple_proj(pair, 1);
+            e.call_indirect(first, vec![], 0);
+            e.call_indirect(second, vec![], 0);
+            e.terminate_return(vec![]);
+            (first, second)
+        });
+
+        let reaching = compute_reaching_fn_ptrs(&ssa, None);
+        assert_eq!(
+            reaching.get(&(main_id, first)).map(Reach::flatten),
+            Some(HashSet::from_iter([f, g])),
+        );
+        assert_eq!(
+            reaching.get(&(main_id, second)).map(Reach::flatten),
+            Some(HashSet::from_iter([other])),
+        );
+    }
 
     #[test]
     fn inject_widens_paths_at_threshold_by_truncation() {
@@ -1040,8 +1438,14 @@ mod tests {
         let f = ssa.add_function("f".to_string());
         let g = ssa.add_function("g".to_string());
 
-        let dispatch_id =
-            build_dispatch_function(&mut ssa, 7, &[Type::field()], &[Type::field()], &[f, g]);
+        let dispatch_id = build_dispatch_function(
+            &mut ssa,
+            7,
+            &[Type::field()],
+            &[Type::field()],
+            &[f, g],
+            None,
+        );
 
         let dispatch = ssa.get_function(dispatch_id);
         let expected = SourceLocation::synthetic("apply_dispatch");
@@ -1065,8 +1469,22 @@ mod tests {
         let f = ssa.add_function("f".to_string());
         let g = ssa.add_function("g".to_string());
 
-        let d1 = build_dispatch_function(&mut ssa, 7, &[Type::field()], &[Type::field()], &[f, g]);
-        let d2 = build_dispatch_function(&mut ssa, 8, &[Type::field()], &[Type::field()], &[f, g]);
+        let d1 = build_dispatch_function(
+            &mut ssa,
+            7,
+            &[Type::field()],
+            &[Type::field()],
+            &[f, g],
+            None,
+        );
+        let d2 = build_dispatch_function(
+            &mut ssa,
+            8,
+            &[Type::field()],
+            &[Type::field()],
+            &[f, g],
+            None,
+        );
 
         MergeIdenticalFunctions::new().do_run(&mut ssa);
 
@@ -1110,7 +1528,7 @@ mod tests {
         }
         let (f, fp) = (callee, elem.unwrap());
 
-        let reaching = compute_reaching_fn_ptrs(&ssa);
+        let reaching = compute_reaching_fn_ptrs(&ssa, None);
         assert!(reaching[&(main_id, fp)].flatten().contains(&f));
         assert!(compute_callable_functions(&ssa, &reaching).contains(&f));
     }
@@ -1144,7 +1562,7 @@ mod tests {
             (bar, qux, callee)
         };
 
-        let targets = compute_reaching_fn_ptrs(&ssa)[&(main_id, callee)].flatten();
+        let targets = compute_reaching_fn_ptrs(&ssa, None)[&(main_id, callee)].flatten();
         assert!(targets.contains(&bar));
         assert!(targets.contains(&qux));
     }
