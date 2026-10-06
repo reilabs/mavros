@@ -88,10 +88,10 @@ fn run_defunctionalize(ssa: &mut HLSSA) {
 
     let reaching = loop {
         let mut reaching = compute_reaching_fn_ptrs(ssa, types.as_ref());
-        // After the first reachability pass, request types only for empty-call signatures
-        // or stores that can carry function values and therefore need precise alias edges.
-        // Keep the snapshot across pruning rounds: discarded functions may still have FnPtr
-        // operands in unused tuple fields, whose original signatures must remain known.
+        // Request types in the first round that needs empty-call signatures or precise
+        // alias edges for stores carrying function values. Earlier rounds may already have
+        // pruned functions. Reuse the snapshot in later rounds: pruning removes functions
+        // but does not rewrite values in surviving functions.
         if types.is_none() {
             let needs_types = ssa.iter_functions().any(|(fid, function)| {
                 let has_targets = |value| {
@@ -431,9 +431,6 @@ fn compute_callable_functions(ssa: &HLSSA, reaching: &ReachingFns) -> HashSet<Fu
         let func = ssa.get_function(fid);
         for (_bid, block) in func.get_blocks() {
             for instr in block.get_instructions() {
-                if matches!(instr, OpCode::Guard { .. }) {
-                    ice!("Guard encountered in {fid:?} before defunctionalization");
-                }
                 let OpCode::Call { function, .. } = instr else {
                     continue;
                 };
@@ -563,8 +560,9 @@ fn extend_set(dest: &mut HashSet<FunctionId>, set: &HashSet<FunctionId>) -> bool
 /// Compute possible function targets to a fixed point, preserving tuple-field paths and erasing
 /// sequence indices. Constants seed the analysis; block arguments, calls (including dynamically
 /// resolved arguments and returns), all sequence operations, references and globals transport it.
-/// Reference-containing values carry stores back across alias edges. When supplied, `types` is
-/// the snapshot taken before function pruning, identifying references even inside aggregates.
+/// Reference-containing values carry stores back across alias edges. When supplied, `types`
+/// identifies references even inside aggregates. It is computed in the first pruning round
+/// that needs types and reused in subsequent rounds.
 /// Unsupported operations that might produce functions are errors, so an empty set is meaningful.
 fn compute_reaching_fn_ptrs(ssa: &HLSSA, types: Option<&TypeInfo>) -> ReachingFns {
     let mut reaching: ReachingFns = HashMap::default();
