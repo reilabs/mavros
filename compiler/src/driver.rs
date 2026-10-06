@@ -721,10 +721,13 @@ impl Driver {
             r1cs_gen.enable_profile();
         }
         r1cs_gen.run(&r1cs_ssa, &type_info).map_err(|e| {
-            Error::UnsatisfiableProgram(vec![Diagnostic::error(
-                e.message,
-                SourceLocation::synthetic("r1cs_generation"),
-            )])
+            Error::UnsatisfiableProgram(vec![
+                self.attach_compiled_source(Diagnostic::error(
+                    e.message,
+                    e.location
+                        .unwrap_or_else(|| SourceLocation::synthetic("r1cs_generation")),
+                )),
+            ])
         })?;
         // Captured before `seal` consumes `r1cs_gen`; feeds the LogUp soundness degree D.
         let num_lookups = r1cs_gen.num_lookups();

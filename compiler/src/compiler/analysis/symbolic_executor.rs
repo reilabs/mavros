@@ -33,13 +33,20 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct AssertionFailure {
     pub message: String,
+    pub location: Option<SourceLocation>,
 }
 
 impl AssertionFailure {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            location: None,
         }
+    }
+
+    fn at(mut self, location: &SourceLocation) -> Self {
+        self.location.get_or_insert_with(|| location.clone());
+        self
     }
 }
 
@@ -413,7 +420,7 @@ impl SymbolicExecutor {
                         let a = &scope[a];
                         let b = &scope[b];
                         let c = &scope[c];
-                        V::assert_r1c(a, b, c, ctx)?;
+                        V::assert_r1c(a, b, c, ctx).map_err(|error| error.at(location))?;
                     }
                     OpCode::Call {
                         results: returns,
@@ -573,11 +580,11 @@ impl SymbolicExecutor {
                         let a = &scope[a];
                         let b = &scope[b];
                         let c = &scope[c];
-                        V::constrain(a, b, c, ctx)?;
+                        V::constrain(a, b, c, ctx).map_err(|error| error.at(location))?;
                     }
                     OpCode::Assert { value } => {
                         let v = &scope[value];
-                        V::assert_bool(v, ctx)?;
+                        V::assert_bool(v, ctx).map_err(|error| error.at(location))?;
                     }
                     OpCode::AssertConstant { .. } => ice_unvalidated_assert_constant(),
                     OpCode::AssertCmp {
@@ -588,7 +595,8 @@ impl SymbolicExecutor {
                         let bits = cmp_operand_bits(*kind, fn_type_info.get_value_type(*a));
                         let a = &scope[a];
                         let b = &scope[b];
-                        V::assert_cmp(*kind, a, b, bits, ctx)?;
+                        V::assert_cmp(*kind, a, b, bits, ctx)
+                            .map_err(|error| error.at(location))?;
                     }
                     OpCode::MemOp { kind, value } => {
                         let value = &scope[value];
@@ -613,7 +621,8 @@ impl SymbolicExecutor {
                     }
                     OpCode::Rangecheck { value: v, max_bits } => {
                         let v = &scope[v];
-                        v.rangecheck(*max_bits, ctx)?;
+                        v.rangecheck(*max_bits, ctx)
+                            .map_err(|error| error.at(location))?;
                     }
                     OpCode::ReadGlobal {
                         result,

@@ -1,0 +1,6 @@
+[package]
+name = "lambda_vector"
+type = "bin"
+authors = [""]
+
+[dependencies]
