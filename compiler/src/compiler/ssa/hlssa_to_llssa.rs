@@ -28,7 +28,7 @@ use crate::{
                 builder::{LLBlockEditor, LLBlockEmitter, LLEmitter},
             },
         },
-        util::{UNSPREAD_INPUT_MAX, ice_non_elided_tuple},
+        util::ice_non_elided_tuple,
     },
 };
 
@@ -1286,12 +1286,10 @@ fn lower_instruction(
         OpCode::Spread {
             result,
             value,
-            bits,
+            value_bits,
         } => {
-            let value_type = fn_type_info.get_value_type(*value);
-            let result_type = fn_type_info.get_value_type(*result);
-            let ll_value = val_map[value];
-            let ll_result = lower_spread(e, ll_value, &value_type, &result_type, *bits);
+            let result_bits = integer_width(fn_type_info.get_value_type(*result));
+            let ll_result = e.spread(val_map[value], *value_bits as u32, result_bits);
             val_map.insert(*result, ll_result);
         }
 
@@ -1299,14 +1297,12 @@ fn lower_instruction(
             result_odd,
             result_even,
             value,
-            bits,
+            value_bits,
         } => {
-            let value_type = fn_type_info.get_value_type(*value);
-            let odd_type = fn_type_info.get_value_type(*result_odd);
-            let even_type = fn_type_info.get_value_type(*result_even);
-            let ll_value = val_map[value];
+            let odd_bits = integer_width(fn_type_info.get_value_type(*result_odd));
+            let even_bits = integer_width(fn_type_info.get_value_type(*result_even));
             let (ll_odd, ll_even) =
-                lower_unspread(e, ll_value, &value_type, &odd_type, &even_type, *bits);
+                e.unspread(val_map[value], *value_bits as u32, odd_bits, even_bits);
             val_map.insert(*result_odd, ll_odd);
             val_map.insert(*result_even, ll_even);
         }
@@ -1659,89 +1655,10 @@ fn lower_instruction(
 }
 
 fn integer_width(ty: &HLType) -> u32 {
-    let scalar_ty = ty.strip_witness();
-    match scalar_ty.expr {
-        HLTypeExpr::Int(bits) => bits as u32,
-        _ => ice!("Expected integer type, got {}", ty),
-    }
-}
-
-/// Emit a Spread LLSSA opcode. `bits` is the active low-bit width from
-/// `spread::<N>`, while the SSA value type may be a wider container such as
-/// `u32`.
-fn lower_spread(
-    e: &mut LLBlockEmitter<'_>,
-    value: ValueId,
-    value_type: &HLType,
-    result_type: &HLType,
-    bits: u8,
-) -> ValueId {
-    let input_bits = integer_width(value_type);
-    let result_bits = integer_width(result_type);
-    let active_bits = bits as u32;
-    assert!(
-        (1..=64).contains(&active_bits),
-        "Spread active bit-width must be in 1..=64, got {}",
-        bits
-    );
-    assert!(
-        active_bits <= input_bits,
-        "Spread active bit-width {} exceeds input type width {}",
-        bits,
-        value_type
-    );
-    assert!(
-        result_bits >= active_bits * 2,
-        "Spread result type {} is too narrow for {} active bits",
-        result_type,
-        bits
-    );
-
-    e.spread(value, bits, result_bits)
-}
-
-fn lower_unspread(
-    e: &mut LLBlockEmitter<'_>,
-    value: ValueId,
-    value_type: &HLType,
-    odd_type: &HLType,
-    even_type: &HLType,
-    bits: u8,
-) -> (ValueId, ValueId) {
-    let input_bits = integer_width(value_type);
-    let odd_bits = integer_width(odd_type);
-    let even_bits = integer_width(even_type);
-    let active_bits = bits as u32;
-    assert!(
-        input_bits as usize <= UNSPREAD_INPUT_MAX && input_bits % 2 == 0,
-        "Unspread expects an even integer width up to {UNSPREAD_INPUT_MAX} bits, got {}",
-        value_type
-    );
-    assert!(
-        active_bits >= 1,
-        "Unspread active bit-width must be at least 1, got {}",
-        bits
-    );
-    assert!(
-        active_bits * 2 <= input_bits,
-        "Unspread active bit-width {} exceeds input type width {}",
-        bits,
-        value_type
-    );
-    assert!(
-        odd_bits >= active_bits,
-        "Unspread odd result type {} is too narrow for {} active bits",
-        odd_type,
-        bits
-    );
-    assert!(
-        even_bits >= active_bits,
-        "Unspread even result type {} is too narrow for {} active bits",
-        even_type,
-        bits
-    );
-
-    e.unspread(value, bits, odd_bits, even_bits)
+    let bits = ty
+        .int_width()
+        .unwrap_or_else(|| ice!("Expected integer type, got {}", ty));
+    bits as u32
 }
 
 // =============================================================================
@@ -4263,8 +4180,6 @@ fn emit_spread_ad_init_body(
         bits
     );
     let lookup = LookupTableSpec::spread(bits);
-    let input_ty = HLType::int(bits as usize);
-    let result_ty = HLType::int(bits as usize * 2);
 
     // The folded spread allocation is one constraint per entry:
     //   y · (α - i + β·spread(i)) = mᵢ
@@ -4301,7 +4216,7 @@ fn emit_spread_ad_init_body(
         e.ad_write_const(DMatrix::B, neg_i_field, coeff);
         //   out_db[β] += spread(i) · coeff
         let i_key = e.truncate(i_i64, bits as u32);
-        let spread = lower_spread(e, i_key, &input_ty, &result_ty, bits);
+        let spread = e.spread(i_key, bits as u32, bits as u32 * 2);
         let spread_u64 = if bits as u32 * 2 == 64 {
             spread
         } else {

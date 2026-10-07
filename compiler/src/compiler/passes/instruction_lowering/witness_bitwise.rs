@@ -1,7 +1,7 @@
 //! Lowers integer bitwise, bit-selection, and sign-extension operations before the main
 //! explicit-witness pass.
 //!
-//! This pass emits `Spread`/`Unspread` operations. A width the spread instruction takes whole is
+//! This pass emits `Spread`/`Unspread` operations. A width the narrow spread opcode takes whole is
 //! spread directly; anything wider is decomposed into half-limbs at half the field's witness limb
 //! width (`shared::limbs`) — 32 bits on bn254 — with the top half-limb carrying only the bits that
 //! are left, which is what lets a bitwise operation reach **any** width. It also canonicalizes
@@ -200,20 +200,19 @@ impl LowerWitnessBitwiseOps {
         }
 
         let result_word = if bits <= SPREAD_MAX_BITS && spread_sum_fits_field(bits, b.field()) {
-            // A width the spread instruction takes whole. Decomposing it would be one half-limb
+            // A width the narrow spread opcode takes whole. Decomposing it would be one half-limb
             // plus a recombination, which is **measurably** worse: routing these through the
             // general path below costs +1.88% of corpus rows.
             //
             // The spread bound is a bytecode-layout constant and the sum bound is the field's, so
             // both are asked here: a field that cannot hold the sum of two spreads this wide has a
             // width the arm below reaches perfectly well, and taking this one would refuse it.
-            let width = u8::try_from(bits).expect("a width the spread takes is under 256");
-            lower_word_bitwise(b, kind, lhs, rhs, width)
+            lower_word_bitwise(b, kind, lhs, rhs, bits)
         } else {
             // Every other width, including the ones between the arms above and the ragged top limb
-            // the multi-cell representation leaves at a width the limb count does not divide. The
-            // half-limbs are each at most what the spread instruction takes, so this reaches any
-            // width the recombination still fits a field element at.
+            // the multi-cell representation leaves at a width the limb count does not divide. One
+            // field element holds the sum of two half-limbs' spreads, so this reaches any width the
+            // recombination still fits a field element at.
             let lhs_limbs = decompose_into_spread_limbs(b, lhs, bits, lhs_witness);
             let rhs_limbs = decompose_into_spread_limbs(b, rhs, bits, rhs_witness);
             let result_limbs = lower_limb_bitwise(b, kind, &lhs_limbs, &rhs_limbs);
@@ -1125,7 +1124,7 @@ fn integer_bits_and_cast(
     }
 }
 
-fn spread_as_field(b: &mut impl HLEmitter, value: ValueId, bits: u8) -> ValueId {
+fn spread_as_field(b: &mut impl HLEmitter, value: ValueId, bits: usize) -> ValueId {
     let spread = b.spread(value, bits);
     b.cast_to_field(spread)
 }
@@ -1148,13 +1147,13 @@ fn lower_word_bitwise(
     kind: BinaryArithOpKind,
     lhs: ValueId,
     rhs: ValueId,
-    bits: u8,
+    bits: usize,
 ) -> ValueId {
-    if !spread_sum_fits_field(bits as usize, b.field()) {
+    if !spread_sum_fits_field(bits, b.field()) {
         unsupported_on_this_field(
             format_args!(
                 "a {bits}-bit bitwise op spreads each operand to {} bits, and the sum of the two spreads no longer fits one field element, so `Unspread` would read a residue rather than the interleaved bits",
-                2 * bits as usize
+                2 * bits
             ),
             b.field(),
         );
@@ -1163,8 +1162,8 @@ fn lower_word_bitwise(
     let lhs_spread = spread_as_field(b, lhs, bits);
     let rhs_spread = spread_as_field(b, rhs, bits);
     let input_spread_sum = b.uadd(lhs_spread, rhs_spread);
-    let input_spread_sum = b.cast_to(CastTarget::Int(bits as usize * 2), input_spread_sum);
-    let (and_word, xor_word) = b.unspread(input_spread_sum, bits);
+    let input_spread_sum = b.cast_to(CastTarget::Int(2 * bits), input_spread_sum);
+    let (and_word, xor_word) = b.unspread(input_spread_sum, 2 * bits);
 
     match kind {
         BinaryArithOpKind::And => and_word,
@@ -1177,7 +1176,7 @@ fn lower_word_bitwise(
 // SPREAD LIMBS
 // ================================================================================================
 
-/// A decomposition into limbs the spread instruction takes whole, each with the width it carries.
+/// A decomposition into half-limbs, each with the width it carries.
 ///
 /// [`WitnessLimbs`] is uniform-width by contract The **spread** wants the other reading as its cost
 /// falls as the width does (`LookupSizing::decompose_spread`), so a ragged top limb spread at its
@@ -1223,8 +1222,7 @@ fn lower_limb_bitwise(
         .zip(&rhs.limbs)
         .zip(&lhs.widths)
         .map(|((&lhs_limb, &rhs_limb), &limb_width)| {
-            let width = u8::try_from(limb_width).expect("a limb is at most one host word wide");
-            lower_word_bitwise(b, kind, lhs_limb, rhs_limb, width)
+            lower_word_bitwise(b, kind, lhs_limb, rhs_limb, limb_width)
         })
         .collect();
     WitnessLimbs { limb_bits, limbs }
@@ -1232,9 +1230,9 @@ fn lower_limb_bitwise(
 
 /// Split `value` into half-limbs at every width, the top one carrying only the bits that are left.
 ///
-/// The only decomposition a bitwise operation needs. Every limb is at most a half-limb wide, which
-/// is what the spread instruction bounds, so what this reaches is every width past the one arm
-/// above it.
+/// The only decomposition of a bitswise operation. Every limb is at most a half-limb wide, and one
+/// field element holds the sum of two such limbs' spreads, so what this reaches is every width past
+/// the one arm above it.
 ///
 /// The high half-limbs are witnessed from the pure shadow and the lowest is **derived** as
 /// `value - sum(higher limbs at their places)`, so the reconstruction holds by construction and
@@ -1330,10 +1328,9 @@ mod tests {
             assert!(spread_sum_fits_field(bits, bn254), "{bits} bits");
         }
 
-        // The half-limb is itself a width the spread instruction takes, which is what lets the
-        // general arm reach any width at all: a wider one would meet the `todo!` in bytecode
-        // codegen rather than the predicate above. It holds because a limb width is a power of two
-        // capped at one host word, so its half is at most half a host word.
+        // The half-limb is a width the narrow spread opcode takes, so every spread this lowering
+        // makes keeps that opcode's encoding. It holds on every field, because a limb width is a
+        // power of two capped at one 64-bit host limb, so its half is at most 32 bits.
         assert!(witness_half_limb_bits(bn254) <= SPREAD_MAX_BITS);
     }
 
@@ -1464,11 +1461,11 @@ mod tests {
             .collect();
         let spreads = ops
             .iter()
-            .filter(|op| matches!(op, OpCode::Spread { bits: 8, .. }))
+            .filter(|op| matches!(op, OpCode::Spread { value_bits: 8, .. }))
             .count();
         let unspreads = ops
             .iter()
-            .filter(|op| matches!(op, OpCode::Unspread { bits: 8, .. }))
+            .filter(|op| matches!(op, OpCode::Unspread { value_bits: 16, .. }))
             .count();
         assert_eq!((spreads, unspreads), (6, 3));
     }

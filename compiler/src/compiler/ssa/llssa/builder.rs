@@ -70,12 +70,12 @@ pub trait LLEmitter {
         r
     }
 
-    fn spread(&mut self, value: ValueId, bits: u8, result_bits: u32) -> ValueId {
+    fn spread(&mut self, value: ValueId, value_bits: u32, result_bits: u32) -> ValueId {
         let r = self.fresh_value();
         self.emit_ll(LLOp::Spread {
             result: r,
             value,
-            bits,
+            value_bits,
             result_bits,
         });
         r
@@ -84,7 +84,7 @@ pub trait LLEmitter {
     fn unspread(
         &mut self,
         value: ValueId,
-        bits: u8,
+        value_bits: u32,
         odd_bits: u32,
         even_bits: u32,
     ) -> (ValueId, ValueId) {
@@ -94,7 +94,7 @@ pub trait LLEmitter {
             result_odd,
             result_even,
             value,
-            bits,
+            value_bits,
             odd_bits,
             even_bits,
         });

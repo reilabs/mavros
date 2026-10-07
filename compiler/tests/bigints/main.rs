@@ -148,6 +148,16 @@ fn assert_changing_an_input_breaks_the_witness(
     );
 }
 
+/// Whether a run was refused by the program's own constraints rather than by the entry point's
+/// return check.
+///
+/// A trap at the return check says only that the declared answer is not the one the VM computed,
+/// which an under-constrained circuit says too. A test of what the constraints reject therefore
+/// declares the answer the VM computes, and asks for this.
+fn refused_by_the_constraints(verdict: &Verdict) -> bool {
+    verdict.is_refusal() || matches!(verdict, Verdict::Unsatisfied { .. })
+}
+
 // FUNCTIONAL TESTS
 // ================================================================================================
 
@@ -3764,15 +3774,14 @@ fn a_pure_int_min_over_a_witnessed_minus_one_is_refused() {
 /// A witnessed bitwise operation computes at **every** width, as the unsigned sum, difference and
 /// ordering do, but by a different route: limb by limb with no carry between them.
 ///
-/// **The widths are the ones that used to be gaps, and each was a different gap.** `40` fell off
-/// the two limb cases into a spread at the operand's own width, which the VM's `SpreadU32ToU64`
-/// stops at 32. `96` reached a _different_ ceiling — the spread of a `65..=127`-bit operand is a
-/// `130..=254`-bit value, and `Unspread`'s typing rule refused anything above `int128`. `200` was
-/// past the narrow bound with no representation to split it. `254` is the first width the
-/// representation splits **raggedly**, so its top limb is 62 bits and lands back in the first gap.
+/// **Each width is a different shape.** `40` is past the two limb cases and past the 32 bits the
+/// narrow spread opcode takes. `96` spreads to 192 bits, past the widest value a host word holds.
+/// `200` is past the narrow bound but not held as limbs. `254` is the first width the
+/// representation splits **raggedly**, so its top limb is 62 bits.
 ///
-/// What closes all four is the same thing: the decomposition runs at the **half-limb**, which is
-/// what the spread instruction bounds, and the top half-limb carries only the bits that are left.
+/// What reaches all four is the same thing: the decomposition runs at the **half-limb**, which
+/// keeps every spread within the narrow opcode, and the top half-limb carries only the bits that
+/// are left.
 #[test]
 fn a_witnessed_bitwise_operation_computes_at_every_width() {
     for bits in [40usize, 96, 200, 253, 254, 320] {
@@ -4273,6 +4282,80 @@ fn a_pure_sign_extension_agrees_with_the_model() {
     assert!(verdict.is_accepted(), "WASM: {verdict:?}");
 }
 
+/// A pure spread and unspread agree with the model on both lanes, either side of every boundary
+/// where an opcode or a backend's ladder hands over to the wide path, reading fewer bits than their
+/// containers hold wherever a set bit sits above the read for them to discard.
+#[test]
+fn a_pure_spread_and_unspread_agree_with_the_model() {
+    // `(container, read)`: the narrow opcode and the LLVM ladder, the VM's wide opcode under the
+    // ladder, both wide paths, and the widest container each op takes.
+    let spreads = [
+        (8usize, 5usize),
+        (32, 32),
+        (33, 20),
+        (64, 64),
+        (65, 65),
+        (100, 77),
+        (1000, 999),
+        (8192, 8192),
+    ];
+    let unspreads = [
+        (8usize, 7usize),
+        (64, 64),
+        (65, 65),
+        (128, 100),
+        (129, 129),
+        (1000, 501),
+        (16383, 16383),
+        (16384, 10000),
+    ];
+    let values = |bits: usize| {
+        let every_other = ((BigUint::from(1u8) << bits) - 1u8) / 3u8;
+        [
+            IntBits::all_ones(bits),
+            IntBits::from_biguint(bits, &every_other),
+            IntBits::one(bits).shifted_left(bits - 1),
+        ]
+    };
+
+    let ssa = unconstrained_program(move |e, params| {
+        let mut checks = Vec::new();
+        for (bits, read) in spreads {
+            let zero = e.int_const(IntBits::zero(bits));
+            for value in values(bits) {
+                let want = e.int_const(value.spread(read));
+                let value = e.int_const(value);
+                let value = pure_choice(e, params[0], value, zero, bits);
+                let spread = e.spread(value, read);
+                checks.push(e.eq(spread, want));
+            }
+        }
+        for (bits, read) in unspreads {
+            let zero = e.int_const(IntBits::zero(bits));
+            for value in values(bits) {
+                let (want_odd, want_even) = value.unspread(read);
+                let (want_odd, want_even) = (e.int_const(want_odd), e.int_const(want_even));
+                let value = e.int_const(value);
+                let value = pure_choice(e, params[0], value, zero, bits);
+                let (odd, even) = e.unspread(value, read);
+                checks.push(e.eq(odd, want_odd));
+                checks.push(e.eq(even, want_even));
+            }
+        }
+        checks
+            .into_iter()
+            .reduce(|all, same| e.bin(BinaryArithOpKind::And, all, same))
+            .expect("there is at least one check")
+    });
+    let compiled = Compiled::new(ssa)
+        .unwrap_or_else(|error| panic!("a pure spread does not compile: {error}"));
+    let inputs = unconstrained_inputs(0);
+    let verdict = compiled.run(&inputs);
+    assert!(verdict.is_accepted(), "{verdict:?}");
+    let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
+    assert!(verdict.is_accepted(), "WASM: {verdict:?}");
+}
+
 /// A pure signed operation under a witnessed condition is checked only where the condition holds.
 ///
 /// Inside a branch on a witness a pure operation is guarded, so its rejection is an assertion under
@@ -4737,38 +4820,560 @@ fn a_double_lane_shift_by_a_narrower_amount_is_an_ice_in_codegen() {
     let _ = bytecode_listing(&ssa);
 }
 
+/// `main(a: int(bits)) -> int(2 * bits) { spread(a) }`.
+fn program_spreading(bits: usize) -> HLSSA {
+    main_program(
+        &[Type::int(bits)],
+        &[Type::int(2 * bits)],
+        move |e, params| vec![e.spread(params[0], bits)],
+    )
+}
+
 /// `main(a: int(bits)) -> int(bits / 2) { unspread(a).odd }`, the inverse of a spread.
 fn program_unspreading(bits: usize) -> HLSSA {
     main_program(
         &[Type::int(bits)],
         &[Type::int(bits / 2)],
         move |e, params| {
-            let half = u8::try_from(bits / 2).expect("a spread half is at most 64 bits");
-            let (odd, _even) = e.unspread(params[0], half);
+            let (odd, _even) = e.unspread(params[0], bits);
             vec![odd]
         },
     )
 }
 
-/// An unspread wider than the spread it inverts is refused by the bytecode arm itself.
-///
-/// The type rule admits an operand up to 128 bits, and the opcode reads 64. Nothing emits a wider
-/// one — every spread the bitwise lowering makes is a half-limb or narrower — so this is a guard on
-/// a producer that does not exist yet, and drives codegen directly to reach it.
+/// Each op takes its narrow opcode up to the widest container that opcode holds, and the wide one
+/// from the next width on, which is what keeps the narrow lane's encoding for every spread the
+/// bitwise lowering and the Noir surface make.
 #[test]
-#[should_panic(expected = "Unspread bytecode lowering for integer widths > 64 bits")]
-fn an_unspread_past_what_its_opcode_reads_is_refused_in_codegen() {
-    let _ = bytecode_listing(&program_unspreading(128));
+fn a_spread_or_unspread_takes_the_wide_opcode_past_the_narrow_one() {
+    for (program, narrow, wide) in [
+        (
+            program_spreading as fn(usize) -> HLSSA,
+            (32, "spread_u32_to_u64"),
+            (33, "spread_intn"),
+        ),
+        (
+            program_unspreading,
+            (64, "unspread_u64_to_u32"),
+            (65, "unspread_intn"),
+        ),
+    ] {
+        for ((bits, opcode), (_, other)) in [(narrow, wide), (wide, narrow)] {
+            let listing = bytecode_listing(&program(bits));
+            // Whole mnemonics, since `spread_intn` is a suffix of `unspread_intn`.
+            let has = |mnemonic: &str| listing.split_whitespace().any(|word| word == mnemonic);
+            assert!(has(opcode), "no {opcode} at {bits} in:\n{listing}");
+            assert!(!has(other), "{other} at {bits} in:\n{listing}");
+        }
+    }
 }
 
-/// The widest unspread the opcode reads still lowers to it.
+/// A witnessed unspread at an **odd** width agrees with the model on both lanes, the odd stream one
+/// bit narrower than the even one.
+///
+/// The bitwise lowering never makes one, since it unspreads a sum it has cast to twice an operand's
+/// width; the multi-cell representation does, on the ragged top limb of an operand held as limbs,
+/// and this program makes one at the narrow lowering directly. The two streams are bounded by
+/// lookups at two different widths, and what holds the lowering to them is that no column of the
+/// witness can move without breaking a constraint.
 #[test]
-fn an_unspread_the_opcode_reads_lowers_to_it() {
-    let listing = bytecode_listing(&program_unspreading(64));
-    assert!(
-        listing.contains("unspread_u64_to_u32"),
-        "no unspread in:\n{listing}"
+fn an_odd_width_unspread_agrees_with_the_model() {
+    for bits in [3usize, 7, 33, 63] {
+        let ssa = main_program(
+            &[Type::int(bits)],
+            &[Type::int(bits / 2), Type::int(bits.div_ceil(2))],
+            move |e, params| {
+                let (odd, even) = e.unspread(params[0], bits);
+                vec![odd, even]
+            },
+        );
+        let compiled = Compiled::new(ssa)
+            .unwrap_or_else(|error| panic!("an int{bits} unspread is refused: {error}"));
+
+        for value in corners::values(bits) {
+            let value = IntBits::from_u128(bits, value);
+            let (odd, even) = value.unspread(bits);
+            let inputs = input_block(&[&value, &odd, &even]);
+            let verdict = compiled.run(&inputs);
+            assert!(verdict.is_accepted(), "int{bits} {value:?}: {verdict:?}");
+            let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
+            assert!(
+                verdict.is_accepted(),
+                "int{bits} {value:?} on WASM: {verdict:?}"
+            );
+        }
+
+        let alternating = IntBits::from_u128(bits, 0x5555_5555_5555_5555 ^ 0x3);
+        let (odd, even) = alternating.unspread(bits);
+        assert_every_column_is_pinned(
+            &format!("an int{bits} unspread"),
+            &compiled,
+            &[&alternating, &odd, &even],
+        );
+    }
+}
+
+/// A witnessed spread reads only the bits it names, and **rejects** a value with any above them.
+///
+/// The container is wider than the read, which is the shape the Noir surface gives every
+/// `spread::<N>` of a `u32`, and the SHA-256 replacement leans on the rejection to range-check its
+/// chunks. A pure spread discards those bits instead, which no witnessed one may do.
+#[test]
+fn a_witnessed_spread_rejects_the_bits_above_its_read() {
+    let ssa = main_program(&[Type::int(16)], &[Type::int(32)], |e, params| {
+        vec![e.spread(params[0], 8)]
+    });
+    let compiled = Compiled::new(ssa).expect("a spread of 8 bits of an int16 compiles");
+
+    for value in [0u128, 1, 0x5A, 0xFF] {
+        let value = IntBits::from_u128(16, value);
+        let spread = value.spread(8);
+        let inputs = input_block(&[&value, &spread]);
+        let verdict = compiled.run(&inputs);
+        assert!(verdict.is_accepted(), "{value:?}: {verdict:?}");
+        let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
+        assert!(verdict.is_accepted(), "{value:?} on WASM: {verdict:?}");
+    }
+    let value = IntBits::from_u128(16, 0x5A);
+    assert_every_column_is_pinned(
+        "a spread of 8 bits of an int16",
+        &compiled,
+        &[&value, &value.spread(8)],
     );
+
+    // Whatever answer is declared for it, a value past the read has no witness: not the masked
+    // spread the model gives a pure evaluation, which is the one the VM computes and so has to be
+    // refused by the constraints, and not the spread of the whole container either.
+    for value in [0x100u128, 0x1FF, 0xFFFF] {
+        let value = IntBits::from_u128(16, value);
+        for (declared, computed) in [(value.spread(8), true), (value.spread(16), false)] {
+            let inputs = input_block(&[&value, &declared]);
+            let refused = |verdict: &Verdict| {
+                if computed {
+                    refused_by_the_constraints(verdict)
+                } else {
+                    verdict.rejects()
+                }
+            };
+            let verdict = compiled.run(&inputs);
+            assert!(refused(&verdict), "{value:?} as {declared:?}: {verdict:?}");
+            let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
+            assert!(
+                refused(&verdict),
+                "{value:?} as {declared:?} on WASM: {verdict:?}"
+            );
+        }
+    }
+}
+
+/// A witnessed unspread rejects the bits above its read as the spread does, at an odd read inside a
+/// wider container.
+///
+/// `unspread_64` in the SHA-256 replacement leans on this to range-check its limbs: each is an
+/// unconstrained hint read through `unspread::<N>`, and only the lookups say it is a spread.
+#[test]
+fn a_witnessed_unspread_rejects_the_bits_above_its_read() {
+    let ssa = main_program(
+        &[Type::int(16)],
+        &[Type::int(8), Type::int(8)],
+        |e, params| {
+            let (odd, even) = e.unspread(params[0], 7);
+            vec![odd, even]
+        },
+    );
+    let compiled = Compiled::new(ssa).expect("an unspread of 7 bits of an int16 compiles");
+
+    for value in [0u128, 1, 0x2A, 0x55, 0x7F] {
+        let value = IntBits::from_u128(16, value);
+        let (odd, even) = value.unspread(7);
+        let inputs = input_block(&[&value, &odd, &even]);
+        let verdict = compiled.run(&inputs);
+        assert!(verdict.is_accepted(), "{value:?}: {verdict:?}");
+        let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
+        assert!(verdict.is_accepted(), "{value:?} on WASM: {verdict:?}");
+    }
+    let value = IntBits::from_u128(16, 0x55);
+    let (odd, even) = value.unspread(7);
+    assert_every_column_is_pinned(
+        "an unspread of 7 bits of an int16",
+        &compiled,
+        &[&value, &odd, &even],
+    );
+
+    // As with the spread: neither the masked streams, which are what the VM computes, nor the whole
+    // container's has a witness.
+    for value in [0x80u128, 0xAA, 0x100, 0xFFFF] {
+        let value = IntBits::from_u128(16, value);
+        for ((odd, even), computed) in [(value.unspread(7), true), (value.unspread(16), false)] {
+            let inputs = input_block(&[&value, &odd, &even]);
+            let refused = |verdict: &Verdict| {
+                if computed {
+                    refused_by_the_constraints(verdict)
+                } else {
+                    verdict.rejects()
+                }
+            };
+            let verdict = compiled.run(&inputs);
+            assert!(
+                refused(&verdict),
+                "{value:?} as {odd:?}, {even:?}: {verdict:?}"
+            );
+            let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
+            assert!(
+                refused(&verdict),
+                "{value:?} as {odd:?}, {even:?} on WASM: {verdict:?}"
+            );
+        }
+    }
+}
+
+/// The widths of the 64-bit windows a `width`-wide value is read out of an entry point through.
+fn window_widths(width: usize) -> Vec<usize> {
+    (0..width.div_ceil(64))
+        .map(|index| (width - 64 * index).min(64))
+        .collect()
+}
+
+/// The 64-bit windows of a `width`-wide value, low first, as the values an entry point returns.
+fn windows(e: &mut HLBlockEmitter<'_>, value: ValueId, width: usize) -> Vec<ValueId> {
+    window_widths(width)
+        .into_iter()
+        .enumerate()
+        .map(|(index, window)| {
+            let shifted = if index == 0 {
+                value
+            } else {
+                let amount = e.int_const(IntBits::from_u128(width, 64 * index as u128));
+                e.bin(BinaryArithOpKind::UShr, value, amount)
+            };
+            e.cast_to(CastTarget::Int(window), shifted)
+        })
+        .collect()
+}
+
+/// The 64-bit windows of `value`'s pattern, as the input block declares them.
+fn pattern_windows(value: &IntBits) -> Vec<IntBits> {
+    window_widths(value.bits())
+        .into_iter()
+        .enumerate()
+        .map(|(index, window)| value.bit_range(64 * index, window))
+        .collect()
+}
+
+/// An `int(bits)` put together out of the 64-bit windows `windows` carries it in.
+fn assembled(e: &mut HLBlockEmitter<'_>, windows: &[ValueId], bits: usize) -> ValueId {
+    let mut x = e.cast_to(CastTarget::Int(bits), windows[0]);
+    for (index, window) in windows.iter().enumerate().skip(1) {
+        let widened = e.cast_to(CastTarget::Int(bits), *window);
+        let amount = e.int_const(IntBits::from_u128(bits, 64 * index as u128));
+        let placed = e.bin(BinaryArithOpKind::UShl, widened, amount);
+        x = e.bin(BinaryArithOpKind::Or, x, placed);
+    }
+    x
+}
+
+/// `main` taking an `int(bits)` as 64-bit windows, assembling it, and answering the windows of
+/// `spread(x, spread_read)` and of both streams of `unspread(x, unspread_read)`.
+///
+/// An entry point takes and returns only what one field element holds, so a value past the field
+/// is put together and taken apart inside the program, through the representation's own `Or`,
+/// shifts and narrowing casts.
+fn program_spreading_witnessed(bits: usize, spread_read: usize, unspread_read: usize) -> HLSSA {
+    let params: Vec<Type> = window_widths(bits).into_iter().map(Type::int).collect();
+    let returns: Vec<Type> = [2 * bits, bits / 2, bits.div_ceil(2)]
+        .into_iter()
+        .flat_map(window_widths)
+        .map(Type::int)
+        .collect();
+    main_program(&params, &returns, move |e, params| {
+        let x = assembled(e, params, bits);
+        let spread = e.spread(x, spread_read);
+        let (odd, even) = e.unspread(x, unspread_read);
+        let mut answers = windows(e, spread, 2 * bits);
+        answers.extend(windows(e, odd, bits / 2));
+        answers.extend(windows(e, even, bits.div_ceil(2)));
+        answers
+    })
+}
+
+/// The input block of a [`program_spreading_witnessed`]: `value`'s windows, then the windows of
+/// the model's answers, which mask to each read.
+fn spreading_inputs(value: &IntBits, spread_read: usize, unspread_read: usize) -> Vec<IntBits> {
+    let (odd, even) = value.unspread(unspread_read);
+    [value.clone(), value.spread(spread_read), odd, even]
+        .iter()
+        .flat_map(pattern_windows)
+        .collect()
+}
+
+/// A witnessed spread and unspread agree with the model where the spread, the operand or a stream
+/// is too wide for one field element, and every column of the witness is pinned.
+///
+/// Each width is a different shape: `127` spreads into the first width past the field from an
+/// operand that is one element, `254` is the first operand held as limbs, whose streams are one
+/// element each again, `601` has streams held as limbs too, and the odd widths leave a ragged top
+/// limb and an even stream one bit wider than the odd; `577`'s top limb is a single bit, which has
+/// no odd half. Reads short of the width put a straddling half-limb, or a straddling limb of an
+/// unspread, under a narrower lookup, a limb an unspread reads one bit of under a one-bit range
+/// check, and limbs wholly above the read under a zero constraint, both for an operand that is one
+/// element (`200`) and for one held as limbs (`300` read at 250, `600` read at 333).
+///
+/// The widest is 601 because this program's own scaffolding, the wide shifts that assemble the
+/// operand and cut the answers into windows, is what stops the WASM engine loading the module from
+/// about a thousand bits; `wide_witness_ints`' own tests take the lowering to the widest widths.
+#[test]
+fn a_witnessed_spread_and_unspread_agree_with_the_model_past_the_field() {
+    for (bits, spread_read, unspread_read) in [
+        (127usize, 127usize, 127usize),
+        (200, 150, 200),
+        (253, 253, 253),
+        (254, 254, 254),
+        (300, 299, 300),
+        (300, 250, 300),
+        (577, 577, 577),
+        (600, 600, 333),
+        (601, 601, 513),
+    ] {
+        let compiled = Compiled::new(program_spreading_witnessed(
+            bits,
+            spread_read,
+            unspread_read,
+        ))
+        .unwrap_or_else(|error| panic!("an int{bits} spread and unspread are refused: {error}"));
+        let read = spread_read.min(unspread_read);
+        let every_other = ((BigUint::from(1u8) << read) - 1u8) / 3u8;
+        let values = [
+            IntBits::all_ones(read),
+            IntBits::from_biguint(read, &every_other),
+            IntBits::one(read).shifted_left(read - 1),
+            IntBits::from_limbs(read, &[0x0123_4567_89AB_CDEF; 16]),
+        ];
+        for value in values {
+            let value = value.cast(bits);
+            let block = spreading_inputs(&value, spread_read, unspread_read);
+            let inputs = input_block(&block.iter().collect::<Vec<_>>());
+            let verdict = compiled.run(&inputs);
+            assert!(verdict.is_accepted(), "int{bits} {value:?}: {verdict:?}");
+            let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
+            assert!(
+                verdict.is_accepted(),
+                "int{bits} {value:?} on WASM: {verdict:?}"
+            );
+        }
+
+        {
+            let value = IntBits::from_biguint(read, &every_other).cast(bits);
+            let block = spreading_inputs(&value, spread_read, unspread_read);
+            assert_every_column_is_pinned(
+                &format!("an int{bits} spread and unspread"),
+                &compiled,
+                &block.iter().collect::<Vec<_>>(),
+            );
+        }
+    }
+}
+
+/// A witnessed spread or unspread past the field rejects a bit above its read, as the narrow ones
+/// do, whatever answer is declared for it: the model's, which discards the bit and is what the VM
+/// computes, so that the constraints are what refuse it, and the whole container's.
+#[test]
+fn a_witnessed_spread_or_unspread_past_the_field_rejects_the_bits_above_its_read() {
+    // `(width, spread read, unspread read, the bit set past the shorter read)`: a bit in the
+    // half-limb the read straddles, and one in a limb wholly above it, for each op, and two in a limb
+    // an unspread reads a single bit of, the second past the half-limb that limb's even stream
+    // keeps, where reading the limb at that half's width would drop it.
+    for (bits, spread_read, unspread_read, bit) in [
+        (300usize, 250usize, 300usize, 251usize),
+        (300, 250, 300, 290),
+        (600, 600, 333, 335),
+        (600, 600, 333, 500),
+        (600, 600, 513, 514),
+        (600, 600, 513, 550),
+    ] {
+        let compiled = Compiled::new(program_spreading_witnessed(
+            bits,
+            spread_read,
+            unspread_read,
+        ))
+        .unwrap_or_else(|error| panic!("an int{bits} spread and unspread are refused: {error}"));
+        let value = IntBits::from_u128(bits, 0xF0F0).or(&IntBits::one(bits).shifted_left(bit));
+
+        // The model's masked answers are the ones the VM computes, so it is the constraints that
+        // have to refuse them; the whole container's answers have no witness either.
+        let computed = spreading_inputs(&value, spread_read, unspread_read);
+        let whole = spreading_inputs(&value, bits, bits);
+        for (block, by_constraints) in [(computed, true), (whole, false)] {
+            let refused = |verdict: &Verdict| {
+                if by_constraints {
+                    refused_by_the_constraints(verdict)
+                } else {
+                    verdict.rejects()
+                }
+            };
+            let inputs = input_block(&block.iter().collect::<Vec<_>>());
+            let verdict = compiled.run(&inputs);
+            assert!(
+                refused(&verdict),
+                "int{bits} with bit {bit} set: {verdict:?}"
+            );
+            let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
+            assert!(
+                refused(&verdict),
+                "int{bits} with bit {bit} set on WASM: {verdict:?}"
+            );
+        }
+    }
+}
+
+/// A limb an unspread reads one bit of is held to that bit, rather than taken whole as the even
+/// stream's half-limb.
+///
+/// The answer declared is the one an unbounded limb would compute, which is also the one the VM
+/// computes, so it is the constraints and not the return check that have to refuse it: the honest
+/// streams of a read that stops at bit 512 hold that bit and nothing above it, and this one carries
+/// the limb's bit 513 too, as bit 257 of the even stream.
+#[test]
+fn a_limb_an_unspread_reads_one_bit_of_is_held_to_that_bit() {
+    let (bits, read) = (600usize, 513usize);
+    let compiled = Compiled::new(program_spreading_witnessed(bits, bits, read))
+        .unwrap_or_else(|error| panic!("an int{bits} spread and unspread are refused: {error}"));
+    let value = IntBits::from_u128(bits, 0b11).shifted_left(512);
+    let (odd, even) = value.unspread(read);
+    let forged = even.or(&IntBits::one(even.bits()).shifted_left(257));
+    let block: Vec<IntBits> = [value.clone(), value.spread(bits), odd, forged]
+        .iter()
+        .flat_map(pattern_windows)
+        .collect();
+    let inputs = input_block(&block.iter().collect::<Vec<_>>());
+    let verdict = compiled.run(&inputs);
+    assert!(refused_by_the_constraints(&verdict), "{verdict:?}");
+    let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
+    assert!(refused_by_the_constraints(&verdict), "on WASM: {verdict:?}");
+}
+
+/// `main(taken: u1, x)` answering the windows of `spread(x, read)`, or of both streams of
+/// `unspread(x, read)`, computed in a branch on `taken`, and of zeros where it is not taken.
+///
+/// Only the spread or unspread is in the branch; the answers are cut into windows after the merge,
+/// so that nothing else in the program is under the guard.
+fn program_spreading_under_a_branch(bits: usize, read: usize, unspread: bool) -> HLSSA {
+    let answer_widths: Vec<usize> = if unspread {
+        vec![bits / 2, bits.div_ceil(2)]
+    } else {
+        vec![2 * bits]
+    };
+    let mut params = vec![Type::int(1)];
+    params.extend(window_widths(bits).into_iter().map(Type::int));
+    let returns: Vec<Type> = answer_widths
+        .iter()
+        .flat_map(|width| window_widths(*width))
+        .map(Type::int)
+        .collect();
+    main_program(&params, &returns, move |e, params| {
+        let x = assembled(e, &params[1..], bits);
+        let (then_id, _) = e.add_block();
+        let (else_id, _) = e.add_block();
+        let (merge_id, _) = e.add_block();
+        e.seal_and_switch(Terminator::JmpIf(params[0], then_id, else_id), then_id);
+        let answers = if unspread {
+            let (odd, even) = e.unspread(x, read);
+            vec![odd, even]
+        } else {
+            vec![e.spread(x, read)]
+        };
+        e.seal_and_switch(Terminator::Jmp(merge_id, answers), else_id);
+        let zeros = answer_widths
+            .iter()
+            .map(|width| e.int_const(IntBits::zero(*width)))
+            .collect();
+        e.seal_and_switch(Terminator::Jmp(merge_id, zeros), merge_id);
+        let merged: Vec<ValueId> = answer_widths
+            .iter()
+            .map(|width| e.add_parameter(Type::int(*width)))
+            .collect();
+        merged
+            .into_iter()
+            .zip(&answer_widths)
+            .flat_map(|(answer, width)| windows(e, answer, *width))
+            .collect()
+    })
+}
+
+/// A witnessed spread or unspread in a branch rejects a bit above its read only where the branch is
+/// taken, on the narrow lowering and on the representation's: its lookups, zero checks and one-bit
+/// checks hold only under its guard, as a guarded range check's do.
+#[test]
+fn a_guarded_witnessed_spread_rejects_the_bits_above_its_read_only_where_taken() {
+    // `(width, read, unspread)`: each op on each lowering, at the narrow one both with a read a
+    // single lookup table takes and with one it splits into chunks, and the unspread of a limb the
+    // read takes one bit of, whose top bit is past the half-limb its even stream keeps at `560`.
+    for (bits, read, unspread) in [
+        (16usize, 8usize, false),
+        (16, 7, true),
+        (64, 30, false),
+        (64, 61, true),
+        (300, 250, false),
+        (600, 333, true),
+        (600, 513, true),
+        (560, 513, true),
+    ] {
+        let what = format!(
+            "a guarded int{bits} {} of {read} bits",
+            if unspread { "unspread" } else { "spread" }
+        );
+        let compiled = Compiled::new(program_spreading_under_a_branch(bits, read, unspread))
+            .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        let answers = |value: &IntBits| -> Vec<IntBits> {
+            if unspread {
+                let (odd, even) = value.unspread(read);
+                [odd, even].iter().flat_map(pattern_windows).collect()
+            } else {
+                pattern_windows(&value.spread(read))
+            }
+        };
+        let run = |taken: u128, value: &IntBits, answers: Vec<IntBits>| {
+            let mut block = vec![IntBits::from_u128(1, taken)];
+            block.extend(pattern_windows(value));
+            block.extend(answers);
+            let inputs = input_block(&block.iter().collect::<Vec<_>>());
+            let wasm = compiled.run_wasm(&inputs).expect("the WASM lane builds");
+            (compiled.run(&inputs), wasm)
+        };
+
+        let clean = IntBits::all_ones(read).cast(bits);
+        // A bit just past the read, which a straddled piece holds, and the top bit, which a piece
+        // or limb wholly above the read holds.
+        let dirty = clean
+            .or(&IntBits::one(bits).shifted_left(read))
+            .or(&IntBits::one(bits).shifted_left(bits - 1));
+        let zeros = |value: &IntBits| {
+            answers(value)
+                .into_iter()
+                .map(|window| IntBits::zero(window.bits()))
+                .collect::<Vec<_>>()
+        };
+        for (taken, value, declared, accepted) in [
+            (1, &clean, answers(&clean), true),
+            (0, &clean, zeros(&clean), true),
+            (0, &dirty, zeros(&dirty), true),
+            (1, &dirty, answers(&dirty), false),
+        ] {
+            let (vm, wasm) = run(taken, value, declared);
+            for (lane, verdict) in [("VM", vm), ("WASM", wasm)] {
+                if accepted {
+                    assert!(
+                        verdict.is_accepted(),
+                        "{what}, taken {taken}, {value:?} on {lane}: {verdict:?}"
+                    );
+                } else {
+                    assert!(
+                        refused_by_the_constraints(&verdict),
+                        "{what}, taken {taken}, {value:?} on {lane}: {verdict:?}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// The **bytecode** cell lane keeps taking a narrower amount, which is what makes the bound above

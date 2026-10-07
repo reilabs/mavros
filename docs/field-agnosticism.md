@@ -709,8 +709,9 @@ already produces the exact spans the FALSE-case codegen consumes (no new marker;
 
 These are already deliberately field agnostic and should not be touched.
 
-- `spread_bits` / `unspread_bits` (VM) — pure u64 bit-tricks; only their `Field::from(..)` wrappers
-  change.
+- `spread_u32_to_u64` / `unspread_u64_to_u32` and the limb-wise `spread` / `unspread` (`limb-arith`,
+  shared by the VM and the WASM runtime) — pure u64 bit-tricks; only the `Field::from(..)` wrappers
+  the VM's spread tables put around them change.
 - The generic `SSA<Op, Ty, C>` layer — agnostic; bn254 enters only via the concrete
   `Constant::Field` variant.
 - `mavros-opcode-gen` dispatch/`DISPATCH`/`OPCODE_NAMES` generation — the machinery itself is

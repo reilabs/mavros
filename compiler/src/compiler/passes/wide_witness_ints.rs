@@ -31,7 +31,8 @@
 //!
 //! Everything else either moves limbs around or, as the bitwise operations do, acts on each limb
 //! within its own width, and so they remain constrained. The exceptions are the carry chain, the
-//! schoolbook product, the division built from the two, the shift, and the sign and the magnitude.
+//! schoolbook product, the division built from the two, the shift, the spread and the unspread, and
+//! the sign and the magnitude.
 //!
 //! # The Carry Chain
 //!
@@ -91,6 +92,17 @@
 //! A pure amount is known wherever the constraints are built, so its decomposition is pure, its
 //! bound a comparison, and the split and the barrel linear.
 //!
+//! # The Spread
+//!
+//! A spread and an unspread are limb-local at the half-limb: a half-limb of a spread's operand is
+//! one limb of its answer, and a limb of an unspread's operand is a half-limb of each stream. So
+//! each becomes the narrow one the witness lowering builds, once per half-limb or limb, and those
+//! narrow ones' lookups are what bound the pieces, which [`Rewriter::cut_unbounded`] cuts
+//! unbounded. A piece the read straddles is taken at the bits the read reaches, a limb an unspread
+//! reads one bit of is range-checked to that bit, and a limb wholly above the read is held to zero,
+//! so the bits above a read are rejected as the narrow lowering rejects them. Under a guard every
+//! one of those checks holds only where the guard does.
+//!
 //! # The Sign
 //!
 //! A signed value's sign is the top bit of its top limb, which [`Rewriter::sign_bit`] cuts out as a
@@ -141,7 +153,7 @@ use crate::compiler::{
             LimbBudget, ceil_log2, limb_bits_for_modulus, max_pow2_table_size,
             single_cell_product_fits, single_cell_shift_fits, single_cell_signed_product_fits,
             widest_cell_sum_bits, widest_injective_int_bits, widest_injective_int_bits_for_modulus,
-            witness_limb_bits,
+            witness_half_limb_bits, witness_limb_bits,
         },
         overflow_guard::abs_as_u,
         shift_guard::{amount_type_stays_below, emit_pure_shift_amount_check},
@@ -381,7 +393,9 @@ fn plan_function(
                         value,
                         target: CastTarget::Field,
                     } => {
-                        let Some(bits) = int_width(fti.get_value_type(*value))
+                        let Some(bits) = fti
+                            .get_value_type(*value)
+                            .int_width()
                             .filter(|bits| *bits > multi_cell_int_bits(field))
                         else {
                             continue;
@@ -635,7 +649,10 @@ impl Rewriter<'_> {
             mapped.len()
         );
 
-        let bits = int_width(self.types.get_value_type(value))
+        let bits = self
+            .types
+            .get_value_type(value)
+            .int_width()
             .unwrap_or_else(|| ice!("a non-integer operand met a wide witnessed integer"));
         let widths = limb_widths(bits, self.limb_bits());
         assert_eq!(
@@ -1001,8 +1018,9 @@ impl Rewriter<'_> {
 
     /// A witnessed zero of `width` bits, which is a constant and therefore pinned by being one.
     fn zero_limb(&mut self, width: usize) -> ValueId {
-        let zero = self.int_const(IntBits::zero(width));
-        self.cast(zero, CastTarget::WitnessOf)
+        let result = self.fresh();
+        self.define_zero(result, width);
+        result
     }
 
     /// The limbs of a wide value as **pure** values, cut to the shape a `to_bits` target needs.
@@ -3297,7 +3315,10 @@ impl Rewriter<'_> {
             "ICE: a {limb_bits}-bit limb has no powers-of-two table to split it at an amount"
         );
 
-        let amount_bits = int_width(self.types.get_value_type(rhs))
+        let amount_bits = self
+            .types
+            .get_value_type(rhs)
+            .int_width()
             .unwrap_or_else(|| ice!("a shift by a non-integer amount"));
         if !self.is_witness(rhs) {
             return self.pure_shift_amount(rhs, amount_bits, bits, stages, left, guard);
@@ -3973,6 +3994,317 @@ impl Rewriter<'_> {
     }
 }
 
+// THE SPREAD
+// ================================================================================================
+
+impl Rewriter<'_> {
+    /// A witnessed spread whose spread is held as limbs (and whose operand may be too) under the
+    /// `guard` where one exists.
+    ///
+    /// A spread is limb-local: a half-limb of the operand spreads into exactly one limb of the
+    /// answer, with nothing crossing between them. So the operand is cut into half-limbs and each
+    /// one becomes the narrow spread that the witness lowering already builds, its lookup keyed by
+    /// the half-limb, into the answer's limb in that position.
+    ///
+    /// The lookups are also what bounds the half-limbs, which [`Self::cut_unbounded`] leaves
+    /// unbounded: a lookup at `r` bits holds its key below `2^r`. Only the half-limbs the read
+    /// reaches are cut, the one it straddles spread at the bits of it the read takes. Whatever the
+    /// operand holds above the read inside a cut is refused.
+    fn lower_spread(
+        &mut self,
+        guard: Option<ValueId>,
+        result: ValueId,
+        value: ValueId,
+        value_bits: usize,
+    ) {
+        let bits = self
+            .types
+            .get_value_type(value)
+            .int_width()
+            .unwrap_or_else(|| ice!("a spread of a non-integer reached the representation"));
+        let containers = limb_widths(bits, witness_half_limb_bits(self.field));
+        let results = self.limbs(result);
+        assert_eq!(
+            results.len(),
+            containers.len(),
+            "ICE: an int{bits} spread is a limb per half-limb, not {} for {}",
+            results.len(),
+            containers.len()
+        );
+
+        let mut pieces = Vec::with_capacity(containers.len());
+        if self.wide_width(value).is_some() {
+            for (limb, width, read) in self.limbs_and_reads(value, bits, value_bits) {
+                match read {
+                    0 => self.constrain_zero(limb, guard),
+                    read => pieces.extend(self.cut_unbounded(limb, width, read, guard)),
+                }
+            }
+        } else {
+            pieces = self.cut_unbounded(value, bits, value_bits, guard);
+        }
+
+        for (index, (result, container)) in results.into_iter().zip(containers).enumerate() {
+            match pieces.get(index) {
+                Some(&(piece, read)) => self.push_guarded(
+                    guard,
+                    OpCode::Spread {
+                        result,
+                        value: piece,
+                        value_bits: read,
+                    },
+                ),
+                None => self.define_zero(result, 2 * container),
+            }
+        }
+    }
+
+    /// A witnessed unspread of an operand held as limbs, under `guard` where there is one.
+    ///
+    /// Limb-local in the other direction: each limb of the operand unspreads into a half-limb of
+    /// each stream, by the narrow unspread the witness lowering already builds, whose lookups bound
+    /// both. The half-limbs are then put back together as the streams, which may be limbs or one
+    /// element each. A limb the read straddles is unspread at the bits of it the read takes, one
+    /// the read takes a single bit of, which has no odd bit for the narrow unspread to take, is
+    /// range-checked to that bit and is the even half-limb itself, and one wholly above the read is
+    /// held to zero.
+    fn lower_unspread(
+        &mut self,
+        guard: Option<ValueId>,
+        result_odd: ValueId,
+        result_even: ValueId,
+        value: ValueId,
+        value_bits: usize,
+    ) {
+        let bits = self.wide_width(value).unwrap_or_else(|| {
+            ice!(
+                "an unspread whose operand is one element answers streams that are one element too"
+            )
+        });
+        let mut odd_parts = Vec::new();
+        let mut even_parts = Vec::new();
+
+        for (limb, width, read) in self.limbs_and_reads(value, bits, value_bits) {
+            let (odd_width, even_width) = (width / 2, width.div_ceil(2));
+            let (odd, even) = match read {
+                0 => {
+                    self.constrain_zero(limb, guard);
+                    (None, self.zero_limb(even_width))
+                }
+                1 => {
+                    let limb_field = self.cast(limb, CastTarget::Field);
+                    // Under a guard the bit is witnessed and tied to the limb under it: where the
+                    // guard is off the limb may hold more than a bit, which an `Int` of the even
+                    // half-limb's width would truncate.
+                    let bit = match guard {
+                        None => limb_field,
+                        Some(_) => {
+                            let pure = self.cast(limb, CastTarget::ValueOf);
+                            let low = self.cast(pure, CastTarget::Int(1));
+                            let low_field = self.cast(low, CastTarget::Field);
+                            let bit = self.write_witness(low_field);
+                            self.constrain_equal(limb_field, bit, guard);
+                            bit
+                        }
+                    };
+                    self.push_guarded(
+                        guard,
+                        OpCode::Rangecheck {
+                            value: bit,
+                            max_bits: 1,
+                        },
+                    );
+                    (None, self.cast(bit, CastTarget::Int(even_width)))
+                }
+                _ => {
+                    let (odd, even) = (self.fresh(), self.fresh());
+                    self.push_guarded(
+                        guard,
+                        OpCode::Unspread {
+                            result_odd: odd,
+                            result_even: even,
+                            value: limb,
+                            value_bits: read,
+                        },
+                    );
+                    (Some(odd), even)
+                }
+            };
+            // A one-bit top limb has an even bit and no odd one, so it adds no odd half-limb.
+            if odd_width > 0 {
+                let odd = odd.unwrap_or_else(|| self.zero_limb(odd_width));
+                odd_parts.push((odd, odd_width));
+            }
+            even_parts.push((even, even_width));
+        }
+
+        self.assemble_half_limbs(result_odd, &odd_parts);
+        self.assemble_half_limbs(result_even, &even_parts);
+    }
+
+    /// The limbs of `value`, an `int(bits)` held as limbs, low first, each with its width and the
+    /// number of its bits that a read of the low `read` bits takes, which is zero for a limb wholly
+    /// above the read.
+    fn limbs_and_reads(
+        &self,
+        value: ValueId,
+        bits: usize,
+        read: usize,
+    ) -> Vec<(ValueId, usize, usize)> {
+        let limb_bits = self.limb_bits();
+        self.limbs(value)
+            .into_iter()
+            .zip(limb_widths(bits, limb_bits))
+            .enumerate()
+            .map(|(index, (limb, width))| {
+                (
+                    limb,
+                    width,
+                    read.saturating_sub(index * limb_bits).min(width),
+                )
+            })
+            .collect()
+    }
+
+    /// The half-limbs of a witnessed element `value` of `bits` that the low `read` bits reach, low
+    /// first, each typed at its half-limb's width and paired with the bits of it the read takes,
+    /// and **none of them bounded**: each has to be bounded by whatever the caller builds with it.
+    ///
+    /// The high pieces are witnessed from the pure shadow and the lowest is what is left of the
+    /// source once they are taken out at their places, so the pieces recombine to the source by
+    /// construction, bits above the read included, which land in the lowest. Once each piece is
+    /// bounded at its read their sum is below `2^read` and the field carries it.
+    ///
+    /// Under a guard the lowest piece is witnessed too, and the sum tied to the source by a
+    /// constraint under the guard. Where there is no guard nothing bounds a derived piece, so one
+    /// carrying the bits above the read would sit in an `Int` it does not fit, which the VM's cast
+    /// truncates and the constraint system does not, and the two would disagree about the witness.
+    fn cut_unbounded(
+        &mut self,
+        value: ValueId,
+        bits: usize,
+        read: usize,
+        guard: Option<ValueId>,
+    ) -> Vec<(ValueId, usize)> {
+        let half = witness_half_limb_bits(self.field);
+        let containers = limb_widths(bits, half);
+        let reads = limb_widths(read, half);
+        if containers.len() == 1 {
+            return vec![(value, read)];
+        }
+
+        let pure = self.cast(value, CastTarget::ValueOf);
+        let source = self.cast(value, CastTarget::Field);
+        let first = if guard.is_some() { 0 } else { 1 };
+        let mut rest = source;
+        let mut sum = None;
+        let mut pieces = Vec::with_capacity(reads.len());
+        for (index, piece_read) in reads.iter().enumerate().skip(first) {
+            let hint = self.shifted_down(pure, bits, index * half);
+            let narrowed = self.cast(hint, CastTarget::Int(*piece_read));
+            let hint_field = self.cast(narrowed, CastTarget::Field);
+            let written = self.write_witness(hint_field);
+            let placed = if index == 0 {
+                written
+            } else {
+                let place = self.field_const(self.field.two_pow(index * half));
+                self.bin(BinaryArithOpKind::UMul, written, place)
+            };
+            if guard.is_some() {
+                sum = Some(match sum {
+                    None => placed,
+                    Some(acc) => self.bin(BinaryArithOpKind::UAdd, acc, placed),
+                });
+            } else {
+                rest = self.bin(BinaryArithOpKind::USub, rest, placed);
+            }
+            pieces.push((
+                self.cast(written, CastTarget::Int(containers[index])),
+                *piece_read,
+            ));
+        }
+        match sum {
+            Some(sum) => self.constrain_equal(source, sum, guard),
+            None => {
+                let lowest = self.cast(rest, CastTarget::Int(containers[0]));
+                pieces.insert(0, (lowest, reads[0]));
+            }
+        }
+        pieces
+    }
+
+    /// Half-limbs, low first, put back together as `result`, which is their whole width held as
+    /// limbs or as one element.
+    ///
+    /// Every piece but the last is a full half-limb, so each lands at a multiple of one, and each
+    /// is already bounded, so the sum is below `2^width` and needs no constraint of its own.
+    fn assemble_half_limbs(&mut self, result: ValueId, parts: &[(ValueId, usize)]) {
+        let half = witness_half_limb_bits(self.field);
+        let targets = self.limbs(result);
+        let target_widths: Vec<usize> = limb_types(self.types.get_value_type(result), self.field)
+            .iter()
+            .map(|ty| ty.int_width().expect("a stream is an integer"))
+            .collect();
+        let groups: Vec<&[(ValueId, usize)]> = if targets.len() == 1 {
+            vec![parts]
+        } else {
+            parts.chunks(self.limb_bits() / half).collect()
+        };
+        assert_eq!(
+            groups.len(),
+            targets.len(),
+            "ICE: {} groups of half-limbs were assembled into a stream of {} limbs",
+            groups.len(),
+            targets.len()
+        );
+
+        for ((target, target_width), group) in targets.into_iter().zip(target_widths).zip(groups) {
+            let width: usize = group.iter().map(|(_, width)| width).sum();
+            assert_eq!(
+                width, target_width,
+                "ICE: half-limbs of {width} bits were assembled into an int{target_width}"
+            );
+            let mut sum = None;
+            for (index, (part, _)) in group.iter().enumerate() {
+                let part_field = self.cast(*part, CastTarget::Field);
+                let placed = if index == 0 {
+                    part_field
+                } else {
+                    let place = self.field_const(self.field.two_pow(index * half));
+                    self.bin(BinaryArithOpKind::UMul, part_field, place)
+                };
+                sum = Some(match sum {
+                    None => placed,
+                    Some(acc) => self.bin(BinaryArithOpKind::UAdd, acc, placed),
+                });
+            }
+            self.push(OpCode::Cast {
+                result: target,
+                value: sum.expect("a limb is at least one half-limb"),
+                target: CastTarget::Int(width),
+            });
+        }
+    }
+
+    /// Hold a witnessed integer to zero, where `guard` holds.
+    fn constrain_zero(&mut self, value: ValueId, guard: Option<ValueId>) {
+        let value_field = self.cast(value, CastTarget::Field);
+        let zero = self.field_const(self.field.zero());
+        self.constrain_equal(value_field, zero, guard);
+    }
+
+    /// Define `result` as a witnessed zero of `width` bits, which is a constant and pinned by being
+    /// one: [`Self::zero_limb`] into a value the caller names.
+    fn define_zero(&mut self, result: ValueId, width: usize) {
+        let zero = self.int_const(IntBits::zero(width));
+        self.push(OpCode::Cast {
+            result,
+            value: zero,
+            target: CastTarget::WitnessOf,
+        });
+    }
+}
+
 // PER-INSTRUCTION REWRITING
 // ================================================================================================
 
@@ -4019,6 +4351,24 @@ impl Rewriter<'_> {
 
             OpCode::AssertCmp { kind, lhs, rhs } => {
                 self.lower_assert_compare(*kind, *lhs, *rhs, None);
+            }
+
+            // A witnessed spread or unspread, under its guard where it has one, whose lookups and
+            // zero checks hold only where the guard does.
+            OpCode::Spread { value, .. } | OpCode::Unspread { value, .. }
+                if self.is_witness(*value) =>
+            {
+                self.lower_spread_family(None, op);
+            }
+            OpCode::Guard { condition, inner }
+                if matches!(
+                    **inner,
+                    OpCode::Spread { value, .. } | OpCode::Unspread { value, .. }
+                        if self.is_witness(value)
+                ) =>
+            {
+                let guard = self.one(*condition);
+                self.lower_spread_family(Some(guard), inner);
             }
 
             // An assertion in a branch on a witness, which holds only where the branch is taken.
@@ -4135,7 +4485,8 @@ impl Rewriter<'_> {
                 else {
                     ice!("a blob-backed sequence without a blob constant")
                 };
-                let bits = int_width(element_type)
+                let bits = element_type
+                    .int_width()
                     .unwrap_or_else(|| ice!("a wide blob sequence of {element_type}"));
                 let widths = limb_widths(bits, self.limb_bits());
                 let elem_types = element_types(element_type, self.field, results.len());
@@ -4386,20 +4737,35 @@ impl Rewriter<'_> {
                 unconstrained: *unconstrained,
             }),
 
-            // A wide value reaching anything else is a shape this pass does not represent. For a
-            // witnessed operand `width_validation` is what refuses it; a **pure** one has no width
-            // rule to refuse it and reaches here only by being read out of a transposed sequence,
-            // which no arm above hands to anything but another limb-mover.
+            // A wide value reaching anything else is a shape this pass does not represent.
             other => ice!(
                 "{other:?} reached the multi-cell representation with a wide operand, which is a shape it does not represent"
             ),
         }
     }
 
+    /// A spread or an unspread, under `guard` where there is one.
+    fn lower_spread_family(&mut self, guard: Option<ValueId>, op: &OpCode) {
+        match op {
+            OpCode::Spread {
+                result,
+                value,
+                value_bits,
+            } => self.lower_spread(guard, *result, *value, *value_bits),
+            OpCode::Unspread {
+                result_odd,
+                result_even,
+                value,
+                value_bits,
+            } => self.lower_unspread(guard, *result_odd, *result_even, *value, *value_bits),
+            other => ice_unreachable!("{other:?} is not a spread or an unspread"),
+        }
+    }
+
     /// A cast, which is where a value enters and leaves the representation.
     fn lower_cast(&mut self, result: ValueId, value: ValueId, target: &CastTarget) {
         let source_type = self.types.get_value_type(value);
-        let source_bits = int_width(source_type);
+        let source_bits = source_type.int_width();
 
         match target {
             CastTarget::Int(to_bits) => {
@@ -4732,17 +5098,9 @@ fn unguarded(op: &OpCode) -> &OpCode {
 /// The width of an integer operation with a witnessed operand, read off its left one, or [`None`]
 /// where both are pure or it is not an integer operation.
 fn witnessed_width(types: &FunctionTypeInfo, lhs: ValueId, rhs: ValueId) -> Option<usize> {
-    let bits = int_width(types.get_value_type(lhs))?;
+    let bits = types.get_value_type(lhs).int_width()?;
     (types.get_value_type(lhs).is_witness_of() || types.get_value_type(rhs).is_witness_of())
         .then_some(bits)
-}
-
-/// The declared width of an integer type, looking through a witness wrapper.
-fn int_width(ty: &Type) -> Option<usize> {
-    match &ty.strip_witness().expr {
-        TypeExpr::Int(bits) => Some(*bits),
-        _ => None,
-    }
 }
 
 // UTILITIES
@@ -4772,7 +5130,10 @@ mod tests {
     use crate::compiler::{
         analysis::types::Types,
         passes::shared::limbs::narrow_int_bits,
-        ssa::hlssa::builder::{HLEmitter, HLSSABuilder},
+        ssa::hlssa::{
+            MAX_SPREAD_INPUT_BITS, MAX_SUPPORTED_INT_BITS,
+            builder::{HLEmitter, HLSSABuilder},
+        },
     };
 
     fn bn254() -> FieldConfig {
@@ -7423,5 +7784,202 @@ mod tests {
         store.insert_with_deps(flow, vec![]);
         store.insert_with_deps(types, vec![]);
         WideWitnessInts::new().run(ssa, &store);
+    }
+
+    // SPREADS
+    // --------------------------------------------------------------------------------------
+
+    /// `main(x: witness int(bits))` answering `op(x)`, whose results are `result_types`.
+    fn program_answering(
+        bits: usize,
+        result_types: Vec<Type>,
+        op: impl FnOnce(ValueId, &[ValueId]) -> OpCode,
+    ) -> HLSSA {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let value = ssa.fresh_value();
+        let results: Vec<ValueId> = result_types.iter().map(|_| ssa.fresh_value()).collect();
+        let mut builder = HLSSABuilder::new(&mut ssa);
+        builder.modify_function(main, |fb| {
+            for ty in &result_types {
+                fb.function.add_return_type(ty.clone());
+            }
+            let entry = fb.function.get_entry_id();
+            fb.function
+                .get_block_mut(entry)
+                .push_parameter(value, Type::witness_of(Type::int(bits)));
+            let mut block = fb.test_block(entry);
+            block.emit(op(value, &results));
+            block.terminate_return(results);
+        });
+        ssa
+    }
+
+    /// The narrow spreads a widest spread becomes, one per half-limb the read reaches, each at the
+    /// bits of its half-limb the read takes, and one zero constraint per limb wholly above the
+    /// read.
+    #[test]
+    fn a_spread_at_the_widest_width_is_one_narrow_spread_per_half_limb() {
+        let bits = MAX_SPREAD_INPUT_BITS;
+        let half = witness_half_limb_bits(bn254());
+        let limb = witness_limb_bits(bn254());
+        for read in [bits, 100] {
+            let mut ssa = program_answering(
+                bits,
+                vec![Type::witness_of(Type::int(2 * bits))],
+                |value, results| OpCode::Spread {
+                    result: results[0],
+                    value,
+                    value_bits: read,
+                },
+            );
+            run_pass(&mut ssa);
+
+            let ops = emitted(&ssa);
+            let reads: Vec<usize> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    OpCode::Spread { value_bits, .. } => Some(*value_bits),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(reads.len(), read.div_ceil(half), "read {read}");
+            assert!(reads.iter().all(|&taken| taken <= half), "read {read}");
+            assert_eq!(reads.iter().sum::<usize>(), read, "read {read}");
+            let zeros = ops
+                .iter()
+                .filter(|op| matches!(op, OpCode::Constrain { .. }))
+                .count();
+            assert_eq!(
+                zeros,
+                bits.div_ceil(limb) - read.div_ceil(limb),
+                "read {read}"
+            );
+        }
+    }
+
+    /// Under a guard, every narrow spread and unspread is emitted under it and every zero check and
+    /// one-bit check is built under it, so that none of them holds where the guard does not.
+    #[test]
+    fn a_guarded_spread_or_unspread_builds_every_check_under_its_guard() {
+        let bits = 600usize;
+        for unspread in [false, true] {
+            let mut ssa = HLSSA::with_main("main".to_string());
+            let main = ssa.get_unique_entrypoint_id();
+            let (condition, value) = (ssa.fresh_value(), ssa.fresh_value());
+            let results = [ssa.fresh_value(), ssa.fresh_value()];
+            let mut builder = HLSSABuilder::new(&mut ssa);
+            builder.modify_function(main, |fb| {
+                let entry = fb.function.get_entry_id();
+                let inner = if unspread {
+                    fb.function
+                        .add_return_type(Type::witness_of(Type::int(bits / 2)));
+                    fb.function
+                        .add_return_type(Type::witness_of(Type::int(bits / 2)));
+                    OpCode::Unspread {
+                        result_odd: results[0],
+                        result_even: results[1],
+                        value,
+                        value_bits: 129,
+                    }
+                } else {
+                    fb.function
+                        .add_return_type(Type::witness_of(Type::int(2 * bits)));
+                    OpCode::Spread {
+                        result: results[0],
+                        value,
+                        value_bits: 100,
+                    }
+                };
+                let block = fb.function.get_block_mut(entry);
+                block.push_parameter(condition, Type::witness_of(Type::int(1)));
+                block.push_parameter(value, Type::witness_of(Type::int(bits)));
+                let mut block = fb.test_block(entry);
+                block.emit(OpCode::Guard {
+                    condition,
+                    inner: Box::new(inner),
+                });
+                let answers = if unspread {
+                    results.to_vec()
+                } else {
+                    vec![results[0]]
+                };
+                block.terminate_return(answers);
+            });
+            run_pass(&mut ssa);
+
+            let ops = emitted(&ssa);
+            assert!(
+                !ops.iter().any(|op| matches!(
+                    op,
+                    OpCode::Spread { .. } | OpCode::Unspread { .. } | OpCode::Rangecheck { .. }
+                )),
+                "an unguarded check under a guard: {ops:?}"
+            );
+            let guarded = ops
+                .iter()
+                .filter(|op| match op {
+                    OpCode::Guard { inner, .. } => matches!(
+                        **inner,
+                        OpCode::Spread { .. } | OpCode::Unspread { .. } | OpCode::Rangecheck { .. }
+                    ),
+                    _ => false,
+                })
+                .count();
+            assert!(guarded > 0, "nothing was built under the guard: {ops:?}");
+            let one = ssa.add_const(Constant::Field(bn254().one()));
+            assert!(
+                ops.iter()
+                    .all(|op| !matches!(op, OpCode::Constrain { a, .. } if *a == one)),
+                "a zero check holds whatever the guard: {ops:?}"
+            );
+        }
+    }
+
+    /// The narrow unspreads a widest unspread becomes, one per limb the read reaches, except that a
+    /// limb the read takes one bit of is range-checked to a bit instead, having no odd bit.
+    #[test]
+    fn an_unspread_at_the_widest_width_is_one_narrow_unspread_per_limb() {
+        let bits = MAX_SUPPORTED_INT_BITS;
+        let limb = witness_limb_bits(bn254());
+        for read in [bits, 1000, 2 * limb + 1] {
+            let mut ssa = program_answering(
+                bits,
+                vec![Type::witness_of(Type::int(bits / 2)); 2],
+                |value, results| OpCode::Unspread {
+                    result_odd: results[0],
+                    result_even: results[1],
+                    value,
+                    value_bits: read,
+                },
+            );
+            run_pass(&mut ssa);
+
+            let ops = emitted(&ssa);
+            let reads: Vec<usize> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    OpCode::Unspread { value_bits, .. } => Some(*value_bits),
+                    _ => None,
+                })
+                .collect();
+            let one_bit = usize::from(read % limb == 1);
+            assert_eq!(reads.len(), read.div_ceil(limb) - one_bit, "read {read}");
+            assert_eq!(reads.iter().sum::<usize>() + one_bit, read, "read {read}");
+            let bits_checks = ops
+                .iter()
+                .filter(|op| matches!(op, OpCode::Rangecheck { max_bits: 1, .. }))
+                .count();
+            assert_eq!(bits_checks, one_bit, "read {read}");
+            let zeros = ops
+                .iter()
+                .filter(|op| matches!(op, OpCode::Constrain { .. }))
+                .count();
+            assert_eq!(
+                zeros,
+                bits.div_ceil(limb) - read.div_ceil(limb),
+                "read {read}"
+            );
+        }
     }
 }

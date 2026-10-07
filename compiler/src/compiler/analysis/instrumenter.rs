@@ -30,10 +30,7 @@ use crate::{
                 LookupTarget, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
             },
         },
-        util::{
-            UNSPREAD_INPUT_MAX, field_constant, host_word, ice_non_elided_tuple, spread_bits,
-            unspread_bits,
-        },
+        util::{field_constant, host_word, ice_non_elided_tuple},
     },
 };
 
@@ -534,10 +531,9 @@ impl Value {
     fn sext_op(&self, to: usize, _instrumenter: &mut dyn OpInstrumenter) -> Value {
         match self {
             // An unknown widens like a known one. The kind is the only width an unknown carries,
-            // so leaving it at the source's would describe the result at the wrong width in two
-            // places that read it: `ValueSignature::Unknown` keys a specialization on it, and
-            // `spread_op` bounds itself by it -- a stale `int64` would pass a `<= 64` check that
-            // the `int128` this actually produces must fail.
+            // so leaving it at the source's would describe the result at the wrong width wherever
+            // it is read: `ValueSignature::Unknown` keys a specialization on it, and `spread_op`
+            // and `unspread_op` derive their own results' widths from it.
             Value::Unknown(ScalarKind::Int(_)) => Value::Unknown(ScalarKind::Int(to)),
             Value::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.sext_op(to, _instrumenter))),
             Value::Int(v) => Value::Int(v.sign_extend(to)),
@@ -547,68 +543,36 @@ impl Value {
         }
     }
 
-    fn spread_op(&self) -> Value {
+    fn spread_op(&self, value_bits: usize) -> Value {
         match self {
-            Value::Int(v) => {
-                let bits = v.bits();
-                assert!(
-                    bits <= 64,
-                    "Spread only supports integer widths up to 64 bits, got int{bits}"
-                );
-                Value::int(bits * 2, spread_bits(host_word(v), bits))
-            }
+            Value::Int(v) => Value::Int(v.spread(value_bits)),
             Value::Field(_) => ice!("Spread of field values is unsupported"),
-            Value::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.spread_op())),
-            Value::Unknown(ScalarKind::Int(bits)) => {
-                assert!(
-                    *bits <= 64,
-                    "Spread only supports integer widths up to 64 bits, got int{}",
-                    bits
-                );
-                Value::Unknown(ScalarKind::Int(bits * 2))
-            }
+            Value::WitnessOf(inner) => Value::WitnessOf(Box::new(inner.spread_op(value_bits))),
+            Value::Unknown(ScalarKind::Int(bits)) => Value::Unknown(ScalarKind::Int(bits * 2)),
             Value::Unknown(ScalarKind::Field) => ice!("Spread of field values is unsupported"),
             _ => ice!("Cannot spread {:?}", self),
         }
     }
 
-    fn unspread_op(&self) -> (Value, Value) {
+    fn unspread_op(&self, value_bits: usize) -> (Value, Value) {
         match self {
             Value::Int(v) => {
-                let bits = v.bits();
-                assert!(
-                    bits <= UNSPREAD_INPUT_MAX && bits % 2 == 0,
-                    "Unspread expects an even integer width up to {UNSPREAD_INPUT_MAX} bits, got int{bits}"
-                );
-
-                let (odd_val, even_val) = unspread_bits(host_word(v), bits);
-                let half_bits = bits / 2;
-                (
-                    Value::int(half_bits, odd_val),
-                    Value::int(half_bits, even_val),
-                )
+                let (odd, even) = v.unspread(value_bits);
+                (Value::Int(odd), Value::Int(even))
             }
             Value::Field(_) => ice!("Unspread of field values is unsupported"),
             Value::WitnessOf(inner) => {
-                let (odd, even) = inner.unspread_op();
+                let (odd, even) = inner.unspread_op(value_bits);
                 (
                     Value::WitnessOf(Box::new(odd)),
                     Value::WitnessOf(Box::new(even)),
                 )
             }
-            Value::Unknown(ScalarKind::Int(bits)) => {
-                assert!(
-                    *bits <= UNSPREAD_INPUT_MAX && bits % 2 == 0,
-                    "Unspread expects an even integer width up to {UNSPREAD_INPUT_MAX} bits, got int{}",
-                    bits
-                );
-
-                let half_bits = bits / 2;
-                (
-                    Value::Unknown(ScalarKind::Int(half_bits)),
-                    Value::Unknown(ScalarKind::Int(half_bits)),
-                )
-            }
+            // The widths `analysis::types` gives the two streams.
+            Value::Unknown(ScalarKind::Int(bits)) => (
+                Value::Unknown(ScalarKind::Int(bits / 2)),
+                Value::Unknown(ScalarKind::Int(bits.div_ceil(2))),
+            ),
             Value::Unknown(ScalarKind::Field) => {
                 ice!("Unspread of field values is unsupported")
             }
@@ -1260,16 +1224,16 @@ impl symbolic_executor::Value<CostAnalysis> for SpecSplitValue {
 
     fn mem_op(&self, _kind: RefCountOp, _ctx: &mut CostAnalysis) {}
 
-    fn spread(&self, _bits: u8, _instrumenter: &mut CostAnalysis) -> Self {
+    fn spread(&self, value_bits: usize, _instrumenter: &mut CostAnalysis) -> Self {
         Self {
-            unspecialized: self.unspecialized.spread_op(),
-            specialized: self.specialized.spread_op(),
+            unspecialized: self.unspecialized.spread_op(value_bits),
+            specialized: self.specialized.spread_op(value_bits),
         }
     }
 
-    fn unspread(&self, _bits: u8, _instrumenter: &mut CostAnalysis) -> (Self, Self) {
-        let (unspec_odd, unspec_even) = self.unspecialized.unspread_op();
-        let (spec_odd, spec_even) = self.specialized.unspread_op();
+    fn unspread(&self, value_bits: usize, _instrumenter: &mut CostAnalysis) -> (Self, Self) {
+        let (unspec_odd, unspec_even) = self.unspecialized.unspread_op(value_bits);
+        let (spec_odd, spec_even) = self.specialized.unspread_op(value_bits);
         (
             Self {
                 unspecialized: unspec_odd,
@@ -2303,9 +2267,8 @@ mod tests {
     /// An unknown widens too: the kind is the only width it carries.
     ///
     /// The width matters even with no value behind it. `ValueSignature::Unknown` keys a
-    /// specialization on the kind, and `spread_op` bounds itself by it -- so an unknown left at the
-    /// width it was extended _from_ would both key on the wrong thing and pass a `<= 64` check the
-    /// width it actually has must fail.
+    /// specialization on the kind, so an unknown left at the width it was extended _from_ would key
+    /// on the wrong thing.
     #[test]
     fn an_unknown_carries_the_width_it_was_extended_to() {
         let mut dummy = DummyInstrumenter {
@@ -2325,15 +2288,6 @@ mod tests {
             panic!("the witness wrapper must survive, got {wrapped:?}");
         };
         assert!(matches!(**inner, Value::Unknown(ScalarKind::Int(64))));
-
-        // And the consequence that is not merely a wrong number: the widened value is past the
-        // bound `spread_op` enforces, so it must now be refused there rather than sailing through
-        // on the source's width.
-        let past_the_bound = Value::Unknown(ScalarKind::Int(64)).sext_op(128, &mut dummy);
-        assert!(matches!(
-            past_the_bound,
-            Value::Unknown(ScalarKind::Int(128))
-        ));
     }
 
     /// Sign extension fills, where a cast zero-extends.

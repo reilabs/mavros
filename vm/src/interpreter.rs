@@ -15,7 +15,7 @@ use crate::{
     array::BoxedValue,
     bytecode::{
         self, AllocationInstrumenter, AllocationType, ENTRY_AD, ENTRY_WITGEN, Int128, OpCode,
-        TableInfo, VM, parse_program_header, pow2_rows, spread_bits,
+        TableInfo, VM, parse_program_header, pow2_rows,
     },
 };
 
@@ -550,7 +550,7 @@ pub fn run_phase2(
                 let beta = phase1.out_wit_post_comm[1];
                 for i in 0..tbl.length {
                     let multiplicity = unsafe { *tbl.multiplicities_wit.add(i) };
-                    let spread_i = Field::from(spread_bits(i as u32));
+                    let spread_i = Field::from(mavros_limb_arith::spread_u32_to_u64(i as u32));
                     let denom = alpha - Field::from(i as u64) + beta * spread_i;
                     phase1.out_b[base + i] = denom;
                     phase1.out_c[base + i] = multiplicity;

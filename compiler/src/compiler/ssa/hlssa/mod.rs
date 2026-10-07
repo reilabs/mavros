@@ -13,7 +13,7 @@ use crate::compiler::ssa::{
     SourceLocation, ValueId,
 };
 
-pub use type_system::{MAX_SUPPORTED_INT_BITS, Type, TypeExpr};
+pub use type_system::{MAX_SPREAD_INPUT_BITS, MAX_SUPPORTED_INT_BITS, Type, TypeExpr};
 
 // HLSSA
 // ================================================================================================
@@ -286,15 +286,13 @@ pub enum OpCode {
     Spread {
         result: ValueId,
         value: ValueId,
-        /// Number of input bits (1..=16).
-        bits: u8,
+        value_bits: usize,
     },
     Unspread {
         result_odd: ValueId,
         result_even: ValueId,
         value: ValueId,
-        /// Number of input bits per half (1..=16).
-        bits: u8,
+        value_bits: usize,
     },
     Guard {
         condition: ValueId,
@@ -948,10 +946,10 @@ impl Instruction for OpCode {
             OpCode::Spread {
                 result,
                 value,
-                bits,
+                value_bits,
             } => {
                 format!(
-                    "v{}{} = spread(v{}, {bits})",
+                    "v{}{} = spread(v{}, {value_bits})",
                     result.0,
                     annotate_value(*result),
                     value.0,
@@ -961,10 +959,10 @@ impl Instruction for OpCode {
                 result_odd,
                 result_even,
                 value,
-                bits,
+                value_bits,
             } => {
                 format!(
-                    "v{}{}, v{}{} = unspread(v{}, {bits})",
+                    "v{}{}, v{}{} = unspread(v{}, {value_bits})",
                     result_odd.0,
                     annotate_value(*result_odd),
                     result_even.0,

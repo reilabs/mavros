@@ -7,6 +7,7 @@ edition = "2024"
 # The Mavros crates that the compiler depends on
 mavros-artifacts.workspace = true
 mavros-int-semantics.workspace = true
+mavros-limb-arith.workspace = true
 mavros-vm.workspace = true
 mavros-wasm-layout.workspace = true
 

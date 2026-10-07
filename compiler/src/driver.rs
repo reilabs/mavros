@@ -662,6 +662,12 @@ impl Driver {
                 // Immediately before the lowerings that read an integer's width: a witnessed value
                 // too wide for one field element becomes its limbs here, and every lowering below
                 // this sees limbs it can work with.
+                //
+                // Nothing drops an unused `Spread` may run between this and `witness_integer_ops`.
+                // A spread past the field is cut into pieces that only its narrow spreads' lookups
+                // bound, and those are built there: a dead-code pass in between would leave the
+                // pieces of an answer used only in part unbounded. There isn't a reasonable way to
+                // enforce this at compile time for now.
                 Box::new(WideWitnessInts::new()),
                 // After the representation, so a value it carries as limbs has already had its
                 // narrowing rewritten into a recombination.

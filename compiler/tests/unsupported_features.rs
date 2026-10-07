@@ -83,3 +83,69 @@ fn print_oracles_remain_ignored() {
     driver.run_noir_compiler().unwrap();
     driver.make_struct_access_static().unwrap();
 }
+
+/// `spread::<N>` reads `N` bits of a `u32` and `unspread::<N>` takes two `N`-bit halves out of a
+/// `u64`, so each takes `N` from 1 to 32 and refuses the rest with a diagnostic.
+#[test]
+fn spread_widths_past_their_containers_are_refused() {
+    for (call, message) in [
+        (
+            "spread::<0>(x as u32)",
+            "`spread::<0>` must read 1..=32 bits of its `u32`",
+        ),
+        (
+            "spread::<33>(x as u32)",
+            "`spread::<33>` must read 1..=32 bits of its `u32`",
+        ),
+        (
+            "unspread::<0>(x).0",
+            "`unspread::<0>` must take halves of 1..=32 bits of its `u64`",
+        ),
+        (
+            "unspread::<33>(x).0",
+            "`unspread::<33>` must take halves of 1..=32 bits of its `u64`",
+        ),
+    ] {
+        assert_refused(
+            &format!(
+                "use std::mavros::{{spread, unspread}};\n\
+                 fn main(x: u64) {{ let _ = {call}; }}\n"
+            ),
+            message,
+            &[],
+        );
+    }
+}
+
+/// The widest `N` each takes compiles, and its witness satisfies the constraints.
+#[test]
+fn spread_widths_up_to_their_containers_run() {
+    use mavros_compiler::{api, compiler::codegen::CodeGenOptions};
+
+    let dir = common::noir_project(
+        r#"use std::mavros::{spread, unspread};
+fn main(x: u32) {
+    let s = spread::<32>(x);
+    assert_eq(s & 0xAAAAAAAAAAAAAAAA, 0);
+    let (odd, even) = unspread::<32>(s);
+    assert_eq(odd, 0);
+    assert_eq(even, x);
+}
+"#,
+    );
+    let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
+    let mut binary = api::compile_bytecode(
+        &mut driver,
+        CodeGenOptions {
+            check_constraints: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for x in [0u32, 1, 0x8000_0000, 0x1234_5678, u32::MAX] {
+        std::fs::write(dir.path().join("Prover.toml"), format!("x = {x}")).unwrap();
+        let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+        let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None).unwrap();
+        assert!(api::check_witgen(&r1cs, &result), "x = {x}");
+    }
+}
