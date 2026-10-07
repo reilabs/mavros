@@ -87,9 +87,10 @@ are described below.
 
 ### Stage 1: Noir Compilation
 
-Mavros uses the Noir [compiler](https://github.com/noir-lang/noir) to parse and type-check Noir
-source code. This provides familiar diagnostics to the user of Mavros, while ensuring that the input
-code is correct Noir.
+Mavros uses a pinned revision of the
+[World Noir fork](https://github.com/worldfnd/noir/tree/provekit-v2) to parse and type-check Noir
+source code, including arbitrary-width integers. This provides familiar diagnostics to the user of
+Mavros, while ensuring that the input code is correct Noir.
 
 We use this to convert Noir's monomorphic AST this to our own SSA representation
 ([`compiler/lowering`](../compiler/src/compiler/lowering/)). This SSA relies mostly on immutable

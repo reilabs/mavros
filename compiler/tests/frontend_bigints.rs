@@ -1,0 +1,186 @@
+mod common;
+
+use mavros_compiler::{
+    Project, abi_helpers, api, compiler::codegen::CodeGenOptions, driver::Driver,
+};
+
+/// Exercise source parsing, monomorphization, input decoding, witness generation and R1CS.
+/// Check a declared return as well so a missing high limb cannot pass unnoticed.
+fn check(source: &str, inputs: &str) {
+    let dir = common::noir_project(source);
+    if source.contains("match ") {
+        let manifest = dir.path().join("Nargo.toml");
+        let contents = std::fs::read_to_string(&manifest).unwrap();
+        std::fs::write(
+            manifest,
+            contents + "compiler_unstable_features = ['enums']\n",
+        )
+        .unwrap();
+    }
+    let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false)
+        .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+    let mut binary = api::compile_bytecode(
+        &mut driver,
+        CodeGenOptions {
+            check_constraints: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("Prover.toml"), inputs).unwrap();
+    let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+    let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None).unwrap();
+    assert!(api::check_witgen(&r1cs, &result));
+    abi_helpers::check_return_guard(
+        driver.abi(),
+        &r1cs.witness_layout,
+        &params,
+        &result.out_wit_pre_comm,
+    )
+    .unwrap();
+}
+
+fn check_both_modes(source: &str, inputs: &str) {
+    check(source, inputs);
+    check(&source.replace("fn main", "unconstrained fn main"), inputs);
+}
+
+#[test]
+fn wide_arithmetic_from_source() {
+    check_both_modes(
+        include_str!("../../noir_tests/bigint_arithmetic/src/main.nr"),
+        include_str!("../../noir_tests/bigint_arithmetic/Prover.toml"),
+    );
+}
+
+#[test]
+fn generic_wide_integers_in_arrays_and_vectors() {
+    check_both_modes(
+        include_str!("../../noir_tests/bigint_sequences/src/main.nr"),
+        include_str!("../../noir_tests/bigint_sequences/Prover.toml"),
+    );
+}
+
+#[test]
+fn wide_abi_from_source() {
+    check_both_modes(
+        include_str!("../../noir_tests/bigint_abi/src/main.nr"),
+        include_str!("../../noir_tests/bigint_abi/Prover.toml"),
+    );
+}
+
+#[test]
+fn wide_match_literals_and_signed_literals_keep_their_value() {
+    check(
+        r#"fn main(x: u200, n: i64) -> pub [u64; 2] {
+            let tag = match x {
+                0x1000000000000000000000000000000000000000000000 => 7,
+                _ => 9,
+            };
+            assert(n == -42);
+            assert((-7 as Field) + 7 == 0);
+            [tag, (n as u64)]
+        }"#,
+        "x = '0x1000000000000000000000000000000000000000000000'\nn = '-42'\nreturn = [7, '18446744073709551574']",
+    );
+}
+
+#[test]
+fn the_maximum_width_and_nonstandard_signed_width_reach_source_lowering() {
+    check(
+        r#"fn main(n: i33) -> pub [u64; 2] {
+            let high: u16384 = 1 << 16383;
+            assert(high >> 16383 == 1);
+            let low: u3 = 7;
+            assert(low == 7);
+            [(high >> 16383) as u64, ((n + 1) as i64) as u64]
+        }"#,
+        "n = '-2'\nreturn = [1, '18446744073709551615']",
+    );
+}
+
+#[test]
+fn wide_arithmetic_still_rejects_overflow_and_zero_divisors() {
+    for (body, valid, invalid) in [
+        (
+            "let max: u256 = !0; let sum = max + (x as u256); assert(sum >= max);",
+            "x = 0",
+            "x = 1",
+        ),
+        (
+            "let high: u256 = 1 << 200; let q = high / (x as u256); assert(q > 0);",
+            "x = 1",
+            "x = 0",
+        ),
+    ] {
+        let dir = common::noir_project(&format!("fn main(x: u64) {{ {body} }}"));
+        let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
+        let binary = api::compile_bytecode(
+            &mut driver,
+            CodeGenOptions {
+                check_constraints: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for (input, accepted) in [(valid, true), (invalid, false)] {
+            std::fs::write(dir.path().join("Prover.toml"), input).unwrap();
+            let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+            let result = api::run_witgen_from_binary(&mut binary.clone(), &r1cs, &params, None);
+            if accepted {
+                assert!(api::check_witgen(&r1cs, &result.unwrap()));
+            } else {
+                assert!(result.is_err(), "{body}: invalid operands were accepted");
+            }
+        }
+    }
+}
+
+#[test]
+fn wide_abi_checks_input_ranges_and_declared_returns() {
+    let dir = common::noir_project(include_str!("../../noir_tests/bigint_abi/src/main.nr"));
+    let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
+    let mut binary = api::compile_bytecode(
+        &mut driver,
+        CodeGenOptions {
+            check_constraints: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // A wrong return differing only above bit 128 must fail the return constraint.
+    let correct = (num_bigint::BigUint::from(1u8) << 180) + 16u8;
+    let wrong = (num_bigint::BigUint::from(2u8) << 180) + 16u8;
+    std::fs::write(
+        dir.path().join("Prover.toml"),
+        format!("a = '{correct}'\nb = 0\nreturn = '{wrong}'"),
+    )
+    .unwrap();
+    let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+    assert!(api::run_witgen_from_binary(&mut binary, &r1cs, &params, None).is_err());
+
+    let out_of_range = num_bigint::BigUint::from(1u8) << 200;
+    std::fs::write(
+        dir.path().join("Prover.toml"),
+        format!("a = '{out_of_range}'\nb = 0\nreturn = 0"),
+    )
+    .unwrap();
+    assert!(api::read_prover_inputs(dir.path(), driver.abi()).is_err());
+}
+
+#[test]
+fn frontend_rejects_widths_and_entry_points_outside_the_supported_domain() {
+    for source in [
+        "fn main(x: u256) {}",
+        "fn main() -> pub u256 { 0 }",
+        "fn main(x: u64) { let _: u16385 = x as u16385; }",
+        "fn main(x: u64) { let _: u1 = x as u1; }",
+        // These errors arise only after the generic width is bound in monomorphization.
+        "fn bad<let N: u32>(x: u64) { let _: u<N> = x as u<N>; } fn main(x: u64) { bad::<16385>(x); }",
+        "fn bad<let N: u32>() -> u<N> { 256 } fn main() { assert(bad::<8>() == 0); }",
+    ] {
+        let dir = common::noir_project(source);
+        let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
+        assert!(driver.run_noir_compiler().is_err(), "{source}");
+    }
+}
