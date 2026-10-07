@@ -2372,6 +2372,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mavros-limb-arith"
+version = "0.1.0"
+
+[[package]]
 name = "mavros-opcode-gen"
 version = "0.1.0"
 dependencies = [
@@ -2388,6 +2392,7 @@ dependencies = [
  "ark-ff",
  "mavros-artifacts",
  "mavros-int-semantics",
+ "mavros-limb-arith",
  "mavros-opcode-gen",
  "serde",
  "serde_json",
@@ -2405,6 +2410,7 @@ dependencies = [
  "ark-bn254",
  "ark-ff",
  "mavros-int-semantics",
+ "mavros-limb-arith",
  "num-bigint 0.4.6",
 ]
 

@@ -17,8 +17,7 @@ use num_bigint::BigUint;
 use proptest::prelude::*;
 
 use crate::{
-    CmpOp, IntBits, IntOp, MAX_BITS, MAX_LOWERED_SIGNED_BITS, Outcome, Reject, SignedValue,
-    corners, eval,
+    CmpOp, IntBits, IntOp, MAX_BITS, Outcome, Reject, SignedValue, corners, eval,
     int_bits::{FIELD_LIMB_BITS, HOST_WORD_BITS},
     mask, residue,
 };
@@ -799,9 +798,6 @@ fn every_operand_pair_at_narrow_widths() {
     for bits in corners::EXHAUSTIVE_WIDTHS {
         let m = mask(bits);
         for op in IntOp::ALL {
-            if op.is_signed() && !corners::signed_width_ok(bits) {
-                continue;
-            }
             for lhs in 0..=m {
                 for rhs in 0..=m {
                     check_point(op, bits, lhs, bits, rhs);
@@ -814,7 +810,7 @@ fn every_operand_pair_at_narrow_widths() {
 #[test]
 fn the_corner_cross_product_at_every_width() {
     for op in IntOp::ALL {
-        for &bits in corners::widths_for(op.is_signed()) {
+        for &bits in corners::widths() {
             let vals = corners::values(bits);
             for &lhs in &vals {
                 for &rhs in &vals {
@@ -828,7 +824,7 @@ fn the_corner_cross_product_at_every_width() {
 #[test]
 fn shifts_across_mixed_operand_widths() {
     for op in [IntOp::Shl, IntOp::UShr, IntOp::SShr] {
-        for (bits, rhs_bits) in corners::shift_width_pairs(op.is_signed()) {
+        for (bits, rhs_bits) in corners::shift_width_pairs() {
             let vals = corners::values(bits);
             let amounts = corners::shift_amounts(bits, rhs_bits);
             for &lhs in &vals {
@@ -846,7 +842,7 @@ fn the_accept_boundary_is_exactly_the_width() {
     // amount from it up to the representable maximum is rejected. An off-by-one anywhere in the
     // model or in an evaluator conforming to it shows up here as a single flipped point.
     for op in [IntOp::Shl, IntOp::UShr, IntOp::SShr] {
-        for &bits in corners::widths_for(op.is_signed()) {
+        for &bits in corners::widths() {
             for amount in 0..bits {
                 assert!(
                     !eval(op, &pat(bits, 1), &pat(HOST_WORD_BITS, amount as u128)).is_rejected(),
@@ -893,10 +889,10 @@ fn width_and_value(max_bits: usize) -> impl Strategy<Value = (usize, u128)> {
     })
 }
 
-/// Any operation whose reading is not signed, so the sweep may use the full width range.
+/// Any operation whose reading is not signed.
 ///
-/// The reading-free operations belong here rather than being dropped: `And` at 128 bits is
-/// perfectly legal and is the case the unsigned sweep is for.
+/// The reading-free operations belong here rather than being dropped, so that the two sweeps below
+/// between them cover every operation.
 fn any_unsigned_op() -> impl Strategy<Value = IntOp> {
     prop::sample::select(
         IntOp::ALL
@@ -930,7 +926,7 @@ proptest! {
 
     #[test]
     fn model_invariants_hold_anywhere_signed(
-        (bits, lhs) in width_and_value(MAX_LOWERED_SIGNED_BITS),
+        (bits, lhs) in width_and_value(HOST_WORD_BITS),
         rhs in any::<u128>(),
         op in any_signed_op(),
     ) {
@@ -950,7 +946,7 @@ proptest! {
 
     /// Two's complement round-trips, which everything signed rests on.
     #[test]
-    fn signed_encoding_round_trips((bits, raw) in width_and_value(MAX_LOWERED_SIGNED_BITS)) {
+    fn signed_encoding_round_trips((bits, raw) in width_and_value(HOST_WORD_BITS)) {
         let decoded = pat(bits, raw).to_signed();
         prop_assert!(IntBits::fits_signed(bits, &decoded));
         prop_assert_eq!(host(&IntBits::from_signed(bits, &decoded)), raw);
@@ -961,7 +957,7 @@ proptest! {
     /// that does not — stated independently of how `eval` decides it.
     #[test]
     fn signed_addition_rejects_exactly_the_unrepresentable(
-        (bits, lhs) in width_and_value(MAX_LOWERED_SIGNED_BITS),
+        (bits, lhs) in width_and_value(HOST_WORD_BITS),
         rhs in any::<u128>(),
     ) {
         let rhs = rhs & mask(bits);
@@ -994,7 +990,7 @@ proptest! {
 
     /// Comparison is a total order consistent with the reading it names.
     #[test]
-    fn comparison_matches_its_reading((bits, lhs) in width_and_value(MAX_LOWERED_SIGNED_BITS), rhs in any::<u128>()) {
+    fn comparison_matches_its_reading((bits, lhs) in width_and_value(HOST_WORD_BITS), rhs in any::<u128>()) {
         let rhs = rhs & mask(bits);
         prop_assert_eq!(compare(CmpOp::ULt, bits, lhs, rhs), lhs < rhs);
         prop_assert_eq!(

@@ -13,7 +13,7 @@ use crate::compiler::ssa::{
     SourceLocation, ValueId,
 };
 
-pub use type_system::{MAX_SUPPORTED_INT_BITS, Type, TypeExpr, assert_signed_op_width};
+pub use type_system::{MAX_SUPPORTED_INT_BITS, Type, TypeExpr};
 
 // HLSSA
 // ================================================================================================

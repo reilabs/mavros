@@ -9,9 +9,9 @@
 //!   false under the guard instead (`lower_witness_field_div_guard`), and a guarded witness integer
 //!   one is left to its lowering, which rejects the same executions.
 //! - `LowerPureGuards::lower_unguarded_divmod` — an unguarded division whose quotient is used
-//!   asserts the condition is false, then performs the division unchanged. An unsigned division by
-//!   a witness is the exception, as its lowering refuses a zero divisor itself
-//!   ([`divisor_checked_by_its_lowering`]).
+//!   asserts the condition is false, then performs the division unchanged. An integer division by
+//!   a witness is the exception, as its lowering refuses a zero divisor, and a signed one
+//!   `INT_MIN / -1`, itself ([`divisor_checked_by_its_lowering`]).
 //! - `DCE` — an unguarded division whose quotient is _not_ used is replaced by the assertion
 //!   alone. Mavros builds HLSSA straight from Noir's monomorphized AST and never runs Noir's SSA
 //!   pipeline, so nothing upstream has already attached a failure to the division; if the division
@@ -52,15 +52,20 @@ pub fn divmod_can_fail(ty: &Type) -> bool {
     matches!(ty.strip_witness().expr, TypeExpr::Int(_) | TypeExpr::Field)
 }
 
-/// Whether the witness lowering a `kind` division by a `rhs_type` divisor is bound for rejects a
-/// zero divisor itself, so that no separate check is needed.
+/// Whether the witness lowering a `kind` division by a `rhs_type` divisor is bound for rejects
+/// every execution [`emit_divmod_failure_cond`] would itself, so that no separate check is needed.
+///
+/// That holds for an integer division by a witness, whatever its sign. A zero divisor fails the
+/// `r < d` check of the unsigned division, which the signed one runs on the magnitudes, and the
+/// signed `INT_MIN / -1` fails the range check of the quotient, whose magnitude `2^(bits - 1)` the
+/// type cannot hold as a positive answer. Both are built into the remainder's lowering as well as
+/// the quotient's.
 ///
 /// The check this answers for is only as good as the lowering being reached, so a dead division
 /// this answers `true` for has to be **kept** until then rather than deleted, which is what `DCE`'s
 /// `owes_witness_check` ensures.
 pub fn divisor_checked_by_its_lowering(kind: BinaryArithOpKind, rhs_type: &Type) -> bool {
     matches!(kind.group(), ArithGroup::Div | ArithGroup::Rem)
-        && !kind.is_signed()
         && rhs_type.is_witness_of()
         && matches!(rhs_type.strip_witness().expr, TypeExpr::Int(_))
 }
@@ -196,7 +201,7 @@ pub fn emit_divmod_is_defined_assert(
 /// The divisor a division's witness-generation hint divides by: `divisor`, or one where it is zero.
 ///
 /// A zero divisor has no quotient (and the constraints the hint feeds refuse it) but the hint runs
-/// first. An unsigned division by a witness has no assertion ahead of it to trap there instead (see
+/// first. An integer division by a witness has no assertion ahead of it to trap there instead (see
 /// [`divisor_checked_by_its_lowering`]), and a guarded one reaches it whenever the guard holds, so
 /// without this the hint would be a compiled `udiv` by zero, which LLVM leaves undefined.
 ///

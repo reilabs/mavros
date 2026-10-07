@@ -20,7 +20,7 @@ use crate::{
             hlssa::{
                 ArithGroup, BinaryArithOpKind, CmpKind, Constant, DMatrix, Endianness, HLFunction,
                 HLSSA, HLSSAConstantsSnapshot, MAX_POW2_TABLE_SIZE, SliceOpDir, Type as HLType,
-                TypeExpr as HLTypeExpr, assert_signed_op_width,
+                TypeExpr as HLTypeExpr,
             },
             llssa::{
                 Blob as LLBlob, Constant as LLConstant, FieldArithOp, IntArithOp, IntCmpOp,
@@ -922,11 +922,6 @@ fn lower_instruction(
                     e.field_arith(op, ll_lhs, ll_rhs)
                 }
                 HLTypeExpr::Int(bits) => {
-                    // Only the _signed_ operations carry the 64-bit bound. `And`/`Or`/`Xor` have no
-                    // signed form and an unsigned `int128` is perfectly ordinary here.
-                    if signed {
-                        assert_signed_op_width(*bits, "arithmetic");
-                    }
                     assert_int_arith_widths(fn_type_info, kind, *bits, *lhs, *rhs);
                     e.int_arith(int_arith_op(kind.group(), signed), ll_lhs, ll_rhs)
                 }
@@ -975,12 +970,7 @@ fn lower_instruction(
                     CmpKind::ULt | CmpKind::SLt,
                     HLTypeExpr::Int(lhs_bits),
                     HLTypeExpr::Int(rhs_bits),
-                ) if lhs_bits == rhs_bits => {
-                    if signed {
-                        assert_signed_op_width(*lhs_bits, "comparison");
-                    }
-                    e.int_cmp(lt, ll_lhs, ll_rhs)
-                }
+                ) if lhs_bits == rhs_bits => e.int_cmp(lt, ll_lhs, ll_rhs),
                 (CmpKind::Eq, HLTypeExpr::Field, HLTypeExpr::Field) => e.field_eq(ll_lhs, ll_rhs),
                 // `ULt` alone: a field element has no two's complement reading, so an `SLt`
                 // over one is a compiler bug rather than a comparison to lower. It falls to the
@@ -1370,9 +1360,6 @@ fn lower_instruction(
                         (HLTypeExpr::Int(lhs_bits), HLTypeExpr::Int(rhs_bits))
                             if lhs_bits == rhs_bits =>
                         {
-                            if signed {
-                                assert_signed_op_width(*lhs_bits, "assertion comparison");
-                            }
                             e.int_cmp(lt, ll_lhs, ll_rhs)
                         }
                         // Unsigned alone, as at the `Cmp` site above: a signed comparison of field

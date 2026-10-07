@@ -1,9 +1,6 @@
 //! Converts monomorphized AST types to mavros SSA types.
 
 use noirc_frontend::monomorphization::ast::Type as NoirType;
-use noirc_frontend::shared::Signedness;
-
-use mavros_int_semantics::MAX_LOWERED_SIGNED_BITS;
 
 use crate::compiler::ssa::hlssa::Type;
 
@@ -20,17 +17,8 @@ impl TypeConverter {
         match ast_type {
             NoirType::Field => Type::field(),
             NoirType::Bool => Type::bool(),
-            NoirType::Integer(signedness, bit_size) => match signedness {
-                Signedness::Unsigned => Type::int(*bit_size as usize),
-                Signedness::Signed => {
-                    let bits = *bit_size as usize;
-                    assert!(
-                        bits <= MAX_LOWERED_SIGNED_BITS,
-                        "signed integers wider than i{MAX_LOWERED_SIGNED_BITS} are unsupported"
-                    );
-                    Type::int(bits)
-                }
-            },
+            // The type carries no sign: each operation names the reading it takes.
+            NoirType::Integer(_, bit_size) => Type::int(*bit_size as usize),
             NoirType::Unit => {
                 // Unit type is represented as an empty tuple
                 Type::tuple_of(vec![])

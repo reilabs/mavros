@@ -35,7 +35,6 @@ use crate::compiler::{
         ValueId,
         hlssa::{
             ArithGroup, BinaryArithOpKind, CastTarget, OpCode, Type, TypeExpr,
-            assert_signed_op_width,
             builder::{HLBlockEmitter, HLEmitter, two_pow_pattern},
         },
     },
@@ -296,9 +295,11 @@ impl LowerWitnessBitwiseOps {
         });
     }
 
-    // FIELD-ASSUMPTION: L6-int-op-strategy
-    // Sign-extends via `value + sign * (field.two_pow(to_bits) - field.two_pow(from_bits))`. The
-    // `field.two_pow(to_bits)` shift wraps mod p once `to_bits` reaches the field width.
+    /// Sign-extends via `value + sign * (2^to_bits - 2^from_bits)` in one field element.
+    ///
+    /// Sound while `2^to_bits <= p`, which a witnessed target meets by being held in one element: a
+    /// wider one is held as limbs, and `WideWitnessInts` fills them with the sign bit before this
+    /// pass runs.
     fn lower_integer_sext(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -308,28 +309,25 @@ impl LowerWitnessBitwiseOps {
         from_bits: usize,
         to_bits: usize,
     ) {
-        // The bound belongs on the **source**, not on the target. A signed source is capped at
-        // `MAX_LOWERED_SIGNED_BITS` for now, but the target is just a wider integer to deposit the
-        // result in, and widening an `i32` into a `u128` is exactly what `x as u128` asks for.
-        assert_signed_op_width(from_bits, "sign extension source");
         let narrow_bits = narrow_int_bits(b.field());
-        assert!(
-            from_bits < to_bits && to_bits <= narrow_bits,
-            "sign extension must widen within the narrow integer range: {from_bits} -> {to_bits}"
-        );
-
-        // FIELD-ASSUMPTION: L4-modulus-query. The extension term below is
-        // `two_pow(to_bits) - two_pow(from_bits)`, which is only the value it is meant to be while
-        // `two_pow(to_bits)` has not wrapped. On bn254 the 128-bit cap leaves ample room; on a
-        // narrower field this refuses rather than silently extending by a wrapped constant.
-        if to_bits >= b.field().field_bit_size() as usize {
-            unsupported_on_this_field(
-                format_args!(
-                    "sign extension from {from_bits} to {to_bits} bits builds its extension term out of `two_pow({to_bits})`, which has itself wrapped, so the widened value would be a residue rather than the sign-extended one"
-                ),
-                b.field(),
-            );
+        let witnessed = context.types().get_value_type(value).is_witness_of();
+        if !witnessed && to_bits > narrow_bits {
+            self.lower_wide_pure_sext(b, context, result, value, from_bits, to_bits);
+            return;
         }
+
+        // A pure target past the narrow range takes the integer route above, and a witnessed one
+        // past the element is limbs, so what is left fits an element: the extension term
+        // `2^to_bits - 2^from_bits` is the value it is meant to be rather than a wrapped one.
+        let widest = if witnessed {
+            widest_injective_int_bits(b.field())
+        } else {
+            narrow_bits
+        };
+        assert!(
+            from_bits < to_bits && to_bits <= widest,
+            "ICE: a sign extension from {from_bits} to {to_bits} bits reached the single-element lowering"
+        );
 
         // The question is whether bit `from_bits - 1` of the encoding is provably clear, so it is
         // asked of the range record rather than of one chosen reading — `SExt`'s source may be
@@ -349,6 +347,43 @@ impl LowerWitnessBitwiseOps {
             result,
             value: extended,
             target: cast_target_for_integer_type(context.types().get_value_type(result)),
+        });
+    }
+
+    /// Sign-extends a pure value to a target past the narrow range, where the place value the
+    /// field formula above adds no longer fits one element.
+    fn lower_wide_pure_sext(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        context: &LoweringContext<'_>,
+        result: ValueId,
+        value: ValueId,
+        from_bits: usize,
+        to_bits: usize,
+    ) {
+        assert!(
+            from_bits < to_bits,
+            "sign extension must widen: {from_bits} -> {to_bits}"
+        );
+        // As in the field formula, a sign bit the range record proves clear costs nothing: the
+        // extension is then the widening alone.
+        if context.range(value).is_non_negative_at_width(from_bits) {
+            b.emit(OpCode::Cast {
+                result,
+                value,
+                target: CastTarget::Int(to_bits),
+            });
+            return;
+        }
+
+        let widened = b.cast_to(CastTarget::Int(to_bits), value);
+        let gap = b.int_const(IntBits::from_u128(to_bits, (to_bits - from_bits) as u128));
+        let raised = b.bin(BinaryArithOpKind::UShl, widened, gap);
+        b.emit(OpCode::BinaryArithOp {
+            kind: BinaryArithOpKind::SShr,
+            result,
+            lhs: raised,
+            rhs: gap,
         });
     }
 
@@ -384,17 +419,14 @@ impl LowerWitnessBitwiseOps {
         let rhs_witness = context.types().get_value_type(rhs).is_witness_of();
 
         // Everything below packs the value, its `2^n` factor and their product into single field
-        // elements. `WideWitnessInts` runs first and lowers every unsigned shift those elements
-        // cannot hold limb-wise, and the funnel refuses a signed one before either, so a shift
-        // reaching here fits by construction.
+        // elements. `WideWitnessInts` runs first and lowers every shift those elements cannot hold
+        // limb-wise, so a shift reaching here fits by construction. A signed right shift's
+        // correction adds a multiple of `2^bits`, which the same bound keeps inside the modulus.
         assert!(
             single_cell_shift_fits(b.field(), bits, kind.group() == ArithGroup::Shl),
             "ICE: an int{bits} witness {kind:?} reached the single-cell shift, whose field element \
              cannot hold it"
         );
-        if lhs_signed {
-            assert_signed_op_width(bits, "shift");
-        }
 
         let widths = shift_amount_bits(context, rhs, bits);
 
@@ -846,10 +878,10 @@ fn emit_pow2_factor(
 ///
 /// `factor * cofactor == 2^bits` determines `cofactor` uniquely.
 fn emit_pow2_cofactor(b: &mut HLBlockEmitter<'_>, factor: ValueId, bits: usize) -> ValueId {
-    // Only the signed `>>` correction wants a cofactor. The pure side divides at any width, so the
-    // double-width hint below needs no bound of its own; this states which shifts reach here.
-    assert_signed_op_width(bits, "shift cofactor");
-
+    // Only the signed `>>` correction wants a cofactor, at a width `single_cell_shift_fits` holds
+    // it to. The pure side divides at any width, so the double-width hint below needs no bound of
+    // its own.
+    //
     // FIELD-ASSUMPTION: L4-decompose
     let two_pow_bits = b.field_const(b.field().two_pow(bits));
 

@@ -31,7 +31,7 @@
 //!
 //! Everything else either moves limbs around or, as the bitwise operations do, acts on each limb
 //! within its own width, and so they remain constrained. The exceptions are the carry chain, the
-//! schoolbook product, the division built from the two, and the shift.
+//! schoolbook product, the division built from the two, the shift, and the sign and the magnitude.
 //!
 //! # The Carry Chain
 //!
@@ -46,11 +46,18 @@
 //! width the operands still have an element each but their sum does not, so the operands are
 //! decomposed into limbs first. A sum or difference is then recombined into its element.
 //!
+//! The signed three are the same chain. A signed sum or difference keeps the unsigned one's limbs
+//! and witnesses its top carry, and is checked by one linear relation between that carry and the
+//! sign bits of both operands and of the answer. A signed ordering is the unsigned ordering of the
+//! operands with their top bits flipped, which is offset binary.
+//!
 //! # The Schoolbook Product
 //!
 //! An unsigned product runs here wherever the single cell cannot hold it, which is past
 //! [`single_cell_product_fits`]: from the width whose product passes the modulus, apart from the
-//! double lane's own two-limb product. Each column of the answer sums its partial products and the
+//! double lane's own two-limb product. A signed one runs here past
+//! [`single_cell_signed_product_fits`], which has no such escape, as the product of its operands'
+//! magnitudes (see the sign, below). Each column of the answer sums its partial products and the
 //! carries into it, and is reduced into its limb, range-checked at the limb width, and a witnessed
 //! carry range-checked at the width its bound needs. The top column carries nothing out, so it is
 //! range-checked at the top limb's width instead, and every partial product landing past it is
@@ -66,21 +73,39 @@
 //! dividend's limb** rather than range-checked, and `r < d`, which is the carry chain with its top
 //! borrow forced out and so also refuses a zero divisor. Together they admit exactly the pair
 //! Euclidean division gives. An operand's known limbs bound both answers, and a limb they cannot
-//! reach is a known zero rather than a column.
+//! reach is a known zero rather than a column. A signed division is the unsigned one of the
+//! operands' magnitudes, past [`single_cell_signed_product_fits`].
 //!
 //! # The Shift
 //!
-//! An unsigned shift runs here wherever the single cell cannot hold it, which is past
-//! [`single_cell_shift_fits`]. An amount known at compile time only moves bits, so the operand is cut
-//! where a run of its bits stops landing inside one limb of the answer, and each piece is
-//! range-checked at its own width; moving an operand held as limbs by a whole number of them costs
-//! nothing. Any other amount is `q·h + r`, with `r` read out of the powers-of-two table beside
-//! `2^r`. Every limb is split at `2^r` into two
-//! halves, each range-checked, that land either side of a limb boundary without overlapping, and a
-//! barrel over the bits of `q` moves the whole limbs. The amount's own bound is the decomposition
-//! where that reaches the width, and an explicit range check where it does not. A pure amount is
-//! known wherever the constraints are built, so its decomposition is pure, its bound a comparison,
-//! and the split and the barrel linear.
+//! A shift under either reading runs here wherever the single cell cannot hold it, which is past
+//! [`single_cell_shift_fits`]. A left shift is one map on the pattern, and a signed right shift is
+//! the unsigned one with the sign filled in. An
+//! amount known at compile time only moves bits, so the operand is cut where a run of its bits
+//! stops landing inside one limb of the answer, and each piece is range-checked at its own width;
+//! moving an operand held as limbs by a whole number of them costs nothing. Any other amount is
+//! `q·h + r`, with `r` read out of the powers-of-two table beside `2^r`. Every limb is split at
+//! `2^r` into two halves, each range-checked, that land either side of a limb boundary without
+//! overlapping, and a barrel over the bits of `q` moves the whole limbs. The amount's own bound is
+//! the decomposition where that reaches the width, and an explicit range check where it does not.
+//! A pure amount is known wherever the constraints are built, so its decomposition is pure, its
+//! bound a comparison, and the split and the barrel linear.
+//!
+//! # The Sign
+//!
+//! A signed value's sign is the top bit of its top limb, which [`Rewriter::sign_bit`] cuts out as a
+//! witnessed bit beside the rest of the limb, range-checked one bit narrower. The chain's checks
+//! above are linear in it, as is a sign extension into the representation, whose limbs past the
+//! source's are that bit times all ones, and the fill of a right shift by a known amount.
+//!
+//! The rest is sign-magnitude. A limb complemented where the sign is one,
+//! [`Rewriter::complement`], is `x + s·(2^w - 1 - 2x)`: one product, and below `2^w` with no check
+//! of its own. A value negated where the sign is one, [`Rewriter::negate_if`], is each limb
+//! complemented and the sign added through the chain, its top carry dropped. A product, quotient
+//! and remainder run the unsigned gadgets on the operands' magnitudes, and the answer's magnitude
+//! is held to `2^(N - 1) - 1 + s` for the sign `s` it takes, by one constraint on its top bit, and
+//! negated by it. A right shift by any other amount is the unsigned one between two complements by
+//! the operand's sign.
 //!
 //! # Strategy
 //!
@@ -114,9 +139,11 @@ use crate::compiler::{
         divmod_guard::nonzero_hint_divisor,
         limbs::{
             LimbBudget, ceil_log2, limb_bits_for_modulus, max_pow2_table_size,
-            single_cell_product_fits, single_cell_shift_fits, widest_cell_sum_bits,
-            widest_injective_int_bits, widest_injective_int_bits_for_modulus, witness_limb_bits,
+            single_cell_product_fits, single_cell_shift_fits, single_cell_signed_product_fits,
+            widest_cell_sum_bits, widest_injective_int_bits, widest_injective_int_bits_for_modulus,
+            witness_limb_bits,
         },
+        overflow_guard::abs_as_u,
         shift_guard::{amount_type_stays_below, emit_pure_shift_amount_check},
         unsupported::unsupported_on_this_field,
     },
@@ -506,6 +533,7 @@ fn rewrite_function(
         let old_instructions = block.take_instructions();
         let mut new_instructions = Vec::with_capacity(old_instructions.len());
         let mut decomposed = HashMap::default();
+        let mut signs = HashMap::default();
         let mut divisions = HashMap::default();
         for instr in &old_instructions {
             let location = instr.location().clone();
@@ -515,6 +543,7 @@ fn rewrite_function(
                 types: fti,
                 field,
                 decomposed: &mut decomposed,
+                signs: &mut signs,
                 divisions: &mut divisions,
                 known: &mut known,
                 out: Vec::new(),
@@ -540,8 +569,20 @@ fn rewrite_function(
     ssa.put_function(fid, function);
 }
 
-/// A division's operands and guard, which decide both of its answers: dividend, divisor, guard.
-type Division = (ValueId, ValueId, Option<ValueId>);
+/// A division's operands, guard and reading, which decide both of its answers: dividend, divisor,
+/// guard, and whether it is signed.
+type Division = (ValueId, ValueId, Option<ValueId>, bool);
+
+/// One answer of a division, as far as it has been built.
+#[derive(Clone)]
+enum Answer {
+    /// Limbs as the field elements [`Rewriter::deliver`] takes.
+    Built(Vec<ValueId>),
+
+    /// A signed answer's magnitude as limbs, each with whether it is witnessed, and the sign it
+    /// takes, which [`Rewriter::answer`] negates it by the first time it is asked for.
+    Signed(Vec<(ValueId, bool)>, Sign),
+}
 
 /// One instruction's worth of rewriting, plus the minting the gadgets need.
 ///
@@ -555,25 +596,17 @@ struct Rewriter<'a> {
     field: FieldConfig,
 
     /// The decompositions already emitted in this block, by value and width.
-    ///
-    /// Kept per block as limbs minted in one block are in scope only in the blocks that block
-    /// dominates, and this pass does not track dominance. Within a block the instructions are
-    /// rewritten in order, so an earlier decomposition is always in scope.
     decomposed: &'a mut HashMap<(ValueId, usize), Vec<ValueId>>,
 
-    /// The divisions already built in this block, as their quotient's and remainder's limbs, by
-    /// dividend, divisor and guard.
-    ///
-    /// One gadget pins both answers, so `a / b` beside `a % b` reads the second from the first.
-    /// Kept per block for the reason [`Self::decomposed`] is.
-    divisions: &'a mut HashMap<Division, (Vec<ValueId>, Vec<ValueId>)>,
+    /// The top bits already cut out of a witnessed limb in this block, by limb and width.
+    signs: &'a mut HashMap<(ValueId, usize), ValueId>,
+
+    /// The divisions already built in this block, as their quotient and remainder, by dividend,
+    /// divisor, guard and reading.
+    divisions: &'a mut HashMap<Division, (Answer, Answer)>,
 
     /// The values this function's rewrite has minted whose pattern is known at compile time but
     /// that are not constants themselves, by value.
-    ///
-    /// A witnessed constant is a cast of a constant, as [`Self::zero_limb`] makes one, and
-    /// `get_const` finds nothing behind a cast. [`Self::known`] reads both. Kept for the whole
-    /// function rather than per block, as a pattern holds wherever its value is in scope.
     known: &'a mut HashMap<ValueId, IntBits>,
 
     out: Vec<OpCode>,
@@ -730,6 +763,14 @@ impl Rewriter<'_> {
 
     fn field_const(&self, value: Field) -> ValueId {
         self.ssa.add_const(Constant::Field(value))
+    }
+
+    /// A limb's pattern as a field constant.
+    fn limb_const(&self, pattern: &IntBits) -> ValueId {
+        self.field_const(
+            field_constant(self.field, pattern)
+                .unwrap_or_else(|| ice!("a limb's pattern {pattern:?} is wider than the field")),
+        )
     }
 
     /// `2^(index * h)` as a field element, the place value of limb `index`.
@@ -1029,6 +1070,17 @@ impl Rewriter<'_> {
 // THE CARRY CHAIN
 // ================================================================================================
 
+/// Who bounds a chain's top answer limb at its width.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TopLimb {
+    /// The chain, as it does every other limb.
+    Checked,
+
+    /// The caller, which cuts the limb's top bit out with [`Rewriter::sign_bit`] and so bounds it
+    /// with the cut's own two range checks.
+    CutByCaller,
+}
+
 /// Where the carry out of a chain's top limb goes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum CarryOut {
@@ -1059,7 +1111,8 @@ struct Operands {
 
 /// What a carry chain leaves behind.
 struct Chain {
-    /// Each limb of the answer as a field element, range-checked at its own width.
+    /// Each limb of the answer as a field element, range-checked at its own width, the top one
+    /// unless [`TopLimb::CutByCaller`] says the caller bounds it.
     answer: Vec<ValueId>,
 
     /// The width of each limb, little-endian.
@@ -1082,25 +1135,193 @@ impl Rewriter<'_> {
         let (guard, inner) = self.split_guard(op);
 
         match inner {
-            OpCode::BinaryArithOp { kind, result, .. } => {
-                self.lower_add_sub(*kind, *result, lhs, rhs, bits, guard);
-            }
+            OpCode::BinaryArithOp { kind, result, .. } => match kind {
+                BinaryArithOpKind::UAdd | BinaryArithOpKind::USub => {
+                    self.lower_add_sub(*kind, *result, lhs, rhs, bits, guard);
+                }
+                BinaryArithOpKind::SAdd | BinaryArithOpKind::SSub => {
+                    self.lower_signed_add_sub(*kind, *result, lhs, rhs, bits, guard);
+                }
+                _ => ice_unreachable!("`chained` matches only a sum or a difference"),
+            },
             // An ordering cannot fail, so a guard has nothing to withhold from it: the chain holds
             // for any pair of operands, and every limb of either is bounded whatever the guard.
-            OpCode::Cmp { result, .. } => {
-                let chain = self.carry_chain(true, lhs, rhs, bits, CarryOut::Witnessed, None);
+            OpCode::Cmp { kind, result, .. } => {
+                let signed = kind.is_signed();
+                let chain = self.ordering_chain(signed, lhs, rhs, bits, CarryOut::Witnessed, None);
                 self.push(OpCode::Cast {
                     result: *result,
                     value: chain.carry_out.expect("an ordering witnesses its borrow"),
                     target: CastTarget::Int(1),
                 });
             }
-            OpCode::AssertCmp { .. } => {
-                self.carry_chain(true, lhs, rhs, bits, CarryOut::One, guard);
+            OpCode::AssertCmp { kind, .. } => {
+                self.ordering_chain(kind.is_signed(), lhs, rhs, bits, CarryOut::One, guard);
             }
             _ => ice_unreachable!("`chained` matches only these"),
         }
         true
+    }
+
+    /// The chain whose top borrow is `lhs < rhs`, under the signed reading where `signed`.
+    ///
+    /// A signed ordering is the unsigned ordering of the operands in offset binary, which is the
+    /// top bit of each flipped: that adds `2^(N - 1)` to every signed value, mapping the signed
+    /// range onto `[0, 2^N)` in order. Only the top limb holds that bit, so only it changes, and
+    /// [`Self::flip_top_bit`] says what the change costs.
+    fn ordering_chain(
+        &mut self,
+        signed: bool,
+        lhs: ValueId,
+        rhs: ValueId,
+        bits: usize,
+        out: CarryOut,
+        guard: Option<ValueId>,
+    ) -> Chain {
+        if !signed {
+            return self.carry_chain(true, lhs, rhs, bits, out, guard);
+        }
+        let widths = limb_widths(bits, self.limb_bits());
+        let mut lhs = self.chain_limbs(lhs, bits, widths.len());
+        let mut rhs = self.chain_limbs(rhs, bits, widths.len());
+        let top = widths.len() - 1;
+        lhs[top] = self.flip_top_bit(lhs[top], widths[top]);
+        rhs[top] = self.flip_top_bit(rhs[top], widths[top]);
+        self.carry_chain_over(true, &lhs, &rhs, widths, out, guard)
+    }
+
+    /// A signed sum or difference: the unsigned one's limbs, with its overflow read off the sign
+    /// bits rather than the carry out of the top limb.
+    ///
+    /// The chain says `a + b = r + 2^N·c` for a sum and `a - b = r - 2^N·c` for a difference, with
+    /// `c` the witnessed carry or borrow out of the top limb. Reading each pattern `x` as
+    /// `x - 2^N·s_x` for its sign bit `s_x`, the signed sum is `r + 2^N·(c - s_a - s_b)` and the
+    /// signed difference `r - 2^N·(c + s_a - s_b)`. Either fits exactly when it is `r`'s own signed
+    /// reading, `r - 2^N·s_r`, so the one check is `c + s_r == s_a + s_b` for a sum and
+    /// `c + s_a == s_r + s_b` for a difference: linear in four bits, all of them pinned.
+    ///
+    /// The answer's sign is cut out of its top limb without the guard, as the operands' are: an
+    /// honest carry keeps every limb of the answer in range wherever the operands are, and they
+    /// are on every path. Only the check itself is under the guard. The cut bounds that limb at its
+    /// width, so the chain does not check it again ([`TopLimb::CutByCaller`]), except where it is
+    /// one bit wide and is its own sign with no cut.
+    fn lower_signed_add_sub(
+        &mut self,
+        kind: BinaryArithOpKind,
+        result: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        bits: usize,
+        guard: Option<ValueId>,
+    ) {
+        let subtract = kind == BinaryArithOpKind::SSub;
+        let widths = limb_widths(bits, self.limb_bits());
+        let top = widths.len() - 1;
+        let lhs = self.chain_limbs(lhs, bits, widths.len());
+        let rhs = self.chain_limbs(rhs, bits, widths.len());
+        let lhs_sign = self.sign_bit(lhs[top], widths[top]);
+        let rhs_sign = self.sign_bit(rhs[top], widths[top]);
+
+        let top_limb = if widths[top] > 1 {
+            TopLimb::CutByCaller
+        } else {
+            TopLimb::Checked
+        };
+        let chain = self.carry_chain_bounded(
+            subtract,
+            &lhs,
+            &rhs,
+            widths,
+            CarryOut::Witnessed,
+            guard,
+            top_limb,
+        );
+
+        let carry = chain
+            .carry_out
+            .expect("a signed sum or difference witnesses its top carry");
+        let answer_top = self.cast(chain.answer[top], CastTarget::Int(chain.widths[top]));
+        let answer_sign = self.sign_bit((answer_top, true), chain.widths[top]);
+
+        let (left, right) = if subtract {
+            (
+                self.bin(BinaryArithOpKind::UAdd, carry, lhs_sign),
+                self.bin(BinaryArithOpKind::UAdd, answer_sign, rhs_sign),
+            )
+        } else {
+            (
+                self.bin(BinaryArithOpKind::UAdd, carry, answer_sign),
+                self.bin(BinaryArithOpKind::UAdd, lhs_sign, rhs_sign),
+            )
+        };
+        self.constrain_equal(left, right, guard);
+        self.deliver(result, chain.answer, &chain.widths, bits, guard);
+    }
+
+    /// The top bit of a limb `width` bits wide, as a field element that is zero or one.
+    ///
+    /// The sign-bit primitive. A known limb answers at compile time and a pure one on the pure
+    /// side, so neither costs a constraint. A witnessed one is cut at `width - 1` by
+    /// [`Self::cut_segment`], which witnesses the bit, range-checks it at one bit, and range-checks
+    /// what it leaves of the limb at `width - 1`. Together they pin the bit and bound the limb below
+    /// `2^width`: the other value of the bit puts that remainder out of range. A limb is cut once
+    /// per block, and a later request reads the same bit ([`Self::signs`]). A one-bit limb is its
+    /// own top bit, and is bounded by nothing here.
+    fn sign_bit(&mut self, (limb, witnessed): (ValueId, bool), width: usize) -> ValueId {
+        if let Some(pattern) = self.known(limb) {
+            return self.field_const(match pattern.cast(width).bit(width - 1) {
+                Some(true) => self.field.one(),
+                _ => self.field.zero(),
+            });
+        }
+        if !witnessed {
+            let top = self.shifted_down(limb, width, width - 1);
+            let bit = self.cast(top, CastTarget::Int(1));
+            return self.cast(bit, CastTarget::Field);
+        }
+        let whole = self.cast(limb, CastTarget::Field);
+        if width == 1 {
+            return whole;
+        }
+        if let Some(bit) = self.signs.get(&(limb, width)) {
+            return *bit;
+        }
+        let pieces = self.cut_segment(limb, whole, width, 0, &[0, width - 1, width]);
+        let &[_, (_, 1, bit)] = pieces.as_slice() else {
+            ice!("a limb's top bit was cut as {pieces:?}");
+        };
+        self.signs.insert((limb, width), bit);
+        bit
+    }
+
+    /// A limb `width` bits wide with its top bit flipped, in the form [`Self::carry_chain_over`]
+    /// reads.
+    ///
+    /// A known limb or a pure one flips on the pure side. A witnessed one is
+    /// `x + 2^(w - 1) - s·2^w` for its top bit `s`, which is linear in the [`Self::sign_bit`] cut,
+    /// so it costs that cut and nothing more: it is below `2^w` because `x` is and `s` is its top
+    /// bit, and its hint is the same combination read back on the pure side.
+    fn flip_top_bit(
+        &mut self,
+        (limb, witnessed): (ValueId, bool),
+        width: usize,
+    ) -> (ValueId, bool) {
+        let top = IntBits::one(width).shifted_left(width - 1);
+        if let Some(pattern) = self.known(limb) {
+            return (self.int_const(pattern.cast(width).xor(&top)), false);
+        }
+        if !witnessed {
+            let top = self.int_const(top);
+            return (self.bin(BinaryArithOpKind::Xor, limb, top), false);
+        }
+        let sign = self.sign_bit((limb, true), width);
+        let whole = self.cast(limb, CastTarget::Field);
+        let half = self.field_const(self.field.two_pow(width - 1));
+        let raised = self.bin(BinaryArithOpKind::UAdd, whole, half);
+        let place = self.field_const(self.field.two_pow(width));
+        let cleared = self.bin(BinaryArithOpKind::UMul, sign, place);
+        let flipped = self.bin(BinaryArithOpKind::USub, raised, cleared);
+        (self.cast(flipped, CastTarget::Int(width)), true)
     }
 
     /// A checked sum or difference, whose carry out of the top limb is its overflow.
@@ -1247,6 +1468,21 @@ impl Rewriter<'_> {
         out: CarryOut,
         guard: Option<ValueId>,
     ) -> Chain {
+        self.carry_chain_bounded(subtract, lhs, rhs, widths, out, guard, TopLimb::Checked)
+    }
+
+    /// [`Self::carry_chain_over`], with `top_limb` saying who bounds the answer's top limb.
+    #[allow(clippy::too_many_arguments)]
+    fn carry_chain_bounded(
+        &mut self,
+        subtract: bool,
+        lhs: &[(ValueId, bool)],
+        rhs: &[(ValueId, bool)],
+        widths: Vec<usize>,
+        out: CarryOut,
+        guard: Option<ValueId>,
+        top_limb: TopLimb,
+    ) -> Chain {
         assert!(
             subtract || out != CarryOut::One,
             "ICE: a sum whose top carry is forced out has no meaning"
@@ -1258,6 +1494,7 @@ impl Rewriter<'_> {
             lhs.len(),
             rhs.len()
         );
+
         let (fold, unfold) = if subtract {
             (BinaryArithOpKind::USub, BinaryArithOpKind::UAdd)
         } else {
@@ -1307,13 +1544,15 @@ impl Rewriter<'_> {
                 None
             };
 
-            self.push_guarded(
-                guard,
-                OpCode::Rangecheck {
-                    value: limb,
-                    max_bits: *width,
-                },
-            );
+            if !top || top_limb == TopLimb::Checked {
+                self.push_guarded(
+                    guard,
+                    OpCode::Rangecheck {
+                        value: limb,
+                        max_bits: *width,
+                    },
+                );
+            }
             answer.push(limb);
             carry = next;
         }
@@ -1396,24 +1635,28 @@ impl Rewriter<'_> {
     }
 }
 
-/// The operation the carry chain lowers, if `op` is one: an unsigned sum, difference or ordering,
-/// guarded or not, with a witnessed operand, past [`widest_cell_sum_bits`].
+/// The operation the carry chain lowers, if `op` is one: a sum, difference or ordering under
+/// either reading, guarded or not, with a witnessed operand, past [`widest_cell_sum_bits`].
 fn chained(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Option<Operands> {
     let (lhs, rhs) = match unguarded(op) {
         OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::UAdd | BinaryArithOpKind::USub,
+            kind:
+                BinaryArithOpKind::UAdd
+                | BinaryArithOpKind::USub
+                | BinaryArithOpKind::SAdd
+                | BinaryArithOpKind::SSub,
             lhs,
             rhs,
             ..
         }
         | OpCode::Cmp {
-            kind: CmpKind::ULt,
+            kind: CmpKind::ULt | CmpKind::SLt,
             lhs,
             rhs,
             ..
         }
         | OpCode::AssertCmp {
-            kind: CmpKind::ULt,
+            kind: CmpKind::ULt | CmpKind::SLt,
             lhs,
             rhs,
         } => (*lhs, *rhs),
@@ -1796,9 +2039,13 @@ impl Rewriter<'_> {
             return false;
         };
         let (guard, inner) = self.split_guard(op);
-        let OpCode::BinaryArithOp { result, .. } = inner else {
+        let OpCode::BinaryArithOp { kind, result, .. } = inner else {
             ice_unreachable!("`multiplied` matches only a binary operation");
         };
+        if *kind == BinaryArithOpKind::SMul {
+            self.lower_signed_product(*result, lhs, rhs, bits, guard);
+            return true;
+        }
 
         let widths = limb_widths(bits, self.limb_bits());
         let lhs = self.factor(lhs, bits, &widths);
@@ -2259,14 +2506,20 @@ impl FactorForms {
     }
 }
 
-/// The product the schoolbook lowers, if `op` is one: an unsigned multiplication, guarded or not,
-/// with a witnessed operand, at a width the single cell does not take.
+/// The product the schoolbook lowers, if `op` is one: a multiplication under either reading,
+/// guarded or not, with a witnessed operand, at a width the single cell does not take.
 fn multiplied(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Option<Operands> {
-    past_the_single_cell_product(op, types, field, &[BinaryArithOpKind::UMul])
+    past_the_single_cell_product(
+        op,
+        types,
+        field,
+        &[BinaryArithOpKind::UMul, BinaryArithOpKind::SMul],
+    )
 }
 
 /// A binary operation of one of `kinds`, guarded or not, with a witnessed operand, at a width whose
-/// product [`single_cell_product_fits`] says one element cannot hold.
+/// product one element cannot hold: past [`single_cell_product_fits`] for an unsigned one, and
+/// past [`single_cell_signed_product_fits`] for a signed one.
 fn past_the_single_cell_product(
     op: &OpCode,
     types: &FunctionTypeInfo,
@@ -2280,7 +2533,12 @@ fn past_the_single_cell_product(
         return None;
     }
     let bits = witnessed_width(types, *lhs, *rhs)?;
-    (!single_cell_product_fits(field, bits)).then_some(Operands {
+    let fits = if kind.is_signed() {
+        single_cell_signed_product_fits(field, bits)
+    } else {
+        single_cell_product_fits(field, bits)
+    };
+    (!fits).then_some(Operands {
         bits,
         lhs: *lhs,
         rhs: *rhs,
@@ -2320,27 +2578,56 @@ impl Rewriter<'_> {
         };
 
         let widths = limb_widths(bits, self.limb_bits());
-        let key = (dividend, divisor, guard);
-        let (quotient, remainder) = match self.divisions.get(&key) {
-            Some(answers) => answers.clone(),
+        let signed = kind.is_signed();
+        let key = (dividend, divisor, guard, signed);
+        let (mut quotient, mut remainder) = match self.divisions.remove(&key) {
+            Some(answers) => answers,
+            // `d / d` is one and `d % d` zero under either reading, wherever `d` is not zero.
+            None if dividend == divisor => {
+                let (q, r) = self.divide_by_itself(divisor, bits, &widths, guard);
+                (Answer::Built(q), Answer::Built(r))
+            }
+            None if signed => self.divide_signed(dividend, divisor, bits, &widths, guard),
             None => {
-                let answers = if dividend == divisor {
-                    self.divide_by_itself(divisor, bits, &widths, guard)
-                } else {
-                    self.divide(dividend, divisor, bits, &widths, guard)
-                };
-                self.divisions.insert(key, answers.clone());
-                answers
+                let (q, r) = self.divide(dividend, divisor, bits, &widths, guard);
+                (Answer::Built(q), Answer::Built(r))
             }
         };
-        let answer = match kind {
-            BinaryArithOpKind::UDiv => quotient,
-            BinaryArithOpKind::URem => remainder,
-            _ => ice_unreachable!("`divided` matches only an unsigned division or remainder"),
+        let wanted = match kind {
+            BinaryArithOpKind::UDiv | BinaryArithOpKind::SDiv => &mut quotient,
+            BinaryArithOpKind::URem | BinaryArithOpKind::SRem => &mut remainder,
+            _ => ice_unreachable!("`divided` matches only a division or a remainder"),
         };
-        let selected = if dividend == divisor { guard } else { None };
+        let answer = self.answer(wanted, &widths, guard);
+        self.divisions.insert(key, (quotient, remainder));
+        // A signed answer is the magnitude's negated by a chain checked only under the guard, so
+        // off it the answer is selected to zero, as `d / d`'s is.
+        let selected = if dividend == divisor || signed {
+            guard
+        } else {
+            None
+        };
         self.deliver(*result, answer, &widths, bits, selected);
         true
+    }
+
+    /// `answer`'s limbs as the field elements [`Self::deliver`] takes, negating a signed one by
+    /// its sign under `guard` and keeping what that builds for the next time it is asked for.
+    fn answer(
+        &mut self,
+        answer: &mut Answer,
+        widths: &[usize],
+        guard: Option<ValueId>,
+    ) -> Vec<ValueId> {
+        match answer {
+            Answer::Built(limbs) => limbs.clone(),
+            Answer::Signed(magnitude, sign) => {
+                let negated = self.negate_if(magnitude.clone(), widths, *sign, guard);
+                let limbs = self.limb_fields(negated);
+                *answer = Answer::Built(limbs.clone());
+                limbs
+            }
+        }
     }
 
     /// The quotient and the remainder of `dividend / divisor`, each as its limbs' field elements.
@@ -2354,7 +2641,27 @@ impl Rewriter<'_> {
     ) -> (Vec<ValueId>, Vec<ValueId>) {
         let n = self.factor(dividend, bits, widths);
         let d = self.factor(divisor, bits, widths);
+        let pure_dividend = self.pure_whole(dividend, bits);
+        let pure_divisor = self.pure_whole(divisor, bits);
+        let (q, r) = self.divide_factors(&n, &d, pure_dividend, pure_divisor, bits, widths, guard);
+        let quotient = q.limbs.iter().map(|limb| self.limb_field(limb)).collect();
+        let remainder = r.limbs.iter().map(|limb| self.limb_field(limb)).collect();
+        (quotient, remainder)
+    }
 
+    /// The quotient and the remainder of `n / d` as limbs, witnessed from the pure side's division
+    /// of `pure_dividend` by `pure_divisor`, which are the two operands' whole values there.
+    #[allow(clippy::too_many_arguments)]
+    fn divide_factors(
+        &mut self,
+        n: &Factor,
+        d: &Factor,
+        mut pure_dividend: ValueId,
+        mut pure_divisor: ValueId,
+        bits: usize,
+        widths: &[usize],
+        guard: Option<ValueId>,
+    ) -> (Factor, Factor) {
         // What the answers can be, from what the operands can: `q <= n / d` and `r < d`. Only a
         // known limb says more than the width does, and a constant divisor says the most.
         //
@@ -2371,8 +2678,6 @@ impl Rewriter<'_> {
             (&divisor_max - 1u8).min(dividend_max)
         };
 
-        let mut pure_dividend = self.pure_whole(dividend, bits);
-        let mut pure_divisor = self.pure_whole(divisor, bits);
         if let Some(condition) = guard {
             let condition = self.pure_of(condition, self.is_witness(condition));
             let zero = self.int_const(IntBits::zero(bits));
@@ -2390,7 +2695,7 @@ impl Rewriter<'_> {
         self.schoolbook(
             Schoolbook {
                 lhs: &q,
-                rhs: &d,
+                rhs: d,
                 addend: Some(&r),
                 pinned: Some(&target),
                 widths,
@@ -2406,7 +2711,7 @@ impl Rewriter<'_> {
             .find(|index| !r.bounds[*index].is_zero() || !d.bounds[*index].is_zero())
             .map_or(1, |top| top + 1);
         let remainder_limbs = self.chain_limbs_of(&r, reached);
-        let divisor_limbs = self.chain_limbs_of(&d, reached);
+        let divisor_limbs = self.chain_limbs_of(d, reached);
         self.carry_chain_over(
             true,
             &remainder_limbs,
@@ -2415,10 +2720,7 @@ impl Rewriter<'_> {
             CarryOut::One,
             guard,
         );
-
-        let quotient = q.limbs.iter().map(|limb| self.limb_field(limb)).collect();
-        let remainder = r.limbs.iter().map(|limb| self.limb_field(limb)).collect();
-        (quotient, remainder)
+        (q, r)
     }
 
     /// `d / d` and `d % d`, which are one and zero wherever `d` is not zero, so only that is
@@ -2516,8 +2818,9 @@ impl Rewriter<'_> {
     }
 }
 
-/// The division the representation lowers, if `op` is one: an unsigned division or remainder,
-/// guarded or not, with a witnessed operand, at a width whose product the single cell cannot hold.
+/// The division the representation lowers, if `op` is one: a division or remainder under either
+/// reading, guarded or not, with a witnessed operand, at a width whose product the single cell
+/// cannot hold.
 ///
 /// That is where the single-cell lowering's `q·d` could wrap: it forms the product in one element,
 /// and a quotient range-checked at the width times a divisor of the width passes the modulus from
@@ -2527,7 +2830,12 @@ fn divided(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Option<
         op,
         types,
         field,
-        &[BinaryArithOpKind::UDiv, BinaryArithOpKind::URem],
+        &[
+            BinaryArithOpKind::UDiv,
+            BinaryArithOpKind::URem,
+            BinaryArithOpKind::SDiv,
+            BinaryArithOpKind::SRem,
+        ],
     )
 }
 
@@ -2535,13 +2843,13 @@ fn divided(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Option<
 // ================================================================================================
 
 impl Rewriter<'_> {
-    /// An unsigned shift the single cell cannot hold, returning `true` if `op` was one and was
-    /// lowered.
+    /// A shift the single cell cannot hold, returning `true` if `op` was one and was lowered.
     ///
     /// An amount known at compile time is a relabelling of bits, which [`Self::shift_by_constant`]
     /// performs by cutting the operand where its bits land on a limb boundary. Any other amount is
     /// [`Self::shift_by_amount`]'s: a split of every limb at the amount within a limb, and a barrel
-    /// over the bits of how many whole limbs it moves.
+    /// over the bits of how many whole limbs it moves. A signed right shift is either, with the
+    /// vacated bits filled by [`Self::fill_with_sign`] or by complements around the shift.
     fn lower_shift(&mut self, op: &OpCode) -> bool {
         let Some(Operands { bits, lhs, rhs }) = shifted(op, self.types, self.field) else {
             return false;
@@ -2559,15 +2867,29 @@ impl Rewriter<'_> {
             );
         }
 
-        let left = *kind == BinaryArithOpKind::UShl;
+        // A left shift is one map on the pattern under either reading, so a signed one is this.
+        let left = matches!(kind, BinaryArithOpKind::UShl | BinaryArithOpKind::SShl);
+        let signed = *kind == BinaryArithOpKind::SShr;
         // A pure operand shifted by a known witness amount has no witness to cut, so it takes the
         // general route, whose every limb is witnessed by the split.
         match self.known_amount(rhs).filter(|_| self.is_witness(lhs)) {
             Some(amount) => match amount.to_usize().filter(|amount| *amount < bits) {
-                Some(amount) => self.shift_by_constant(*result, lhs, bits, left, amount),
+                Some(amount) => {
+                    let widths = self.shift_widths(*result, bits);
+                    let (mut answer, sign) =
+                        self.shift_by_constant(lhs, bits, &widths, left, amount, signed);
+                    if let Some(sign) = sign {
+                        self.fill_with_sign(&mut answer, &widths, sign, bits, amount);
+                    }
+                    self.deliver(*result, answer, &widths, bits, None);
+                }
                 None => self.shift_out_of_range(*result, bits, guard),
             },
-            None => self.shift_by_amount(*result, lhs, rhs, bits, left, guard),
+            None => {
+                let widths = limb_widths(bits, self.limb_bits());
+                let answer = self.shift_by_amount(lhs, rhs, bits, left, signed, guard);
+                self.deliver(*result, answer, &widths, bits, None);
+            }
         }
         true
     }
@@ -2622,26 +2944,39 @@ impl Rewriter<'_> {
     /// element near `p`, which that range check rejects. An answer limb is then a sum of pieces.
     ///
     /// A limb nothing cuts costs nothing, so an amount that is a whole number of limbs is free.
+    ///
+    /// The answer is one field element per limb of `answer_widths`, which are the result's. Where
+    /// `signed` asks for it and the shift moves anything, the operand's sign is handed back too,
+    /// for [`Self::fill_with_sign`]: the piece a cut at its top bit leaves, or, where the top limb
+    /// is known, its top bit.
     fn shift_by_constant(
         &mut self,
-        result: ValueId,
         lhs: ValueId,
         bits: usize,
+        answer_widths: &[usize],
         left: bool,
         amount: usize,
-    ) {
+        signed: bool,
+    ) -> (Vec<ValueId>, Option<Sign>) {
         let segments = self.limbs(lhs);
         let segment_widths = self.shift_widths(lhs, bits);
-        let answer_widths = self.shift_widths(result, bits);
+        let signed = signed && amount > 0;
+        let top_width = segment_widths[segment_widths.len() - 1];
+        let known_top = self.known(segments[segments.len() - 1]);
 
+        // A known top limb's sign is read off its pattern instead. Cut, it would leave a known limb
+        // of the answer as arithmetic on constants, which `deliver` hands on as a pure value.
         let mut cuts = BTreeSet::from([0, bits, if left { bits - amount } else { amount }]);
+        if signed && known_top.is_none() {
+            cuts.insert(bits - 1);
+        }
         let mut start = 0usize;
         for width in &segment_widths {
             cuts.insert(start);
             start += width;
         }
         let mut start = 0usize;
-        for width in &answer_widths {
+        for width in answer_widths {
             let source = if left {
                 start.checked_sub(amount)
             } else {
@@ -2670,7 +3005,7 @@ impl Rewriter<'_> {
 
         let mut answer = Vec::with_capacity(answer_widths.len());
         let mut start = 0;
-        for width in &answer_widths {
+        for width in answer_widths {
             let end = start + width;
             let mut sum = None;
             for (source, piece_width, piece) in &pieces {
@@ -2702,7 +3037,18 @@ impl Rewriter<'_> {
             answer.push(sum.unwrap_or_else(|| self.field_const(self.field.zero())));
             start = end;
         }
-        self.deliver(result, answer, &answer_widths, bits, None);
+
+        let sign = signed.then(|| match known_top {
+            Some(pattern) => Sign::Known(pattern.cast(top_width).bit(top_width - 1) == Some(true)),
+            None => {
+                let (_, _, bit) = pieces
+                    .iter()
+                    .find(|(source, width, _)| *source == bits - 1 && *width == 1)
+                    .unwrap_or_else(|| ice!("the operand's top bit was not cut out"));
+                Sign::Bit(*bit, true)
+            }
+        });
+        (answer, sign)
     }
 
     /// One witnessed `segment` of `width` bits starting at `start`, cut at `bounds`, which run from
@@ -2729,13 +3075,7 @@ impl Rewriter<'_> {
         for window in bounds.windows(2).skip(1) {
             let (low, piece_width) = (window[0] - start, window[1] - window[0]);
             let piece = match (&known, pure) {
-                (Some(pattern), _) => {
-                    let piece = pattern.bit_range(low, piece_width);
-                    self.field_const(
-                        field_constant(self.field, &piece)
-                            .unwrap_or_else(|| ice!("a piece of a limb is wider than the field")),
-                    )
-                }
+                (Some(pattern), _) => self.limb_const(&pattern.bit_range(low, piece_width)),
                 (None, Some(pure)) => self.witness_window(pure, width, low, piece_width),
                 (None, None) => ice_unreachable!("a segment is known or has a pure shadow"),
             };
@@ -2806,15 +3146,23 @@ impl Rewriter<'_> {
     ///
     /// A pure amount is decomposed on the pure side instead, by [`Self::pure_shift_amount`], and
     /// every product above is by a constant.
+    ///
+    /// **A sign-filling right shift**, where `signed`, is the operand [`Self::complement`]ed by its
+    /// sign, shifted as above, and the answer complemented back. For a negative operand that is
+    /// `!(!lhs >> n)`, and `!lhs` is not negative, so its unsigned shift is its arithmetic one and
+    /// complementing back fills the vacated bits with ones. It costs the sign's cut and two
+    /// products per limb more than the unsigned shift.
+    ///
+    /// The answer is one field element per limb.
     fn shift_by_amount(
         &mut self,
-        result: ValueId,
         lhs: ValueId,
         rhs: ValueId,
         bits: usize,
         left: bool,
+        signed: bool,
         guard: Option<ValueId>,
-    ) {
+    ) -> Vec<ValueId> {
         let limb_bits = self.limb_bits();
         let widths = limb_widths(bits, limb_bits);
         let count = widths.len();
@@ -2824,11 +3172,19 @@ impl Rewriter<'_> {
         // The split of every limb, as its two halves' field elements.
         let two_pow_limb = self.field_const(self.field.two_pow(limb_bits));
         let hint_width = CastTarget::Int(2 * limb_bits);
-        let operand = self.chain_limbs(lhs, bits, count);
+        let mut operand = self.chain_limbs(lhs, bits, count);
+        let sign = signed.then(|| self.operand_sign(&operand, &widths));
+        if let Some(sign) = sign {
+            operand = operand
+                .into_iter()
+                .zip(&widths)
+                .map(|(limb, width)| self.complement(limb, *width, sign))
+                .collect();
+        }
         let mut halves = Vec::with_capacity(count);
         let top_width = widths[count - 1];
         let narrow_top = left && top_width < limb_bits;
-        for (index, ((limb, witnessed), width)) in operand.into_iter().zip(&widths).enumerate() {
+        for (index, (&(limb, witnessed), width)) in operand.iter().zip(&widths).enumerate() {
             if self.known(limb).is_some_and(|pattern| pattern.is_zero()) {
                 let zero = self.field_const(self.field.zero());
                 halves.push((zero, zero));
@@ -2912,7 +3268,18 @@ impl Rewriter<'_> {
             limbs[count - 1] = low;
         }
 
-        self.deliver(result, limbs, &widths, bits, None);
+        match sign {
+            Some(sign) => {
+                let answer = self.answer_limbs(limbs, &widths);
+                let restored = answer
+                    .into_iter()
+                    .zip(&widths)
+                    .map(|(limb, width)| self.complement(limb, *width, sign))
+                    .collect();
+                self.limb_fields(restored)
+            }
+            None => limbs,
+        }
     }
 
     /// The amount of a [`Self::shift_by_amount`], as the `stages` bits of how many whole limbs it
@@ -3132,15 +3499,15 @@ fn limb_shift_fits_modulus(modulus: &BigInt) -> bool {
         <= widest_injective_int_bits_for_modulus(modulus)
 }
 
-/// The shift the representation lowers, if `op` is one: an unsigned `<<` or `>>`, guarded or not,
-/// with a witnessed operand, at a width the single cell does not take.
+/// The shift the representation lowers, if `op` is one, under either reading, guarded or not, with a
+/// witnessed operand, at a width the single cell does not take.
 fn shifted(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Option<Operands> {
     let OpCode::BinaryArithOp { kind, lhs, rhs, .. } = unguarded(op) else {
         return None;
     };
     let left = match kind {
-        BinaryArithOpKind::UShl => true,
-        BinaryArithOpKind::UShr => false,
+        BinaryArithOpKind::UShl | BinaryArithOpKind::SShl => true,
+        BinaryArithOpKind::UShr | BinaryArithOpKind::SShr => false,
         _ => return None,
     };
     let bits = witnessed_width(types, *lhs, *rhs)?;
@@ -3149,6 +3516,464 @@ fn shifted(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Option<
         lhs: *lhs,
         rhs: *rhs,
     })
+}
+
+// THE SIGN AND THE MAGNITUDE
+// ================================================================================================
+
+/// A sign bit as the signed gadgets read it.
+#[derive(Clone, Copy, Debug)]
+enum Sign {
+    /// Known at compile time.
+    Known(bool),
+
+    /// A field element that is zero or one, with whether it is witnessed.
+    Bit(ValueId, bool),
+}
+
+impl Rewriter<'_> {
+    /// A signed product the single cell cannot hold.
+    ///
+    /// The unsigned schoolbook over the operands' magnitudes, whose own overflow check holds the
+    /// product below `2^N`, then [`Self::check_fits`] under the sign the product takes, and the
+    /// product negated by that sign. Every check past the operands is under the guard but the cut
+    /// of the product's top bit, which reads a product that is zero where the guard is off, and the
+    /// answer is zero there too, as the unsigned product's is.
+    fn lower_signed_product(
+        &mut self,
+        result: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        bits: usize,
+        guard: Option<ValueId>,
+    ) {
+        let widths = limb_widths(bits, self.limb_bits());
+        let (lhs_magnitude, lhs_sign, _) = self.magnitude(lhs, bits, &widths, guard);
+        let (rhs_magnitude, rhs_sign, _) = if lhs == rhs {
+            (lhs_magnitude.clone(), lhs_sign, None)
+        } else {
+            self.magnitude(rhs, bits, &widths, guard)
+        };
+        let lhs_factor = self.factor_of(&lhs_magnitude, &widths);
+        let rhs_factor = self.factor_of(&rhs_magnitude, &widths);
+        let product = self.schoolbook(
+            Schoolbook {
+                lhs: &lhs_factor,
+                rhs: &rhs_factor,
+                addend: None,
+                pinned: None,
+                widths: &widths,
+                bits,
+                operation: "multiplication",
+            },
+            guard,
+        );
+
+        // Off the guard the schoolbook's checks are off, and a top column the branch not taken
+        // overflowed is past its width. The cast to a limb's width that the negation reads it
+        // through truncates on the pure side while the constraints carry the column whole, so the
+        // negation's products would disagree with their own columns there. The product is zero
+        // there instead.
+        let product = match guard {
+            Some(condition) => {
+                let zero = self.field_const(self.field.zero());
+                product
+                    .into_iter()
+                    .map(|limb| self.select(condition, limb, zero))
+                    .collect()
+            }
+            None => product,
+        };
+        let product = self.answer_limbs(product, &widths);
+
+        // A square is never negative.
+        let sign = if lhs == rhs {
+            Sign::Known(false)
+        } else {
+            self.xor_signs(lhs_sign, rhs_sign)
+        };
+        self.check_fits(&product, &widths, sign, guard);
+        let answer = self.negate_if(product, &widths, sign, guard);
+        let answer = self.limb_fields(answer);
+        self.deliver(result, answer, &widths, bits, guard);
+    }
+
+    /// The signed quotient and remainder of `dividend / divisor`, each as its magnitude and the
+    /// sign [`Self::answer`] negates it by.
+    ///
+    /// The unsigned division of the operands' magnitudes, which refuses a zero divisor, then
+    /// Noir's truncation toward zero: the quotient takes the sign of the two operands' signs
+    /// combined, and the remainder the dividend's. The quotient's magnitude is held to fit under
+    /// its sign for both answers, as the model refuses `INT_MIN % -1` along with `INT_MIN / -1`.
+    /// The remainder's always fits, being below the divisor's magnitude and so below `2^(N - 1)`.
+    fn divide_signed(
+        &mut self,
+        dividend: ValueId,
+        divisor: ValueId,
+        bits: usize,
+        widths: &[usize],
+        guard: Option<ValueId>,
+    ) -> (Answer, Answer) {
+        let (n, dividend_sign, pure_dividend) = self.magnitude(dividend, bits, widths, guard);
+        let (d, divisor_sign, pure_divisor) = self.magnitude(divisor, bits, widths, guard);
+        let n = self.factor_of(&n, widths);
+        let d = self.factor_of(&d, widths);
+        let mut pure_side = |operand: ValueId, magnitude: Option<ValueId>| {
+            magnitude.unwrap_or_else(|| {
+                let whole = self.pure_whole(operand, bits);
+                self.pure_magnitude(whole, bits).0
+            })
+        };
+
+        let pure_dividend = pure_side(dividend, pure_dividend);
+        let pure_divisor = pure_side(divisor, pure_divisor);
+        let (q, r) = self.divide_factors(&n, &d, pure_dividend, pure_divisor, bits, widths, guard);
+        let q = self.chain_limbs_of(&q, widths.len());
+        let r = self.chain_limbs_of(&r, widths.len());
+
+        let quotient_sign = self.xor_signs(dividend_sign, divisor_sign);
+        self.check_fits(&q, widths, quotient_sign, guard);
+        (
+            Answer::Signed(q, quotient_sign),
+            Answer::Signed(r, dividend_sign),
+        )
+    }
+
+    /// Fill the bits a right shift by a known `amount` above zero vacates with the operand's
+    /// `sign`, which [`Self::shift_by_constant`] cut out, in an `answer` whose limbs are at
+    /// `widths`.
+    ///
+    /// The unsigned answer has those bits clear, so filling them is adding `s` times each limb's
+    /// share of `2^N - 2^(N - amount)`: linear in the sign, and below each limb's width still.
+    ///
+    /// A sign known to be set fills a known limb at compile time. Added as arithmetic, the fill
+    /// would turn a constant limb, which [`Self::deliver`] hands on as a witnessed constant, into
+    /// a pure value where the result is witnessed.
+    fn fill_with_sign(
+        &mut self,
+        answer: &mut [ValueId],
+        widths: &[usize],
+        sign: Sign,
+        bits: usize,
+        amount: usize,
+    ) {
+        if let Sign::Known(false) = sign {
+            return;
+        }
+
+        let vacated = bits - amount;
+        let mut start = 0;
+        for (limb, width) in answer.iter_mut().zip(widths) {
+            let end = start + width;
+            let low = vacated.max(start);
+            if low < end {
+                let pattern = IntBits::all_ones(end - low)
+                    .cast(*width)
+                    .shifted_left(low - start);
+                *limb = match (sign, self.constant_limb(*limb, *width)) {
+                    (Sign::Known(true), Some(known)) => self.limb_const(&known.or(&pattern)),
+                    (Sign::Known(true), None) => {
+                        let fill = self.limb_const(&pattern);
+                        self.bin(BinaryArithOpKind::UAdd, *limb, fill)
+                    }
+                    (Sign::Bit(bit, _), _) => {
+                        let fill = self.limb_const(&pattern);
+                        let scaled = self.bin(BinaryArithOpKind::UMul, bit, fill);
+                        self.bin(BinaryArithOpKind::UAdd, *limb, scaled)
+                    }
+                    (Sign::Known(false), _) => ice_unreachable!("a clear sign fills nothing"),
+                };
+            }
+            start = end;
+        }
+    }
+
+    /// The magnitude of a `bits`-wide operand read as signed, as limbs at `widths` each with
+    /// whether it is witnessed, its sign, and, for a pure operand, the whole magnitude the limbs
+    /// were cut from, which a division's hint reads.
+    ///
+    /// `|INT_MIN|` is `2^(N - 1)`, which `N` unsigned bits hold, so every magnitude fits its
+    /// width. A constant's is taken at compile time, so the limbs a constant factor does not reach
+    /// stay known zeros, and a pure operand's is taken on the pure side, at no cost. A witnessed
+    /// one is its limbs [`Self::negate_if`] by its sign.
+    fn magnitude(
+        &mut self,
+        value: ValueId,
+        bits: usize,
+        widths: &[usize],
+        guard: Option<ValueId>,
+    ) -> (Vec<(ValueId, bool)>, Sign, Option<ValueId>) {
+        let limb_bits = self.limb_bits();
+        if let Some(pattern) = self.known(value) {
+            let signed = pattern.cast(bits).to_signed();
+            let magnitude = IntBits::from_biguint(bits, signed.magnitude());
+            let limbs = widths
+                .iter()
+                .enumerate()
+                .map(|(index, width)| {
+                    let limb = magnitude.bit_range(index * limb_bits, *width);
+                    (self.int_const(limb), false)
+                })
+                .collect();
+            let negative = signed.sign() == num_bigint::Sign::Minus;
+            return (limbs, Sign::Known(negative), None);
+        }
+
+        if !self.is_witness(value) {
+            let (whole, sign) = self.pure_magnitude(value, bits);
+            let limbs = widths
+                .iter()
+                .enumerate()
+                .map(|(index, width)| {
+                    let shifted = self.shifted_down(whole, bits, index * limb_bits);
+                    (self.cast(shifted, CastTarget::Int(*width)), false)
+                })
+                .collect();
+            let sign = self.cast(sign, CastTarget::Field);
+            return (limbs, Sign::Bit(sign, false), Some(whole));
+        }
+
+        let limbs = self.chain_limbs(value, bits, widths.len());
+        let sign = self.operand_sign(&limbs, widths);
+        (self.negate_if(limbs, widths, sign, guard), sign, None)
+    }
+
+    /// `|value|` for a pure `value` of `bits` read as signed, as a pure value of `bits`, and its
+    /// sign as a pure `int1`.
+    ///
+    /// [`abs_as_u`], with the sign read by a division rather than a shift for the reason
+    /// [`Self::shifted_down`] gives.
+    fn pure_magnitude(&mut self, value: ValueId, bits: usize) -> (ValueId, ValueId) {
+        let top = self.shifted_down(value, bits, bits - 1);
+        let sign = self.cast(top, CastTarget::Int(1));
+        (abs_as_u(self, value, sign, bits), sign)
+    }
+
+    /// The sign of a value held as `limbs` at `widths`, which is its top limb's top bit.
+    fn operand_sign(&mut self, limbs: &[(ValueId, bool)], widths: &[usize]) -> Sign {
+        let top = widths.len() - 1;
+        self.top_bit(limbs[top], widths[top])
+    }
+
+    /// The top bit of a limb `width` bits wide, known where the limb is, and otherwise the
+    /// [`Self::sign_bit`] cut.
+    fn top_bit(&mut self, (limb, witnessed): (ValueId, bool), width: usize) -> Sign {
+        match self.known(limb) {
+            Some(pattern) => Sign::Known(pattern.cast(width).bit(width - 1) == Some(true)),
+            None => Sign::Bit(self.sign_bit((limb, witnessed), width), witnessed),
+        }
+    }
+
+    /// A sign as a field element that is zero or one.
+    fn sign_field(&self, sign: Sign) -> ValueId {
+        match sign {
+            Sign::Known(true) => self.field_const(self.field.one()),
+            Sign::Known(false) => self.field_const(self.field.zero()),
+            Sign::Bit(bit, _) => bit,
+        }
+    }
+
+    /// `a ⊕ b`, which on two bits is `a + b - 2ab`: one product where both are witnessed, and
+    /// linear wherever either is known.
+    fn xor_signs(&mut self, a: Sign, b: Sign) -> Sign {
+        match (a, b) {
+            (Sign::Known(a), Sign::Known(b)) => Sign::Known(a != b),
+            (Sign::Known(false), other) | (other, Sign::Known(false)) => other,
+            (Sign::Known(true), Sign::Bit(bit, witnessed))
+            | (Sign::Bit(bit, witnessed), Sign::Known(true)) => {
+                let one = self.field_const(self.field.one());
+                Sign::Bit(self.bin(BinaryArithOpKind::USub, one, bit), witnessed)
+            }
+            (Sign::Bit(a, a_witnessed), Sign::Bit(b, b_witnessed)) => {
+                let sum = self.bin(BinaryArithOpKind::UAdd, a, b);
+                let product = self.bin(BinaryArithOpKind::UMul, a, b);
+                let twice = self.bin(BinaryArithOpKind::UAdd, product, product);
+                let xor = self.bin(BinaryArithOpKind::USub, sum, twice);
+                Sign::Bit(xor, a_witnessed || b_witnessed)
+            }
+        }
+    }
+
+    /// A limb `width` bits wide complemented where `sign` is one and kept where it is zero.
+    ///
+    /// `x + s·(2^w - 1 - 2x)`, which is `x` or `2^w - 1 - x`, and so below `2^w` either way because
+    /// `x` is and `s` is a bit: it needs no check of its own. One product where both the limb and
+    /// the sign are witnessed, and linear otherwise.
+    fn complement(
+        &mut self,
+        (limb, witnessed): (ValueId, bool),
+        width: usize,
+        sign: Sign,
+    ) -> (ValueId, bool) {
+        let known = self.known(limb);
+        let ones = self.limb_const(&IntBits::all_ones(width));
+        match sign {
+            Sign::Known(false) => (limb, witnessed),
+            Sign::Known(true) => match known {
+                Some(pattern) => (self.int_const(pattern.cast(width).complement()), false),
+                None => {
+                    let x = self.cast(limb, CastTarget::Field);
+                    let flipped = self.bin(BinaryArithOpKind::USub, ones, x);
+                    (self.cast(flipped, CastTarget::Int(width)), witnessed)
+                }
+            },
+            Sign::Bit(sign, sign_witnessed) => {
+                let x = self.cast(limb, CastTarget::Field);
+                let twice = self.bin(BinaryArithOpKind::UAdd, x, x);
+                let span = self.bin(BinaryArithOpKind::USub, ones, twice);
+                let moved = self.bin(BinaryArithOpKind::UMul, sign, span);
+                let flipped = self.bin(BinaryArithOpKind::UAdd, x, moved);
+                let witnessed = (witnessed && known.is_none()) || sign_witnessed;
+                (self.cast(flipped, CastTarget::Int(width)), witnessed)
+            }
+        }
+    }
+
+    /// `limbs` at `widths` negated modulo `2^N` where `sign` is one, and kept where it is zero.
+    ///
+    /// Each limb [`Self::complement`]ed by the sign, then the carry chain adds the sign as the
+    /// low limb's addend, its top carry witnessed and dropped: `!x + 1` is `2^N - x` for every `x`
+    /// but zero, whose negation carries out of the top limb and leaves zero, as it should. The
+    /// chain's checks are under `guard`.
+    fn negate_if(
+        &mut self,
+        limbs: Vec<(ValueId, bool)>,
+        widths: &[usize],
+        sign: Sign,
+        guard: Option<ValueId>,
+    ) -> Vec<(ValueId, bool)> {
+        if let Sign::Known(false) = sign {
+            return limbs;
+        }
+        let flipped: Vec<(ValueId, bool)> = limbs
+            .iter()
+            .zip(widths)
+            .map(|(limb, width)| self.complement(*limb, *width, sign))
+            .collect();
+        let addend: Vec<(ValueId, bool)> = widths
+            .iter()
+            .enumerate()
+            .map(|(index, width)| match (index, sign) {
+                (0, Sign::Known(_)) => (self.int_const(IntBits::one(*width)), false),
+                (0, Sign::Bit(bit, witnessed)) => {
+                    (self.cast(bit, CastTarget::Int(*width)), witnessed)
+                }
+                _ => (self.int_const(IntBits::zero(*width)), false),
+            })
+            .collect();
+        let chain = self.carry_chain_over(
+            false,
+            &flipped,
+            &addend,
+            widths.to_vec(),
+            CarryOut::Witnessed,
+            guard,
+        );
+        self.answer_limbs(chain.answer, widths)
+    }
+
+    /// Hold a magnitude held as `limbs` at `widths` to `2^(N - 1) - 1 + s`, for the sign `s` it is
+    /// about to take: below `2^(N - 1)`, or exactly that where `s` is one, which is `INT_MIN`.
+    ///
+    /// The magnitude's top bit `t` is cut out of its top limb, and one constraint asks that
+    /// `t·(rest + Σ low limbs + (1 - s)) == 0`, `rest` being what the cut leaves of the top limb.
+    /// Every term of that sum is a non-negative integer and their sum is far below the modulus, so
+    /// it is zero exactly when each term is: either `t` is zero, or every other bit is and `s` is
+    /// one. The constraint is under `guard`. The cut is not, as every caller hands this limbs that
+    /// are in range on every path: a product is zero where the guard is off, and so is the hint a
+    /// quotient is witnessed from.
+    ///
+    /// The cut also bounds the top limb at its width, but a product's schoolbook checks its top
+    /// column all the same. The cut reads the column through a cast to the limb's width, which
+    /// truncates on the pure side, so a product past the width is refused by the cut's constraint
+    /// alone and witness generation runs on; the schoolbook's check is what refuses there.
+    fn check_fits(
+        &mut self,
+        limbs: &[(ValueId, bool)],
+        widths: &[usize],
+        sign: Sign,
+        guard: Option<ValueId>,
+    ) {
+        let top = widths.len() - 1;
+        let width = widths[top];
+        let t = match self.top_bit(limbs[top], width) {
+            Sign::Known(false) => return,
+            t => self.sign_field(t),
+        };
+        let whole = self.cast(limbs[top].0, CastTarget::Field);
+        let half = self.field_const(self.field.two_pow(width - 1));
+        let high = self.bin(BinaryArithOpKind::UMul, t, half);
+        let mut sum = self.bin(BinaryArithOpKind::USub, whole, high);
+        for &(limb, _) in &limbs[..top] {
+            let limb = self.cast(limb, CastTarget::Field);
+            sum = self.bin(BinaryArithOpKind::UAdd, sum, limb);
+        }
+        let one = self.field_const(self.field.one());
+        let sign = self.sign_field(sign);
+        let positive = self.bin(BinaryArithOpKind::USub, one, sign);
+        sum = self.bin(BinaryArithOpKind::UAdd, sum, positive);
+        let product = self.bin(BinaryArithOpKind::UMul, t, sum);
+        let zero = self.field_const(self.field.zero());
+        self.constrain_equal(product, zero, guard);
+    }
+
+    /// Limbs at `widths` as a schoolbook [`Factor`]: a known limb is a constant with its own value
+    /// as its bound, and any other is bounded by its width.
+    fn factor_of(&mut self, limbs: &[(ValueId, bool)], widths: &[usize]) -> Factor {
+        let mut witnessed = false;
+        let (limbs, bounds) = limbs
+            .iter()
+            .zip(full_bounds(widths))
+            .zip(widths)
+            .map(
+                |((&(limb, limb_witnessed), full), width)| match self.known(limb) {
+                    Some(pattern) => {
+                        let pattern = pattern.cast(*width);
+                        let bound = BigUint::from(&pattern);
+                        (Limb::Constant(pattern), bound)
+                    }
+                    None => {
+                        witnessed |= limb_witnessed;
+                        (Limb::Value(limb), full)
+                    }
+                },
+            )
+            .unzip();
+        Factor {
+            limbs,
+            witnessed,
+            bounds,
+        }
+    }
+
+    /// A gadget's answer, one field element per limb of `widths`, as limbs the chain and the
+    /// schoolbook read: a known limb as its constant, and any other as witnessed, which an answer
+    /// with a witnessed operand is. A pure one would read back unchanged through `ValueOf`.
+    fn answer_limbs(&mut self, answer: Vec<ValueId>, widths: &[usize]) -> Vec<(ValueId, bool)> {
+        answer
+            .into_iter()
+            .zip(widths)
+            .map(|(limb, width)| match self.constant_limb(limb, *width) {
+                Some(pattern) => (self.int_const(pattern), false),
+                None => (self.cast(limb, CastTarget::Int(*width)), true),
+            })
+            .collect()
+    }
+
+    /// Limbs as the field elements [`Self::deliver`] takes, a known limb as a field constant.
+    ///
+    /// `deliver` hands a known limb on as a witnessed constant, and it recognises one only as a
+    /// constant: a cast of one would reach the result as a pure value where the result is
+    /// witnessed, as every limb of `0 % d` would.
+    fn limb_fields(&mut self, limbs: Vec<(ValueId, bool)>) -> Vec<ValueId> {
+        limbs
+            .into_iter()
+            .map(|(limb, _)| match self.known(limb) {
+                Some(pattern) => self.limb_const(&pattern),
+                None => self.cast(limb, CastTarget::Field),
+            })
+            .collect()
+    }
 }
 
 // PER-INSTRUCTION REWRITING
@@ -3180,6 +4005,13 @@ impl Rewriter<'_> {
                 value,
                 target,
             } => self.lower_cast(*result, *value, target),
+
+            OpCode::SExt {
+                result,
+                value,
+                from_bits,
+                to_bits,
+            } => self.lower_sext(*result, *value, *from_bits, *to_bits),
 
             OpCode::Cmp {
                 kind,
@@ -3733,6 +4565,83 @@ impl Rewriter<'_> {
                 }
             }
         }
+    }
+
+    /// A sign extension whose target is held as limbs: the source's limbs, with its sign bit
+    /// filling every bit above them.
+    ///
+    /// Every limb of the answer is linear in that bit `s`. Below the source's top limb they are the
+    /// source's own; the limb holding the source's top limb, `w_s` bits of a `w`-bit limb, is that
+    /// limb plus `s·(2^w - 2^w_s)`; and every limb above it is `s·(2^w - 1)`. Each is below `2^w`,
+    /// as its pieces are and cover disjoint bits, so the cut that pins `s` is the whole cost.
+    ///
+    /// A sign known at compile time, which is one read off a known top limb, fills at compile time:
+    /// that limb with its fill and every limb above it are constants.
+    ///
+    /// The source is witnessed: the type rule keeps the witness wrapper across the extension, and
+    /// only a witnessed result is held as limbs.
+    fn lower_sext(&mut self, result: ValueId, value: ValueId, from_bits: usize, to_bits: usize) {
+        assert!(
+            self.is_witness(value),
+            "ICE: a sign extension into the representation from a pure int{from_bits}"
+        );
+        let limb_bits = self.limb_bits();
+        let source_widths = limb_widths(from_bits, limb_bits);
+        let source = match self.wide_width(value) {
+            Some(_) => self.limbs(value),
+            None => self.decompose(value, from_bits),
+        };
+        let top = source.len() - 1;
+        let top_width = source_widths[top];
+        let sign = self.top_bit((source[top], true), top_width);
+
+        let widths = limb_widths(to_bits, limb_bits);
+        let mut answer = Vec::with_capacity(widths.len());
+        for (index, width) in widths.iter().enumerate() {
+            let limb = match index.cmp(&top) {
+                std::cmp::Ordering::Less => self.cast(source[index], CastTarget::Field),
+                std::cmp::Ordering::Equal
+                    if *width == top_width || matches!(sign, Sign::Known(false)) =>
+                {
+                    self.cast(source[top], CastTarget::Field)
+                }
+                std::cmp::Ordering::Equal => {
+                    let fill = IntBits::all_ones(width - top_width)
+                        .cast(*width)
+                        .shifted_left(top_width);
+                    match sign {
+                        Sign::Known(_) => {
+                            let known = self.known(source[top]).unwrap_or_else(|| {
+                                ice!("a known sign was read from a limb that is not known")
+                            });
+                            self.limb_const(&known.cast(*width).or(&fill))
+                        }
+                        Sign::Bit(bit, _) => {
+                            let limb = self.cast(source[top], CastTarget::Field);
+                            let fill = self.limb_const(&fill);
+                            let fill = self.bin(BinaryArithOpKind::UMul, bit, fill);
+                            self.bin(BinaryArithOpKind::UAdd, limb, fill)
+                        }
+                    }
+                }
+                std::cmp::Ordering::Greater => match sign {
+                    Sign::Known(negative) => {
+                        let fill = if negative {
+                            IntBits::all_ones(*width)
+                        } else {
+                            IntBits::zero(*width)
+                        };
+                        self.limb_const(&fill)
+                    }
+                    Sign::Bit(bit, _) => {
+                        let ones = self.limb_const(&IntBits::all_ones(*width));
+                        self.bin(BinaryArithOpKind::UMul, bit, ones)
+                    }
+                },
+            };
+            answer.push(limb);
+        }
+        self.deliver(result, answer, &widths, to_bits, None);
     }
 
     /// Equality, which is the conjunction of the limbs' own.
@@ -4449,6 +5358,240 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The columns a signed operation adds to the chain are its sign bits, and each is cut out of
+    /// its top limb: witnessed, checked to be a bit, and pinned by the rest of that limb being
+    /// range-checked one bit narrower.
+    #[test]
+    fn every_sign_bit_is_cut_out_of_its_top_limb() {
+        let h = witness_limb_bits(bn254());
+        let audit = |what: &str, ssa: &mut HLSSA, columns: usize, narrower: Vec<usize>, ties| {
+            run_pass(ssa);
+            let ops = emitted(ssa);
+            let mut written: Vec<u64> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    OpCode::WriteWitness {
+                        result: Some(result),
+                        ..
+                    } => Some(result.0),
+                    _ => None,
+                })
+                .collect();
+            let mut bits_checked: Vec<u64> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    OpCode::Rangecheck { value, max_bits: 1 } => Some(value.0),
+                    _ => None,
+                })
+                .collect();
+            let mut checked: Vec<usize> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    OpCode::Rangecheck { max_bits, .. } if *max_bits > 1 => Some(*max_bits),
+                    _ => None,
+                })
+                .collect();
+            let relations = ops
+                .iter()
+                .filter(|op| matches!(op, OpCode::Constrain { .. }))
+                .count();
+
+            written.sort_unstable();
+            bits_checked.sort_unstable();
+            checked.sort_unstable();
+            let mut narrower = narrower;
+            narrower.sort_unstable();
+            assert_eq!(written.len(), columns, "{what}: its columns");
+            assert_eq!(written, bits_checked, "{what}: each column is a bit");
+            assert_eq!(checked, narrower, "{what}: the range checks");
+            assert_eq!(relations, ties, "{what}: the relations between the bits");
+        };
+
+        for bits in [254usize, 320] {
+            let widths = limb_widths(bits, h);
+            let (k, top) = (widths.len(), widths[widths.len() - 1]);
+            let with_cuts = |cuts: usize, top_checked: bool| {
+                let mut checks = widths.clone();
+                if !top_checked {
+                    checks.pop();
+                }
+                checks.extend(std::iter::repeat_n(top - 1, cuts));
+                checks
+            };
+            let arith = |kind| {
+                program_chaining(
+                    bits,
+                    Some(Type::witness_of(Type::int(bits))),
+                    move |result, lhs, rhs| OpCode::BinaryArithOp {
+                        kind,
+                        result,
+                        lhs,
+                        rhs,
+                    },
+                )
+            };
+            let mut ordering = program_chaining(
+                bits,
+                Some(Type::witness_of(Type::int(1))),
+                |result, lhs, rhs| OpCode::Cmp {
+                    kind: CmpKind::SLt,
+                    result,
+                    lhs,
+                    rhs,
+                },
+            );
+            let mut assertion = program_chaining(bits, None, |_, lhs, rhs| OpCode::AssertCmp {
+                kind: CmpKind::SLt,
+                lhs,
+                rhs,
+            });
+
+            // Both operands' signs and the answer's, beside a carry out of every limb.
+            for kind in [BinaryArithOpKind::SAdd, BinaryArithOpKind::SSub] {
+                let what = format!("int{bits} {kind:?}");
+                audit(&what, &mut arith(kind), k + 3, with_cuts(3, false), 1);
+            }
+            // Both operands' signs, and the chain an unsigned ordering has.
+            audit(
+                &format!("int{bits} SLt"),
+                &mut ordering,
+                k + 2,
+                with_cuts(2, true),
+                0,
+            );
+            audit(
+                &format!("int{bits} asserted SLt"),
+                &mut assertion,
+                k + 1,
+                with_cuts(2, true),
+                0,
+            );
+        }
+
+        // A sign extension into the representation cuts its source's sign and checks nothing else:
+        // every limb past the source is that bit times all ones.
+        let source = 320usize;
+        let top = limb_widths(source, h).last().copied().expect("a limb");
+        let mut extension = program_chaining(
+            source,
+            Some(Type::witness_of(Type::int(1000))),
+            |result, value, _| OpCode::SExt {
+                result,
+                value,
+                from_bits: source,
+                to_bits: 1000,
+            },
+        );
+        audit(
+            "int320 to int1000 SExt",
+            &mut extension,
+            1,
+            vec![top - 1],
+            0,
+        );
+    }
+
+    /// An operand's sign is cut once per block, however many signed operations read it, and an
+    /// operation that reads one operand twice cuts it once.
+    #[test]
+    fn an_operand_sign_is_cut_once_per_block() {
+        let bits = 320usize;
+        let top = *limb_widths(bits, witness_limb_bits(bn254()))
+            .last()
+            .expect("a limb");
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let (lhs, rhs) = (ssa.fresh_value(), ssa.fresh_value());
+        let (sum, ordering, double) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        let mut builder = HLSSABuilder::new(&mut ssa);
+        builder.modify_function(main, |fb| {
+            let entry = fb.function.get_entry_id();
+            for value in [lhs, rhs] {
+                fb.function
+                    .get_block_mut(entry)
+                    .push_parameter(value, Type::witness_of(Type::int(bits)));
+            }
+            fb.function
+                .add_return_type(Type::witness_of(Type::int(bits)));
+            fb.function.add_return_type(Type::witness_of(Type::int(1)));
+            fb.function
+                .add_return_type(Type::witness_of(Type::int(bits)));
+            let mut block = fb.test_block(entry);
+            block.emit(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::SAdd,
+                result: sum,
+                lhs,
+                rhs,
+            });
+            block.emit(OpCode::Cmp {
+                kind: CmpKind::SLt,
+                result: ordering,
+                lhs,
+                rhs,
+            });
+            block.emit(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::SAdd,
+                result: double,
+                lhs,
+                rhs: lhs,
+            });
+            block.terminate_return(vec![sum, ordering, double]);
+        });
+        run_pass(&mut ssa);
+
+        let cuts = emitted(&ssa)
+            .iter()
+            .filter(|op| matches!(op, OpCode::Rangecheck { max_bits, .. } if *max_bits == top - 1))
+            .count();
+        assert_eq!(cuts, 4, "the sign cuts");
+    }
+
+    /// A sign extension whose source's top limb is known fills at compile time.
+    #[test]
+    fn a_sign_extension_of_a_known_top_limb_fills_at_compile_time() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let (value, widened, extended) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        let mut builder = HLSSABuilder::new(&mut ssa);
+        builder.modify_function(main, |fb| {
+            let entry = fb.function.get_entry_id();
+            fb.function
+                .get_block_mut(entry)
+                .push_parameter(value, Type::witness_of(Type::int(64)));
+            fb.function
+                .add_return_type(Type::witness_of(Type::int(1000)));
+            let mut block = fb.test_block(entry);
+            block.emit(OpCode::Cast {
+                result: widened,
+                value,
+                target: CastTarget::Int(320),
+            });
+            block.emit(OpCode::SExt {
+                result: extended,
+                value: widened,
+                from_bits: 320,
+                to_bits: 1000,
+            });
+            block.terminate_return(vec![extended]);
+        });
+        run_pass(&mut ssa);
+
+        let ops = emitted(&ssa);
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, OpCode::Rangecheck { max_bits: 1, .. })),
+            "the known sign was cut"
+        );
+        let constant = |value: &ValueId| ssa.get_const(*value).is_some();
+        assert!(
+            !ops.iter().any(|op| matches!(
+                op,
+                OpCode::BinaryArithOp { lhs, rhs, .. } if constant(lhs) && constant(rhs)
+            )),
+            "a limb of the fill is arithmetic on two constants"
+        );
     }
 
     /// A guarded chain checks nothing where the guard is off, since the operands are then whatever

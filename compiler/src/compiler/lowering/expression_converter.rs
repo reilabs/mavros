@@ -25,7 +25,7 @@ use crate::{
             BlockId, FunctionId, SourceLocation, ValueId,
             hlssa::{
                 ArithGroup, BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness,
-                Radix, SequenceTargetType, SliceOpDir, Type, TypeExpr, assert_signed_op_width,
+                Radix, SequenceTargetType, SliceOpDir, Type, TypeExpr,
                 builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder},
             },
         },
@@ -1253,12 +1253,9 @@ impl<'a> ExpressionConverter<'a> {
                 let zero_const = if matches!(unary.operator, noirc_frontend::ast::UnaryOp::Minus) {
                     use noirc_frontend::monomorphization::ast::Type as AstType;
                     Some(match Self::expression_type(&unary.rhs) {
-                        AstType::Integer(signedness, bit_size) => {
-                            // Only for the width gate: zero is zero under either reading, and the
-                            // negation that consumes it takes its sign from its own opcode.
-                            let (_, bits) = checked_int_cast_target(signedness, bit_size);
-                            Constant::int(bits, 0)
-                        }
+                        // Zero is zero under either reading, and the negation that consumes it takes
+                        // its sign from its own opcode.
+                        AstType::Integer(_, bit_size) => Constant::int(bit_size as usize, 0),
                         _ => Constant::Field(b.field().constant(0u64)),
                     })
                 } else {
@@ -1480,8 +1477,11 @@ impl<'a> ExpressionConverter<'a> {
                 );
                 (CastTarget::Field, field_bits)
             }
-            AstType::Integer(signedness, bit_size) => {
-                checked_int_cast_target(*signedness, *bit_size)
+            // A cast to an integer is a raw-bit conversion that truncates or zero-extends
+            // identically under either reading.
+            AstType::Integer(_, bit_size) => {
+                let bits = *bit_size as usize;
+                (CastTarget::Int(bits), bits)
             }
             AstType::Bool => (CastTarget::Int(1), 1),
             _ => ice!("Unsupported cast target type: {:?}", cast.r#type),
@@ -1737,12 +1737,8 @@ impl<'a> ExpressionConverter<'a> {
                         .into(),
                 )
             }
-            AstType::Integer(signedness, bit_size) => {
-                use noirc_frontend::shared::Signedness;
+            AstType::Integer(_, bit_size) => {
                 let bits = *bit_size as usize;
-                if *signedness == Signedness::Signed {
-                    assert_signed_op_width(bits, "integer literal");
-                }
                 // Bridge Noir's num-bigint 0.5 to the model's 0.4 without narrowing.
                 let value = BigInt::from_signed_bytes_le(&value.to_signed_bytes_le());
                 Constant::Int(IntBits::from_signed(bits, &value))
@@ -2130,9 +2126,7 @@ impl<'a> ExpressionConverter<'a> {
                 let target = match &call.return_type {
                     AstType::Field => CastTarget::Field,
                     AstType::Bool => CastTarget::Int(1),
-                    AstType::Integer(signedness, bit_size) => {
-                        checked_int_cast_target(*signedness, *bit_size).0
-                    }
+                    AstType::Integer(_, bit_size) => CastTarget::Int(*bit_size as usize),
                     other => ice_usr!("unsafe_cast: unsupported target type {:?}", other),
                 };
 
@@ -2180,36 +2174,6 @@ impl<'a> ExpressionConverter<'a> {
                 .to_u32()
                 .expect("builtin integer argument fits u32"),
             _ => ice!("Expected a constant integer argument, got {:?}", expr),
-        }
-    }
-}
-
-/// The width and cast target of a Noir integer type, rejecting a signed one the signed operations
-/// cannot read.
-///
-/// This is the frontend's half of the width bound. `TypeExpr::Int(n)` is a width and nothing more,
-/// so an `i128` has to be refused while a `Signedness` still exists to refuse it — after this point
-/// nothing downstream can tell it from a `u128`, which is legal. `TypeConverter::convert_type` and
-/// `scalar_literal_to_constant` carry the same gate for the paths that arrive as a type or as a
-/// literal rather than as a cast target.
-///
-/// Enforcing that bound is the _only_ thing the `Signedness` is read for: both arms build the same
-/// `CastTarget::Int(bits)`, because a cast to an integer is a raw-bit conversion that truncates or
-/// zero-extends identically under either reading. The match is kept split rather than collapsed to
-/// one line precisely so the assert has somewhere to live. This is the last point at which the sign
-/// is knowable.
-fn checked_int_cast_target(
-    signedness: noirc_frontend::shared::Signedness,
-    bit_size: u32,
-) -> (CastTarget, usize) {
-    use noirc_frontend::shared::Signedness;
-
-    let bits = bit_size as usize;
-    match signedness {
-        Signedness::Unsigned => (CastTarget::Int(bits), bits),
-        Signedness::Signed => {
-            assert_signed_op_width(bits, "cast target");
-            (CastTarget::Int(bits), bits)
         }
     }
 }

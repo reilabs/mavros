@@ -16,12 +16,11 @@ use mavros_int_semantics::IntBits;
 
 use crate::compiler::{
     analysis::value_range_analysis::ValueRange,
-    passes::shared::unsupported::unsupported_on_this_field,
     ssa::{
         ValueId,
         hlssa::{
             ArithGroup, BinaryArithOpKind, CastTarget, CmpKind, OpCode, Type, TypeExpr,
-            assert_signed_op_width, builder::HLEmitter,
+            builder::HLEmitter,
         },
     },
 };
@@ -94,9 +93,8 @@ pub fn overflow_provably_impossible(
 /// compute and what the add/sub tests below compare against.
 ///
 /// It is **required for `Add` and `Sub`, and ignored for `Mul`**, whose test is built from the
-/// operands alone. `bits` is the operand width. A signed operation is additionally bounded by
-/// [`assert_signed_op_width`], because the sign-bit and magnitude arithmetic below is built at
-/// that width.
+/// operands alone. `bits` is the operand width, and every test below is built at it, under either
+/// reading.
 ///
 /// # Panics
 ///
@@ -110,9 +108,6 @@ pub fn emit_overflow_cond(
     bits: usize,
 ) -> ValueId {
     let signed = kind.is_signed();
-    if signed {
-        assert_signed_op_width(bits, "overflow check");
-    }
 
     match (signed, kind.group()) {
         (_, group @ (ArithGroup::Add | ArithGroup::Sub)) => {
@@ -362,10 +357,15 @@ pub fn sign_bit(emitter: &mut impl HLEmitter, value: ValueId, bits: usize) -> Va
 
 /// The value's magnitude, as an unsigned integer of the same width.
 ///
-/// Computed in the field rather than with a negation, because the one value this has to get right
-/// is `INT_MIN`, whose magnitude is not representable at the width: `−(−2^(bits−1))` wraps back to
-/// itself. Lifting to the field first means `2^(bits−1)` is an ordinary number until the final cast
-/// puts it back, where it is the one pattern whose unsigned reading is what the magnitude needs.
+/// `(value ^ mask) + sign`, where `mask` is the sign broadcast across the width: `!value + 1` for a
+/// negative value, and the value itself otherwise. The one value this has to get right is
+/// `INT_MIN`, whose magnitude `2^(bits−1)` is not representable as a _signed_ value: here
+/// `!INT_MIN + 1` is exactly that pattern, which is what its unsigned reading needs. The addition
+/// cannot leave the width, as `!value` is at most `2^(bits−1) − 1` for a negative value.
+///
+/// Built from integer operations at the operand's own width, so it holds at every width with no
+/// lift into the field. It is also built without a `Select`: this runs in unconstrained functions
+/// too, and the AD half of the program keeps a copy of those whose selects nothing lowers.
 ///
 /// `sign_u1` is the value's own sign bit, which the caller already has.
 pub fn abs_as_u(
@@ -374,32 +374,11 @@ pub fn abs_as_u(
     sign_u1: ValueId,
     bits: usize,
 ) -> ValueId {
-    // FIELD-ASSUMPTION: L4-modulus-query. `two_pow(bits)` below is the value it is meant to be only
-    // while it has not wrapped, and if it has, the magnitude is silently wrong and so is every
-    // overflow test built on it — a wrong answer rather than a rejection. On bn254 the 64-bit
-    // signed cap leaves ample room; on a narrower field this refuses instead. Same construction and
-    // same bound as `LowerWitnessBitwiseOps::lower_integer_sext`, which lifts a value into the
-    // field the same way.
-    if bits >= emitter.field().field_bit_size() as usize {
-        unsupported_on_this_field(
-            format_args!(
-                "a {bits}-bit magnitude lifts the sign out with `two_pow({bits})`, which has itself wrapped, leaving the magnitude — and every overflow test built on it — silently wrong"
-            ),
-            emitter.field(),
-        );
-    }
-
-    let value_field = emitter.cast_to_field(value);
-    let sign = emitter.cast_to_field(sign_u1);
-    let sign_shift = emitter.field_const(emitter.field().two_pow(bits));
-    let sign_shifted = emitter.umul(sign, sign_shift);
-    let signed_value = emitter.usub(value_field, sign_shifted);
-    let two = emitter.field_const(emitter.field().constant(2));
-    let two_sign = emitter.umul(two, sign);
-    let one = emitter.field_const(emitter.field().constant(1));
-    let factor = emitter.usub(one, two_sign);
-    let abs = emitter.umul(signed_value, factor);
-    emitter.cast_to(CastTarget::Int(bits), abs)
+    let top = emitter.int_const(IntBits::from_u128(bits, (bits - 1) as u128));
+    let mask = emitter.bin(BinaryArithOpKind::SShr, value, top);
+    let complemented = emitter.xor(value, mask);
+    let sign = emitter.cast_to(CastTarget::Int(bits), sign_u1);
+    emitter.uadd(complemented, sign)
 }
 
 // TESTS

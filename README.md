@@ -105,9 +105,9 @@ pipeline gets for each Noir test.
 
 The frontend is pinned to the `provekit-v2` branch of
 [worldfnd/noir](https://github.com/worldfnd/noir), with the exact revision recorded in
-`compiler/Cargo.toml`. Unsigned types from `u2` through `u16384` and generic widths such as `u<N>`
-can be used inside programs; supported operations still depend on width. Signed integers remain
-limited to 64 bits in Mavros.
+`compiler/Cargo.toml`. Unsigned and signed types from `u2`/`i2` through `u16384`/`i16384`, including
+generic widths such as `u<N>` and `i<N>`, can be used inside programs; supported operations still
+depend on width.
 
 The fork restricts integer parameters and returns at `main` to `u8`, `u16`, `u32`, `u64`, `u128`,
 `i8`, `i16`, `i32`, and `i64`, including integers inside arrays and structs. Wider arithmetic can

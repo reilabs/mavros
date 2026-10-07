@@ -41,9 +41,7 @@ use crate::compiler::{
     analysis::value_range_analysis::ValueRange,
     ssa::{
         ValueId,
-        hlssa::{
-            CastTarget, CmpKind, OpCode, Type, TypeExpr, assert_signed_op_width, builder::HLEmitter,
-        },
+        hlssa::{CastTarget, CmpKind, OpCode, Type, TypeExpr, builder::HLEmitter},
     },
 };
 
@@ -114,12 +112,8 @@ fn emit_shift_amount_tests(
     bits: usize,
     signed: bool,
 ) -> ShiftAmountTests {
-    if signed {
-        // The check below compares at `cmp_bits`, which is 64 for every width this can reach; a
-        // wider signed amount would need an `SLt` at that width, which nothing under HLSSA
-        // currently provides.
-        assert_signed_op_width(bits, "shift amount check");
-    }
+    // Both tests compare at `cmp_bits`, the operand width or 64 if that is wider, under the shift's
+    // own reading.
     let cmp_bits = bits.max(64);
 
     // The cast is the same under either reading (it widens by zero-extending raw bits) so it takes
@@ -130,12 +124,12 @@ fn emit_shift_amount_tests(
     let below_width = emitter.cmp(rhs_cmp, rhs_bound, lt);
 
     let negative = signed.then(|| {
-        // LIVE at `bits == 64`, and the only check that catches a negative amount there. Noir types
-        // a shift's amount as the _value's_ own type (`noir_tests/signed_shift` shifts an `i8` by
-        // an `i8` and an `i32` by an `i32`), so on an `i64` the amount is an `i64` too (and
-        // `cmp_bits` is then `64`, which makes the cast above an identity rather than a widening).
-        // A negative amount therefore keeps its sign bit, and `below_width` does _not_ catch that:
-        // `-1 s< 64` is true, so the bound test reports the shift as valid.
+        // LIVE wherever the amount is as wide as `cmp_bits`, and the only check that catches a
+        // negative amount there. Noir types a shift's amount as the _value's_ own type
+        // (`noir_tests/signed_shift` shifts an `i8` by an `i8` and an `i32` by an `i32`), so on an
+        // `i64` or wider the amount is as wide as the value and the cast above is an identity
+        // rather than a widening. A negative amount therefore keeps its sign bit, and `below_width`
+        // does _not_ catch that: `-1 s< 64` is true, so the bound test reports the shift as valid.
         //
         // Below 64 bits it is indeed dead, because the widening cast is a raw-bit zero-extension
         // (`Cast` masks, sign extension is the separate `SExt`) and so clears the sign bit at

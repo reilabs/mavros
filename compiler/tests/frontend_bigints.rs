@@ -54,6 +54,24 @@ fn wide_arithmetic_from_source() {
 }
 
 #[test]
+fn wide_signed_arithmetic_from_source() {
+    check_both_modes(
+        r#"fn main(x: i64) -> pub [i64; 3] {
+            let high: i256 = 1 << 200;
+            let negative: i256 = -0x100000000000000000000000000000000000000000000000000;
+            assert(negative == -high);
+            let value = negative + (x as i256);
+            assert(value < 0);
+            let product = value * -3;
+            assert(product / -3 == value);
+            [(value >> 200) as i64, ((value as i512) >> 256) as i64,
+             (value + high) as i64]
+        }"#,
+        "x = 9\nreturn = ['-1', '-1', 9]",
+    );
+}
+
+#[test]
 fn generic_wide_integers_in_arrays_and_vectors() {
     check_both_modes(
         include_str!("../../noir_tests/bigint_sequences/src/main.nr"),

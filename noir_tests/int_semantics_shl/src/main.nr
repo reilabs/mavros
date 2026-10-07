@@ -14,6 +14,7 @@
 //   * unsigned, 16 bits, 6 pair(s)
 //   * unsigned, 32 bits, 6 pair(s)
 //   * unsigned, 64 bits, 6 pair(s)
+//   * unsigned, 128 bits, 6 pair(s)
 //   * signed, 8 bits, 6 pair(s)
 //   * signed, 16 bits, 6 pair(s)
 //   * signed, 32 bits, 6 pair(s)
@@ -63,6 +64,17 @@ fn main(
     u64_8: u64,
     u64_9: u64,
     u64_10: u64,
+    u128_0: u128,
+    u128_1: u128,
+    u128_2: u128,
+    u128_3: u128,
+    u128_4: u128,
+    u128_5: u128,
+    u128_6: u128,
+    u128_7: u128,
+    u128_8: u128,
+    u128_9: u128,
+    u128_10: u128,
     i8_0: i8,
     i8_1: i8,
     i8_2: i8,
@@ -138,6 +150,14 @@ fn main(
     assert_eq(u64_8 << u64_4, 6148914689804861440);
     assert_eq(u64_9 << u64_3, 0);
     assert_eq(u64_10 << u64_1, 18446744073709551610);
+
+    // unsigned at 128 bits: 6 pair(s).
+    assert_eq(u128_0 << u128_0, 0);
+    assert_eq(u128_2 << u128_7, 170141183460469231731687303715884105728);
+    assert_eq(u128_6 << u128_5, 7378697629483820646400);
+    assert_eq(u128_8 << u128_4, 113427455640312821148309287786019553280);
+    assert_eq(u128_9 << u128_3, 0);
+    assert_eq(u128_10 << u128_1, 340282366920938463463374607431768211450);
 
     // signed at 8 bits: 6 pair(s).
     assert_eq(i8_2 << i8_2, 0);

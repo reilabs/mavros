@@ -437,7 +437,7 @@ mod int_semantics_conformance {
         }
 
         for op in ops {
-            for &bits in corners::widths_for(op.is_signed()) {
+            for &bits in corners::widths() {
                 let rhs = if op.is_shift() {
                     corners::shift_amounts(bits, bits)
                 } else {
@@ -460,7 +460,7 @@ mod int_semantics_conformance {
             }
 
             // The wide half, whose corners are patterns rather than host words.
-            for bits in corners::wide_widths_for(op.is_signed()) {
+            for bits in corners::WIDE_WIDTHS {
                 let (values, rhs) = corners::wide_operands(op, bits);
 
                 for a in &values {

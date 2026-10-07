@@ -513,33 +513,31 @@ Let `B = floor(log2 p)` (bn254: 253; goldilocks: 63). For standard widths on gol
   correct standalone, but a fused `q·divisor + r` reconstruction can tip over.
 - `u64 / u128 / i64`: a bare value's range `≥ p` (`2⁶⁴ − 1 > p`) ⇒ it **cannot be held injectively
   in one cell**; every recombination into one cell (`shared/limbs.rs`'s `combine_limbs_of_value`,
-  signed `sign·2⁶⁴` packing) wraps. `lower_not`'s all-ones mask is **not** in that list any more:
-  the representation splits a witnessed `u64` into limbs on such a field before the complement is
+  signed `sign·2⁶⁴` packing) wraps. `lower_not`'s all-ones mask is **not** in that list: the
+  representation splits a witnessed `u64` into limbs on such a field before the complement is
   lowered, so the mask is only ever minted at a width the cell holds.
 
 So on goldilocks standard widths collapse to **{single-field for n ≤ 32, multi-cell for n ≥ 64}**;
 the "operation-strategy-only" band is empty for standard widths. `range_fits_field_injectively`
-(`witness_integer_arith.rs`) already flips correctly on a small field — **the debt is the missing
-FALSE-case codegen**, not the predicate. Today the only FALSE-case path is unsigned u128 mul, and it
-still packs `lo + cross·2ʰ ≈ 2³ʰ⁺¹` into one cell (~2¹⁹³ at the bn254 limb); every other _consumer
-of that predicate_ refuses through the funnel below. Lowerings that never ask it are a separate
-matter — see the list under `L6-int-op-strategy`.
+(`witness_integer_arith.rs`) flips correctly on a small field, and the FALSE-case codegen is the
+multi-cell representation in `WideWitnessInts`, which takes each operation past the width its
+single-cell lowering holds. The single-cell u128 mul still packs `lo + cross·2ʰ ≈ 2³ʰ⁺¹` into one
+cell (~2¹⁹³ at the bn254 limb) and refuses through the funnel below where that does not fit. The
+per-lowering list is under `L6-int-op-strategy`.
 
 ### Refusing On a Narrow Field
 
-The FALSE-case codegen does not exist yet, so every lowering whose precondition the configured field
-fails routes through one funnel: `compiler/src/compiler/passes/shared/unsupported.rs`. It appends
-the field's modulus width and witness limb width to the caller's own description of what did not
-fit, so a refusal names both halves of the mismatch, and the set of its call sites **is** the
+Every lowering whose precondition the configured field fails, and that has no FALSE-case lowering to
+fall back on, routes through one funnel: `compiler/src/compiler/passes/shared/unsupported.rs`. It
+appends the field's modulus width and witness limb width to the caller's own description of what did
+not fit, so a refusal names both halves of the mismatch, and the set of its call sites **is** the
 machine-readable half of this register.
 
-The call sites: `witness_bitwise`'s `lower_integer_sext` and `lower_word_bitwise` (spread width);
-`witness_integer_arith`'s `lower_unsigned_mul` (both the single-field product and the two-limb
-packing, the latter covering the limb _count_ as well as the packing); `lower_signed_addsub` and
-`lower_signed_mul`; `shared/limbs.rs`'s `combine_limbs_of_value` (the recombination);
-`witness_field`'s `to_bits` and `to_radix`; `shared::overflow_guard`'s `abs_as_u`; and
-`wide_witness_ints`' `schoolbook` (the product and the division) and `lower_shift` (the limb-wise
-shift).
+The call sites: `witness_bitwise`'s `lower_word_bitwise` (spread width); `witness_integer_arith`'s
+`lower_unsigned_mul` (both the single-field product and the two-limb packing, the latter covering
+the limb _count_ as well as the packing); `shared/limbs.rs`'s `combine_limbs_of_value` (the
+recombination); `witness_field`'s `to_bits` and `to_radix`; and `wide_witness_ints`' `schoolbook`
+(the product and the division) and `lower_shift` (the limb-wise shift).
 
 One kind of neighboring check deliberately stays out: an internal invariant no field choice can
 violate (`bit_range`'s "a field `BitRange` cannot exceed a field element").
@@ -565,8 +563,22 @@ Two tags, distinct from the constant-swap tags:
 A single-field arithmetic op assumes its exact result span fits one cell (one `b.mul`/`b.add`, or a
 `two_pow`-based packing). Fix = multi-limb schoolbook / carry-chain lowering in the FALSE branch.
 
-- [ ] `witness_integer_arith.rs` — `lower_signed_mul` (no fallback), `lower_signed_addsub`,
-      `signed_value_from_encoded`/`encode_signed_value` (sign packing).
+- [x] `witness_integer_arith.rs` — `lower_signed_mul` and `lower_signed_divmod`, with
+      `signed_value_from_encoded`/`encode_signed_value` (sign packing). The FALSE case is the
+      **sign-magnitude** lowering in `WideWitnessInts`, which takes every signed witnessed product,
+      division and remainder `single_cell_signed_product_fits` (`shared/limbs.rs`) says one cell
+      cannot hold. Each operand's magnitude is its limbs complemented by its sign bit (one product
+      per limb) plus that bit through the carry chain; the unsigned schoolbook or division runs on
+      the magnitudes; the answer's magnitude is held to `2^(N − 1) − 1 + s` for its sign `s` by one
+      constraint on its top bit; and it is negated by `s` the same way. The single-cell lowerings
+      assert that bound, which is also what keeps their sign packing below the modulus: unlike the
+      unsigned one it has no two-limb escape at 128 bits.
+- [x] `witness_integer_arith.rs` — `lower_signed_addsub`. The FALSE case is the **signed carry
+      chain** in `WideWitnessInts`: the unsigned chain with its top carry witnessed, the sign bits
+      of both operands and of the answer cut out of their top limbs, and one linear relation between
+      the four. It takes every signed sum and difference past `widest_cell_sum_bits`, as the
+      unsigned chain does, and the single-cell lowering asserts that bound, which is also what keeps
+      its sign packing below the modulus.
 - [x] `witness_integer_arith.rs` — `lower_unsigned_mul` (single-field product + the `2³ʰ⁺¹` u128
       fallback packing). The FALSE case is the **schoolbook product** in `WideWitnessInts`, which
       takes every unsigned witnessed product `single_cell_product_fits` (`shared/limbs.rs`) says one
@@ -588,9 +600,8 @@ A single-field arithmetic op assumes its exact result span fits one cell (one `b
       limb instead of being range-checked. `r < d` is the carry chain with its top borrow forced
       out, which is also what refuses a zero divisor. A constant operand bounds both answers, so a
       limb they cannot reach is never witnessed. The funnel asks `schoolbook_division_fits`, which
-      plans that same schoolbook, and refuses a signed division wherever the single cell cannot hold
-      its product, as the signed lowering reads its magnitudes through this one. What reaches the
-      single-cell lowering fits the cell, and it asserts so.
+      plans that same schoolbook, for a signed division too, which runs it on the operands'
+      magnitudes. What reaches the single-cell lowering fits the cell, and it asserts so.
 - [x] `witness_bitwise.rs` — `lower_shift` (`value · 2^n` in one field element, or a division by
       `2^n`). The FALSE case is the **limb-wise shift** in `WideWitnessInts`, which takes every
       unsigned witnessed shift `single_cell_shift_fits` (`shared/limbs.rs`) says one cell cannot
@@ -599,9 +610,11 @@ A single-field arithmetic op assumes its exact result span fits one cell (one `b
       of the answer; any other is `q·h + r`, with `r` keyed into the powers-of-two table the narrow
       shift already uses, every limb split at `2^r` into two range-checked halves, and a barrel over
       the bits of `q`. `limb_shift_fits` has the funnel refuse a field whose limb times a power of
-      two below it passes an element — goldilocks at the default `LimbBudget` — and a signed shift
-      is refused wherever the single cell cannot hold it. What reaches `lower_shift` fits the cell,
-      and it asserts so.
+      two below it passes an element — goldilocks at the default `LimbBudget`. A signed left shift
+      is the unsigned one, and a signed right shift is the unsigned one with its sign filled in: by
+      a known amount the vacated bits are the sign times a constant, and by any other the operand is
+      complemented by its sign before the shift and the answer after it. What reaches `lower_shift`
+      fits the cell, and it asserts so.
 - [x] `witness_integer_arith.rs` — `lower_unsigned_addsub`; `witness_compare.rs` —
       `lower_unsigned_lt` for an unsigned ordering; and `witness_assert.rs` —
       `lower_unsigned_assert_lt` for an asserted one. The FALSE case is the **carry chain** in
@@ -612,12 +625,18 @@ A single-field arithmetic op assumes its exact result span fits one cell (one `b
       element too, decomposing it first, so the width at which the operands fit and their sum does
       not is covered. What reaches the three single-cell lowerings fits the cell on any field, and
       each asserts it: `lower_unsigned_addsub` and `lower_unsigned_assert_lt` themselves, and the
-      ordering in `lower_lt`'s unsigned arm, since `lower_unsigned_lt` is also the signed path's.
-- [ ] `witness_compare.rs` — `lower_signed_lt`, which reads the magnitudes through
-      `lower_unsigned_lt` at widths up to the signed frontier rather than the chain's. That is past
-      `widest_cell_sum_bits` only on a field whose modulus is at most 64 bits wide — goldilocks, at
-      63 bits. At 64 the operand is past that field's `narrow_int_bits`, and the funnel refuses it.
-- [ ] `witness_bitwise.rs` — `lower_integer_sext`, `lower_word_bitwise` (spread width).
+      ordering in `lower_lt`, for either reading, since `lower_unsigned_lt` is also the signed
+      path's.
+- [x] `witness_compare.rs` — `lower_signed_lt`, which orders the raw patterns through
+      `lower_unsigned_lt` and selects the answer by the operands' sign bits. The FALSE case is the
+      **carry chain** over the operands with their top bits flipped, which is offset binary and so
+      orders them as signed values, at the same `widest_cell_sum_bits` as the unsigned ordering. On
+      goldilocks that is where `i63` and `i64` go, as their difference does not fit the cell there.
+- [x] `witness_bitwise.rs` — `lower_integer_sext` (`value + sign·(2^to - 2^from)` in one element).
+      The FALSE case is the **sign fill** in `WideWitnessInts`, which takes every witnessed target
+      held as limbs and fills each limb past the source with the source's sign bit. What reaches the
+      single-element lowering has a target the field carries, and it asserts so.
+- [ ] `witness_bitwise.rs` — `lower_word_bitwise` (spread width).
 - [x] `witness_bitwise.rs` — `lower_not`. The FALSE case is the **representation**, not a second
       lowering: `WideWitnessInts` runs ahead of this pass, with only the narrowing-cast lowering
       between them, and splits a witnessed value wider than `multi_cell_int_bits` into limbs,
@@ -626,17 +645,17 @@ A single-field arithmetic op assumes its exact result span fits one cell (one `b
       there is no width at which it can wrap. The assert on the bound states the coupling rather
       than guarding a reachable case.
 
-**Four of the open ones refuse** rather than miscompiling when their span does not fit (see the
-funnel above): `lower_signed_mul`, `lower_signed_addsub`, `lower_integer_sext` and
-`lower_word_bitwise`. What remains for P5 at those four is the FALSE-case lowering itself — except
-at `lower_word_bitwise`, where it partly exists. `lower_binary_bitwise` asks `spread_sum_fits_field`
-before taking the whole-width arm, so a width whose spread sum the field cannot hold falls through
-to the half-limb decomposition instead of refusing. What that site still refuses is a field whose
-**half-limb** spread sum does not fit, which no decomposition below it helps.
+**The one open site refuses** rather than miscompiling when its span does not fit (see the funnel
+above): `lower_word_bitwise`. What remains for P5 there is the FALSE-case lowering itself, which
+partly exists. `lower_binary_bitwise` asks `spread_sum_fits_field` before taking the whole-width
+arm, so a width whose spread sum the field cannot hold falls through to the half-limb decomposition
+instead of refusing. What that site still refuses is a field whose **half-limb** spread sum does not
+fit, which no decomposition below it helps.
 
-**The rest still carry the assumption unchecked**, with only a `FIELD-ASSUMPTION` comment on it, and
-are what to fix first if a narrow field is configured before P5's lowerings exist: the
-`signed_value_from_encoded`/`encode_signed_value` sign packing, and `lower_signed_lt`'s ordering.
+The `signed_value_from_encoded`/`encode_signed_value` sign packing carries a `FIELD-ASSUMPTION`
+comment but no unchecked assumption: every lowering that reads it asserts the bound that keeps its
+place values below the modulus, `widest_cell_sum_bits` for the sum and the difference and
+`single_cell_signed_product_fits` for the product and the division.
 
 `lower_unsigned_divmod`'s 128-bit path is checked, but indirectly: it reconstructs `q·divisor + r`
 by emitting `UMul`/`UAdd` **ops**, which this same pass re-lowers after `WideWitnessInts` has run,

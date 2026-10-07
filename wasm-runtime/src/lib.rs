@@ -11,8 +11,11 @@
 //! against the vm_ptr — see `codegen/llssa_llvm_codegen.rs`.
 
 // FIELD-ASSUMPTION: L1-direct-ref (1 sites)
+use core::mem::MaybeUninit;
+
 use ark_bn254::Fr;
 use ark_ff::BigInt;
+use mavros_limb_arith::{divide_by_limb, knuth_divide, negate, significant_limbs};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Heap allocation (delegates to Rust's global allocator, dlmalloc on wasm32)
@@ -247,26 +250,65 @@ pub unsafe extern "C" fn __field_lt(
 // an `iN` by value — one body serves every width, so the width arrives as the
 // limb count `limbs` instead of in the type.
 //
+//   __int_add(result_ptr, a_ptr, b_ptr, limbs)
+//   __int_sub(result_ptr, a_ptr, b_ptr, limbs)
 //   __int_mul(result_ptr, a_ptr, b_ptr, limbs)
+//   __int_udivrem(quotient_ptr, remainder_ptr, a_ptr, b_ptr, limbs)
+//   __int_sdivrem(quotient_ptr, remainder_ptr, a_ptr, b_ptr, limbs)
 //
 // Every buffer is `limbs` little-endian `u64`s, which is exactly how LLVM lays
 // an `iN` out in memory on this little-endian target: the caller stores an
-// `i64*limbs` value into the slot and loads the answer back out of it.
+// `i64*limbs` value into the slot and loads the answer back out of it. The
+// signed division reads its operands at that whole width, so the caller
+// sign-extends them into the slot where the unsigned ones zero-extend.
 //
 // LLVM's own expansion of a wide `mul` is straight-line code quadratic in the
 // width -- 7.2 MB at `i16384`, and past the wasm engine's function-size and
 // local-count caps from about `i5700` up -- where a loop over the limbs is one
-// small function serving every width.
+// small function serving every width. Its wide `udiv` and `sdiv` are linear but
+// not small: unoptimised codegen gives a bit-serial loop of about 20 000 wasm
+// locals for a `udiv` at `i16384`, and 28 000 to 36 000 for an `sdiv`, against
+// the engine's cap of 50 000 per function. Even its wide `add` and `sub`, linear
+// and branch-free, cost about 4 400 and 3 500 locals at `i16384` unoptimised,
+// where a call to a helper costs about 770: the store and load of its buffers.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// The low `limbs` limbs of `a * b`.
+/// The low `limbs` limbs of `a + b`.
 ///
-/// Schoolbook, dropping the columns at or above `limbs` rather than computing and discarding
-/// them: the answer is taken modulo `2^(64*limbs)` and those columns cannot reach it.
+/// # Safety
 ///
-/// The column accumulator needs no wrapping arithmetic. A limb product plus the running cell plus
-/// the carry is at most `(2^64 - 1)^2 + 2 * (2^64 - 1)`, which is `2^128 - 1` exactly, so a `u128`
-/// holds every column.
+/// `result` must be writable for `limbs` `u64`s, and `a` and `b` readable for `limbs` each.
+/// `result` must not overlap either operand.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __int_add(result: *mut u64, a: *const u64, b: *const u64, limbs: u32) {
+    let k = limbs as usize;
+    unsafe {
+        mavros_limb_arith::add(
+            core::slice::from_raw_parts_mut(result, k),
+            core::slice::from_raw_parts(a, k),
+            core::slice::from_raw_parts(b, k),
+        );
+    }
+}
+
+/// The low `limbs` limbs of `a - b`.
+///
+/// # Safety
+///
+/// As [`__int_add`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __int_sub(result: *mut u64, a: *const u64, b: *const u64, limbs: u32) {
+    let k = limbs as usize;
+    unsafe {
+        mavros_limb_arith::sub(
+            core::slice::from_raw_parts_mut(result, k),
+            core::slice::from_raw_parts(a, k),
+            core::slice::from_raw_parts(b, k),
+        );
+    }
+}
+
+/// The low `limbs` limbs of `a * b`, by [`mavros_limb_arith::mul`].
 ///
 /// # Safety
 ///
@@ -277,34 +319,162 @@ pub unsafe extern "C" fn __field_lt(
 pub unsafe extern "C" fn __int_mul(result: *mut u64, a: *const u64, b: *const u64, limbs: u32) {
     let k = limbs as usize;
     unsafe {
-        result.write_bytes(0, k);
+        mavros_limb_arith::mul(
+            core::slice::from_raw_parts_mut(result, k),
+            core::slice::from_raw_parts(a, k),
+            core::slice::from_raw_parts(b, k),
+        );
+    }
+}
 
-        for i in 0..k {
-            let ai = u128::from(*a.add(i));
-            let mut carry = 0u64;
-            for j in 0..(k - i) {
-                let column =
-                    ai * u128::from(*b.add(j)) + u128::from(*result.add(i + j)) + u128::from(carry);
-                *result.add(i + j) = column as u64;
-                carry = (column >> 64) as u64;
-            }
+/// The widest operand any helper here is handed, in limbs.
+///
+/// `MAX_BITS` in `mavros-int-semantics` caps every integer type at 16384 bits, so no division is
+/// wider than this, and the divisions keep their working copies in arrays of this size on their own
+/// stack rather than allocating. `the_limb_cap_is_the_type_cap` ties the two together.
+const MAX_LIMBS: usize = 256;
+
+/// The first `len` limbs of a stack buffer, zeroed, as a slice.
+///
+/// A buffer is sized for the widest operand, and a call initializes only the limbs it uses.
+fn zeroed(store: &mut [MaybeUninit<u64>], len: usize) -> &mut [u64] {
+    let prefix = &mut store[..len];
+    for limb in prefix.iter_mut() {
+        limb.write(0);
+    }
+    // SAFETY: every element of `prefix` was just initialised, and `MaybeUninit<u64>` has the
+    // layout of `u64`.
+    unsafe { &mut *(core::ptr::from_mut(prefix) as *mut [u64]) }
+}
+
+/// `a / b` and `a % b`, both read as unsigned, written into `quotient` and `remainder`.
+///
+/// Total: a zero divisor answers zero for both results, as the VM's `int_limbs::udivrem` does. This
+/// holds for a call; a division by a constant zero that codegen folds instead of calling this is
+/// LLVM's poison. It is undefined behavior in LLVM's own `udiv`, and the model leaves it
+/// unspecified because the guard IR keeps it from any division: a guarded one branches around it
+/// and an unguarded one asserts first.
+///
+/// # Safety
+///
+/// `quotient` and `remainder` must be writable for `limbs` `u64`s, and `a` and `b` readable for
+/// `limbs` each. No buffer may overlap another, and `limbs` must be at most [`MAX_LIMBS`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __int_udivrem(
+    quotient: *mut u64,
+    remainder: *mut u64,
+    a: *const u64,
+    b: *const u64,
+    limbs: u32,
+) {
+    let k = limbs as usize;
+    unsafe {
+        udivrem(
+            core::slice::from_raw_parts_mut(quotient, k),
+            core::slice::from_raw_parts_mut(remainder, k),
+            core::slice::from_raw_parts(a, k),
+            core::slice::from_raw_parts(b, k),
+        );
+    }
+}
+
+/// `a / b` and `a % b`, both read as two's complement at the whole `64 * limbs` bits.
+///
+/// Total, as [`__int_udivrem`] is: a zero divisor answers zero for both. The one other input the
+/// model leaves unspecified, `INT_MIN / -1`, wraps to `INT_MIN` remainder zero.
+///
+/// # Safety
+///
+/// As [`__int_udivrem`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __int_sdivrem(
+    quotient: *mut u64,
+    remainder: *mut u64,
+    a: *const u64,
+    b: *const u64,
+    limbs: u32,
+) {
+    let k = limbs as usize;
+    unsafe {
+        sdivrem(
+            core::slice::from_raw_parts_mut(quotient, k),
+            core::slice::from_raw_parts_mut(remainder, k),
+            core::slice::from_raw_parts(a, k),
+            core::slice::from_raw_parts(b, k),
+        );
+    }
+}
+
+/// The body of [`__int_udivrem`], over slices of one length.
+fn udivrem(quotient: &mut [u64], remainder: &mut [u64], a: &[u64], b: &[u64]) {
+    quotient.fill(0);
+    remainder.fill(0);
+
+    match significant_limbs(b) {
+        0 => {}
+        1 => remainder[0] = divide_by_limb(quotient, a, b[0]),
+        n => {
+            let mut divisor_store = [MaybeUninit::<u64>::uninit(); MAX_LIMBS];
+            let mut dividend_store = [MaybeUninit::<u64>::uninit(); MAX_LIMBS + 1];
+            let divisor = zeroed(&mut divisor_store, n);
+            let dividend = zeroed(&mut dividend_store, a.len() + 1);
+            knuth_divide(quotient, remainder, a, &b[..n], divisor, dividend);
         }
     }
 }
 
+/// The body of [`__int_sdivrem`]: sign-magnitude around [`udivrem`].
+///
+/// The quotient takes the operands' xor and the remainder takes the dividend's sign, which is
+/// truncation toward zero.
+fn sdivrem(quotient: &mut [u64], remainder: &mut [u64], a: &[u64], b: &[u64]) {
+    let k = a.len();
+    let mut a_store = [MaybeUninit::<u64>::uninit(); MAX_LIMBS];
+    let mut b_store = [MaybeUninit::<u64>::uninit(); MAX_LIMBS];
+    let a_magnitude = zeroed(&mut a_store, k);
+    let b_magnitude = zeroed(&mut b_store, k);
+    a_magnitude.copy_from_slice(a);
+    b_magnitude.copy_from_slice(b);
+
+    let (a_negative, b_negative) = (is_negative(a), is_negative(b));
+    if a_negative {
+        negate(a_magnitude);
+    }
+    if b_negative {
+        negate(b_magnitude);
+    }
+
+    udivrem(quotient, remainder, a_magnitude, b_magnitude);
+
+    if a_negative != b_negative {
+        negate(quotient);
+    }
+    if a_negative {
+        negate(remainder);
+    }
+}
+
+/// The top bit of the top limb, which is the sign of a value read at the buffer's whole width.
+fn is_negative(value: &[u64]) -> bool {
+    value.last().is_some_and(|&top| top >> 63 == 1)
+}
+
 /// The runtime helper's conformance relation to the normative model in `mavros-int-semantics`.
 ///
-/// [`__int_mul`] is the one integer operation this crate evaluates, and it is reached only from
-/// the LLVM backend, so it conforms under the `llvm` tag rather than one of its own. The relation
-/// is that backend's: equal to [`residue`](mavros_int_semantics::residue) wherever the model has
-/// an opinion, which for a multiply is everywhere.
+/// The wide helpers are the only integer operations this crate evaluates, and they are reached only
+/// from the LLVM backend, so they conform under the `llvm` tag rather than one of their own. The
+/// relation is that backend's: equal to [`residue`](mavros_int_semantics::residue) wherever the
+/// model has an opinion, which for a sum, difference or product is everywhere and for a division is
+/// everywhere but a zero divisor and a signed `INT_MIN / -1`.
 ///
 /// The sweep runs at the narrow widths as well as the wide ones, though the backend routes only
 /// the wide ones here. A width-generic body is either right at a width or it is not, and one and
 /// two limbs are where a limb-count error is visible rather than averaged over.
 #[cfg(test)]
 mod int_semantics_conformance {
-    use mavros_int_semantics::{IntBits, IntOp, corners, residue};
+    use mavros_int_semantics::{
+        IntBits, IntOp, MAX_BITS, corners, int_bits::HOST_LIMB_BITS, residue,
+    };
 
     /// [`super::__int_mul`] applied to two patterns of the same width.
     ///
@@ -325,6 +495,220 @@ mod int_semantics_conformance {
         IntBits::from_limbs(a.bits(), &out)
     }
 
+    /// One of the four divisions through its helper, as the backend calls it.
+    ///
+    /// Each operand is widened to whole limbs, by sign extension for a signed division because the
+    /// signed helper reads the sign at the top of the buffer, and the answer is truncated back to
+    /// the operation's width.
+    fn helper_divide(op: IntOp, a: &IntBits, b: &IntBits) -> IntBits {
+        assert_eq!(a.bits(), b.bits());
+        let bits = a.bits();
+        let padded = a.limb_count() * HOST_LIMB_BITS;
+        let signed = matches!(op, IntOp::SDiv | IntOp::SRem);
+        let widen = |x: &IntBits| {
+            if signed {
+                x.sign_extend(padded)
+            } else {
+                x.cast(padded)
+            }
+        };
+        let (a, b) = (widen(a), widen(b));
+
+        let limbs = a.limb_count();
+        let (mut quotient, mut remainder) = (vec![0u64; limbs], vec![0u64; limbs]);
+        let helper = if signed {
+            super::__int_sdivrem
+        } else {
+            super::__int_udivrem
+        };
+        unsafe {
+            helper(
+                quotient.as_mut_ptr(),
+                remainder.as_mut_ptr(),
+                a.limbs().as_ptr(),
+                b.limbs().as_ptr(),
+                limbs as u32,
+            );
+        }
+
+        let answer = match op {
+            IntOp::UDiv | IntOp::SDiv => quotient,
+            IntOp::URem | IntOp::SRem => remainder,
+            other => unreachable!("{other:?} is not a division"),
+        };
+        IntBits::from_limbs(bits, &answer)
+    }
+
+    const DIVISIONS: [IntOp; 4] = [IntOp::UDiv, IntOp::URem, IntOp::SDiv, IntOp::SRem];
+
+    #[test]
+    fn the_helper_divisions_agree_with_the_model() {
+        let mut checked = 0usize;
+        let mut at_the_widest = 0usize;
+
+        let mut widths = vec![1usize, 2, 7, 8, 63, 64, 65, 96, 127, 128];
+        widths.extend(corners::WIDE_WIDTHS);
+        let widest = *corners::WIDE_WIDTHS
+            .last()
+            .expect("the wide set is not empty");
+
+        for op in DIVISIONS {
+            for &bits in &widths {
+                let (lhs, rhs) = corners::wide_operands(op, bits);
+                for a in &lhs {
+                    for b in &rhs {
+                        let Some(want) = residue(op, a, b) else {
+                            continue;
+                        };
+                        let got = helper_divide(op, a, b);
+                        assert_eq!(
+                            got, want,
+                            "{op:?} at {bits} bits: {a:?}, {b:?} gave {got:?}, model says {want:?}"
+                        );
+                        checked += 1;
+                        if bits == widest {
+                            at_the_widest += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            checked > 10_000,
+            "the sweep only reached {checked} specified points"
+        );
+        assert!(
+            at_the_widest > 400,
+            "the widest width contributed only {at_the_widest} points"
+        );
+    }
+
+    /// The inputs the model leaves unspecified still get an answer, and it is the VM's.
+    ///
+    /// A zero divisor answers zero for both quotient and remainder, and a signed `INT_MIN / -1`
+    /// wraps to `INT_MIN` with a zero remainder. The guard IR keeps both from any division, so this
+    /// is not conformance; it is the helper being total rather than trapping, which is what the
+    /// wasm engine would otherwise make of a Rust division by zero.
+    #[test]
+    fn the_helper_divisions_are_total() {
+        for bits in [129, 1000, 16384] {
+            for a in corners::wide_values(bits) {
+                let zero = IntBits::zero(bits);
+                for op in DIVISIONS {
+                    assert!(
+                        helper_divide(op, &a, &zero).is_zero(),
+                        "{op:?} by zero at {bits} bits gave a non-zero answer"
+                    );
+                }
+            }
+
+            let min = IntBits::from_signed(bits, &IntBits::signed_min(bits));
+            let minus_one = IntBits::all_ones(bits);
+            assert_eq!(helper_divide(IntOp::SDiv, &min, &minus_one), min);
+            assert!(helper_divide(IntOp::SRem, &min, &minus_one).is_zero());
+        }
+    }
+
+    /// The one input shape where Knuth D's first estimate survives its correction loop and is still
+    /// one too large, so the window goes negative and the divisor is added back.
+    ///
+    /// Hacker's Delight's `divmnu` vector, with its 32-bit digits scaled to 64-bit limbs:
+    /// `2^191 + 3` divided by `2^189 + 1`. Normalising shifts both left by two, the estimate from
+    /// the top two limbs is 4, and the true quotient is 3. The corner sweep reaches the add-back
+    /// too, but only through whichever corners the shared set happens to hold; this pins it to an
+    /// input whose path is known.
+    #[test]
+    fn a_quotient_limb_estimated_one_too_large_is_added_back() {
+        let bits = 192;
+        let a = IntBits::from_limbs(bits, &[3, 0, 1 << 63]);
+        let b = IntBits::from_limbs(bits, &[1, 0, 1 << 61]);
+        for op in [IntOp::UDiv, IntOp::URem] {
+            assert_eq!(
+                helper_divide(op, &a, &b),
+                residue(op, &a, &b).expect("a non-zero divisor is specified"),
+                "{op:?} through the add-back"
+            );
+        }
+        assert_eq!(
+            helper_divide(IntOp::UDiv, &a, &b),
+            IntBits::from_limbs(bits, &[3])
+        );
+    }
+
+    /// The divisions' stack buffers hold the widest operand the type system admits.
+    #[test]
+    fn the_limb_cap_is_the_type_cap() {
+        assert_eq!(super::MAX_LIMBS, IntBits::limbs_for_bits(MAX_BITS));
+    }
+
+    /// [`super::__int_add`] or [`super::__int_sub`] applied to two patterns of the same width, the
+    /// way [`helper_mul`] applies the multiply.
+    fn helper_sum(op: IntOp, a: &IntBits, b: &IntBits) -> IntBits {
+        assert_eq!(a.bits(), b.bits());
+        let limbs = a.limb_count();
+        let mut out = vec![0u64; limbs];
+        let helper = match op {
+            IntOp::UAdd | IntOp::SAdd => super::__int_add,
+            IntOp::USub | IntOp::SSub => super::__int_sub,
+            other => unreachable!("{other:?} is not a sum or difference"),
+        };
+        unsafe {
+            helper(
+                out.as_mut_ptr(),
+                a.limbs().as_ptr(),
+                b.limbs().as_ptr(),
+                limbs as u32,
+            );
+        }
+        IntBits::from_limbs(a.bits(), &out)
+    }
+
+    /// Both readings of both operations, because one helper serves each pair: a wrapping sum or
+    /// difference has the same bits whichever way its operands are read, and the model's residue
+    /// for an overflow says so.
+    #[test]
+    fn the_helper_sums_and_differences_agree_with_the_model() {
+        let mut checked = 0usize;
+        let mut at_the_widest = 0usize;
+
+        let mut widths = vec![1usize, 2, 7, 8, 63, 64, 65, 96, 127, 128];
+        widths.extend(corners::WIDE_WIDTHS);
+        let widest = *corners::WIDE_WIDTHS
+            .last()
+            .expect("the wide set is not empty");
+
+        for op in [IntOp::UAdd, IntOp::SAdd, IntOp::USub, IntOp::SSub] {
+            for &bits in &widths {
+                let (lhs, rhs) = corners::wide_operands(op, bits);
+                for a in &lhs {
+                    for b in &rhs {
+                        let want = residue(op, a, b)
+                            .expect("a sum or difference wraps, so the model always answers");
+                        let got = helper_sum(op, a, b);
+                        assert_eq!(
+                            got, want,
+                            "{op:?} at {bits} bits: {a:?}, {b:?} gave {got:?}, model says {want:?}"
+                        );
+                        checked += 1;
+                        if bits == widest {
+                            at_the_widest += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            checked > 10_000,
+            "the sweep only reached {checked} specified points"
+        );
+        assert!(
+            at_the_widest > 400,
+            "the widest width contributed only {at_the_widest} points"
+        );
+    }
+
     #[test]
     fn the_helper_multiply_agrees_with_the_model() {
         let mut checked = 0usize;
@@ -332,7 +716,7 @@ mod int_semantics_conformance {
 
         // Every wide width the backend can route here, plus the narrow ones it never will.
         let mut widths = vec![1usize, 2, 7, 8, 63, 64, 65, 96, 127, 128];
-        widths.extend(corners::wide_widths_for(false));
+        widths.extend(corners::WIDE_WIDTHS);
 
         let widest = *corners::WIDE_WIDTHS
             .last()
@@ -368,8 +752,7 @@ mod int_semantics_conformance {
         );
 
         // And without this the wide half could contribute nothing at all while the narrow half
-        // carried the count on its own. A sweep whose wide widths come from a filtered set is an
-        // ordinary shape here, not a hypothetical: `corners::wide_widths_for(true)` is empty.
+        // carried the count on its own.
         assert!(
             at_the_widest > 100,
             "the widest width contributed only {at_the_widest} points"
