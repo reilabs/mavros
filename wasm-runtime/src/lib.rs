@@ -255,6 +255,8 @@ pub unsafe extern "C" fn __field_lt(
 //   __int_mul(result_ptr, a_ptr, b_ptr, limbs)
 //   __int_udivrem(quotient_ptr, remainder_ptr, a_ptr, b_ptr, limbs)
 //   __int_sdivrem(quotient_ptr, remainder_ptr, a_ptr, b_ptr, limbs)
+//   __int_spread(result_ptr, a_ptr, limbs, bits)
+//   __int_unspread(odd_ptr, even_ptr, a_ptr, limbs, bits)
 //
 // Every buffer is `limbs` little-endian `u64`s, which is exactly how LLVM lays
 // an `iN` out in memory on this little-endian target: the caller stores an
@@ -457,6 +459,53 @@ fn sdivrem(quotient: &mut [u64], remainder: &mut [u64], a: &[u64], b: &[u64]) {
 /// The top bit of the top limb, which is the sign of a value read at the buffer's whole width.
 fn is_negative(value: &[u64]) -> bool {
     value.last().is_some_and(|&top| top >> 63 == 1)
+}
+
+/// The low `bits` bits of `a` spread into `result`, bit `i` to bit `2i`, by
+/// [`mavros_limb_arith::spread`]. Every other bit of `result` is cleared and no bit of `a` above
+/// `bits` is read.
+///
+/// # Safety
+///
+/// `result` must be writable and `a` readable for `limbs` `u64`s each, and `limbs` must hold
+/// `2 * bits` bits. The two must not overlap.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __int_spread(result: *mut u64, a: *const u64, limbs: u32, bits: u32) {
+    let k = limbs as usize;
+    unsafe {
+        mavros_limb_arith::spread(
+            core::slice::from_raw_parts_mut(result, k),
+            core::slice::from_raw_parts(a, k),
+            bits as usize,
+        );
+    }
+}
+
+/// The low `bits` bits of `a` separated into its odd- and even-indexed streams, by
+/// [`mavros_limb_arith::unspread`]. Every other bit of both is cleared and no bit of `a` above
+/// `bits` is read.
+///
+/// # Safety
+///
+/// `odd` and `even` must be writable and `a` readable for `limbs` `u64`s each, and `limbs` must hold
+/// `bits` bits. No buffer may overlap another.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __int_unspread(
+    odd: *mut u64,
+    even: *mut u64,
+    a: *const u64,
+    limbs: u32,
+    bits: u32,
+) {
+    let k = limbs as usize;
+    unsafe {
+        mavros_limb_arith::unspread(
+            core::slice::from_raw_parts_mut(odd, k),
+            core::slice::from_raw_parts_mut(even, k),
+            core::slice::from_raw_parts(a, k),
+            bits as usize,
+        );
+    }
 }
 
 /// The runtime helper's conformance relation to the normative model in `mavros-int-semantics`.
@@ -776,5 +825,81 @@ mod int_semantics_conformance {
             "2^128 squared is 2^256, which is 0 mod 2^129"
         );
         assert_eq!(helper_mul(&a, &a), want);
+    }
+
+    /// [`super::__int_spread`] and [`super::__int_unspread`] against the model, through buffers
+    /// laid out as the backend lays them out: a spread's operand zero-extended into the result's
+    /// whole limbs, an unspread's streams in the operand's.
+    ///
+    /// Every output buffer starts as garbage and every answer is compared limb for limb, so a limb
+    /// the helper failed to clear shows. The widest widths each op takes are asserted present, as a
+    /// filter that dropped them would leave the sweep green.
+    #[test]
+    fn the_helper_spreads_and_unspreads_agree_with_the_model() {
+        const GARBAGE: u64 = 0xAAAA_AAAA_AAAA_AAAA;
+        let mut widths = vec![1usize, 2, 7, 8, 63, 64, 65, 96, 127, 128];
+        widths.extend(corners::WIDE_WIDTHS);
+
+        // A spread doubles its operand, so its widest is half the cap rather than the cap.
+        let mut spread_widths: Vec<usize> = widths
+            .iter()
+            .copied()
+            .filter(|&bits| bits <= MAX_BITS / 2)
+            .collect();
+        spread_widths.push(MAX_BITS / 2);
+        for &bits in &spread_widths {
+            for value in corners::wide_values(bits) {
+                for read in corners::spread_reads(bits, 1) {
+                    let padded = IntBits::limbs_for_bits(2 * bits) * HOST_LIMB_BITS;
+                    let a = value.cast(padded);
+                    let mut out = vec![GARBAGE; a.limb_count()];
+                    unsafe {
+                        super::__int_spread(
+                            out.as_mut_ptr(),
+                            a.limbs().as_ptr(),
+                            a.limb_count() as u32,
+                            read as u32,
+                        );
+                    }
+                    assert_eq!(
+                        out,
+                        value.spread(read).cast(padded).limbs(),
+                        "spread of {read} bits of {value:?}"
+                    );
+                }
+            }
+        }
+
+        let unspread_widths: Vec<usize> = widths.into_iter().filter(|&bits| bits >= 2).collect();
+        for &bits in &unspread_widths {
+            for value in corners::wide_values(bits) {
+                for read in corners::spread_reads(bits, 2) {
+                    let limbs = value.limb_count();
+                    let (mut odd, mut even) = (vec![GARBAGE; limbs], vec![GARBAGE; limbs]);
+                    unsafe {
+                        super::__int_unspread(
+                            odd.as_mut_ptr(),
+                            even.as_mut_ptr(),
+                            value.limbs().as_ptr(),
+                            limbs as u32,
+                            read as u32,
+                        );
+                    }
+                    let (want_odd, want_even) = value.unspread(read);
+                    let padded = limbs * HOST_LIMB_BITS;
+                    assert_eq!(
+                        (odd.as_slice(), even.as_slice()),
+                        (
+                            want_odd.cast(padded).limbs(),
+                            want_even.cast(padded).limbs()
+                        ),
+                        "unspread of {read} bits of {value:?}"
+                    );
+                }
+            }
+        }
+
+        assert!(spread_widths.contains(&(MAX_BITS / 2)));
+        assert!(unspread_widths.contains(&MAX_BITS) && unspread_widths.contains(&(MAX_BITS - 1)));
     }
 }

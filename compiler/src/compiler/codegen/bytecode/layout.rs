@@ -288,7 +288,8 @@ pub fn int_cell_count(bits: usize) -> usize {
     IntBits::limbs_for_bits(bits)
 }
 
-/// The widest value the `SpreadU32ToU64` opcode interleaves.
+/// The widest container the `SpreadU32ToU64` opcode interleaves, and half the widest
+/// `UnspreadU64ToU32` separates; a wider one takes the `_intn` pair.
 pub const SPREAD_MAX_BITS: usize = 32;
 
 /// The widest integer the cell lane holds: one frame cell, which is one host `u64`.

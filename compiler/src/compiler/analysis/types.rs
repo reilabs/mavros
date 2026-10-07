@@ -11,9 +11,11 @@ use crate::{
         pass_manager::{Analysis, AnalysisId, AnalysisStore},
         ssa::{
             FunctionId, SSAConstantsSnapshot, ValueId,
-            hlssa::{CallTarget, Constant, HLFunction, HLSSA, OpCode, Type, TypeExpr},
+            hlssa::{
+                CallTarget, Constant, HLFunction, HLSSA, MAX_SPREAD_INPUT_BITS, OpCode, Type,
+                TypeExpr,
+            },
         },
-        util::UNSPREAD_INPUT_MAX,
     },
 };
 
@@ -157,20 +159,24 @@ impl Types {
         })
     }
 
-    fn spread_result_type(value_type: &Type) -> Result<Type, String> {
+    /// A spread is twice as wide as its operand's type, whatever `value_bits` it reads.
+    ///
+    /// The type is the container the program declared and `value_bits` is how much of it the spread
+    /// reads, so the two are bounded separately.
+    fn spread_result_type(value_type: &Type, value_bits: usize) -> Result<Type, String> {
         match &value_type.expr {
-            TypeExpr::WitnessOf(inner) => Ok(Type::witness_of(Self::spread_result_type(inner)?)),
+            TypeExpr::WitnessOf(inner) => Ok(Type::witness_of(Self::spread_result_type(
+                inner, value_bits,
+            )?)),
             TypeExpr::Int(bits) => {
-                // The host word the spread ladders run in, rather than the integer type cap.
-                //
-                // Looser than the evaluators: this rule answers `int(2n)`, so the input bound a
-                // host word implies is half of one, which is what `util::spread_bits` and
-                // `specializer::spread` both assert. A `Spread(int(65..=128))` therefore type
-                // checks here and panics in every evaluator.
-                if *bits > UNSPREAD_INPUT_MAX {
+                if *bits > MAX_SPREAD_INPUT_BITS {
                     return Err(format!(
-                        "Spread expects int(n) with n <= {UNSPREAD_INPUT_MAX}, got {}",
-                        value_type
+                        "Spread expects int(n) with n <= {MAX_SPREAD_INPUT_BITS}, got {value_type}"
+                    ));
+                }
+                if !(1..=*bits).contains(&value_bits) {
+                    return Err(format!(
+                        "Spread reads 1..={bits} bits of {value_type}, not {value_bits}"
                     ));
                 }
                 Ok(Type::int(bits * 2))
@@ -183,21 +189,29 @@ impl Types {
         }
     }
 
-    fn unspread_result_types(value_type: &Type) -> Result<(Type, Type), String> {
+    /// An unspread of an `int(m)` is `(int(floor(m/2)) odd, int(ceil(m/2)) even)`.
+    ///
+    /// Forced by the bit indices: the even stream starts at bit zero, so at an odd width it is the
+    /// one with the extra bit. At an even width it is the same half twice. The odd stream needs a
+    /// bit of its own to have a type, so the operand is at least two bits wide.
+    fn unspread_result_types(value_type: &Type, value_bits: usize) -> Result<(Type, Type), String> {
         match &value_type.expr {
             TypeExpr::WitnessOf(inner) => {
-                let (odd, even) = Self::unspread_result_types(inner)?;
+                let (odd, even) = Self::unspread_result_types(inner, value_bits)?;
                 Ok((Type::witness_of(odd), Type::witness_of(even)))
             }
             TypeExpr::Int(bits) => {
-                if *bits % 2 != 0 || (*bits / 2) > 64 {
+                if *bits < 2 {
                     return Err(format!(
-                        "Unspread expects int(2n) with n <= 64, got {}",
-                        value_type
+                        "Unspread needs an operand of at least two bits, got {value_type}"
                     ));
                 }
-                let half_bits = bits / 2;
-                Ok((Type::int(half_bits), Type::int(half_bits)))
+                if !(2..=*bits).contains(&value_bits) {
+                    return Err(format!(
+                        "Unspread reads 2..={bits} bits of {value_type}, not {value_bits}"
+                    ));
+                }
+                Ok((Type::int(bits / 2), Type::int(bits.div_ceil(2))))
             }
             TypeExpr::Field => Err("Unspread does not support field inputs".to_string()),
             _ => Err(format!(
@@ -870,12 +884,16 @@ impl Types {
                 value: _,
             } => Ok(()),
             OpCode::DropGlobal { global: _ } => Ok(()),
-            OpCode::Spread { result, value, .. } => {
+            OpCode::Spread {
+                result,
+                value,
+                value_bits,
+            } => {
                 let value_type = function_info
                     .values
                     .get(value)
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
-                let result_type = Self::spread_result_type(value_type)?;
+                let result_type = Self::spread_result_type(value_type, *value_bits)?;
                 function_info.values.insert(*result, result_type);
                 Ok(())
             }
@@ -883,13 +901,13 @@ impl Types {
                 result_odd,
                 result_even,
                 value,
-                ..
+                value_bits,
             } => {
                 let value_type = function_info
                     .values
                     .get(value)
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
-                let (odd_type, even_type) = Self::unspread_result_types(value_type)?;
+                let (odd_type, even_type) = Self::unspread_result_types(value_type, *value_bits)?;
                 function_info.values.insert(*result_odd, odd_type);
                 function_info.values.insert(*result_even, even_type);
                 Ok(())
@@ -918,7 +936,10 @@ impl Analysis for TypeInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::ssa::hlssa::builder::{HLEmitter, HLSSABuilder};
+    use crate::compiler::ssa::hlssa::{
+        MAX_SUPPORTED_INT_BITS,
+        builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
+    };
     use mavros_int_semantics::IntBits;
 
     /// Type an `SExt` whose operand is an eight-bit constant but which declares `from_bits`.
@@ -950,6 +971,104 @@ mod tests {
     #[should_panic(expected = "SExt declares from_bits 16 for a value of type int8")]
     fn a_sext_declaring_a_width_its_operand_does_not_have_is_rejected() {
         sext_declaring(16);
+    }
+
+    /// The types `main` gives the results of `op(x)` for a parameter `x: int(bits)`.
+    fn result_types(
+        bits: usize,
+        op: impl FnOnce(&mut HLBlockEmitter<'_>, ValueId) -> Vec<ValueId>,
+    ) -> Vec<Type> {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let results = HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            let x = e.add_parameter(Type::int(bits));
+            let results = op(&mut e, x);
+            e.terminate_return(vec![]);
+            results
+        });
+        let flow = FlowAnalysis::run(&ssa);
+        let types = Types::new().run(&ssa, &flow);
+        let main = types.get_function(main_id);
+        results
+            .iter()
+            .map(|result| main.get_value_type(*result).clone())
+            .collect()
+    }
+
+    /// The container doubles, not the read: `spread::<5>` of a `u32` is a `u64`.
+    #[test]
+    fn a_spread_doubles_its_container_whatever_it_reads() {
+        let types = result_types(32, |e, x| vec![e.spread(x, 5)]);
+        assert_eq!(types, vec![Type::int(64)]);
+    }
+
+    #[test]
+    fn the_widest_spread_is_half_the_integer_cap() {
+        let types = result_types(MAX_SPREAD_INPUT_BITS, |e, x| {
+            vec![e.spread(x, MAX_SPREAD_INPUT_BITS)]
+        });
+        assert_eq!(types, vec![Type::int(MAX_SUPPORTED_INT_BITS)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Spread expects int(n) with n <= 8192, got int8193")]
+    fn a_spread_whose_double_is_past_the_cap_is_rejected() {
+        let _ = result_types(MAX_SPREAD_INPUT_BITS + 1, |e, x| vec![e.spread(x, 1)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Spread reads 1..=8 bits of int8, not 9")]
+    fn a_spread_reading_past_its_container_is_rejected() {
+        let _ = result_types(8, |e, x| vec![e.spread(x, 9)]);
+    }
+
+    /// At an odd width the even stream, which starts at bit zero, holds the extra bit.
+    #[test]
+    fn an_odd_width_unspreads_into_a_wider_even_stream() {
+        let types = result_types(7, |e, x| {
+            let (odd, even) = e.unspread(x, 7);
+            vec![odd, even]
+        });
+        assert_eq!(types, vec![Type::int(3), Type::int(4)]);
+    }
+
+    /// The streams halve the container, not the read: `unspread::<5>` of a `u64` is two `u32`s.
+    #[test]
+    fn an_unspread_halves_its_container_whatever_it_reads() {
+        let types = result_types(64, |e, x| {
+            let (odd, even) = e.unspread(x, 10);
+            vec![odd, even]
+        });
+        assert_eq!(types, vec![Type::int(32), Type::int(32)]);
+    }
+
+    #[test]
+    fn the_widest_unspread_is_the_integer_cap() {
+        let types = result_types(MAX_SUPPORTED_INT_BITS, |e, x| {
+            let (odd, even) = e.unspread(x, MAX_SUPPORTED_INT_BITS);
+            vec![odd, even]
+        });
+        assert_eq!(types, vec![Type::int(MAX_SPREAD_INPUT_BITS); 2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unspread needs an operand of at least two bits, got int1")]
+    fn a_single_bit_has_no_unspread() {
+        let _ = result_types(1, |e, x| {
+            let (odd, even) = e.unspread(x, 1);
+            vec![odd, even]
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "Unspread reads 2..=8 bits of int8, not 1")]
+    fn an_unspread_reading_no_odd_bit_is_rejected() {
+        let _ = result_types(8, |e, x| {
+            let (odd, even) = e.unspread(x, 1);
+            vec![odd, even]
+        });
     }
 
     /// `main(x: int8) { fn_ptr(x) }` calling `callee(value: int8) -> returns` indirectly.

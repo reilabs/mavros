@@ -530,26 +530,29 @@ pub trait HLEmitter {
         self.emit(OpCode::MemOp { kind, value });
     }
 
-    fn spread(&mut self, value: ValueId, bits: u8) -> ValueId {
+    /// `spread(value)`, reading its low `value_bits` bits.
+    fn spread(&mut self, value: ValueId, value_bits: usize) -> ValueId {
         let r = self.fresh_value();
         self.emit(OpCode::Spread {
             result: r,
             value,
-            bits,
+            value_bits,
         });
         r
     }
 
-    fn unspread(&mut self, value: ValueId, bits: u8) -> (ValueId, ValueId) {
-        let r_and = self.fresh_value();
-        let r_xor = self.fresh_value();
+    /// `unspread(value)` as `(odd, even)`, reading its low `value_bits` bits: the width of the
+    /// spread.
+    fn unspread(&mut self, value: ValueId, value_bits: usize) -> (ValueId, ValueId) {
+        let odd = self.fresh_value();
+        let even = self.fresh_value();
         self.emit(OpCode::Unspread {
-            result_odd: r_and,
-            result_even: r_xor,
+            result_odd: odd,
+            result_even: even,
             value,
-            bits,
+            value_bits,
         });
-        (r_and, r_xor)
+        (odd, even)
     }
 
     fn lookup_spread(&mut self, bits: u8, key: ValueId, result: ValueId, flag: ValueId) {

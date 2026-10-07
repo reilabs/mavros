@@ -2335,6 +2335,7 @@ dependencies = [
  "itertools 0.14.0",
  "mavros-artifacts",
  "mavros-int-semantics",
+ "mavros-limb-arith",
  "mavros-vm",
  "mavros-wasm-layout",
  "nargo",

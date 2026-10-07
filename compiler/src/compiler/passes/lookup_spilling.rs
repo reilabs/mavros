@@ -649,7 +649,7 @@ impl LookupSpilling {
     ) -> ValueId {
         let pure = if is_witness { b.value_of(key) } else { key };
         let key_u = b.cast_to(CastTarget::Int(table_size as usize), pure);
-        let spread = b.spread(key_u, table_size);
+        let spread = b.spread(key_u, usize::from(table_size));
         let spread_field = b.cast_to_field(spread);
         if is_witness {
             b.write_witness(spread_field)

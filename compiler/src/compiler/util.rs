@@ -43,8 +43,6 @@ const _: () = assert!(
 /// - `hlssa_to_r1cs`'s `const_u128` chain, which reads a field element back as a small number —
 ///   a table size, an index, a bit. The host word there is a fact about what those callers return
 ///   rather than a bound on any integer type, and the refusal past it is the honest answer;
-/// - `spread_bits` / `unspread_bits`, whose own signatures are `u128`, and which Phase 5
-///   generalises along with the VM's fixed-width spread opcodes;
 /// - one genuine host-word arithmetic site, `instrumenter`'s `Radix::Dyn`, which uses the value as
 ///   a `u128` divisor to build the digits of a radix decomposition.
 ///
@@ -109,48 +107,6 @@ pub fn ice_non_elided_tuple() -> ! {
 #[track_caller]
 pub fn ice_unvalidated_assert_constant() -> ! {
     ice!("AssertConstant encountered after assert-constant validation")
-}
-
-pub fn spread_bits(v: u128, bits: usize) -> u128 {
-    assert!(
-        bits <= 64,
-        "spread_bits only supports widths up to 64, got {bits}"
-    );
-
-    let mut x = v;
-    x = (x | (x << 32)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFFu128;
-    x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFFu128;
-    x = (x | (x << 8)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FFu128;
-    x = (x | (x << 4)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0Fu128;
-    x = (x | (x << 2)) & 0x3333_3333_3333_3333_3333_3333_3333_3333u128;
-    x = (x | (x << 1)) & 0x5555_5555_5555_5555_5555_5555_5555_5555u128;
-    x
-}
-
-/// The widest spread [`unspread_bits`] can read back, and so the widest `Unspread` any evaluator
-/// may be asked for.
-pub const UNSPREAD_INPUT_MAX: usize = HOST_WORD_BITS;
-
-pub fn unspread_bits(v: u128, bits: usize) -> (u128, u128) {
-    assert!(
-        bits <= UNSPREAD_INPUT_MAX && bits % 2 == 0,
-        "unspread_bits expects an even width up to {UNSPREAD_INPUT_MAX}, got {bits}"
-    );
-
-    fn compact_bits(mut x: u128) -> u128 {
-        x &= 0x5555_5555_5555_5555_5555_5555_5555_5555u128;
-        x = (x | (x >> 1)) & 0x3333_3333_3333_3333_3333_3333_3333_3333u128;
-        x = (x | (x >> 2)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0Fu128;
-        x = (x | (x >> 4)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FFu128;
-        x = (x | (x >> 8)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFFu128;
-        x = (x | (x >> 16)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFFu128;
-        x = (x | (x >> 32)) & 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFFu128;
-        x
-    }
-
-    let even = compact_bits(v);
-    let odd = compact_bits(v >> 1);
-    (odd, even)
 }
 
 /// Utilities only available in tests.

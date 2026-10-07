@@ -155,8 +155,8 @@ where
     fn fresh_witness(result_type: &Type, ctx: &mut Context) -> Self;
     fn mem_op(&self, kind: RefCountOp, ctx: &mut Context);
     fn rangecheck(&self, max_bits: usize, ctx: &mut Context) -> Result<(), AssertionFailure>;
-    fn spread(&self, bits: u8, ctx: &mut Context) -> Self;
-    fn unspread(&self, bits: u8, ctx: &mut Context) -> (Self, Self);
+    fn spread(&self, value_bits: usize, ctx: &mut Context) -> Self;
+    fn unspread(&self, value_bits: usize, ctx: &mut Context) -> (Self, Self);
 }
 
 pub trait Context<V> {
@@ -693,19 +693,19 @@ impl SymbolicExecutor {
                     OpCode::Spread {
                         result,
                         value,
-                        bits,
+                        value_bits,
                     } => {
                         let val = &scope[value];
-                        scope.insert(*result, val.spread(*bits, ctx));
+                        scope.insert(*result, val.spread(*value_bits, ctx));
                     }
                     OpCode::Unspread {
                         result_odd,
                         result_even,
                         value,
-                        bits,
+                        value_bits,
                     } => {
                         let val = &scope[value];
-                        let (odd_val, even_val) = val.unspread(*bits, ctx);
+                        let (odd_val, even_val) = val.unspread(*value_bits, ctx);
                         scope.insert(*result_odd, odd_val);
                         scope.insert(*result_even, even_val);
                     }

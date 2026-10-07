@@ -19,7 +19,7 @@ use crate::compiler::{
             Type, TypeExpr,
         },
     },
-    util::{field_constant, host_word, spread_bits, unspread_bits},
+    util::{field_constant, host_word},
 };
 
 pub use mavros_artifacts::{
@@ -1053,20 +1053,18 @@ impl symbolic_executor::Value<R1CGen> for Value {
         }
     }
 
-    fn spread(&self, bits: u8, _ctx: &mut R1CGen) -> Self {
-        let val = self.expect_constant();
-        let v: u128 = val.into_bigint().as_ref()[0] as u128;
-        let spread_val = spread_bits(v, bits as usize);
-        Value::Const(ark_bn254::Fr::from(spread_val))
+    // The operand is read at `value_bits`, which is the masking the model gives the bits above the
+    // read.
+    fn spread(&self, value_bits: usize, ctx: &mut R1CGen) -> Self {
+        let spread = self.expect_pattern(value_bits).spread(value_bits);
+        Value::of_pattern(ctx.field(), spread)
     }
 
-    fn unspread(&self, bits: u8, _ctx: &mut R1CGen) -> (Self, Self) {
-        let val = self.expect_constant();
-        let v: u128 = val.into_bigint().as_ref()[0] as u128;
-        let (odd_val, even_val) = unspread_bits(v, bits as usize * 2);
+    fn unspread(&self, value_bits: usize, ctx: &mut R1CGen) -> (Self, Self) {
+        let (odd, even) = self.expect_pattern(value_bits).unspread(value_bits);
         (
-            Value::Const(ark_bn254::Fr::from(odd_val)),
-            Value::Const(ark_bn254::Fr::from(even_val)),
+            Value::of_pattern(ctx.field(), odd),
+            Value::of_pattern(ctx.field(), even),
         )
     }
 }
@@ -1413,7 +1411,8 @@ impl R1CGen {
                     let len = 1usize << bits;
                     let mut sum_lhs: LC = vec![];
                     for i in 0..len {
-                        let spread_val = spread_bits(i as u128, 32);
+                        let key = u32::try_from(i).expect("a spread table's key fits a half-word");
+                        let spread_val = mavros_limb_arith::spread_u32_to_u64(key);
                         let y = witness_layout.next_table_data();
                         let m = table_info.multiplicities_witness_off + i;
                         result.push(R1C {
@@ -2335,5 +2334,25 @@ mod int_semantics_conformance {
                 ark_bn254::Fr::from(0xdead_beefu64)
             );
         }
+    }
+
+    /// The spread pair reads a constant at the width the op names, including the bits past its low
+    /// host limb.
+    #[test]
+    fn a_spread_constant_agrees_with_the_model_past_one_host_limb() {
+        let field = FieldConfig::bn254();
+        let mut generator = R1CGen::new(field);
+        let pattern = IntBits::from_u128(128, 0xF0F0_1234_5678_9ABC_DEF0_0F0F_A5A5_C3C3);
+        let value = Value::of_pattern(field, pattern.clone());
+
+        let spread =
+            <Value as symbolic_executor::Value<R1CGen>>::spread(&value, 100, &mut generator);
+        assert_eq!(spread.expect_pattern(256), pattern.spread(100).cast(256));
+
+        let (odd, even) =
+            <Value as symbolic_executor::Value<R1CGen>>::unspread(&value, 128, &mut generator);
+        let (want_odd, want_even) = pattern.unspread(128);
+        assert_eq!(odd.expect_pattern(64), want_odd);
+        assert_eq!(even.expect_pattern(64), want_even);
     }
 }

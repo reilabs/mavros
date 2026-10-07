@@ -101,6 +101,10 @@ pub const EVALUATORS: &[Evaluator] = &[
                 path: "compiler/src/compiler/codegen/hlssa_to_r1cs.rs",
                 test: "an_integer_cast_reads_a_constant_at_its_target_width",
             },
+            Conformance {
+                path: "compiler/src/compiler/codegen/hlssa_to_r1cs.rs",
+                test: "a_spread_constant_agrees_with_the_model_past_one_host_limb",
+            },
         ],
     },
     Evaluator {
@@ -152,6 +156,18 @@ pub const EVALUATORS: &[Evaluator] = &[
                 test: "the_complement_opcode_agrees_with_the_model",
             },
             Conformance {
+                path: "vm/src/bytecode.rs",
+                test: "the_cell_spreads_agree_with_the_model",
+            },
+            Conformance {
+                path: "vm/src/bytecode.rs",
+                test: "the_intn_spreads_agree_with_the_model",
+            },
+            Conformance {
+                path: "vm/src/bytecode.rs",
+                test: "the_spread_opcodes_survive_the_round_trip_through_dispatch",
+            },
+            Conformance {
                 path: "vm/src/int_limbs.rs",
                 test: "the_intn_lane_agrees_with_the_model",
             },
@@ -174,8 +190,8 @@ pub const EVALUATORS: &[Evaluator] = &[
         what: "the LLVM backend, used for WASM",
         relation: "the VM's, read three ways because no one reading reaches the whole backend: \
                    LLVM's own constant folder for the instructions it emits, the runtime helpers' \
-                   bodies directly for the wide sum, difference, multiply and divisions the \
-                   folder cannot see through a call, and a wasm engine for the lowering built \
+                   bodies directly for the wide sum, difference, multiply, divisions and spreads \
+                   the folder cannot see through a call, and a wasm engine for the lowering built \
                    around those calls, which is the one shape the folder is deliberately never \
                    handed",
         files: &[
@@ -194,6 +210,10 @@ pub const EVALUATORS: &[Evaluator] = &[
             },
             Conformance {
                 path: "compiler/src/compiler/codegen/llssa_to_llvm.rs",
+                test: "the_spread_ladders_agree_with_the_model",
+            },
+            Conformance {
+                path: "compiler/src/compiler/codegen/llssa_to_llvm.rs",
                 test: "the_routed_lowering_agrees_with_the_model_through_wasm",
             },
             Conformance {
@@ -207,6 +227,14 @@ pub const EVALUATORS: &[Evaluator] = &[
             Conformance {
                 path: "wasm-runtime/src/lib.rs",
                 test: "the_helper_sums_and_differences_agree_with_the_model",
+            },
+            Conformance {
+                path: "wasm-runtime/src/lib.rs",
+                test: "the_helper_spreads_and_unspreads_agree_with_the_model",
+            },
+            Conformance {
+                path: "compiler/tests/bigints/main.rs",
+                test: "a_pure_spread_and_unspread_agree_with_the_model",
             },
         ],
     },

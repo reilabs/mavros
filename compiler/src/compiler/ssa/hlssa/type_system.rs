@@ -18,6 +18,10 @@ const _: () = assert!(
     "the integer type cap and `mavros-int-semantics`'s width bound have drifted apart"
 );
 
+/// The widest integer a `Spread` takes, which is half the cap because the spread is twice as wide
+/// as its operand and has to be a type too.
+pub const MAX_SPREAD_INPUT_BITS: usize = MAX_SUPPORTED_INT_BITS / 2;
+
 /// A type expression.
 ///
 /// Integers carry only a width: [`TypeExpr::Int`] is "an `n`-bit integer", _not_ "a signed `n`-bit
@@ -328,6 +332,15 @@ impl Type {
     pub fn try_unwrap_witness_of(&self) -> Option<&Type> {
         match &self.expr {
             TypeExpr::WitnessOf(inner) => Some(inner),
+            _ => None,
+        }
+    }
+
+    /// The width of an integer type, looking through a witness wrapper, or [`None`] for any other
+    /// type.
+    pub fn int_width(&self) -> Option<usize> {
+        match self.peel_witness().expr {
+            TypeExpr::Int(bits) => Some(bits),
             _ => None,
         }
     }

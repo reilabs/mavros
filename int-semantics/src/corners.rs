@@ -145,6 +145,21 @@ pub fn shift_width_pairs() -> Vec<(usize, usize)> {
     out
 }
 
+/// The reads worth taking of a `bits`-wide container by a spread or an unspread, the narrowest of
+/// which is `least`: all of it, one bit short, half, and `least` itself.
+///
+/// Every read short of the container leaves the bits above it for the evaluator to discard. A
+/// spread reads at least one bit and an unspread at least two, so `least` is `1` or `2`, and no
+/// read below it is returned.
+#[must_use]
+pub fn spread_reads(bits: usize, least: usize) -> Vec<usize> {
+    let mut reads = vec![bits, bits.saturating_sub(1), bits / 2, least];
+    reads.retain(|&read| (least..=bits).contains(&read));
+    reads.sort_unstable();
+    reads.dedup();
+    reads
+}
+
 /// The widths every narrow sweep covers, under either reading.
 ///
 /// This is [`WIDTHS`] **plus [`ODD_WIDTHS`]**. The union lives here rather than in each sweep on

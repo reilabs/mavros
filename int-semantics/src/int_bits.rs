@@ -437,6 +437,72 @@ impl IntBits {
         Self::normalized(self.bits, out)
     }
 
+    /// Interleave the low `bits` bits with zeros, so that bit `i` lands on bit `2i` of a pattern
+    /// twice this one's width.
+    ///
+    /// Only the low `bits` bits are read and anything above them is discarded. A witnessed spread
+    /// rejects such a value through its lookup instead, but a total evaluator still has to produce
+    /// a pattern. The width doubles whatever `bits` is,.
+    ///
+    /// Written bit by bit so it can serve as a clear behavioral specification of the operation.
+    ///
+    /// # Panics
+    ///
+    /// If `bits` is zero or wider than the pattern.
+    #[must_use]
+    pub fn spread(&self, bits: usize) -> Self {
+        assert!(
+            (1..=self.bits).contains(&bits),
+            "a spread reads 1..={} bits of an int{}, not {bits}",
+            self.bits,
+            self.bits
+        );
+        let mut out = Self::zero(2 * self.bits);
+        for i in (0..bits).filter(|&i| self.bit(i) == Some(true)) {
+            out.set_bit(2 * i);
+        }
+        out
+    }
+
+    /// Separate the low `bits` bits into their odd- and even-indexed streams, the inverse of
+    /// [`IntBits::spread`], answering `(odd, even)`.
+    ///
+    /// Bit `2i + 1` becomes bit `i` of the odd stream and bit `2i` bit `i` of the even one. The
+    /// even stream starts at bit zero, so at an odd width it holds the one bit more: the odd answer
+    /// is `floor(width / 2)` wide and the even one `ceil(width / 2)`. As with the spread, bits at
+    /// or above `bits` are discarded.
+    ///
+    /// The read is at least two bits, as HLSSA's `Unspread` requires, so that the odd stream it
+    /// reads has a bit in it.
+    ///
+    /// # Panics
+    ///
+    /// If `bits` is below two or wider than the pattern, or if the pattern is a single bit, which
+    /// has no odd stream to give a width to.
+    #[must_use]
+    pub fn unspread(&self, bits: usize) -> (Self, Self) {
+        assert!(self.bits >= 2, "an int1 has no odd stream to unspread into");
+        assert!(
+            (2..=self.bits).contains(&bits),
+            "an unspread reads 2..={} bits of an int{}, not {bits}",
+            self.bits,
+            self.bits
+        );
+        let mut odd = Self::zero(self.bits / 2);
+        let mut even = Self::zero(self.bits.div_ceil(2));
+        for i in (0..bits).filter(|&i| self.bit(i) == Some(true)) {
+            let stream = if i % 2 == 0 { &mut even } else { &mut odd };
+            stream.set_bit(i / 2);
+        }
+        (odd, even)
+    }
+
+    /// Set bit `index`, which must be below the width for the pattern to stay normalized.
+    fn set_bit(&mut self, index: usize) {
+        debug_assert!(index < self.bits, "bit {index} is outside int{}", self.bits);
+        self.limbs[index / HOST_LIMB_BITS] |= 1 << (index % HOST_LIMB_BITS);
+    }
+
     /// Combine two same-width patterns limb by limb.
     ///
     /// # Panics
@@ -1631,6 +1697,148 @@ mod tests {
         let v = IntBits::from_u128(128, u128::MAX);
         assert_eq!(as_u128(&v.shifted_left(64)), u128::MAX << 64);
         assert_eq!(as_u128(&v.shifted_right(64)), u128::MAX >> 64);
+    }
+
+    // SPREAD AND UNSPREAD
+    // --------------------------------------------------------------------------------------
+
+    /// The mask ladder the backends run, as an oracle for the bit-by-bit definition at the widths a
+    /// host word holds.
+    fn ladder_spread(v: u64) -> u128 {
+        let mut x = u128::from(v);
+        x = (x | (x << 32)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
+        x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
+        x = (x | (x << 8)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
+        x = (x | (x << 4)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
+        x = (x | (x << 2)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
+        (x | (x << 1)) & 0x5555_5555_5555_5555_5555_5555_5555_5555
+    }
+
+    #[test]
+    fn a_spread_gives_the_values_the_noir_corpus_asserts() {
+        // `noir_tests/spread_and_cast` asserts these through `spread::<N>` on a `u32`.
+        for (value, bits, want) in [(5, 5, 17), (13, 5, 81), (100, 7, 5136), (77, 7, 4177)] {
+            let got = IntBits::from_u128(32, value).spread(bits);
+            assert_eq!(
+                got,
+                IntBits::from_u128(64, want),
+                "spread::<{bits}>({value})"
+            );
+        }
+    }
+
+    #[test]
+    fn bits_above_the_read_width_are_discarded() {
+        let dirty = IntBits::from_u128(8, 0xFF);
+        let clean = IntBits::from_u128(8, 0x0F);
+        assert_eq!(dirty.spread(4), clean.spread(4));
+        assert_eq!(dirty.spread(4), IntBits::from_u128(16, 0x55));
+
+        // The unspread reads its own low bits the same way: a spread `0x0F` and two dirty bits.
+        let spread_dirty = IntBits::from_u128(16, 0xC055);
+        assert_eq!(
+            spread_dirty.unspread(8),
+            (IntBits::zero(8), IntBits::from_u128(8, 0x0F))
+        );
+    }
+
+    #[test]
+    fn an_odd_width_unspreads_into_a_wider_even_stream() {
+        // Seven bits, the even ones set: four of them, and three odd ones that are clear.
+        let (odd, even) = IntBits::from_u128(7, 0b101_0101).unspread(7);
+        assert_eq!(odd, IntBits::zero(3));
+        assert_eq!(even, IntBits::from_u128(4, 0b1111));
+
+        // And the odd ones set, which fill the narrower stream exactly.
+        let (odd, even) = IntBits::from_u128(7, 0b010_1010).unspread(7);
+        assert_eq!(odd, IntBits::from_u128(3, 0b111));
+        assert_eq!(even, IntBits::zero(4));
+    }
+
+    #[test]
+    #[should_panic(expected = "a spread reads 1..=8 bits of an int8, not 0")]
+    fn a_spread_of_no_bits_is_refused() {
+        let _ = IntBits::from_u128(8, 1).spread(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "a spread reads 1..=8 bits of an int8, not 9")]
+    fn a_spread_wider_than_its_container_is_refused() {
+        let _ = IntBits::from_u128(8, 1).spread(9);
+    }
+
+    #[test]
+    #[should_panic(expected = "an unspread reads 2..=8 bits of an int8, not 9")]
+    fn an_unspread_wider_than_its_container_is_refused() {
+        let _ = IntBits::from_u128(8, 1).unspread(9);
+    }
+
+    #[test]
+    #[should_panic(expected = "an unspread reads 2..=8 bits of an int8, not 1")]
+    fn an_unspread_reading_no_odd_bit_is_refused() {
+        let _ = IntBits::from_u128(8, 1).unspread(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "an int1 has no odd stream")]
+    fn a_single_bit_has_no_unspread() {
+        let _ = IntBits::from_u128(1, 1).unspread(1);
+    }
+
+    proptest! {
+        /// At every width a host word holds, the definition is the ladder, reading only `bits`.
+        #[test]
+        fn a_spread_is_the_mask_ladder_on_a_host_word(
+            width in 1usize..=64,
+            value in any::<u64>(),
+            bits_seed in any::<usize>(),
+        ) {
+            let bits = 1 + bits_seed % width;
+            let got = IntBits::from_u128(width, u128::from(value)).spread(bits);
+            let read = value & (u64::MAX >> (64 - bits));
+            prop_assert_eq!(got, IntBits::from_u128(2 * width, ladder_spread(read)));
+        }
+
+        /// Two spreads, one moved onto the odd positions, come back apart at every width, which is
+        /// the identity a bitwise lowering stands on.
+        #[test]
+        fn an_unspread_separates_two_interleaved_spreads(
+            width_index in 0..WIDTHS.len(),
+            odd_limbs in prop::collection::vec(any::<u64>(), 256),
+            even_limbs in prop::collection::vec(any::<u64>(), 256),
+        ) {
+            let bits = WIDTHS[width_index];
+            let odd = IntBits::from_limbs(bits, &odd_limbs);
+            let even = IntBits::from_limbs(bits, &even_limbs);
+            let woven = odd.spread(bits).shifted_left(1).or(&even.spread(bits));
+            prop_assert_eq!(woven.unspread(2 * bits), (odd, even));
+        }
+
+        /// The streams put back together give the value they came from, at an odd width as at an
+        /// even one.
+        #[test]
+        fn an_unspread_at_any_width_loses_nothing(
+            width_index in 0..WIDTHS.len(),
+            limbs in prop::collection::vec(any::<u64>(), 256),
+        ) {
+            let bits = WIDTHS[width_index];
+            // A single bit has no odd stream.
+            prop_assume!(bits >= 2);
+            let value = IntBits::from_limbs(bits, &limbs);
+            let (odd, even) = value.unspread(bits);
+            prop_assert_eq!(odd.bits(), bits / 2);
+            prop_assert_eq!(even.bits(), bits.div_ceil(2));
+
+            // Back at the original width: the even stream's spread already sits on the even
+            // positions, and the odd stream's moves one place up onto the odd ones.
+            let rebuilt = odd
+                .spread(odd.bits())
+                .cast(2 * bits)
+                .shifted_left(1)
+                .or(&even.spread(even.bits()).cast(2 * bits))
+                .cast(bits);
+            prop_assert_eq!(rebuilt, value);
+        }
     }
 
     // BIGNUM CONVERSIONS

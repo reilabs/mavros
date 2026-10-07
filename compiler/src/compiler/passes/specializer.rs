@@ -32,7 +32,7 @@ use crate::{
                 builder::{HLEmitter, HLFunctionBuilder},
             },
         },
-        util::{UNSPREAD_INPUT_MAX, field_constant, host_word, spread_bits, unspread_bits},
+        util::field_constant,
     },
 };
 
@@ -683,45 +683,25 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         Ok(())
     }
 
-    fn spread(&self, bits: u8, ctx: &mut SpecializationState) -> Self {
-        let cst_val = ctx.const_vals.get(&self.0);
-        match cst_val {
+    fn spread(&self, value_bits: usize, ctx: &mut SpecializationState) -> Self {
+        match ctx.const_vals.get(&self.0) {
             Some(ConstVal::Int(pattern)) => {
-                let b = pattern.bits();
-                assert!(
-                    b <= 64,
-                    "Spread only supports integer widths up to 64 bits, got int{b}"
-                );
-                let spread = IntBits::from_u128(b * 2, spread_bits(host_word(pattern), b));
+                let spread = pattern.spread(value_bits);
                 Self::of_int(&spread, ctx)
             }
-            _ => {
-                let res = HLEmitter::spread(ctx, self.0, bits);
-                Self(res)
-            }
+            _ => Self(HLEmitter::spread(ctx, self.0, value_bits)),
         }
     }
 
-    fn unspread(&self, bits: u8, ctx: &mut SpecializationState) -> (Self, Self) {
-        let cst_val = ctx.const_vals.get(&self.0);
-        match cst_val {
+    fn unspread(&self, value_bits: usize, ctx: &mut SpecializationState) -> (Self, Self) {
+        match ctx.const_vals.get(&self.0) {
             Some(ConstVal::Int(pattern)) => {
-                let b = pattern.bits();
-                assert!(
-                    b <= UNSPREAD_INPUT_MAX && b % 2 == 0,
-                    "Unspread expects an even integer width up to {UNSPREAD_INPUT_MAX} bits, got int{b}"
-                );
-
-                let half_bits = b / 2;
-                let (odd, even) = unspread_bits(host_word(pattern), b);
-                (
-                    Self::of_int(&IntBits::from_u128(half_bits, odd), ctx),
-                    Self::of_int(&IntBits::from_u128(half_bits, even), ctx),
-                )
+                let (odd, even) = pattern.unspread(value_bits);
+                (Self::of_int(&odd, ctx), Self::of_int(&even, ctx))
             }
             _ => {
-                let (res_and, res_xor) = HLEmitter::unspread(ctx, self.0, bits);
-                (Self(res_and), Self(res_xor))
+                let (odd, even) = HLEmitter::unspread(ctx, self.0, value_bits);
+                (Self(odd), Self(even))
             }
         }
     }
@@ -1164,7 +1144,9 @@ impl Specializer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::{analysis::symbolic_executor::Value as _, located::SourceLocation};
+    use crate::compiler::{
+        analysis::symbolic_executor::Value as _, located::SourceLocation, util::host_word,
+    };
 
     #[test]
     fn an_unknown_branch_declines_speculation() {

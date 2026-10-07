@@ -72,9 +72,12 @@ impl LowerSideEffectFreeGuards {
             | OpCode::ReadGlobal { .. }
             | OpCode::InitGlobal { .. }
             | OpCode::DropGlobal { .. }
-            | OpCode::Spread { .. }
-            | OpCode::Unspread { .. }
             | OpCode::Todo { .. } => true,
+            // A witnessed one's lookups reject a value with bits above its read, so they may hold
+            // only where the guard does: `LowerWitnessSpreadOps` builds them under it.
+            OpCode::Spread { value, .. } | OpCode::Unspread { value, .. } => {
+                !type_info.get_value_type(*value).is_witness_of()
+            }
             OpCode::ToBits { value, .. } => !type_info.get_value_type(*value).is_witness_of(),
             // Dynamic radix validation and the source fit check have not been emitted yet.
             // Keep their guard until the radix lowerer establishes the raw byte decomposition.
