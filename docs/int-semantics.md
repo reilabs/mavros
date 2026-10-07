@@ -10,11 +10,15 @@ best-effort check that this holds.
 
 ## Noir as the Reference
 
-The exact semantics of these operations are required to match the currently-pinned version of Noir,
-which is the one `compiler/Cargo.toml` names: tag `v1.0.0-beta.22`, commit
-`c57152f91260ecdb9faad4efc20abb14b6d2ece7`. Every citation below was read in that tree, so the table
-is re-checkable rather than merely plausible; a Noir bump is the point at which to read it again.
-Paths are relative to `noir/compiler/`.
+The frontend is pinned in `compiler/Cargo.toml` to `worldfnd/noir`'s `provekit-v2` revision
+`dbbee4871605b9d9469051ea95a9d9e205ae614d`. The fork extends integer widths and retains `BigInt`
+literals through monomorphization; Mavros lowers them directly to `IntBits`, preserving every bit.
+The existing SSA oracle tests remain the arithmetic reference for these extended widths, while
+`compiler/tests/frontend_bigints.rs` also exercises the source and ABI boundaries.
+
+The arithmetic citations below were originally reviewed at upstream tag `v1.0.0-beta.22`, commit
+`c57152f91260ecdb9faad4efc20abb14b6d2ece7`; they record the origin of the model's rules. Paths are
+relative to `noir/compiler/`.
 
 | Rule                                      | Where                                                                 |
 | ----------------------------------------- | --------------------------------------------------------------------- |

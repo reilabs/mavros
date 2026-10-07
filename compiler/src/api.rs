@@ -57,7 +57,11 @@ pub fn read_prover_inputs(
 
     let inputs_src = fs::read_to_string(&file_path)?;
     let inputs = format
-        .parse(&inputs_src, abi)
+        .parse(
+            &inputs_src,
+            abi,
+            acvm::FieldConfig::new(acvm::FieldId::Bn254),
+        )
         .map_err(|e| format!("failed to parse inputs: {e}"))?;
     let ordered_params = ordered_params_from_btreemap(abi, &inputs)?;
 

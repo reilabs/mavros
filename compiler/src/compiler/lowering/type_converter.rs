@@ -21,9 +21,9 @@ impl TypeConverter {
             NoirType::Field => Type::field(),
             NoirType::Bool => Type::bool(),
             NoirType::Integer(signedness, bit_size) => match signedness {
-                Signedness::Unsigned => Type::int(bit_size.bit_size() as usize),
+                Signedness::Unsigned => Type::int(*bit_size as usize),
                 Signedness::Signed => {
-                    let bits = bit_size.bit_size() as usize;
+                    let bits = *bit_size as usize;
                     assert!(
                         bits <= MAX_LOWERED_SIGNED_BITS,
                         "signed integers wider than i{MAX_LOWERED_SIGNED_BITS} are unsupported"

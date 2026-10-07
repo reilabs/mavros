@@ -381,9 +381,12 @@ fn plan_function(
                     } => (*result, expansion(&value_map, *value)),
                     // Read out of a transposed sequence, which yields its limbs.
                     //
-                    // We keep the limbs to avoid doing the same work twice, so reassembly only
-                    // happens where the whole value is required.
+                    // Pure integer reads are recombined immediately: their users, including
+                    // arithmetic and function calls, expect one whole integer in the hint domain.
                     OpCode::ArrayGet { result, array, .. } => {
+                        if matches!(fti.get_value_type(*result).expr, TypeExpr::Int(_)) {
+                            continue;
+                        }
                         (*result, limb_types(fti.get_value_type(*array), field).len())
                     }
                     _ => continue,
@@ -3364,11 +3367,29 @@ impl Rewriter<'_> {
                 index,
             } => {
                 let index = self.one(*index);
-                for (result, array) in paired(self.limbs(*result), self.limbs(*array)) {
+                let arrays = self.limbs(*array);
+                let pure_bits = match self.types.get_value_type(*result).expr {
+                    TypeExpr::Int(bits) => Some(bits),
+                    _ => None,
+                };
+                let results = if pure_bits.is_some() {
+                    arrays.iter().map(|_| self.fresh()).collect()
+                } else {
+                    self.limbs(*result)
+                };
+                for (result, array) in paired(results.clone(), arrays) {
                     self.push(OpCode::ArrayGet {
                         result,
                         array,
                         index,
+                    });
+                }
+                if let Some(bits) = pure_bits {
+                    let value = self.recombine_pure(&results, bits);
+                    self.push(OpCode::Cast {
+                        result: *result,
+                        value,
+                        target: CastTarget::Nop,
                     });
                 }
             }
@@ -3555,9 +3576,8 @@ impl Rewriter<'_> {
             }),
 
             // A wide value reaching anything else is a shape this pass does not represent. For a
-            // witnessed operand `width_validation` is what refuses it; a **pure** one has no width
-            // rule to refuse it and reaches here only by being read out of a transposed sequence,
-            // which no arm above hands to anything but another limb-mover.
+            // witnessed operand `width_validation` is what refuses it. Pure integer reads from
+            // transposed sequences are recombined above before arithmetic uses them.
             other => ice!(
                 "{other:?} reached the multi-cell representation with a wide operand, which is a shape it does not represent"
             ),

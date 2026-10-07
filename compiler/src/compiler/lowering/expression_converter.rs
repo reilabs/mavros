@@ -1,6 +1,5 @@
 //! Converts monomorphized AST expressions to SSA instructions.
 
-use acvm::AcirField;
 use fm::{FileId, FileManager};
 use noirc_errors::Location as NoirLocation;
 use noirc_frontend::{
@@ -11,9 +10,11 @@ use noirc_frontend::{
         Index, LValue, Let, Literal, LocalId, Match, MatchCase, Type as AstType, While,
     },
 };
+use num_bigint::BigInt;
+use num_traits::ToPrimitive;
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
-use mavros_int_semantics::{IntBits, IntOp, MAX_LOWERED_SIGNED_BITS, Outcome, eval};
+use mavros_int_semantics::{IntBits, IntOp, Outcome, eval};
 
 use crate::{
     collections::{HashMap, HashSet},
@@ -1457,12 +1458,13 @@ impl<'a> ExpressionConverter<'a> {
         // A Noir `Field` is as wide as the configured field's modulus.
         let field_bits = b.field().field_bit_size() as usize;
 
-        let (src_bits, src_signed) = match Self::expression_type(&cast.lhs) {
+        let source_type = Self::expression_type(&cast.lhs);
+        let source_is_field = matches!(source_type, AstType::Field);
+        let (src_bits, src_signed) = match source_type {
             AstType::Field => (field_bits, false),
-            AstType::Integer(signedness, bit_size) => (
-                bit_size.bit_size() as usize,
-                signedness == Signedness::Signed,
-            ),
+            AstType::Integer(signedness, bit_size) => {
+                (bit_size as usize, signedness == Signedness::Signed)
+            }
             AstType::Bool => (1, false),
             _ => (0, false),
         };
@@ -1486,8 +1488,10 @@ impl<'a> ExpressionConverter<'a> {
         };
 
         let result = self.emit_located(b, Some(cast.location), |e| {
-            // Narrowing cast: select the low bits first, then cast.
-            let value = if src_bits > 0 && target_bits < src_bits {
+            // A field narrowing needs an explicit bit window. Integer casts already truncate
+            // in the integer lowerings; a BitRange here would require a wide integer to fit
+            // into one field element before its limbs have been lowered.
+            let value = if source_is_field && target_bits < src_bits {
                 e.bit_range(value, 0, target_bits)
             } else {
                 value
@@ -1717,33 +1721,33 @@ impl<'a> ExpressionConverter<'a> {
                 let value = if *bv { 1 } else { 0 };
                 Some(Constant::int(1, value))
             }
-            Literal::Integer(field_element, typ, _location) => {
-                Some(Self::integer_constant(field_element, typ))
-            }
+            Literal::Integer(value, typ, _location) => Some(Self::integer_constant(value, typ)),
             _ => None,
         }
     }
 
-    fn integer_constant(value: &acvm::FieldElement, typ: &AstType) -> Constant {
+    fn integer_constant(value: &noir_bigint::BigInt, typ: &AstType) -> Constant {
         match typ {
             AstType::Field => {
-                // Boundary: the Noir frontend hands us a raw `ark_bn254::Fr`.
-                Constant::Field(value.into_repr().into())
+                // Only Field literals cross Noir's field boundary. Integer literals below
+                // retain their full magnitude even when it exceeds the field modulus.
+                Constant::Field(
+                    noirc_frontend::hir::comptime::bigint_to_field(value)
+                        .into_repr()
+                        .into(),
+                )
             }
             AstType::Integer(signedness, bit_size) => {
                 use noirc_frontend::shared::Signedness;
-                let bits: usize = bit_size.bit_size() as usize;
+                let bits = *bit_size as usize;
                 if *signedness == Signedness::Signed {
-                    assert!(
-                        bits <= MAX_LOWERED_SIGNED_BITS,
-                        "signed integers wider than i{MAX_LOWERED_SIGNED_BITS} are unsupported"
-                    );
-                    Constant::int(bits, value.to_i128() as u128)
-                } else {
-                    Constant::int(bits, value.to_u128())
+                    assert_signed_op_width(bits, "integer literal");
                 }
+                // Bridge Noir's num-bigint 0.5 to the model's 0.4 without narrowing.
+                let value = BigInt::from_signed_bytes_le(&value.to_signed_bytes_le());
+                Constant::Int(IntBits::from_signed(bits, &value))
             }
-            AstType::Bool => Constant::int(1, value.to_u128()),
+            AstType::Bool => Constant::int(1, value.to_u128().expect("boolean literal fits u128")),
             _ => ice!("integer constant with non-integer type {typ:?}"),
         }
     }
@@ -1938,7 +1942,7 @@ impl<'a> ExpressionConverter<'a> {
                 let bit_size = match &call.arguments[1] {
                     Expression::Literal(
                         noirc_frontend::monomorphization::ast::Literal::Integer(sf, _, _),
-                    ) => sf.to_u128() as usize,
+                    ) => sf.to_usize().expect("range constraint width fits usize"),
                     other => ice!(
                         "apply_range_constraint bit_size must be a constant, got {:?}",
                         other
@@ -2172,7 +2176,9 @@ impl<'a> ExpressionConverter<'a> {
                 signed_field,
                 _typ,
                 _location,
-            )) => signed_field.to_u128() as u32,
+            )) => signed_field
+                .to_u32()
+                .expect("builtin integer argument fits u32"),
             _ => ice!("Expected a constant integer argument, got {:?}", expr),
         }
     }
@@ -2194,11 +2200,11 @@ impl<'a> ExpressionConverter<'a> {
 /// is knowable.
 fn checked_int_cast_target(
     signedness: noirc_frontend::shared::Signedness,
-    bit_size: noirc_frontend::ast::IntegerBitSize,
+    bit_size: u32,
 ) -> (CastTarget, usize) {
     use noirc_frontend::shared::Signedness;
 
-    let bits = bit_size.bit_size() as usize;
+    let bits = bit_size as usize;
     match signedness {
         Signedness::Unsigned => (CastTarget::Int(bits), bits),
         Signedness::Signed => {

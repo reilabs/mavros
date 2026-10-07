@@ -311,8 +311,12 @@ impl Driver {
             None,
             false,
         );
-        monomorphizer.compile_main(main).unwrap();
-        monomorphizer.process_queue().unwrap();
+        monomorphizer
+            .compile_main(main)
+            .map_err(|error| Error::NoirCompilerError(vec![error.into()]))?;
+        monomorphizer
+            .process_queue()
+            .map_err(|error| Error::NoirCompilerError(vec![error.into()]))?;
         let program = monomorphizer.into_program();
 
         self.abi = Some(noirc_driver::gen_abi(
