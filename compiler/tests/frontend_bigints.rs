@@ -72,8 +72,8 @@ fn wide_abi_from_source() {
 #[test]
 fn wide_match_literals_and_signed_literals_keep_their_value() {
     check(
-        r#"fn main(x: u200, n: i64) -> pub [u64; 2] {
-            let tag = match x {
+        r#"fn main(x: Field, n: i64) -> pub [u64; 2] {
+            let tag = match x as u200 {
                 0x1000000000000000000000000000000000000000000000 => 7,
                 _ => 9,
             };
@@ -88,7 +88,8 @@ fn wide_match_literals_and_signed_literals_keep_their_value() {
 #[test]
 fn the_maximum_width_and_nonstandard_signed_width_reach_source_lowering() {
     check(
-        r#"fn main(n: i33) -> pub [u64; 2] {
+        r#"fn main(n: i64) -> pub [u64; 2] {
+            let n = n as i33;
             let high: u16384 = 1 << 16383;
             assert(high >> 16383 == 1);
             let low: u3 = 7;
@@ -149,20 +150,20 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
     )
     .unwrap();
     // A wrong return differing only above bit 128 must fail the return constraint.
-    let correct = (num_bigint::BigUint::from(1u8) << 180) + 16u8;
-    let wrong = (num_bigint::BigUint::from(2u8) << 180) + 16u8;
+    let correct_high = 1u128 << 52;
+    let wrong_high = 2u128 << 52;
     std::fs::write(
         dir.path().join("Prover.toml"),
-        format!("a = '{correct}'\nb = 0\nreturn = '{wrong}'"),
+        format!("a = [16, '{correct_high}']\nb = [0, 0]\nreturn = [16, '{wrong_high}']"),
     )
     .unwrap();
     let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
     assert!(api::run_witgen_from_binary(&mut binary, &r1cs, &params, None).is_err());
 
-    let out_of_range = num_bigint::BigUint::from(1u8) << 200;
+    let out_of_range = num_bigint::BigUint::from(1u8) << 128;
     std::fs::write(
         dir.path().join("Prover.toml"),
-        format!("a = '{out_of_range}'\nb = 0\nreturn = 0"),
+        format!("a = ['{out_of_range}', 0]\nb = [0, 0]\nreturn = [0, 0]"),
     )
     .unwrap();
     assert!(api::read_prover_inputs(dir.path(), driver.abi()).is_err());
@@ -171,6 +172,13 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
 #[test]
 fn frontend_rejects_widths_and_entry_points_outside_the_supported_domain() {
     for source in [
+        "fn main(x: u24) {}",
+        "fn main(x: u200) {}",
+        "fn main(x: u253) {}",
+        "fn main(x: i33) {}",
+        "fn main(x: i65) {}",
+        "fn main(x: [u200; 2]) {}",
+        "fn main() -> pub u200 { 0 }",
         "fn main(x: u256) {}",
         "fn main() -> pub u256 { 0 }",
         "fn main(x: u64) { let _: u16385 = x as u16385; }",

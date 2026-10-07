@@ -109,7 +109,8 @@ The frontend is pinned to the `provekit-v2` branch of
 can be used inside programs; supported operations still depend on width. Signed integers remain
 limited to 64 bits in Mavros.
 
-The fork's ABI represents each scalar as one field element, so integer parameters and returns at
-`main` must be at most 253 bits under BN254. Wider arithmetic can use narrow inputs and outputs,
-with casts inside the function. See `noir_tests/bigint_arithmetic`, `bigint_sequences`, and
-`bigint_abi` for source examples exercised by the functional runner.
+The fork restricts integer parameters and returns at `main` to `u8`, `u16`, `u32`, `u64`, `u128`,
+`i8`, `i16`, `i32`, and `i64`, including integers inside arrays and structs. Wider arithmetic can
+use arrays of these types at the boundary, with casts and limb assembly inside the function. See
+`noir_tests/bigint_arithmetic`, `bigint_sequences`, and `bigint_abi` for source examples exercised
+by the functional runner.

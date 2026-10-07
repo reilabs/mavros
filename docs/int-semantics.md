@@ -11,7 +11,7 @@ best-effort check that this holds.
 ## Noir as the Reference
 
 The frontend is pinned in `compiler/Cargo.toml` to `worldfnd/noir`'s `provekit-v2` revision
-`dbbee4871605b9d9469051ea95a9d9e205ae614d`. The fork extends integer widths and retains `BigInt`
+`59467ac7c66cc27dcf70edc22a9d8b655a9fdf76`. The fork extends integer widths and retains `BigInt`
 literals through monomorphization; Mavros lowers them directly to `IntBits`, preserving every bit.
 The existing SSA oracle tests remain the arithmetic reference for these extended widths, while
 `compiler/tests/frontend_bigints.rs` also exercises the source and ABI boundaries.

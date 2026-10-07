@@ -12,14 +12,14 @@ mavros-wasm-layout.workspace = true
 
 # The Noir crates that the compiler depends on (worldfnd/noir provekit-v2).
 # Keep every crate pinned to the same revision for wide-integer frontend support.
-acvm = { git = "https://github.com/worldfnd/noir.git", rev = "dbbee4871605b9d9469051ea95a9d9e205ae614d", package = "acvm" }
-fm = { git = "https://github.com/worldfnd/noir.git", rev = "dbbee4871605b9d9469051ea95a9d9e205ae614d", package = "fm" }
-nargo = { git = "https://github.com/worldfnd/noir.git", rev = "dbbee4871605b9d9469051ea95a9d9e205ae614d", package = "nargo" }
-nargo_toml = { git = "https://github.com/worldfnd/noir.git", rev = "dbbee4871605b9d9469051ea95a9d9e205ae614d", package = "nargo_toml" }
-noirc_abi = { git = "https://github.com/worldfnd/noir.git", rev = "dbbee4871605b9d9469051ea95a9d9e205ae614d", package = "noirc_abi" }
-noirc_driver = { git = "https://github.com/worldfnd/noir.git", rev = "dbbee4871605b9d9469051ea95a9d9e205ae614d", package = "noirc_driver" }
-noirc_errors = { git = "https://github.com/worldfnd/noir.git", rev = "dbbee4871605b9d9469051ea95a9d9e205ae614d", package = "noirc_errors" }
-noirc_frontend = { git = "https://github.com/worldfnd/noir.git", rev = "dbbee4871605b9d9469051ea95a9d9e205ae614d", package = "noirc_frontend" }
+acvm = { git = "https://github.com/worldfnd/noir.git", rev = "59467ac7c66cc27dcf70edc22a9d8b655a9fdf76", package = "acvm" }
+fm = { git = "https://github.com/worldfnd/noir.git", rev = "59467ac7c66cc27dcf70edc22a9d8b655a9fdf76", package = "fm" }
+nargo = { git = "https://github.com/worldfnd/noir.git", rev = "59467ac7c66cc27dcf70edc22a9d8b655a9fdf76", package = "nargo" }
+nargo_toml = { git = "https://github.com/worldfnd/noir.git", rev = "59467ac7c66cc27dcf70edc22a9d8b655a9fdf76", package = "nargo_toml" }
+noirc_abi = { git = "https://github.com/worldfnd/noir.git", rev = "59467ac7c66cc27dcf70edc22a9d8b655a9fdf76", package = "noirc_abi" }
+noirc_driver = { git = "https://github.com/worldfnd/noir.git", rev = "59467ac7c66cc27dcf70edc22a9d8b655a9fdf76", package = "noirc_driver" }
+noirc_errors = { git = "https://github.com/worldfnd/noir.git", rev = "59467ac7c66cc27dcf70edc22a9d8b655a9fdf76", package = "noirc_errors" }
+noirc_frontend = { git = "https://github.com/worldfnd/noir.git", rev = "59467ac7c66cc27dcf70edc22a9d8b655a9fdf76", package = "noirc_frontend" }
 
 # The rest of the dependencies
 ark-bn254.workspace = true
