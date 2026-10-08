@@ -70,17 +70,14 @@ impl InstructionLoweringRule for LowerWitnessNarrowingCast {
         }
 
         // A value already inside the target width has nothing to discard, so the cast is a relabel
-        // and the window would be constraints for nothing. This is the shape every program
-        // compiled from Noir takes: the frontend emits `bit_range(v, 0, n)` and then the cast, and
-        // the window's own transfer bounds the result by `2^n`.
+        // and the window would be constraints for nothing. A preceding bit window, for example,
+        // bounds its result by `2^n`. Wide integer casts have already been lowered into limb
+        // casts before this rule runs.
         //
         // `proves_` rather than the bare predicate: a bottom range means "no execution reaches
         // here", and eliding a truncation on the strength of that is circular: the only reason the
         // value cannot occur would be the very check being skipped.
-        //
-        // Above `HOST_WORD_BITS` the range domain deliberately stops tracking, so a window there
-        // is never discharged and a program that already narrowed by hand pays for a second one.
-        // Sound but not minimal, and invisible to any width Noir can name.
+
         if context
             .urange(*value)
             .proves_fits_in_unsigned_bits(*to_bits)

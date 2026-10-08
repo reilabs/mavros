@@ -315,6 +315,20 @@ fn element_limb_types(ty: &Type, field: FieldConfig) -> Vec<Type> {
     }
 }
 
+/// The width of a pure integer read out of a transposed sequence, or [`None`] for a witnessed one.
+///
+/// A witnessed read stays as limbs: the plan expands its result and the rewriter reads one limb
+/// into each. A pure one is left whole by the plan and recombined by the rewriter, because its
+/// users, arithmetic and calls among them, expect one whole integer in the hint domain. This is the
+/// one predicate both sides ask. Were they to drift, the rewriter would pair a one-limb result
+/// against every limb sequence and read the low limb alone, with nothing to say so.
+fn pure_int_read(ty: &Type) -> Option<usize> {
+    match &ty.expr {
+        TypeExpr::Int(bits) => Some(*bits),
+        _ => None,
+    }
+}
+
 /// The width of a witnessed integer that this pass represents as limbs, or [`None`] otherwise.
 fn wide_witness_width(ty: &Type, field: FieldConfig) -> Option<usize> {
     match &ty.expr {
@@ -422,9 +436,14 @@ fn plan_function(
                     } => (*result, expansion(&value_map, *value)),
                     // Read out of a transposed sequence, which yields its limbs.
                     //
-                    // We keep the limbs to avoid doing the same work twice, so reassembly only
-                    // happens where the whole value is required.
+                    // A pure integer read is left whole and recombined by the rewriter, which
+                    // asks [`pure_int_read`] as this does so that its reads pair with this
+                    // expansion. The limbs it was recombined from are kept by the rewriter for a
+                    // user that wants them back, so the whole value costs no second split.
                     OpCode::ArrayGet { result, array, .. } => {
+                        if pure_int_read(fti.get_value_type(*result)).is_some() {
+                            continue;
+                        }
                         (*result, limb_types(fti.get_value_type(*array), field).len())
                     }
                     _ => continue,
@@ -546,6 +565,7 @@ fn rewrite_function(
         let mut decomposed = HashMap::default();
         let mut signs = HashMap::default();
         let mut divisions = HashMap::default();
+        let mut read_limbs = HashMap::default();
         for instr in &old_instructions {
             let location = instr.location().clone();
             let mut rewriter = Rewriter {
@@ -556,6 +576,7 @@ fn rewrite_function(
                 decomposed: &mut decomposed,
                 signs: &mut signs,
                 divisions: &mut divisions,
+                read_limbs: &mut read_limbs,
                 known: &mut known,
                 out: Vec::new(),
             };
@@ -616,6 +637,14 @@ struct Rewriter<'a> {
     /// divisor, guard and reading.
     divisions: &'a mut HashMap<Division, (Answer, Answer)>,
 
+    /// The limbs a pure integer read in this block was recombined from, by the read's result.
+    ///
+    /// A user that wants the limbs back, as the field image a witness-indexed lookup moves through
+    /// does, takes these rather than splitting what was just joined. The split is a division and a
+    /// narrowing per limb at the value's full width, which is the work the read has just done in
+    /// the other direction.
+    read_limbs: &'a mut HashMap<ValueId, Vec<ValueId>>,
+
     /// The values this function's rewrite has minted whose pattern is known at compile time but
     /// that are not constants themselves, by value.
     known: &'a mut HashMap<ValueId, IntBits>,
@@ -636,11 +665,17 @@ impl Rewriter<'_> {
     ///
     /// `check_widths` makes both operands of a non-shift the same width, and a mixed pure/witness
     /// pair is legal, so one witnessed operand is sufficient to require a witness lowering. A
-    /// constant is split at compile time, so its limbs are constants too.
+    /// constant is split at compile time, so its limbs are constants too. A pure value that a
+    /// sequence read in this block recombined hands back the limbs it was recombined from.
     fn operand_limbs(&mut self, value: ValueId, expected: usize) -> Vec<ValueId> {
         let mapped = self.limbs(value);
         if mapped.len() == expected {
             return mapped;
+        }
+        if let Some(limbs) = self.read_limbs.get(&value)
+            && limbs.len() == expected
+        {
+            return limbs.clone();
         }
         assert_eq!(
             mapped.len(),
@@ -4547,12 +4582,28 @@ impl Rewriter<'_> {
                 index,
             } => {
                 let index = self.one(*index);
-                for (result, array) in paired(self.limbs(*result), self.limbs(*array)) {
+                let arrays = self.limbs(*array);
+                let pure_bits = pure_int_read(self.types.get_value_type(*result));
+                let results = if pure_bits.is_some() {
+                    arrays.iter().map(|_| self.fresh()).collect()
+                } else {
+                    self.limbs(*result)
+                };
+                for (result, array) in paired(results.clone(), arrays) {
                     self.push(OpCode::ArrayGet {
                         result,
                         array,
                         index,
                     });
+                }
+                if let Some(bits) = pure_bits {
+                    let value = self.recombine_pure(&results, bits);
+                    self.push(OpCode::Cast {
+                        result: *result,
+                        value,
+                        target: CastTarget::Nop,
+                    });
+                    self.read_limbs.insert(*result, results);
                 }
             }
 
@@ -4738,6 +4789,8 @@ impl Rewriter<'_> {
             }),
 
             // A wide value reaching anything else is a shape this pass does not represent.
+            // Pure integer reads from transposed sequences are recombined above before
+            // arithmetic uses them.
             other => ice!(
                 "{other:?} reached the multi-cell representation with a wide operand, which is a shape it does not represent"
             ),
@@ -5477,6 +5530,60 @@ mod tests {
         results.dedup();
         assert_eq!(tables.len(), expected, "one table per limb sequence");
         assert_eq!(results.len(), expected, "one column per limb");
+    }
+
+    /// The field image of a pure read is cast from the limbs the read produced.
+    ///
+    /// A pure read is recombined for the users that want the whole value, and the image a
+    /// witness-indexed lookup moves through wants the limbs again. Splitting the recombined value
+    /// would be a division and a narrowing per limb at the full width, so the arm hands back the
+    /// limbs it has: every `Field` cast takes one of the read's own results, and nothing in between
+    /// divides at the value's width.
+    #[test]
+    fn the_field_image_of_a_pure_read_is_cast_from_the_limbs_it_was_read_as() {
+        let bits = 320usize;
+        let mut ssa = program_reading_a_sequence_at_a_witness_index(bits, 2);
+        run_pass(&mut ssa);
+        let ops = emitted(&ssa);
+
+        let read: Vec<ValueId> = ops
+            .iter()
+            .filter_map(|op| match op {
+                OpCode::ArrayGet { result, .. } => Some(*result),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            read.len(),
+            limb_widths(bits, witness_limb_bits(bn254())).len(),
+            "one read per limb sequence"
+        );
+
+        let imaged: Vec<ValueId> = ops
+            .iter()
+            .filter_map(|op| match op {
+                OpCode::Cast {
+                    value,
+                    target: CastTarget::Field,
+                    ..
+                } => Some(*value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            imaged, read,
+            "the field image is cast from the read's limbs, not split out of the whole value"
+        );
+        assert!(
+            !ops.iter().any(|op| matches!(
+                op,
+                OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::UDiv,
+                    ..
+                }
+            )),
+            "nothing splits the recombined value back into limbs"
+        );
     }
 
     /// Every emitted opcode of one function, in order.

@@ -173,6 +173,29 @@ impl Funnel {
             OpCode::Rangecheck { value, max_bits } => {
                 self.check_rangecheck(*value, *max_bits, types, location, refusals);
             }
+            // Constants have already been folded and pure casts are supported by both
+            // backends. Only a witnessed field-to-wide-integer cast needs a canonical limb
+            // decomposition that the wide integer pass does not yet implement.
+            OpCode::Cast {
+                value,
+                target: CastTarget::Int(bits),
+                ..
+            } if *bits > self.injective
+                && is_witness(types, *value)
+                && types.get_value_type(*value).strip_witness().is_field() =>
+            {
+                refusals.push(
+                    Diagnostic::error(
+                        format!("casting a witnessed `Field` to int{bits} is not supported"),
+                        location.clone(),
+                    )
+                    .with_label(format!(
+                        "a witnessed `Field` can be cast to an integer of at most {} bits on this field",
+                        self.injective
+                    ))
+                    .with_note("cast to a supported integer width before widening the integer"),
+                );
+            }
             // Every other opcode either carries no integer width of its own, or reaches a lowering
             // that is generic in one, or reaches a bound this pass deliberately does not state.
             _ => {}

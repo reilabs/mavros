@@ -18,7 +18,7 @@ impl TypeConverter {
             NoirType::Field => Type::field(),
             NoirType::Bool => Type::bool(),
             // The type carries no sign: each operation names the reading it takes.
-            NoirType::Integer(_, bit_size) => Type::int(bit_size.bit_size() as usize),
+            NoirType::Integer(_, bit_size) => Type::int(*bit_size as usize),
             NoirType::Unit => {
                 // Unit type is represented as an empty tuple
                 Type::tuple_of(vec![])

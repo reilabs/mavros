@@ -1,29 +1,9 @@
 mod common;
 
 use mavros_compiler::{Project, driver::Driver};
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
-/// These refusals deliberately use ice_usr! until lowering propagates diagnostics as errors.
-fn assert_refused(source: &str, message: &str, source_checks: &[&str]) {
-    let dir = common::noir_project(source);
-    let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
-    let panic = catch_unwind(AssertUnwindSafe(|| driver.run_noir_compiler()))
-        .expect_err("unsupported features must be refused during lowering");
-    let rendered = panic
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| panic.downcast_ref::<&str>().copied())
-        .expect("a rendered user diagnostic");
-    for expected in ["Unhandled error from user input:", message]
-        .into_iter()
-        .chain(source_checks.iter().copied())
-    {
-        assert!(
-            rendered.contains(expected),
-            "missing {expected:?}: {rendered}"
-        );
-    }
-}
+// The fork rejects unsupported features with source diagnostics before Mavros lowering.
+use common::assert_frontend_refused as assert_refused;
 
 #[test]
 fn folded_recursion_is_refused_before_cost_analysis() {
@@ -37,8 +17,7 @@ fn fibonacci(x: u32) -> u32 {
     if x <= 1 { x } else { fibonacci(x - 1) + fibonacci(x - 2) }
 }
 "#,
-        "#[fold] functions are not supported by Mavros",
-        &["src/main.nr:", "if x <= 1", "^"],
+        "#[fold] attribute on function fibonacci is not supported",
     );
 }
 
@@ -49,8 +28,7 @@ fn nonrecursive_fold_is_also_refused() {
 #[fold]
 fn folded(x: Field) -> Field { x }
 "#,
-        "#[fold] functions are not supported by Mavros",
-        &["src/main.nr:", "fn folded(x: Field) -> Field { x }", "^"],
+        "#[fold] attribute on function folded is not supported",
     );
 }
 
@@ -58,19 +36,12 @@ fn folded(x: Field) -> Field { x }
 fn oracle_calls_and_function_values_are_refused() {
     for attribute in ["", "#[pure]"] {
         for body in ["oracle(x)", "let f = oracle; f(x)"] {
-            // Noir synthesizes a wrapper for the function value with no source location.
-            let source_checks: &[&str] = if body == "oracle(x)" {
-                &["src/main.nr:", body, "^"]
-            } else {
-                &["<Noir generated>:1:1"]
-            };
             assert_refused(
                 &format!(
                     "#[oracle(barnacle)]\n{attribute}\nunconstrained fn oracle(x: Field) -> Field {{}}\n\
                      unconstrained fn main(x: Field) -> pub Field {{ {body} }}\n"
                 ),
-                "oracle functions are not supported by Mavros: `barnacle`",
-                source_checks,
+                "Oracle `barnacle` is not supported",
             );
         }
     }
@@ -82,6 +53,25 @@ fn print_oracles_remain_ignored() {
     let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
     driver.run_noir_compiler().unwrap();
     driver.make_struct_access_static().unwrap();
+}
+
+/// Mavros lowering still reports these errors through `ice_usr!`.
+fn assert_lowering_refused(source: &str, message: &str) {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let dir = common::noir_project(source);
+    let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
+    let panic = catch_unwind(AssertUnwindSafe(|| driver.run_noir_compiler()))
+        .expect_err("expected a lowering diagnostic");
+    let rendered = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("a rendered user diagnostic");
+    assert!(
+        rendered.contains("Unhandled error from user input:") && rendered.contains(message),
+        "missing {message:?}: {rendered}"
+    );
 }
 
 /// `spread::<N>` reads `N` bits of a `u32` and `unspread::<N>` takes two `N`-bit halves out of a
@@ -106,13 +96,12 @@ fn spread_widths_past_their_containers_are_refused() {
             "`unspread::<33>` must take halves of 1..=32 bits of its `u64`",
         ),
     ] {
-        assert_refused(
+        assert_lowering_refused(
             &format!(
                 "use std::mavros::{{spread, unspread}};\n\
                  fn main(x: u64) {{ let _ = {call}; }}\n"
             ),
             message,
-            &[],
         );
     }
 }
@@ -147,5 +136,40 @@ fn main(x: u32) {
         let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
         let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None).unwrap();
         assert!(api::check_witgen(&r1cs, &result), "x = {x}");
+    }
+}
+
+/// A witnessed `Field` can be read back as an integer no wider than one element carries injectively. The
+/// fork allows any width, but the wide integer pass reads a non-integer source back one limb per
+/// limb and an element is one limb, so a wider target is refused at the cast rather than reached
+/// as an ICE in the pass.
+#[test]
+fn a_field_cast_to_a_wide_integer_is_refused_at_the_cast() {
+    for (target, body) in [
+        ("u256", "let y = x as u256; [y as u128, (y >> 128) as u128]"),
+        ("u254", "let y = x as u254; [y as u128, (y >> 128) as u128]"),
+        ("i512", "let y = x as i512; [y as u128, (y >> 128) as u128]"),
+    ] {
+        let dir = common::noir_project(&format!("fn main(x: Field) -> pub [u128; 2] {{ {body} }}"));
+        let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
+        driver.run_noir_compiler().unwrap();
+        driver.make_struct_access_static().unwrap();
+        driver.monomorphize().unwrap();
+        let mavros_compiler::driver::Error::Refused(diagnostics) = driver
+            .spill_witness()
+            .expect_err("expected a cast diagnostic")
+        else {
+            panic!("expected a capability refusal for {target}");
+        };
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message(),
+            format!(
+                "casting a witnessed `Field` to int{} is not supported",
+                &target[1..]
+            )
+        );
+        assert!(diagnostics[0].location().file.ends_with("src/main.nr"));
+        assert_eq!(diagnostics[0].location().start.line, 1);
     }
 }
