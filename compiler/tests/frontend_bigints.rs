@@ -52,6 +52,24 @@ fn wide_arithmetic_from_source() {
 }
 
 #[test]
+fn wide_signed_arithmetic_from_source() {
+    check_both_modes(
+        r#"fn main(x: i64) -> pub [i64; 3] {
+            let high: i256 = 1 << 200;
+            let negative: i256 = -0x100000000000000000000000000000000000000000000000000;
+            assert(negative == -high);
+            let value = negative + (x as i256);
+            assert(value < 0);
+            let product = value * -3;
+            assert(product / -3 == value);
+            [(value >> 200) as i64, ((value as i512) >> 256) as i64,
+             (value + high) as i64]
+        }"#,
+        "x = 9\nreturn = ['-1', '-1', 9]",
+    );
+}
+
+#[test]
 fn generic_wide_integers_in_arrays_and_vectors() {
     check_both_modes(
         include_str!("../../noir_tests/bigint_sequences/src/main.nr"),
@@ -65,6 +83,55 @@ fn wide_abi_from_source() {
         include_str!("../../noir_tests/bigint_abi/src/main.nr"),
         include_str!("../../noir_tests/bigint_abi/Prover.toml"),
     );
+}
+
+#[test]
+fn field_identity_casts_preserve_the_top_field_bit() {
+    check_both_modes(
+        "fn main(x: Field) -> pub Field { x as Field }",
+        "x = '21888242871839275222246405745257275088548364400416034343698204186575808495616'\nreturn = '21888242871839275222246405745257275088548364400416034343698204186575808495616'",
+    );
+}
+
+#[test]
+fn constant_field_expressions_can_be_cast_to_wide_integers() {
+    check_both_modes(
+        r#"fn main(x: u64) -> pub [u64; 3] {
+            let constant: Field = 1 + 2;
+            let literal = (1 as u512) << 300;
+            let computed = (constant as u512) << 300;
+            let negative: Field = -1;
+            let top = (negative as u512) >> 253;
+            [((literal >> 300) as u64) + x,
+             ((computed >> 300) as u64) + x, top as u64]
+        }"#,
+        "x = 4\nreturn = [5, 7, 1]",
+    );
+}
+
+#[test]
+fn field_casts_to_wide_integers_preserve_the_canonical_value() {
+    for target in ["u254", "u256", "i512"] {
+        for decimal in [
+            "0",
+            "14474011154664524427946373126085988481658748083205070504932198000989141204993",
+            "21888242871839275222246405745257275088548364400416034343698204186575808495616",
+        ] {
+            let value: num_bigint::BigUint = decimal.parse().unwrap();
+            let mask = (num_bigint::BigUint::from(1u8) << 128) - 1u8;
+            let low = &value & &mask;
+            let high = &value >> 128;
+            check_both_modes(
+                &format!(
+                    "fn main(x: Field) -> pub [u128; 2] {{
+                        let wide = x as {target};
+                        [wide as u128, (wide >> 128) as u128]
+                    }}"
+                ),
+                &format!("x = '{decimal}'\nreturn = ['{low}', '{high}']"),
+            );
+        }
+    }
 }
 
 #[test]
@@ -195,11 +262,11 @@ fn frontend_rejects_widths_and_entry_points_outside_the_supported_domain() {
         ),
         (
             "fn main(x: u64) { let _: u1 = x as u1; }",
-            "`u1` is not a supported integer type".to_string(),
+            "`u1` has been removed, use `bool` instead".to_string(),
         ),
         // These errors arise only after the generic width is bound in monomorphization.
         (
-            "fn bad<let N: u32>(x: u64) { let _: u<N> = x as u<N>; } fn main(x: u64) { bad::<16385>(x); }",
+            "fn bad<let N: u32>() -> u<N> { 0 } fn main() { assert(bad::<16385>() == 0); }",
             "`u16385` is not a supported integer type".to_string(),
         ),
         (

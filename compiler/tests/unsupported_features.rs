@@ -171,4 +171,3 @@ fn main(x: u32) {
         assert_eq!(holds, *x < 0x100, "x = {x:#x}");
     }
 }
-
