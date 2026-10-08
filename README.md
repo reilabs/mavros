@@ -116,5 +116,5 @@ use arrays of these types at the boundary, with casts and limb assembly inside t
 by the functional runner.
 
 A `Field` can be cast to an integer of at most 253 bits, the widest integer one field element
-carries injectively on BN254. Casting a `Field` to a wider integer is refused at the cast; widen
-the integer after the cast instead.
+carries injectively on BN254. Casting a `Field` to a wider integer is refused at the cast; widen the
+integer after the cast instead.
