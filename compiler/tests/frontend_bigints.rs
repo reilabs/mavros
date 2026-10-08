@@ -1,8 +1,6 @@
 mod common;
 
-use mavros_compiler::{
-    Project, abi_helpers, api, compiler::codegen::CodeGenOptions, driver::Driver,
-};
+use mavros_compiler::{abi_helpers, api, compiler::codegen::CodeGenOptions};
 
 /// Exercise source parsing, monomorphization, input decoding, witness generation and R1CS.
 /// Check a declared return as well so a missing high limb cannot pass unnoticed.
@@ -187,26 +185,46 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
     assert!(api::read_prover_inputs(dir.path(), driver.abi()).is_err());
 }
 
+/// Each refusal is matched by the diagnostic the rule under test emits, so that a program that
+/// fails for some other reason, a typo say, does not pass for the rule.
 #[test]
 fn frontend_rejects_widths_and_entry_points_outside_the_supported_domain() {
-    for source in [
-        "fn main(x: u24) {}",
-        "fn main(x: u200) {}",
-        "fn main(x: u253) {}",
-        "fn main(x: i33) {}",
-        "fn main(x: i65) {}",
-        "fn main(x: [u200; 2]) {}",
-        "fn main() -> pub u200 { 0 }",
-        "fn main(x: u256) {}",
-        "fn main() -> pub u256 { 0 }",
-        "fn main(x: u64) { let _: u16385 = x as u16385; }",
-        "fn main(x: u64) { let _: u1 = x as u1; }",
+    const NOT_LOWERABLE: &str =
+        "Integers the circuit backend does not lower are not valid entry point types. Found: ";
+    for (source, expected) in [
+        ("fn main(x: u24) {}", format!("{NOT_LOWERABLE}u24")),
+        ("fn main(x: u200) {}", format!("{NOT_LOWERABLE}u200")),
+        ("fn main(x: u253) {}", format!("{NOT_LOWERABLE}u253")),
+        ("fn main(x: i33) {}", format!("{NOT_LOWERABLE}i33")),
+        ("fn main(x: i65) {}", format!("{NOT_LOWERABLE}i65")),
+        ("fn main(x: [u200; 2]) {}", format!("{NOT_LOWERABLE}u200")),
+        (
+            "fn main() -> pub u200 { 0 }",
+            format!("{NOT_LOWERABLE}u200"),
+        ),
+        ("fn main(x: u256) {}", format!("{NOT_LOWERABLE}u256")),
+        (
+            "fn main() -> pub u256 { 0 }",
+            format!("{NOT_LOWERABLE}u256"),
+        ),
+        (
+            "fn main(x: u64) { let _: u16385 = x as u16385; }",
+            "`u16385` is not a supported integer type".to_string(),
+        ),
+        (
+            "fn main(x: u64) { let _: u1 = x as u1; }",
+            "`u1` is not a supported integer type".to_string(),
+        ),
         // These errors arise only after the generic width is bound in monomorphization.
-        "fn bad<let N: u32>(x: u64) { let _: u<N> = x as u<N>; } fn main(x: u64) { bad::<16385>(x); }",
-        "fn bad<let N: u32>() -> u<N> { 256 } fn main() { assert(bad::<8>() == 0); }",
+        (
+            "fn bad<let N: u32>(x: u64) { let _: u<N> = x as u<N>; } fn main(x: u64) { bad::<16385>(x); }",
+            "`u16385` is not a supported integer type".to_string(),
+        ),
+        (
+            "fn bad<let N: u32>() -> u<N> { 256 } fn main() { assert(bad::<8>() == 0); }",
+            "Integer literal does not fit its type".to_string(),
+        ),
     ] {
-        let dir = common::noir_project(source);
-        let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
-        assert!(driver.run_noir_compiler().is_err(), "{source}");
+        common::assert_frontend_refused(source, &expected);
     }
 }

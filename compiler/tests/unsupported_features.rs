@@ -1,24 +1,9 @@
 mod common;
 
-use mavros_compiler::{
-    Project,
-    driver::{Driver, Error},
-};
+use mavros_compiler::{Project, driver::Driver};
 
-/// The fork rejects unsupported features with source diagnostics before Mavros lowering.
-fn assert_refused(source: &str, message: &str) {
-    let dir = common::noir_project(source);
-    let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
-    let Err(Error::NoirCompilerError(diagnostics)) = driver.run_noir_compiler() else {
-        panic!("expected a frontend diagnostic for {source}");
-    };
-    assert!(
-        diagnostics.iter().any(|diagnostic| {
-            diagnostic.message.contains(message) && !diagnostic.secondaries.is_empty()
-        }),
-        "missing located diagnostic {message:?}: {diagnostics:?}"
-    );
-}
+// The fork rejects unsupported features with source diagnostics before Mavros lowering.
+use common::assert_frontend_refused as assert_refused;
 
 #[test]
 fn folded_recursion_is_refused_before_cost_analysis() {
@@ -151,5 +136,26 @@ fn main(x: u32) {
         let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
         let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None).unwrap();
         assert!(api::check_witgen(&r1cs, &result), "x = {x}");
+    }
+}
+
+/// A `Field` can be read back as an integer no wider than one element carries injectively. The
+/// fork allows any width, but the wide integer pass reads a non-integer source back one limb per
+/// limb and an element is one limb, so a wider target is refused at the cast rather than reached
+/// as an ICE in the pass.
+#[test]
+fn a_field_cast_to_a_wide_integer_is_refused_at_the_cast() {
+    for (target, body) in [
+        ("u256", "let y = x as u256; [y as u128, (y >> 128) as u128]"),
+        ("u254", "let y = x as u254; [y as u128, (y >> 128) as u128]"),
+        ("i512", "let y = x as i512; [y as u128, (y >> 128) as u128]"),
+    ] {
+        assert_lowering_refused(
+            &format!("fn main(x: Field) -> pub [u128; 2] {{ {body} }}"),
+            &format!(
+                "casting a `Field` to `{target}` is not supported: a `Field` can be cast to an \
+                 integer of at most 253 bits on this field"
+            ),
+        );
     }
 }

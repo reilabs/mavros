@@ -14,13 +14,16 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
+use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::{IntBits, IntOp, Outcome, eval};
 
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
+        analysis::value_range_analysis::field_modulus,
         diagnostic::Diagnostic,
         lowering::type_converter::TypeConverter,
+        passes::wide_witness_ints::multi_cell_int_bits,
         ssa::{
             BlockId, FunctionId, SourceLocation, ValueId,
             hlssa::{
@@ -255,12 +258,19 @@ impl<'a> ExpressionConverter<'a> {
         } else {
             self.resolve_location(location)
         };
-        let mut diagnostic = Diagnostic::error(message, source_location);
-        if let Some(source) = location
+        let source = location
             .filter(|location| *location != NoirLocation::dummy())
             .and_then(|location| self.file_manager?.fetch_file(location.file))
-        {
-            diagnostic = diagnostic.with_source(Arc::from(source));
+            .map(Arc::from);
+        Self::reject_at(message, source_location, source)
+    }
+
+    /// [`Self::reject_unsupported`] at a location already resolved, rendered against `source`
+    /// where the caller has the file's text.
+    fn reject_at(message: String, location: SourceLocation, source: Option<Arc<str>>) -> ! {
+        let mut diagnostic = Diagnostic::error(message, location);
+        if let Some(source) = source {
+            diagnostic = diagnostic.with_source(source);
         }
         ice_usr!("{diagnostic}");
     }
@@ -1139,7 +1149,9 @@ impl<'a> ExpressionConverter<'a> {
             Constructor::True => (value, true),
             Constructor::False => (value, false),
             Constructor::Int(int) => {
-                let c = b.emit_const(Self::integer_constant(int, &s.ty));
+                let constant = Self::integer_constant(int, &s.ty, b.field())
+                    .unwrap_or_else(|message| Self::reject_at(message, location.clone(), None));
+                let c = b.emit_const(constant);
                 (
                     self.emit_at_source_location(b, location, |e| e.eq(value, c)),
                     true,
@@ -1487,6 +1499,23 @@ impl<'a> ExpressionConverter<'a> {
             _ => ice!("Unsupported cast target type: {:?}", cast.r#type),
         };
 
+        // Noir reads a `Field` back as an integer of any width, but above the width one element
+        // carries injectively the wide integer pass has no lowering for it: it reads a non-integer
+        // source back one limb per limb, and an element is one limb. Decomposing the element into
+        // limbs would need a canonicity check the pass does not build yet, so the cast is refused
+        // here, where it has a location, rather than as an ICE there.
+        let widest = multi_cell_int_bits(b.field());
+        if source_is_field && target_bits > widest {
+            self.reject_unsupported(
+                format!(
+                    "casting a `Field` to `{}` is not supported: a `Field` can be cast to an \
+                     integer of at most {widest} bits on this field",
+                    cast.r#type
+                ),
+                Some(cast.location),
+            );
+        }
+
         let result = self.emit_located(b, Some(cast.location), |e| {
             // A field narrowing needs an explicit bit window. Integer casts already truncate
             // in the integer lowerings; a BitRange here would require a wide integer to fit
@@ -1529,7 +1558,8 @@ impl<'a> ExpressionConverter<'a> {
 
         match lit {
             Literal::Bool(_) | Literal::Integer(_, _, _) => {
-                Some(b.emit_const(Self::scalar_literal_to_constant(lit).unwrap()))
+                let constant = self.scalar_literal_to_constant(lit, b.field()).unwrap();
+                Some(b.emit_const(constant))
             }
             Literal::Unit => None,
             Literal::Array(array_lit) | Literal::Vector(array_lit) => {
@@ -1647,7 +1677,7 @@ impl<'a> ExpressionConverter<'a> {
         };
         let elem_type = self.type_converter.convert_type(elem_ast_type);
 
-        if let Some(elements) = self.const_scalar_array_elements(array_lit, &elem_type) {
+        if let Some(elements) = self.const_scalar_array_elements(array_lit, &elem_type, b.field()) {
             debug_assert!(matches!(seq_type, SequenceTargetType::Array(_)));
             let blob = b.emit_const(Constant::Blob(Blob::new(elem_type.clone(), elements)));
             let result = self.emit_located(
@@ -1682,6 +1712,7 @@ impl<'a> ExpressionConverter<'a> {
         &self,
         array_lit: &noirc_frontend::monomorphization::ast::ArrayLiteral,
         elem_type: &Type,
+        field: FieldConfig,
     ) -> Option<Vec<Constant>> {
         if !Self::is_const_seq_scalar_type(elem_type) {
             return None;
@@ -1695,7 +1726,7 @@ impl<'a> ExpressionConverter<'a> {
 
         let mut constants = Vec::with_capacity(array_lit.contents.len());
         for expr in &array_lit.contents {
-            let constant = Self::scalar_expr_to_constant(expr)?;
+            let constant = self.scalar_expr_to_constant(expr, field)?;
             if !Self::constant_matches_type(&constant, elem_type) {
                 return None;
             }
@@ -1704,15 +1735,19 @@ impl<'a> ExpressionConverter<'a> {
         Some(constants)
     }
 
-    fn scalar_expr_to_constant(expr: &Expression) -> Option<Constant> {
+    fn scalar_expr_to_constant(&self, expr: &Expression, field: FieldConfig) -> Option<Constant> {
         match expr {
-            Expression::Literal(lit) => Self::scalar_literal_to_constant(lit),
+            Expression::Literal(lit) => self.scalar_literal_to_constant(lit, field),
             _ => None,
         }
     }
 
+    /// The constant a scalar literal denotes, or [`None`] for a literal that is not a scalar. A
+    /// literal that denotes no constant is refused at its own location.
     fn scalar_literal_to_constant(
+        &self,
         lit: &noirc_frontend::monomorphization::ast::Literal,
+        field: FieldConfig,
     ) -> Option<Constant> {
         use noirc_frontend::monomorphization::ast::Literal;
 
@@ -1721,29 +1756,52 @@ impl<'a> ExpressionConverter<'a> {
                 let value = if *bv { 1 } else { 0 };
                 Some(Constant::int(1, value))
             }
-            Literal::Integer(value, typ, _location) => Some(Self::integer_constant(value, typ)),
+            Literal::Integer(value, typ, location) => Some(
+                Self::integer_constant(value, typ, field)
+                    .unwrap_or_else(|message| self.reject_unsupported(message, Some(*location))),
+            ),
             _ => None,
         }
     }
 
-    fn integer_constant(value: &noir_bigint::BigInt, typ: &AstType) -> Constant {
+    /// The constant an integer literal of `typ` denotes, or why it denotes none.
+    ///
+    /// Only a `Field` literal crosses Noir's field boundary, and the frontend hands it over as the
+    /// integer it was written as rather than reduced. A magnitude at or above the modulus is the
+    /// one shape `bigint_to_field` panics on, so it is refused first, as a message the caller
+    /// places at the literal. An integer literal keeps its full magnitude even past the modulus.
+    fn integer_constant(
+        value: &noir_bigint::BigInt,
+        typ: &AstType,
+        field: FieldConfig,
+    ) -> Result<Constant, String> {
         match typ {
             AstType::Field => {
-                // Only Field literals cross Noir's field boundary. Integer literals below
-                // retain their full magnitude even when it exceeds the field modulus.
-                Constant::Field(
+                // Bridge Noir's num-bigint 0.5 to the compiler's 0.4 to ask the configured field.
+                let magnitude = BigInt::from_signed_bytes_le(&value.to_signed_bytes_le());
+                if magnitude.magnitude() >= field_modulus(field).magnitude() {
+                    return Err(format!(
+                        "the `Field` literal {value} does not fit the field: its magnitude is \
+                         not below the {}-bit modulus",
+                        field.field_bit_size()
+                    ));
+                }
+                Ok(Constant::Field(
                     noirc_frontend::hir::comptime::bigint_to_field(value)
                         .into_repr()
                         .into(),
-                )
+                ))
             }
             AstType::Integer(_, bit_size) => {
                 let bits = *bit_size as usize;
                 // Bridge Noir's num-bigint 0.5 to the model's 0.4 without narrowing.
                 let value = BigInt::from_signed_bytes_le(&value.to_signed_bytes_le());
-                Constant::Int(IntBits::from_signed(bits, &value))
+                Ok(Constant::Int(IntBits::from_signed(bits, &value)))
             }
-            AstType::Bool => Constant::int(1, value.to_u128().expect("boolean literal fits u128")),
+            AstType::Bool => Ok(Constant::int(
+                1,
+                value.to_u128().expect("boolean literal fits u128"),
+            )),
             _ => ice!("integer constant with non-integer type {typ:?}"),
         }
     }
@@ -2218,4 +2276,62 @@ fn ast_type_is_signed(t: &noirc_frontend::monomorphization::ast::Type) -> bool {
 /// variant. A struct lowers to a plain tuple of its fields with no tag in front.
 fn is_enum_variant(c: &Constructor) -> bool {
     matches!(c, Constructor::Variant(..)) && c.is_enum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field_literal(value: noir_bigint::BigInt) -> Result<Constant, String> {
+        ExpressionConverter::integer_constant(&value, &AstType::Field, FieldConfig::bn254())
+    }
+
+    /// A `Field` literal is refused at the modulus rather than reduced or panicked on: the
+    /// frontend hands it over unreduced, and `bigint_to_field` panics at the same bound.
+    #[test]
+    fn a_field_literal_at_or_above_the_modulus_is_refused_with_a_message() {
+        let modulus = noir_bigint::BigInt::from_signed_bytes_le(
+            &field_modulus(FieldConfig::bn254()).to_signed_bytes_le(),
+        );
+
+        assert!(
+            field_literal(&modulus - 1).is_ok(),
+            "the top element is a field element"
+        );
+        assert!(
+            field_literal(-(&modulus - 1)).is_ok(),
+            "its negation is one too"
+        );
+        for value in [
+            modulus.clone(),
+            &modulus + 1,
+            -modulus.clone(),
+            noir_bigint::BigInt::from(1u8) << 254u32,
+        ] {
+            let message = field_literal(value.clone()).expect_err("at or above the modulus");
+            assert!(
+                message.contains("does not fit the field"),
+                "{value}: {message}"
+            );
+        }
+    }
+
+    /// An integer literal is not bounded by the modulus: a `u512` holds its full magnitude.
+    #[test]
+    fn an_integer_literal_keeps_its_magnitude_past_the_modulus() {
+        use noirc_frontend::shared::Signedness;
+
+        let value = noir_bigint::BigInt::from(1u8) << 300u32;
+        let constant = ExpressionConverter::integer_constant(
+            &value,
+            &AstType::Integer(Signedness::Unsigned, 512),
+            FieldConfig::bn254(),
+        )
+        .expect("an integer literal is not a field element");
+        let Constant::Int(bits) = constant else {
+            panic!("an integer literal is an integer constant, not {constant:?}");
+        };
+        assert_eq!(bits.bits(), 512);
+        assert_eq!(bits.to_signed(), BigInt::from(1u8) << 300u32);
+    }
 }
