@@ -23,7 +23,6 @@ use crate::{
         analysis::value_range_analysis::field_modulus,
         diagnostic::Diagnostic,
         lowering::type_converter::TypeConverter,
-        passes::wide_witness_ints::multi_cell_int_bits,
         ssa::{
             BlockId, FunctionId, SourceLocation, ValueId,
             hlssa::{
@@ -1499,23 +1498,6 @@ impl<'a> ExpressionConverter<'a> {
             _ => ice!("Unsupported cast target type: {:?}", cast.r#type),
         };
 
-        // Noir reads a `Field` back as an integer of any width, but above the width one element
-        // carries injectively the wide integer pass has no lowering for it: it reads a non-integer
-        // source back one limb per limb, and an element is one limb. Decomposing the element into
-        // limbs would need a canonicity check the pass does not build yet, so the cast is refused
-        // here, where it has a location, rather than as an ICE there.
-        let widest = multi_cell_int_bits(b.field());
-        if source_is_field && target_bits > widest {
-            self.reject_unsupported(
-                format!(
-                    "casting a `Field` to `{}` is not supported: a `Field` can be cast to an \
-                     integer of at most {widest} bits on this field",
-                    cast.r#type
-                ),
-                Some(cast.location),
-            );
-        }
-
         let result = self.emit_located(b, Some(cast.location), |e| {
             // A field narrowing needs an explicit bit window. Integer casts already truncate
             // in the integer lowerings; a BitRange here would require a wide integer to fit
@@ -2299,7 +2281,7 @@ mod tests {
             "the top element is a field element"
         );
         assert!(
-            field_literal(-(&modulus - 1)).is_ok(),
+            field_literal(-(&modulus - 1u8)).is_ok(),
             "its negation is one too"
         );
         for value in [

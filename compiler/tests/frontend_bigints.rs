@@ -86,6 +86,41 @@ fn wide_abi_from_source() {
 }
 
 #[test]
+fn field_identity_casts_preserve_the_top_field_bit() {
+    check_both_modes(
+        "fn main(x: Field) -> pub Field { x as Field }",
+        "x = '21888242871839275222246405745257275088548364400416034343698204186575808495616'\nreturn = '21888242871839275222246405745257275088548364400416034343698204186575808495616'",
+    );
+}
+
+#[test]
+fn constant_field_expressions_can_be_cast_to_wide_integers() {
+    check_both_modes(
+        r#"fn main(x: u64) -> pub [u64; 3] {
+            let constant: Field = 1 + 2;
+            let literal = (1 as u512) << 300;
+            let computed = (constant as u512) << 300;
+            let negative: Field = -1;
+            let top = (negative as u512) >> 253;
+            [((literal >> 300) as u64) + x,
+             ((computed >> 300) as u64) + x, top as u64]
+        }"#,
+        "x = 4\nreturn = [5, 7, 1]",
+    );
+}
+
+#[test]
+fn unconstrained_field_casts_preserve_the_top_field_bit() {
+    check(
+        r#"unconstrained fn main(x: Field) -> pub [u128; 2] {
+            let wide = x as u512;
+            [wide as u128, (wide >> 128) as u128]
+        }"#,
+        "x = '0x2000000000000000000000000000000000000000000000000000000000000001'\nreturn = [1, '42535295865117307932921825928971026432']",
+    );
+}
+
+#[test]
 fn wide_match_literals_and_signed_literals_keep_their_value() {
     check(
         r#"fn main(x: Field, n: i64) -> pub [u64; 2] {
@@ -213,11 +248,11 @@ fn frontend_rejects_widths_and_entry_points_outside_the_supported_domain() {
         ),
         (
             "fn main(x: u64) { let _: u1 = x as u1; }",
-            "`u1` is not a supported integer type".to_string(),
+            "`u1` has been removed, use `bool` instead".to_string(),
         ),
         // These errors arise only after the generic width is bound in monomorphization.
         (
-            "fn bad<let N: u32>(x: u64) { let _: u<N> = x as u<N>; } fn main(x: u64) { bad::<16385>(x); }",
+            "fn bad<let N: u32>() -> u<N> { 0 } fn main() { assert(bad::<16385>() == 0); }",
             "`u16385` is not a supported integer type".to_string(),
         ),
         (

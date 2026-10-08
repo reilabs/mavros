@@ -115,6 +115,7 @@ use arrays of these types at the boundary, with casts and limb assembly inside t
 `noir_tests/bigint_arithmetic`, `bigint_sequences`, and `bigint_abi` for source examples exercised
 by the functional runner.
 
-A `Field` can be cast to an integer of at most 253 bits, the widest integer one field element
-carries injectively on BN254. Casting a `Field` to a wider integer is refused at the cast; widen the
-integer after the cast instead.
+A witnessed `Field` can be cast to an integer of at most 253 bits, the widest integer one field
+element carries injectively on BN254. Wider witnessed casts are refused with a source diagnostic;
+widen the integer after the cast instead. Constant and unconstrained casts support wider integers,
+and `Field`-to-`Field` casts preserve the full field value.

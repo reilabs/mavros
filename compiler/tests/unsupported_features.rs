@@ -139,7 +139,7 @@ fn main(x: u32) {
     }
 }
 
-/// A `Field` can be read back as an integer no wider than one element carries injectively. The
+/// A witnessed `Field` can be read back as an integer no wider than one element carries injectively. The
 /// fork allows any width, but the wide integer pass reads a non-integer source back one limb per
 /// limb and an element is one limb, so a wider target is refused at the cast rather than reached
 /// as an ICE in the pass.
@@ -150,12 +150,26 @@ fn a_field_cast_to_a_wide_integer_is_refused_at_the_cast() {
         ("u254", "let y = x as u254; [y as u128, (y >> 128) as u128]"),
         ("i512", "let y = x as i512; [y as u128, (y >> 128) as u128]"),
     ] {
-        assert_lowering_refused(
-            &format!("fn main(x: Field) -> pub [u128; 2] {{ {body} }}"),
-            &format!(
-                "casting a `Field` to `{target}` is not supported: a `Field` can be cast to an \
-                 integer of at most 253 bits on this field"
-            ),
+        let dir = common::noir_project(&format!("fn main(x: Field) -> pub [u128; 2] {{ {body} }}"));
+        let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
+        driver.run_noir_compiler().unwrap();
+        driver.make_struct_access_static().unwrap();
+        driver.monomorphize().unwrap();
+        let mavros_compiler::driver::Error::Refused(diagnostics) = driver
+            .spill_witness()
+            .expect_err("expected a cast diagnostic")
+        else {
+            panic!("expected a capability refusal for {target}");
+        };
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message(),
+            format!(
+                "casting a witnessed `Field` to int{} is not supported",
+                &target[1..]
+            )
         );
+        assert!(diagnostics[0].location().file.ends_with("src/main.nr"));
+        assert_eq!(diagnostics[0].location().start.line, 1);
     }
 }
