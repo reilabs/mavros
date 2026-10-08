@@ -1,24 +1,9 @@
 mod common;
 
-use mavros_compiler::{
-    Project,
-    driver::{Driver, Error},
-};
+use mavros_compiler::{Project, driver::Driver};
 
-/// The fork rejects unsupported features with source diagnostics before Mavros lowering.
-fn assert_refused(source: &str, message: &str) {
-    let dir = common::noir_project(source);
-    let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
-    let Err(Error::NoirCompilerError(diagnostics)) = driver.run_noir_compiler() else {
-        panic!("expected a frontend diagnostic for {source}");
-    };
-    assert!(
-        diagnostics.iter().any(|diagnostic| {
-            diagnostic.message.contains(message) && !diagnostic.secondaries.is_empty()
-        }),
-        "missing located diagnostic {message:?}: {diagnostics:?}"
-    );
-}
+// The fork rejects unsupported features with source diagnostics before Mavros lowering.
+use common::assert_frontend_refused as assert_refused;
 
 #[test]
 fn folded_recursion_is_refused_before_cost_analysis() {
@@ -70,6 +55,25 @@ fn print_oracles_remain_ignored() {
     driver.make_struct_access_static().unwrap();
 }
 
+/// Mavros lowering still reports these errors through `ice_usr!`.
+fn assert_lowering_refused(source: &str, message: &str) {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let dir = common::noir_project(source);
+    let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
+    let panic = catch_unwind(AssertUnwindSafe(|| driver.run_noir_compiler()))
+        .expect_err("expected a lowering diagnostic");
+    let rendered = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("a rendered user diagnostic");
+    assert!(
+        rendered.contains("Unhandled error from user input:") && rendered.contains(message),
+        "missing {message:?}: {rendered}"
+    );
+}
+
 /// `spread::<N>` reads `N` bits of a `u32` and `unspread::<N>` takes two `N`-bit halves out of a
 /// `u64`, so each takes `N` from 1 to 32 and refuses the rest with a diagnostic.
 #[test]
@@ -92,13 +96,12 @@ fn spread_widths_past_their_containers_are_refused() {
             "`unspread::<33>` must take halves of 1..=32 bits of its `u64`",
         ),
     ] {
-        assert_refused(
+        assert_lowering_refused(
             &format!(
                 "use std::mavros::{{spread, unspread}};\n\
                  fn main(x: u64) {{ let _ = {call}; }}\n"
             ),
             message,
-            &[],
         );
     }
 }
@@ -168,3 +171,4 @@ fn main(x: u32) {
         assert_eq!(holds, *x < 0x100, "x = {x:#x}");
     }
 }
+

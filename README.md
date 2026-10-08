@@ -114,3 +114,7 @@ The fork restricts integer parameters and returns at `main` to `u8`, `u16`, `u32
 use arrays of these types at the boundary, with casts and limb assembly inside the function. See
 `noir_tests/bigint_arithmetic`, `bigint_sequences`, and `bigint_abi` for source examples exercised
 by the functional runner.
+
+A `Field` can be cast to an integer of at most 253 bits, the widest integer one field element
+carries injectively on BN254. Casting a `Field` to a wider integer is refused at the cast; widen
+the integer after the cast instead.
