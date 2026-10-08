@@ -2111,8 +2111,8 @@ impl<'a> ExpressionConverter<'a> {
         todo!("LowLevel function '{}' not yet supported", name)
     }
 
-    /// Handle mavros-specific foreign functions directly in SSA,
-    /// without requiring a Noir replacement crate.
+    /// Handle mavros-specific foreign functions directly in SSA, without
+    /// requiring a Noir replacement crate.
     fn try_convert_mavros_intrinsic(
         &mut self,
         name: &str,
@@ -2137,24 +2137,32 @@ impl<'a> ExpressionConverter<'a> {
             }
             "spread_inner" => {
                 let bits = Self::extract_const_u32(&call.arguments[1]);
-                assert!(
-                    bits >= 1 && bits <= 16,
-                    "spread: bits must be 1..=16, got {bits}"
-                );
+                // `N` is how many bits of the `u32` are read.
+                if !(1..=32).contains(&bits) {
+                    self.reject_unsupported(
+                        format!("`spread::<{bits}>` must read 1..=32 bits of its `u32`"),
+                        Some(call.location),
+                    );
+                }
                 let value = self.convert_expression(&call.arguments[0], b).unwrap();
                 let result =
-                    self.emit_located(b, Some(call.location), |e| e.spread(value, bits as u8));
+                    self.emit_located(b, Some(call.location), |e| e.spread(value, bits as usize));
                 Some(result)
             }
             "unspread_inner" => {
                 let bits = Self::extract_const_u32(&call.arguments[1]);
-                assert!(
-                    bits >= 1 && bits <= 16,
-                    "unspread: bits must be 1..=16, got {bits}"
-                );
+                // `N` is the width of each half, so twice it is read of the `u64`.
+                if !(1..=32).contains(&bits) {
+                    self.reject_unsupported(
+                        format!(
+                            "`unspread::<{bits}>` must take halves of 1..=32 bits of its `u64`"
+                        ),
+                        Some(call.location),
+                    );
+                }
                 let value = self.convert_expression(&call.arguments[0], b).unwrap();
                 let result = self.emit_located(b, Some(call.location), |e| {
-                    let (odd, even) = e.unspread(value, bits as u8);
+                    let (odd, even) = e.unspread(value, 2 * bits as usize);
                     e.mk_tuple(vec![odd, even], vec![Type::int(32), Type::int(32)])
                 });
                 Some(result)

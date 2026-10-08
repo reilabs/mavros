@@ -22,7 +22,10 @@ use inkwell::{
     },
 };
 
-use mavros_int_semantics::{IntBits, int_bits::HOST_LIMB_BITS};
+use mavros_int_semantics::{
+    IntBits,
+    int_bits::{HOST_LIMB_BITS, HOST_WORD_BITS},
+};
 
 use crate::{
     collections::HashMap,
@@ -204,6 +207,8 @@ pub struct LLVMCodeGen<'ctx> {
     int_mul_fn: Option<FunctionValue<'ctx>>,
     int_udivrem_fn: Option<FunctionValue<'ctx>>,
     int_sdivrem_fn: Option<FunctionValue<'ctx>>,
+    int_spread_fn: Option<FunctionValue<'ctx>>,
+    int_unspread_fn: Option<FunctionValue<'ctx>>,
     /// Scratch buffers for the wide helpers, keyed by `(width, slot)` and living in the current
     /// function's entry block. Cleared per function.
     wide_scratch: HashMap<(u32, usize), PointerValue<'ctx>>,
@@ -280,6 +285,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             int_mul_fn: None,
             int_udivrem_fn: None,
             int_sdivrem_fn: None,
+            int_spread_fn: None,
+            int_unspread_fn: None,
             wide_scratch: HashMap::default(),
             globals: Vec::new(),
             const_data_counter: 0,
@@ -472,24 +479,26 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
     }
 
+    /// The spread of the low `active_bits` of `value` into a `result_bits`-wide value, by a ladder
+    /// of `u128` masks, which hold a spread of at most [`HOST_WORD_BITS`]: wider is handled using
+    /// [`Self::build_wide_spread`]'s.
     fn compile_spread_bits(
         &self,
         value: IntValue<'ctx>,
-        active_bits: u8,
+        active_bits: u32,
         result_bits: u32,
         name: &str,
     ) -> IntValue<'ctx> {
         assert!(
-            active_bits <= 64,
-            "Spread only supports widths up to 64, got {}",
-            active_bits
+            result_bits as usize <= HOST_WORD_BITS,
+            "the spread ladder holds {HOST_WORD_BITS} bits, not {result_bits}"
         );
         let mut x = self.widen_or_trunc_int(value, result_bits, "spread_wide");
         x = self
             .builder
             .build_and(
                 x,
-                self.int_mask(result_bits, Self::low_bits_mask(active_bits as u32)),
+                self.int_mask(result_bits, Self::low_bits_mask(active_bits)),
                 "spread_active",
             )
             .unwrap();
@@ -520,15 +529,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     fn compact_spread_bits(
         &self,
         value: IntValue<'ctx>,
-        active_bits: u8,
         result_bits: u32,
         name: &str,
     ) -> IntValue<'ctx> {
-        assert!(
-            active_bits <= 64,
-            "Unspread only supports active widths up to 64, got {}",
-            active_bits
-        );
         let work_bits = value.get_type().get_bit_width();
         let mut x = self
             .builder
@@ -560,6 +563,47 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
         }
         self.widen_or_trunc_int(x, result_bits, name)
+    }
+
+    /// The odd and even streams of the low `active_bits` of `value` into `odd_bits` and `even_bits`
+    /// by [`Self::compact_spread_bits`]'s ladder of `u128` masks, which holds an operand of at most
+    /// [`HOST_WORD_BITS`]: wider is handled by [`Self::build_wide_unspread`]'s.
+    fn compile_unspread_bits(
+        &self,
+        value: IntValue<'ctx>,
+        active_bits: u32,
+        odd_bits: u32,
+        even_bits: u32,
+        (odd_name, even_name): &(String, String),
+    ) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        let width = value.get_type().get_bit_width();
+        assert!(
+            width as usize <= HOST_WORD_BITS,
+            "the unspread ladder holds {HOST_WORD_BITS} bits, not {width}"
+        );
+
+        let input = self
+            .builder
+            .build_and(
+                value,
+                self.int_mask(width, Self::low_bits_mask(active_bits)),
+                "unspread_active",
+            )
+            .unwrap();
+
+        let odd_source = self
+            .builder
+            .build_right_shift(
+                input,
+                input.get_type().const_int(1, false),
+                false,
+                "unspread_odd_src",
+            )
+            .unwrap();
+        (
+            self.compact_spread_bits(odd_source, odd_bits, odd_name),
+            self.compact_spread_bits(input, even_bits, even_name),
+        )
     }
 
     /// Materialise an LLSSA constant as an LLVM constant value, recursively.
@@ -821,6 +865,37 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.int_sdivrem_fn = Some(self.module.add_function(
             "__int_sdivrem",
             int_divrem_type,
+            Some(Linkage::External),
+        ));
+
+        // __int_spread(result_ptr, a_ptr, limbs, bits) -> void
+        self.int_spread_fn = Some(self.module.add_function(
+            "__int_spread",
+            void_type.fn_type(
+                &[
+                    ptr_type.into(),
+                    ptr_type.into(),
+                    i32_type.into(),
+                    i32_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        ));
+
+        // __int_unspread(odd_ptr, even_ptr, a_ptr, limbs, bits) -> void
+        self.int_unspread_fn = Some(self.module.add_function(
+            "__int_unspread",
+            void_type.fn_type(
+                &[
+                    ptr_type.into(),
+                    ptr_type.into(),
+                    ptr_type.into(),
+                    i32_type.into(),
+                    i32_type.into(),
+                ],
+                false,
+            ),
             Some(Linkage::External),
         ));
     }
@@ -1227,13 +1302,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         name: &str,
     ) -> IntValue<'ctx> {
         let bits = lhs.get_type().get_bit_width();
-        let limbs = bits.div_ceil(HOST_LIMB_BITS as u32);
-        let padded_bits = limbs * HOST_LIMB_BITS as u32;
-
-        let padded_type = self
-            .context
-            .custom_width_int_type(NonZeroU32::new(padded_bits).expect("a padded width is nonzero"))
-            .expect("A basic integer type can be created");
+        let (padded_type, limbs) = self.padded_limb_type(bits);
+        let padded_bits = padded_type.get_bit_width();
         let a_slot = self.wide_scratch_slot(padded_type, 0);
         let b_slot = self.wide_scratch_slot(padded_type, 1);
         let out_slots: Vec<PointerValue<'ctx>> = (0..outputs)
@@ -1268,6 +1338,126 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .unwrap()
             .into_int_value();
         self.widen_or_trunc_int(loaded, bits, name)
+    }
+
+    /// The spread of the low `value_bits` of `value` into a `result_bits`-wide value: by the mask
+    /// ladder where a `u128` holds the result, and by the runtime helper past that.
+    fn build_spread(
+        &mut self,
+        value: IntValue<'ctx>,
+        value_bits: u32,
+        result_bits: u32,
+        name: &str,
+    ) -> IntValue<'ctx> {
+        if result_bits as usize <= HOST_WORD_BITS {
+            self.compile_spread_bits(value, value_bits, result_bits, name)
+        } else {
+            self.build_wide_spread(value, value_bits, result_bits, name)
+        }
+    }
+
+    /// The odd and even streams of the low `value_bits` of `value`: by the mask ladder where a
+    /// `u128` holds the operand, and by the runtime helper past that.
+    fn build_unspread(
+        &mut self,
+        value: IntValue<'ctx>,
+        value_bits: u32,
+        odd_bits: u32,
+        even_bits: u32,
+        names: &(String, String),
+    ) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        if value.get_type().get_bit_width() as usize <= HOST_WORD_BITS {
+            self.compile_unspread_bits(value, value_bits, odd_bits, even_bits, names)
+        } else {
+            self.build_wide_unspread(value, value_bits, odd_bits, even_bits, names)
+        }
+    }
+
+    /// The spread of the low `value_bits` of `value` into a `result_bits`-wide value, computed by
+    /// `__int_spread` where the ladder's `u128` masks cannot hold it.
+    fn build_wide_spread(
+        &mut self,
+        value: IntValue<'ctx>,
+        value_bits: u32,
+        result_bits: u32,
+        name: &str,
+    ) -> IntValue<'ctx> {
+        let helper = self.int_spread_fn.expect("__int_spread not declared");
+        let (padded_type, limbs) = self.padded_limb_type(result_bits);
+        let a_slot = self.wide_scratch_slot(padded_type, 0);
+        let out_slot = self.wide_scratch_slot(padded_type, 1);
+
+        let a = self.widen_or_trunc_int(value, padded_type.get_bit_width(), "spread_a");
+        self.builder.build_store(a_slot, a).unwrap();
+        let i32_type = self.context.i32_type();
+        let arguments: [BasicMetadataValueEnum<'ctx>; 4] = [
+            out_slot.into(),
+            a_slot.into(),
+            i32_type.const_int(u64::from(limbs), false).into(),
+            i32_type.const_int(u64::from(value_bits), false).into(),
+        ];
+        self.builder.build_call(helper, &arguments, "").unwrap();
+
+        let loaded = self
+            .builder
+            .build_load(padded_type, out_slot, "spread_out")
+            .unwrap()
+            .into_int_value();
+        self.widen_or_trunc_int(loaded, result_bits, name)
+    }
+
+    /// The odd and even streams of the low `value_bits` of `value`, into `odd_bits` and
+    /// `even_bits`, computed by `__int_unspread` where the ladder's `u128` masks cannot hold the
+    /// operand.
+    fn build_wide_unspread(
+        &mut self,
+        value: IntValue<'ctx>,
+        value_bits: u32,
+        odd_bits: u32,
+        even_bits: u32,
+        (odd_name, even_name): &(String, String),
+    ) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        let helper = self.int_unspread_fn.expect("__int_unspread not declared");
+        let (padded_type, limbs) = self.padded_limb_type(value.get_type().get_bit_width());
+        let a_slot = self.wide_scratch_slot(padded_type, 0);
+        let odd_slot = self.wide_scratch_slot(padded_type, 1);
+        let even_slot = self.wide_scratch_slot(padded_type, 2);
+
+        let a = self.widen_or_trunc_int(value, padded_type.get_bit_width(), "unspread_a");
+        self.builder.build_store(a_slot, a).unwrap();
+        let i32_type = self.context.i32_type();
+        let arguments: [BasicMetadataValueEnum<'ctx>; 5] = [
+            odd_slot.into(),
+            even_slot.into(),
+            a_slot.into(),
+            i32_type.const_int(u64::from(limbs), false).into(),
+            i32_type.const_int(u64::from(value_bits), false).into(),
+        ];
+        self.builder.build_call(helper, &arguments, "").unwrap();
+
+        let load = |slot, bits, name: &str| {
+            let loaded = self
+                .builder
+                .build_load(padded_type, slot, "unspread_out")
+                .unwrap()
+                .into_int_value();
+            self.widen_or_trunc_int(loaded, bits, name)
+        };
+        let odd = load(odd_slot, odd_bits, odd_name);
+        let even = load(even_slot, even_bits, even_name);
+        (odd, even)
+    }
+
+    /// The integer type of `bits` padded to whole limbs, and how many limbs that is.
+    fn padded_limb_type(&self, bits: u32) -> (inkwell::types::IntType<'ctx>, u32) {
+        let limbs = bits.div_ceil(HOST_LIMB_BITS as u32);
+        let padded = self
+            .context
+            .custom_width_int_type(
+                NonZeroU32::new(limbs * HOST_LIMB_BITS as u32).expect("a padded width is nonzero"),
+            )
+            .expect("A basic integer type can be created");
+        (padded, limbs)
     }
 
     /// A scratch buffer holding one `slot_type` value, in the current function's entry block.
@@ -1378,12 +1568,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             LLOp::Spread {
                 result,
                 value,
-                bits,
+                value_bits,
                 result_bits,
             } => {
                 let input = self.value_map[value].into_int_value();
-                let val =
-                    self.compile_spread_bits(input, *bits, *result_bits, &format!("v{}", result.0));
+                let name = format!("v{}", result.0);
+                let val = self.build_spread(input, *value_bits, *result_bits, &name);
                 self.value_map.insert(*result, val.into());
             }
 
@@ -1391,44 +1581,14 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 result_odd,
                 result_even,
                 value,
-                bits,
+                value_bits,
                 odd_bits,
                 even_bits,
             } => {
                 let input = self.value_map[value].into_int_value();
-                let active_input_bits = (*bits as u32) * 2;
-                let input = self
-                    .builder
-                    .build_and(
-                        input,
-                        self.int_mask(
-                            input.get_type().get_bit_width(),
-                            Self::low_bits_mask(active_input_bits),
-                        ),
-                        "unspread_active",
-                    )
-                    .unwrap();
-                let odd_source = self
-                    .builder
-                    .build_right_shift(
-                        input,
-                        input.get_type().const_int(1, false),
-                        false,
-                        "unspread_odd_src",
-                    )
-                    .unwrap();
-                let odd = self.compact_spread_bits(
-                    odd_source,
-                    *bits,
-                    *odd_bits,
-                    &format!("v{}", result_odd.0),
-                );
-                let even = self.compact_spread_bits(
-                    input,
-                    *bits,
-                    *even_bits,
-                    &format!("v{}", result_even.0),
-                );
+                let names = (format!("v{}", result_odd.0), format!("v{}", result_even.0));
+                let (odd, even) =
+                    self.build_unspread(input, *value_bits, *odd_bits, *even_bits, &names);
                 self.value_map.insert(*result_odd, odd.into());
                 self.value_map.insert(*result_even, even.into());
             }
@@ -2149,6 +2309,65 @@ mod tests {
             .verify()
             .unwrap_or_else(|error| panic!("the emitted module does not verify: {error}"));
         codegen.get_ir()
+    }
+
+    /// The IR of a spread of a whole `bits`-wide parameter, or `unspread` of an unspread of one.
+    fn spread_ir(unspread: bool, bits: u32) -> String {
+        let context = Context::create();
+        let mut codegen = LLVMCodeGen::new(&context, "spread_shape");
+        let ty = context
+            .custom_width_int_type(NonZeroU32::new(bits).unwrap())
+            .unwrap();
+        let result_bits = if unspread { bits / 2 } else { 2 * bits };
+        let result_ty = context
+            .custom_width_int_type(NonZeroU32::new(result_bits).unwrap())
+            .unwrap();
+        let function =
+            codegen
+                .module
+                .add_function("subject", result_ty.fn_type(&[ty.into()], false), None);
+        codegen
+            .builder
+            .position_at_end(context.append_basic_block(function, "entry"));
+
+        let a = function.get_nth_param(0).unwrap().into_int_value();
+        let result = if unspread {
+            let names = ("odd".to_string(), "even".to_string());
+            codegen
+                .build_unspread(a, bits, bits / 2, bits.div_ceil(2), &names)
+                .0
+        } else {
+            codegen.build_spread(a, bits, result_bits, "spread")
+        };
+        codegen.builder.build_return(Some(&result)).unwrap();
+
+        codegen
+            .module
+            .verify()
+            .unwrap_or_else(|error| panic!("the emitted module does not verify: {error}"));
+        codegen.get_ir()
+    }
+
+    /// A spread calls its helper from the first result a `u128` cannot hold, and an unspread from
+    /// the first such operand, and neither calls it below that.
+    #[test]
+    fn a_spread_calls_its_helper_exactly_past_the_ladder() {
+        for (unspread, helper, last_ladder) in [
+            (false, "call void @__int_spread", HOST_WORD_BITS as u32 / 2),
+            (true, "call void @__int_unspread", HOST_WORD_BITS as u32),
+        ] {
+            let ladder = spread_ir(unspread, last_ladder);
+            assert!(
+                !ladder.contains(helper),
+                "{helper} at {last_ladder}:\n{ladder}"
+            );
+            let wide = spread_ir(unspread, last_ladder + 1);
+            assert!(
+                wide.contains(helper),
+                "no {helper} at {}:\n{wide}",
+                last_ladder + 1
+            );
+        }
     }
 
     #[test]
@@ -2936,6 +3155,82 @@ mod int_semantics_conformance {
             checked > 25_000,
             "the sweep only reached {checked} specified points"
         );
+    }
+
+    /// The spread and unspread ladders: a spread whose result a `u128` holds and an unspread whose
+    /// operand does, each at reads short of the container so that the masks discarding the bits
+    /// above them are exercised.
+    #[test]
+    fn the_spread_ladders_agree_with_the_model() {
+        let context = Context::create();
+        let codegen = LLVMCodeGen::new(&context, "int_semantics_conformance_spread");
+        let scratch =
+            codegen
+                .module
+                .add_function("scratch", context.void_type().fn_type(&[], false), None);
+        codegen
+            .builder
+            .position_at_end(context.append_basic_block(scratch, "entry"));
+
+        let mut checked = 0usize;
+        let mut unfolded = Vec::new();
+        let mut check = |what: String, got: IntValue<'_>, want: &IntBits, codegen: &LLVMCodeGen| {
+            match folds_to(codegen, got, want) {
+                Some(equal) => {
+                    assert!(equal, "{what} folded to something other than {want:?}");
+                    checked += 1;
+                }
+                None => unfolded.push(what),
+            }
+        };
+
+        for bits in 1..=HOST_WORD_BITS / 2 {
+            for a in corners::values(bits) {
+                let value = IntBits::from_u128(bits, a);
+                for read in corners::spread_reads(bits, 1) {
+                    let got = codegen.compile_spread_bits(
+                        codegen.int_pattern(&value),
+                        read as u32,
+                        2 * bits as u32,
+                        "",
+                    );
+                    check(
+                        format!("spread of {read} bits of {a:#x} at {bits}"),
+                        got,
+                        &value.spread(read),
+                        &codegen,
+                    );
+                }
+            }
+        }
+
+        let names = (String::new(), String::new());
+        for bits in 2..=HOST_WORD_BITS {
+            for a in corners::values(bits) {
+                let value = IntBits::from_u128(bits, a);
+                for read in corners::spread_reads(bits, 2) {
+                    let (odd, even) = codegen.compile_unspread_bits(
+                        codegen.int_pattern(&value),
+                        read as u32,
+                        (bits / 2) as u32,
+                        bits.div_ceil(2) as u32,
+                        &names,
+                    );
+                    let (want_odd, want_even) = value.unspread(read);
+                    let what = format!("unspread of {read} bits of {a:#x} at {bits}");
+                    check(format!("{what}, odd"), odd, &want_odd, &codegen);
+                    check(format!("{what}, even"), even, &want_even, &codegen);
+                }
+            }
+        }
+
+        assert!(
+            unfolded.is_empty(),
+            "LLVM did not fold {} spreads, e.g. {:?}",
+            unfolded.len(),
+            &unfolded[..unfolded.len().min(5)]
+        );
+        assert!(checked > 20_000, "the sweep only reached {checked} points");
     }
 
     /// Whether LLVM folded `value` to exactly `want`, or [`None`] if it folded to no constant.

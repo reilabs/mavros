@@ -518,7 +518,7 @@ impl Funnel {
 /// truncates, which is the reading `docs/int-semantics.md` gives it.
 fn int_width_into_field(source: &Type, target: &CastTarget) -> Option<usize> {
     match target {
-        CastTarget::Field => int_width(source),
+        CastTarget::Field => source.int_width(),
         CastTarget::Map(inner) => int_width_into_field(element_type(source)?, inner),
         CastTarget::Int(_)
         | CastTarget::WitnessOf
@@ -530,7 +530,7 @@ fn int_width_into_field(source: &Type, target: &CastTarget) -> Option<usize> {
 
 /// The declared width of `value`'s integer type, or [`None`] where it is not an integer.
 fn int_width_of(types: &FunctionTypeInfo, value: ValueId) -> Option<usize> {
-    int_width(types.try_get_value_type(value)?)
+    types.try_get_value_type(value)?.int_width()
 }
 
 /// Whether `value` is a witness.
@@ -553,15 +553,6 @@ fn operation_name(group: ArithGroup) -> &'static str {
         ArithGroup::And => "bitwise and",
         ArithGroup::Or => "bitwise or",
         ArithGroup::Xor => "bitwise xor",
-    }
-}
-
-/// The width of an integer type, looking through a witness wrapper.
-fn int_width(ty: &Type) -> Option<usize> {
-    match &ty.expr {
-        TypeExpr::Int(bits) => Some(*bits),
-        TypeExpr::WitnessOf(inner) => int_width(inner),
-        _ => None,
     }
 }
 
@@ -950,8 +941,7 @@ mod tests {
     /// The widths named here are the ones that used to have none: the two bands between the three
     /// arms `lower_binary_bitwise` was keyed on, and the band between the narrow bound and the
     /// representation threshold. They are kept as the cases rather than a range because each is a
-    /// different reason — a spread past the instruction's width, a value that is neither one limb
-    /// nor two, and a value too wide for the narrow lowerings but not yet split into limbs.
+    /// different reason.
     ///
     /// **Bitwise reaches them all because it has no cross-limb interaction.** The other unbounded
     /// operations reach every width for other reasons: equality has no width of its own, and the

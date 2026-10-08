@@ -609,6 +609,24 @@ fn cell_srem(a: u64, b: u64, bits: u64) -> u64 {
     }
 }
 
+/// The low `bits` bits of `a`, at most 32, interleaved with zeros. The body of `spread_u32_to_u64`.
+///
+/// The cell holds a value of its container's width, which may be wider than the read, so `bits`
+/// is _semantic_ here: the bits above it are discarded.
+#[inline(always)]
+fn cell_spread(a: u64, bits: u64) -> u64 {
+    mavros_limb_arith::spread_u32_to_u64((a & cell_mask(bits)) as u32)
+}
+
+/// The low `bits` bits of `a`, at most 64, separated into their odd- and even-indexed streams of
+/// at most 32 bits each, as `(odd, even)`. The body of `unspread_u64_to_u32`, discarding the bits
+/// above the read.
+#[inline(always)]
+fn cell_unspread(a: u64, bits: u64) -> (u64, u64) {
+    let (odd, even) = mavros_limb_arith::unspread_u64_to_u32(a & cell_mask(bits));
+    (u64::from(odd), u64::from(even))
+}
+
 /// A 128-bit frame value: two `u64` cells holding a raw bit pattern, with no reading attached.
 ///
 /// `Eq`/`PartialEq` are derived because bit-pattern equality is the same question under either
@@ -1263,35 +1281,6 @@ pub(crate) fn pow2_rows(len: usize) -> impl Iterator<Item = Field> {
         acc += acc;
         row
     })
-}
-
-/// Compute spread of a u32: interleave zero bits between each bit.
-pub(crate) fn spread_bits(v: u32) -> u64 {
-    let mut x = v as u64;
-    x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF;
-    x = (x | (x << 8)) & 0x00FF_00FF_00FF_00FF;
-    x = (x | (x << 4)) & 0x0F0F_0F0F_0F0F_0F0F;
-    x = (x | (x << 2)) & 0x3333_3333_3333_3333;
-    x = (x | (x << 1)) & 0x5555_5555_5555_5555;
-    x
-}
-
-/// Compact even-positioned bits into contiguous low bits.
-fn compact_bits(mut x: u64) -> u32 {
-    x &= 0x5555_5555_5555_5555;
-    x = (x | (x >> 1)) & 0x3333_3333_3333_3333;
-    x = (x | (x >> 2)) & 0x0F0F_0F0F_0F0F_0F0F;
-    x = (x | (x >> 4)) & 0x00FF_00FF_00FF_00FF;
-    x = (x | (x >> 8)) & 0x0000_FFFF_0000_FFFF;
-    x = (x | (x >> 16)) & 0x0000_0000_FFFF_FFFF;
-    x as u32
-}
-
-/// Extract even bits and odd bits from a spread sum. Returns (odd_bits, even_bits).
-fn unspread_bits(v: u64) -> (u32, u32) {
-    let even = compact_bits(v);
-    let odd = compact_bits(v >> 1);
-    (odd, even)
 }
 
 /// The row `key` addresses in a table of `length` entries, or `None` when it
@@ -2809,23 +2798,69 @@ mod def {
         }
     }
 
-    /// Interleave the low 32 bits of `val` with zeros, giving a 64-bit spread pattern.
+    /// Interleave the low `bits` bits of `val` with zeros. See [`cell_spread`].
     #[opcode]
-    fn spread_u32_to_u64(#[out] res: *mut u64, #[frame] val: u64) {
-        let result = spread_bits(val as u32);
+    fn spread_u32_to_u64(#[out] res: *mut u64, #[frame] val: u64, bits: u64) {
         unsafe {
-            *res = result;
+            *res = cell_spread(val, bits);
         }
     }
 
-    /// Split a 64-bit spread pattern into its two 32-bit bit streams, odd-indexed and even.
+    /// Split the low `bits` bits of `val` into their odd- and even-indexed streams. See
+    /// [`cell_unspread`].
     #[opcode]
-    fn unspread_u64_to_u32(#[out] res_and: *mut u64, #[out] res_xor: *mut u64, #[frame] val: u64) {
-        let (and_val, xor_val) = unspread_bits(val);
+    fn unspread_u64_to_u32(
+        #[out] res_odd: *mut u64,
+        #[out] res_even: *mut u64,
+        #[frame] val: u64,
+        bits: u64,
+    ) {
+        let (odd, even) = cell_unspread(val, bits);
         unsafe {
-            *res_and = and_val as u64;
-            *res_xor = xor_val as u64;
+            *res_odd = odd;
+            *res_even = even;
         }
+    }
+
+    /// Interleave the low `bits` bits of a `from_bits`-wide value with zeros, into a value of
+    /// `to_bits`, which is twice `from_bits`: the spread of a container too wide for
+    /// `spread_u32_to_u64`.
+    #[opcode]
+    fn spread_intn(
+        from_bits: u64,
+        to_bits: u64,
+        bits: u64,
+        #[frame_slice(to_bits)] res: &mut [u64],
+        #[frame_slice(from_bits)] a: &[u64],
+    ) {
+        debug_assert!(
+            to_bits == 2 * from_bits && (1..=from_bits).contains(&bits),
+            "a spread of {bits} bits of an int{from_bits} into an int{to_bits}"
+        );
+        mavros_limb_arith::spread(res, a, bits as usize);
+    }
+
+    /// Split the low `bits` bits of a `from_bits`-wide value into its odd- and even-indexed
+    /// streams, of `odd_bits` and `even_bits`: the unspread of a container too wide for
+    /// `unspread_u64_to_u32`.
+    #[opcode]
+    fn unspread_intn(
+        from_bits: u64,
+        odd_bits: u64,
+        even_bits: u64,
+        bits: u64,
+        #[frame_slice(odd_bits)] odd: &mut [u64],
+        #[frame_slice(even_bits)] even: &mut [u64],
+        #[frame_slice(from_bits)] a: &[u64],
+    ) {
+        debug_assert!(
+            odd_bits == from_bits / 2
+                && even_bits == from_bits.div_ceil(2)
+                && (2..=from_bits).contains(&bits),
+            "an unspread of {bits} bits of an int{from_bits} into an int{odd_bits} and an \
+             int{even_bits}"
+        );
+        mavros_limb_arith::unspread(odd, even, a, bits as usize);
     }
 
     #[raw_opcode]
@@ -2947,7 +2982,7 @@ mod def {
                         .as_ad
                         .out_db
                         .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) +=
-                        coeff * Field::from(spread_bits(i as u32));
+                        coeff * Field::from(mavros_limb_arith::spread_u32_to_u64(i as u32));
 
                     // dc[m] += coeff
                     *vm.data
@@ -3930,6 +3965,145 @@ mod tests {
             u64::MAX,
             "cast_intn to 64 bits"
         );
+
+        frame.pop(&mut vm);
+    }
+
+    /// The spread opcodes through real dispatch, in a frame whose every cell starts as garbage.
+    ///
+    /// The conformance sweeps call the opcode bodies' helpers directly, and they start from zeroed
+    /// buffers where a frame cell starts as whatever was there. Each operand carries set bits above
+    /// its read, each result is compared limb for limb, so a bit the opcode failed to clear shows,
+    /// and the shapes are the ones where the streams and the operand differ in cell count.
+    #[test]
+    fn the_spread_opcodes_survive_the_round_trip_through_dispatch() {
+        use mavros_int_semantics::IntBits;
+
+        const GARBAGE: u64 = 0xAAAA_AAAA_AAAA_AAAA;
+        const FRAME: usize = 20;
+        let spread_in = IntBits::from_u128(48, 0xFFFF_FFFF_FFFF);
+        let unspread_odd_in = IntBits::from_limbs(129, &[0x0123_4567_89AB_CDEF, u64::MAX, 1]);
+        let unspread_short_in = IntBits::from_limbs(100, &[u64::MAX, (1 << 36) - 1]);
+        let narrow_spread_in = IntBits::from_u128(32, 0xFFFF_FFFF);
+        let narrow_unspread_in = IntBits::from_u128(64, u128::from(u64::MAX));
+
+        // Positions, each operand's and result's own cells, and one cell after the wide spread's
+        // result that nothing writes.
+        let (a1, r1, after_r1) = (0usize, 1, 3);
+        let (a2, odd2, even2) = (4usize, 7, 8);
+        let (a3, odd3, even3) = (10usize, 12, 13);
+        let (a4, r4) = (14usize, 15);
+        let (a5, odd5, even5) = (16usize, 17, 18);
+        let at = FramePosition;
+
+        let code = vec![
+            OpCode::SpreadIntn {
+                from_bits: 48,
+                to_bits: 96,
+                bits: 40,
+                res: at(r1),
+                a: at(a1),
+            },
+            OpCode::UnspreadIntn {
+                from_bits: 129,
+                odd_bits: 64,
+                even_bits: 65,
+                bits: 129,
+                odd: at(odd2),
+                even: at(even2),
+                a: at(a2),
+            },
+            OpCode::UnspreadIntn {
+                from_bits: 100,
+                odd_bits: 50,
+                even_bits: 50,
+                bits: 70,
+                odd: at(odd3),
+                even: at(even3),
+                a: at(a3),
+            },
+            OpCode::SpreadU32ToU64 {
+                res: at(r4),
+                val: at(a4),
+                bits: 31,
+            },
+            OpCode::UnspreadU64ToU32 {
+                res_odd: at(odd5),
+                res_even: at(even5),
+                val: at(a5),
+                bits: 63,
+            },
+            OpCode::Trap {},
+        ];
+        let locations = vec![location("main", 1); code.len()];
+        let program = Program {
+            functions: vec![Function {
+                name: "main".to_string(),
+                frame_size: FRAME,
+                code,
+                source_locations: locations,
+            }],
+            entry_points: vec![0],
+            entry_blob_field_count: 0,
+            global_frame_size: 0,
+            struct_layouts: Vec::new(),
+            constant_pool: Vec::new(),
+        };
+
+        let (mut binary, debug_info) = program.to_binary_and_debug_info();
+        let header = parse_program_header(&binary);
+        crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
+
+        let mut vm = empty_witgen_vm();
+        vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
+        let frame = Frame::base_frame(FRAME as u64, &mut vm);
+        for cell in 0..FRAME {
+            frame.write_u64(cell as isize, GARBAGE);
+        }
+        for (position, value) in [
+            (a1, &spread_in),
+            (a2, &unspread_odd_in),
+            (a3, &unspread_short_in),
+            (a4, &narrow_spread_in),
+            (a5, &narrow_unspread_in),
+        ] {
+            for (i, &limb) in value.limbs().iter().enumerate() {
+                frame.write_u64((position + i) as isize, limb);
+            }
+        }
+
+        let entry = header.entry_points[0];
+        unsafe { crate::interpreter::dispatch(binary.as_ptr().add(entry + 2), frame, &mut vm) };
+
+        let read = |position: usize, want: &IntBits| -> Vec<u64> {
+            (0..want.limb_count())
+                .map(|i| frame.read_u64((position + i) as isize))
+                .collect()
+        };
+        let check = |what: &str, position: usize, want: &IntBits| {
+            assert_eq!(read(position, want), want.limbs(), "{what}");
+        };
+
+        check("spread_intn", r1, &spread_in.spread(40));
+        assert_eq!(
+            frame.read_u64(after_r1 as isize),
+            GARBAGE,
+            "spread_intn wrote past its result"
+        );
+        let (odd, even) = unspread_odd_in.unspread(129);
+        check("unspread_intn's odd stream at 129 bits", odd2, &odd);
+        check("unspread_intn's even stream at 129 bits", even2, &even);
+        let (odd, even) = unspread_short_in.unspread(70);
+        check("unspread_intn's odd stream of 70 bits of 100", odd3, &odd);
+        check(
+            "unspread_intn's even stream of 70 bits of 100",
+            even3,
+            &even,
+        );
+        check("spread_u32_to_u64", r4, &narrow_spread_in.spread(31));
+        let (odd, even) = narrow_unspread_in.unspread(63);
+        check("unspread_u64_to_u32's odd stream", odd5, &odd);
+        check("unspread_u64_to_u32's even stream", even5, &even);
 
         frame.pop(&mut vm);
     }
@@ -5252,6 +5426,73 @@ mod int_semantics_conformance {
                     host(&IntBits::from_u128(bits as usize, a).complement()),
                     "not_int128 disagreed at {bits} bits on {a:#x}"
                 );
+            }
+        }
+    }
+
+    /// The cell lane's spread and unspread, over every container their opcodes take.
+    #[test]
+    fn the_cell_spreads_agree_with_the_model() {
+        for bits in lane_widths().into_iter().map(|bits| bits as usize) {
+            for a in corners::values(bits) {
+                let value = IntBits::from_u128(bits, a);
+                if bits <= 32 {
+                    for read in corners::spread_reads(bits, 1) {
+                        assert_eq!(
+                            u128::from(cell_spread(a as u64, read as u64)),
+                            host(&value.spread(read)),
+                            "spread_u32_to_u64 of {read} bits of {a:#x} at {bits}"
+                        );
+                    }
+                }
+                if bits >= 2 {
+                    for read in corners::spread_reads(bits, 2) {
+                        let (odd, even) = value.unspread(read);
+                        assert_eq!(
+                            cell_unspread(a as u64, read as u64),
+                            (host(&odd) as u64, host(&even) as u64),
+                            "unspread_u64_to_u32 of {read} bits of {a:#x} at {bits}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The wide lane's spread and unspread, over buffers of exactly the cells the frame gives each
+    /// operand, which is where a stream shorter than its operand's limbs runs out.
+    ///
+    /// Every buffer starts as garbage, as a frame cell does, and every answer is compared limb for
+    /// limb, so a cell the body failed to clear or a bit left above the result's width shows.
+    #[test]
+    fn the_intn_spreads_agree_with_the_model() {
+        const GARBAGE: u64 = 0xAAAA_AAAA_AAAA_AAAA;
+        let mut widths: Vec<usize> = (1..=200).collect();
+        widths.extend(corners::WIDE_WIDTHS);
+        widths.push(mavros_int_semantics::MAX_BITS / 2);
+        for bits in widths {
+            for value in corners::wide_values(bits) {
+                if 2 * bits <= mavros_int_semantics::MAX_BITS {
+                    for read in corners::spread_reads(bits, 1) {
+                        let want = value.spread(read);
+                        let mut res = vec![GARBAGE; want.limb_count()];
+                        mavros_limb_arith::spread(&mut res, value.limbs(), read);
+                        assert_eq!(res, want.limbs(), "spread_intn of {read} bits of {value:?}");
+                    }
+                }
+                if bits >= 2 {
+                    for read in corners::spread_reads(bits, 2) {
+                        let (want_odd, want_even) = value.unspread(read);
+                        let mut odd = vec![GARBAGE; want_odd.limb_count()];
+                        let mut even = vec![GARBAGE; want_even.limb_count()];
+                        mavros_limb_arith::unspread(&mut odd, &mut even, value.limbs(), read);
+                        assert_eq!(
+                            (odd.as_slice(), even.as_slice()),
+                            (want_odd.limbs(), want_even.limbs()),
+                            "unspread_intn of {read} bits of {value:?}"
+                        );
+                    }
+                }
             }
         }
     }

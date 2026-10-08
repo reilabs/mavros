@@ -1861,68 +1861,59 @@ impl CodeGen {
                         size: *size as usize,
                     });
                 }
-                hlssa::OpCode::Spread { result, value, .. } => {
-                    let value_type = type_info.get_value_type(*value);
-
-                    // `Spread` interleaves a bit pattern with zeros; there is no signed form of it,
-                    // and the width it actually supports is `SPREAD_MAX_BITS`.
-                    let value_bits = match value_type.strip_witness().expr {
-                        TypeExpr::Int(bits) => bits,
-                        t => ice!("Unsupported spread value type: {:?}", t),
-                    };
-                    if value_bits > SPREAD_MAX_BITS {
-                        todo!(
-                            "Spread bytecode lowering for integer widths > {SPREAD_MAX_BITS} bits"
-                        );
+                hlssa::OpCode::Spread {
+                    result,
+                    value,
+                    value_bits,
+                } => {
+                    let from_bits = spread_width(type_info, *value);
+                    let to_bits = spread_width(type_info, *result);
+                    let res = layouter.alloc_int(*result, to_bits);
+                    let a = layouter.get_value(*value);
+                    let bits = *value_bits as u64;
+                    if from_bits <= SPREAD_MAX_BITS {
+                        emitter.push_op(bytecode::OpCode::SpreadU32ToU64 { res, val: a, bits });
+                    } else {
+                        emitter.push_op(bytecode::OpCode::SpreadIntn {
+                            res,
+                            a,
+                            from_bits: from_bits as u64,
+                            to_bits: to_bits as u64,
+                            bits,
+                        });
                     }
-                    let result_type = type_info.get_value_type(*result);
-                    let res = match result_type.strip_witness().expr {
-                        TypeExpr::Int(bits) => layouter.alloc_int(*result, bits),
-                        TypeExpr::Field => layouter.alloc_field(*result),
-                        _ => ice!("Unsupported spread result type: {result_type}"),
-                    };
-                    emitter.push_op(bytecode::OpCode::SpreadU32ToU64 {
-                        res,
-                        val: layouter.get_value(*value),
-                    });
                 }
                 hlssa::OpCode::Unspread {
                     result_odd,
                     result_even,
                     value,
-                    ..
+                    value_bits,
                 } => {
-                    // The inverse of the arm above: a spread `SPREAD_MAX_BITS` value, which is
-                    // twice as wide. The type rule admits an operand twice that again, and the
-                    // opcode would read only its low 64 bits.
-                    let value_type = type_info.get_value_type(*value);
-                    let value_bits = match value_type.strip_witness().expr {
-                        TypeExpr::Int(bits) => bits,
-                        t => ice!("Unsupported unspread value type: {:?}", t),
-                    };
-                    if value_bits > 2 * SPREAD_MAX_BITS {
-                        todo!(
-                            "Unspread bytecode lowering for integer widths > {} bits",
-                            2 * SPREAD_MAX_BITS
-                        );
+                    let from_bits = spread_width(type_info, *value);
+                    let odd_bits = spread_width(type_info, *result_odd);
+                    let even_bits = spread_width(type_info, *result_even);
+                    let odd = layouter.alloc_int(*result_odd, odd_bits);
+                    let even = layouter.alloc_int(*result_even, even_bits);
+                    let a = layouter.get_value(*value);
+                    let bits = *value_bits as u64;
+                    if from_bits <= 2 * SPREAD_MAX_BITS {
+                        emitter.push_op(bytecode::OpCode::UnspreadU64ToU32 {
+                            res_odd: odd,
+                            res_even: even,
+                            val: a,
+                            bits,
+                        });
+                    } else {
+                        emitter.push_op(bytecode::OpCode::UnspreadIntn {
+                            odd,
+                            even,
+                            a,
+                            from_bits: from_bits as u64,
+                            odd_bits: odd_bits as u64,
+                            even_bits: even_bits as u64,
+                            bits,
+                        });
                     }
-                    let odd_type = type_info.get_value_type(*result_odd);
-                    let even_type = type_info.get_value_type(*result_even);
-                    let res_and = match odd_type.strip_witness().expr {
-                        TypeExpr::Int(bits) => layouter.alloc_int(*result_odd, bits),
-                        TypeExpr::Field => layouter.alloc_field(*result_odd),
-                        _ => ice!("Unsupported unspread odd result type: {odd_type}"),
-                    };
-                    let res_xor = match even_type.strip_witness().expr {
-                        TypeExpr::Int(bits) => layouter.alloc_int(*result_even, bits),
-                        TypeExpr::Field => layouter.alloc_field(*result_even),
-                        _ => ice!("Unsupported unspread even result type: {even_type}"),
-                    };
-                    emitter.push_op(bytecode::OpCode::UnspreadU64ToU32 {
-                        res_and,
-                        res_xor,
-                        val: layouter.get_value(*value),
-                    });
                 }
                 hlssa::OpCode::Todo { payload, .. } => {
                     ice!("Todo opcode encountered in Codegen: {}", payload);
@@ -2134,6 +2125,14 @@ fn emit_assert_r1c(
 
 // UTILITY FUNCTIONS
 // ================================================================================================
+
+/// The width of a spread's or an unspread's operand or result.
+fn spread_width(type_info: &FunctionTypeInfo, value: ValueId) -> usize {
+    type_info
+        .get_value_type(value)
+        .int_width()
+        .unwrap_or_else(|| ice!("a spread's operand and results are integers"))
+}
 
 /// Returns (stride, elem_kind) for an array element type in a lookup opcode.
 fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {

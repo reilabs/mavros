@@ -182,14 +182,15 @@ Everywhere the intended semantics _has_ an opinion, this agrees with it.
 
 ### `vm`: the Bytecode Interpreter's Opcodes
 
-`vm/src/bytecode.rs` and `vm/src/int_limbs.rs`, with the wide lane's sum, difference, product and
-divisions in `limb-arith/src/lib.rs`, which the WASM runtime's helpers share. This one does **not**
-delegate because it's a hot dispatch loop over `u64` cells, while the model computes over
-heap-backed limbs. Delegating would mean an allocation per opcode to compute an `eval` that is then
-discarded, which is not great for performance. That argument holds for the `_intn` lane too as a
-wide value is a run of frame cells computed over in place, so delegating would allocate an `IntBits`
-for each operand and one more for the result, on every opcode, and also prevent optimizing for
-performance due to `IntBits`' focus on readability.
+`vm/src/bytecode.rs` and `vm/src/int_limbs.rs`, with the wide lane's sum, difference, product,
+divisions, spread and unspread in `limb-arith/src/lib.rs`, which the WASM runtime's helpers share.
+
+This one does **not** delegate because it's a hot dispatch loop over `u64` cells, while the model
+computes over heap-backed limbs. Delegating would mean an allocation per opcode to compute an `eval`
+that is then discarded, which is not great for performance. That argument holds for the `_intn` lane
+too as a wide value is a run of frame cells computed over in place, so delegating would allocate an
+`IntBits` for each operand and one more for the result, on every opcode, and also prevent optimizing
+for performance due to `IntBits`' focus on readability.
 
 The relation is thus checked instead of enforced: **total, and equal to `residue` wherever the model
 specifies a pattern**. Total means no panic, no undefined behavior and no process abort — a witness
@@ -202,7 +203,7 @@ interpreter relies on.
 `codegen/llssa_to_llvm.rs` and `wasm-runtime/src/lib.rs`, with the wide helpers' bodies in
 `limb-arith/src/lib.rs`, which the VM shares. It emits instructions and never computes a value, so a
 Rust mirror of its choices would only be checking a copy. Instead the lowering itself is called with
-two constant operands and we use LLVM's constant folder to check the answer.
+constant operands and we use LLVM's constant folder to check the answer.
 
 Above 128 bits LLVM expands a multiply into quadratic straight-line code -- 7.2 MB at 16384 bits,
 and past around 5700 bits a module no WASM engine will load. It expands a division into a bit-serial
@@ -211,7 +212,9 @@ against an engine cap of 50 000 per function, and even an `add` or `sub` costs 3
 that end, the WASM runtime provides limb-based helpers: `__int_add`, `__int_sub` and `__int_mul` for
 the wrapping operations, and `__int_udivrem` and `__int_sdivrem`, which provide a quotient and a
 remainder together, for the four divisions. Above 128 bits each of those seven operations is emitted
-around a call to its helper, unless both operands are constants.
+around a call to its helper, unless both operands are constants. A spread whose result, or an
+unspread whose operand, is wider than 128 bits calls `__int_spread` or `__int_unspread`, because the
+mask ladder that computes a narrower one runs in 128-bit masks.
 
 ### `value-range`: the Interval Domain's Arithmetic
 
@@ -319,13 +322,3 @@ lane.
 It is generated from the model rather than written by hand.
 `MAVROS_BLESS=1 cargo test -p mavros-int-semantics --test generated_corpus` rewrites it, so a
 semantic change arrives as a reviewable diff of Noir programs.
-
-## Known Divergences
-
-These are conformance gaps, not deferred optimizations. Each is a place where mavros does not
-currently implement Noir.
-
-None is known. Every operation the model defines is computed at every width up to the type cap,
-under either reading, by every evaluator, the witness lowerings included. On a field narrower than
-bn254 `passes::width_validation` refuses, with a diagnostic, the witnessed shapes whose limbs that
-field leaves no room for, but no such field can be configured yet.

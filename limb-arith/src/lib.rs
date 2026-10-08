@@ -1,8 +1,10 @@
-//! Wrapping arithmetic on little-endian `u64` limb buffers.
+//! Wrapping arithmetic, and the spread and unspread bit rearrangements, on buffers of little-endian
+//! `u64` limbs.
 //!
-//! Shared by the two evaluators that compute wide integers in limbs: the VM's `_intn` lane
-//! (`mavros_vm::int_limbs`) and the WASM runtime's helpers (`__int_add`, `__int_sub`, `__int_mul`,
-//! `__int_udivrem` and `__int_sdivrem`). The crate is `no_std` and allocates nothing.
+//! Shared by the evaluators that compute wide integers in limbs: the VM and the WASM runtime's
+//! helpers.
+//!
+//! This crate is `no_std` and does not allocate.
 
 #![no_std]
 
@@ -214,9 +216,126 @@ fn shift_right_into(target: &mut [u64], source: &[u64], shift: u32) {
     }
 }
 
+// SPREADS
+// ================================================================================================
+
+/// `v` with bit `i` moved to bit `2i` and zeros between, which is the spread of one host half-word.
+#[must_use]
+pub fn spread_u32_to_u64(v: u32) -> u64 {
+    let mut x = u64::from(v);
+    x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF;
+    x = (x | (x << 8)) & 0x00FF_00FF_00FF_00FF;
+    x = (x | (x << 4)) & 0x0F0F_0F0F_0F0F_0F0F;
+    x = (x | (x << 2)) & 0x3333_3333_3333_3333;
+    (x | (x << 1)) & 0x5555_5555_5555_5555
+}
+
+/// The odd- and even-indexed bits of `v` as `(odd, even)`, each moved down to be contiguous, which
+/// is the unspread of one host word.
+#[must_use]
+pub fn unspread_u64_to_u32(v: u64) -> (u32, u32) {
+    (compact_even_bits(v >> 1), compact_even_bits(v))
+}
+
+/// The even-indexed bits of `x`, bit `2i` moved to bit `i`.
+fn compact_even_bits(mut x: u64) -> u32 {
+    x &= 0x5555_5555_5555_5555;
+    x = (x | (x >> 1)) & 0x3333_3333_3333_3333;
+    x = (x | (x >> 2)) & 0x0F0F_0F0F_0F0F_0F0F;
+    x = (x | (x >> 4)) & 0x00FF_00FF_00FF_00FF;
+    x = (x | (x >> 8)) & 0x0000_FFFF_0000_FFFF;
+    x = (x | (x >> 16)) & 0x0000_0000_FFFF_FFFF;
+    x as u32
+}
+
+/// Limb `index` of `a` with every bit at or above `bits` cleared, so that a spread or unspread
+/// reads only the bits it names.
+fn read_limb(a: &[u64], index: usize, bits: usize) -> u64 {
+    match bits - 64 * index {
+        rest if rest >= 64 => a[index],
+        rest => a[index] & ((1 << rest) - 1),
+    }
+}
+
+/// The low `bits` bits of `a` spread into `res`, bit `i` to bit `2i`, with every other bit of `res`
+/// cleared.
+///
+/// `a` holds at least the limbs `bits` reaches and `res` at least the limbs `2 * bits` does; the
+/// two need not be the same length, and anything past those is read as zero or written as zero.
+pub fn spread(res: &mut [u64], a: &[u64], bits: usize) {
+    res.fill(0);
+    for index in 0..bits.div_ceil(64) {
+        let limb = read_limb(a, index, bits);
+        res[2 * index] = spread_u32_to_u64(limb as u32);
+        let high = spread_u32_to_u64((limb >> 32) as u32);
+        // A top limb of 32 bits or fewer has an empty high half, and `res` may stop short of it.
+        if let Some(slot) = res.get_mut(2 * index + 1) {
+            *slot = high;
+        } else {
+            debug_assert_eq!(
+                high,
+                0,
+                "a spread of {bits} bits does not fit {} limbs",
+                res.len()
+            );
+        }
+    }
+}
+
+/// The low `bits` bits of `a` separated into `odd` and `even`, bit `2i + 1` to bit `i` of `odd` and
+/// bit `2i` to bit `i` of `even`, with every other bit of both cleared.
+///
+/// `a` holds at least the limbs `bits` reaches, and each stream at least the limbs its own
+/// `floor(bits / 2)` or `ceil(bits / 2)` bits do.
+pub fn unspread(odd: &mut [u64], even: &mut [u64], a: &[u64], bits: usize) {
+    odd.fill(0);
+    even.fill(0);
+    for index in 0..bits.div_ceil(64) {
+        let (odd_half, even_half) = unspread_u64_to_u32(read_limb(a, index, bits));
+        let shift = 32 * (index % 2);
+        for (stream, half) in [(&mut *odd, odd_half), (&mut *even, even_half)] {
+            // The odd stream is a bit shorter at an odd width, and may stop short of a top limb
+            // whose only bit is an even one.
+            if let Some(slot) = stream.get_mut(index / 2) {
+                *slot |= u64::from(half) << shift;
+            } else {
+                debug_assert_eq!(
+                    half, 0,
+                    "an unspread of {bits} bits does not fit its streams"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A spread unspreads back to the bits it read, with nothing in the odd stream, at every width
+    /// across three limbs, including the reads that end inside a limb's low half.
+    ///
+    /// The sweeps against the model are the VM's and the runtime's; this pins the shared body on
+    /// its own, including that bits above the read are cleared rather than carried through. Every
+    /// output starts as garbage, as a VM frame cell does, so a limb the body failed to clear shows.
+    #[test]
+    fn an_unspread_undoes_a_spread_at_every_width() {
+        const GARBAGE: u64 = 0xAAAA_AAAA_AAAA_AAAA;
+        let a = [0xDEAD_BEEF_F00D_CAFE, u64::MAX, 0x0123_4567_89AB_CDEF];
+        for bits in 1..=192 {
+            let mut spread_out = [GARBAGE; 6];
+            spread(&mut spread_out, &a, bits);
+
+            let (mut odd, mut even) = ([GARBAGE; 3], [GARBAGE; 3]);
+            unspread(&mut odd, &mut even, &spread_out, 2 * bits);
+            assert_eq!(odd, [0; 3], "{bits} bits");
+            let mut want = [0u64; 3];
+            for (index, slot) in want.iter_mut().enumerate().take(bits.div_ceil(64)) {
+                *slot = read_limb(&a, index, bits);
+            }
+            assert_eq!(even, want, "{bits} bits");
+        }
+    }
 
     /// Assert `quotient·b + remainder == a` with `remainder < b`, for the division of `a` by `b`.
     fn assert_divides(a: &[u64], b: &[u64]) {

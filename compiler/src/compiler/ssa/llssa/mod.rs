@@ -138,14 +138,14 @@ pub enum LLOp {
     Spread {
         result: ValueId,
         value: ValueId,
-        bits: u8,
+        value_bits: u32,
         result_bits: u32,
     },
     Unspread {
         result_odd: ValueId,
         result_even: ValueId,
         value: ValueId,
-        bits: u8,
+        value_bits: u32,
         odd_bits: u32,
         even_bits: u32,
     },
@@ -564,13 +564,13 @@ impl Instruction for LLOp {
             LLOp::Spread {
                 result,
                 value,
-                bits,
+                value_bits,
                 result_bits,
             } => {
                 format!(
                     "{} = spread({}) {} to i{}",
                     v(*result),
-                    bits,
+                    value_bits,
                     vr(*value),
                     result_bits
                 )
@@ -579,7 +579,7 @@ impl Instruction for LLOp {
                 result_odd,
                 result_even,
                 value,
-                bits,
+                value_bits,
                 odd_bits,
                 even_bits,
             } => {
@@ -587,7 +587,7 @@ impl Instruction for LLOp {
                     "{}, {} = unspread({}) {} to i{}, i{}",
                     v(*result_odd),
                     v(*result_even),
-                    bits,
+                    value_bits,
                     vr(*value),
                     odd_bits,
                     even_bits
