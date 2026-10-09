@@ -4674,7 +4674,7 @@ mod tests {
             },
         };
         use mavros_wasm_layout::{WITGEN_INPUTS_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE};
-        let runtime = crate::wasm_runtime::locate_or_build();
+        let runtime = crate::wasm_runtime::locate_or_build().unwrap();
         for (name, sequence, write) in [
             ("array_get", Some(SequenceTargetType::Array(2)), false),
             ("slice_get", Some(SequenceTargetType::Slice), false),
