@@ -4,12 +4,12 @@
 //!
 //! Two shapes are needed because the consumers want different things from the same comparison: the
 //! lowerings and DCE want an `AssertCmp` to emit, while `LowerPureGuards` wants the *condition* as
-//! a value so it can branch on it. [`seq_bounds_operands`] is the piece they all agree on — which
-//! value is the length, and at what width the two are compared.
+//! a value so it can branch on it. [`seq_bounds_operands`] is the piece they all agree on: which
+//! value is the length, compared with an `int32` index.
 
 use crate::compiler::ssa::{
     ValueId,
-    hlssa::{CastTarget, CmpKind, HLSSA, OpCode, Type, TypeExpr, builder::HLEmitter},
+    hlssa::{CmpKind, HLSSA, OpCode, Type, TypeExpr, builder::HLEmitter},
 };
 use mavros_int_semantics::IntBits;
 
@@ -66,20 +66,20 @@ impl SeqBoundsCheck {
     }
 }
 
-/// The length of `seq` and the index, brought to a common comparison width.
+/// The length of `seq` and the index, as the operands of their comparison.
 ///
-/// Returns `(len, index_cmp, len_cmp, cmp_bits)`; `len` is the un-widened length, which the insert
-/// lowering needs for the slice it builds.
+/// Returns `(len, index_cmp, len_cmp)`; `len` is also what the insert lowering needs for the slice
+/// it builds.
 pub fn seq_bounds_operands(
     emitter: &mut impl HLEmitter,
     seq: ValueId,
     index: ValueId,
     seq_ty: &Type,
     index_ty: &Type,
-) -> (ValueId, ValueId, ValueId, usize) {
+) -> (ValueId, ValueId, ValueId) {
     let len = seq_len(emitter, seq, seq_ty);
-    let (idx_cmp, len_cmp, cmp_bits) = index_bounds_operands(emitter, index, index_ty, len);
-    (len, idx_cmp, len_cmp, cmp_bits)
+    let (idx_cmp, len_cmp) = index_bounds_operands(index, index_ty, len);
+    (len, idx_cmp, len_cmp)
 }
 
 /// An array's length is in its type; a slice carries it as a value.
@@ -91,37 +91,13 @@ pub fn seq_len(emitter: &mut impl HLEmitter, seq: ValueId, seq_ty: &Type) -> Val
     }
 }
 
-/// For an `Int` index, compare at the wider of the two widths. A Field index is narrowed down to `Int(32)` since
-/// Noir unifies every subscript with `u32` during elaboration.
-pub fn index_bounds_operands(
-    emitter: &mut impl HLEmitter,
-    index: ValueId,
-    index_ty: &Type,
-    len: ValueId,
-) -> (ValueId, ValueId, usize) {
-    match index_ty.strip_witness().expr {
-        TypeExpr::Int(idx_bits) => widen_comparison_operands(emitter, index, idx_bits, len, 32),
-        _ => {
-            let idx_cmp = emitter.cast_to(CastTarget::Int(32), index);
-            (idx_cmp, len, 32)
-        }
-    }
-}
-
-/// Bring unsigned operands to a common width without discarding high index bits.
-pub fn widen_comparison_operands(
-    emitter: &mut impl HLEmitter,
-    lhs: ValueId,
-    lhs_bits: usize,
-    rhs: ValueId,
-    rhs_bits: usize,
-) -> (ValueId, ValueId, usize) {
-    let bits = lhs_bits.max(rhs_bits);
-    (
-        emitter.widen_u(lhs, lhs_bits, bits),
-        emitter.widen_u(rhs, rhs_bits, bits),
-        bits,
-    )
+/// The index and the length, compared as they are: the type analysis admits only an `int32` index,
+/// and a length is one.
+pub fn index_bounds_operands(index: ValueId, index_ty: &Type, len: ValueId) -> (ValueId, ValueId) {
+    let TypeExpr::Int(32) = index_ty.strip_witness().expr else {
+        ice!("a sequence index must be an int32, not {index_ty}")
+    };
+    (index, len)
 }
 
 /// Returns `(assert, len)`; the caller emits the assert — bare, or under the op's guard.
@@ -140,48 +116,46 @@ pub fn build_pop_bounds_assert_on_len(emitter: &mut impl HLEmitter, len: ValueId
     }
 }
 
-/// Returns `(assert, len, new_len, idx_cmp, cmp_bits)`; the insert lowering's rebuild scan reuses
-/// the intermediates instead of re-emitting them.
+/// Returns `(assert, len, new_len, idx_cmp)`; the insert lowering's rebuild scan reuses the
+/// intermediates instead of re-emitting them.
 pub fn build_insert_bounds_assert(
     emitter: &mut impl HLEmitter,
     slice: ValueId,
     index: ValueId,
     index_ty: &Type,
-) -> (OpCode, ValueId, ValueId, ValueId, usize) {
+) -> (OpCode, ValueId, ValueId, ValueId) {
     let len = emitter.slice_len(slice);
     let one = emitter.int_const(IntBits::one(32));
     let new_len = emitter.uadd(len, one);
-    let (assert, idx_cmp, cmp_bits) =
-        build_lt_bounds_assert_on_len(emitter, new_len, index, index_ty);
-    (assert, len, new_len, idx_cmp, cmp_bits)
+    let (assert, idx_cmp) = build_lt_bounds_assert_on_len(new_len, index, index_ty);
+    (assert, len, new_len, idx_cmp)
 }
 
-/// Returns `(assert, len, idx_cmp, cmp_bits)`.
+/// Returns `(assert, len, idx_cmp)`.
 pub fn build_remove_bounds_assert(
     emitter: &mut impl HLEmitter,
     slice: ValueId,
     index: ValueId,
     index_ty: &Type,
-) -> (OpCode, ValueId, ValueId, usize) {
+) -> (OpCode, ValueId, ValueId) {
     let len = emitter.slice_len(slice);
-    let (assert, idx_cmp, cmp_bits) = build_lt_bounds_assert_on_len(emitter, len, index, index_ty);
-    (assert, len, idx_cmp, cmp_bits)
+    let (assert, idx_cmp) = build_lt_bounds_assert_on_len(len, index, index_ty);
+    (assert, len, idx_cmp)
 }
 
-/// Returns `(assert, idx_cmp, cmp_bits)`.
+/// Returns `(assert, idx_cmp)`.
 pub fn build_lt_bounds_assert_on_len(
-    emitter: &mut impl HLEmitter,
     len: ValueId,
     index: ValueId,
     index_ty: &Type,
-) -> (OpCode, ValueId, usize) {
-    let (idx_cmp, len_cmp, cmp_bits) = index_bounds_operands(emitter, index, index_ty, len);
+) -> (OpCode, ValueId) {
+    let (idx_cmp, len_cmp) = index_bounds_operands(index, index_ty, len);
     let assert = OpCode::AssertCmp {
         kind: CmpKind::ULt,
         lhs: idx_cmp,
         rhs: len_cmp,
     };
-    (assert, idx_cmp, cmp_bits)
+    (assert, idx_cmp)
 }
 
 /// `index < len(seq)` for a user array/vector access, before witness-slice purification.
@@ -204,7 +178,7 @@ pub fn build_seq_access_bounds_assert(
             || !ssa.witness_slices_purified(),
         "cannot derive logical slice bounds after witness-slice purification"
     );
-    let (_, idx_cmp, len_cmp, _) = seq_bounds_operands(emitter, seq, index, seq_ty, index_ty);
+    let (_, idx_cmp, len_cmp) = seq_bounds_operands(emitter, seq, index, seq_ty, index_ty);
     Some(OpCode::AssertCmp {
         kind: CmpKind::ULt,
         lhs: idx_cmp,

@@ -16,7 +16,7 @@ use inkwell::{
     },
     module::{FlagBehavior, Linkage, Module},
     targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple},
-    types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum},
+    types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType},
     values::{
         BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue, StructValue,
     },
@@ -46,43 +46,61 @@ use crate::{
 
 const WASM_STACK_SIZE_BYTES: u32 = 256 * 1024;
 
-/// The widest integer whose multiply and division LLVM's wasm32 lowering keeps to a single libcall.
+/// The widest integer whose multiply and division LLVM's wasm32 lowering keeps to one libcall.
 ///
-/// Between one host word and this one an `iN` multiply becomes `__multi3` and a division or
-/// remainder one of `__udivti3`, `__umodti3`, `__divti3` and `__modti3`, all of which
-/// `compiler_builtins` already defines weakly in the runtime archive; narrower than that each is a
-/// machine instruction. Above it LLVM expands both inline.
+/// Up to this width an `iN` multiply is `__multi3`, and a division or remainder one of
+/// `__udivti3`, `__umodti3`, `__divti3` and `__modti3`, which `compiler_builtins` defines weakly in
+/// the runtime archive. Wider, LLVM expands both inline: the multiply quadratically (7.2 MB at
+/// `i16384`, and from about `i5700` a module no engine we run will instantiate), a division as a
+/// bit-serial loop of 20 000 to 36 000 wasm locals at `i16384`, against the engines' cap of 50 000
+/// per function.
 ///
-/// The multiply's expansion is quadratic: 7.2 MB of code at `i16384`, and from about `i5700`
-/// upwards a module that every wasm engine we run refuses to _instantiate_, having compiled and
-/// linked it cleanly. A division's is a bit-serial loop, linear but not small: at `i16384`
-/// unoptimised codegen spends about 20 000 wasm locals on a `udiv` and 28 000 to 36 000 on an
-/// `sdiv`, against the engines' cap of 50 000 per function.
-///
-/// The routing threshold is therefore where the libcalls stop, which keeps one rule for every
-/// routed operation. LLVM's multiply would technically still load between `i129` and `i5700`, but
-/// we deemed a second threshold not worthwhile. An `add` or `sub` has no libcall at any width --
-/// LLVM legalises it inline as a carry chain over limbs -- but takes the same threshold for the
-/// same reason: about 4 400 wasm locals for an `add` and 3 500 for a `sub` at `i16384`
-/// unoptimised, so a function holds only a dozen or so.
+/// So the routing threshold is where the libcalls stop, one rule for every routed operation. An
+/// `add` or `sub` has no libcall but takes the same threshold: inline at `i16384` it costs 3 500 to
+/// 4 400 wasm locals, so a function holds only a dozen.
 const LIBCALL_MAX_BITS: u32 = 2 * HOST_LIMB_BITS as u32;
+
+/// The most parameters a wasm function may declare: the engines' validator refuses more, as
+/// `wasmparser`'s `MAX_WASM_FUNCTION_PARAMS` does.
+///
+/// wasm32 passes an `iN` as `ceil(N / 64)` `i64`s, and a witnessed wide value arrives as one
+/// parameter per limb, so four 16384-bit arguments are 1024. A return of more than one wasm value
+/// costs one more, the pointer it is written through. A function past the cap takes its arguments
+/// through memory ([`LLVMCodeGen::spilled_args`]).
+const WASM_MAX_PARAMS: usize = 1000;
 
 // UTILITIES
 // ================================================================================================
 
-/// Whether `kind` at `bits` is emitted around a call to one of the runtime's wide helpers.
+/// How many wasm parameters a value of type `tp` takes once lowered: an integer is split into
+/// `i64`s, an aggregate into its fields.
+fn wasm_slots(tp: BasicTypeEnum<'_>) -> usize {
+    match tp {
+        BasicTypeEnum::IntType(int) => (int.get_bit_width() as usize)
+            .div_ceil(HOST_LIMB_BITS)
+            .max(1),
+        BasicTypeEnum::StructType(fields) => {
+            fields.get_field_types().into_iter().map(wasm_slots).sum()
+        }
+        BasicTypeEnum::ArrayType(array) => {
+            array.len() as usize * wasm_slots(array.get_element_type())
+        }
+        _ => 1,
+    }
+}
+
+/// Whether `kind` at `bits` is lowered to a call to one of the runtime's wide helpers.
 ///
-/// The helpers are `__int_add`, `__int_sub` and `__int_mul` for the three wrapping operations,
-/// `__int_udivrem` for an unsigned division or remainder and `__int_sdivrem` for a signed one.
+/// The helpers are `__int_add`, `__int_sub`, `__int_mul`, `__int_udivrem`, `__int_sdivrem`,
+/// `__int_shl`, `__int_lshr` and `__int_ashr`. A shift is routed too: inline at `i16384` it is
+/// about 17 KB of wasm against a call's 10 KB, and its locals count against the same cap.
 ///
-/// A division helper answers the quotient and the remainder together, so a remainder is that
-/// second answer rather than LLVM's `n - (n / d) * d`, and pays for neither an inline division nor
-/// a multiply.
+/// A division helper returns the quotient and the remainder together, so a remainder costs no
+/// inline division or multiply.
 ///
-/// A division the mid-end can see is also one it can rewrite. The pure multiply's overflow guard
-/// is `MAX / b < a`, which `InstCombine` reads as the overflow bit of `umul.with.overflow` and
-/// expands inline at the multiply's whole quadratic cost, beside the helper call that computes the
-/// product. A call is opaque to it.
+/// A call also hides the operation from the mid-end: `InstCombine` reads the pure multiply's
+/// overflow guard `MAX / b < a` as `umul.with.overflow` and expands it inline at full quadratic
+/// cost.
 fn needs_a_runtime_helper(kind: &IntArithOp, bits: u32) -> bool {
     bits > LIBCALL_MAX_BITS
         && matches!(
@@ -94,24 +112,36 @@ fn needs_a_runtime_helper(kind: &IntArithOp, bits: u32) -> bool {
                 | IntArithOp::URem
                 | IntArithOp::SDiv
                 | IntArithOp::SRem
+                | IntArithOp::Shl
+                | IntArithOp::UShr
+                | IntArithOp::AShr
         )
 }
 
 /// Whether this particular operation is emitted around the helper call.
 ///
-/// The cost [`needs_a_runtime_helper`] describes is the cost of an **expansion**, and there is no
-/// expansion where there is no instruction: `IRBuilder` folds two constant operands as it is
-/// handed them, before any pass runs, so a constant wide sum, product or quotient is an `APInt`
-/// operation and an answer. Routing one anyway would replace a value the rest of the module can
-/// fold through with a call it cannot -- and would cost the conformance sweep every point it has
-/// at these widths, since a call is not something LLVM folds.
+/// Two constant operands are left to `IRBuilder`, which folds them into an answer before any pass
+/// runs; a call would hide that answer from the rest of the module and from the conformance sweep.
+/// A shift by a constant amount stays inline too, since LLVM expands it as limb moves, not as the
+/// barrel a runtime amount needs.
 fn routes_through_a_runtime_helper(
     kind: &IntArithOp,
     lhs: IntValue<'_>,
     rhs: IntValue<'_>,
 ) -> bool {
+    let shift = matches!(kind, IntArithOp::Shl | IntArithOp::UShr | IntArithOp::AShr);
     needs_a_runtime_helper(kind, lhs.get_type().get_bit_width())
         && !(lhs.is_const() && rhs.is_const())
+        && !(shift && rhs.is_const())
+}
+
+/// Whether a comparison of `lhs` and `rhs` is emitted around a call to `__int_eq`, `__int_ult` or
+/// `__int_slt`: past [`LIBCALL_MAX_BITS`], and only when **neither** operand is constant.
+///
+/// A comparison against a constant is one limb-wise chain against known limbs, which LLVM keeps
+/// short, so one constant operand is enough to stay inline, where arithmetic needs both.
+fn compares_through_a_runtime_helper(lhs: IntValue<'_>, rhs: IntValue<'_>) -> bool {
+    lhs.get_type().get_bit_width() > LIBCALL_MAX_BITS && !lhs.is_const() && !rhs.is_const()
 }
 
 // COMPILATION
@@ -209,9 +239,22 @@ pub struct LLVMCodeGen<'ctx> {
     int_sdivrem_fn: Option<FunctionValue<'ctx>>,
     int_spread_fn: Option<FunctionValue<'ctx>>,
     int_unspread_fn: Option<FunctionValue<'ctx>>,
+    int_shl_fn: Option<FunctionValue<'ctx>>,
+    int_lshr_fn: Option<FunctionValue<'ctx>>,
+    int_ashr_fn: Option<FunctionValue<'ctx>>,
+    int_eq_fn: Option<FunctionValue<'ctx>>,
+    int_ult_fn: Option<FunctionValue<'ctx>>,
+    int_slt_fn: Option<FunctionValue<'ctx>>,
     /// Scratch buffers for the wide helpers, keyed by `(width, slot)` and living in the current
     /// function's entry block. Cleared per function.
     wide_scratch: HashMap<(u32, usize), PointerValue<'ctx>>,
+    /// The functions whose arguments exceed [`WASM_MAX_PARAMS`] once lowered, with the struct
+    /// they are passed in. Such a function takes `(VM*, args*)`, and the caller stores the
+    /// arguments into a buffer in the caller's entry block.
+    spilled_args: HashMap<FunctionId, StructType<'ctx>>,
+    /// The argument buffers of the current function's calls to spilled functions, one per callee.
+    /// Cleared per function.
+    args_scratch: HashMap<FunctionId, PointerValue<'ctx>>,
     // Globals
     globals: Vec<inkwell::values::GlobalValue<'ctx>>,
     const_data_counter: usize,
@@ -287,7 +330,15 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             int_sdivrem_fn: None,
             int_spread_fn: None,
             int_unspread_fn: None,
+            int_shl_fn: None,
+            int_lshr_fn: None,
+            int_ashr_fn: None,
+            int_eq_fn: None,
+            int_ult_fn: None,
+            int_slt_fn: None,
             wide_scratch: HashMap::default(),
+            spilled_args: HashMap::default(),
+            args_scratch: HashMap::default(),
             globals: Vec::new(),
             const_data_counter: 0,
             entry_symbols: Vec::new(),
@@ -429,10 +480,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.int_pattern(&IntBits::from_u128(bits as usize, value))
     }
 
-    /// An LLVM constant carrying `pattern`, at the pattern's own width.
+    /// An LLVM constant carrying `pattern`, at the pattern's width.
     ///
-    /// The limbs go straight through: a normalised pattern is already exactly the little-endian
-    /// word sequence `const_int_arbitrary_precision` wants, at exactly the length it wants.
+    /// The limbs pass straight through: a normalized pattern is already the little-endian word
+    /// sequence `const_int_arbitrary_precision` wants, at the length it wants.
     fn int_pattern(&self, pattern: &IntBits) -> IntValue<'ctx> {
         let bits = u32::try_from(pattern.bits()).expect("An integer width fits a u32");
         self.context
@@ -480,8 +531,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     }
 
     /// The spread of the low `active_bits` of `value` into a `result_bits`-wide value, by a ladder
-    /// of `u128` masks, which hold a spread of at most [`HOST_WORD_BITS`]: wider is handled using
-    /// [`Self::build_wide_spread`]'s.
+    /// of `u128` masks. The masks hold a spread of at most [`HOST_WORD_BITS`]; a wider one goes
+    /// through [`Self::build_wide_spread`].
     fn compile_spread_bits(
         &self,
         value: IntValue<'ctx>,
@@ -565,9 +616,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.widen_or_trunc_int(x, result_bits, name)
     }
 
-    /// The odd and even streams of the low `active_bits` of `value` into `odd_bits` and `even_bits`
-    /// by [`Self::compact_spread_bits`]'s ladder of `u128` masks, which holds an operand of at most
-    /// [`HOST_WORD_BITS`]: wider is handled by [`Self::build_wide_unspread`]'s.
+    /// The odd and even streams of the low `active_bits` of `value`, into `odd_bits` and
+    /// `even_bits`, by [`Self::compact_spread_bits`]'s ladder of `u128` masks. The masks hold an
+    /// operand of at most [`HOST_WORD_BITS`]; [`Self::build_unspread`] cuts a wider one to its
+    /// read, or sends it to [`Self::build_wide_unspread`].
     fn compile_unspread_bits(
         &self,
         value: IntValue<'ctx>,
@@ -819,7 +871,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         // __int_sub(result_ptr, a_ptr, b_ptr, limbs) -> void
         // __int_mul(result_ptr, a_ptr, b_ptr, limbs) -> void
         //
-        // Emitted using pointers to ensure that one body can evaluate at any width.
+        // The operands go by pointer, so one body serves every width.
         let int_wrapping_type = void_type.fn_type(
             &[
                 ptr_type.into(),
@@ -898,6 +950,59 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             ),
             Some(Linkage::External),
         ));
+
+        // __int_shl(result_ptr, a_ptr, b_ptr, limbs, bits) -> void
+        // __int_lshr(result_ptr, a_ptr, b_ptr, limbs, bits) -> void
+        // __int_ashr(result_ptr, a_ptr, b_ptr, limbs, bits) -> void
+        let int_shift_type = void_type.fn_type(
+            &[
+                ptr_type.into(),
+                ptr_type.into(),
+                ptr_type.into(),
+                i32_type.into(),
+                i32_type.into(),
+            ],
+            false,
+        );
+        for (slot, name) in [
+            (&mut self.int_shl_fn, "__int_shl"),
+            (&mut self.int_lshr_fn, "__int_lshr"),
+            (&mut self.int_ashr_fn, "__int_ashr"),
+        ] {
+            *slot = Some(
+                self.module
+                    .add_function(name, int_shift_type, Some(Linkage::External)),
+            );
+        }
+
+        // __int_eq(a_ptr, b_ptr, limbs) -> i32
+        // __int_ult(a_ptr, b_ptr, limbs) -> i32
+        // __int_slt(a_ptr, b_ptr, limbs, bits) -> i32
+        let int_order_type =
+            i32_type.fn_type(&[ptr_type.into(), ptr_type.into(), i32_type.into()], false);
+        self.int_eq_fn = Some(self.module.add_function(
+            "__int_eq",
+            int_order_type,
+            Some(Linkage::External),
+        ));
+        self.int_ult_fn = Some(self.module.add_function(
+            "__int_ult",
+            int_order_type,
+            Some(Linkage::External),
+        ));
+        self.int_slt_fn = Some(self.module.add_function(
+            "__int_slt",
+            i32_type.fn_type(
+                &[
+                    ptr_type.into(),
+                    ptr_type.into(),
+                    i32_type.into(),
+                    i32_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        ));
     }
 
     // ── Compilation entry point ─────────────────────────────────────────
@@ -956,17 +1061,33 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         // First parameter is always VM*
         let mut param_types: Vec<BasicMetadataTypeEnum> = vec![ptr_type.into()];
 
-        if entry_index.is_none() {
-            for (_, tp) in entry.get_parameters().skip(1) {
-                param_types.push(self.convert_type(tp).into());
-            }
-        }
-
         let return_types: Vec<BasicTypeEnum> = function
             .get_returns()
             .iter()
             .map(|tp| self.convert_type(tp))
             .collect();
+
+        if entry_index.is_none() {
+            let params: Vec<BasicTypeEnum> = entry
+                .get_parameters()
+                .skip(1)
+                .map(|(_, tp)| self.convert_type(tp))
+                .collect();
+            // Without the multivalue ABI, a return of more than one wasm value goes through memory,
+            // behind a pointer parameter LLVM adds.
+            let returned_through_memory =
+                return_types.iter().map(|tp| wasm_slots(*tp)).sum::<usize>() > 1;
+            let slots = 1
+                + usize::from(returned_through_memory)
+                + params.iter().map(|tp| wasm_slots(*tp)).sum::<usize>();
+            if slots > WASM_MAX_PARAMS {
+                self.spilled_args
+                    .insert(fn_id, self.context.struct_type(&params, false));
+                param_types.push(ptr_type.into());
+            } else {
+                param_types.extend(params.into_iter().map(BasicMetadataTypeEnum::from));
+            }
+        }
 
         let fn_type = if return_types.is_empty() {
             self.context.void_type().fn_type(&param_types, false)
@@ -996,6 +1117,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     ) {
         self.value_map.clear();
         self.wide_scratch.clear();
+        self.args_scratch.clear();
         for (vid, constant) in &self.constants {
             if !matches!(constant.as_ref(), Constant::Blob(_)) {
                 self.value_map
@@ -1032,6 +1154,25 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let entry = function.get_entry();
         if entry_points.contains(&fn_id) {
             self.load_main_params_from_memory(entry.get_parameters());
+        } else if let Some(args_type) = self.spilled_args.get(&fn_id).copied() {
+            let args = fn_value.get_nth_param(1).unwrap().into_pointer_value();
+            for (i, (param_id, _)) in entry.get_parameters().enumerate() {
+                let param_value = match i.checked_sub(1) {
+                    None => fn_value.get_nth_param(0).unwrap(),
+                    Some(field) => {
+                        let field = field as u32;
+                        let slot = self
+                            .builder
+                            .build_struct_gep(args_type, args, field, "arg_slot")
+                            .unwrap();
+                        let field_type = args_type
+                            .get_field_type_at_index(field)
+                            .expect("one field per parameter");
+                        self.builder.build_load(field_type, slot, "arg").unwrap()
+                    }
+                };
+                self.value_map.insert(*param_id, param_value);
+            }
         } else {
             for (i, (param_id, _)) in entry.get_parameters().enumerate() {
                 let param_value = fn_value.get_nth_param(i as u32).unwrap();
@@ -1183,6 +1324,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 IntArithOp::Add | IntArithOp::Sub | IntArithOp::Mul => {
                     self.build_wide_wrapping(kind, lhs, rhs, name)
                 }
+                IntArithOp::Shl | IntArithOp::UShr | IntArithOp::AShr => {
+                    self.build_wide_shift(kind, lhs, rhs, name)
+                }
                 _ => self.build_wide_division(kind, lhs, rhs, name),
             };
         }
@@ -1213,22 +1357,21 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
     }
 
-    /// A wrapping `lhs + rhs`, `lhs - rhs` or `lhs * rhs` at the operands' own width, computed by
+    /// A wrapping `lhs + rhs`, `lhs - rhs` or `lhs * rhs` at the operands' width, computed by
     /// the runtime helper for `kind`.
     ///
-    /// The value is widened to a whole number of limbs before it is stored, and narrowed again
-    /// after. LLVM's _store_ size for an `iN` is `ceil(N / 8)` bytes, so storing an `i1000`
-    /// directly would leave the top limb's high three bytes unwritten. Those bits sit above the
-    /// width, and a garbage bit at position `p >= N` contributes to the sum, difference or product
-    /// only at positions `>= N`, which the truncation discards.
+    /// The value is widened to a whole number of limbs before it is stored, and narrowed after.
+    /// LLVM stores an `iN` in `ceil(N / 8)` bytes, so storing an `i1000` directly would leave the
+    /// top limb's high three bytes unwritten. Those bits sit above the width, and a garbage bit at
+    /// position `p >= N` affects a sum, difference or product only at positions `>= N`, which the
+    /// truncation discards.
     ///
-    /// What the widening buys is therefore **definedness** rather than a value as reading
-    /// uninitialized memory is undefined behaviour on both sides of the call, in a body that has
-    /// no other.
+    /// So the widening buys **definedness**, not a different value: reading uninitialized memory is
+    /// undefined behavior on both sides of the call, in a body that otherwise has none.
     ///
-    /// Widening is by zero-extension whatever the operands' reading, because the low bits of a sum,
-    /// difference or product do not depend on how its operands are read -- the sign, like the
-    /// padding, lives entirely in the bits above the width.
+    /// The widening zero-extends whatever the operands' reading, because the low bits of a sum,
+    /// difference or product do not depend on it: the sign, like the padding, lives entirely above
+    /// the width.
     fn build_wide_wrapping(
         &mut self,
         kind: &IntArithOp,
@@ -1242,24 +1385,111 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             IntArithOp::Mul => self.int_mul_fn.expect("__int_mul not declared"),
             other => ice_unreachable!("{other:?} has no wrapping helper"),
         };
-        self.build_wide_helper_call(helper, lhs, rhs, false, 1, 0, name)
+        self.build_wide_helper_call(helper, lhs, rhs, false, 1, 0, false, name)
+    }
+
+    /// A wide shift by a runtime amount, through the runtime helper for `kind`, which reduces the
+    /// amount modulo the width.
+    ///
+    /// Both operands are zero-extended to whole limbs: the amount is read as an unsigned pattern,
+    /// as the inline `urem` reduction reads it, and the value's sign stays at bit `bits - 1`, where
+    /// the helper reads it.
+    fn build_wide_shift(
+        &mut self,
+        kind: &IntArithOp,
+        lhs: IntValue<'ctx>,
+        rhs: IntValue<'ctx>,
+        name: &str,
+    ) -> IntValue<'ctx> {
+        let helper = match kind {
+            IntArithOp::Shl => self.int_shl_fn.expect("__int_shl not declared"),
+            IntArithOp::UShr => self.int_lshr_fn.expect("__int_lshr not declared"),
+            IntArithOp::AShr => self.int_ashr_fn.expect("__int_ashr not declared"),
+            other => ice_unreachable!("{other:?} is not a shift"),
+        };
+        self.build_wide_helper_call(helper, lhs, rhs, false, 1, 0, true, name)
+    }
+
+    /// An integer comparison: LLVM's `icmp`, or past [`LIBCALL_MAX_BITS`] a call to the runtime
+    /// helper for `predicate` ([`compares_through_a_runtime_helper`]).
+    fn build_int_compare(
+        &mut self,
+        predicate: IntPredicate,
+        lhs: IntValue<'ctx>,
+        rhs: IntValue<'ctx>,
+        name: &str,
+    ) -> IntValue<'ctx> {
+        if compares_through_a_runtime_helper(lhs, rhs) {
+            self.build_wide_compare(predicate, lhs, rhs, name)
+        } else {
+            self.builder
+                .build_int_compare(predicate, lhs, rhs, name)
+                .unwrap()
+        }
+    }
+
+    /// A wide comparison, computed by the runtime helper for `predicate`.
+    ///
+    /// The operands are zero-extended to whole limbs: equality and the unsigned ordering read the
+    /// buffers whole, and the signed ordering is handed the width and reads the sign at it.
+    fn build_wide_compare(
+        &mut self,
+        predicate: IntPredicate,
+        lhs: IntValue<'ctx>,
+        rhs: IntValue<'ctx>,
+        name: &str,
+    ) -> IntValue<'ctx> {
+        let bits = lhs.get_type().get_bit_width();
+        let (helper, with_width) = match predicate {
+            IntPredicate::EQ => (self.int_eq_fn.expect("__int_eq not declared"), false),
+            IntPredicate::ULT => (self.int_ult_fn.expect("__int_ult not declared"), false),
+            IntPredicate::SLT => (self.int_slt_fn.expect("__int_slt not declared"), true),
+            other => ice_unreachable!("{other:?} is not a comparison LLSSA emits"),
+        };
+        let (padded_type, limbs) = self.padded_limb_type(bits);
+        let padded_bits = padded_type.get_bit_width();
+        let a_slot = self.wide_scratch_slot(padded_type, 0);
+        let b_slot = self.wide_scratch_slot(padded_type, 1);
+        let a = self.widen_or_trunc_int(lhs, padded_bits, "wide_a");
+        let b = self.widen_or_trunc_int(rhs, padded_bits, "wide_b");
+        self.builder.build_store(a_slot, a).unwrap();
+        self.builder.build_store(b_slot, b).unwrap();
+
+        let i32_type = self.context.i32_type();
+        let mut arguments: Vec<BasicMetadataValueEnum<'ctx>> = vec![
+            a_slot.into(),
+            b_slot.into(),
+            i32_type.const_int(u64::from(limbs), false).into(),
+        ];
+        if with_width {
+            arguments.push(i32_type.const_int(u64::from(bits), false).into());
+        }
+        let answer = self
+            .builder
+            .build_call(helper, &arguments, "wide_order")
+            .unwrap()
+            .try_as_basic_value()
+            .expect_basic("an ordering helper returns its answer")
+            .into_int_value();
+        self.builder
+            .build_int_truncate(answer, self.context.bool_type(), name)
+            .unwrap()
     }
 
     /// A wide division or remainder, computed by the runtime helper for its reading.
     ///
-    /// Each helper answers both the quotient and the remainder, and this loads whichever `kind`
-    /// asks for. The operands are widened to whole limbs as [`Self::build_wide_wrapping`]'s are,
-    /// except that a signed division's are **sign**-extended: unlike a product's, a quotient's low
-    /// bits depend on the operands' reading, and the signed helper reads the sign at the top of the
-    /// buffer. The widened operands hold the same values as the narrow ones, so the quotient and
-    /// remainder are the same values too, and both fit back in the width -- except a signed
-    /// `INT_MIN / -1`, whose quotient truncates back to `INT_MIN`, which is the VM's answer.
+    /// Each helper answers both the quotient and the remainder; this loads the one `kind` asks for.
+    /// The operands are widened to whole limbs as in [`Self::build_wide_wrapping`], except that a
+    /// signed division's are **sign**-extended: a quotient's low bits, unlike a product's, depend
+    /// on the reading, and the signed helper reads the sign at the top of the buffer. Widening
+    /// keeps the values, so the quotient and remainder are unchanged and fit back in the width,
+    /// except a signed `INT_MIN / -1`, whose quotient truncates back to `INT_MIN`, the VM's answer.
     ///
-    /// A zero divisor results in zero for both. Two constant operands never reach it
+    /// A zero divisor gives zero for both. Two constant operands never reach the helper
     /// ([`routes_through_a_runtime_helper`]), and `IRBuilder` folds a constant division by zero to
-    /// poison rather than zero. Both are undefined behavior in LLVM's own `udiv` and `sdiv`, and
-    /// the model leaves them unspecified because the guard IR keeps a zero divisor from any
-    /// division: a guarded one branches around it and an unguarded one asserts first.
+    /// poison rather than zero. Division by zero is undefined in LLVM's `udiv` and `sdiv`, and the
+    /// model leaves it unspecified, because the guard IR keeps a zero divisor from every division:
+    /// a guarded one branches around it and an unguarded one asserts first.
     fn build_wide_division(
         &mut self,
         kind: &IntArithOp,
@@ -1279,17 +1509,18 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         } else {
             self.int_udivrem_fn.expect("__int_udivrem not declared")
         };
-        self.build_wide_helper_call(helper, lhs, rhs, signed, 2, answer, name)
+        self.build_wide_helper_call(helper, lhs, rhs, signed, 2, answer, false, name)
     }
 
-    /// A call to the runtime helper `helper`, which writes `outputs` answers through the pointers
-    /// ahead of its two operands' and reads them all as `limbs` `u64`s, and the `answer`th of
-    /// those answers.
+    /// A call to the runtime helper `helper`, returning its `answer`th answer. The helper writes
+    /// `outputs` answers through the pointers before its two operand pointers, and reads every
+    /// buffer as `limbs` `u64`s. `with_width` passes the operation's width after the limb count,
+    /// for a helper that reads its operands at that width.
     ///
-    /// The operands are widened to a whole number of limbs before they are stored, by
-    /// sign-extension where necessary and by zero-extension otherwise, and the answer is narrowed
-    /// back after it is loaded. Every buffer is one of the function's scratch slots at the padded
-    /// width: the operands in the first two, the answers in those after.
+    /// The operands are widened to a whole number of limbs before they are stored (sign-extended
+    /// where necessary, zero-extended otherwise), and the answer is narrowed after it is loaded.
+    /// Every buffer is one of the function's scratch slots at the padded width: the operands in the
+    /// first two, the answers in those after.
     #[allow(clippy::too_many_arguments)]
     fn build_wide_helper_call(
         &mut self,
@@ -1299,6 +1530,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         sign_extend: bool,
         outputs: usize,
         answer: usize,
+        with_width: bool,
         name: &str,
     ) -> IntValue<'ctx> {
         let bits = lhs.get_type().get_bit_width();
@@ -1324,12 +1556,16 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.builder.build_store(a_slot, a).unwrap();
         self.builder.build_store(b_slot, b).unwrap();
 
-        let limbs = self.context.i32_type().const_int(u64::from(limbs), false);
-        let arguments: Vec<BasicMetadataValueEnum<'ctx>> = out_slots
+        let i32_type = self.context.i32_type();
+        let limbs = i32_type.const_int(u64::from(limbs), false);
+        let mut arguments: Vec<BasicMetadataValueEnum<'ctx>> = out_slots
             .iter()
             .map(|slot| (*slot).into())
             .chain([a_slot.into(), b_slot.into(), limbs.into()])
             .collect();
+        if with_width {
+            arguments.push(i32_type.const_int(u64::from(bits), false).into());
+        }
         self.builder.build_call(helper, &arguments, "").unwrap();
 
         let loaded = self
@@ -1341,7 +1577,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     }
 
     /// The spread of the low `value_bits` of `value` into a `result_bits`-wide value: by the mask
-    /// ladder where a `u128` holds the result, and by the runtime helper past that.
+    /// ladder where a `u128` holds the result or the spread of the read, and by the runtime helper
+    /// past that.
     fn build_spread(
         &mut self,
         value: IntValue<'ctx>,
@@ -1351,13 +1588,16 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     ) -> IntValue<'ctx> {
         if result_bits as usize <= HOST_WORD_BITS {
             self.compile_spread_bits(value, value_bits, result_bits, name)
+        } else if 2 * value_bits as usize <= HOST_WORD_BITS {
+            let spread = self.compile_spread_bits(value, value_bits, 2 * value_bits, "spread_read");
+            self.widen_or_trunc_int(spread, result_bits, name)
         } else {
             self.build_wide_spread(value, value_bits, result_bits, name)
         }
     }
 
     /// The odd and even streams of the low `value_bits` of `value`: by the mask ladder where a
-    /// `u128` holds the operand, and by the runtime helper past that.
+    /// `u128` holds the operand or the read, and by the runtime helper past that.
     fn build_unspread(
         &mut self,
         value: IntValue<'ctx>,
@@ -1368,6 +1608,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     ) -> (IntValue<'ctx>, IntValue<'ctx>) {
         if value.get_type().get_bit_width() as usize <= HOST_WORD_BITS {
             self.compile_unspread_bits(value, value_bits, odd_bits, even_bits, names)
+        } else if value_bits as usize <= HOST_WORD_BITS {
+            let read = self.widen_or_trunc_int(value, value_bits, "unspread_read");
+            self.compile_unspread_bits(read, value_bits, odd_bits, even_bits, names)
         } else {
             self.build_wide_unspread(value, value_bits, odd_bits, even_bits, names)
         }
@@ -1460,21 +1703,14 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         (padded, limbs)
     }
 
-    /// A scratch buffer holding one `slot_type` value, in the current function's entry block.
+    /// A scratch buffer for one `slot_type` value, in the current function's entry block.
     ///
-    /// Memoised per `(width, slot)`, so a function pays the cost only for the widths it uses rather
-    /// than for its call sites: helper calls within one function never overlap in time, so they
-    /// share their buffers. The alloca is placed at the **top of the entry block** because one
-    /// emitted where the call is would allocate afresh on every iteration of an enclosing loop,
-    /// against a 256 KB wasm stack.
+    /// Memoized per `(width, slot)`: helper calls never overlap, so a function's calls share
+    /// buffers. The alloca is at the top of the entry block, because one at the call would allocate
+    /// afresh on every iteration of an enclosing loop, against a 256 KB wasm stack.
     ///
-    /// It is typed as the value that goes into it rather than as the `[k x i64]` the helper reads,
-    /// so that both are described by one type and the alloca's size is exactly the store's size.
-    /// This ensures the helper remains inside the object.
-    ///
-    /// The alignment is then raised to a limb's, which the helper needs because it reads the buffer
-    /// as `u64`s. LLVM has no alignment entry for an integer this wide in either the default layout
-    /// or wasm32's, so a wide `iN` inherits `i64`'s (eight bytes preferred, four ABI).
+    /// It is typed as the stored value, not as the `[k x i64]` the helper reads, so its size is
+    /// exactly the store's and the helper's reads stay inside it.
     fn wide_scratch_slot(
         &mut self,
         slot_type: inkwell::types::IntType<'ctx>,
@@ -1484,30 +1720,51 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         if let Some(ptr) = self.wide_scratch.get(&(bits, slot)) {
             return *ptr;
         }
+        let ptr = self.alloca_in_entry(slot_type.into(), &format!("wide_scratch_{bits}_{slot}"));
+        self.wide_scratch.insert((bits, slot), ptr);
+        ptr
+    }
 
+    /// The buffer the current function passes `callee`'s arguments in, placed as
+    /// [`Self::wide_scratch_slot`]'s are. Calls never overlap, so one per callee serves them all.
+    fn args_scratch_slot(
+        &mut self,
+        callee: FunctionId,
+        args_type: StructType<'ctx>,
+    ) -> PointerValue<'ctx> {
+        if let Some(ptr) = self.args_scratch.get(&callee) {
+            return *ptr;
+        }
+        let ptr = self.alloca_in_entry(args_type.into(), &format!("args_f{}", callee.0));
+        self.args_scratch.insert(callee, ptr);
+        ptr
+    }
+
+    /// An alloca of `alloca_type` at the top of the current function's entry block, leaving the
+    /// builder where it was.
+    ///
+    /// It is aligned to at least a limb, as the helpers read buffers as `u64`s and LLVM gives a
+    /// wide `iN` only `i64`'s alignment (eight bytes preferred, four ABI) on wasm32.
+    fn alloca_in_entry(&self, alloca_type: BasicTypeEnum<'ctx>, name: &str) -> PointerValue<'ctx> {
         let here = self
             .builder
             .get_insert_block()
-            .expect("a helper call is emitted into a block");
+            .expect("an alloca is requested from inside a block");
         let entry = here
             .get_parent()
             .expect("a block belongs to a function")
             .get_first_basic_block()
             .expect("a function being compiled has an entry block");
 
-        // Positioning before an instruction takes that instruction's debug location with it, so the
-        // caller's has to be carried across by hand: everything the operation goes on to emit after
-        // this would otherwise be attributed to the entry block.
+        // Positioning before an instruction adopts its debug location, so the caller's is restored
+        // below; otherwise what the operation emits next is attributed to the entry block.
         let caller_location = self.builder.get_current_debug_location();
         match entry.get_first_instruction() {
             Some(first) => self.builder.position_before(&first),
             None => self.builder.position_at_end(entry),
         }
 
-        let ptr = self
-            .builder
-            .build_alloca(slot_type, &format!("wide_scratch_{bits}_{slot}"))
-            .unwrap();
+        let ptr = self.builder.build_alloca(alloca_type, name).unwrap();
 
         let allocation = ptr.as_instruction().expect("an alloca is an instruction");
         let natural = allocation.get_alignment().unwrap_or_default();
@@ -1520,26 +1777,20 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             Some(location) => self.builder.set_current_debug_location(location),
             None => self.builder.unset_current_debug_location(),
         }
-        self.wide_scratch.insert((bits, slot), ptr);
         ptr
     }
 
     /// Hold a shift count below the operand width, as `count % bit_width`.
     ///
-    /// LLVM makes a shift by at or past the width into a **poison value**, so a total backend
-    /// cannot simply pass the count through. Reducing is what the VM's `shift_amount` does with the
-    /// same operands, so the two backends answer the same thing on an amount neither should have
-    /// been handed.
+    /// LLVM makes a shift by the width or more poison, so a total backend must reduce the count.
+    /// The VM's `shift_amount` reduces the same way, so the backends agree.
     ///
-    /// A mask by `bit_width - 1` is that modulo only where the width is a power of two. At any
-    /// other width it is a submask: it stays below the width, but it corrupts counts that were
-    /// already _in range_, which `hlssa_to_r1cs` applies literally. So the power-of-two case keeps
-    /// the `and` and every other width gets a real `urem`.
+    /// A mask by `bit_width - 1` is that modulo only at a power-of-two width; elsewhere it corrupts
+    /// in-range counts, which `hlssa_to_r1cs` applies literally. So a power-of-two width gets an
+    /// `and` and any other a `urem`.
     ///
-    /// That `urem` goes through [`Self::build_int_arith`] rather than straight to the builder,
-    /// because at a wide non-2pow width it is exactly the remainder [`needs_a_runtime_helper`]
-    /// routes: a shift by a runtime amount at `int1000` would otherwise carry a whole inline
-    /// division. The amount is a runtime value, so no fold can remove it.
+    /// A wide shift by a runtime amount never reaches here: its helper reduces the amount. So past
+    /// [`LIBCALL_MAX_BITS`] the count is a constant, and the `urem` folds.
     fn reduce_shift_count(&mut self, lhs: IntValue<'ctx>, rhs: IntValue<'ctx>) -> IntValue<'ctx> {
         let ty = lhs.get_type();
         let bw = ty.get_bit_width();
@@ -1548,7 +1799,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             return self.builder.build_and(rhs, mask, "shamt").unwrap();
         }
         let width = ty.const_int(u64::from(bw), false);
-        self.build_int_arith(&IntArithOp::URem, rhs, width, "shamt")
+        self.builder
+            .build_int_unsigned_rem(rhs, width, "shamt")
+            .unwrap()
     }
 
     /// Lower one LLSSA instruction.
@@ -1606,15 +1859,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                         .builder
                         .build_int_compare(predicate, lhs, rhs, &format!("v{}", result.0))
                         .unwrap(),
-                    (lhs, rhs) => self
-                        .builder
-                        .build_int_compare(
-                            predicate,
-                            lhs.into_int_value(),
-                            rhs.into_int_value(),
-                            &format!("v{}", result.0),
-                        )
-                        .unwrap(),
+                    (lhs, rhs) => self.build_int_compare(
+                        predicate,
+                        lhs.into_int_value(),
+                        rhs.into_int_value(),
+                        &format!("v{}", result.0),
+                    ),
                 };
                 self.value_map.insert(*result, val.into());
             }
@@ -2022,8 +2272,20 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let vm_ptr = self.vm_ptr.unwrap();
 
                 let mut call_args: Vec<BasicMetadataValueEnum> = vec![vm_ptr.into()];
-                for arg in args {
-                    call_args.push(self.value_map[arg].into());
+                if let Some(args_type) = self.spilled_args.get(func).copied() {
+                    let buffer = self.args_scratch_slot(*func, args_type);
+                    for (field, arg) in args.iter().enumerate() {
+                        let slot = self
+                            .builder
+                            .build_struct_gep(args_type, buffer, field as u32, "arg_slot")
+                            .unwrap();
+                        self.builder.build_store(slot, self.value_map[arg]).unwrap();
+                    }
+                    call_args.push(buffer.into());
+                } else {
+                    for arg in args {
+                        call_args.push(self.value_map[arg].into());
+                    }
                 }
 
                 let call_result = self
@@ -2245,7 +2507,7 @@ pub fn wasm_debug_info_path(wasm_path: &Path) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use mavros_int_semantics::{IntOp, residue};
+    use mavros_int_semantics::{CmpOp, IntOp, residue};
 
     use super::*;
     use crate::compiler::{
@@ -2273,17 +2535,15 @@ mod tests {
     #[test]
     #[should_panic(expected = "does not fit in a u128")]
     fn a_mask_wider_than_the_host_is_rejected_rather_than_wrapped() {
-        // Without the assert this is `(1u128 << 129) - 1`, which panics in a debug build but
-        // _masks its shift amount_ in a release one and answers `1` -- a plausible number, and
-        // wrong. The rejection has to be explicit to be present at both optimisation levels.
+        // Without the assert, `(1u128 << 129) - 1` panics in a debug build and in release masks the
+        // shift amount and answers `1`.
         let _ = LLVMCodeGen::low_bits_mask(129);
     }
 
     /// The IR of one `op` at `bits`, built over two function parameters.
     ///
-    /// Parameters rather than constants because a constant pair never becomes an instruction:
-    /// `IRBuilder` folds it, which is what the conformance sweep reads and what the routing
-    /// deliberately leaves alone. Only a runtime operand shows the lowering.
+    /// `IRBuilder` folds a constant pair to no instruction at all, so only parameters show the
+    /// lowering. The conformance sweep relies on that fold instead.
     fn arith_ir(op: &IntArithOp, bits: u32) -> String {
         let context = Context::create();
         let mut codegen = LLVMCodeGen::new(&context, "arith_shape");
@@ -2311,7 +2571,8 @@ mod tests {
         codegen.get_ir()
     }
 
-    /// The IR of a spread of a whole `bits`-wide parameter, or `unspread` of an unspread of one.
+    /// The IR of a spread of a whole `bits`-wide parameter, or of an unspread of one (its odd
+    /// stream).
     fn spread_ir(unspread: bool, bits: u32) -> String {
         let context = Context::create();
         let mut codegen = LLVMCodeGen::new(&context, "spread_shape");
@@ -2438,7 +2699,7 @@ mod tests {
                 "{op:?} divides through {helper}:\n{ir}"
             );
             // A remainder is the helper's second answer, so nothing is left for LLVM to expand:
-            // neither the division nor the multiply of its own `n - (n / d) * d`.
+            // neither the division nor the multiply of `n - (n / d) * d`.
             for inline in [
                 "udiv i256",
                 "sdiv i256",
@@ -2486,35 +2747,30 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_shift_at_a_non_power_of_two_width_reduces_through_the_helper() {
-        // `reduce_shift_count` emits a real `urem` off the power-of-two path, and at a wide width
-        // that remainder carries the same expansion the shift's own operand was routed around.
-        // The amount is a runtime value, so nothing folds it away.
+    fn a_wide_shift_at_a_non_power_of_two_width_reduces_inside_its_helper() {
+        // Off the power-of-two path `reduce_shift_count` would emit a real wide `urem`; a routed
+        // shift hands its amount to the helper whole instead, which reduces it modulo the width.
         let odd = arith_ir(&IntArithOp::Shl, 192);
+        assert_eq!(
+            odd.matches("call void @__int_").count(),
+            1,
+            "a 192-bit shift is one helper call:\n{odd}"
+        );
         assert!(
-            odd.contains("call void @__int_udivrem"),
-            "a 192-bit shift reduces its count through the helper:\n{odd}"
+            odd.contains("call void @__int_shl"),
+            "and that call is the shift's:\n{odd}"
         );
         assert!(
             !odd.contains("rem i192"),
             "and leaves no wide remainder behind:\n{odd}"
         );
-
-        // At a power of two the reduction is an `and`, so there is no remainder to route.
-        let even = arith_ir(&IntArithOp::Shl, 256);
-        assert!(
-            !even.contains("call void @__int_"),
-            "a 256-bit shift needs no helper:\n{even}"
-        );
     }
 
     #[test]
     fn the_scratch_buffers_are_shared_and_sit_in_the_entry_block() {
-        // Two blocks, with every multiply in the second one, because that is the only shape the
-        // placement is visible in: in a single-block function the entry block _is_ where the call
-        // is, and an alloca emitted beside the call would sit in the right place by accident.
-        // A `body` block stands for a loop body, where allocating per visit is the actual hazard
-        // against a 256 KB wasm stack.
+        // Every multiply is in a second block, standing for a loop body, where an alloca per visit
+        // would exhaust the 256 KB wasm stack. In a single-block function an alloca beside the call
+        // would land in the entry block by accident.
         let context = Context::create();
         let mut codegen = LLVMCodeGen::new(&context, "scratch_placement");
         let ty = context
@@ -2574,12 +2830,9 @@ mod tests {
 
     #[test]
     fn a_routed_operation_keeps_its_own_source_location() {
-        // `wide_scratch_slot` positions the builder into the entry block to place its allocas, and
-        // positioning _before an instruction_ carries that instruction's debug location with it.
-        //
-        // Left alone, the store, the call and the load that follow are all attributed to the entry
-        // block rather than to the operation, and only for the first multiply of each width in a
-        // function
+        // `wide_scratch_slot` positions the builder before an entry-block instruction, adopting its
+        // debug location. Unrestored, the store, call and load that follow would be attributed to
+        // the entry block for the first multiply of each width.
         let context = Context::create();
         let mut codegen = LLVMCodeGen::new(&context, "routed_location");
         let ty = context
@@ -2679,24 +2932,38 @@ mod tests {
         );
     }
 
-    /// Compiles `subject(operands: ptr) -> i64` around one `bits`-wide `kind`, takes it all the way
-    /// to a wasm modulethen instantiates it, writes two operands into its memory and calls it.
+    /// Compiles `subject(operands: ptr) -> i64` around one `bits`-wide `kind` into a wasm module,
+    /// and calls it on two operands written into its memory.
     ///
-    /// This is the **only** check the routed lowering has as routing is suppressed for a constant
-    /// pair, so the conformance sweep beside it folds the direct lowering every time and never sees
-    /// the one built around a call.
+    /// The **only** check of the routed lowering: routing is suppressed for a constant pair, so
+    /// the conformance sweep never sees the call.
     ///
-    /// Importantly the operands are **loaded from memory** instead of widened from `i64` params. A
-    /// parameter widened into a `bits`-wide operand leaves most of that operand's bits known-zero,
-    /// and the mid-end narrows the multiply back to something it can do inline. That makes this
-    /// test agree with itself under _any_ routing, but the routing is what we want to check. A load
-    /// is opaque, which is also how a wide value reaches a multiply in a real program.
+    /// The operands are loaded from memory, not widened from `i64` params: a widened operand is
+    /// mostly known-zero, and the mid-end would narrow the multiply back to an inline one under any
+    /// routing.
     ///
-    /// The digest carries the **top** word and not only the low one, because the low limb is the
-    /// thing computed correctly by every limb miscount. The low word is in it because a remainder
-    /// is smaller than its divisor and its top word can be a genuine zero.
+    /// The digest carries the top word, which a limb miscount gets wrong, and the low word, since a
+    /// remainder's top word can be zero.
     fn routed_op_through_wasm(
         kind: &IntArithOp,
+        bits: u32,
+        opts_for: fn(std::path::PathBuf) -> WasmCompileOpts,
+    ) -> u64 {
+        subject_through_wasm(&Subject::Arith(kind.clone()), bits, opts_for)
+    }
+
+    /// What a subject computes from its two operands.
+    enum Subject {
+        /// One operation, digested by [`expected_digest`]'s rule.
+        Arith(IntArithOp),
+
+        /// One comparison, three ways: `a ? b` in bit 0, `b ? a` in bit 1 and `a ? a` in bit 2.
+        Order(IntPredicate),
+    }
+
+    /// [`routed_op_through_wasm`] for any [`Subject`].
+    fn subject_through_wasm(
+        subject_kind: &Subject,
         bits: u32,
         opts_for: fn(std::path::PathBuf) -> WasmCompileOpts,
     ) -> u64 {
@@ -2746,13 +3013,33 @@ mod tests {
         let a = operand(0, "a");
         let b = operand(1, "b");
 
-        let result = codegen.build_int_arith(kind, a, b, "result");
-        // A constant amount, so this reduction folds and adds no routing of its own.
-        let top_of = wide.const_int(u64::from(bits - 64), false);
-        let shifted = codegen.build_int_arith(&IntArithOp::UShr, result, top_of, "top");
-        let high = codegen.widen_or_trunc_int(shifted, 64, "high");
-        let low = codegen.widen_or_trunc_int(result, 64, "low");
-        let answer = codegen.builder.build_xor(low, high, "answer").unwrap();
+        let answer = match subject_kind {
+            Subject::Arith(kind) => {
+                let result = codegen.build_int_arith(kind, a, b, "result");
+                // A constant amount, so this reduction folds and adds no routing.
+                let top_of = wide.const_int(u64::from(bits - 64), false);
+                let shifted = codegen.build_int_arith(&IntArithOp::UShr, result, top_of, "top");
+                let high = codegen.widen_or_trunc_int(shifted, 64, "high");
+                let low = codegen.widen_or_trunc_int(result, 64, "low");
+                codegen.builder.build_xor(low, high, "answer").unwrap()
+            }
+            Subject::Order(predicate) => {
+                let mut answer = i64_type.const_zero();
+                for (index, (lhs, rhs)) in [(a, b), (b, a), (a, a)].into_iter().enumerate() {
+                    let holds = codegen.build_int_compare(*predicate, lhs, rhs, "holds");
+                    let bit = codegen
+                        .builder
+                        .build_int_z_extend(holds, i64_type, "bit")
+                        .unwrap();
+                    let placed = codegen
+                        .builder
+                        .build_left_shift(bit, i64_type.const_int(index as u64, false), "placed")
+                        .unwrap();
+                    answer = codegen.builder.build_or(answer, placed, "answer").unwrap();
+                }
+                answer
+            }
+        };
         codegen.builder.build_return(Some(&answer)).unwrap();
         codegen.module.verify().expect("the module verifies");
 
@@ -2768,10 +3055,9 @@ mod tests {
             .expect("the wasm engine accepts the module");
         let mut store = wasmtime::Store::new(&engine, ());
 
-        // The module is linked with `--import-memory`, so the host supplies one; its declared
-        // minimum is read back rather than guessed, the stack and static data being the module's
-        // business and not this test's. Anything else it imports is a runtime symbol the archive
-        // failed to define, which `--allow-undefined` would otherwise have hidden until here.
+        // Linked with `--import-memory`, so the host supplies the memory, at the minimum the module
+        // declares. Any other import is a runtime symbol the archive failed to define, which
+        // `--allow-undefined` would otherwise hide until here.
         let mut memory = None;
         let mut imports: Vec<wasmtime::Extern> = Vec::new();
         for import in module.imports() {
@@ -2792,7 +3078,7 @@ mod tests {
         let instance = wasmtime::Instance::new(&mut store, &module, &imports)
             .expect("the wasm engine instantiates the module");
 
-        // The operands go after the module's own static data, whose end the linker exports.
+        // The operands go after the module's static data, whose end the linker exports.
         let wasmtime::Val::I32(data_end) = instance
             .get_global(&mut store, "__data_end")
             .expect("wasm-ld exports __data_end")
@@ -2826,10 +3112,8 @@ mod tests {
     const SUBJECT_A: u64 = 0xDEAD_BEEF_1234_5678;
     const SUBJECT_B: u64 = 0x0FED_CBA9_8765_4321;
 
-    /// One operand: `seed` in every limb, so the product's every column is a real one.
-    ///
-    /// A sparse operand is what lets the mid-end narrow the multiply, and a sparse one is also
-    /// what an off-by-one-limb bug can get right by accident.
+    /// One operand: `seed` in every limb, so every column of the product is real. A sparse operand
+    /// would let the mid-end narrow the multiply, and could hide an off-by-one-limb bug.
     fn operand_pattern(bits: usize, seed: u64) -> IntBits {
         let limbs = vec![seed; IntBits::limbs_for_bits(bits)];
         IntBits::from_limbs(bits, &limbs)
@@ -2858,6 +3142,8 @@ mod tests {
             IntArithOp::SDiv => IntOp::SDiv,
             IntArithOp::SRem => IntOp::SRem,
             IntArithOp::Shl => IntOp::Shl,
+            IntArithOp::UShr => IntOp::UShr,
+            IntArithOp::AShr => IntOp::SShr,
             other => unreachable!("{other:?} has no engine test"),
         }
     }
@@ -2873,12 +3159,198 @@ mod tests {
         result.limbs()[0] ^ result.shifted_right(bits - 64).limbs()[0]
     }
 
+    /// What the model says an [`Subject::Order`] subject answers at `bits`.
+    fn expected_order(predicate: IntPredicate, bits: usize) -> u64 {
+        let op = match predicate {
+            IntPredicate::EQ => CmpOp::Eq,
+            IntPredicate::ULT => CmpOp::ULt,
+            IntPredicate::SLT => CmpOp::SLt,
+            other => unreachable!("{other:?} has no engine test"),
+        };
+        let (a, b) = (
+            operand_pattern(bits, SUBJECT_A),
+            operand_pattern(bits, SUBJECT_B),
+        );
+        [(&a, &b), (&b, &a), (&a, &a)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (lhs, rhs))| u64::from(lhs.compare(op, rhs)) << index)
+            .sum()
+    }
+
+    /// The three shifts by an amount loaded from memory, through their helpers, and the three
+    /// comparisons through theirs.
+    #[test]
+    fn the_routed_shifts_and_comparisons_agree_with_the_model_through_wasm() {
+        for bits in [1000u32, 16383] {
+            for kind in [IntArithOp::Shl, IntArithOp::UShr, IntArithOp::AShr] {
+                assert_eq!(
+                    routed_op_through_wasm(&kind, bits, WasmCompileOpts::fast),
+                    expected_digest(&kind, bits as usize),
+                    "the wasm lane disagrees with the model for {kind:?} at {bits} bits"
+                );
+            }
+            for predicate in [IntPredicate::EQ, IntPredicate::ULT, IntPredicate::SLT] {
+                assert_eq!(
+                    subject_through_wasm(&Subject::Order(predicate), bits, WasmCompileOpts::fast),
+                    expected_order(predicate, bits as usize),
+                    "the wasm lane disagrees with the model for {predicate:?} at {bits} bits"
+                );
+            }
+        }
+    }
+
+    /// The IR of one comparison of two `bits`-wide parameters.
+    fn compare_ir(predicate: IntPredicate, bits: u32) -> String {
+        let context = Context::create();
+        let mut codegen = LLVMCodeGen::new(&context, "compare_shape");
+        let ty = context
+            .custom_width_int_type(NonZeroU32::new(bits).unwrap())
+            .unwrap();
+        let function = codegen.module.add_function(
+            "subject",
+            context.bool_type().fn_type(&[ty.into(), ty.into()], false),
+            None,
+        );
+        codegen
+            .builder
+            .position_at_end(context.append_basic_block(function, "entry"));
+        let a = function.get_nth_param(0).unwrap().into_int_value();
+        let b = function.get_nth_param(1).unwrap().into_int_value();
+        let result = codegen.build_int_compare(predicate, a, b, "r");
+        codegen.builder.build_return(Some(&result)).unwrap();
+        codegen
+            .module
+            .verify()
+            .unwrap_or_else(|error| panic!("the emitted module does not verify: {error}"));
+        codegen.get_ir()
+    }
+
+    /// A wide shift by a runtime amount and a wide comparison are each one helper call, and the
+    /// last width a `u128` holds stays LLVM's, as a shift by a constant amount does at any width.
+    #[test]
+    fn a_wide_shift_or_comparison_is_a_helper_call_and_a_narrow_one_is_not() {
+        for (op, helper, instruction) in [
+            (IntArithOp::Shl, "__int_shl", "shl"),
+            (IntArithOp::UShr, "__int_lshr", "lshr"),
+            (IntArithOp::AShr, "__int_ashr", "ashr"),
+        ] {
+            let wide = arith_ir(&op, 256);
+            assert!(
+                wide.contains(&format!("call void @{helper}")),
+                "a 256-bit {op:?} must reach {helper}:\n{wide}"
+            );
+            assert!(
+                !wide.contains(&format!("{instruction} i256")),
+                "and must not also expand inline:\n{wide}"
+            );
+            let narrow = arith_ir(&op, LIBCALL_MAX_BITS);
+            assert!(
+                narrow.contains(&format!("{instruction} i128")),
+                "a 128-bit {op:?} stays LLVM's:\n{narrow}"
+            );
+            assert!(
+                !narrow.contains(&format!("call void @{helper}")),
+                "and calls nothing:\n{narrow}"
+            );
+            let by_constant = constant_amount_shift_ir(&op, 256);
+            assert!(
+                !by_constant.contains(&format!("call void @{helper}")),
+                "a 256-bit {op:?} by a constant amount moves limbs inline:\n{by_constant}"
+            );
+        }
+        // The arguments are read off the call: the engine test's operands repeat one seed in every
+        // limb, so a helper handed too few limbs would still answer them correctly.
+        for (predicate, helper, instruction, tail) in [
+            (IntPredicate::EQ, "__int_eq", "icmp eq i256", "i32 4)"),
+            (IntPredicate::ULT, "__int_ult", "icmp ult i256", "i32 4)"),
+            (
+                IntPredicate::SLT,
+                "__int_slt",
+                "icmp slt i256",
+                "i32 4, i32 256)",
+            ),
+        ] {
+            let wide = compare_ir(predicate, 256);
+            let call = wide
+                .lines()
+                .find(|line| line.contains(&format!("call i32 @{helper}(")))
+                .unwrap_or_else(|| panic!("a 256-bit {predicate:?} must reach {helper}:\n{wide}"));
+            assert!(
+                call.trim_end().ends_with(tail),
+                "{helper} is handed four limbs, and the signed one the width: {call}"
+            );
+            assert!(
+                !wide.contains(instruction),
+                "and must not also expand inline:\n{wide}"
+            );
+            let narrow = compare_ir(predicate, LIBCALL_MAX_BITS);
+            assert!(
+                !narrow.contains(&format!("call i32 @{helper}")),
+                "a 128-bit {predicate:?} stays LLVM's:\n{narrow}"
+            );
+            let against_constant = constant_compare_ir(predicate, 256);
+            assert!(
+                !against_constant.contains(&format!("call i32 @{helper}")),
+                "a 256-bit {predicate:?} against a constant stays LLVM's:\n{against_constant}"
+            );
+        }
+    }
+
+    /// The IR of one comparison of a `bits`-wide parameter against the constant 7.
+    fn constant_compare_ir(predicate: IntPredicate, bits: u32) -> String {
+        let context = Context::create();
+        let mut codegen = LLVMCodeGen::new(&context, "constant_compare_shape");
+        let ty = context
+            .custom_width_int_type(NonZeroU32::new(bits).unwrap())
+            .unwrap();
+        let function = codegen.module.add_function(
+            "subject",
+            context.bool_type().fn_type(&[ty.into()], false),
+            None,
+        );
+        codegen
+            .builder
+            .position_at_end(context.append_basic_block(function, "entry"));
+        let a = function.get_nth_param(0).unwrap().into_int_value();
+        let result = codegen.build_int_compare(predicate, a, ty.const_int(7, false), "r");
+        codegen.builder.build_return(Some(&result)).unwrap();
+        codegen
+            .module
+            .verify()
+            .unwrap_or_else(|error| panic!("the emitted module does not verify: {error}"));
+        codegen.get_ir()
+    }
+
+    /// The IR of one `op` of a `bits`-wide parameter by the constant amount 3.
+    fn constant_amount_shift_ir(op: &IntArithOp, bits: u32) -> String {
+        let context = Context::create();
+        let mut codegen = LLVMCodeGen::new(&context, "constant_shift_shape");
+        let ty = context
+            .custom_width_int_type(NonZeroU32::new(bits).unwrap())
+            .unwrap();
+        let function =
+            codegen
+                .module
+                .add_function("subject", ty.fn_type(&[ty.into()], false), None);
+        codegen
+            .builder
+            .position_at_end(context.append_basic_block(function, "entry"));
+        let a = function.get_nth_param(0).unwrap().into_int_value();
+        let result = codegen.build_int_arith(op, a, ty.const_int(3, false), "r");
+        codegen.builder.build_return(Some(&result)).unwrap();
+        codegen
+            .module
+            .verify()
+            .unwrap_or_else(|error| panic!("the emitted module does not verify: {error}"));
+        codegen.get_ir()
+    }
+
     #[test]
     fn a_wide_multiply_survives_the_engine_and_computes_the_model_s_answer() {
-        // 16384 is the width at which LLVM's own expansion is refused by both wasmtime and V8,
-        // so a green run there is the whole objection to a wide multiply answered rather than
-        // avoided. 1000 is neither a limb multiple nor a power of two, which is where the limb
-        // count and the shift-count reduction are both at their least forgiving.
+        // At 16384 bits LLVM's inline expansion is refused by both wasmtime and V8, so passing
+        // there answers that objection to a wide multiply. 1000 is neither a limb multiple nor a
+        // power of two, where the limb count and the shift-count reduction are least forgiving.
         for bits in [16384, 1000] {
             assert_eq!(
                 routed_op_through_wasm(&IntArithOp::Mul, bits, WasmCompileOpts::fast),
@@ -2888,8 +3360,7 @@ mod tests {
         }
     }
 
-    /// The sum, the difference, the four divisions through their helpers, and the shift whose count
-    /// reduction is one.
+    /// The sum, the difference and the four divisions, through their helpers.
     ///
     /// At 1000 bits both operands are negative under a signed reading, and the top limb holds 40
     /// bits, so a signed operand is sign-extended into the helper's buffer.
@@ -2902,7 +3373,6 @@ mod tests {
             IntArithOp::URem,
             IntArithOp::SDiv,
             IntArithOp::SRem,
-            IntArithOp::Shl,
         ] {
             assert_eq!(
                 routed_op_through_wasm(&kind, 1000, WasmCompileOpts::fast),
@@ -2914,7 +3384,7 @@ mod tests {
 
     /// The helpers at the type cap and one below it, where the operands' signs differ.
     #[test]
-    fn a_wide_division_sum_or_difference_reaches_the_engine_at_the_cap() {
+    fn every_routed_operation_reaches_the_engine_at_the_cap() {
         for bits in [16383, 16384] {
             for kind in [
                 IntArithOp::Add,
@@ -2923,6 +3393,8 @@ mod tests {
                 IntArithOp::URem,
                 IntArithOp::SDiv,
                 IntArithOp::SRem,
+                IntArithOp::Shl,
+                IntArithOp::AShr,
             ] {
                 assert_eq!(
                     routed_op_through_wasm(&kind, bits, WasmCompileOpts::fast),
@@ -3013,30 +3485,23 @@ mod tests {
     }
 }
 
-/// The LLVM backend's conformance relation to the normative model in `mavros-int-semantics`.
+/// The LLVM backend's conformance to the normative model in `mavros-int-semantics`.
 ///
-/// The backend emits IR rather than computing values, so it cannot be checked the way an
-/// interpreter can. What it can be checked against is **LLVM's own constant folder**: build the
-/// real lowering — [`LLVMCodeGen::build_int_arith`], not a mirror of it — with two constant
-/// operands, and LLVM folds the instruction as it emits it, handing back the value that lowering
-/// means. That composes the two decisions the backend actually makes, which instruction each
-/// `IntArithOp` picks and how the shift count is masked, with LLVM's definition of the instruction
-/// chosen.
+/// The backend emits IR rather than values, so it is checked against **LLVM's constant folder**:
+/// the real lowering ([`LLVMCodeGen::build_int_arith`]) is built on two constant operands, and LLVM
+/// folds it to the value it means. That covers which instruction each `IntArithOp` picks, how the
+/// shift count is reduced, and LLVM's definition of the instruction.
 ///
 /// The relation is the VM's: equal to [`residue`](mavros_int_semantics::residue) wherever the model
 /// has an opinion, and total. It is vacuous on a zero divisor and a signed `INT_MIN / -1`.
 ///
-/// Which `IntArithOp` an operation lowers to is not transcribed here either: the sweep calls
-/// `hlssa_to_llssa::int_arith_op`, the same table the real lowering applies, reached through
-/// the model's own
-/// `IntOp -> ArithGroup` renaming. A copy of that table would only have checked itself.
+/// The sweep calls `hlssa_to_llssa::int_arith_op`, the table the lowering applies, rather than a
+/// copy that would only check itself.
 ///
-/// Two constant operands are also the one shape [`routes_through_a_runtime_helper`] answers
-/// `false` for, so what the folder reads is always the direct lowering. That is deliberate as a
-/// folded wide product is worth more to the module than a call, and a call something the folder
-/// can't answer for.
+/// A constant pair is never routed to a runtime helper ([`routes_through_a_runtime_helper`]), so
+/// the folder always reads the direct lowering: a folded wide product beats a call.
 ///
-/// What this does **not** prove is that the emitted IR reaches a backend unchanged.
+/// This does **not** prove that the emitted IR reaches a backend unchanged.
 #[cfg(test)]
 mod int_semantics_conformance {
     use inkwell::{context::Context, values::AnyValue};
@@ -3045,12 +3510,8 @@ mod int_semantics_conformance {
     use super::*;
     use crate::compiler::ssa::{hlssa::BinaryArithOpKind, hlssa_to_llssa::int_arith_op};
 
-    /// The `IntArithOp` a given opcode lowers to.
-    ///
-    /// Delegates to the compiler's own table rather than restating it, so that this sweep covers
-    /// the lowering's instruction choice as well as LLVM's definition of the instruction chosen.
-    /// Note there is no `sshl`: a left shift is one map on the bit pattern, which is why
-    /// `int_arith_op` ignores the sign for it just as the VM has no signed `cell_shl`.
+    /// The `IntArithOp` a given opcode lowers to, from the compiler's table, so the sweep covers
+    /// the lowering's choice too. There is no `sshl`: a left shift is sign-agnostic, as in the VM.
     fn lowering(kind: BinaryArithOpKind) -> IntArithOp {
         int_arith_op(kind.group(), kind.is_signed())
     }
@@ -3091,10 +3552,10 @@ mod int_semantics_conformance {
         let mut checked = 0usize;
         let mut unfolded = Vec::new();
 
-        // Driven from `BinaryArithOpKind`, the vocabulary being lowered _from_: the two are no
-        // longer in bijection, so sweeping the model's sixteen would cover only one of
-        // `UShl`/`SShl`. Shifts share the one width set, because `reduce_shift_count` emits a real
-        // `urem` off the power-of-two path rather than an `and` that is a modulo only there.
+        // Driven from `BinaryArithOpKind`, the vocabulary lowered from: the model's operations are
+        // not in bijection with it, and sweeping those would cover only one of `UShl`/`SShl`.
+        // Shifts share the width set, because `reduce_shift_count` emits a `urem` off the
+        // power-of-two widths.
         for kind in BinaryArithOpKind::ALL {
             let op = IntOp::from(kind);
             let sign = kind.sign();
@@ -3103,7 +3564,7 @@ mod int_semantics_conformance {
                     .custom_width_int_type(NonZeroU32::new(bits as u32).unwrap())
                     .unwrap();
                 let rhs_values = if op.is_shift() {
-                    corners::shift_amounts(bits, bits)
+                    corners::shift_amounts(bits)
                 } else {
                     corners::values(bits)
                 };
@@ -3233,14 +3694,66 @@ mod int_semantics_conformance {
         assert!(checked > 20_000, "the sweep only reached {checked} points");
     }
 
+    /// A read a `u128` holds out of a container it does not: the ladder runs on the read alone.
+    #[test]
+    fn a_short_read_of_a_wide_container_takes_the_ladder() {
+        let context = Context::create();
+        let mut codegen = LLVMCodeGen::new(&context, "short_wide_spread");
+        let scratch =
+            codegen
+                .module
+                .add_function("scratch", context.void_type().fn_type(&[], false), None);
+        codegen
+            .builder
+            .position_at_end(context.append_basic_block(scratch, "entry"));
+
+        let names = (String::new(), String::new());
+        for bits in [200usize, 1000] {
+            for value in corners::wide_values(bits) {
+                for read in [1usize, 7, 63, 64] {
+                    let got = codegen.build_spread(
+                        codegen.int_pattern(&value),
+                        read as u32,
+                        2 * bits as u32,
+                        "",
+                    );
+                    assert_eq!(
+                        folds_to(&codegen, got, &value.spread(read)),
+                        Some(true),
+                        "spread of {read} bits of {value:?}"
+                    );
+                }
+                for read in [2usize, 7, 127, 128] {
+                    let (odd, even) = codegen.build_unspread(
+                        codegen.int_pattern(&value),
+                        read as u32,
+                        (bits / 2) as u32,
+                        bits.div_ceil(2) as u32,
+                        &names,
+                    );
+                    let (want_odd, want_even) = value.unspread(read);
+                    assert_eq!(
+                        folds_to(&codegen, odd, &want_odd),
+                        Some(true),
+                        "odd stream of {read} bits of {value:?}"
+                    );
+                    assert_eq!(
+                        folds_to(&codegen, even, &want_even),
+                        Some(true),
+                        "even stream of {read} bits of {value:?}"
+                    );
+                }
+            }
+        }
+    }
+
     /// Whether LLVM folded `value` to exactly `want`, or [`None`] if it folded to no constant.
     ///
-    /// Read as a comparison rather than as a value, which is what makes the wide half affordable.
-    /// Printing a wide constant is a decimal conversion quadratic in the width, and pulling one
-    /// out limb by limb leaves a uniqued constant per limb in the context for the whole test.
-    /// Folding an `icmp eq` against the model's own answer costs one constant and one bit at any
-    /// width. The price is that a failure has to fetch the operands separately to say what it saw,
-    /// which is the right way round: that path runs once.
+    /// Read as a comparison rather than a value, which keeps the wide cases cheap: printing a wide
+    /// constant is a decimal conversion quadratic in the width, and extracting one limb by limb
+    /// leaves a uniqued constant per limb in the context for the whole test. Folding an `icmp eq`
+    /// against the model's answer costs one constant and one bit at any width. A failure then has
+    /// to fetch the operands separately to report them, which is fine as that path runs once.
     fn folds_to(codegen: &LLVMCodeGen<'_>, value: IntValue<'_>, want: &IntBits) -> Option<bool> {
         // A `poison` is not a `ConstantInt`, and comparing against one folds to poison in turn,
         // so this is the same reading of an unfolded result the narrow half takes.
@@ -3309,11 +3822,9 @@ mod int_semantics_conformance {
 
                 checked += folded_here;
 
-                // Read off the sweep rather than off `needs_a_runtime_helper` again, so that this
-                // says something the body could falsify. A shape the routing would take, that the
-                // sweep nevertheless reached and folded, is the suppression in
-                // `routes_through_a_runtime_helper` working: a routed operation is a call, and a
-                // call loads its result rather than folding, which `unfolded` would catch.
+                // Read off the sweep, not off `needs_a_runtime_helper`, so the body can falsify
+                // it: a routed operation is a call, which loads its result rather than folding,
+                // and `unfolded` would catch it.
                 if routable && folded_here > 0 {
                     suppressed += 1;
                 }
@@ -3327,13 +3838,13 @@ mod int_semantics_conformance {
             &unfolded[..unfolded.len().min(3)]
         );
 
-        // `BinaryArithOpKind::ALL` lowers to `Add`, `Sub` and `Mul` from both readings, so the ten
-        // kinds reaching the seven routed opcodes are counted once per wide width. What the routing does
-        // emit at these shapes is not this relation's business at all -- see
+        // `BinaryArithOpKind::ALL` reaches `Add`, `Sub`, `Mul` and `Shl` from both readings, so the
+        // fourteen kinds reaching the ten routed opcodes are counted once per wide width. What the
+        // routing emits is checked by
         // `tests::the_routed_lowering_agrees_with_the_model_through_wasm`.
         assert_eq!(
             suppressed,
-            10 * corners::WIDE_WIDTHS.len(),
+            14 * corners::WIDE_WIDTHS.len(),
             "a routable shape was not reached, or did not fold, at every wide width"
         );
 

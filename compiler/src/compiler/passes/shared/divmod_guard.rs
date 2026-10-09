@@ -1,32 +1,31 @@
-//! The single definition of "this division is undefined", shared by every pass that has to make a
+//! The single definition of "this division is undefined", shared by every pass that makes a
 //! failable `Div`/`Mod` explicit.
 //!
 //! Three consumers, which must not drift:
 //!
-//! - `LowerPureGuards::lower_divmod_guard` — a _guarded_ division turns the condition into "this
-//!   branch must be inactive", so an inactive bad division is not an error. That needs pure
-//!   operands, as it branches on them. A guarded witness field division asserts the condition
-//!   false under the guard instead (`lower_witness_field_div_guard`), and a guarded witness integer
-//!   one is left to its lowering, which rejects the same executions.
-//! - `LowerPureGuards::lower_unguarded_divmod` — an unguarded division whose quotient is used
-//!   asserts the condition is false, then performs the division unchanged. An integer division by
-//!   a witness is the exception, as its lowering refuses a zero divisor, and a signed one
-//!   `INT_MIN / -1`, itself ([`divisor_checked_by_its_lowering`]).
-//! - `DCE` — an unguarded division whose quotient is _not_ used is replaced by the assertion
-//!   alone. Mavros builds HLSSA straight from Noir's monomorphized AST and never runs Noir's SSA
-//!   pipeline, so nothing upstream has already attached a failure to the division; if the division
-//!   is simply deleted, the failure Noir promises disappears with it. After taint inference, the
-//!   exception above is kept whole instead, as the division is then its own check.
+//! - `LowerPureGuards::lower_divmod_guard`: a _guarded_ division turns the condition into "this
+//!   branch must be inactive", so a bad division in an inactive branch is not an error. This
+//!   branches on the operands, so it needs them pure. A guarded witness field division instead
+//!   asserts the condition false under the guard (`lower_witness_field_div_guard`), and a guarded
+//!   witness integer division is left to its lowering, which rejects the same executions.
+//! - `LowerPureGuards::lower_unguarded_divmod`: an unguarded division whose quotient is used
+//!   asserts the condition is false, then divides unchanged. An integer division by a witness is
+//!   the exception: its lowering refuses a zero divisor, and when signed `INT_MIN / -1`
+//!   ([`divisor_checked_by_its_lowering`]).
+//! - `DCE`: an unguarded division whose quotient is _not_ used is replaced by the assertion alone.
+//!   Mavros builds HLSSA from Noir's monomorphized AST and never runs Noir's SSA pipeline, so
+//!   nothing upstream attaches a failure to the division; deleting it would drop the failure Noir
+//!   promises. After taint inference, the exception above is kept whole instead, as the division
+//!   itself is the check.
 //!
-//! [`divmod_provably_defined`] is the fourth member of that set and must not drift either: it is
-//! the _discharge_ of the same condition, so a consumer that can prove it need emit nothing at all.
-//! Both `LowerPureGuards` (at each of its two sites) and `DCE` consult it — the latter in its mark
-//! phase as well as its sweep, since a check it will not emit must not hold the operand chain that
-//! feeds it live either.
+//! [`divmod_provably_defined`] is a fourth member that must not drift either: it _discharges_ the
+//! same condition, so a consumer that can prove it emits nothing. `LowerPureGuards` (at both its
+//! sites) and `DCE` consult it; DCE in its mark phase as well as its sweep, since a check it will
+//! not emit must not keep the operand chain that feeds it alive.
 //!
-//! None of them reads the operand's signedness off the type — a type has none to read. Every
-//! entry point here takes a `signed` flag its caller took from the `Div`/`Mod` opcode, so that the
-//! check and the division it accompanies are decided by one source.
+//! None of them reads signedness off the operand's type, which has none. Every entry point takes a
+//! `signed` flag that its caller took from the `Div`/`Mod` opcode, so the check and its division
+//! are decided by one source.
 
 use num_bigint::BigInt;
 use num_traits::{One, Zero};
@@ -52,58 +51,45 @@ pub fn divmod_can_fail(ty: &Type) -> bool {
     matches!(ty.strip_witness().expr, TypeExpr::Int(_) | TypeExpr::Field)
 }
 
-/// Whether the witness lowering a `kind` division by a `rhs_type` divisor is bound for rejects
-/// every execution [`emit_divmod_failure_cond`] would itself, so that no separate check is needed.
+/// Whether the witness lowering a `kind` division by a `rhs_type` divisor reaches rejects every
+/// execution [`emit_divmod_failure_cond`] would, so no separate check is needed.
 ///
-/// That holds for an integer division by a witness, whatever its sign. A zero divisor fails the
-/// `r < d` check of the unsigned division, which the signed one runs on the magnitudes, and the
-/// signed `INT_MIN / -1` fails the range check of the quotient, whose magnitude `2^(bits - 1)` the
-/// type cannot hold as a positive answer. Both are built into the remainder's lowering as well as
-/// the quotient's.
+/// It does for an integer division by a witness: a zero divisor fails the unsigned `r < d` check
+/// (which a signed division runs on magnitudes), and `INT_MIN / -1` fails the quotient's range
+/// check. The remainder's lowering has both checks too.
 ///
-/// The check this answers for is only as good as the lowering being reached, so a dead division
-/// this answers `true` for has to be **kept** until then rather than deleted, which is what `DCE`'s
-/// `owes_witness_check` ensures.
+/// The check is made only when the lowering is reached, so a dead division answered `true` here
+/// must be kept until then, which `DCE`'s `owes_witness_check` ensures.
 pub fn divisor_checked_by_its_lowering(kind: BinaryArithOpKind, rhs_type: &Type) -> bool {
     matches!(kind.group(), ArithGroup::Div | ArithGroup::Rem)
         && rhs_type.is_witness_of()
         && matches!(rhs_type.strip_witness().expr, TypeExpr::Int(_))
 }
 
-/// Whether the range domain **proves** this division is defined, so the check
-/// [`emit_divmod_failure_cond`] would build is dead and need not be emitted at all.
+/// Whether the range domain **proves** this division defined, so the check
+/// [`emit_divmod_failure_cond`] would build is dead.
 ///
-/// This is the exact complement of that function: it discharges the same disjunction, pattern by
-/// pattern, rather than constraining it.
+/// It discharges that function's disjunction pattern by pattern:
 ///
-/// - A zero divisor is the failure every operand type shares.
-/// - A signed operand additionally fails at `INT_MIN / −1`, whose mathematical quotient is one past
-///   the top of the type. Either half is enough to rule that out: a divisor that is never `−1`, or
-///   a dividend that is never `INT_MIN`.
+/// - a zero divisor, for every operand type;
+/// - for a signed operand, `INT_MIN / −1`, ruled out by a divisor never `−1` or a dividend never
+///   `INT_MIN`.
 ///
-/// The queries are over _bit patterns_, not mathematical values, which is what lets one predicate
-/// serve `U`, `I` and `Field` alike — and it is the reason the domain carries both readings, since
-/// `−1` is the pattern `2^bits − 1` read one way and `−1` read the other.
+/// The queries are over bit patterns, so one predicate serves `U`, `I` and `Field`: `−1` is the
+/// pattern `2^bits − 1`.
 ///
-/// `lhs_type` must already be stripped of any `WitnessOf` wrapper and satisfy [`divmod_can_fail`];
-/// anything else answers `false`, since a check that is not understood must not be dropped.
+/// `lhs_type` must be stripped of `WitnessOf` and satisfy [`divmod_can_fail`]; anything else
+/// answers `false`, as a check not understood must not be dropped.
 ///
-/// `signed` comes from the caller's opcode, **not** from `lhs_type`, which carries no sign to
-/// read. It has to: [`emit_divmod_failure_cond`] builds the disjunction from the same flag,
-/// and the division the caller re-plants alongside it takes its lowering from the same operation.
-/// If this predicate answered differently from that lowering, a check could be discharged here that
-/// the lowering still needs — so the three are given one source, and the opcode is it. The width
-/// still comes from the type, which is not in question.
+/// `signed` comes from the caller's opcode, not `lhs_type`, which carries no sign. The failure
+/// condition and the re-planted division read the same opcode, so this cannot discharge a check
+/// their lowering still needs. The width comes from the type.
 ///
-/// Note that ⊥ answers `false` throughout, by [`ValueRange::proves_excludes_pattern`]. That matters
-/// here more than anywhere: a `Div` whose operand range is ⊥ is exactly the division the check is
-/// there to reject.
+/// ⊥ answers `false` ([`ValueRange::proves_excludes_pattern`]): a division whose operand range is ⊥
+/// is exactly the one the check exists to reject.
 ///
-/// This is the domain's first _constraint-eliding_ consumer, so it also inherits the one soundness
-/// assumption the domain cannot discharge itself: `WriteWitness` gives a minted witness the range
-/// of its **hint**, which binds the prover only through whatever constraints accompany it. A
-/// divisor that is a hint written without them would be proved nonzero on the honest execution
-/// alone. Every hint in the tree today is pinned; see the `WriteWitness` transfer in
+/// As a constraint-eliding consumer, this assumes every hint is pinned by its constraints, since
+/// the domain gives a `WriteWitness` its hint's range; see the `WriteWitness` transfer in
 /// `value_range_analysis`.
 pub fn divmod_provably_defined(
     lhs: &ValueRange,
@@ -198,15 +184,12 @@ pub fn emit_divmod_is_defined_assert(
     });
 }
 
-/// The divisor a division's witness-generation hint divides by: `divisor`, or one where it is zero.
+/// The divisor a division's hint divides by: `divisor`, or one where it is zero.
 ///
-/// A zero divisor has no quotient (and the constraints the hint feeds refuse it) but the hint runs
-/// first. An integer division by a witness has no assertion ahead of it to trap there instead (see
-/// [`divisor_checked_by_its_lowering`]), and a guarded one reaches it whenever the guard holds, so
-/// without this the hint would be a compiled `udiv` by zero, which LLVM leaves undefined.
-///
-/// Dividing by one changes nothing that an honest run can compute. Both the single-cell division
-/// and `WideWitnessInts`' limb-wise one hint through it.
+/// The constraints refuse a zero divisor, but the hint runs first, and an integer division by a
+/// witness has no assertion ahead of it (see [`divisor_checked_by_its_lowering`]). Without this
+/// the hint would compile to a `udiv` by zero, which LLVM leaves undefined. Dividing by one changes
+/// nothing an honest run computes. The single-cell and limb-wise divisions both hint through this.
 pub fn nonzero_hint_divisor(b: &mut impl HLEmitter, divisor: ValueId, bits: usize) -> ValueId {
     let zero = b.int_const(IntBits::zero(bits));
     let one = b.int_const(IntBits::one(bits));

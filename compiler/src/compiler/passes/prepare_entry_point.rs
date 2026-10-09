@@ -56,6 +56,9 @@ use crate::{
     collections::HashMap,
     compiler::{
         pass_manager::{AnalysisStore, Pass},
+        passes::{
+            shared::limbs::widest_injective_int_bits, wide_witness_ints::multi_cell_int_bits,
+        },
         ssa::{
             BlockId, FunctionId, Located, SourceLocation, ValueId,
             hlssa::{
@@ -531,13 +534,9 @@ impl PrepareEntryPoint {
 
     /// How many elements of the entry point's input blob a value of `typ` occupies.
     ///
-    /// An integer takes one for the moment. A parameter is written to a single witness column and
-    /// range-checked to its own width there, and a range check bounds a _field element_. As a
-    /// result the widest integer one slot carries is `widest_injective_int_bits`, and below that
-    /// there is no width at which one slot is not enough.
-    ///
-    /// A wider parameter would need a slot per limb here, and a reconstruction that combines them —
-    /// which is a witnessed wide addition and shift. Supporting this is future work.
+    /// An integer takes one: a parameter is written to a single witness column and range-checked
+    /// to its width there. A range check bounds a _field element_, so one slot carries any integer
+    /// up to `widest_injective_int_bits`.
     pub fn flattened_field_count(typ: &Type) -> usize {
         match &typ.expr {
             TypeExpr::Field | TypeExpr::Int(_) => 1,
@@ -605,6 +604,10 @@ impl PrepareEntryPoint {
     ) -> ValueId {
         match &typ.expr {
             TypeExpr::Field => e.write_witness(value_id),
+            // `WideWitnessInts` splits a whole value written this wide into range-checked limbs.
+            TypeExpr::Int(size) if *size > multi_cell_int_bits(e.field()) => {
+                e.write_witness(value_id)
+            }
             TypeExpr::Int(size) => {
                 let cast_back = CastTarget::Int(*size);
                 let as_field = e.cast_to_field(value_id);
@@ -728,6 +731,15 @@ impl PrepareEntryPoint {
                 e.array_get(input_array, zero)
             }
             TypeExpr::Int(size) => {
+                // One input element carries the value, so it can be no wider than an element holds
+                // injectively; Noir has no wider integer.
+                let widest = widest_injective_int_bits(e.field());
+                if *size > widest {
+                    ice!(
+                        "an int{size} crosses the entry point, which carries integers up to \
+                         int{widest}"
+                    );
+                }
                 let zero = e.int_const(IntBits::zero(32));
                 let field_param = e.array_get(input_array, zero);
                 if *size == 1 {

@@ -69,7 +69,7 @@ Registering a place that implements integer semantics means three things:
    than a value.
 2. Write a test that holds it to that relation, and name that test in the register. A relation
    nothing checks is a belief.
-3. Give it a section in [docs/int-semantics.md](int-semantics.md).
+3. Give it a row in the register table of [docs/int-semantics.md](int-semantics.md).
 
 `register.rs` checks all three, and additionally sweeps the workspace for arithmetic that defines an
 out-of-range answer without going through the model. The best outcome is that you don't need any of

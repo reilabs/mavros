@@ -1,134 +1,135 @@
 //! The multi-cell representation: a witnessed integer too wide for one field element becomes a
 //! group of limbs.
 //!
-//! A `WitnessOf(Int(N))` with `N > multi_cell_int_bits` becomes `k = ceil(N/h)` values, stored in
-//! little-endian order, where `h` is [`witness_limb_bits`]. Limbs `0..k-1` are `WitnessOf(Int(h))`
-//! and the top one is `WitnessOf(Int(N - (k-1)h))`, so a limb's declared width remains correct.
+//! A `WitnessOf(Int(N))` with `N > multi_cell_int_bits` becomes `k = ceil(N/h)` little-endian
+//! values, where `h` is [`witness_limb_bits`]. Limbs `0..k-1` are `WitnessOf(Int(h))` and the top
+//! one is `WitnessOf(Int(N - (k-1)h))`, so each limb's declared width is correct.
 //!
-//! A **pure** `Int(N)` **scalar** is untouched as it exists in the hint domain where both backends
-//! can compute on it at arbitrary width.
+//! A **pure** `Int(N)` **scalar** is untouched: it lives in the hint domain, where both backends
+//! compute at any width.
 //!
-//! A **sequence** of wide elements is transposed instead: `Array(E, n)` becomes `k` parallel
-//! `Array(E_j, n)`, each holding one limb position of every element, and a read or a write is that
-//! operation once per limb sequence at the caller's own index. This is [`element_limb_types`], and
-//! it splits a **pure** wide element too. A sequence has to make one field element per entry for
-//! the lookup tape to address it; transposing makes every entry a limb the tape already knows how
-//! to read. Putting such an element back together is [`Rewriter::recombine_pure`], which is integer
-//! arithmetic at the value's own width and so costs interpreter work rather than constraints.
+//! A **sequence** of wide elements is transposed: `Array(E, n)` becomes `k` parallel
+//! `Array(E_j, n)`, each holding one limb position of every element, and a read or write is that
+//! operation once per limb sequence at the caller's index. This is [`element_limb_types`], and it
+//! splits **pure** wide elements too: the lookup tape needs one field element per entry, and
+//! transposing makes every entry a limb it can already read. A pure element read back is
+//! recombined at once by [`Rewriter::recombine_pure`], integer arithmetic at the value's width that
+//! costs interpreter work rather than constraints, so no pure integer is held as limbs past the
+//! read. A global holding such a sequence takes a slot per limb sequence.
 //!
-//! This representation is sound because **every limb is range-checked** to its declared width when
-//! it is created or modified. `2^h` is invertible mod `p`, so an unbounded limb lets a prover solve
-//! for any value, so it is crucial to avoid that.
+//! The representation is sound because **every limb is range-checked** to its declared width when
+//! it is created or modified. `2^h` is invertible mod `p`, so a single unbounded limb would let a
+//! prover solve for any value.
 //!
 //! Limbs are created in two shapes:
 //!
-//! - **A single value becoming limbs** via [`Rewriter::decompose`] says that each limb is witnessed
-//!   from the pure shadow, range-checked to its width, and the limbs are then constrained to
-//!   recombine to the value from which they came. Without the reconstruction constraint the limbs
-//!   would be range-checked garbage unrelated to the source.
-//! - **A value that is limbs from the start** (a widening cast, a pure-to-witness injection) has no
-//!   source value to agree with, so they are simply range-checked.
+//! - **A single value becoming limbs** ([`Rewriter::decompose`]): each limb is witnessed from the
+//!   pure shadow and range-checked to its width, and the limbs are constrained to recombine to the
+//!   source value. Without that constraint the limbs would be unrelated to the source.
+//! - **A value that is limbs from the start** (a widening cast, a pure-to-witness injection) has
+//!   no source to agree with, so its limbs are only range-checked.
 //!
-//! Everything else either moves limbs around or, as the bitwise operations do, acts on each limb
-//! within its own width, and so they remain constrained. The exceptions are the carry chain, the
-//! schoolbook product, the division built from the two, the shift, the spread and the unspread, and
-//! the sign and the magnitude.
+//! Everything else either moves limbs or, like the bitwise operations, acts on each limb within its
+//! width, so the limbs stay constrained. The exceptions, below, are the carry chain, the schoolbook
+//! product, the division built from those two, the shift, the spread and unspread, and the sign
+//! and magnitude.
 //!
 //! # The Carry Chain
 //!
 //! The unsigned sum, difference and ordering are one gadget: `a < b` **is** the borrow out of the
-//! top limb of `a - b`. Per limb of width `w`, the answer is `a + b + c_in - 2^w c_out` for a sum
+//! top limb of `a - b`. For a limb of width `w`, the answer is `a + b + c_in - 2^w c_out` for a sum
 //! and `a - b - c_in + 2^w c_out` for a difference, with `c_out` a witnessed carry checked to be a
-//! bit and the answer range-checked at `w`, which is what pins the carry. A checked sum or
-//! difference lets no carry out of the top limb, an ordering witnesses that carry as its answer,
-//! and an asserted ordering fixes it at one.
+//! bit; range-checking the answer at `w` pins the carry. A checked sum or difference lets no carry
+//! out of the top limb, an ordering's answer is that carry, and an asserted ordering fixes it at
+//! one.
 //!
-//! The chain runs past [`widest_cell_sum_bits`], one bit short of the threshold above: at that one
-//! width the operands still have an element each but their sum does not, so the operands are
-//! decomposed into limbs first. A sum or difference is then recombined into its element.
+//! The chain runs past [`widest_cell_sum_bits`], one bit below the threshold above: at that width
+//! each operand still fits an element but their sum does not, so the operands are decomposed into
+//! limbs first and a sum or difference is recombined into its element.
 //!
-//! The signed three are the same chain. A signed sum or difference keeps the unsigned one's limbs
-//! and witnesses its top carry, and is checked by one linear relation between that carry and the
-//! sign bits of both operands and of the answer. A signed ordering is the unsigned ordering of the
-//! operands with their top bits flipped, which is offset binary.
+//! The signed three use the same chain. A signed sum or difference keeps the unsigned limbs and top
+//! carry, checked by one linear relation between that carry and the sign bits of both operands and
+//! the answer. A signed ordering is the unsigned ordering with the operands' top bits flipped
+//! (offset binary).
 //!
 //! # The Schoolbook Product
 //!
-//! An unsigned product runs here wherever the single cell cannot hold it, which is past
-//! [`single_cell_product_fits`]: from the width whose product passes the modulus, apart from the
-//! double lane's own two-limb product. A signed one runs here past
-//! [`single_cell_signed_product_fits`], which has no such escape, as the product of its operands'
-//! magnitudes (see the sign, below). Each column of the answer sums its partial products and the
-//! carries into it, and is reduced into its limb, range-checked at the limb width, and a witnessed
-//! carry range-checked at the width its bound needs. The top column carries nothing out, so it is
-//! range-checked at the top limb's width instead, and every partial product landing past it is
-//! held to zero, one constraint per left limb. [`plan_product`] decides where the reductions fall
-//! and states why each identity holds as integers rather than modulo `p`.
+//! An unsigned product runs here wherever the single cell cannot hold it, past
+//! [`single_cell_product_fits`]: from the width whose product passes the modulus, except for the
+//! double lane's two-limb product. A signed one runs here past [`single_cell_signed_product_fits`],
+//! with no such exception, as the product of the operands' magnitudes (see the sign, below). Each
+//! answer column sums its partial products and incoming carries, and is reduced into its limb,
+//! range-checked at the limb width, plus a witnessed carry range-checked at the width its bound
+//! needs. The top column carries nothing out, so it is range-checked at the top limb's width, and
+//! every partial product landing past it is held to zero, one constraint per left limb.
+//! [`plan_product`] decides where the reductions fall and why each identity holds as integers
+//! rather than modulo `p`.
 //!
 //! # The Division
 //!
 //! An unsigned division or remainder runs here wherever its single-cell lowering could not form
-//! `q·d` in one element, which is where the product does. The quotient and the remainder are
-//! witnessed as limbs from the pure side's own division and pinned by two checks: `q·d + r == n`,
-//! which is the schoolbook with `r` as one more term in each column and every column **held to the
-//! dividend's limb** rather than range-checked, and `r < d`, which is the carry chain with its top
-//! borrow forced out and so also refuses a zero divisor. Together they admit exactly the pair
-//! Euclidean division gives. An operand's known limbs bound both answers, and a limb they cannot
-//! reach is a known zero rather than a column. A signed division is the unsigned one of the
-//! operands' magnitudes, past [`single_cell_signed_product_fits`].
+//! `q·d` in one element, which is where the product does. The quotient and remainder are witnessed
+//! as limbs from a pure-side division and pinned by two checks: `q·d + r == n`, the schoolbook with
+//! `r` as one more term in each column and every column **held to the dividend's limb** rather than
+//! range-checked; and `r < d`, the carry chain with its top borrow forced out, which also refuses a
+//! zero divisor. Together they admit exactly the Euclidean pair. An operand's known limbs bound
+//! both answers, and a limb they cannot reach is a known zero rather than a column. A signed
+//! division is the unsigned one on the operands' magnitudes, past
+//! [`single_cell_signed_product_fits`].
 //!
 //! # The Shift
 //!
-//! A shift under either reading runs here wherever the single cell cannot hold it, which is past
+//! A shift under either reading runs here wherever the single cell cannot hold it, past
 //! [`single_cell_shift_fits`]. A left shift is one map on the pattern, and a signed right shift is
-//! the unsigned one with the sign filled in. An
-//! amount known at compile time only moves bits, so the operand is cut where a run of its bits
-//! stops landing inside one limb of the answer, and each piece is range-checked at its own width;
-//! moving an operand held as limbs by a whole number of them costs nothing. Any other amount is
-//! `q·h + r`, with `r` read out of the powers-of-two table beside `2^r`. Every limb is split at
-//! `2^r` into two halves, each range-checked, that land either side of a limb boundary without
-//! overlapping, and a barrel over the bits of `q` moves the whole limbs. The amount's own bound is
-//! the decomposition where that reaches the width, and an explicit range check where it does not.
-//! A pure amount is known wherever the constraints are built, so its decomposition is pure, its
-//! bound a comparison, and the split and the barrel linear.
+//! the unsigned one with the sign filled in. An amount known at compile time only moves bits, so
+//! the operand is cut where a run of its bits stops landing inside one answer limb, and each piece
+//! is range-checked at its width; moving an operand held as limbs by a whole number of limbs costs
+//! nothing. Any other amount is `q·h + r`, with `r` and `2^r` read from the powers-of-two table.
+//! Every limb is split at `2^r` into two range-checked halves that land on either side of a limb
+//! boundary without overlapping, and a barrel over the bits of `q` moves whole limbs. The amount is
+//! bounded by the decomposition where that reaches the width, and by an explicit range check where
+//! it does not. A pure amount is known wherever the constraints are built, so its decomposition is
+//! pure, its bound a comparison, and the split and barrel linear.
 //!
 //! # The Spread
 //!
 //! A spread and an unspread are limb-local at the half-limb: a half-limb of a spread's operand is
 //! one limb of its answer, and a limb of an unspread's operand is a half-limb of each stream. So
-//! each becomes the narrow one the witness lowering builds, once per half-limb or limb, and those
-//! narrow ones' lookups are what bound the pieces, which [`Rewriter::cut_unbounded`] cuts
-//! unbounded. A piece the read straddles is taken at the bits the read reaches, a limb an unspread
-//! reads one bit of is range-checked to that bit, and a limb wholly above the read is held to zero,
-//! so the bits above a read are rejected as the narrow lowering rejects them. Under a guard every
-//! one of those checks holds only where the guard does.
+//! each becomes the narrow form the witness lowering builds, once per half-limb or limb, and those
+//! narrow lookups bound the pieces, which [`Rewriter::cut_unbounded`] cuts unbounded. A piece the
+//! read straddles is taken at the bits the read reaches, a limb an unspread reads one bit of is
+//! range-checked to that bit, and a limb wholly above the read is held to zero, so bits above a
+//! read are rejected as the narrow lowering rejects them. Under a guard, each of those checks holds
+//! only where the guard does.
+//!
+//! Every pure evaluator masks the bits above a read instead, so the same spread rejects an operand
+//! as a witness and accepts it once known, as after constant folding. A program's verdict can
+//! depend on that, and the rejection is kept because callers range-check through it.
 //!
 //! # The Sign
 //!
 //! A signed value's sign is the top bit of its top limb, which [`Rewriter::sign_bit`] cuts out as a
-//! witnessed bit beside the rest of the limb, range-checked one bit narrower. The chain's checks
-//! above are linear in it, as is a sign extension into the representation, whose limbs past the
-//! source's are that bit times all ones, and the fill of a right shift by a known amount.
+//! witnessed bit, with the rest of the limb range-checked one bit narrower. The chain checks above
+//! are linear in it, as are a sign extension into the representation (its limbs past the source's
+//! are that bit times all ones) and the fill of a right shift by a known amount.
 //!
 //! The rest is sign-magnitude. A limb complemented where the sign is one,
-//! [`Rewriter::complement`], is `x + s·(2^w - 1 - 2x)`: one product, and below `2^w` with no check
-//! of its own. A value negated where the sign is one, [`Rewriter::negate_if`], is each limb
-//! complemented and the sign added through the chain, its top carry dropped. A product, quotient
-//! and remainder run the unsigned gadgets on the operands' magnitudes, and the answer's magnitude
-//! is held to `2^(N - 1) - 1 + s` for the sign `s` it takes, by one constraint on its top bit, and
-//! negated by it. A right shift by any other amount is the unsigned one between two complements by
-//! the operand's sign.
+//! [`Rewriter::complement`], is `x + s·(2^w - 1 - 2x)`: one product, and below `2^w` with no
+//! separate check. A value negated where the sign is one, [`Rewriter::negate_if`], is each limb
+//! complemented and the sign added through the chain, dropping its top carry. A product, quotient
+//! and remainder run the unsigned gadgets on the operands' magnitudes; the answer's magnitude is
+//! held to `2^(N - 1) - 1 + s` for its sign `s` by one constraint on its top bit, then negated by
+//! it. A right shift by any other amount is the unsigned one between two complements by the
+//! operand's sign.
 //!
 //! # Strategy
 //!
-//! Types come from a single [`TypeInfo`] snapshot taken on the original, type-consistent IR; they
-//! are never recomputed mid-pass. Each function is handled in two phases, as `elide_tuples` does
-//! for tuples:
+//! Types come from a single [`TypeInfo`] snapshot of the original, type-consistent IR and are never
+//! recomputed mid-pass. Each function is handled in two phases, as `elide_tuples` does for tuples:
 //!
-//! 1. **Plan:** Build a `value_map: ValueId -> Vec<ValueId>` mapping every value to its limbs. A
-//!    value with no wide witness integer in its type maps to itself, so nothing narrow undergoes
-//!    needless churn.
-//! 2. **Rewrite:** Flatten returns, block parameters, instructions and terminators through that
+//! 1. **Plan:** build a `value_map: ValueId -> Vec<ValueId>` from every value to its limbs. A value
+//!    with no wide witness integer in its type maps to itself, so nothing narrow is churned.
+//! 2. **Rewrite:** flatten returns, block parameters, instructions and terminators through that
 //!    map, emitting the gadgets above where an instruction does more than move limbs.
 
 use std::collections::BTreeSet;
@@ -156,7 +157,7 @@ use crate::compiler::{
             witness_half_limb_bits, witness_limb_bits,
         },
         overflow_guard::abs_as_u,
-        shift_guard::{amount_type_stays_below, emit_pure_shift_amount_check},
+        shift_guard::emit_pure_shift_amount_check,
         unsupported::unsupported_on_this_field,
     },
     ssa::{
@@ -197,13 +198,7 @@ impl Pass for WideWitnessInts {
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         let field = ssa.field();
-        for global in ssa.get_global_types() {
-            assert!(
-                limb_types(global, field).len() == 1,
-                "ICE: a global carries a wide integer, as a value or as a sequence element, and \
-                 neither has a slot layout here"
-            );
-        }
+        let globals = Globals::split(ssa, field);
 
         let type_info = store.get::<TypeInfo>();
         let cfg = store.get::<FlowAnalysis>();
@@ -215,10 +210,19 @@ impl Pass for WideWitnessInts {
                 .get_function_cfg(fid)
                 .get_domination_pre_order()
                 .collect();
+            // Only reachable blocks are rewritten, so an orphan would keep its wide values and its
+            // global slots unrenumbered. None reaches here: the pipeline reclaims orphans before
+            // the lowerings just ahead of this pass, which type every block against reachable-only
+            // type info.
+            debug_assert_eq!(
+                reachable.len(),
+                ssa.get_function(fid).get_blocks().count(),
+                "ICE: an unreachable block reached the multi-cell representation"
+            );
             let value_map = plan_function(ssa, fid, &reachable, type_info);
-            // A function with no limbs can still hold an operation whose operands have an element
-            // each and whose sum or product does not, which the chain, the schoolbook and the
-            // division lower all the same.
+            // A function with no limbs can still hold an operation whose operands each fit an
+            // element but whose sum or product does not; the chain, schoolbook and division lower
+            // those too.
             let fti = type_info.get_function(fid);
             let lowers_here = || {
                 reachable.iter().any(|bid| {
@@ -233,10 +237,22 @@ impl Pass for WideWitnessInts {
                         })
                 })
             };
-            if value_map.values().all(|limbs| limbs.len() == 1) && !lowers_here() {
+            let reads_a_moved_global = || {
+                globals.moved
+                    && reachable.iter().any(|bid| {
+                        ssa.get_function(fid)
+                            .get_block(*bid)
+                            .get_instructions()
+                            .any(|op| Globals::slot(op).is_some())
+                    })
+            };
+            if value_map.values().all(|limbs| limbs.len() == 1)
+                && !lowers_here()
+                && !reads_a_moved_global()
+            {
                 continue;
             }
-            rewrite_function(ssa, fid, &reachable, &value_map, type_info, field);
+            rewrite_function(ssa, fid, &reachable, &value_map, type_info, field, &globals);
         }
     }
 
@@ -261,7 +277,7 @@ fn limb_widths(bits: usize, limb_bits: usize) -> Vec<usize> {
         .collect()
 }
 
-/// The parallel types a type expands into, which is itself unless it's a witnessed wide integer.
+/// The types a type expands into: one per limb for a witnessed wide integer, itself otherwise.
 fn limb_types(ty: &Type, field: FieldConfig) -> Vec<Type> {
     match &ty.expr {
         TypeExpr::WitnessOf(inner) => match &inner.expr {
@@ -273,14 +289,14 @@ fn limb_types(ty: &Type, field: FieldConfig) -> Vec<Type> {
             }
             _ => vec![ty.clone()],
         },
-        // A sequence of wide elements is transposed: one sequence per limb position, each holding
-        // the corresponding limb of every element. The element type of each array is a single limb,
-        // which is at most one host cell wide, so the lookup tape reads it with the tag it already
-        // has for a cell and needs no notion of a wide element at all.
+        // A sequence of wide elements is transposed: one sequence per limb position, holding that
+        // limb of every element. Each array's element type is a single limb, at most one host cell
+        // wide, so the lookup tape reads it with its existing cell tag and needs no notion of a
+        // wide element.
         //
-        // The alternative (one sequence of `n * k` limbs) would make the index `i * k + j` and so
-        // put arithmetic between the caller's index and the tape's. Here every limb sequence is
-        // indexed by the caller's own index.
+        // The alternative, one sequence of `n * k` limbs, would index it at `i * k + j`, putting
+        // arithmetic between the caller's index and the tape's. Here every limb sequence is
+        // indexed by the caller's index.
         TypeExpr::Array(inner, count) => element_limb_types(inner, field)
             .into_iter()
             .map(|leaf| leaf.array_of(*count))
@@ -299,10 +315,9 @@ fn limb_types(ty: &Type, field: FieldConfig) -> Vec<Type> {
 
 /// A sequence element splits whether or not it is witnessed.
 ///
-/// A sequence is stored one sequence per limb, so a **pure** wide element splits too — otherwise a
-/// purely-constant wide sequence stays whole, its entries have to become one field element each,
-/// and the widest it can hold is what the modulus carries. Splitting it costs pure arithmetic to
-/// put an element back together, which is interpreter work rather than constraints.
+/// A sequence is stored as one sequence per limb, so a **pure** wide element splits too: kept
+/// whole, a constant wide sequence would hold each entry as one field element, capping its width at
+/// the modulus. Reassembling an element costs interpreter work, not constraints.
 fn element_limb_types(ty: &Type, field: FieldConfig) -> Vec<Type> {
     match &ty.expr {
         TypeExpr::Int(bits) if *bits > multi_cell_int_bits(field) => {
@@ -365,20 +380,20 @@ fn plan_function(
         }
     }
 
-    // A wide value's expansion has to reach the values that merely **carry** it, which are not
-    // identified by their types.
+    // A wide value's expansion must reach the values that merely **carry** it, which their types
+    // do not identify.
     //
     // A witness-indexed array read moves its element through a field element: the lowering reads
     // the hint, strips it to the pure domain, casts that to `Field`, writes it as a witness, pins
-    // it with `constrain_lookup`, and casts back to the element's own width. Only the first and
-    // last of those are typed as the wide integer. The middle ones are a pure `int`, a `Field` and
-    // a `WitnessOf(Field)` — each of which `limb_types` calls a single value, because each of them
-    // **is** a single value everywhere else in the program.
+    // it with `constrain_lookup`, and casts back to the element's width. Only the first and last
+    // of those are typed as the wide integer. The middle ones are a pure `int`, a `Field` and a
+    // `WitnessOf(Field)`, each of which `limb_types` treats as a single value, as it is everywhere
+    // else.
     //
-    // So the expansion is propagated along the instructions that carry a value without reading it,
-    // to a fixed point. Two facts make that sound rather than a heuristic: a value the modulus
-    // cannot carry has no single field element **in either domain**, so its field image is one
-    // element per limb whether it was stripped or not; and every step below preserves the value.
+    // So the expansion is propagated, to a fixed point, along the instructions that carry a value
+    // without reading it. This is sound, not a heuristic: a value the modulus cannot carry has no
+    // single field element **in either domain**, so its field image is one element per limb
+    // whether stripped or not; and every step below preserves the value.
     let expansion = |map: &HashMap<ValueId, Vec<ValueId>>, value: ValueId| -> usize {
         map.get(&value).map_or(1, Vec::len)
     };
@@ -402,13 +417,11 @@ fn plan_function(
                         };
                         (*result, limb_widths(bits, witness_limb_bits(field)).len())
                     }
-                    // Not converted at all, so whatever the source stands for the result stands for
-                    // too.
+                    // No conversion, so the result stands for whatever the source does.
                     //
-                    // `WitnessOf` and `ValueOf` are deliberately **not** here: they are where the
-                    // representation is entered and left, and the rewriter decomposes and
-                    // recombines at them explicitly. A strip in particular yields one pure wide
-                    // value, because the pure lane holds such a value whole.
+                    // `WitnessOf` and `ValueOf` are deliberately **not** here: the rewriter
+                    // decomposes and recombines at them explicitly. A strip yields one pure wide
+                    // value, as the pure lane holds it whole.
                     OpCode::Cast {
                         result,
                         value,
@@ -420,13 +433,6 @@ fn plan_function(
                         value,
                         ..
                     } => (*result, expansion(&value_map, *value)),
-                    // Read out of a transposed sequence, which yields its limbs.
-                    //
-                    // We keep the limbs to avoid doing the same work twice, so reassembly only
-                    // happens where the whole value is required.
-                    OpCode::ArrayGet { result, array, .. } => {
-                        (*result, limb_types(fti.get_value_type(*array), field).len())
-                    }
                     _ => continue,
                 };
                 if count <= 1 || expansion(&value_map, result) == count {
@@ -445,7 +451,7 @@ fn plan_function(
     value_map
 }
 
-/// The limbs of a value; an unmapped value is its own single limb.
+/// The limbs of a value; an unmapped value is one limb, the value itself.
 fn limbs_of(value_map: &HashMap<ValueId, Vec<ValueId>>, value: ValueId) -> Vec<ValueId> {
     value_map
         .get(&value)
@@ -475,10 +481,8 @@ fn flat_limbs(value_map: &HashMap<ValueId, Vec<ValueId>>, values: &[ValueId]) ->
 
 /// The limb types of a sequence element, refused if they do not line up with the sequences.
 ///
-/// A constructor names its element type separately from its result, so the two are computed from
-/// different places and a `zip` between them builds fewer limb sequences than the plan minted
-/// values for whenever they disagree. That failure is silent (the missing sequences are simply
-/// never emitted) so the two are checked against each other here instead.
+/// A constructor's element type and result type are computed separately. Where they disagree, a
+/// `zip` would silently build fewer limb sequences than the plan minted values for.
 #[track_caller]
 fn element_types(elem_type: &Type, field: FieldConfig, expected: usize) -> Vec<Type> {
     let types = element_limb_types(elem_type, field);
@@ -514,6 +518,7 @@ fn rewrite_function(
     value_map: &HashMap<ValueId, Vec<ValueId>>,
     type_info: &TypeInfo,
     field: FieldConfig,
+    globals: &Globals,
 ) {
     let mut function = ssa.take_function(fid);
     let fti = type_info.get_function(fid);
@@ -557,6 +562,7 @@ fn rewrite_function(
                 signs: &mut signs,
                 divisions: &mut divisions,
                 known: &mut known,
+                globals,
                 out: Vec::new(),
             };
             rewriter.lower(instr.as_ref());
@@ -580,8 +586,7 @@ fn rewrite_function(
     ssa.put_function(fid, function);
 }
 
-/// A division's operands, guard and reading, which decide both of its answers: dividend, divisor,
-/// guard, and whether it is signed.
+/// What decides both answers of a division: dividend, divisor, guard, and whether it is signed.
 type Division = (ValueId, ValueId, Option<ValueId>, bool);
 
 /// One answer of a division, as far as it has been built.
@@ -590,15 +595,15 @@ enum Answer {
     /// Limbs as the field elements [`Rewriter::deliver`] takes.
     Built(Vec<ValueId>),
 
-    /// A signed answer's magnitude as limbs, each with whether it is witnessed, and the sign it
-    /// takes, which [`Rewriter::answer`] negates it by the first time it is asked for.
+    /// A signed answer's magnitude as limbs, each with whether it is witnessed, and its sign, which
+    /// [`Rewriter::answer`] negates the magnitude by the first time it is asked for.
     Signed(Vec<(ValueId, bool)>, Sign),
 }
 
 /// One instruction's worth of rewriting, plus the minting the gadgets need.
 ///
-/// `ssa` is borrowed immutably because minting a value or interning a constant does not need more
-/// than that: the function being rewritten is out of the SSA for the duration.
+/// `ssa` is borrowed immutably, which is enough to mint a value or intern a constant: the function
+/// being rewritten is out of the SSA while it is rewritten.
 struct Rewriter<'a> {
     ssa: &'a HLSSA,
     value_map: &'a HashMap<ValueId, Vec<ValueId>>,
@@ -616,11 +621,61 @@ struct Rewriter<'a> {
     /// divisor, guard and reading.
     divisions: &'a mut HashMap<Division, (Answer, Answer)>,
 
-    /// The values this function's rewrite has minted whose pattern is known at compile time but
-    /// that are not constants themselves, by value.
+    /// Values this function's rewrite minted that are not constants but whose pattern is known at
+    /// compile time, by value.
     known: &'a mut HashMap<ValueId, IntBits>,
 
+    /// Where each global's slots moved to.
+    globals: &'a Globals,
+
     out: Vec<OpCode>,
+}
+
+/// The global slots after each global holding wide integers has one slot per limb.
+///
+/// A global holding wide integers as sequence elements takes the same transposed shape as a local:
+/// one sequence per limb position, each in a separate slot. Every later slot moves along, so every
+/// global opcode is renumbered, whatever it holds.
+struct Globals {
+    /// The first new slot of each old one.
+    offsets: Vec<usize>,
+
+    /// The old slots' types, which say how many new slots each became.
+    old_types: Vec<Type>,
+
+    /// Whether any slot moved; if none did, nothing needs renumbering.
+    moved: bool,
+}
+
+impl Globals {
+    /// Split every global in `ssa` that holds a wide integer, and record where each slot went.
+    fn split(ssa: &mut HLSSA, field: FieldConfig) -> Self {
+        let old_types: Vec<Type> = ssa.get_global_types().to_vec();
+        let mut offsets = Vec::with_capacity(old_types.len());
+        let mut new_types = Vec::new();
+        for ty in &old_types {
+            offsets.push(new_types.len());
+            new_types.extend(limb_types(ty, field));
+        }
+        let moved = new_types.len() != old_types.len();
+        if moved {
+            ssa.set_global_types(new_types);
+        }
+        Self {
+            offsets,
+            old_types,
+            moved,
+        }
+    }
+
+    /// The old slot a global opcode names, if `op` is one.
+    fn slot(op: &OpCode) -> Option<usize> {
+        match op {
+            OpCode::ReadGlobal { offset, .. } => Some(*offset as usize),
+            OpCode::InitGlobal { global, .. } | OpCode::DropGlobal { global } => Some(*global),
+            _ => None,
+        }
+    }
 }
 
 impl Rewriter<'_> {
@@ -632,11 +687,11 @@ impl Rewriter<'_> {
         limbs_of(self.value_map, value)
     }
 
-    /// The limbs of an operand, splitting a **pure** one that the plan never saw.
+    /// The limbs of an operand, splitting a **pure** one the plan never saw.
     ///
-    /// `check_widths` makes both operands of a non-shift the same width, and a mixed pure/witness
-    /// pair is legal, so one witnessed operand is sufficient to require a witness lowering. A
-    /// constant is split at compile time, so its limbs are constants too.
+    /// Both operands have one width (`check_widths`). A mixed pure/witness pair is legal, so one
+    /// witnessed operand is enough to need a witness lowering. A constant splits into constant
+    /// limbs.
     fn operand_limbs(&mut self, value: ValueId, expected: usize) -> Vec<ValueId> {
         let mapped = self.limbs(value);
         if mapped.len() == expected {
@@ -745,16 +800,22 @@ impl Rewriter<'_> {
         result
     }
 
-    /// `value >> offset` on the pure side, as a division rather than a shift.
+    /// `value >> offset` on the pure side.
     ///
-    /// At a width the field carries, a shift by a constant is rewritten into a `BitRange` by
-    /// `Simplifier`, which runs **after** this pass and therefore after the rule that lowers one —
-    /// so the window would survive into codegen and be refused there. A division by the same power
-    /// of two says the same thing at every width and is the shape `lookup_spilling`'s own chunk
-    /// extraction already takes.
+    /// Up to the injective width it is a division by `2^offset`: `Simplifier` turns a shift by a
+    /// constant there into a `BitRange`, and it runs after the rule that lowers `BitRange`, so the
+    /// window would reach codegen and be refused.
+    ///
+    /// Past that width it is a shift, which the simplifier leaves alone. Wasm emits it inline,
+    /// where a division calls a runtime helper per limb and, at 16384 bits, makes the function too
+    /// large to compile.
     fn shifted_down(&mut self, value: ValueId, bits: usize, offset: usize) -> ValueId {
         if offset == 0 {
             return value;
+        }
+        if bits > widest_injective_int_bits(self.field) {
+            let amount = self.int_const(IntBits::from_u128(bits, offset as u128));
+            return self.bin(BinaryArithOpKind::UShr, value, amount);
         }
         let divisor = self.two_pow_const(bits, offset);
         self.bin(BinaryArithOpKind::UDiv, value, divisor)
@@ -793,8 +854,8 @@ impl Rewriter<'_> {
     }
 }
 
-/// The rewriter is an emitter, so that the helpers every lowering shares can build into it. What it
-/// emits goes through [`Rewriter::push`], which is what tracks the constants a cast carries.
+/// The rewriter is an emitter, so the shared lowering helpers can build into it. Everything it
+/// emits goes through [`Rewriter::push`], which tracks the constants a cast carries.
 impl HLEmitter for Rewriter<'_> {
     fn fresh_value(&mut self) -> ValueId {
         self.fresh()
@@ -822,23 +883,30 @@ impl HLEmitter for Rewriter<'_> {
 // ================================================================================================
 
 impl Rewriter<'_> {
-    /// A single witnessed value of `bits` wide, split into range-checked limbs that are constrained
-    /// to recombine to it.
+    /// A single witnessed `bits`-wide value, split into range-checked limbs constrained to
+    /// recombine to it.
     ///
-    /// The hints come from the pure shadow, which both compiled backends can compute at any width;
-    /// the constraints are what ensures that they are a representation. As
-    /// `bits <= multi_cell_int_bits`, the source has an element and the limb sum below the modulus
-    /// reaches it without wrapping.
-    ///
-    /// A value is decomposed once per block at a given width. A later request reuses the limbs,
-    /// which are already tied to the value, instead of paying the columns and checks again.
+    /// As `bits <= multi_cell_int_bits`, the source has an element and the limb sum reaches it
+    /// without wrapping. A value is decomposed once per block per width; later requests reuse the
+    /// limbs.
     fn decompose(&mut self, value: ValueId, bits: usize) -> Vec<ValueId> {
         if let Some(limbs) = self.decomposed.get(&(value, bits)) {
             return limbs.clone();
         }
-        let widths = limb_widths(bits, self.limb_bits());
         let pure = self.cast(value, CastTarget::ValueOf);
+        let (limbs, sum) = self.witness_limbs_of(pure, bits);
+        let value_field = self.cast(value, CastTarget::Field);
+        self.constrain_equal(value_field, sum, None);
 
+        self.decomposed.insert((value, bits), limbs.clone());
+        limbs
+    }
+
+    /// The limbs of a pure `bits`-wide `value` at the limb widths, each written to a witness
+    /// column and range-checked at its width, with their place-weighted field sum. The caller ties
+    /// that sum to the witnessed source.
+    fn witness_limbs_of(&mut self, pure: ValueId, bits: usize) -> (Vec<ValueId>, ValueId) {
+        let widths = limb_widths(bits, self.limb_bits());
         let mut limbs = Vec::with_capacity(widths.len());
         let mut fields = Vec::with_capacity(widths.len());
         for (index, width) in widths.iter().enumerate() {
@@ -853,20 +921,67 @@ impl Rewriter<'_> {
             let scaled = self.bin(BinaryArithOpKind::UMul, *limb_field, place);
             sum = self.bin(BinaryArithOpKind::UAdd, sum, scaled);
         }
-
-        let value_field = self.cast(value, CastTarget::Field);
-        self.constrain_equal(value_field, sum, None);
-
-        self.decomposed.insert((value, bits), limbs.clone());
-        limbs
+        (limbs, sum)
     }
 
-    /// Limb `index` of a pure `value` of `bits`, at `width`, written to a witness column and
-    /// range-checked at `checked` bits, as the limb and its field element.
+    /// A witnessed field element read as an integer of `to_bits` held as limbs, into `results`.
     ///
-    /// The column is written from the hint rather than injected as an injection would keep the pure
-    /// shadow as a live operand all the way into R1CS, where a witness strip is an ICE because a
-    /// hint is not a constraint.
+    /// An element below the modulus fits any width the representation holds, so this is its
+    /// canonical value, zero-filled. It is decomposed at the field's width by
+    /// [`Self::witness_limbs_of`]: limbs from the pure shadow, each range-checked at its width,
+    /// constrained to sum to the element. That sum is taken modulo `p` and the limbs span past it,
+    /// so `v` and `v + p` both satisfy it where `v + p` fits the limbs. The carry chain with its
+    /// top borrow forced out holds the limbs below the modulus, leaving only the canonical value.
+    fn lower_field_into_limbs(&mut self, value: ValueId, to_bits: usize, results: &[ValueId]) {
+        let field_bits = self.field.field_bit_size() as usize;
+        let widths = limb_widths(field_bits, self.limb_bits());
+        let shadow = self.cast(value, CastTarget::ValueOf);
+        let pure = self.cast(shadow, CastTarget::Int(field_bits));
+        let (limbs, sum) = self.witness_limbs_of(pure, field_bits);
+        self.constrain_equal(value, sum, None);
+
+        let modulus = IntBits::from_biguint(
+            field_bits,
+            &field_modulus(self.field)
+                .to_biguint()
+                .expect("a modulus is positive"),
+        );
+        let witnessed: Vec<(ValueId, bool)> = limbs.iter().map(|limb| (*limb, true)).collect();
+        let bound: Vec<(ValueId, bool)> = widths
+            .iter()
+            .enumerate()
+            .map(|(index, width)| {
+                let limb = modulus.bit_range(index * self.limb_bits(), *width);
+                (self.int_const(limb), false)
+            })
+            .collect();
+        self.carry_chain_over(true, &witnessed, &bound, widths, CarryOut::One, None);
+
+        let target_widths = limb_widths(to_bits, self.limb_bits());
+        assert_eq!(
+            target_widths.len(),
+            results.len(),
+            "ICE: an int{to_bits} is {} limbs, not {}",
+            target_widths.len(),
+            results.len()
+        );
+        for (index, (result, width)) in results.iter().zip(target_widths).enumerate() {
+            match limbs.get(index) {
+                Some(limb) => self.push(OpCode::Cast {
+                    result: *result,
+                    value: *limb,
+                    target: CastTarget::Int(width),
+                }),
+                None => self.define_zero(*result, width),
+            }
+        }
+    }
+
+    /// Limb `index` of a pure `bits`-wide `value`, at `width`, written to a witness column and
+    /// range-checked at `checked` bits. Returns the limb and its field element.
+    ///
+    /// Written from the hint, not injected: an injection keeps the pure shadow live into R1CS,
+    /// where a witness strip is an ICE.
     fn witness_limb(
         &mut self,
         value: ValueId,
@@ -888,19 +1003,13 @@ impl Rewriter<'_> {
         (limb, limb_field)
     }
 
-    /// A **pure** wide value injected into the representation as witnessed, range-checked limbs.
+    /// A **pure** wide value injected into the representation as witnessed, range-checked limbs,
+    /// written into `results`.
     ///
-    /// The counterpart of [`Self::decompose`] above the width the field carries. There is no
-    /// reconstruction constraint here as the source is a hint rather than a constrained value, so
-    /// there is no prior value to tie the limbs back to. The limbs **are** the value's definition,
-    /// and each one is bounded by an individual range check.
-    ///
-    /// [`Self::decompose`] cannot be used here: it constrains the limbs against the source's field
-    /// element, which a value wider than the modulus does not have. The limbs are written into
-    /// `results`, so that entering the representation costs only the injection.
-    ///
-    /// A constant enters as witnessed constants, one per limb, which are pinned by being constants
-    /// and so need no range check.
+    /// [`Self::decompose`] cannot serve past the field's width: it ties the limbs to the source's
+    /// field element, which a value wider than the modulus lacks. The source is a hint, so the
+    /// limbs **are** the value, each bounded by a range check. A constant enters as one witnessed
+    /// constant per limb, pinned by being one.
     fn inject(&mut self, value: ValueId, bits: usize, results: &[ValueId]) {
         let widths = limb_widths(bits, self.limb_bits());
         assert_eq!(
@@ -938,15 +1047,14 @@ impl Rewriter<'_> {
         }
     }
 
-    /// The low `bits` of a limb list, as a single witnessed value of that width, the inverse of
+    /// The low `bits` of a limb list as a single witnessed value of that width; the inverse of
     /// [`Self::decompose`].
     ///
-    /// It needs no constraint of its own: a linear combination of values that are already pinned is
-    /// itself pinned.
+    /// It needs no separate constraint: a linear combination of pinned values is pinned.
     ///
-    /// `bits` has to be at most [`multi_cell_int_bits`], and the assertion is the whole reason this
-    /// is sound: the sum is formed in **one field element**, so a target the modulus cannot carry
-    /// would wrap silently. [`Self::pure_limbs_at`] is what a wider target takes instead.
+    /// `bits` must be at most [`multi_cell_int_bits`], and the assertion is what makes this sound:
+    /// the sum is formed in **one field element**, so a target the modulus cannot carry would wrap
+    /// silently. A wider target uses [`Self::pure_limbs_at`] instead.
     fn recombine(&mut self, limbs: &[ValueId], widths: &[usize], bits: usize) -> ValueId {
         assert!(
             bits <= multi_cell_int_bits(self.field),
@@ -980,11 +1088,10 @@ impl Rewriter<'_> {
 
     /// Pure limbs shifted into place and or-ed together, as one pure value of `bits`.
     ///
-    /// The **pure** counterpart of [`Self::recombine`], and the distinction is not cosmetic: that
-    /// one sums field elements, so it wraps once the value passes the modulus. This one is integer
-    /// arithmetic at the value's own width, which both compiled backends have at every width, and
-    /// which costs interpreter work rather than constraints. It is what lets a sequence hold
-    /// elements the field cannot carry.
+    /// The **pure** counterpart of [`Self::recombine`], which sums field elements and so wraps once
+    /// the value passes the modulus. This is integer arithmetic at the value's width, which both
+    /// compiled backends have at every width, and costs interpreter work rather than constraints.
+    /// It lets a sequence hold elements the field cannot carry.
     fn recombine_pure(&mut self, limbs: &[ValueId], bits: usize) -> ValueId {
         let mut sum = None;
         for (index, limb) in limbs.iter().enumerate() {
@@ -1006,12 +1113,9 @@ impl Rewriter<'_> {
 
     /// The low `width` bits of a limb, as a value **of that width**.
     ///
-    /// A narrowing cast rather than a `BitRange`: `BitRange` keeps its source's type, so a window
-    /// cut out of an `int64` limb is still an `int64` carrying `width` bits. That is right for a
-    /// window but wrong for a limb as the caller is building a limb list whose widths are the
-    /// target's, and a limb whose declared width disagrees with its position meets an operand split
-    /// at the true width and the two cannot be paired. The cast lowers to the same mask, witness
-    /// and range check.
+    /// A narrowing cast, not a `BitRange`, which keeps its source's type: a limb list at the
+    /// target's widths needs each limb typed at its position's width. The cast lowers to the same
+    /// mask, witness and range check.
     fn truncate_limb(&mut self, limb: ValueId, width: usize) -> ValueId {
         self.cast(limb, CastTarget::Int(width))
     }
@@ -1025,10 +1129,10 @@ impl Rewriter<'_> {
 
     /// The limbs of a wide value as **pure** values, cut to the shape a `to_bits` target needs.
     ///
-    /// What a narrowing out of the representation takes when the target is wider than the field
-    /// carries, where [`Self::recombine`] cannot serve: that one sums field elements, and a sum
-    /// reaching `2^to_bits` wraps once the target passes the modulus. Reading these back is
-    /// [`Self::recombine_pure`], which is integer arithmetic at the target's own width.
+    /// For narrowing out of the representation to a target wider than the field carries, where
+    /// [`Self::recombine`] cannot serve: it sums field elements, and a sum reaching `2^to_bits`
+    /// wraps once the target passes the modulus. [`Self::recombine_pure`] reads these back with
+    /// integer arithmetic at the target's width.
     fn pure_limbs_at(&mut self, value: ValueId, from_bits: usize, to_bits: usize) -> Vec<ValueId> {
         assert!(
             to_bits <= from_bits,
@@ -1092,7 +1196,7 @@ enum TopLimb {
     Checked,
 
     /// The caller, which cuts the limb's top bit out with [`Rewriter::sign_bit`] and so bounds it
-    /// with the cut's own two range checks.
+    /// with the two range checks of the cut.
     CutByCaller,
 }
 
@@ -1126,7 +1230,7 @@ struct Operands {
 
 /// What a carry chain leaves behind.
 struct Chain {
-    /// Each limb of the answer as a field element, range-checked at its own width, the top one
+    /// Each limb of the answer as a field element, range-checked at its width, the top one
     /// unless [`TopLimb::CutByCaller`] says the caller bounds it.
     answer: Vec<ValueId>,
 
@@ -1139,10 +1243,8 @@ struct Chain {
 
 impl Rewriter<'_> {
     /// The unsigned sum, difference and ordering at a width whose sum one element cannot carry,
-    /// returning `true` if the provided `op` was lowered or `false` otherwise.
-    ///
-    /// All three are lowered using the carry [`Chain`] regardless of the operand format, as it is
-    /// necessary to handle overflow properly.
+    /// through the carry [`Chain`] whatever form the operands are in, as the chain handles
+    /// overflow. Returns whether `op` was lowered.
     fn lower_through_chain(&mut self, op: &OpCode) -> bool {
         let Some(Operands { bits, lhs, rhs }) = chained(op, self.types, self.field) else {
             return false;
@@ -1180,10 +1282,9 @@ impl Rewriter<'_> {
 
     /// The chain whose top borrow is `lhs < rhs`, under the signed reading where `signed`.
     ///
-    /// A signed ordering is the unsigned ordering of the operands in offset binary, which is the
-    /// top bit of each flipped: that adds `2^(N - 1)` to every signed value, mapping the signed
-    /// range onto `[0, 2^N)` in order. Only the top limb holds that bit, so only it changes, and
-    /// [`Self::flip_top_bit`] says what the change costs.
+    /// A signed ordering is the unsigned ordering of the operands with their top bits flipped
+    /// (offset binary), which maps the signed range onto `[0, 2^N)` in order. Only the top limb
+    /// changes ([`Self::flip_top_bit`]).
     fn ordering_chain(
         &mut self,
         signed: bool,
@@ -1205,21 +1306,21 @@ impl Rewriter<'_> {
         self.carry_chain_over(true, &lhs, &rhs, widths, out, guard)
     }
 
-    /// A signed sum or difference: the unsigned one's limbs, with its overflow read off the sign
-    /// bits rather than the carry out of the top limb.
+    /// A signed sum or difference: the unsigned one's limbs, with overflow read off the sign bits
+    /// rather than the carry out of the top limb.
     ///
     /// The chain says `a + b = r + 2^N·c` for a sum and `a - b = r - 2^N·c` for a difference, with
     /// `c` the witnessed carry or borrow out of the top limb. Reading each pattern `x` as
     /// `x - 2^N·s_x` for its sign bit `s_x`, the signed sum is `r + 2^N·(c - s_a - s_b)` and the
-    /// signed difference `r - 2^N·(c + s_a - s_b)`. Either fits exactly when it is `r`'s own signed
+    /// signed difference `r - 2^N·(c + s_a - s_b)`. Either fits exactly when it equals `r`'s signed
     /// reading, `r - 2^N·s_r`, so the one check is `c + s_r == s_a + s_b` for a sum and
-    /// `c + s_a == s_r + s_b` for a difference: linear in four bits, all of them pinned.
+    /// `c + s_a == s_r + s_b` for a difference: linear in four pinned bits.
     ///
     /// The answer's sign is cut out of its top limb without the guard, as the operands' are: an
-    /// honest carry keeps every limb of the answer in range wherever the operands are, and they
-    /// are on every path. Only the check itself is under the guard. The cut bounds that limb at its
-    /// width, so the chain does not check it again ([`TopLimb::CutByCaller`]), except where it is
-    /// one bit wide and is its own sign with no cut.
+    /// honest carry keeps every answer limb in range wherever the operands are, and they are on
+    /// every path. Only the check is guarded. The cut bounds the top limb at its width, so the
+    /// chain does not check it again ([`TopLimb::CutByCaller`]), except where that limb is one bit
+    /// wide and so is the sign bit itself, with no cut.
     fn lower_signed_add_sub(
         &mut self,
         kind: BinaryArithOpKind,
@@ -1273,15 +1374,15 @@ impl Rewriter<'_> {
         self.deliver(result, chain.answer, &chain.widths, bits, guard);
     }
 
-    /// The top bit of a limb `width` bits wide, as a field element that is zero or one.
+    /// The top bit of a `width`-bit limb, as a field element that is zero or one.
     ///
     /// The sign-bit primitive. A known limb answers at compile time and a pure one on the pure
     /// side, so neither costs a constraint. A witnessed one is cut at `width - 1` by
     /// [`Self::cut_segment`], which witnesses the bit, range-checks it at one bit, and range-checks
-    /// what it leaves of the limb at `width - 1`. Together they pin the bit and bound the limb below
-    /// `2^width`: the other value of the bit puts that remainder out of range. A limb is cut once
-    /// per block, and a later request reads the same bit ([`Self::signs`]). A one-bit limb is its
-    /// own top bit, and is bounded by nothing here.
+    /// the rest of the limb at `width - 1`. Together these pin the bit and bound the limb below
+    /// `2^width`: the other bit value puts the rest out of range. A limb is cut once per block, and
+    /// later requests reuse the bit ([`Self::signs`]). A one-bit limb is its top bit and is not
+    /// bounded here.
     fn sign_bit(&mut self, (limb, witnessed): (ValueId, bool), width: usize) -> ValueId {
         if let Some(pattern) = self.known(limb) {
             return self.field_const(match pattern.cast(width).bit(width - 1) {
@@ -1309,13 +1410,10 @@ impl Rewriter<'_> {
         bit
     }
 
-    /// A limb `width` bits wide with its top bit flipped, in the form [`Self::carry_chain_over`]
-    /// reads.
+    /// A `width`-bit limb with its top bit flipped, as [`Self::carry_chain_over`] reads it.
     ///
-    /// A known limb or a pure one flips on the pure side. A witnessed one is
-    /// `x + 2^(w - 1) - s·2^w` for its top bit `s`, which is linear in the [`Self::sign_bit`] cut,
-    /// so it costs that cut and nothing more: it is below `2^w` because `x` is and `s` is its top
-    /// bit, and its hint is the same combination read back on the pure side.
+    /// A known or pure limb flips on the pure side. A witnessed one is `x + 2^(w - 1) - s·2^w` for
+    /// its top bit `s`: linear in the [`Self::sign_bit`] cut, and below `2^w`.
     fn flip_top_bit(
         &mut self,
         (limb, witnessed): (ValueId, bool),
@@ -1341,9 +1439,8 @@ impl Rewriter<'_> {
 
     /// A checked sum or difference, whose carry out of the top limb is its overflow.
     ///
-    /// Under a guard the answer is zero where the guard is off, as the single-cell lowering's is:
-    /// there the operands are whatever the not-taken branch left, the chain's range checks are off
-    /// with the guard, and the limbs it would otherwise leave are unbounded.
+    /// Under a guard the answer is zero where the guard is off: the chain's range checks are off
+    /// there, so the limbs it would leave are unbounded.
     fn lower_add_sub(
         &mut self,
         kind: BinaryArithOpKind,
@@ -1358,14 +1455,12 @@ impl Rewriter<'_> {
         self.deliver(result, chain.answer, &chain.widths, bits, guard);
     }
 
-    /// Hand the limbs of an answer to `result`, each a field element range-checked at its width.
+    /// Hand the limbs of an answer to `result`, each a field element range-checked at its width,
+    /// and zero where a guard is off.
     ///
-    /// Under a guard each limb is zero where the guard is off. A result held as limbs takes them as
-    /// they are; one still held as an element has one, as the operands do, and it is only their
-    /// sum or product that lacks one, which the limbs have already carried.
-    ///
-    /// A limb the gadget knows at compile time is a constant, as every limb of `0 / d` is, and it is
-    /// delivered as a **witnessed** integer constant, as [`Self::zero_limb`] makes one.
+    /// A result held as one element fits one, as the operands do: only their sum or product needed
+    /// limbs. A limb known at compile time, as every limb of `0 / d` is, is delivered as a
+    /// **witnessed** integer constant.
     fn deliver(
         &mut self,
         result: ValueId,
@@ -1444,16 +1539,16 @@ impl Rewriter<'_> {
 
     /// `lhs + rhs` or `lhs - rhs` limb by limb, each limb's carry a witnessed bit.
     ///
-    /// Per limb of width `w`, the answer is `a + b + c_in - 2^w * c_out` for a sum and
+    /// For a limb of width `w`, the answer is `a + b + c_in - 2^w * c_out` for a sum and
     /// `a - b - c_in + 2^w * c_out` for a difference, range-checked at `w`. This pins `c_out`: the
-    /// other choice moves the answer by `2^w`, either to `2^w` or past it, or below zero, where it
-    /// wraps to an element no range check at `w` admits. Either answer is within `2^(w + 1)` of
-    /// zero, far inside the modulus, so the identity is one field element whichever carry the
-    /// prover picks.
+    /// other value moves the answer by `2^w`, to `2^w` or past it, or below zero, where it wraps to
+    /// an element no range check at `w` admits. Either answer is within `2^(w + 1)` of zero, far
+    /// inside the modulus, so the identity holds as one field element whichever carry the prover
+    /// picks.
     ///
-    /// Every check the chain itself makes is under `guard`. The decomposition of an operand that
-    /// is still one element is not: its checks restate that operand's own bounds, which hold
-    /// whether the guard is on or off.
+    /// Every check the chain makes is under `guard`. The decomposition of an operand that is still
+    /// one element is not: its checks restate that operand's bounds, which hold whether the guard
+    /// is on or off.
     fn carry_chain(
         &mut self,
         subtract: bool,
@@ -1469,11 +1564,9 @@ impl Rewriter<'_> {
         self.carry_chain_over(subtract, &lhs, &rhs, widths, out, guard)
     }
 
-    /// [`Self::carry_chain`] over operands already cut into limbs at `widths`, each limb with
-    /// whether it is witnessed, which decides how its hint is read.
-    ///
-    /// A limb list may mix the two: a limb that is a known constant is a pure value beside the
-    /// witnessed ones.
+    /// [`Self::carry_chain`] over operands already cut into limbs at `widths`, each limb paired
+    /// with whether it is witnessed, which decides how its hint is read. One list may mix both: a
+    /// known constant limb is a pure value beside witnessed ones.
     fn carry_chain_over(
         &mut self,
         subtract: bool,
@@ -1583,8 +1676,8 @@ impl Rewriter<'_> {
 
     /// The honest carry out of one limb, computed on the pure side at one bit past the limb.
     ///
-    /// A sum's carry is its bit `w`; a difference borrows exactly when what it takes away exceeds
-    /// what it takes it from. Neither reaches `2^(w + 1)`, so neither wraps.
+    /// A sum's carry is its bit `w`; a difference borrows exactly when the subtrahend exceeds the
+    /// minuend. Neither reaches `2^(w + 1)`, so neither wraps.
     fn carry_hint(
         &mut self,
         subtract: bool,
@@ -1630,9 +1723,9 @@ impl Rewriter<'_> {
 
     /// An operand of the chain as its `count` limbs at `bits`.
     ///
-    /// A witnessed operand that is still one value is below the representation threshold, and is
-    /// split with [`Self::decompose`] so its limbs are tied to it; a pure one is cut on the pure side,
-    /// which costs no constraint because it is not witnessed.
+    /// A witnessed operand still held as one value is below the representation threshold and is
+    /// split by [`Self::decompose`], which ties its limbs to it. A pure one is cut on the pure
+    /// side, at no constraint cost.
     fn chain_operand(&mut self, value: ValueId, bits: usize, count: usize) -> Vec<ValueId> {
         if self.limbs(value).len() == 1 && self.is_witness(value) {
             return self.decompose(value, bits);
@@ -1686,14 +1779,15 @@ fn chained(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Option<
 
 /// One operand of the schoolbook, limb by limb.
 struct Factor {
-    /// Each limb at its own width.
+    /// Each limb at its width.
     limbs: Vec<Limb>,
 
     /// Whether the operand is witnessed, which decides how the hints of its [`Limb::Value`]s are
     /// read. A witnessed operand can still have known limbs, which are [`Limb::Constant`]s.
     witnessed: bool,
 
-    /// The largest value each limb can take: its width's, or a constant limb's own.
+    /// The largest value each limb can take: the largest its width holds, or a constant limb's
+    /// value.
     bounds: Vec<BigUint>,
 }
 
@@ -1767,7 +1861,7 @@ struct ProductPlan {
     ///
     /// Each left limb with the right limbs whose partial products with it land at or past the top
     /// of the answer, grouped so that one group's sum times the limb stays inside an element. Empty
-    /// where the product is evaluated, whose identity is its own overflow check.
+    /// where the product is evaluated, whose identity is also its overflow check.
     overflow: Vec<(usize, Vec<usize>)>,
 
     /// Whether the columns are witnessed whole and pinned by evaluating the product, instead of
@@ -1779,42 +1873,40 @@ struct ProductPlan {
 }
 
 /// The schoolbook plan for operands whose limbs are bounded by `lhs` and `rhs`, plus an `addend`
-/// whose limbs are bounded as given (empty for none), at the answer's limb `widths`, on a field
-/// whose widest injective width is `injective`.
+/// with the given limb bounds (empty for none), at the answer's limb `widths`, on a field whose
+/// widest injective width is `injective`.
 ///
-/// The addend is what lets a division state `q·d + r` as one sum: limb `i` of `r` is one more
-/// non-negative term in column `i`, so every argument below holds of it unchanged.
+/// The addend lets a division state `q·d + r` as one sum: limb `i` of `r` is one more
+/// non-negative term in column `i`, so every argument below still holds.
 ///
 /// [`None`] where one partial product and the headroom it is reduced in do not fit an element.
 ///
-/// **Every bound here is an integer bound, kept under the field.** A column adds partial products
-/// and the carries into it, all non-negative, while the sum stays below `2^injective`, so the field
-/// element is the integer sum. Where the next term would pass that, the column is reduced first:
-/// its low limb is range-checked at the limb width and the rest leaves as a carry range-checked at
-/// `carry_bits`, whose identity is `low + 2^w·carry` below `2^injective` and so holds as integers
-/// too. The carry's bound is its range check's, `2^carry_bits - 1`, not the honest maximum.
+/// **Every bound is an integer bound, kept under the field.** A column sums non-negative partial
+/// products and carries while the sum stays below `2^injective`, so the field element is the
+/// integer sum. Before the next term would pass that, the column is reduced: its low limb is
+/// range-checked at the limb width and the rest leaves as a carry range-checked at `carry_bits`.
+/// The identity `low + 2^w·carry` is below `2^injective`, so it holds as integers too. A carry's
+/// bound is its range check's, `2^carry_bits - 1`, not the honest maximum.
 ///
-/// **The overflow check is on the operands.** Every partial product is non-negative, so the product
-/// stays below `2^N` exactly when every partial product landing at or past the top column's place
-/// is zero and the top column itself fits its width. The first half is `a_i · Σ b_j == 0` over the
-/// `b_j` that land there with `a_i`, which holds as integers while the sum times the limb is below
-/// the modulus, and a zero sum of non-negative terms is zero term by term. It costs one constraint
+/// **The overflow check is on the operands.** All partial products are non-negative, so the
+/// product is below `2^N` exactly when every partial product at or past the top column's place is
+/// zero and the top column fits its width. The first half is `a_i · Σ b_j == 0` over the `b_j`
+/// that land there with `a_i`; it holds as integers while the sum times the limb is below the
+/// modulus, and a zero sum of non-negative terms is zero term by term. This costs one constraint
 /// per left limb rather than one per partial product.
 ///
-/// **Where summing would cost more, the product is evaluated instead** (`evaluate`). Each partial
-/// product of two witnessed limbs is a row of its own, so the schoolbook pays about `k^2 / 2` of
-/// them on two full operands, and evaluating pays `2k - 1` whatever the operands; the caller counts
-/// the rows summing would pay with [`witnessed_partial_products`] and evaluates only where both
-/// operands are witnessed and that is more. The columns `c_0 .. c_(k-1)` are witnessed whole and the
-/// identity `(Σ a_i x^i)(Σ b_j x^j) = Σ c_m x^m` is constrained at `2k - 1` distinct points, which
-/// makes it an identity of polynomials of degree `2k - 2` over the field, so every coefficient
-/// agrees modulo `p`.
+/// **Where summing costs more, the product is evaluated instead** (`evaluate`). Each partial
+/// product of two witnessed limbs is a separate row, so the schoolbook pays about `k^2 / 2` rows
+/// on two full operands, while evaluating pays `2k - 1` regardless. The caller counts the rows
+/// summing would pay with [`witnessed_partial_products`] and evaluates only where both operands are
+/// witnessed and that count is larger. The columns `c_0 .. c_(k-1)` are witnessed whole and
+/// `(Σ a_i x^i)(Σ b_j x^j) = Σ c_m x^m` is constrained at `2k - 1` distinct points, which makes it
+/// a polynomial identity of degree `2k - 2`, so every coefficient agrees modulo `p`.
 ///
 /// Every column's integer sum is non-negative, and the plan requires each to be below
 /// `2^injective`, so a coefficient equal modulo `p` is equal as an integer: `c_m` is column `m`,
-/// and the columns past the answer are zero which serves as the overflow check. Where some column
-/// could pass the modulus, the plan falls back to the schoolbook, which reduces as often as it
-/// needs to.
+/// and the columns past the answer being zero is the overflow check. Where a column could pass the
+/// modulus, the plan falls back to the schoolbook, which reduces as often as it needs.
 fn plan_product(
     lhs: &[BigUint],
     rhs: &[BigUint],
@@ -1941,26 +2033,9 @@ fn plan_product(
     })
 }
 
-/// Whether the schoolbook takes an unsigned product of two `bits`-wide witnessed operands on
-/// `field`, evaluated or summed.
-///
-/// The bound is the operands' full range; a constant operand only tightens it. An evaluation the
-/// field cannot hold falls back to summing, so it is the summing plan that decides.
-pub fn schoolbook_product_fits(field: FieldConfig, bits: usize) -> bool {
-    schoolbook_fits(field, bits, false)
-}
-
-/// Whether the representation takes an unsigned division or remainder of `bits`-wide operands on
-/// `field`: its `q·d + r` is the schoolbook with the remainder added to its columns.
-///
-/// The bound is every operand's full range, as in [`schoolbook_product_fits`]; a constant only
-/// tightens it.
-pub fn schoolbook_division_fits(field: FieldConfig, bits: usize) -> bool {
-    schoolbook_fits(field, bits, true)
-}
-
 /// Whether [`plan_product`] plans a `bits`-wide schoolbook on `field` at full operand ranges, with
 /// a full-range addend or without one.
+#[cfg(test)]
 fn schoolbook_fits(field: FieldConfig, bits: usize, with_addend: bool) -> bool {
     let widths = limb_widths(bits, witness_limb_bits(field));
     let bounds = full_bounds(&widths);
@@ -1976,7 +2051,8 @@ fn schoolbook_fits(field: FieldConfig, bits: usize, with_addend: bool) -> bool {
     .is_some()
 }
 
-/// The bound of each limb at `widths` that nothing narrower is known about: its width's own.
+/// The bound of each limb at `widths` when nothing narrower is known: the largest value its width
+/// holds.
 fn full_bounds(widths: &[usize]) -> Vec<BigUint> {
     widths
         .iter()
@@ -1984,17 +2060,13 @@ fn full_bounds(widths: &[usize]) -> Vec<BigUint> {
         .collect()
 }
 
-/// How many multiplications of two witnessed limbs summing `lhs · rhs` costs: one per partial
-/// product that lands in the answer, and one per left limb for the overflow check past it.
+/// How many products of two witnessed limbs summing `lhs · rhs` costs: one per partial product in
+/// the answer, plus one per left limb for the overflow check.
 ///
-/// Evaluating the product instead costs `2k - 1` of them whatever the operands are, which is fewer
-/// wherever every limb is witnessed and `k` is at least two. A known limb multiplies for free, so
-/// an operand with enough of them, such as a narrow value widened, is cheaper summed.
-///
-/// A witnessed guard adds to both sides and is left out of the comparison: evaluating scales each
-/// of the `k` left limbs by it, and summing scales each overflow check, which is then one more
-/// product. On two dense operands that never makes the choice worse: at two limbs the two tie, and
-/// past that evaluating stays ahead.
+/// Evaluating costs `2k - 1`, fewer whenever every limb is witnessed and `k >= 2`. A known limb
+/// multiplies for free, so a widened narrow value is cheaper summed. A witnessed guard is left
+/// out: it adds to both sides, and on two dense operands they tie at two limbs and evaluating wins
+/// past that.
 fn witnessed_partial_products(lhs: &Factor, rhs: &Factor) -> usize {
     let count = lhs.limbs.len();
     let witnessed = |factor: &Factor, index: usize| {
@@ -2039,16 +2111,12 @@ struct Schoolbook<'a> {
 }
 
 impl Rewriter<'_> {
-    /// An unsigned product the single cell cannot hold, returning `true` if `op` was one and was
+    /// An unsigned product the single cell cannot hold. Returns whether `op` was one and was
     /// lowered.
     ///
-    /// Schoolbook at the witness limb, column by column, each column reduced into its answer limb
-    /// and a witnessed carry into the next. [`plan_product`] decides where the reductions fall and
-    /// states the soundness argument; this only follows it.
-    ///
-    /// Under a guard every range check and the overflow check are off where the guard is, and the
-    /// answer is zero there, for the reason [`Self::lower_add_sub`] gives. The carries are written
-    /// either way.
+    /// A schoolbook at the witness limb, following [`plan_product`], which states the soundness
+    /// argument. Under a guard the range and overflow checks are off where the guard is off, and
+    /// the answer is zero there; the carries are written either way.
     fn lower_product(&mut self, op: &OpCode) -> bool {
         let Some(Operands { bits, lhs, rhs }) = multiplied(op, self.types, self.field) else {
             return false;
@@ -2081,17 +2149,15 @@ impl Rewriter<'_> {
         true
     }
 
-    /// `lhs · rhs (+ addend)` at `widths`, following the plan [`plan_product`] makes for it, and
-    /// returning each limb of the answer as a field element.
+    /// `lhs · rhs (+ addend)` at `widths`, following [`plan_product`], as the field element of each
+    /// answer limb.
     ///
-    /// Where the schoolbook is `pinned`, each column's final value is constrained to equal that
-    /// limb of the target instead of being range-checked, as a limb of the target is already
-    /// bounded. That identity holds as integers for the reason a reduction's does, so it states
-    /// `lhs · rhs + addend == target` exactly, and the answer returned is the target's.
+    /// A `pinned` schoolbook holds each column's final value equal to the target's limb, already
+    /// bounded, instead of range-checking it. So it states `lhs · rhs + addend == target` exactly
+    /// and returns the target's limbs.
     ///
-    /// Under a guard a product's checks are all off where it is. A pinned schoolbook is a
-    /// division's, whose left operand and addend are witnessed from hints that are zero there, so
-    /// every column, carry and overflow term is zero there too and only the pins need the guard.
+    /// Under a guard the checks are off where the guard is off. A pinned schoolbook is a
+    /// division's, whose hints are zero there, so only the pins need the guard.
     fn schoolbook(&mut self, product: Schoolbook<'_>, guard: Option<ValueId>) -> Vec<ValueId> {
         let Schoolbook {
             lhs,
@@ -2138,16 +2204,12 @@ impl Rewriter<'_> {
         answer
     }
 
-    /// An operand of the schoolbook as its limbs at `bits`, and what each of them can be.
+    /// An operand of the schoolbook as its limbs at `bits`, with their bounds.
     ///
-    /// A constant is cut at compile time, so a limb it does not reach is a known zero and every
-    /// partial product and overflow term against it drops out of the plan. This ensures that a
-    /// product by a small constant is as cheap as the constant is narrow.
-    ///
-    /// A witnessed operand can have known limbs too: the limbs above a widened value, a limb a
-    /// shift by a constant empties, or an answer limb an earlier gadget knew. Each is taken as the
-    /// constant it is, with its value as its bound, which is sound for the reason an injected
-    /// constant needs no range check: a constant is pinned by being one.
+    /// A constant is cut at compile time, so limbs it does not reach are known zeros and drop out
+    /// of the plan. A witnessed operand can have known limbs too (above a widened value, emptied by
+    /// a constant shift, or known from an earlier gadget); each is taken as its constant, which is
+    /// pinned by being one.
     fn factor(&mut self, value: ValueId, bits: usize, widths: &[usize]) -> Factor {
         if let Some(constant) = self.ssa.get_const(value)
             && let Constant::Int(pattern) = constant.as_ref()
@@ -2188,8 +2250,8 @@ impl Rewriter<'_> {
     /// The columns of an evaluated product, witnessed and pinned by the identity [`plan_product`]
     /// states, each as its column and its hint.
     ///
-    /// Under a guard the left limbs are scaled by it, so where it is off the product is zero and so
-    /// is every column: the identity holds whatever the operands the branch not taken left behind.
+    /// Under a guard the left limbs are scaled by it, so where it is off the product and every
+    /// column are zero: the identity holds whatever operands the branch not taken left.
     fn evaluate_product(
         &mut self,
         plan: &ProductPlan,
@@ -2273,14 +2335,12 @@ impl Rewriter<'_> {
         sum.expect("a polynomial has at least one coefficient")
     }
 
-    /// Every column of the answer, as field elements, following `plan`.
+    /// Every column of the answer, as field elements, following `plan`. `columns` are an evaluated
+    /// product's witnessed columns, which a [`Step::Column`] adds.
     ///
-    /// `columns` are an evaluated product's witnessed columns, which a [`Step::Column`] adds.
-    ///
-    /// Where `product` is pinned, the range check that would bound a column's final value is
-    /// replaced by its equality with the target's limb, which bounds it as tightly, and a column
-    /// that never needed reducing is held to that limb all the same. The range checks are under
-    /// `checks` and the equalities under `pins`.
+    /// Where `product` is pinned, a column's final value is held equal to the target's limb, which
+    /// bounds it as tightly as the range check it replaces; a column that never needed reducing is
+    /// held to that limb too. The range checks are under `checks` and the equalities under `pins`.
     fn accumulate_columns(
         &mut self,
         plan: &ProductPlan,
@@ -2564,20 +2624,21 @@ fn past_the_single_cell_product(
 // ================================================================================================
 
 impl Rewriter<'_> {
-    /// An unsigned division or remainder whose product the single cell cannot hold, returning
-    /// `true` if `op` was one and was lowered.
+    /// An unsigned division or remainder whose product the single cell cannot hold; returns `true`
+    /// if `op` was one and was lowered.
     ///
-    /// The quotient `q` and remainder `r` are witnessed as limbs from the pure side's own division,
-    /// and pinned by `q·d + r == n` and `r < d`. The first is one schoolbook, the remainder an
-    /// addend to its columns and the dividend's limbs the target each column is held to; the
-    /// second is the carry chain with its top borrow forced out, which a zero divisor cannot pass.
-    /// Together they admit exactly the one pair that Euclidean division gives.
+    /// The quotient `q` and remainder `r` are witnessed as limbs from a pure-side division and
+    /// pinned by `q·d + r == n` and `r < d`. The first is one schoolbook, with `r` added to its
+    /// columns and each column held to the dividend's limb; the second is the carry chain with its
+    /// top borrow forced out, which a zero divisor cannot pass. Together they admit exactly the
+    /// Euclidean pair.
     ///
-    /// Under a guard the pure side divides zero by one where it is off, so the quotient and the
-    /// remainder are zero there, and so is everything the schoolbook builds from them: its checks
-    /// hold whatever the branch not taken left behind, and only `q·d + r == n` and `r < d` are
-    /// guarded. The answer is those zeros, range-checked like any other limb, so it needs no
-    /// selecting. `d / d` is not witnessed at all, and is selected to zero instead.
+    /// Under a guard, the pure side divides zero by one where the guard is off, so `q`, `r` and
+    /// everything the schoolbook builds from them are zero there: its checks hold whatever the
+    /// untaken branch left behind, and only `q·d + r == n` and `r < d` are guarded. The answer is
+    /// those zeros, range-checked like any limb, so it needs no select. A value divided by itself,
+    /// `d / d`, witnesses nothing: its answers are the constants one and zero, so where the guard
+    /// is off they are selected to zero instead.
     fn lower_division(&mut self, op: &OpCode) -> bool {
         let Some(Operands {
             bits,
@@ -2615,8 +2676,8 @@ impl Rewriter<'_> {
         };
         let answer = self.answer(wanted, &widths, guard);
         self.divisions.insert(key, (quotient, remainder));
-        // A signed answer is the magnitude's negated by a chain checked only under the guard, so
-        // off it the answer is selected to zero, as `d / d`'s is.
+        // A signed answer negates the magnitude by a chain checked only under the guard, so where
+        // the guard is off the answer is selected to zero, as `d / d`'s is.
         let selected = if dividend == divisor || signed {
             guard
         } else {
@@ -2664,8 +2725,8 @@ impl Rewriter<'_> {
         (quotient, remainder)
     }
 
-    /// The quotient and the remainder of `n / d` as limbs, witnessed from the pure side's division
-    /// of `pure_dividend` by `pure_divisor`, which are the two operands' whole values there.
+    /// The quotient and the remainder of `n / d` as limbs, witnessed from the pure side's
+    /// `pure_dividend / pure_divisor`, the operands' whole values there.
     #[allow(clippy::too_many_arguments)]
     fn divide_factors(
         &mut self,
@@ -2677,11 +2738,9 @@ impl Rewriter<'_> {
         widths: &[usize],
         guard: Option<ValueId>,
     ) -> (Factor, Factor) {
-        // What the answers can be, from what the operands can: `q <= n / d` and `r < d`. Only a
-        // known limb says more than the width does, and a constant divisor says the most.
-        //
-        // A divisor of zero has neither answer, and the chain below refuses it, so the bounds only
-        // have to hold for a divisor of at least one.
+        // Bound the answers by `q <= n / d` and `r < d`; only known limbs, and most of all a
+        // constant divisor, tighten the width's bound. The chain below refuses a zero divisor, so
+        // the bounds need only hold for `d >= 1`.
         let limb_bits = self.limb_bits();
         let dividend_max = n.largest(limb_bits);
         let divisor_max = d.largest(limb_bits);
@@ -2763,12 +2822,9 @@ impl Rewriter<'_> {
         (quotient, vec![zero; widths.len()])
     }
 
-    /// A pure `hint` of `bits` witnessed as limbs at `widths`, each range-checked no wider than
-    /// `max`, the largest value the hint can honestly take, lets that limb be.
-    ///
-    /// A limb `max` does not reach is not witnessed at all: it is a constant zero, which drops it
-    /// and every term against it out of the schoolbook's plan. The limbs are the value's
-    /// definition, and the constraints the caller builds on them are what tie them to anything.
+    /// A pure `bits`-wide `hint` witnessed as limbs at `widths`, each range-checked no wider than
+    /// `max` allows for it. A limb `max` does not reach is a constant zero, which drops out of the
+    /// schoolbook's plan. Only the caller's constraints tie the limbs to anything.
     fn witness_hinted(
         &mut self,
         hint: ValueId,
@@ -2834,12 +2890,8 @@ impl Rewriter<'_> {
 }
 
 /// The division the representation lowers, if `op` is one: a division or remainder under either
-/// reading, guarded or not, with a witnessed operand, at a width whose product the single cell
-/// cannot hold.
-///
-/// That is where the single-cell lowering's `q·d` could wrap: it forms the product in one element,
-/// and a quotient range-checked at the width times a divisor of the width passes the modulus from
-/// the width [`single_cell_product_fits`] refuses.
+/// reading, guarded or not, with a witnessed operand, past [`single_cell_product_fits`], where the
+/// single-cell lowering's `q·d` could wrap the modulus.
 fn divided(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Option<Operands> {
     past_the_single_cell_product(
         op,
@@ -2918,8 +2970,8 @@ impl Rewriter<'_> {
         Some(value)
     }
 
-    /// A shift by a known amount at or past the width, which the program is refused for wherever
-    /// the guard is on. The answer is zero, so it stays in range where the guard is off.
+    /// A shift by a known amount at or past the width, which refuses the program wherever the guard
+    /// is on. The answer is zero, so it is in range where the guard is off.
     fn shift_out_of_range(&mut self, result: ValueId, bits: usize, guard: Option<ValueId>) {
         let (zero, one) = (
             self.field_const(self.field.zero()),
@@ -2938,8 +2990,8 @@ impl Rewriter<'_> {
         self.deliver(result, answer, &widths, bits, None);
     }
 
-    /// The limb widths a value of `bits` is held at here: its limbs', or its own where it is still
-    /// one element.
+    /// The limb widths a value of `bits` is held at here: its limbs' widths, or `bits` where it is
+    /// still one element.
     fn shift_widths(&self, value: ValueId, bits: usize) -> Vec<usize> {
         if self.limbs(value).len() > 1 {
             limb_widths(bits, self.limb_bits())
@@ -2950,20 +3002,20 @@ impl Rewriter<'_> {
 
     /// `lhs` shifted by an `amount` below `bits` that is known at compile time.
     ///
-    /// Every bit of the answer is a bit of the operand, so the operand is cut wherever a run of
-    /// its bits stops landing inside one limb of the answer: at its own limb boundaries, at the
-    /// bits that land on the answer's, and where the discarded bits begin. Each piece of a limb
-    /// that is cut is witnessed and range-checked at its own width except the lowest, which is what
-    /// the others leave of the limb and is range-checked too. The limb is below `2^w` and so are
-    /// the pieces recombined, so the difference is either the lowest piece as an integer or an
-    /// element near `p`, which that range check rejects. An answer limb is then a sum of pieces.
+    /// Every answer bit is an operand bit, so the operand is cut wherever a run of its bits stops
+    /// landing inside one answer limb: at its limb boundaries, where its bits meet the answer's
+    /// limb boundaries, and where the discarded bits begin. Each piece of a cut limb is witnessed
+    /// and range-checked at its width, except the lowest, which is the limb minus the others and
+    /// is range-checked too: the limb and the recombined pieces are below `2^w`, so the difference
+    /// is either the lowest piece or an element near `p`, which that check rejects. Each answer
+    /// limb is then a sum of pieces.
     ///
     /// A limb nothing cuts costs nothing, so an amount that is a whole number of limbs is free.
     ///
-    /// The answer is one field element per limb of `answer_widths`, which are the result's. Where
-    /// `signed` asks for it and the shift moves anything, the operand's sign is handed back too,
-    /// for [`Self::fill_with_sign`]: the piece a cut at its top bit leaves, or, where the top limb
-    /// is known, its top bit.
+    /// The answer is one field element per limb of `answer_widths` (the result's). Where `signed`
+    /// asks for it and the shift moves anything, the operand's sign is also returned, for
+    /// [`Self::fill_with_sign`]: the piece left by a cut at its top bit or, where the top limb is
+    /// known, its top bit.
     fn shift_by_constant(
         &mut self,
         lhs: ValueId,
@@ -2979,8 +3031,8 @@ impl Rewriter<'_> {
         let top_width = segment_widths[segment_widths.len() - 1];
         let known_top = self.known(segments[segments.len() - 1]);
 
-        // A known top limb's sign is read off its pattern instead. Cut, it would leave a known limb
-        // of the answer as arithmetic on constants, which `deliver` hands on as a pure value.
+        // A known top limb's sign is read off its pattern. Cutting it would leave a known answer
+        // limb as arithmetic on constants, which `deliver` hands on as a pure value.
         let mut cuts = BTreeSet::from([0, bits, if left { bits - amount } else { amount }]);
         if signed && known_top.is_none() {
             cuts.insert(bits - 1);
@@ -3066,8 +3118,8 @@ impl Rewriter<'_> {
         (answer, sign)
     }
 
-    /// One witnessed `segment` of `width` bits starting at `start`, cut at `bounds`, which run from
-    /// `start` to its end, as each piece's start, width and field element.
+    /// One witnessed `width`-bit `segment` starting at `start`, cut at `bounds` (which run from
+    /// `start` to its end). Returns each piece's start, width and field element.
     ///
     /// A known segment is cut at compile time and costs nothing.
     fn cut_segment(
@@ -3133,40 +3185,33 @@ impl Rewriter<'_> {
 
     /// `lhs` shifted by an amount not known at compile time.
     ///
-    /// **The amount** is `n = q·h + r`, with `r` below the limb width `h` and `q` the number of whole
-    /// limbs it moves. Its low limb is witnessed as `h·Σ e_t·2^t + r` with every `e_t` a bit and `r`
-    /// read out of the powers-of-two table beside its power `f = 2^r`, which bounds `r` below `h`;
-    /// its other limbs are held to zero. With `s` bits of `q`, that is `n < h·2^s` already, and
-    /// `n < bits` exactly where `h·2^s` is the width; elsewhere `bits - 1 - n` is range-checked as
-    /// well.
+    /// **The amount** is `n = q·h + r`, with `r` below the limb width `h` and `q` the number of
+    /// whole limbs it moves. Its low limb is witnessed as `h·Σ e_t·2^t + r` with every `e_t` a bit
+    /// and `r` read out of the powers-of-two table beside its power `f = 2^r`, which bounds `r`
+    /// below `h`; its other limbs are held to zero. With `s` bits of `q`, that is `n < h·2^s`
+    /// already, and `n < bits` exactly where `h·2^s` is the width; elsewhere `bits - 1 - n` is
+    /// range-checked as well.
     ///
     /// **Each limb** `x_i` is split as `x_i·m = hi_i·2^h + lo_i` with both halves range-checked,
-    /// where `m` is `f` for `<<` and `2^(h - r)` for `>>`, which is pinned by `m·f == 2^h`. As `x_i·m`
-    /// is below `2^2h`, which [`limb_shift_fits`] keeps inside an element, that split is unique.
-    /// For `<<`, `lo_i` is `x_i`'s low `h - r` bits moved up by `r` and `hi_i` its top `r` bits; for
-    /// `>>`, `hi_i` is `x_i`'s bits above `r` and `lo_i` its low `r` bits moved to the top. Answer
-    /// limb `j` before the whole limbs move is then `lo_j + hi_(j-1)` or `hi_j + lo_(j+1)`: the two
-    /// halves cover disjoint bits, so neither sum carries.
+    /// where `m` is `f` for `<<` and `2^(h - r)` for `>>`, pinned by `m·f == 2^h`. As `x_i·m` is
+    /// below `2^2h`, which [`limb_shift_fits`] keeps inside an element, the split is unique. Answer
+    /// limb `j` before the whole limbs move is `lo_j + hi_(j-1)` for `<<` or `hi_j + lo_(j+1)` for
+    /// `>>`; the two halves cover disjoint bits, so neither sum carries.
     ///
-    /// **The whole limbs** move by `q` through a barrel, one stage per bit `e_t` moving every limb
-    /// `2^t` places, each limb of a stage `a + e_t·(b - a)`. A `<<` whose top limb is narrower than
-    /// `h` then cuts it to its width. Its high half would be cut away there too, so that limb is not
-    /// split: its `x·m` goes into the barrel whole, the answer's top limb is then below `2^(w + h)`,
-    /// and the cut keeps its low `w` bits and range-checks the `h` above them.
+    /// **The whole limbs** move by `q` through a barrel: stage `t` moves every limb `2^t` places
+    /// where `e_t` is set, each of its limbs being `a + e_t·(b - a)`. For a `<<` whose top limb is
+    /// narrower than `h`, that limb is not split: its `x·m` enters the barrel whole, and a final
+    /// cut keeps the answer's low `w` bits and range-checks the `h` above them.
     ///
-    /// Under a guard a witnessed amount's lowest limb is zero where the guard is off, so every check
-    /// here holds there whatever the branch not taken left behind, and the operand's limbs are in
-    /// range on every path. Its other limbs are held to zero only under the guard, which is the one
-    /// check here that needs it.
-    ///
-    /// A pure amount is decomposed on the pure side instead, by [`Self::pure_shift_amount`], and
-    /// every product above is by a constant.
+    /// Under a guard a witnessed amount's lowest limb is zero where the guard is off, so every
+    /// check holds there, and the operand's limbs are in range on every path. Holding the amount's
+    /// other limbs to zero is the one check that needs the guard. A pure amount is decomposed on
+    /// the pure side, by [`Self::pure_shift_amount`], and every product above is by a constant.
     ///
     /// **A sign-filling right shift**, where `signed`, is the operand [`Self::complement`]ed by its
     /// sign, shifted as above, and the answer complemented back. For a negative operand that is
-    /// `!(!lhs >> n)`, and `!lhs` is not negative, so its unsigned shift is its arithmetic one and
-    /// complementing back fills the vacated bits with ones. It costs the sign's cut and two
-    /// products per limb more than the unsigned shift.
+    /// `!(!lhs >> n)`, and `!lhs` is not negative, so complementing back fills the vacated bits
+    /// with ones.
     ///
     /// The answer is one field element per limb.
     fn shift_by_amount(
@@ -3265,7 +3310,7 @@ impl Rewriter<'_> {
                 .collect();
         }
 
-        // The top limb of a `<<` has to be below its own width. It was never split, so it can be
+        // The top limb of a `<<` has to be below its width. It was never split, so it can be
         // `x_top·f + hi`, below `2^(w + h)`, and everything above `w` is cut away here.
         if narrow_top {
             let top = limbs[count - 1];
@@ -3297,8 +3342,8 @@ impl Rewriter<'_> {
         }
     }
 
-    /// The amount of a [`Self::shift_by_amount`], as the `stages` bits of how many whole limbs it
-    /// moves and the multiplier that splits a limb, as a field element and as a pure hint at twice
+    /// The amount of a [`Self::shift_by_amount`]: the `stages` bits of how many whole limbs it
+    /// moves, and the multiplier that splits a limb, as a field element and as a pure hint at twice
     /// the limb width.
     fn shift_amount(
         &mut self,
@@ -3315,20 +3360,16 @@ impl Rewriter<'_> {
             "ICE: a {limb_bits}-bit limb has no powers-of-two table to split it at an amount"
         );
 
-        let amount_bits = self
-            .types
-            .get_value_type(rhs)
-            .int_width()
-            .unwrap_or_else(|| ice!("a shift by a non-integer amount"));
         if !self.is_witness(rhs) {
-            return self.pure_shift_amount(rhs, amount_bits, bits, stages, left, guard);
+            return self.pure_shift_amount(rhs, bits, stages, left, guard);
         }
-        let (low, rest, low_bits) = if amount_bits > multi_cell_int_bits(self.field) {
-            let widths = limb_widths(amount_bits, limb_bits);
+        // The amount is as wide as the value, so it is held in limbs exactly where the value is.
+        let (low, rest, low_bits) = if bits > multi_cell_int_bits(self.field) {
+            let widths = limb_widths(bits, limb_bits);
             let limbs = self.operand_limbs(rhs, widths.len());
             (limbs[0], limbs[1..].to_vec(), widths[0])
         } else {
-            (rhs, Vec::new(), amount_bits)
+            (rhs, Vec::new(), bits)
         };
 
         // Every limb above the lowest is zero, or the amount is past any width.
@@ -3350,17 +3391,12 @@ impl Rewriter<'_> {
         }
         let hints = self.amount_hints(low_pure, low_bits, stages);
 
-        // `n = h·Σ e_t·2^t + r`, each `e_t` a bit and `r` a key of the table. A bit the amount is too
-        // narrow to hold is a known zero.
+        // `n = h·Σ e_t·2^t + r`, each `e_t` a bit and `r` a key of the table.
         let within_field = self.cast(hints.within, CastTarget::Field);
         let within_column = self.write_witness(within_field);
         let mut sum = within_column;
         let mut e = Vec::with_capacity(stages);
         for (stage, hint) in hints.stages.into_iter().enumerate() {
-            let Some(hint) = hint else {
-                e.push(zero);
-                continue;
-            };
             let hint = self.cast(hint, CastTarget::Field);
             let bit = self.write_witness(hint);
             self.push(OpCode::Rangecheck {
@@ -3374,9 +3410,9 @@ impl Rewriter<'_> {
         }
         self.constrain_equal(low_field, sum, None);
 
-        // Where `h·2^t` passes the width the decomposition does not bound the amount by it, unless
-        // the amount's own width already does.
-        if limb_bits << stages != bits && !amount_type_stays_below(amount_bits, bits) {
+        // Where `h·2^stages` is not the width, the decomposition alone does not bound the amount
+        // below it, so it is checked explicitly.
+        if limb_bits << stages != bits {
             let largest = self.field_const(self.field.constant((bits - 1) as u64));
             let headroom = self.bin(BinaryArithOpKind::USub, largest, low_field);
             self.push(OpCode::Rangecheck {
@@ -3413,21 +3449,19 @@ impl Rewriter<'_> {
         (e, cofactor, cofactor_hint)
     }
 
-    /// The pure side of an amount `n = q·h + r` of `amount_bits`, which both routes decompose the
-    /// same way: each of the `stages` bits of `q` as a one-bit integer, or [`None`] where the amount
-    /// is too narrow to hold it; `r`; and `2^r` at twice the limb width.
+    /// The pure side of an amount `n = q·h + r` of `amount_bits`, decomposed the same way by both
+    /// routes: each of the `stages` bits of `q` as a one-bit integer, `r`, and `2^r` at twice the
+    /// limb width.
     ///
-    /// Only the low `log2(h) + stages` bits are read, so an amount past what those spell is taken
-    /// modulo `h·2^stages`, which is for the check the caller builds to rule out.
+    /// Only the low `log2(h) + stages` bits are read, so a larger amount is taken modulo
+    /// `h·2^stages`; the caller's check rules that out.
     fn amount_hints(&mut self, amount: ValueId, amount_bits: usize, stages: usize) -> AmountHints {
         let limb_bits = self.limb_bits();
         let log_limb = limb_bits.trailing_zeros() as usize;
         let stages = (0..stages)
             .map(|stage| {
-                (log_limb + stage < amount_bits).then(|| {
-                    let bit = self.shifted_down(amount, amount_bits, log_limb + stage);
-                    self.cast(bit, CastTarget::Int(1))
-                })
+                let bit = self.shifted_down(amount, amount_bits, log_limb + stage);
+                self.cast(bit, CastTarget::Int(1))
             })
             .collect();
         let within = self.cast(amount, CastTarget::Int(log_limb));
@@ -3449,37 +3483,28 @@ impl Rewriter<'_> {
         self.bin(BinaryArithOpKind::UDiv, two_pow_limb, power)
     }
 
-    /// [`Self::shift_amount`] for a pure amount.
+    /// [`Self::shift_amount`] for a pure amount, which is known wherever the constraints are built,
+    /// so nothing is witnessed: its check is [`emit_pure_shift_amount_check`]'s comparison, and its
+    /// bits and multiplier are pure, so each split and barrel stage is linear.
     ///
-    /// Such an amount is known wherever the constraints are built, so nothing about it is
-    /// witnessed: its check is [`emit_pure_shift_amount_check`]'s comparison, and its bits and its
-    /// multiplier are pure values, which make each limb's split and each stage of the barrel
-    /// linear. It is read whole, as the pure side holds it whole at any width.
-    ///
-    /// Under a guard only the comparison is guarded, and the amount is not zeroed where the guard
-    /// is off. Nothing else here reads the amount except through hints taken from it, so the split
-    /// and the barrel hold for any amount the branch not taken left behind, and the answer there is
-    /// the operand shifted by that amount modulo `h·2^stages`.
+    /// Under a guard only the comparison is guarded. The amount is not zeroed where the guard is
+    /// off; the split and barrel still hold, and the answer there is the operand shifted by that
+    /// amount modulo `h·2^stages`.
     fn pure_shift_amount(
         &mut self,
         rhs: ValueId,
-        amount_bits: usize,
         bits: usize,
         stages: usize,
         left: bool,
         guard: Option<ValueId>,
     ) -> (Vec<ValueId>, ValueId, ValueId) {
-        emit_pure_shift_amount_check(self, guard, rhs, amount_bits, bits);
+        emit_pure_shift_amount_check(self, guard, rhs, bits);
 
-        let hints = self.amount_hints(rhs, amount_bits, stages);
-        let zero = self.field_const(self.field.zero());
+        let hints = self.amount_hints(rhs, bits, stages);
         let e = hints
             .stages
             .into_iter()
-            .map(|bit| match bit {
-                Some(bit) => self.cast(bit, CastTarget::Field),
-                None => zero,
-            })
+            .map(|bit| self.cast(bit, CastTarget::Field))
             .collect();
         let multiplier = if left {
             hints.power
@@ -3493,9 +3518,8 @@ impl Rewriter<'_> {
 
 /// The pure side of a shift amount, from [`Rewriter::amount_hints`].
 struct AmountHints {
-    /// Each bit of how many whole limbs the amount moves, as a one-bit integer, or [`None`] where
-    /// the amount is too narrow to hold it.
-    stages: Vec<Option<ValueId>>,
+    /// Each bit of how many whole limbs the amount moves, as a one-bit integer.
+    stages: Vec<ValueId>,
 
     /// The amount within a limb, `r`, at `log2(h)` bits.
     within: ValueId,
@@ -3504,21 +3528,21 @@ struct AmountHints {
     power: ValueId,
 }
 
-/// Whether the limb-wise shift takes a shift on `field`: a limb times a power of two no greater than
-/// the limb's own place, `hi·2^h + lo`, has to be one element for the split to be unique.
+/// Whether the limb-wise shift works on `field`: a limb times a power of two up to the limb's
+/// place, `hi·2^h + lo`, must fit in one element for the split to be unique.
 pub fn limb_shift_fits(field: FieldConfig) -> bool {
     limb_shift_fits_modulus(&field_modulus(field))
 }
 
-/// The body of [`limb_shift_fits`], stated against the modulus so that a field this compiler cannot
-/// yet be configured for can still be checked.
+/// The body of [`limb_shift_fits`], stated against the modulus so that fields this compiler cannot
+/// be configured for can be checked too.
 fn limb_shift_fits_modulus(modulus: &BigInt) -> bool {
     2 * limb_bits_for_modulus(modulus, LimbBudget::DEFAULT)
         <= widest_injective_int_bits_for_modulus(modulus)
 }
 
-/// The shift the representation lowers, if `op` is one, under either reading, guarded or not, with a
-/// witnessed operand, at a width the single cell does not take.
+/// The shift the representation lowers, if `op` is one, under either reading, guarded or not, with
+/// a witnessed operand, at a width the single cell does not take.
 fn shifted(op: &OpCode, types: &FunctionTypeInfo, field: FieldConfig) -> Option<Operands> {
     let OpCode::BinaryArithOp { kind, lhs, rhs, .. } = unguarded(op) else {
         return None;
@@ -3552,11 +3576,11 @@ enum Sign {
 impl Rewriter<'_> {
     /// A signed product the single cell cannot hold.
     ///
-    /// The unsigned schoolbook over the operands' magnitudes, whose own overflow check holds the
-    /// product below `2^N`, then [`Self::check_fits`] under the sign the product takes, and the
-    /// product negated by that sign. Every check past the operands is under the guard but the cut
-    /// of the product's top bit, which reads a product that is zero where the guard is off, and the
-    /// answer is zero there too, as the unsigned product's is.
+    /// The unsigned schoolbook over the operands' magnitudes, whose overflow check keeps the
+    /// product below `2^N`; then [`Self::check_fits`] under the product's sign; then the product
+    /// negated by that sign. Every check past the operands is guarded, except the cut of the
+    /// product's top bit, which reads a product that is zero where the guard is off; the answer is
+    /// zero there too, as the unsigned product's is.
     fn lower_signed_product(
         &mut self,
         result: ValueId,
@@ -3587,11 +3611,11 @@ impl Rewriter<'_> {
             guard,
         );
 
-        // Off the guard the schoolbook's checks are off, and a top column the branch not taken
-        // overflowed is past its width. The cast to a limb's width that the negation reads it
-        // through truncates on the pure side while the constraints carry the column whole, so the
-        // negation's products would disagree with their own columns there. The product is zero
-        // there instead.
+        // Off the guard the schoolbook's checks are off, so a top column the untaken branch
+        // overflowed is past its width. The negation reads that column through a cast to a limb's
+        // width, which truncates on the pure side while the constraints carry it whole, so the
+        // negation's products would disagree with their columns. The product is zero there
+        // instead.
         let product = match guard {
             Some(condition) => {
                 let zero = self.field_const(self.field.zero());
@@ -3619,11 +3643,11 @@ impl Rewriter<'_> {
     /// The signed quotient and remainder of `dividend / divisor`, each as its magnitude and the
     /// sign [`Self::answer`] negates it by.
     ///
-    /// The unsigned division of the operands' magnitudes, which refuses a zero divisor, then
-    /// Noir's truncation toward zero: the quotient takes the sign of the two operands' signs
-    /// combined, and the remainder the dividend's. The quotient's magnitude is held to fit under
-    /// its sign for both answers, as the model refuses `INT_MIN % -1` along with `INT_MIN / -1`.
-    /// The remainder's always fits, being below the divisor's magnitude and so below `2^(N - 1)`.
+    /// The unsigned division of the magnitudes, which refuses a zero divisor, then Noir's
+    /// truncation toward zero: the quotient's sign is the XOR of the operands' signs, and the
+    /// remainder takes the dividend's. The quotient's magnitude is held to fit under its sign for
+    /// both answers, as the model refuses `INT_MIN % -1` along with `INT_MIN / -1`. The remainder's
+    /// always fits, being below the divisor's magnitude and so below `2^(N - 1)`.
     fn divide_signed(
         &mut self,
         dividend: ValueId,
@@ -3657,16 +3681,13 @@ impl Rewriter<'_> {
         )
     }
 
-    /// Fill the bits a right shift by a known `amount` above zero vacates with the operand's
-    /// `sign`, which [`Self::shift_by_constant`] cut out, in an `answer` whose limbs are at
-    /// `widths`.
+    /// Fill the bits vacated by a right shift by a known nonzero `amount` with the operand's
+    /// `sign`, which [`Self::shift_by_constant`] cut out, in an `answer` with limbs at `widths`.
     ///
-    /// The unsigned answer has those bits clear, so filling them is adding `s` times each limb's
-    /// share of `2^N - 2^(N - amount)`: linear in the sign, and below each limb's width still.
-    ///
-    /// A sign known to be set fills a known limb at compile time. Added as arithmetic, the fill
-    /// would turn a constant limb, which [`Self::deliver`] hands on as a witnessed constant, into
-    /// a pure value where the result is witnessed.
+    /// The unsigned answer has those bits clear, so filling adds `s` times each limb's share of
+    /// `2^N - 2^(N - amount)`: linear in the sign, and each limb stays below its width. A sign
+    /// known to be set fills a known limb at compile time, so it stays a constant, which
+    /// [`Self::deliver`] hands on as a witnessed constant.
     fn fill_with_sign(
         &mut self,
         answer: &mut [ValueId],
@@ -3706,14 +3727,14 @@ impl Rewriter<'_> {
         }
     }
 
-    /// The magnitude of a `bits`-wide operand read as signed, as limbs at `widths` each with
-    /// whether it is witnessed, its sign, and, for a pure operand, the whole magnitude the limbs
+    /// The magnitude of a `bits`-wide operand read as signed: its limbs at `widths`, each with
+    /// whether it is witnessed; its sign; and, for a pure operand, the whole magnitude the limbs
     /// were cut from, which a division's hint reads.
     ///
     /// `|INT_MIN|` is `2^(N - 1)`, which `N` unsigned bits hold, so every magnitude fits its
-    /// width. A constant's is taken at compile time, so the limbs a constant factor does not reach
-    /// stay known zeros, and a pure operand's is taken on the pure side, at no cost. A witnessed
-    /// one is its limbs [`Self::negate_if`] by its sign.
+    /// width. A constant's is taken at compile time, so limbs it does not reach stay known zeros;
+    /// a pure operand's is taken on the pure side, at no cost; and a witnessed one is its limbs
+    /// [`Self::negate_if`] by its sign.
     fn magnitude(
         &mut self,
         value: ValueId,
@@ -3815,8 +3836,8 @@ impl Rewriter<'_> {
     /// A limb `width` bits wide complemented where `sign` is one and kept where it is zero.
     ///
     /// `x + s·(2^w - 1 - 2x)`, which is `x` or `2^w - 1 - x`, and so below `2^w` either way because
-    /// `x` is and `s` is a bit: it needs no check of its own. One product where both the limb and
-    /// the sign are witnessed, and linear otherwise.
+    /// `x` is and `s` is a bit: it needs no separate check. It costs one product where both the
+    /// limb and the sign are witnessed, and is linear otherwise.
     fn complement(
         &mut self,
         (limb, witnessed): (ValueId, bool),
@@ -3849,10 +3870,10 @@ impl Rewriter<'_> {
 
     /// `limbs` at `widths` negated modulo `2^N` where `sign` is one, and kept where it is zero.
     ///
-    /// Each limb [`Self::complement`]ed by the sign, then the carry chain adds the sign as the
-    /// low limb's addend, its top carry witnessed and dropped: `!x + 1` is `2^N - x` for every `x`
-    /// but zero, whose negation carries out of the top limb and leaves zero, as it should. The
-    /// chain's checks are under `guard`.
+    /// Each limb is [`Self::complement`]ed by the sign, then the carry chain adds the sign to the
+    /// low limb, its top carry witnessed and dropped: `!x + 1` is `2^N - x` for every nonzero `x`,
+    /// and for zero it carries out of the top limb and leaves zero, as it should. The chain's
+    /// checks are under `guard`.
     fn negate_if(
         &mut self,
         limbs: Vec<(ValueId, bool)>,
@@ -3890,21 +3911,18 @@ impl Rewriter<'_> {
         self.answer_limbs(chain.answer, widths)
     }
 
-    /// Hold a magnitude held as `limbs` at `widths` to `2^(N - 1) - 1 + s`, for the sign `s` it is
-    /// about to take: below `2^(N - 1)`, or exactly that where `s` is one, which is `INT_MIN`.
+    /// Hold a magnitude, as `limbs` at `widths`, to at most `2^(N - 1) - 1 + s` for the sign `s` it
+    /// is about to take: below `2^(N - 1)`, or exactly `2^(N - 1)` (`INT_MIN`) where `s` is one.
     ///
-    /// The magnitude's top bit `t` is cut out of its top limb, and one constraint asks that
-    /// `t·(rest + Σ low limbs + (1 - s)) == 0`, `rest` being what the cut leaves of the top limb.
-    /// Every term of that sum is a non-negative integer and their sum is far below the modulus, so
-    /// it is zero exactly when each term is: either `t` is zero, or every other bit is and `s` is
-    /// one. The constraint is under `guard`. The cut is not, as every caller hands this limbs that
-    /// are in range on every path: a product is zero where the guard is off, and so is the hint a
-    /// quotient is witnessed from.
+    /// The magnitude's top bit `t` is cut out of its top limb, leaving `rest`, and one constraint
+    /// asks `t·(rest + Σ low limbs + (1 - s)) == 0`. The sum is of non-negative integers far below
+    /// the modulus, so it is zero exactly when each term is: either `t` is zero, or every other bit
+    /// is and `s` is one. The constraint is under `guard`; the cut is not, as every caller passes
+    /// limbs in range on every path.
     ///
-    /// The cut also bounds the top limb at its width, but a product's schoolbook checks its top
-    /// column all the same. The cut reads the column through a cast to the limb's width, which
-    /// truncates on the pure side, so a product past the width is refused by the cut's constraint
-    /// alone and witness generation runs on; the schoolbook's check is what refuses there.
+    /// A product's schoolbook still checks its top column: the cut reads it through a cast that
+    /// truncates on the pure side, so without that check an overflowing product would be refused
+    /// only by the cut's constraint, after witness generation has run on.
     fn check_fits(
         &mut self,
         limbs: &[(ValueId, bool)],
@@ -3935,8 +3953,8 @@ impl Rewriter<'_> {
         self.constrain_equal(product, zero, guard);
     }
 
-    /// Limbs at `widths` as a schoolbook [`Factor`]: a known limb is a constant with its own value
-    /// as its bound, and any other is bounded by its width.
+    /// Limbs at `widths` as a schoolbook [`Factor`]: a known limb is a constant with its value as
+    /// its bound, and any other is bounded by its width.
     fn factor_of(&mut self, limbs: &[(ValueId, bool)], widths: &[usize]) -> Factor {
         let mut witnessed = false;
         let (limbs, bounds) = limbs
@@ -3980,9 +3998,9 @@ impl Rewriter<'_> {
 
     /// Limbs as the field elements [`Self::deliver`] takes, a known limb as a field constant.
     ///
-    /// `deliver` hands a known limb on as a witnessed constant, and it recognises one only as a
-    /// constant: a cast of one would reach the result as a pure value where the result is
-    /// witnessed, as every limb of `0 % d` would.
+    /// `deliver` hands a known limb on as a witnessed constant, but recognizes one only as a
+    /// constant: a cast of one would reach a witnessed result as a pure value, as every limb of
+    /// `0 % d` would.
     fn limb_fields(&mut self, limbs: Vec<(ValueId, bool)>) -> Vec<ValueId> {
         limbs
             .into_iter()
@@ -3998,18 +4016,15 @@ impl Rewriter<'_> {
 // ================================================================================================
 
 impl Rewriter<'_> {
-    /// A witnessed spread whose spread is held as limbs (and whose operand may be too) under the
-    /// `guard` where one exists.
+    /// A witnessed spread whose answer is held as limbs, under `guard` where there is one.
     ///
-    /// A spread is limb-local: a half-limb of the operand spreads into exactly one limb of the
-    /// answer, with nothing crossing between them. So the operand is cut into half-limbs and each
-    /// one becomes the narrow spread that the witness lowering already builds, its lookup keyed by
-    /// the half-limb, into the answer's limb in that position.
-    ///
-    /// The lookups are also what bounds the half-limbs, which [`Self::cut_unbounded`] leaves
-    /// unbounded: a lookup at `r` bits holds its key below `2^r`. Only the half-limbs the read
-    /// reaches are cut, the one it straddles spread at the bits of it the read takes. Whatever the
-    /// operand holds above the read inside a cut is refused.
+    /// A spread is limb-local: each half-limb of the operand spreads into one answer limb, by the
+    /// narrow spread the witness lowering builds, its lookup keyed by the half-limb. The lookups
+    /// also bound the half-limbs [`Self::cut_unbounded`] leaves unbounded, even for an answer used
+    /// only in part, as dead-code elimination keeps every witnessed spread until its lookup is
+    /// built. Only the half-limbs the read reaches are cut, the one it straddles spreads only the
+    /// bits the read takes, and anything above the read inside a cut is refused. A limb known to
+    /// be zero spreads to zero and costs nothing.
     fn lower_spread(
         &mut self,
         guard: Option<ValueId>,
@@ -4032,21 +4047,35 @@ impl Rewriter<'_> {
             containers.len()
         );
 
-        let mut pieces = Vec::with_capacity(containers.len());
+        // `None` is a piece of a limb known to be zero, which `cut_unbounded` would cut into as
+        // many pieces as the read reaches half-limbs.
+        let mut pieces: Vec<Option<(ValueId, usize)>> = Vec::with_capacity(containers.len());
         if self.wide_width(value).is_some() {
+            let half = witness_half_limb_bits(self.field);
             for (limb, width, read) in self.limbs_and_reads(value, bits, value_bits) {
+                let zero = self.known(limb).is_some_and(|pattern| pattern.is_zero());
                 match read {
+                    0 if zero => {}
                     0 => self.constrain_zero(limb, guard),
-                    read => pieces.extend(self.cut_unbounded(limb, width, read, guard)),
+                    read if zero => pieces.extend(std::iter::repeat_n(None, read.div_ceil(half))),
+                    read => pieces.extend(
+                        self.cut_unbounded(limb, width, read, guard)
+                            .into_iter()
+                            .map(Some),
+                    ),
                 }
             }
         } else {
-            pieces = self.cut_unbounded(value, bits, value_bits, guard);
+            pieces = self
+                .cut_unbounded(value, bits, value_bits, guard)
+                .into_iter()
+                .map(Some)
+                .collect();
         }
 
         for (index, (result, container)) in results.into_iter().zip(containers).enumerate() {
             match pieces.get(index) {
-                Some(&(piece, read)) => self.push_guarded(
+                Some(&Some((piece, read))) => self.push_guarded(
                     guard,
                     OpCode::Spread {
                         result,
@@ -4054,20 +4083,22 @@ impl Rewriter<'_> {
                         value_bits: read,
                     },
                 ),
-                None => self.define_zero(result, 2 * container),
+                Some(None) | None => self.define_zero(result, 2 * container),
             }
         }
     }
 
     /// A witnessed unspread of an operand held as limbs, under `guard` where there is one.
     ///
-    /// Limb-local in the other direction: each limb of the operand unspreads into a half-limb of
-    /// each stream, by the narrow unspread the witness lowering already builds, whose lookups bound
-    /// both. The half-limbs are then put back together as the streams, which may be limbs or one
-    /// element each. A limb the read straddles is unspread at the bits of it the read takes, one
-    /// the read takes a single bit of, which has no odd bit for the narrow unspread to take, is
-    /// range-checked to that bit and is the even half-limb itself, and one wholly above the read is
-    /// held to zero.
+    /// Limb-local in the other direction: each operand limb unspreads into a half-limb of each
+    /// stream, by the narrow unspread the witness lowering already builds, whose lookups bound
+    /// both. The half-limbs are then reassembled into the streams, which may be limbs or one
+    /// element each.
+    ///
+    /// A limb the read straddles unspreads only the bits the read takes. A limb the read takes a
+    /// single bit of has no odd bit to unspread, so it is range-checked to one bit and is itself
+    /// the even half-limb. A limb wholly above the read is held to zero. A limb known to be zero
+    /// unspreads to zero and costs nothing.
     fn lower_unspread(
         &mut self,
         guard: Option<ValueId>,
@@ -4086,7 +4117,9 @@ impl Rewriter<'_> {
 
         for (limb, width, read) in self.limbs_and_reads(value, bits, value_bits) {
             let (odd_width, even_width) = (width / 2, width.div_ceil(2));
+            let zero = self.known(limb).is_some_and(|pattern| pattern.is_zero());
             let (odd, even) = match read {
+                _ if zero => (None, self.zero_limb(even_width)),
                 0 => {
                     self.constrain_zero(limb, guard);
                     (None, self.zero_limb(even_width))
@@ -4166,19 +4199,19 @@ impl Rewriter<'_> {
             .collect()
     }
 
-    /// The half-limbs of a witnessed element `value` of `bits` that the low `read` bits reach, low
-    /// first, each typed at its half-limb's width and paired with the bits of it the read takes,
-    /// and **none of them bounded**: each has to be bounded by whatever the caller builds with it.
+    /// The half-limbs of a `bits`-wide witnessed `value` that the low `read` bits reach, low first,
+    /// each typed at its width and paired with how many of its bits the read takes. **None is
+    /// bounded**: the caller bounds each.
     ///
-    /// The high pieces are witnessed from the pure shadow and the lowest is what is left of the
-    /// source once they are taken out at their places, so the pieces recombine to the source by
-    /// construction, bits above the read included, which land in the lowest. Once each piece is
-    /// bounded at its read their sum is below `2^read` and the field carries it.
+    /// The high pieces are witnessed from the pure shadow and the lowest is the source minus them,
+    /// so the pieces recombine to the source; bits above the read land in the lowest. Once each is
+    /// bounded at its read, their sum is below `2^read`.
     ///
-    /// Under a guard the lowest piece is witnessed too, and the sum tied to the source by a
-    /// constraint under the guard. Where there is no guard nothing bounds a derived piece, so one
-    /// carrying the bits above the read would sit in an `Int` it does not fit, which the VM's cast
-    /// truncates and the constraint system does not, and the two would disagree about the witness.
+    /// Without a guard the lowest piece is derived, and its narrow lookup bounds it. Under a guard
+    /// it is witnessed too, and tied to the source under the guard: where the guard is off nothing
+    /// bounds a derived piece, so one carrying the bits above the read would sit in an `Int` it
+    /// does not fit, and the VM's truncating cast would disagree with the constraint system on the
+    /// witness.
     fn cut_unbounded(
         &mut self,
         value: ValueId,
@@ -4233,11 +4266,11 @@ impl Rewriter<'_> {
         pieces
     }
 
-    /// Half-limbs, low first, put back together as `result`, which is their whole width held as
-    /// limbs or as one element.
+    /// Half-limbs, low first, recombined into `result`, which spans their total width and is held
+    /// as limbs or as one element.
     ///
-    /// Every piece but the last is a full half-limb, so each lands at a multiple of one, and each
-    /// is already bounded, so the sum is below `2^width` and needs no constraint of its own.
+    /// Every piece but the last is a full half-limb, so each lands at a multiple of one; each is
+    /// already bounded, so the sum is below `2^width` and needs no separate constraint.
     fn assemble_half_limbs(&mut self, result: ValueId, parts: &[(ValueId, usize)]) {
         let half = witness_half_limb_bits(self.field);
         let targets = self.limbs(result);
@@ -4311,6 +4344,9 @@ impl Rewriter<'_> {
 impl Rewriter<'_> {
     /// Rewrite one instruction into the limb-wise instructions that replace it.
     fn lower(&mut self, op: &OpCode) {
+        if self.lower_global(op) {
+            return;
+        }
         if self.lower_through_chain(op)
             || self.lower_product(op)
             || self.lower_division(op)
@@ -4380,8 +4416,8 @@ impl Rewriter<'_> {
                 self.lower_assert_compare(kind, lhs, rhs, Some(guard));
             }
 
-            // Everything below moves limbs without reading them, so each is its narrow self once
-            // per limb.
+            // Everything below moves limbs without reading them, so each becomes its narrow form
+            // once per limb.
             OpCode::Select {
                 result,
                 cond,
@@ -4432,10 +4468,9 @@ impl Rewriter<'_> {
                 }
             }
 
-            // The witness-indexed read, which is the lookup the array lowering built at
-            // `driver.rs:619` — before this pass, so the index and the flag are already narrow and
-            // already pinned. One lookup per limb sequence against that same index and flag, so
-            // each limb is selected by the same `sum(hit) == 1` argument rather than a new one.
+            // The witness-indexed read: `witness_array_access` built its lookup before this pass,
+            // so the index and flag are narrow and pinned. One lookup per limb sequence against
+            // them selects each limb by the same `sum(hit) == 1` argument.
             OpCode::Lookup {
                 target: LookupTarget::Array(array),
                 args,
@@ -4470,11 +4505,9 @@ impl Rewriter<'_> {
                 }
             }
 
-            // A blob-backed sequence: one blob per limb, holding that limb of every element.
-            //
-            // The elements are constants, so the split is arithmetic on the patterns rather than
-            // emitted code, which is what lets a constant sequence carry elements the field
-            // cannot hold where reading one whole entry as a field element could not.
+            // A blob-backed sequence: one blob per limb. The elements are constants, so the split
+            // is arithmetic on their patterns, which lets a constant sequence hold elements too
+            // wide for one field element.
             OpCode::MkSeqOfBlob {
                 result,
                 element_type,
@@ -4538,23 +4571,30 @@ impl Rewriter<'_> {
                 }
             }
 
-            // One read per limb sequence, at the caller's own index. The index is narrow and is
-            // shared rather than re-derived, so a witnessed one is looked up once per limb against
-            // the same value the array lowering pinned.
+            // A witness-indexed read inside a branch on a witness, whose hint the array lowering
+            // guards so that an index past the end on the branch not taken does not trap: one
+            // guarded read per limb sequence, under the same condition.
+            OpCode::Guard { condition, inner } if matches!(**inner, OpCode::ArrayGet { .. }) => {
+                let OpCode::ArrayGet {
+                    result,
+                    array,
+                    index,
+                } = **inner
+                else {
+                    ice_unreachable!("matched above");
+                };
+                let condition = self.one(*condition);
+                self.lower_array_get(Some(condition), result, array, index);
+            }
+
+            // One read per limb sequence, at the caller's index. The index is narrow and shared
+            // rather than re-derived, so a witnessed one is looked up once per limb against the
+            // value the array lowering pinned.
             OpCode::ArrayGet {
                 result,
                 array,
                 index,
-            } => {
-                let index = self.one(*index);
-                for (result, array) in paired(self.limbs(*result), self.limbs(*array)) {
-                    self.push(OpCode::ArrayGet {
-                        result,
-                        array,
-                        index,
-                    });
-                }
-            }
+            } => self.lower_array_get(None, *result, *array, *index),
 
             OpCode::ArraySet {
                 result,
@@ -4576,15 +4616,13 @@ impl Rewriter<'_> {
                 }
             }
 
-            // The slice family that survives this far. Every limb sequence is the same length,
-            // because every operation that changes one is applied identically to all `k` of them —
-            // which is what lets the length be read off any single limb, and is the same reason the
-            // index is shared rather than re-derived.
+            // The slice operations that survive this far. Every operation that changes a limb
+            // sequence's length is applied to all `k`, so the length is read off any one, and the
+            // index is shared.
             //
-            // `SlicePop`, `SliceInsert` and `SliceRemove` have no arm because
-            // `InstructionLowering::slice_ops` replaces each of them with an assert, a get and a
-            // copy loop before this pass runs. A wide one therefore arrives here as the `ArrayGet`,
-            // `ArraySet` and `SliceLen` this pass already handles.
+            // `SlicePop`, `SliceInsert` and `SliceRemove` have no arm:
+            // `InstructionLowering::slice_ops` replaces each with an assert, a get and a copy loop
+            // before this pass.
             OpCode::SliceLen { result, slice } => {
                 let slice = self.limbs(*slice);
                 self.push(OpCode::SliceLen {
@@ -4616,12 +4654,11 @@ impl Rewriter<'_> {
                 }
             }
 
-            // The bitwise three, which are the one arithmetic family with **no cross-limb
-            // interaction**: bit `i` of the answer depends on bit `i` of each operand and nothing
-            // else, so a limb of the answer is the same operation on the matching pair of operand
-            // limbs. There is no carry to thread and no reconstruction to re-establish — each limb
-            // is already held to its own width, and an operation that cannot set a bit the operands
-            // did not have between them cannot break that.
+            // The bitwise three, the one arithmetic family with **no cross-limb interaction**:
+            // bit `i` of the answer depends only on bit `i` of each operand, so each answer limb is
+            // the same operation on the matching operand limbs. There is no carry and nothing to
+            // reconstruct: each limb is already held to its width, and an operation that sets no
+            // bit absent from both operands cannot break that.
             OpCode::BinaryArithOp {
                 kind:
                     kind @ (BinaryArithOpKind::And | BinaryArithOpKind::Or | BinaryArithOpKind::Xor),
@@ -4648,10 +4685,10 @@ impl Rewriter<'_> {
                 }
             }
 
-            // The complement, which is the unary member of the same family and limb-wise for the
-            // same reason: bit `i` of the answer depends on bit `i` of the operand alone. Each limb
-            // is complemented at **its own** width, so the top one — which may be narrower than a
-            // full limb — does not acquire bits the value's width does not have.
+            // The complement, the unary member of the same family and limb-wise for the same
+            // reason: bit `i` of the answer depends only on bit `i` of the operand. Each limb is
+            // complemented at its width, so the top one, which may be narrower than a full limb,
+            // gains no bits beyond the value's width.
             OpCode::Not { result, value } => {
                 let results = self.limbs(*result);
                 let values = self.operand_limbs(*value, results.len());
@@ -4675,6 +4712,33 @@ impl Rewriter<'_> {
             OpCode::Store { ptr, value } => {
                 for (ptr, value) in paired(self.limbs(*ptr), self.limbs(*value)) {
                     self.push(OpCode::Store { ptr, value });
+                }
+            }
+
+            // A whole pure integer written as a witnessed one held as limbs, such as an
+            // unconstrained call's answer: each limb is a new column, written from the value and
+            // bounded at its width, as nothing else ties the limbs to it.
+            OpCode::WriteWitness {
+                result: Some(result),
+                value,
+                pinned,
+            } if self.limbs(*value).len() == 1 && self.limbs(*result).len() > 1 => {
+                // A pinned write is an entry point's input, which `prepare_entry_point` keeps
+                // within one element.
+                debug_assert!(!pinned, "ICE: a pinned write of a wide value");
+                let bits = self
+                    .wide_width(*result)
+                    .expect("ICE: a write into the representation without a wide result");
+                let widths = limb_widths(bits, self.limb_bits());
+                for (index, (result, width)) in
+                    self.limbs(*result).into_iter().zip(widths).enumerate()
+                {
+                    let (limb, _) = self.witness_limb(*value, bits, index, width, width);
+                    self.push(OpCode::Cast {
+                        result,
+                        value: limb,
+                        target: CastTarget::Nop,
+                    });
                 }
             }
 
@@ -4737,10 +4801,129 @@ impl Rewriter<'_> {
                 unconstrained: *unconstrained,
             }),
 
-            // A wide value reaching anything else is a shape this pass does not represent.
+            // A wide witnessed value reaching anything else is a shape this pass does not
+            // represent.
             other => ice!(
                 "{other:?} reached the multi-cell representation with a wide operand, which is a shape it does not represent"
             ),
+        }
+    }
+
+    /// A global opcode, renumbered to its slots' new place and fanned out over its limbs, a limb
+    /// per slot. A drop drops only the slots that hold something on the heap.
+    fn lower_global(&mut self, op: &OpCode) -> bool {
+        if !self.globals.moved {
+            return false;
+        }
+        match op {
+            OpCode::ReadGlobal {
+                result,
+                offset,
+                result_type,
+            } => {
+                let base = self.globals.offsets[*offset as usize];
+                let results = self.limbs(*result);
+                let types = limb_types(result_type, self.field);
+                assert_eq!(
+                    results.len(),
+                    types.len(),
+                    "ICE: a global read of {} slots answers {} limbs",
+                    types.len(),
+                    results.len()
+                );
+                for (slot, (result, result_type)) in results.into_iter().zip(types).enumerate() {
+                    self.push(OpCode::ReadGlobal {
+                        result,
+                        offset: (base + slot) as u64,
+                        result_type,
+                    });
+                }
+            }
+            OpCode::InitGlobal { global, value } => {
+                let base = self.globals.offsets[*global];
+                let values = self.limbs(*value);
+                let slots = limb_types(&self.globals.old_types[*global], self.field).len();
+                assert_eq!(
+                    values.len(),
+                    slots,
+                    "ICE: a global of {slots} slots is initialised with {} limbs",
+                    values.len()
+                );
+                for (slot, value) in values.into_iter().enumerate() {
+                    self.push(OpCode::InitGlobal {
+                        global: base + slot,
+                        value,
+                    });
+                }
+            }
+            OpCode::DropGlobal { global } => {
+                let base = self.globals.offsets[*global];
+                for (slot, ty) in limb_types(&self.globals.old_types[*global], self.field)
+                    .into_iter()
+                    .enumerate()
+                {
+                    if ty.is_heap_allocated() {
+                        self.push(OpCode::DropGlobal {
+                            global: base + slot,
+                        });
+                    }
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// One read per limb sequence of `array`, at the caller's index and under `guard` if any.
+    ///
+    /// A pure element is recombined into `result` at once, so nothing after the read meets a pure
+    /// integer held as limbs: everything else holds it whole, and a witness-indexed read's lookup
+    /// splits its field image again where it needs the limbs. This costs interpreter work, not
+    /// constraints, as a pure value is known wherever the constraints are built.
+    fn lower_array_get(
+        &mut self,
+        guard: Option<ValueId>,
+        result: ValueId,
+        array: ValueId,
+        index: ValueId,
+    ) {
+        let index = self.one(index);
+        let arrays = self.limbs(array);
+        let results = self.limbs(result);
+        let whole = results.len() == 1 && arrays.len() > 1;
+        let reads: Vec<ValueId> = if whole {
+            arrays.iter().map(|_| self.fresh()).collect()
+        } else {
+            results
+        };
+        for (read, array) in paired(reads.clone(), arrays) {
+            let get = OpCode::ArrayGet {
+                result: read,
+                array,
+                index,
+            };
+            self.push(match guard {
+                Some(condition) => OpCode::Guard {
+                    condition,
+                    inner: Box::new(get),
+                },
+                None => get,
+            });
+        }
+        if whole {
+            let bits = self
+                .types
+                .get_value_type(result)
+                .int_width()
+                .unwrap_or_else(|| {
+                    ice!("a whole element read out of limb sequences is not an integer")
+                });
+            let combined = self.recombine_pure(&reads, bits);
+            self.push(OpCode::Cast {
+                result,
+                value: combined,
+                target: CastTarget::Nop,
+            });
         }
     }
 
@@ -4770,11 +4953,15 @@ impl Rewriter<'_> {
         match target {
             CastTarget::Int(to_bits) => {
                 // The other side of the field boundary: a wide value read back out of the field
-                // elements its limbs were pinned as. Each limb returns at its own width, so there
+                // elements its limbs were pinned as. Each limb returns at its width, so there
                 // is nothing to recombine and no place value to mint.
                 if source_bits.is_none() {
                     let limbs = self.limbs(value);
                     let results = self.limbs(result);
+                    if limbs.len() == 1 && results.len() > 1 {
+                        self.lower_field_into_limbs(value, *to_bits, &results);
+                        return;
+                    }
                     let widths = limb_widths(*to_bits, self.limb_bits());
                     assert_eq!(
                         limbs.len(),
@@ -4812,11 +4999,10 @@ impl Rewriter<'_> {
                             });
                         }
                     }
-                    // Out of it. A target the field carries is one element again, so the low
-                    // limbs recombine there and the linear combination carries the pinning with
-                    // them. A target it cannot carry has no element to be summed into, so the
-                    // limbs go back together as integer arithmetic at the target's own width —
-                    // which is what the witness strip does, and for the same reason.
+                    // Out of it. A target the field carries is one element again, so the low limbs
+                    // recombine into it and the linear combination keeps them pinned. A target it
+                    // cannot carry has no element to sum into, so the limbs recombine as integer
+                    // arithmetic at the target's width, as the witness strip does.
                     None => {
                         let combined = if *to_bits > multi_cell_int_bits(self.field) {
                             let limbs = self.pure_limbs_at(value, from_bits, *to_bits);
@@ -4870,9 +5056,9 @@ impl Rewriter<'_> {
                 }
             }
 
-            // A wide value's field image is one element per limb, which the array lowering's lookup
-            // chain moves through a field. The limbs are already held to their own widths, so each
-            // is an element.
+            // A wide value's field image is one element per limb; the array lowering's lookup
+            // chain moves it through a field. Each limb is already held to its width, so each is
+            // an element.
             CastTarget::Field => {
                 let results = self.limbs(result);
                 let limbs = self.operand_limbs(value, results.len());
@@ -4913,16 +5099,16 @@ impl Rewriter<'_> {
         }
     }
 
-    /// A sign extension whose target is held as limbs: the source's limbs, with its sign bit
+    /// A sign extension whose target is held as limbs: the source's limbs, with its sign bit `s`
     /// filling every bit above them.
     ///
-    /// Every limb of the answer is linear in that bit `s`. Below the source's top limb they are the
-    /// source's own; the limb holding the source's top limb, `w_s` bits of a `w`-bit limb, is that
-    /// limb plus `s·(2^w - 2^w_s)`; and every limb above it is `s·(2^w - 1)`. Each is below `2^w`,
-    /// as its pieces are and cover disjoint bits, so the cut that pins `s` is the whole cost.
+    /// Every limb of the answer is linear in `s`. Below the source's top limb they are the source's
+    /// limbs; the limb holding the source's top limb (`w_s` bits of a `w`-bit limb) is that limb
+    /// plus `s·(2^w - 2^w_s)`; every limb above it is `s·(2^w - 1)`. Each is below `2^w`, as its
+    /// pieces are and cover disjoint bits, so the cut that pins `s` is the whole cost.
     ///
-    /// A sign known at compile time, which is one read off a known top limb, fills at compile time:
-    /// that limb with its fill and every limb above it are constants.
+    /// A sign known at compile time (read off a known top limb) fills at compile time: that limb
+    /// with its fill and every limb above it are constants.
     ///
     /// The source is witnessed: the type rule keeps the witness wrapper across the extension, and
     /// only a witnessed result is held as limbs.
@@ -4990,16 +5176,15 @@ impl Rewriter<'_> {
         self.deliver(result, answer, &widths, to_bits, None);
     }
 
-    /// Equality, which is the conjunction of the limbs' own.
+    /// Equality: the conjunction of per-limb equalities.
     ///
-    /// A pair of limbs both known at compile time is decided here rather than compared, because a
-    /// witnessed constant is still a witness to the comparison's lowering, which would spend a
-    /// gadget on it. A pair known to differ decides the whole equality, and when every pair is
-    /// known equal so is the value.
+    /// A pair of limbs both known at compile time is decided here rather than compared: the
+    /// comparison's lowering would spend a gadget on a witnessed constant. One pair known to differ
+    /// decides the whole equality, and if every pair is known equal, so is the value.
     fn lower_compare(&mut self, kind: CmpKind, result: ValueId, lhs: ValueId, rhs: ValueId) {
         assert!(
             matches!(kind, CmpKind::Eq),
-            "ICE: a {kind:?} of a wide witnessed integer reached the multi-cell representation; width validation should have refused the program"
+            "ICE: a {kind:?} of a wide witnessed integer reached the multi-cell representation; the carry chain takes every ordering"
         );
 
         let mut pairs = Vec::new();
@@ -5067,7 +5252,7 @@ impl Rewriter<'_> {
     ) {
         assert!(
             matches!(kind, CmpKind::Eq),
-            "ICE: a {kind:?} assertion of a wide witnessed integer reached the multi-cell representation; width validation should have refused the program"
+            "ICE: a {kind:?} assertion of a wide witnessed integer reached the multi-cell representation; the carry chain takes every ordering"
         );
 
         let pairs = self.operand_pair(lhs, rhs);
@@ -5106,15 +5291,15 @@ fn witnessed_width(types: &FunctionTypeInfo, lhs: ValueId, rhs: ValueId) -> Opti
 // UTILITIES
 // ================================================================================================
 
-/// The widest witnessed integer that is carried as a single field element.
+/// The widest witnessed integer carried as a single field element.
 ///
-/// Above it a value has no element to be carried in, which is what forces the limbs. It is
-/// [`widest_injective_int_bits`] and therefore field-derived: 253 on bn254, 63 on goldilocks.
+/// A wider value has no element to hold it, so it is held as limbs. This is
+/// [`widest_injective_int_bits`], so it is field-derived: 253 on bn254, 63 on goldilocks.
 ///
-/// An operation whose gadget needs more headroom than one element leaves does not move this: it
-/// asks its own bound locally, as the carry chain asks [`widest_cell_sum_bits`], one bit narrower.
-/// It is one constant, and `the_representation_threshold_is_where_an_element_stops_being_injective`
-/// is what fails when it moves without its reason moving with it.
+/// A gadget that needs more headroom than one element leaves does not move this; it asks for a
+/// bound locally, as the carry chain asks [`widest_cell_sum_bits`], one bit narrower.
+/// `the_representation_threshold_is_where_an_element_stops_being_injective` fails if this moves
+/// without its reason moving too.
 pub fn multi_cell_int_bits(field: FieldConfig) -> usize {
     widest_injective_int_bits(field)
 }
@@ -5143,7 +5328,8 @@ mod tests {
     /// The threshold is where a value stops having a field element, which is what forces limbs.
     ///
     /// It is deliberately **not** the narrower width the single-cell lowerings stop at: between the
-    /// two a value is one element that no lowering will touch, which `width_validation` refuses.
+    /// two a value is still one element, and an operation the single cell cannot take there is cut
+    /// into limbs by the operation that needs them.
     #[test]
     fn the_representation_threshold_is_where_an_element_stops_being_injective() {
         let field = bn254();
@@ -5185,11 +5371,10 @@ mod tests {
     /// A reference and a sequence both expand, and a sequence expands whether or not its element
     /// is witnessed.
     ///
-    /// A reference is a place and every limb needs one. A sequence is transposed, so the count is
-    /// the element's limbs rather than the sequence's length. A **pure** wide element counts too,
-    /// which is the one place [`element_limb_types`] parts company with [`limb_types`]. A narrow
-    /// element does not expand at any of it, which is what keeps a `[u128; n]` on bn254 off this
-    /// path entirely.
+    /// A reference is a place, and every limb needs one. A sequence is transposed, so the count is
+    /// the element's limbs, not the sequence's length. A **pure** wide element counts too, the one
+    /// place [`element_limb_types`] differs from [`limb_types`]. A narrow element expands in none
+    /// of these, which keeps a `[u128; n]` on bn254 off this path entirely.
     #[test]
     fn a_reference_and_a_sequence_both_expand_by_the_element() {
         let field = bn254();
@@ -5255,9 +5440,8 @@ mod tests {
     /// Every block parameter carrying a wide value becomes one parameter per limb, and the jump
     /// that feeds it carries one argument per limb.
     ///
-    /// This is the case a memoised table could get silently wrong: the limbs of a value crossing a
-    /// block boundary would be re-derived at the consumer from the pure shadow, which is a hint
-    /// rather than a constraint, so producer and consumer would be unrelated witnesses.
+    /// A memoized table could get this silently wrong: limbs re-derived at the consumer from the
+    /// pure shadow, a hint, would leave producer and consumer holding unrelated witnesses.
     #[test]
     fn a_block_parameter_becomes_one_parameter_per_limb() {
         let bits = 320usize;
@@ -5279,9 +5463,8 @@ mod tests {
 
         assert_eq!(widths, expected);
 
-        // And the jump that feeds it carries one argument per limb: a parameter list and an
-        // argument list that disagree is the failure this flattening has to avoid, and it is one an
-        // arity check downstream would report a long way from its cause.
+        // And the jump that feeds it carries one argument per limb. A parameter list and argument
+        // list that disagree would surface only in an arity check far downstream of the cause.
         let Some(Terminator::Jmp(_, args)) = function.get_block(BlockId(0)).get_terminator() else {
             panic!("the entry block jumps to the block carrying the value");
         };
@@ -5338,19 +5521,17 @@ mod tests {
         ssa
     }
 
-    /// A **pure** value injected into the representation is bounded, and that bound is all there is.
+    /// A **pure** value injected into the representation is bounded, and that bound is all there
+    /// is.
     ///
-    /// The counterpart of the test above. [`Rewriter::decompose`] ties its limbs back to a value
-    /// that already existed, so a limb out of range breaks the reconstruction. [`Rewriter::inject`]
-    /// has no prior value to tie back to so the per-limb range check is the **only** thing that
-    /// bounds them. `2^h` being invertible mod `p` means an unbounded limb lets a prover solve for
-    /// any value at all.
-    ///
-    /// **No honest witness can see this**, so we check it here.
+    /// Unlike [`Rewriter::decompose`], [`Rewriter::inject`] has no prior value to tie its limbs to,
+    /// so the per-limb range check is the **only** bound: as `2^h` is invertible mod `p`, an
+    /// unbounded limb lets a prover choose any value. No honest witness can see this, so it is
+    /// checked structurally.
     #[test]
     fn a_pure_value_injected_into_the_representation_is_bounded_per_limb() {
-        // Above the representation threshold, so the value is limbs at all, and not a whole number
-        // of them, so the top limb is bounded at its own width rather than a full limb's.
+        // Above the representation threshold, so the value is held as limbs, and not a whole number
+        // of them, so the top limb is bounded at its width rather than a full limb's.
         let bits = 328usize;
         let mut ssa = program_injecting(bits);
         run_pass(&mut ssa);
@@ -5367,7 +5548,7 @@ mod tests {
         assert_eq!(
             bounded,
             limb_widths(bits, witness_limb_bits(bn254())),
-            "each injected limb is bounded at its own declared width"
+            "each injected limb is bounded at its declared width"
         );
         assert!(
             bounded.len() > 1,
@@ -5428,15 +5609,12 @@ mod tests {
         ssa
     }
 
-    /// A transposed read is **one lookup per limb**, every one of them at the same index.
+    /// A transposed read is **one lookup per limb**, all at the same index.
     ///
-    /// The count is what makes the read sound, and no run can see it: a limb the tape never pins
-    /// is a limb nothing else reads either, so it is eliminated rather than left as a free column
-    /// and `every_column_of_a_wide_sequence_is_pinned` stays green without it. So the lookups are
-    /// counted here, where they are emitted.
-    ///
-    /// The shared index is the other half: `k` lookups against `k` tables at `k` **different**
-    /// indices would pin `k` limbs of no single element.
+    /// No run can see the count: a limb the tape never pins is read by nothing else either, so it
+    /// is eliminated rather than left free, and `every_column_of_a_wide_sequence_is_pinned` still
+    /// passes. The shared index is the other half: `k` lookups at `k` **different** indices would
+    /// pin `k` limbs of no single element.
     #[test]
     fn a_transposed_read_is_one_lookup_per_limb_at_one_index() {
         let bits = 320usize;
@@ -5490,18 +5668,18 @@ mod tests {
             .collect()
     }
 
-    /// A value entering the representation is witnessed, bounded and tied back to where it came
-    /// from: one of each, per limb, and one tie for the lot.
+    /// A value entering the representation is witnessed and bounded once per limb, and tied back to
+    /// its source once.
     ///
-    /// A structural audit rather than a behavioral one, because neither half is visible to an
-    /// honest witness. Drop the range check and a prover can move value between limbs while the
-    /// sum still holds; drop the reconstruction and the limbs stop being this value's at all. In
-    /// that second case the limb loses its only consumer, so it is eliminated along with its
-    /// witness column and a column-by-column perturbation has nothing left to find.
+    /// A structural audit, not a behavioral one, because neither half is visible to an honest
+    /// witness. Without the range check a prover can move value between limbs while the sum still
+    /// holds; without the reconstruction the limbs are not this value's at all. In that second case
+    /// the limb loses its only consumer, so it is eliminated along with its witness column, and a
+    /// column-by-column perturbation has nothing left to find.
     #[test]
     fn a_value_entering_the_representation_is_witnessed_bounded_and_tied_back() {
-        // A source that is not a whole number of limbs, so the top limb's own width is the thing it
-        // is bounded at rather than a full limb's.
+        // A source that is not a whole number of limbs, so the top limb is bounded at its width
+        // rather than a full limb's.
         let (from, to) = (200usize, 320usize);
         let mut ssa = program_widening(from, to);
         run_pass(&mut ssa);
@@ -5533,12 +5711,101 @@ mod tests {
         assert_eq!(
             bounded,
             limb_widths(from, witness_limb_bits(bn254())),
-            "each limb is bounded at its own declared width"
+            "each limb is bounded at its declared width"
         );
         assert_eq!(
             tied, 1,
             "one reconstruction, tying the limbs to their source"
         );
+    }
+
+    /// A witnessed field element read as a wide integer is decomposed at the field's width and held
+    /// below the modulus.
+    ///
+    /// Structural: an honest witness is always the canonical decomposition, so only the constraints
+    /// tell `v` from `v + p`, through the borrow-forced chain against the modulus limbs. Each of
+    /// those limbs must reach an emitted instruction as a constant, which a dropped chain or a
+    /// wrong bound would not leave. The chain's top limb must mint no borrow column: a witnessed
+    /// top borrow lets the prover answer zero, which admits `v + p`.
+    #[test]
+    fn a_field_read_as_a_wide_integer_is_held_below_the_modulus() {
+        let field = bn254();
+        let field_bits = field.field_bit_size() as usize;
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let value = ssa.fresh_value();
+        let result = ssa.fresh_value();
+        HLSSABuilder::new(&mut ssa).modify_function(main, |fb| {
+            fb.function
+                .add_return_type(Type::witness_of(Type::int(300)));
+            let entry = fb.function.get_entry_id();
+            fb.function
+                .get_block_mut(entry)
+                .push_parameter(value, Type::witness_of(Type::field()));
+            let mut block = fb.test_block(entry);
+            block.emit(OpCode::Cast {
+                result,
+                value,
+                target: CastTarget::Int(300),
+            });
+            block.terminate_return(vec![result]);
+        });
+        run_pass(&mut ssa);
+
+        let ops = emitted(&ssa);
+        let bounded: Vec<usize> = ops
+            .iter()
+            .filter_map(|op| match op {
+                OpCode::Rangecheck { max_bits, .. } => Some(*max_bits),
+                _ => None,
+            })
+            .collect();
+        let widths = limb_widths(field_bits, witness_limb_bits(field));
+        // The decomposition bounds each limb at its width; the chain bounds each borrow but the
+        // top one at one bit and each difference limb at its width.
+        let mut expected = widths.clone();
+        for (index, width) in widths.iter().enumerate() {
+            if index + 1 < widths.len() {
+                expected.push(1);
+            }
+            expected.push(*width);
+        }
+        assert_eq!(
+            bounded, expected,
+            "the limbs, the borrows below the top and the differences are each bounded once, and \
+             the top borrow is forced rather than witnessed"
+        );
+        let written = ops
+            .iter()
+            .filter(|op| matches!(op, OpCode::WriteWitness { .. }))
+            .count();
+        assert_eq!(
+            written,
+            2 * widths.len() - 1,
+            "one column per limb and per borrow below the top"
+        );
+
+        let constants: Vec<IntBits> = ops
+            .iter()
+            .flat_map(|op| op.get_inputs().copied().collect::<Vec<_>>())
+            .filter_map(|input| match ssa.get_const(input).as_deref() {
+                Some(Constant::Int(pattern)) => Some(pattern.clone()),
+                _ => None,
+            })
+            .collect();
+        let modulus = IntBits::from_biguint(
+            field_bits,
+            &field_modulus(field)
+                .to_biguint()
+                .expect("a modulus is positive"),
+        );
+        for (index, width) in widths.iter().enumerate() {
+            let limb = modulus.bit_range(index * witness_limb_bits(field), *width);
+            assert!(
+                constants.contains(&limb),
+                "limb {index} of the modulus, {limb:?}, bounds nothing"
+            );
+        }
     }
 
     /// The limbs a widening does not reach are the zero constant, which is pinned by being one.
@@ -5607,13 +5874,13 @@ mod tests {
         )
     }
 
-    /// Every carry the chain witnesses is a bit, and every limb of the answer is bounded at its own
+    /// Every carry the chain witnesses is a bit, and every limb of the answer is bounded at its
     /// width.
     ///
-    /// A structural audit, because perturbing a column by one cannot see the first half: a carry of
-    /// two moves its limb's answer by `2^w` and breaks that limb's range check anyway. What the bit
-    /// check stops is a carry that is not one step away, a field element that shifts value between
-    /// two neighbouring limbs' identities while each still passes.
+    /// Structural, because perturbing a column by one cannot test the carry checks: a carry of two
+    /// moves its limb's answer by `2^w` and fails that limb's range check anyway. The bit check
+    /// stops a carry that is a large field element, which moves value between two neighboring limbs
+    /// while each limb still passes.
     #[test]
     fn every_carry_is_a_bit_and_every_limb_of_the_chain_is_bounded() {
         let h = witness_limb_bits(bn254());
@@ -5695,7 +5962,7 @@ mod tests {
                 assert_eq!(
                     limbs_checked,
                     limb_widths(bits, h),
-                    "int{bits} {what}: each limb of the answer is bounded at its own width"
+                    "int{bits} {what}: each limb of the answer is bounded at its width"
                 );
             }
         }
@@ -5972,7 +6239,7 @@ mod tests {
         );
     }
 
-    /// The one width whose operands have an element each and whose sum does not goes through the
+    /// The one width where each operand fits an element but the sum does not goes through the
     /// chain, on a decomposition of each operand; one bit narrower, the pass leaves it alone.
     #[test]
     fn a_sum_the_element_cannot_carry_takes_the_chain_without_limbs() {
@@ -6238,9 +6505,9 @@ mod tests {
 
     /// The plan is sound on any field that can hold it, and on bn254 it can at every width.
     ///
-    /// The injective widths below bn254's are fields this compiler cannot be configured for. They
-    /// are what reaches the reductions part-way along a column, which bn254 never does, and a field
-    /// too narrow for one product plus its headroom is where the plan refuses.
+    /// The injective widths below bn254's stand for fields this compiler cannot be configured for.
+    /// They exercise reductions part-way along a column, which bn254 never needs, and the refusal
+    /// of a field too narrow for one product plus its headroom.
     #[test]
     fn the_schoolbook_plan_is_sound_on_any_field_that_holds_it() {
         let bn254 = widest_injective_int_bits(bn254());
@@ -6365,11 +6632,17 @@ mod tests {
         );
     }
 
-    /// The funnel's question, asked of every width class bn254 has.
+    /// bn254 plans a schoolbook product, and the `q·d + r` of a division, at every width class it
+    /// has, so neither ever reaches [`unsupported_on_this_field`].
     #[test]
     fn bn254_holds_a_product_at_every_width() {
         for bits in [1usize, 127, 128, 129, 253, 254, 1000, 16383, 16384] {
-            assert!(schoolbook_product_fits(bn254(), bits), "int{bits}");
+            for with_addend in [false, true] {
+                assert!(
+                    schoolbook_fits(bn254(), bits, with_addend),
+                    "int{bits}, addend: {with_addend}"
+                );
+            }
         }
     }
 
@@ -6408,17 +6681,15 @@ mod tests {
         product_with(bits, Type::witness_of(Type::int(bits)))
     }
 
-    /// Every carry a product witnesses is range-checked at the width its plan gives it and every
-    /// limb of the answer at its own width, however the columns are formed.
+    /// Every carry a product witnesses is range-checked at the width its plan gives, and every limb
+    /// of the answer at its width, however the columns are formed.
     ///
-    /// Evaluated, with both operands witnessed, each column is a witness of its own that only the
-    /// `2k - 1` evaluations pin, and there is nothing else to hold to zero. Summed, with a pure
-    /// right operand, the columns are linear and every left limb above the lowest is held to a zero
-    /// overflow.
+    /// Evaluated (both operands witnessed), each column is a separate witness pinned only by the
+    /// `2k - 1` evaluations, and nothing is held to zero. Summed (a pure right operand), the
+    /// columns are linear and every left limb above the lowest is held to a zero overflow.
     ///
-    /// A structural audit for the reason
-    /// [`every_carry_is_a_bit_and_every_limb_of_the_chain_is_bounded`] gives: a carry check is
-    /// invisible to perturbing its column by one, which the limb's own check catches first.
+    /// Structural for the reason [`every_carry_is_a_bit_and_every_limb_of_the_chain_is_bounded`]
+    /// gives: perturbing a column by one trips the limb check before the carry check.
     #[test]
     fn every_carry_and_every_limb_of_a_product_is_bounded() {
         let h = witness_limb_bits(bn254());
@@ -6500,7 +6771,7 @@ mod tests {
                     .collect();
                 assert_eq!(
                     limbs, widths,
-                    "int{bits} {what}: each limb of the answer is bounded at its own width"
+                    "int{bits} {what}: each limb of the answer is bounded at its width"
                 );
 
                 let constraints = ops
@@ -6516,12 +6787,12 @@ mod tests {
         }
     }
 
-    /// The evaluations are at `2k - 1` distinct points, as many as the degree-`2k - 2` identity
-    /// needs to be one of polynomials, and each reads every limb of both operands and every column.
+    /// The evaluations are at `2k - 1` distinct points, enough to make the degree-`2k - 2` identity
+    /// one of polynomials, and each reads every limb of both operands and every column.
     ///
-    /// Structural because an honest witness satisfies the identity at any set of points: one point
-    /// short, or two the same, and a prover could move value into the columns past the answer
-    /// that nothing else would see.
+    /// Structural, because an honest witness satisfies the identity at any set of points. With one
+    /// point short, or two the same, a prover could move value into the columns past the answer,
+    /// where nothing else would see it.
     #[test]
     fn an_evaluated_product_is_pinned_at_distinct_points() {
         let bits = 320usize;
@@ -6678,8 +6949,8 @@ mod tests {
         );
     }
 
-    /// A product the single cell cannot hold goes through the schoolbook, on a decomposition of each
-    /// operand while they still have an element; one it can hold, and the double lane's width,
+    /// A product the single cell cannot hold goes through the schoolbook, on a decomposition of
+    /// each operand while they still have an element; one it can hold, and the double lane's width,
     /// are left alone.
     #[test]
     fn a_product_the_single_cell_cannot_hold_takes_the_schoolbook() {
@@ -6888,14 +7159,14 @@ mod tests {
     /// Every column a division witnesses is range-checked, and every column of `q·d + r` is held
     /// to the dividend's limb instead of being checked, however the product is formed.
     ///
-    /// In order: the quotient's limbs and the remainder's, each at its own width; the schoolbook's
-    /// carries at the widths its plan gives them; and the borrows of `r < d`, each a bit. The only
-    /// columns left unchecked are an evaluated product's, which its evaluations pin. What is left
-    /// over is the chain's own answer, one check per limb, and the constraints are the product's
-    /// (its evaluations or its overflow terms) plus one equality per limb of the dividend.
+    /// Checks, in order: the quotient's and the remainder's limbs at their widths; the schoolbook's
+    /// carries at the widths its plan gives; and the borrows of `r < d`, each a bit. Only an
+    /// evaluated product's columns go unchecked, as its evaluations pin them. The rest is the
+    /// chain's answer, one check per limb. The constraints are the product's (evaluations or
+    /// overflow terms) plus one equality per dividend limb.
     ///
     /// Structural for the reason [`every_carry_and_every_limb_of_a_product_is_bounded`] gives, and
-    /// because a pinned column has no check left to perturb against: the equality is its bound.
+    /// because a pinned column has no check to perturb: the equality is its bound.
     #[test]
     fn every_column_of_a_division_is_bounded_and_every_limb_pinned() {
         let h = witness_limb_bits(bn254());
@@ -7211,12 +7482,12 @@ mod tests {
         ssa
     }
 
-    /// An equality between limbs both known at compile time is decided here, and spends nothing.
+    /// An equality between limbs both known at compile time is decided here, at no cost.
     ///
     /// The limbs above a widened value's source are witnessed constants, which the comparison's
-    /// lowering would otherwise meet as witnesses and give a gadget each. Two values widened from
-    /// 64 bits into 320 therefore compare in their low limb alone, and a constant with a bit above
-    /// that limb decides the comparison without comparing anything.
+    /// lowering would otherwise treat as witnesses, with a gadget each. So two values widened from
+    /// 64 to 320 bits compare in their low limb alone, and a constant with a bit above that limb
+    /// decides the comparison outright.
     #[test]
     fn an_equality_of_limbs_known_at_compile_time_is_decided_here() {
         let bits = 320usize;
@@ -7273,8 +7544,8 @@ mod tests {
     /// A division whose answer the lowering knows limb by limb hands those limbs on as known, so an
     /// equality the answer reaches is decided here rather than compared.
     ///
-    /// `0 / d` knows every limb of both answers, and `(0 / d) == 0` then compares nothing; the zero
-    /// divisor is still refused by the division's own `0 < d`.
+    /// `0 / d` knows every limb of both answers, so `(0 / d) == 0` compares nothing; a zero divisor
+    /// is still refused by the division's `0 < d` check.
     #[test]
     fn a_known_answer_limb_is_known_to_the_comparison_it_reaches() {
         let bits = 320usize;
@@ -7307,8 +7578,8 @@ mod tests {
             });
             run_pass(&mut ssa);
 
-            // The one equality left is the pure side's own zero test of the divisor, at the
-            // division's width; a limb comparison would be at a limb's.
+            // The one equality left is the pure-side zero test of the divisor, at the division's
+            // width; a limb comparison would be at a limb's width.
             let ops = emitted(&ssa);
             let compared: Vec<&OpCode> = ops
                 .iter()
@@ -7485,17 +7756,17 @@ mod tests {
     /// Every column a shift by a witnessed amount writes is bounded, and every half of a split limb
     /// is range-checked.
     ///
-    /// In order: `r`, which the table bounds; the bits of `q`, each a bit; `f = 2^r`, which the table
-    /// pins; for a right shift the cofactor, which its product with `f` pins; then each limb's high
-    /// half, at one bit under its width for a left shift and at its width for a right one. A left
-    /// shift does not split a narrow top limb, and cuts the answer's top limb instead, whose bits
-    /// above its width are the last column, at the limb width. What is checked without being written
-    /// is each split limb's low half at the limb width, the explicit amount bound where the
-    /// decomposition passes the width, and the cut top limb at its own width. The constraints are
-    /// one per upper limb of the amount, the decomposition, and the cofactor's.
+    /// Written columns, in order: `r` (bounded by the table); the bits of `q`; `f = 2^r` (pinned by
+    /// the table); for a right shift, the cofactor (pinned by its product with `f`); then each
+    /// limb's high half, one bit under its width for a left shift and at its width for a right one.
+    /// A left shift does not split a narrow top limb; it cuts the answer's top limb instead, whose
+    /// bits above its width are the last column, at the limb width. Checked but not written: each
+    /// split limb's low half at the limb width, the amount bound where the decomposition passes the
+    /// width, and the cut top limb at its width. Constraints: one per upper limb of the amount, the
+    /// decomposition, and the cofactor's.
     ///
     /// Structural for the reason [`every_carry_and_every_limb_of_a_product_is_bounded`] gives: a
-    /// low half is a difference, not a column, so perturbing a column is the only way to reach it.
+    /// low half is a difference, not a column, so perturbing columns cannot reach it.
     #[test]
     fn every_column_of_a_shift_is_bounded_and_every_half_checked() {
         let h = witness_limb_bits(bn254());
@@ -7618,10 +7889,10 @@ mod tests {
         }
     }
 
-    /// The limb-wise shift needs a limb times a power of two below its place to be one element,
-    /// which bn254's 64-bit limb leaves room for and goldilocks' 32-bit one, whose `2^64` passes
-    /// its modulus, does not. There the funnel refuses the shift rather than reaching a split that
-    /// is not unique.
+    /// The limb-wise shift needs a limb times a power of two below `2^h` to fit one element.
+    /// bn254's 64-bit limb leaves room for that; goldilocks' 32-bit limb does not, as `2^64` passes
+    /// its modulus. There `lower_shift` refuses the shift rather than reach a split that is not
+    /// unique.
     #[test]
     fn the_limb_wise_shift_needs_a_limb_times_its_place_in_one_element() {
         assert!(limb_shift_fits(bn254()));
@@ -7708,9 +7979,9 @@ mod tests {
 
     /// A witnessed operand's known limbs drop out of a product as a constant's do.
     ///
-    /// `(a as int320) · b` plans no term against `a`'s four upper limbs, which the widening knows to
-    /// be zero. What is left is one partial product per limb of `b`, which is cheaper summed than
-    /// the nine evaluations a product of two full operands pays, so the product constrains no
+    /// `(a as int320) · b` plans no term against `a`'s four upper limbs, which the widening knows
+    /// to be zero. What is left is one partial product per limb of `b`, which is cheaper summed
+    /// than the nine evaluations a product of two full operands pays, so the product constrains no
     /// evaluation and no overflow term at all.
     #[test]
     fn a_known_limb_of_a_witnessed_operand_drops_out_of_the_product() {
@@ -7767,7 +8038,7 @@ mod tests {
                     .all(|value| ssa.get_const(*value).is_none())
             })
             .count();
-        // The one constraint is the widening's own, tying `a`'s limb back to `a`.
+        // The one constraint is the widening's, tying `a`'s limb back to `a`.
         assert_eq!(audit.constraints(), 1, "no evaluation and no overflow term");
         // Per column: the partial product and its hint.
         assert_eq!(
@@ -7933,6 +8204,70 @@ mod tests {
                     .all(|op| !matches!(op, OpCode::Constrain { a, .. } if *a == one)),
                 "a zero check holds whatever the guard: {ops:?}"
             );
+        }
+    }
+
+    /// A spread or unspread of a widened value spends no narrow lookup on the limbs above the
+    /// source, which are the zero constant.
+    #[test]
+    fn a_limb_known_to_be_zero_costs_a_spread_or_unspread_nothing() {
+        let (from, to) = (200usize, 600usize);
+        let limb = witness_limb_bits(bn254());
+        for unspread in [false, true] {
+            let mut ssa = HLSSA::with_main("main".to_string());
+            let main = ssa.get_unique_entrypoint_id();
+            let (value, wide) = (ssa.fresh_value(), ssa.fresh_value());
+            let results = [ssa.fresh_value(), ssa.fresh_value()];
+            let mut builder = HLSSABuilder::new(&mut ssa);
+            builder.modify_function(main, |fb| {
+                let entry = fb.function.get_entry_id();
+                let (op, answers) = if unspread {
+                    for _ in 0..2 {
+                        fb.function
+                            .add_return_type(Type::witness_of(Type::int(to / 2)));
+                    }
+                    let op = OpCode::Unspread {
+                        result_odd: results[0],
+                        result_even: results[1],
+                        value: wide,
+                        value_bits: to,
+                    };
+                    (op, results.to_vec())
+                } else {
+                    fb.function
+                        .add_return_type(Type::witness_of(Type::int(2 * to)));
+                    let op = OpCode::Spread {
+                        result: results[0],
+                        value: wide,
+                        value_bits: to,
+                    };
+                    (op, vec![results[0]])
+                };
+                fb.function
+                    .get_block_mut(entry)
+                    .push_parameter(value, Type::witness_of(Type::int(from)));
+                let mut block = fb.test_block(entry);
+                block.emit(OpCode::Cast {
+                    result: wide,
+                    value,
+                    target: CastTarget::Int(to),
+                });
+                block.emit(op);
+                block.terminate_return(answers);
+            });
+            run_pass(&mut ssa);
+
+            let narrow = emitted(&ssa)
+                .iter()
+                .filter(|op| matches!(op, OpCode::Spread { .. } | OpCode::Unspread { .. }))
+                .count();
+            let source_limbs = from.div_ceil(limb);
+            let expected = if unspread {
+                source_limbs
+            } else {
+                source_limbs * (limb / witness_half_limb_bits(bn254()))
+            };
+            assert_eq!(narrow, expected, "unspread {unspread}");
         }
     }
 

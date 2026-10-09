@@ -827,14 +827,10 @@ fn add_vm_parameter(func: &mut LLFunction, llssa: &mut LLSSA) -> ValueId {
 // Instruction lowering
 // =============================================================================
 
-/// The LLSSA integer operation for an HLSSA arithmetic group read at a given signedness.
+/// The LLSSA integer operation for an HLSSA arithmetic group at a given signedness.
 ///
-/// One table rather than one per integer type variant: they differ only in the three groups where
-/// the sign selects a different machine operation, which is what the `signed` parameter carries.
-///
-/// `Shl` has no signed form: a left shift is the same map on the bits either way, which is why
-/// HLSSA still distinguishes `UShl` from `SShl` (they differ in their overflow contract, not in
-/// their result) but LLSSA does not.
+/// `signed` picks the machine operation in the three groups where the sign matters. `Shl` has no
+/// signed form: `UShl` and `SShl` differ in their overflow contract, not their result.
 pub(crate) fn int_arith_op(group: ArithGroup, signed: bool) -> IntArithOp {
     match group {
         ArithGroup::Add => IntArithOp::Add,
@@ -1935,7 +1931,7 @@ fn lower_to_bits(
         let shifted = if bit_offset == 0 {
             limbs[limb_idx]
         } else {
-            // The shift shares the limb's own width, so it is the field limb.
+            // The amount is at the limb's width, as both operands of a shift must be.
             let shift = e.emit_int_const(FIELD_LIMB_BITS as u32, bit_offset as u64);
             e.int_arith(IntArithOp::UShr, limbs[limb_idx], shift)
         };
@@ -2337,12 +2333,10 @@ fn lower_rc_drop(
 // AD LOWERING HELPERS
 // ================================================================================================
 
-/// The widest integer the raw-limb packing below carries.
+/// The widest integer the raw-limb packing below carries: the capacity of [`LLStruct::limbs`], not
+/// a bound on which integers one or more field elements can represent.
 ///
-/// This is specifically about how much [`LLStruct::limbs`] holds, not about which integers can be
-/// represented in terms of one or more field elements.
-///
-/// The limb it counts is the **field's** and not the host's.
+/// The limb it counts is the **field's**, not the host's.
 pub const INT_TO_FIELD_MAX_BITS: usize = LLStruct::FIELD_LIMBS * FIELD_LIMB_BITS;
 
 /// The raw little-endian limbs of a `bits`-wide integer, one per cell of [`LLStruct::limbs`].
@@ -2377,11 +2371,8 @@ fn int_to_raw_limbs(e: &mut LLBlockEmitter<'_>, value: ValueId, bits: usize) -> 
         .collect()
 }
 
-/// A `bits`-wide integer read out of the raw little-endian limbs of a field element.
-///
-/// Only the limbs the target has room for are read, and only as many as the element has: a target
-/// wider than [`INT_TO_FIELD_MAX_BITS`] is zero-filled above them, which is the whole value because
-/// an element has no bits up there.
+/// A `bits`-wide integer read out of the raw little-endian limbs of a field element. A target
+/// wider than [`INT_TO_FIELD_MAX_BITS`] is zero-filled above them; the element has no bits there.
 fn int_from_raw_limbs(e: &mut LLBlockEmitter<'_>, limbs: ValueId, bits: usize) -> ValueId {
     let used = LLStruct::FIELD_LIMBS.min(bits.div_ceil(FIELD_LIMB_BITS));
     let raw: Vec<ValueId> = (0..used)
@@ -4669,7 +4660,7 @@ mod tests {
             analysis::types::Types,
             codegen::llssa_to_llvm::{LLVMCodeGen, WasmCompileOpts},
             ssa::hlssa::{
-                SequenceTargetType,
+                CastTarget, SequenceTargetType,
                 builder::{HLEmitter, HLSSABuilder},
             },
         };
@@ -4691,8 +4682,9 @@ mod tests {
                 let entry = fb.function.get_entry_id();
                 let mut e = fb.test_block(entry);
                 let inputs = e.add_parameter(HLType::blob(HLType::int(64), 3));
-                let zero = e.int_const(IntBits::from(0u64));
+                let zero = e.int_const(IntBits::from(0u32));
                 let index = e.array_get(inputs, zero);
+                let index = e.cast_to(CastTarget::Int(32), index);
                 let array = if let Some(kind) = sequence {
                     let a = e.int_const(IntBits::from(10u64));
                     let b = e.int_const(IntBits::from(20u64));
@@ -4708,7 +4700,7 @@ mod tests {
                 };
                 // A valid read after ArraySet must not mask a missing write-side guard.
                 let read_index = if write {
-                    e.int_const(IntBits::from(1u64))
+                    e.int_const(IntBits::from(1u32))
                 } else {
                     index
                 };
@@ -4729,7 +4721,7 @@ mod tests {
             let len = if name == "blob_get" { 3 } else { 2 };
             // The large index wraps an eight-byte offset to zero; it must trap even though
             // that wrapped address lies inside linear memory and names an allocated element.
-            for index in [1u64, len, 1 << 61, u64::MAX] {
+            for index in [1u64, len, 1 << 29, u64::from(u32::MAX)] {
                 let mut store = wasmtime::Store::new(&engine, ());
                 let memory =
                     wasmtime::Memory::new(&mut store, wasmtime::MemoryType::new(8, None)).unwrap();
@@ -4798,8 +4790,8 @@ mod tests {
                 let limbs = e.mk_struct(LLStruct::limbs(), limb_values);
                 let _ = e.field_from_limbs(limbs);
             } else {
-                // An element built from a 64-bit constant, which packs with no shift of its own
-                // and so leaves the `int.shl` count below to the unpacking alone.
+                // An element built from a 64-bit constant, which packs without a shift and so
+                // leaves the `int.shl` count below to the unpacking alone.
                 let seed = e.emit_int_const(64, 7);
                 let seed_limbs = int_to_raw_limbs(&mut e, seed, 64);
                 let packed = e.mk_struct(LLStruct::limbs(), seed_limbs);
@@ -4818,11 +4810,8 @@ mod tests {
         dump.matches(mnemonic).count()
     }
 
-    /// The packing fills exactly the limbs the width reaches.
-    ///
-    /// A limb the width cannot reach is the zero constant, so the instruction count is what says
-    /// how far the value was read. This is the thing an off-by-one limb could get wrong while the
-    /// narrow widths, which the corpus does cover, stay byte-identical.
+    /// The packing fills exactly the limbs the width reaches, and the rest are the zero constant,
+    /// so the instruction count shows an off-by-one limb the narrow corpus widths would not.
     #[test]
     fn the_packing_reaches_every_limb_the_width_does() {
         for (bits, shifts) in [(64usize, 0usize), (128, 1), (129, 2), (200, 3), (256, 3)] {
@@ -4838,7 +4827,7 @@ mod tests {
     /// The unpacking reads exactly the limbs the target has room for, and no more than the element
     /// has.
     ///
-    /// A target past [`INT_TO_FIELD_MAX_BITS`] stops at the element's own limbs rather than
+    /// A target past [`INT_TO_FIELD_MAX_BITS`] stops at the element's limbs rather than
     /// shifting in zeros it already has, which is why 256 and 320 agree.
     #[test]
     fn the_unpacking_reads_every_limb_the_target_has_room_for() {

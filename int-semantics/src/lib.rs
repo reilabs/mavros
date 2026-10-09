@@ -1,20 +1,18 @@
 //! What an integer operation _means_ in Mavros.
 //!
-//! Mavros evaluates integer arithmetic in lots of places, spanning from compile-time evaluation to
-//! the VM and the WASM backend. This crate exists to avoid the risk of all of those sites drifting
-//! from the agreed-upon set of semantics that match Noir.
+//! Mavros evaluates integer arithmetic in many places, from compile-time folding to the VM and the
+//! WASM backend. This crate is the one specification they all follow, so none drifts from Noir.
 //!
-//! We split this executable specification into two portions:
+//! The specification has two parts:
 //!
-//! - [`eval`] is the answer to **what Noir specifies**, including that the program may be rejected.
-//! - [`residue`] is the answer to what a total evaluator must produce anyway, because most backends
-//!   have no way to reject in the middle of an expression. When it returns [`None`] it is calling
-//!   the input undefined in the LLVM sense.
+//! - [`eval`] is **what Noir specifies**, including that the program may be rejected.
+//! - [`residue`] is what a total evaluator must produce anyway, because most backends cannot reject
+//!   in the middle of an expression. [`None`] means the input is undefined, in the LLVM sense.
 //!
-//! This distinction exists because the guard IR is supposed to have rejected the program before the
-//! opcode runs, but if it _is_ running it still has to put a bit pattern in a register somewhere.
+//! The guard IR should reject a program before the opcode runs, but an opcode that does run still
+//! has to write some bit pattern; [`residue`] says which.
 //!
-//! The two are tied together by the invariant that **an accepted evaluation and its residue never disagree**.
+//! The invariant tying them together: **an accepted evaluation and its residue never disagree**.
 //!
 //! ```
 //! # use mavros_int_semantics::{eval, residue, IntBits, IntOp, Outcome};
@@ -48,31 +46,27 @@
 //!
 //! # Values are Patterns
 //!
-//! Every value in and out is an [`IntBits`], which is a **raw bit pattern** that carries its own
-//! width. With no sign, it's up to the operation to name the reading much like in the SSA, and its
-//! corresponding 2's-complement reading is [`SignedValue`].
+//! Every value in and out is an [`IntBits`]: a **raw bit pattern** that carries its width and no
+//! sign. As in the SSA, the operation names the reading; the two's-complement reading is
+//! [`SignedValue`].
 //!
-//! Everything an [`IntBits`] can _do_ lives on [`IntBits`], in `int_bits.rs`. What is left here is
-//! the part of the model with **no receiver**: [`eval`] and [`residue`], whose subject is the
-//! _operation_ rather than the left operand, plus the vocabulary they take and the width rule they
-//! enforce.
+//! Operations on a single [`IntBits`] live in `int_bits.rs`. This file holds the part of the model
+//! that belongs to the _operation_: [`eval`], [`residue`], the types they take, and the width rule
+//! they enforce.
 //!
 //! # The Source of the Rules
 //!
-//! The rules are drawn from the semantics encoded in the currently-pinned version of Noir, and are
-//! found in the following source locations in the Noir tree:
+//! The rules come from the pinned version of Noir, in these files of the Noir tree:
 //!
-//! - `noirc_evaluator/src/ssa/ir/instruction/binary.rs::eval_constant_binary_op`, which defines the
-//!   constant-folded operations that are a `Failure`.
-//! - `noirc_evaluator/src/ssa/opt/remove_bit_shifts.rs`, which handles shift lowering. Its module
-//!   doc states the rule this crate encodes: "In all cases, if the shift amount is equal to or
-//!   exceeds the operand's number of bits, the result will be a constrain failure".
-//! - `noirc_evaluator/src/ssa/opt/expand_signed_math.rs`, which handles the fact that signed
-//!   division truncates toward zero, the remainder takes the dividend's sign, and that
-//!   `INT_MIN / -1` is rejected.
-//! - `noirc_evaluator/src/brillig/brillig_gen/brillig_instructions/brillig_binary.rs`, which
-//!   describes the behavior in unconstrained code and that it gets `add_overflow_check` and
-//!   `bit_shift_overflow` too.
+//! - `noirc_evaluator/src/ssa/ir/instruction/binary.rs::eval_constant_binary_op`: which
+//!   constant-folded operations are a `Failure`.
+//! - `noirc_evaluator/src/ssa/opt/remove_bit_shifts.rs`: shift lowering. Its module doc states the
+//!   rule encoded here: "In all cases, if the shift amount is equal to or exceeds the operand's
+//!   number of bits, the result will be a constrain failure".
+//! - `noirc_evaluator/src/ssa/opt/expand_signed_math.rs`: signed division truncates toward zero,
+//!   the remainder takes the dividend's sign, and `INT_MIN / -1` is rejected.
+//! - `noirc_evaluator/src/brillig/brillig_gen/brillig_instructions/brillig_binary.rs`:
+//!   unconstrained code behaves the same, with `add_overflow_check` and `bit_shift_overflow`.
 //!
 //! A rejection is a **runtime** failure in Noir, not a compile error:
 //! `remove_unreachable_instructions.rs` replaces a statically-failing operation with a failing
@@ -100,9 +94,8 @@ pub const MAX_BITS: usize = 1 << 14;
 
 /// The two's-complement _reading_ of an [`IntBits`], as a mathematical integer.
 ///
-/// Named rather than spelled `BigInt` at every site so that what backs a signed reading stays this
-/// crate's business. [`IntBits`] itself is the payload type and is named directly: it is Mavros's
-/// own, so there is nothing to hide behind an alias.
+/// An alias, so callers do not depend on what backs a signed reading. [`IntBits`] needs no alias,
+/// since Mavros defines it.
 pub type SignedValue = BigInt;
 
 // INTEGER OPERATIONS MODEL
@@ -165,11 +158,9 @@ impl IntOp {
         IntOp::SShr,
     ];
 
-    /// The reading this operation names, or [`None`] where it names none.
+    /// The reading this operation names, or [`None`] where it gives one answer under either.
     ///
-    /// `None` is not "unsigned": it is the statement that this operation gives one answer whatever
-    /// the operands were meant as. Only the width checks distinguish the two as a signed cap has
-    /// nothing to say about an operation with no signed form.
+    /// `None` is not "unsigned": the operation has no signed form.
     #[must_use]
     pub const fn sign(self) -> Option<Sign> {
         match self {
@@ -233,33 +224,24 @@ impl IntOp {
 
     /// Whether the two readings of this operation take **different routes through the lowering**.
     ///
-    /// Not "give different answers", which would be wrong about `Shl`: a left shift wraps
-    /// identically under both readings, and what its signed form additionally owns is a rejecting
-    /// constraint on a negative _amount_. The corpus generator
-    /// reads this to decide how many operand pairs a cell is worth, so the set it picks out is
-    /// load-bearing on the blessed test files — it is exactly the operations with a signed form
-    /// plus `Shl`, or equivalently everything but the three bitwise ones.
+    /// Not whether they give different answers: `Shl` wraps and rejects identically under both, but
+    /// only its signed lowering tests the amount for a negative pattern. The corpus generator reads
+    /// this to size each cell, so the set (every operation but the three bitwise) is load-bearing
+    /// on the blessed test files.
     #[must_use]
     pub const fn reading_matters(self) -> bool {
         !matches!(self, IntOp::And | IntOp::Or | IntOp::Xor)
     }
 
-    /// Whether this operation reads its right operand at a width of its **own**.
-    ///
-    /// True for the shifts, whose amount carries its own type, and false for everything else,
-    /// where the two operands are one width and a caller offering two widths is offering a
-    /// contradiction. The width checks every entry point performs are what act on the answer.
+    /// Whether this operation's right operand is a shift amount rather than a value.
     #[must_use]
     pub const fn is_shift(self) -> bool {
         matches!(self, IntOp::Shl | IntOp::UShr | IntOp::SShr)
     }
 }
 
-/// A comparison, with the reading it names.
-///
-/// The same shape as HLSSA's `CmpKind` and LLSSA's `IntCmpOp`, which is the point: equality needs
-/// no reading — two patterns of one width are equal under either — so only the ordering comes in
-/// a pair.
+/// A comparison, with the reading it names; the shape of HLSSA's `CmpKind` and LLSSA's
+/// `IntCmpOp`. Equality needs no reading, so only the ordering comes in a pair.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum CmpOp {
     /// Pattern equality.
@@ -367,19 +349,12 @@ impl Outcome {
 
 /// All-ones for the low `bits` bits, as a **host word**, total at the edges.
 ///
-/// The one free function here that is not part of the model, and a host word rather than a method
-/// on [`IntBits`] because it takes no operand and answers no value: there is no integer for it to
-/// be an operation _on_. Its callers are the
-/// ones genuinely working in `u64`s and `u128`s — the limb recombination in [`IntBits`], and the
-/// compiler's remaining host-word arithmetic — so it stops being expressible the moment a width
-/// outruns the host, which is the intended failure. The pattern of the same shape is
-/// [`IntBits::all_ones`].
+/// Not part of the model: its callers work in `u64`s and `u128`s (the limb recombination in
+/// [`IntBits`], the compiler's host-word arithmetic). [`IntBits::all_ones`] is the pattern form.
 ///
-/// The saturation bound is [`HOST_WORD_BITS`] and deliberately not [`MAX_BITS`], which is far above
-/// it. The claim being made is that a `u128` cannot hold more than 128 bits, which is a fact about
-/// the host; written as the model's cap the arm below would be `1u128 << bits` at a width no `u128`
-/// can express: a debug panic and, worse, a release build that masks the shift amount and answers
-/// with a plausible but incorrect result.
+/// It saturates at [`HOST_WORD_BITS`](crate::int_bits::HOST_WORD_BITS), not [`MAX_BITS`]: past
+/// 128 bits the arm below would be `1u128 << bits`, a debug panic and, in release, a masked amount
+/// and a plausible wrong answer.
 #[must_use]
 pub fn mask(bits: usize) -> u128 {
     if bits == 0 {
@@ -394,22 +369,17 @@ pub fn mask(bits: usize) -> u128 {
 // THE MODEL
 // ================================================================================================
 
-/// Check the widths the operands arrived carrying.
+/// Check the widths the operands arrived carrying: one width, inside `1..=`[`MAX_BITS`].
 ///
-/// There is deliberately no signed conjunct here. A signed _reading_ is total at every width this
-/// model admits.
-pub(crate) fn check_widths(is_shift: bool, bits: usize, rhs_bits: usize) {
+/// There is no signed conjunct: a signed _reading_ is total at every width this model admits.
+pub(crate) fn check_widths(bits: usize, rhs_bits: usize) {
     assert!(
         (1..=MAX_BITS).contains(&bits),
         "operand width {bits} is outside 1..={MAX_BITS}"
     );
     assert!(
-        (1..=MAX_BITS).contains(&rhs_bits),
-        "right-operand width {rhs_bits} is outside 1..={MAX_BITS}"
-    );
-    assert!(
-        rhs_bits == bits || is_shift,
-        "operand widths {bits} and {rhs_bits}; only a shift reads its right operand at a width of its own"
+        rhs_bits == bits,
+        "operand widths {bits} and {rhs_bits} differ; both operands of an operation are one width"
     );
 }
 
@@ -417,18 +387,16 @@ pub(crate) fn check_widths(is_shift: bool, bits: usize, rhs_bits: usize) {
 ///
 /// # Panics
 ///
-/// If either width is outside `1..=`[`MAX_BITS`], or if a non-shift is given two operands of
-/// different widths. Those are compiler bugs rather than program errors, so they are not
-/// [`Reject`] variants.
+/// If either width is outside `1..=`[`MAX_BITS`], or if the two operands have different widths.
+/// Those are compiler bugs rather than program errors, so they are not [`Reject`] variants.
 #[must_use]
 pub fn eval(op: IntOp, lhs: &IntBits, rhs: &IntBits) -> Outcome {
     let bits = lhs.bits();
-    check_widths(op.is_shift(), bits, rhs.bits());
+    check_widths(bits, rhs.bits());
 
     match op {
-        // Bitwise operations have no reading and cannot fail, so they answer here. They are also
-        // the only arms that stay on the pattern throughout: everything past this point needs a
-        // number, and a number is what a pattern is not.
+        // Bitwise operations have no reading and cannot fail, so they answer here, on the pattern;
+        // everything past this point needs a number.
         IntOp::And => Outcome::Value(lhs.and(rhs)),
         IntOp::Or => Outcome::Value(lhs.or(rhs)),
         IntOp::Xor => Outcome::Value(lhs.xor(rhs)),
@@ -445,9 +413,8 @@ pub fn eval(op: IntOp, lhs: &IntBits, rhs: &IntBits) -> Outcome {
 }
 
 fn eval_unsigned_arith(op: IntOp, lhs: &IntBits, rhs: &IntBits) -> Outcome {
-    // Both operands are one width here — a shift never reaches this function — so either says what
-    // the result is held to. The signed arm below still takes it as a parameter, because by then
-    // the operands are `SignedValue`s and a mathematical integer has no width to read.
+    // Both operands share a width (shifts never get here), which is the result's. The signed arm
+    // takes it as a parameter, as a `SignedValue` has no width.
     let bits = lhs.bits();
     let (lhs, rhs) = (BigUint::from(lhs), BigUint::from(rhs));
 
@@ -558,8 +525,9 @@ fn eval_shift(op: IntOp, lhs: &IntBits, rhs: &IntBits) -> Outcome {
 ///
 /// [`None`] means _deliberately unspecified_, where the backends do not agree and there is no right
 /// answer to hold them to. In essence, this is the model recording that the whole obligation for
-/// those inputs sits on the guard IR. Today it is exactly the two division cases, where LLVM's
-/// `udiv`/`sdiv` are undefined outright while the VM answers zero.
+/// those inputs sits on the guard IR. It is exactly the two division cases, a zero divisor and
+/// `INT_MIN / -1` or `INT_MIN % -1`, where LLVM's divisions are undefined outright while the VM
+/// answers zero for the first and wraps for the second.
 ///
 /// # Panics
 ///
@@ -571,11 +539,9 @@ pub fn residue(op: IntOp, lhs: &IntBits, rhs: &IntBits) -> Option<IntBits> {
     match eval(op, lhs, rhs) {
         Outcome::Value(v) => Some(v),
         Outcome::Rejected(Reject::Overflow) => {
-            // One formula for both readings. Wrapping _is_ arithmetic modulo `2^bits`, and which
-            // reading the operands were meant as does not change the bits of a sum, difference or
-            // product — so the exact result
-            // taken through `IntBits::from_signed`, which reduces modulo the width, is the answer
-            // for signed and unsigned alike.
+            // One formula for both readings: wrapping is arithmetic modulo `2^bits`, which
+            // `IntBits::from_signed` applies to the exact result, and the reading does not change
+            // the bits of a sum, difference or product.
             let lhs = SignedValue::from(BigUint::from(lhs));
             let rhs = SignedValue::from(BigUint::from(rhs));
             let exact = match op {
@@ -587,16 +553,12 @@ pub fn residue(op: IntOp, lhs: &IntBits, rhs: &IntBits) -> Option<IntBits> {
             Some(IntBits::from_signed(bits, &exact))
         }
         Outcome::Rejected(Reject::ShiftAmount) => {
-            // Re-entering `eval` keeps one definition of what a shift computes. The reduced amount
-            // is below `bits`, so the re-entry cannot reject again; it is carried at the amount's
-            // own width, which is where it fits by construction — the reduction is modulo `bits`,
-            // and the original amount was already representable at that width.
+            // Re-entering `eval` keeps one definition of a shift. The reduced amount is below
+            // `bits`, so the re-entry cannot reject.
             //
-            // The `expect` is what states that. A bare `value()` would turn a broken re-entry into
-            // a `None`, which this function documents as meaning something quite different: that
-            // the backends have no agreed answer. Widening that set silently is the failure to
-            // avoid, so the invariant is asserted rather than propagated.
-            let amount = IntBits::from_u128(rhs.bits(), u128::from(rhs.reduced_shift_amount(bits)));
+            // The `expect` asserts that. A bare `value()` would turn a broken re-entry into `None`,
+            // which here means "the backends have no agreed answer", silently widening that set.
+            let amount = IntBits::from_u128(bits, u128::from(rhs.reduced_shift_amount(bits)));
             Some(
                 eval(op, lhs, &amount)
                     .value()

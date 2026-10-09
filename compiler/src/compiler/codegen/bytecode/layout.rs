@@ -200,15 +200,14 @@ impl ConstantPoolInterner {
 
 /// Visit the `u64` words of `constant` in frame order.
 ///
-/// This is the single source of truth for constant word ordering: [`ConstantPoolInterner`], the
-/// `spill_constant_to_frame` inline path, and `constant_cell_count` (which just counts the visits)
-/// all use this, so the pooled and inline representations — and the memcpy size — cannot drift out
-/// of sync. Adding a new [`Constant`] variant only requires updating this function.
+/// The definition of constant word order, used by [`ConstantPoolInterner`],
+/// `spill_constant_to_frame`'s inline path and `constant_cell_count`, so the pooled and inline
+/// forms and the memcpy size cannot drift apart. A new [`Constant`] variant must be handled here.
 pub fn for_each_constant_word(constant: &Constant, visit: &mut impl FnMut(u64)) {
     match constant {
         Constant::Int(v) => {
-            // A normalised pattern already _is_ the word sequence, at exactly the length the frame
-            // wants. `int_cell_count` is called anyway, for the width cap it asserts on the way.
+            // A normalized pattern _is_ the word sequence, at the frame's length. `int_cell_count`
+            // is called anyway for the width cap it asserts.
             assert_eq!(int_cell_count(v.bits()), v.limb_count());
             for &word in v.limbs() {
                 visit(word);
@@ -339,10 +338,9 @@ mod tests {
 
     #[test]
     fn a_width_past_the_old_cap_is_laid_out_rather_than_refused() {
-        // The corpus gate is silent on widths this wide, no corpus program naming one, so these
-        // three asserts pin the layout to them. `int_cell_count` delegates to
-        // `IntBits::limbs_for_bits`, which is width-generic; what is checked here is that the bound
-        // above it admits the width at all.
+        // No corpus program reaches these widths, so these asserts pin the layout there:
+        // `IntBits::limbs_for_bits` is width-generic, and what is checked is that the bound in
+        // front of it admits the width.
         assert_eq!(int_cell_count(200), 4, "200 bits is four 64-bit cells");
         assert_eq!(int_cell_count(MAX_SUPPORTED_INT_BITS), 256);
         assert_eq!(
@@ -353,9 +351,8 @@ mod tests {
 
     #[test]
     fn the_two_frame_size_formulas_agree_at_every_width() {
-        // `alloc_value` goes through `type_size` while `alloc_int` goes through `int_cell_count`,
-        // and the same value can be allocated by either, so the two formulas have to agree at every
-        // width.
+        // `alloc_value` uses `type_size` and `alloc_int` uses `int_cell_count`, and a value can be
+        // allocated by either, so the two must agree at every width.
         let layouter = FrameLayouter::new();
         for bits in [
             1usize,
@@ -387,8 +384,8 @@ mod tests {
 
     #[test]
     fn a_constant_occupies_as_many_words_as_its_width_needs() {
-        // The word count follows the width, and `alloc_int` must agree with it: where they part
-        // company, a wide constant loses its upper word.
+        // The word count follows the width, and `alloc_int` must agree: where they differ, a wide
+        // constant loses its upper word.
         let count = |c: &Constant| {
             let mut n = 0;
             for_each_constant_word(c, &mut |_| n += 1);
@@ -409,9 +406,8 @@ mod tests {
         for_each_constant_word(&Constant::int(128, 1u128 << 100), &mut |w| words.push(w));
         assert_eq!(words, vec![0u64, 1u64 << 36]);
 
-        // And the count agrees with what the frame reserves for the same width, which is the
-        // pairing that actually has to hold — at the wide widths too, where a constant emitter
-        // that had stayed host-word-shaped would write two words into a four-cell slot.
+        // The count matches what the frame reserves for the width, wide widths included, where a
+        // host-word-shaped emitter would write two words into a four-cell slot.
         for bits in [1usize, 8, 32, 63, 64, 65, 96, 127, 128, 200, 1000] {
             assert_eq!(
                 count(&Constant::int(bits, 1)),

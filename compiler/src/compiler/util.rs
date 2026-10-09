@@ -7,8 +7,8 @@ use crate::compiler::Field;
 
 /// The low-`bits` mask, as a host word.
 ///
-/// A guarded wrapper over [`mavros_int_semantics::mask`]. The model's own `mask` **saturates**
-/// above [`HOST_WORD_BITS`], which is the wrong answer here where every caller feeds the result to
+/// A guarded wrapper over [`mavros_int_semantics::mask`], which **saturates** above
+/// [`HOST_WORD_BITS`]: the wrong answer here, where every caller passes the result to
 /// `HLEmitter::int_const` at `bits`.
 #[track_caller]
 pub fn bit_mask(bits: usize) -> u128 {
@@ -19,17 +19,13 @@ pub fn bit_mask(bits: usize) -> u128 {
     mavros_int_semantics::mask(bits)
 }
 
-// The claim `FIELD_LIMB_BITS` is written on, checked rather than stated in prose.
+// Checks the claim `FIELD_LIMB_BITS` rests on: arkworks' `BigInt<N>` limbs are 64 bits, the model's
+// width. Each caller passes `into_bigint().0` to `IntBits::from_field_limbs`, and nothing else
+// checks the two agree; if they differed, every field-sourced constant would be recombined at the
+// wrong place values, silently.
 //
-// `ark_ff::BigInt<N>` is `[u64; N]`, so a canonical field representation's limb _count_ varies from
-// field to field while its limb _width_ does not. The limb _type_ is already pinned at every call
-// site, because `IntBits::from_field_limbs` takes a `&[u64]` and each caller hands it
-// `into_bigint().0`. What nothing else checks is that the model's 64 and arkworks' 64 are the same
-// number: if they ever parted, every field-sourced constant would be recombined with the wrong
-// place values and nothing would say so.
-//
-// It lives here because this is the lowest crate where both are in scope: `mavros-int-semantics`
-// cannot see `BigInt`, and must not, being the crate every evaluator is measured against.
+// This is the lowest crate that sees both: `mavros-int-semantics` cannot (and must not) see
+// `BigInt`.
 const _: () = assert!(
     size_of::<ark_ff::BigInt<1>>() * 8 == mavros_int_semantics::int_bits::FIELD_LIMB_BITS,
     "a canonical field limb is no longer FIELD_LIMB_BITS wide"
@@ -37,22 +33,19 @@ const _: () = assert!(
 
 /// The host word an integer pattern carries, panicking above the host word.
 ///
-/// Its **production** callers are enumerated here and nowhere else (tests reach for it too, to read
-/// an answer back as a number):
+/// Its **production** callers are listed here and nowhere else (tests also use it to read an
+/// answer back as a number):
 ///
-/// - `hlssa_to_r1cs`'s `const_u128` chain, which reads a field element back as a small number —
-///   a table size, an index, a bit. The host word there is a fact about what those callers return
-///   rather than a bound on any integer type, and the refusal past it is the honest answer;
-/// - one genuine host-word arithmetic site, `instrumenter`'s `Radix::Dyn`, which uses the value as
+/// - `hlssa_to_r1cs`'s `const_u128` chain, which reads a field element back as a small number (a
+///   table size, an index, a bit). The host word is what those callers return, not a bound on any
+///   integer type, so refusing past it is the honest answer;
+/// - `instrumenter`'s `Radix::Dyn`, the one real host-word arithmetic site, which uses the value as
 ///   a `u128` divisor to build the digits of a radix decomposition.
 ///
-/// Do not add a caller that could ask its question of the pattern instead: [`IntBits`] answers
-/// `is_zero` / `is_one` / `is_all_ones`, the bitwise and shift operations, `cast` / `bit_range` and
-/// the whole signed reading width-generically; [`field_constant`] answers the `Int -> Field`
-/// direction at the field's own bound; and `usize::try_from` reads an index without the truncation
-/// an `as` cast would hide.
-///
-/// TODO Remove by the end of the `big-int-model` branch work
+/// Do not add a caller that could ask the pattern instead: [`IntBits`] answers `is_zero` /
+/// `is_one` / `is_all_ones`, the bitwise and shift operations, `cast` / `bit_range` and the whole
+/// signed reading at any width; [`field_constant`] answers `Int -> Field` at the field's bound; and
+/// `usize::try_from` reads an index without the truncation an `as` cast would hide.
 #[track_caller]
 pub fn host_word(pattern: &IntBits) -> u128 {
     u128::try_from(pattern)
@@ -61,24 +54,22 @@ pub fn host_word(pattern: &IntBits) -> u128 {
 
 /// The field element an integer pattern denotes, or `None` if this field cannot carry it.
 ///
-/// The limbs-to-field half of the `Int <-> Field` conversions. The value it carries across is the
-/// model's: a cast is a raw-bits conversion, so a pattern denotes the magnitude its bits spell.
+/// The limbs-to-field half of the `Int <-> Field` conversions. A cast is a raw-bits conversion, as
+/// in the model, so a pattern denotes the magnitude its bits spell.
 ///
-/// It is a **left** inverse of [`IntBits::from_field_limbs`] rather than an inverse: that direction
-/// truncates to the width asked for, so the round trip returns the element it started from only
-/// where the width was wide enough to hold it. In the other order the round trip is exact wherever
-/// this answers at all.
+/// It inverts [`IntBits::from_field_limbs`] in one direction only. That function truncates to the
+/// width asked for, so element to pattern and back returns the starting element only where the
+/// width holds it; pattern to element and back is exact wherever this answers.
 ///
-/// The bound is on the **value** and not on the width: a pattern at or above the modulus has no
-/// element however narrow its type, and every pattern below one has an element however wide. The
-/// refusal is what keeps a residue from being minted in place of the value, which nothing
-/// downstream could tell apart from the value itself. A caller that cannot handle a refusal here
-/// must bound its own inputs.
+/// The bound is on the **value**, not the width: a pattern at or above the modulus has no element
+/// however narrow its type, and every pattern below it has one however wide. Refusing keeps a
+/// residue from being minted in place of the value, which nothing downstream could tell apart. A
+/// caller that cannot handle a refusal must bound its inputs itself.
 #[must_use]
 pub fn field_constant(field: FieldConfig, pattern: &IntBits) -> Option<Field> {
-    // Four limbs, spelled as a literal because that is what it is: `FieldConfig::from_bigint`
-    // takes an `ark_ff::BigInt<4>`, so the count is fixed by the signature rather than asked of the
-    // field. Reading it off `modulus_limbs` would look field-derived without being so.
+    // A literal four, because `FieldConfig::from_bigint` takes an `ark_ff::BigInt<4>`: the
+    // signature fixes the count, not the field. Reading it off `modulus_limbs` would look
+    // field-derived without being so.
     // FIELD-ASSUMPTION: L3-felt-limbs
     let mut canonical = [0u64; 4];
 
@@ -144,15 +135,14 @@ mod tests {
 
     use super::*;
 
-    // Eight sites create a constant with a host-word shift or mask, and each is guarded by an
-    // assert naming the host word (or the narrow threshold) rather than the integer type _cap_: the
-    // cap is far above both, so a guard written against it would admit a silent overflow instead of
-    // refusing. We ensure the arithmetic facts these guards rest on (for the moment) below:
+    // Eight sites mint a constant with a host-word shift or mask, each guarded by an assert on the
+    // host word (or the narrow threshold), not the integer type cap, which is far above both. The
+    // tests below pin what those guards rest on:
     //
-    //   1. `1u128 << n` is a debug panic and a release wraparound for every `n >= 128`; and a shift
-    //      that stays in range still **truncates silently** once its result would not fit.
-    //   2. `mask(n)` above the host word **saturates** rather than refusing, so a constant minted
-    //      from it at a wider width is a wrong value with nothing to say so.
+    //   1. `1u128 << n` panics in debug and wraps in release for `n >= 128`, and an in-range shift
+    //      truncates silently when its result does not fit.
+    //   2. `mask(n)` above the host word saturates rather than refusing, so a constant minted from
+    //      it at a wider width is silently wrong.
 
     /// Fact 1, at the first width the raised cap admits and the guards refuse.
     #[test]
@@ -161,14 +151,14 @@ mod tests {
         assert!(1u128.checked_shl(u128::BITS).is_none());
     }
 
-    /// Fact 1's second half, which the `offset + width <= bits` bound is what actually catches.
+    /// Fact 1's second half, which only the `offset + width <= bits` bound catches.
     ///
-    /// This is the fragile one: `width` and `offset` can each be perfectly legal on their own while
-    /// the mask they build together is not, and nothing about a `<<` says so.
+    /// The fragile case: `width` and `offset` can each be legal while the mask they build together
+    /// is not, and nothing about a `<<` says so.
     #[test]
     fn a_bit_range_mask_truncates_silently_when_only_its_pieces_are_in_range() {
         // Bits 100..200 of a 200-bit value: legal at the raised cap, and neither shift is out of
-        // range on its own.
+        // range by itself.
         let (offset, width) = (100usize, 100usize);
         let host = ((1u128 << width) - 1) << offset;
 
@@ -183,11 +173,11 @@ mod tests {
     /// Fact 2: why `bit_mask` is a guarded wrapper rather than a bare re-export.
     #[test]
     fn the_model_mask_saturates_where_bit_mask_refuses() {
-        // At the host word the two agree, which is what makes the difference invisible below it.
+        // At the host word the two agree, so the difference is invisible below it.
         assert_eq!(bit_mask(128), u128::MAX);
 
-        // One bit further the model still answers -- and the constant that answer mints is not the
-        // all-ones pattern the caller asked for, because bit 128 is zero.
+        // One bit further the model still answers, but the constant it mints is not all ones:
+        // bit 128 is zero.
         let saturated = mavros_int_semantics::mask(129);
         assert_eq!(saturated, u128::MAX);
         let minus_one = IntBits::from_u128(129, saturated);
@@ -215,7 +205,7 @@ mod tests {
             })
     }
 
-    /// Below the host word the reading is as with Noir, so we pin it to ensure artifact neutrality.
+    /// Below the host word the reading matches Noir; pinned so the artifacts do not move.
     #[test]
     fn a_narrow_pattern_reads_the_value_a_host_word_did() {
         let field = FieldConfig::bn254();
@@ -249,8 +239,8 @@ mod tests {
             let element = field_constant(field, &pattern)
                 .unwrap_or_else(|| panic!("u{bits} holding p-1 has an element"));
 
-            // Read back through the same canonical decomposition the `Field -> Int` direction uses,
-            // so the round trip pins the place values and not just the acceptance.
+            // Read back through the canonical decomposition `Field -> Int` uses, so the round
+            // trip pins the place values, not just the acceptance.
             assert_eq!(
                 IntBits::from_field_limbs(&element.into_bigint().0, bits),
                 pattern,
@@ -304,7 +294,7 @@ mod tests {
         );
     }
 
-    /// At the modulus the reduction would answer **zero**, and a residue is indistinguishable from
+    /// At the modulus the reduction would give **zero**, and a residue cannot be told apart from
     /// the value it should have been.
     #[test]
     fn a_pattern_at_or_above_the_modulus_declines_rather_than_reducing() {
@@ -316,8 +306,7 @@ mod tests {
             assert_eq!(field_constant(field, &pattern), None, "p + {offset}");
         }
 
-        // And a pattern whose magnitude is in limbs the field has none of, which is the other half
-        // of the decline.
+        // The other half of the decline: a magnitude in limbs past those the field has.
         assert_eq!(field_constant(field, &IntBits::all_ones(16384)), None);
         assert_eq!(field_constant(field, &IntBits::all_ones(256)), None);
     }

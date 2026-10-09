@@ -291,9 +291,8 @@ impl LowerWitnessFieldOps {
         if !context.types().get_value_type(value).is_witness_of() {
             return false;
         }
-        // Supporting wider decompositions will require deciding how their leading zeroes
-        // participate in the field-agnostic lowering contract, which is why this refuses rather
-        // than padding.
+        // This refuses rather than pads: a wider decomposition needs a decision on how its
+        // leading zeroes fit the field-agnostic lowering contract.
         if count > b.field().field_bit_size() as usize {
             unsupported_on_this_field(
                 format_args!(

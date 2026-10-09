@@ -1,28 +1,26 @@
-//! Multi-limb integer arithmetic, the backing engine for the `_intn` lane.
+//! Multi-limb integer arithmetic, the engine behind the `_intn` lane.
 //!
-//! An `int(N)` value is `ceil(N/64)` consecutive frame cells, little-endian, with the top cell
-//! holding the `N - 64*(k-1)` bits that are left over. Unlike its cousins it cannot rely on host
-//! implementations.
+//! An `int(N)` value is `ceil(N/64)` consecutive frame cells, little-endian; the top cell holds the
+//! `N - 64*(k-1)` leftover bits. No host type is this wide, so nothing here can defer to one.
 //!
-//! These functions all assume the following:
+//! Every function here assumes:
 //!
-//! - **Operands are provided masked**, avoiding the need to perform their own masking which may be
-//!   unnecessary. Results are, however, returned with the necessary masking performed.
-//! - **They are responsible for guaranteeing totality**, as the guards are emitted into the
-//!   bytecode external to these implementations.
-//! - **A slice is exactly the width's cells,** so every function reads a slice's length as the
-//!   value's extent, so one that disagrees with the width beside it does not fail: it masks the
-//!   wrong cell or accumulates into a neighbor.
+//! - **Operands arrive masked**, so they are not masked again. Results are returned masked.
+//! - **Each function is total.** The guards are separate bytecode, so a function must answer every
+//!   input.
+//! - **A slice is exactly the width's cells.** A function reads a slice's length as the value's
+//!   extent, so a slice that disagrees with the width beside it does not fail: it masks the wrong
+//!   cell or accumulates into a neighbor.
 //!
-//! Every operation the lane could need is here and checked against the model at every wide width.
-//! This does not check whether they are reachable from their corresponding opcodes, however, so
-//! this is instead checked in `bytecode.rs`.
+//! Every operation is checked against the model at every wide width. That does not show each is
+//! reachable from its opcode, so `bytecode.rs` also runs every `_intn` opcode through real
+//! dispatch, in `every_wide_opcode_agrees_with_the_model_through_dispatch` and the round trips
+//! beside it.
 //!
-//! This is a separate implementation of the model described by `IntBits` as that is intended to
-//! stay legible, while this needs to be optimized for performance wherever possible. It is
-//! nevertheless checked against that model of the semantics.
+//! This is a second implementation of the model in `IntBits`: that one stays legible, this one is
+//! tuned for speed, and the tests hold them together.
 
-use mavros_limb_arith::{divide_by_limb, knuth_divide, significant_limbs};
+use mavros_limb_arith::top_limb_mask;
 
 use crate::interpreter::Frame;
 
@@ -53,38 +51,18 @@ fn debug_same_extent(res: &[u64], a: &[u64], b: &[u64]) {
     );
 }
 
-/// The number of bits the top cell of a `bits`-wide value actually holds, in `1..=64`.
-#[inline(always)]
-fn top_cell_bits(bits: u64) -> u64 {
-    debug_assert!(bits > 0, "a zero-width integer has no top cell");
-    ((bits - 1) % 64) + 1
-}
-
-/// The mask of the top cell of a `bits`-wide value.
-#[inline(always)]
-fn top_cell_mask(bits: u64) -> u64 {
-    let held = top_cell_bits(bits);
-    if held == 64 {
-        u64::MAX
-    } else {
-        (1u64 << held) - 1
-    }
-}
-
-/// Clear every bit above the width to ensure validity.
+/// Clear every bit above the width.
 #[inline(always)]
 fn normalize(value: &mut [u64], bits: u64) {
     debug_extent(value, bits);
-    let top = value.len() - 1;
-    value[top] &= top_cell_mask(bits);
+    mavros_limb_arith::mask_top(value, bits as usize);
 }
 
 /// The value's sign bit, under a two's complement reading at `bits`.
 #[inline(always)]
 fn is_negative(value: &[u64], bits: u64) -> bool {
     debug_extent(value, bits);
-    let held = top_cell_bits(bits);
-    (value[value.len() - 1] >> (held - 1)) & 1 == 1
+    mavros_limb_arith::is_negative(value, bits as usize)
 }
 
 // ADDITION AND SUBTRACTION
@@ -155,106 +133,43 @@ pub fn eq(a: &[u64], b: &[u64]) -> bool {
 
 /// Whether `a < b`, reading both as unsigned.
 pub fn ult(a: &[u64], b: &[u64]) -> bool {
-    debug_assert_eq!(a.len(), b.len(), "a comparison across two extents");
-    for i in (0..a.len()).rev() {
-        if a[i] != b[i] {
-            return a[i] < b[i];
-        }
-    }
-    false
+    mavros_limb_arith::ult(a, b)
 }
 
 /// Whether `a < b`, reading both as two's complement at `bits`.
 pub fn slt(a: &[u64], b: &[u64], bits: u64) -> bool {
-    match (is_negative(a, bits), is_negative(b, bits)) {
-        (true, false) => true,
-        (false, true) => false,
-        _ => ult(a, b),
-    }
+    debug_extent(a, bits);
+    debug_extent(b, bits);
+    mavros_limb_arith::slt(a, b, bits as usize)
 }
 
 // SHIFTS
 // ================================================================================================
 
-/// The amount a shift by `b` actually applies to a `bits`-wide operand: the magnitude mod `bits`.
+/// The amount a shift by `b` applies to a `bits`-wide operand: `b` read as unsigned, mod `bits`.
 pub fn shift_amount(b: &[u64], bits: u64) -> u64 {
-    if bits == 0 {
-        return 0;
-    }
-    if bits.is_power_of_two() {
-        return b[0] & (bits - 1);
-    }
-    // A running remainder below `bits`, so `(rest << 64) | limb` cannot overflow a `u128` for any
-    // width this VM supports.
-    let modulus = u128::from(bits);
-    let mut rest = 0u128;
-    for i in (0..b.len()).rev() {
-        rest = ((rest << 64) | u128::from(b[i])) % modulus;
-    }
-    rest as u64
+    mavros_limb_arith::shift_amount(b, bits as usize) as u64
 }
 
 /// `a << amount`, wrapping at the width, with `amount` already reduced.
 pub fn shl_by(res: &mut [u64], a: &[u64], amount: u64, bits: u64) {
     debug_extent(a, bits);
-    let k = res.len();
-    let cells = (amount / 64) as usize;
-    let within = (amount % 64) as u32;
-
-    for i in (0..k).rev() {
-        // The limb landing at `i` is the one `cells` below it, with the bits carried up out of the
-        // limb below that. `within == 0` is the case a `64 - within` shift would answer wrongly.
-        let low = if i >= cells { a[i - cells] } else { 0 };
-        let carried = if within > 0 && i > cells {
-            a[i - cells - 1] >> (64 - within)
-        } else {
-            0
-        };
-        res[i] = (low << within) | carried;
-    }
-    normalize(res, bits);
+    debug_extent(res, bits);
+    mavros_limb_arith::shl(res, a, amount as usize, bits as usize);
 }
 
 /// `a >> amount`, zero-filling, with `amount` already reduced.
 pub fn ushr_by(res: &mut [u64], a: &[u64], amount: u64, bits: u64) {
-    shr_by(res, a, amount, bits, 0);
+    debug_extent(a, bits);
+    debug_extent(res, bits);
+    mavros_limb_arith::ushr(res, a, amount as usize, bits as usize);
 }
 
 /// `a >> amount`, sign-filling under a two's complement reading at `bits`.
 pub fn ashr_by(res: &mut [u64], a: &[u64], amount: u64, bits: u64) {
-    let fill = if is_negative(a, bits) { u64::MAX } else { 0 };
-    shr_by(res, a, amount, bits, fill);
-}
-
-/// The shared right-shift body, `fill` being the bits shifted in at the top.
-fn shr_by(res: &mut [u64], a: &[u64], amount: u64, bits: u64, fill: u64) {
     debug_extent(a, bits);
-    let k = res.len();
-    let cells = (amount / 64) as usize;
-    let within = (amount % 64) as u32;
-    let top_mask = top_cell_mask(bits);
-
-    // The operand's own top cell, sign-extended above the width where the fill asks for it.
-    let cell = |i: usize| -> u64 {
-        if i >= k {
-            fill
-        } else if i == k - 1 {
-            (a[i] & top_mask) | (fill & !top_mask)
-        } else {
-            a[i]
-        }
-    };
-
-    for i in 0..k {
-        let high = cell(i + cells);
-        let carried = if within > 0 {
-            cell(i + cells + 1) << (64 - within)
-        } else {
-            0
-        };
-        res[i] = (high >> within) | carried;
-    }
-    normalize(res, bits);
+    debug_extent(res, bits);
+    mavros_limb_arith::ashr(res, a, amount as usize, bits as usize);
 }
 
 // WIDTH
@@ -278,19 +193,17 @@ pub fn sign_extend(res: &mut [u64], a: &[u64], from_bits: u64, to_bits: u64) {
     extend_by(res, a, from_bits, to_bits, fill);
 }
 
-/// The shared width-cast body, `fill` being the bits written above the source.
-///
-/// The two casts differ in that one value, as the two right shifts do, so they share a body for
-/// the same reason [`shr_by`] is shared.
+/// The width-cast body both casts share. They differ only in `fill`, the bits written above the
+/// source.
 fn extend_by(res: &mut [u64], a: &[u64], from_bits: u64, to_bits: u64, fill: u64) {
     debug_extent(a, from_bits);
     debug_extent(res, to_bits);
     let source_top = a.len() - 1;
-    let source_mask = top_cell_mask(from_bits);
+    let source_mask = top_limb_mask(from_bits as usize);
     for i in 0..res.len() {
         res[i] = match i {
             _ if i > source_top => fill,
-            // The source's own top cell is half value and half fill, split at the source width.
+            // The source's top cell is half value and half fill, split at the source width.
             _ if i == source_top => (a[i] & source_mask) | (fill & !source_mask),
             _ => a[i],
         };
@@ -301,8 +214,8 @@ fn extend_by(res: &mut [u64], a: &[u64], from_bits: u64, to_bits: u64, fill: u64
 // MULTIPLICATION
 // ================================================================================================
 
-/// `a * b`, wrapping at the width: [`mavros_limb_arith::mul`], which needs no scratch buffer, masked
-/// back to the width.
+/// `a * b`, wrapping at the width: [`mavros_limb_arith::mul`], which needs no scratch buffer,
+/// masked back to the width.
 pub fn mul(res: &mut [u64], a: &[u64], b: &[u64], bits: u64) {
     debug_extent(a, bits);
     debug_extent(b, bits);
@@ -319,60 +232,23 @@ pub fn mul(res: &mut [u64], a: &[u64], b: &[u64], bits: u64) {
 /// `cell_udiv` records for all four division helpers. Nothing here traps, because the VM reports a
 /// failed execution through `trap` rather than by aborting the host.
 pub fn udivrem(quotient: &mut [u64], remainder: &mut [u64], a: &[u64], b: &[u64], bits: u64) {
-    // All four up front rather than through `normalize`, which the zero-divisor path returns
-    // before reaching.
     debug_extent(quotient, bits);
     debug_extent(remainder, bits);
     debug_extent(a, bits);
     debug_extent(b, bits);
-
-    quotient.fill(0);
-    remainder.fill(0);
-
-    match significant_limbs(b) {
-        0 => return,
-        1 => remainder[0] = divide_by_limb(quotient, a, b[0]),
-        n => {
-            let (mut divisor, mut dividend) = (vec![0u64; n], vec![0u64; a.len() + 1]);
-            knuth_divide(quotient, remainder, a, &b[..n], &mut divisor, &mut dividend);
-        }
-    }
-    normalize(quotient, bits);
-    normalize(remainder, bits);
+    let mut scratch = vec![0u64; 2 * a.len() + 1];
+    mavros_limb_arith::udivrem(quotient, remainder, a, b, &mut scratch);
 }
 
-/// `a / b` and `a % b`, both read as two's complement at `bits`.
-///
-/// Sign-magnitude around [`udivrem`]: the quotient takes the operands' xor and the remainder takes
-/// the dividend's sign.
+/// `a / b` and `a % b`, both read as two's complement at `bits`, by
+/// [`mavros_limb_arith::sdivrem`].
 pub fn sdivrem(quotient: &mut [u64], remainder: &mut [u64], a: &[u64], b: &[u64], bits: u64) {
+    debug_extent(quotient, bits);
+    debug_extent(remainder, bits);
     debug_extent(a, bits);
     debug_extent(b, bits);
-    let (a_negative, b_negative) = (is_negative(a, bits), is_negative(b, bits));
-
-    let mut a_magnitude = a.to_vec();
-    let mut b_magnitude = b.to_vec();
-    if a_negative {
-        negate(&mut a_magnitude, bits);
-    }
-    if b_negative {
-        negate(&mut b_magnitude, bits);
-    }
-
-    udivrem(quotient, remainder, &a_magnitude, &b_magnitude, bits);
-
-    if a_negative != b_negative {
-        negate(quotient, bits);
-    }
-    if a_negative {
-        negate(remainder, bits);
-    }
-}
-
-/// Replace `value` with its two's complement negation at `bits`.
-fn negate(value: &mut [u64], bits: u64) {
-    mavros_limb_arith::negate(value);
-    normalize(value, bits);
+    let mut scratch = vec![0u64; 4 * a.len() + 1];
+    mavros_limb_arith::sdivrem(quotient, remainder, a, b, bits as usize, &mut scratch);
 }
 
 // TESTS
@@ -388,9 +264,9 @@ mod tests {
         let mut res = vec![0u64; a.len()];
         let mut scratch = vec![0u64; a.len()];
         match op {
-            // The signed and unsigned members of a pair differ only in _when they fail_, and by
-            // the time an opcode runs the guard IR has already decided. That is the same reason
-            // this lane is held to `residue` rather than to `eval`.
+            // The signed and unsigned members of a pair differ only in _when they fail_, which the
+            // guard IR decides before an opcode runs. So this lane is held to `residue`, not
+            // `eval`.
             IntOp::UAdd | IntOp::SAdd => add(&mut res, a, b, bits),
             IntOp::USub | IntOp::SSub => sub(&mut res, a, b, bits),
             IntOp::UMul | IntOp::SMul => mul(&mut res, a, b, bits),
@@ -408,12 +284,11 @@ mod tests {
         res
     }
 
-    /// The widths this engine is swept at, which is more than the widths it is dispatched for.
+    /// The widths this engine is swept at, which include widths it is never dispatched for.
     ///
-    /// [`corners::WIDE_WIDTHS`] starts at 129, so nothing in the shared set has **two** limbs
-    /// — the shape where a carry chain first has a carry, a Knuth divisor first has two limbs, and
-    /// a shift first crosses a limb boundary. The interpreter sends those widths to its double
-    /// lane, so this engine never sees one in production.
+    /// [`corners::WIDE_WIDTHS`] starts at 129, past every two-limb width: where a carry chain first
+    /// carries, a Knuth divisor first has two limbs and a shift first crosses a limb boundary. The
+    /// interpreter sends those widths to its double lane, so they are added here.
     fn swept_widths() -> Vec<usize> {
         let mut widths = vec![65, 96, 127];
         widths.extend(corners::WIDE_WIDTHS);
@@ -441,7 +316,7 @@ mod tests {
                     // Rule 3, which binds on every input including the unspecified ones: whatever
                     // the answer is, it is inside the width.
                     assert_eq!(
-                        got[got.len() - 1] & !top_cell_mask(bits as u64),
+                        got[got.len() - 1] & !top_limb_mask(bits),
                         0,
                         "{op:?} at {bits} bits left a result outside the width"
                     );

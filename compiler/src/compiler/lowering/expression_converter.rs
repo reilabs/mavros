@@ -1253,7 +1253,7 @@ impl<'a> ExpressionConverter<'a> {
                     use noirc_frontend::monomorphization::ast::Type as AstType;
                     Some(match Self::expression_type(&unary.rhs) {
                         // Zero is zero under either reading, and the negation that consumes it takes
-                        // its sign from its own opcode.
+                        // its sign from the negation's opcode.
                         AstType::Integer(_, bit_size) => {
                             Constant::int(bit_size.bit_size() as usize, 0)
                         }

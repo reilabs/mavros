@@ -1,27 +1,26 @@
-//! An end-to-end test harness for programs consisting of hand-built SSA.
+//! An end-to-end test harness for programs built directly as SSA.
 //!
-//! This exists to allow testing of arbitrary-width integer support without the need for a Noir
-//! front-end with syntactic support for the same. It is designed to check whether, for **given
-//! operands** at a **given width**, the model, the constraint system, and the VM all agree.
+//! It tests arbitrary-width integers without a Noir front-end that can write them. For **given
+//! operands** at a **given width**, it checks that the model, the constraint system and the VM
+//! agree.
 //!
-//! Concretely, [`BinaryOpOracle::check`]:
+//! [`BinaryOpOracle::check`]:
 //!
-//! 1. asks the model what the operation means (a value, or a rejection);
-//! 2. compiles `main(a, b) -> c { a op b }` from hand-built SSA, declaring the model's answer as
-//!    the return value, so that the entry point's own return assertion is the equality test;
-//! 3. runs witness generation on the VM and checks every emitted constraint against the witness.
+//! 1. asks the model what the operation means (a value or a rejection);
+//! 2. compiles `main(a, b) -> c { a op b }`, declaring the model's answer as the return value, so
+//!    the entry point's return assertion is the equality test;
+//! 3. runs witness generation on the VM and checks every constraint against the witness.
 //!
-//! An accepted run means the VM produced a witness, the witness satisfies the R1CS, and the value
-//! it carries agrees with the model. A rejected run means the guard IR refused the operands.
+//! An accepted run means the VM produced a witness that satisfies the R1CS and carries the model's
+//! value. A rejected run means the guard IR refused the operands.
 //!
-//! Every program is also held to its **AD** entry point on both lanes when it is compiled, since
-//! that answer depends on the circuit rather than on the operands. See
-//! [`Compiled::assert_the_ad_lane_agrees`].
+//! Each compiled program is also checked against its **AD** entry point on both lanes, since that
+//! answer depends on the circuit, not on the operands. See [`Compiled::assert_the_ad_lane_agrees`].
 //!
-//! [`Compiled::run_wasm`] is the same judgement against the compiled WASM, run against the **same**
-//! R1CS, so a disagreement between the two lanes is a disagreement between two implementations of
-//! one program. It answers [`None`] only where no module came out of the linker; a lane that fails
-//! to compile fails the test rather than reporting itself absent.
+//! [`Compiled::run_wasm`] makes the same judgement with the compiled WASM against the **same**
+//! R1CS, so a disagreement between the lanes is one between two implementations of one program. It
+//! answers [`None`] only when the linker produced no module; a lane that fails to compile fails the
+//! test.
 
 use std::{
     path::{Path, PathBuf},
@@ -64,10 +63,8 @@ use mavros_compiler::{
 
 /// Builds `main(params...) -> returns...` with `body` as its single-block body.
 ///
-/// The parameters are ordinary typed entry-point parameters, so `prepare_entry_point` turns each
-/// into a witness column with the range check its type calls for, and witness taint inference then
-/// reads the body as the _witnessed_ lane. Constants folded in the body take the pure lane instead,
-/// which is how the same builder reaches the compile-time evaluators.
+/// Each parameter becomes a range-checked witness column, so the body runs on the witnessed lane;
+/// constants folded in it take the pure lane.
 pub fn main_program(
     params: &[Type],
     returns: &[Type],
@@ -92,11 +89,11 @@ pub fn main_program(
     ssa
 }
 
-/// Builds `main(lhs: int(lhs_bits), rhs: int(rhs_bits)) -> int(lhs_bits) { lhs op rhs }`.
-pub fn binary_op_program(kind: BinaryArithOpKind, lhs_bits: usize, rhs_bits: usize) -> HLSSA {
+/// Builds `main(lhs: int(bits), rhs: int(bits)) -> int(bits) { lhs op rhs }`.
+pub fn binary_op_program(kind: BinaryArithOpKind, bits: usize) -> HLSSA {
     main_program(
-        &[Type::int(lhs_bits), Type::int(rhs_bits)],
-        &[Type::int(lhs_bits)],
+        &[Type::int(bits), Type::int(bits)],
+        &[Type::int(bits)],
         |e, params| vec![e.bin(kind, params[0], params[1])],
     )
 }
@@ -104,11 +101,8 @@ pub fn binary_op_program(kind: BinaryArithOpKind, lhs_bits: usize, rhs_bits: usi
 // INPUTS
 // ================================================================================================
 
-/// The field element the entry point expects for one integer input.
-///
-/// `prepare_entry_point` writes each flattened input to a witness column as a single field element
-/// and range-checks it there, so an integer crosses the boundary as its unsigned magnitude whatever
-/// the operation will read it as.
+/// The field element the entry point expects for one integer input: its unsigned magnitude, however
+/// the operation reads it.
 #[must_use]
 pub fn input_field(value: &IntBits) -> Field {
     Field::from(BigUint::from(value))
@@ -129,8 +123,8 @@ pub fn input_block(values: &[&IntBits]) -> Vec<InputValueOrdered> {
 
 /// The results of one run of a compiled program.
 pub enum Verdict {
-    /// Witness generation ran, every constraint holds against the witness it produced, and the VM's
-    /// own `a`/`b`/`c` evaluations agree with the constraint system.
+    /// Witness generation ran, every constraint holds against the witness it produced, and the
+    /// `a`/`b`/`c` evaluations the VM emitted agree with the constraint system.
     Accepted { witness: Vec<Field> },
 
     /// The VM refused to produce a witness at all — an assertion in the guard IR, a division check,
@@ -141,9 +135,9 @@ pub enum Verdict {
     /// never lands here on an honest witness; a _wrongly_-constrained one does.
     Unsatisfied { index: usize },
 
-    /// Every constraint holds, but the `a`/`b`/`c` vectors the VM emitted alongside the witness do
-    /// not match the ones the constraint system computes from it. The witness is fine and the VM's
-    /// own bookkeeping about it is not.
+    /// Every constraint holds, but the `a`/`b`/`c` vectors the VM emitted do not match the ones the
+    /// constraint system computes from the witness: the witness is right and the VM's bookkeeping
+    /// is wrong.
     AbcMismatch,
 }
 
@@ -206,10 +200,9 @@ impl Verdict {
     }
 }
 
-/// A hand-built program taken all the way to executable artifacts.
+/// A hand-built program compiled all the way to executable artifacts.
 ///
-/// Holds the R1CS and the VM binary together because the two are positionally coupled, and hence
-/// meaningful only as a pair.
+/// The R1CS and the VM binary are positionally coupled, so they are kept together.
 pub struct Compiled {
     /// The compiled constraint system: the two layouts witness generation runs against, and the
     /// constraints a witness is judged by.
@@ -231,14 +224,12 @@ pub struct Compiled {
 
     /// Where the entry blob's return guard sits, when `main` returns anything.
     ///
-    /// [`Self::with_guard`] splices it in, so a caller states parameters and declared returns and
-    /// nothing else.
+    /// [`Self::with_guard`] splices it in, so a caller states only parameters and declared returns.
     guard_slot: Option<usize>,
 
-    /// The same program compiled to WASM, when a module came out of the linker.
+    /// The same program compiled to WASM, when the linker produced a module.
     ///
-    /// [`None`] only where none did; a compilation that *fails* fails loudly. See [`compile_wasm`]
-    /// for which is which.
+    /// [`None`] only when it did not; a compilation that _fails_ panics. See [`compile_wasm`].
     wasm: Option<WasmArtifact>,
 }
 
@@ -254,10 +245,23 @@ pub struct WasmArtifact {
 impl WasmArtifact {
     fn loaded(&self) -> Result<&LoadedModule, &str> {
         self.loaded
-            .get_or_init(|| LoadedModule::load(&self.path).map_err(|error| error.to_string()))
+            .get_or_init(|| {
+                LoadedModule::load(&self.path).map_err(|error| with_causes(error.as_ref()))
+            })
             .as_ref()
             .map_err(String::as_str)
     }
+}
+
+/// `error` and every cause beneath it, where a wasm engine puts its reason.
+fn with_causes(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = error.to_string();
+    let mut cause = error.source();
+    while let Some(inner) = cause {
+        message.push_str(&format!(": {inner}"));
+        cause = inner.source();
+    }
+    message
 }
 
 /// Environment variable naming a directory to keep the pipeline's per-stage dumps in.
@@ -285,10 +289,9 @@ impl Compiled {
             }
         };
 
-        // `wrap_main` writes the entry blob as parameters, then a one-field return guard when
-        // `main` returns anything, then the declared return values. The guard says whether to
-        // check the declared return against the computed one, which is exactly what this oracle
-        // is for, so it is set and the caller supplies only the values.
+        // `wrap_main` lays the entry blob out as the parameters, a one-field return guard when
+        // `main` returns anything, and the declared returns. The guard is set, so the declared
+        // return is checked against the computed one.
         let entry = ssa.get_unique_entrypoint();
         let guard_slot = (!entry.get_returns().is_empty()).then(|| {
             entry
@@ -305,8 +308,8 @@ impl Compiled {
 
         let r1cs = driver.generate_r1cs()?;
         let artifact = driver.compile_bytecode_artifact(CodeGenOptions {
-            // The VM's own constraint checking, which is what makes a trap the _first_ sign of
-            // disagreement rather than a wrong witness discovered later.
+            // The VM checks constraints as it runs, so a disagreement shows up first as a trap
+            // rather than later as a wrong witness.
             check_constraints: true,
             include_debug_info: true,
         })?;
@@ -326,18 +329,12 @@ impl Compiled {
         Ok(compiled)
     }
 
-    /// Runs the AD entry point on each lane and holds it to the constraint system.
+    /// Runs the AD entry point on each lane and holds it to the constraint system, panicking on a
+    /// disagreement, which is a compiler bug.
     ///
-    /// AD is the prover's other half: for random coefficients it computes each constraint matrix
-    /// weighted by them, and that answer depends on the circuit alone, not on any input. It is
-    /// checked once per program, here, rather than once per run, ensuring every test in this suite
-    /// is run on the AD lane as well.
-    ///
-    /// A disagreement is a compiler bug rather than a verdict about operands, so it panics.
-    ///
-    /// The coefficients are random, so that no one choice of them can hide a wrong row, but drawn
-    /// from a **seed** the panic names: a disagreement that only some coefficients expose is then
-    /// replayed by setting [`AD_SEED_ENV`] to it, rather than lost with the run.
+    /// AD weights each constraint matrix by random coefficients, which depends on the circuit
+    /// alone, so it is checked once per program. The coefficients come from a seed the panic names;
+    /// setting [`AD_SEED_ENV`] to it replays the failure.
     fn assert_the_ad_lane_agrees(&self) {
         let seed = match std::env::var(AD_SEED_ENV) {
             Ok(seed) => seed
@@ -389,22 +386,24 @@ impl Compiled {
         self.wasm.is_some()
     }
 
-    /// Generates a witness by running the compiled WASM, and judges it the way [`Self::run`] does.
+    /// Generates a witness by running the compiled WASM, and judges it as [`Self::run`] does,
+    /// against the same R1CS. Returns [`None`] when the module could not be built.
     ///
-    /// The two lanes are judged against the **same** R1CS, which is the whole point: a disagreement
-    /// between them is a disagreement between two implementations of one program, not between two
-    /// programs. Returns [`None`] when the module could not be built.
+    /// # Panics
+    ///
+    /// If the module was built but no engine will load it: a broken lane, which scored as a trap
+    /// would pass a test that expects a rejection.
     pub fn run_wasm(&self, inputs: &[InputValueOrdered]) -> Option<Verdict> {
         let wasm = self.wasm.as_ref()?;
         let inputs = self.with_guard(inputs);
-        let result = match wasm.loaded().map_err(str::to_string).and_then(|loaded| {
-            wasm_host::run_witgen_loaded(loaded, &self.r1cs, &inputs)
-                .map_err(|error| error.to_string())
-        }) {
+        let loaded = wasm
+            .loaded()
+            .unwrap_or_else(|error| panic!("the WASM module did not load: {error}"));
+        let result = match wasm_host::run_witgen_loaded(loaded, &self.r1cs, &inputs) {
             Ok(result) => result,
             Err(error) => {
                 return Some(Verdict::Trapped {
-                    message: error,
+                    message: with_causes(error.as_ref()),
                     // A WASM trap carries no mavros stack, so the return check cannot be told from
                     // any other refusal here. Callers that need the distinction use `run`.
                     in_return_check: false,
@@ -465,8 +464,8 @@ impl Compiled {
 
     /// `inputs` with the entry blob's return guard spliced in, set to check the declared return.
     ///
-    /// The guard is the wrapper's own slot rather than a value of the program, so a test states
-    /// the parameters and the declared return and this puts the blob together.
+    /// The guard is a slot of the wrapper, not a value of the program, so a test gives only the
+    /// parameters and the declared return, and this assembles the blob.
     fn with_guard(&self, inputs: &[InputValueOrdered]) -> Vec<InputValueOrdered> {
         let Some(slot) = self.guard_slot else {
             return inputs.to_vec();
@@ -538,36 +537,26 @@ pub struct BinaryOpOracle {
     /// cannot be undone. `UShl` and `SShl` both answer `IntOp::Shl`.
     op: IntOp,
 
-    /// The left operand's width, which is also the result's.
-    ///
-    /// Kept, with `rhs_bits`, so [`Self::check`] can turn away operands of another width.
-    lhs_bits: usize,
-
-    /// The right operand's width, which differs from `lhs_bits` only for a shift, which reads its
-    /// amount at a width of its own.
-    rhs_bits: usize,
+    /// The width of both operands and the result, which [`Self::check`] requires its operands to
+    /// have.
+    bits: usize,
 
     /// The program itself, compiled once here and run once per operand pair.
     compiled: Compiled,
 }
 
 impl BinaryOpOracle {
-    /// Compiles `main(lhs, rhs) -> result { lhs op rhs }` at the given widths.
+    /// Compiles `main(lhs, rhs) -> result { lhs op rhs }` at the given width.
     ///
     /// # Errors
     ///
-    /// Propagates a pipeline refusal. Note that a pipeline _panic_ is not caught.
-    pub fn new(
-        kind: BinaryArithOpKind,
-        lhs_bits: usize,
-        rhs_bits: usize,
-    ) -> Result<Self, DriverError> {
+    /// Propagates a pipeline refusal. A pipeline _panic_ is not caught.
+    pub fn new(kind: BinaryArithOpKind, bits: usize) -> Result<Self, DriverError> {
         Ok(Self {
             kind,
             op: IntOp::from(kind),
-            lhs_bits,
-            rhs_bits,
-            compiled: Compiled::new(binary_op_program(kind, lhs_bits, rhs_bits))?,
+            bits,
+            compiled: Compiled::new(binary_op_program(kind, bits))?,
         })
     }
 
@@ -579,14 +568,10 @@ impl BinaryOpOracle {
 
     /// Runs one operand pair and reports whether the pipeline agreed with [`mavros_int_semantics`].
     ///
-    /// The model's answer enters the program as the _declared return value_, which the entry point
-    /// wrapper constrains against what the body computed. So a value disagreement is not something
-    /// this function inspects afterwards.
-    ///
-    /// A model rejection is expected to surface as a refusal: the guard IR is what turns "Noir
-    /// would reject this" into a runtime trap. The residue is declared as the return so that a
-    /// _missing_ guard shows up as an acceptance, and [`Verdict::is_refusal`] keeps a trap at the
-    /// return check from being read as the guard having fired.
+    /// The model's answer is the declared return, which the entry point checks against the
+    /// computed one. For a pair the model rejects, the residue is declared instead, so a missing
+    /// guard shows as an acceptance, and [`Verdict::is_refusal`] keeps a trap at the return check
+    /// from counting as the guard firing.
     ///
     /// # Errors
     ///
@@ -594,13 +579,12 @@ impl BinaryOpOracle {
     ///
     /// # Panics
     ///
-    /// If either operand's width is not the one this oracle was compiled for. An operand wider than
-    /// its parameter would be caught only by the entry point's input range check, and would then be
-    /// scored as a refusal, which is wrong.
+    /// If either operand's width is not the one this oracle was compiled for: a wider operand would
+    /// be refused by the entry point's range check and wrongly scored as a refusal.
     pub fn check(&self, lhs: &IntBits, rhs: &IntBits) -> Result<(), String> {
         assert_eq!(
             (lhs.bits(), rhs.bits()),
-            (self.lhs_bits, self.rhs_bits),
+            (self.bits, self.bits),
             "operands do not match the widths this oracle was compiled for"
         );
         let expectation = eval_expectation(self.op, lhs, rhs);
@@ -647,9 +631,8 @@ impl BinaryOpOracle {
     ///
     /// # Errors
     ///
-    /// Returns a description if the wrong answer was accepted, or refused somewhere other than
-    /// the return check. The latter means that the program refused the _operands_, so the run tells
-    /// us nothing about the return.
+    /// Returns a description if the wrong answer was accepted, or refused somewhere other than the
+    /// return check, which means the operands were refused and says nothing about the return.
     ///
     /// # Panics
     ///
@@ -663,9 +646,7 @@ impl BinaryOpOracle {
             .value()
             .expect("operands the model rejects have no right answer to perturb");
 
-        // Flipping the low bit lands on a different pattern of the same width, so it stays a
-        // legal input — the entry point range-checks every declared value before the return
-        // check ever sees it.
+        // Flipping the low bit keeps the value in range, so only the return check can refuse it.
         let wrong = expected.xor(&IntBits::from_u128(expected.bits(), 1));
 
         let verdict = self.compiled.run(&input_block(&[lhs, rhs, &wrong]));
@@ -689,12 +670,8 @@ struct Expectation {
     /// Whether the model gives the operation a value, as opposed to rejecting it.
     accepted: bool,
 
-    /// The value to declare as the program's return.
-    ///
-    /// For an accepted operation it is the model's value. For a rejected one it is the residue (the
-    /// pattern a total evaluator produces anyway) so that a guard that fails to fire is caught as
-    /// an _acceptance_ of the residue rather than as a second, unrelated failure of the return
-    /// assertion.
+    /// The value to declare as the program's return: the model's value, or for a rejected
+    /// operation the residue, so a guard that fails to fire shows as an acceptance.
     declared_return: IntBits,
 }
 
@@ -706,10 +683,8 @@ fn eval_expectation(op: IntOp, lhs: &IntBits, rhs: &IntBits) -> Expectation {
         },
         Outcome::Rejected(_) => Expectation {
             accepted: false,
-            // `None` is the model declining to specify the pattern (the division cases, where the
-            // backends genuinely disagree). Zero stands in: the run is expected to refuse before
-            // the return is ever compared, and if it does not, any declared value makes that
-            // visible.
+            // `None` means the model leaves the pattern unspecified (division, where the backends
+            // disagree). Zero stands in: the run should refuse before the return is compared.
             declared_return: residue(op, lhs, rhs).unwrap_or_else(|| IntBits::zero(lhs.bits())),
         },
     }
@@ -735,15 +710,10 @@ pub fn bytecode_listing(ssa: &HLSSA) -> String {
 
 /// Compile `driver`'s program to a linked WASM module, or [`None`] if no module came out.
 ///
-/// A compilation **failure is a failure**, and says so: `compile_llvm_targets` reports a broken
-/// WASM lane by returning an error, and swallowing one would leave every assertion below to pass
-/// by skipping. The absent-toolchain case is not this one — `wasm_runtime::locate_or_build` and
-/// `compile_to_wasm` both panic where `wasm-ld` or the runtime archive is missing, so a bare
-/// `cargo test` outside the development shell never reaches the `None` here at all.
-///
-/// [`None`] is therefore narrow: a scratch directory that could not be made, or a linker that
-/// reported success and wrote nothing. [`Compiled::wasm_is_available`] is how a test that needs
-/// this lane says so, and it is the one thing that tells those two apart from a lane that ran.
+/// A failed compilation panics, as does a missing `wasm-ld` or runtime archive, so a broken lane
+/// cannot pass by skipping. [`None`] means only that no scratch directory could be made, or that
+/// the linker succeeded without writing a module; [`Compiled::wasm_is_available`] tells those
+/// apart from a lane that ran.
 fn compile_wasm(driver: &mut Driver, r1cs: &R1CS) -> Option<WasmArtifact> {
     let scratch = TempDir::new().ok()?;
     let path = scratch.path().join("program.wasm");

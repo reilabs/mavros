@@ -180,7 +180,7 @@ fn lower_instruction(
             array,
             index,
         } if is_zst_slice(array) => {
-            let (assert, _, _) = build_lt_bounds_assert_on_len(b, array, index, ty_of(index));
+            let (assert, _) = build_lt_bounds_assert_on_len(array, index, ty_of(index));
             b.emit(assert);
             let elem = synthesize_leafless(b, ty_of(result));
             aliases.insert(result, elem);
@@ -191,7 +191,7 @@ fn lower_instruction(
             index,
             ..
         } if is_zst_slice(array) => {
-            let (assert, _, _) = build_lt_bounds_assert_on_len(b, array, index, ty_of(index));
+            let (assert, _) = build_lt_bounds_assert_on_len(array, index, ty_of(index));
             b.emit(assert);
             aliases.insert(result, array);
         }
@@ -229,7 +229,7 @@ fn lower_instruction(
         } if is_zst_slice(slice) => {
             let one = len_const(b, 1);
             let new_len = b.uadd(slice, one);
-            let (assert, _, _) = build_lt_bounds_assert_on_len(b, new_len, index, ty_of(index));
+            let (assert, _) = build_lt_bounds_assert_on_len(new_len, index, ty_of(index));
             b.emit(assert);
             aliases.insert(result, new_len);
         }
@@ -239,7 +239,7 @@ fn lower_instruction(
             slice,
             index,
         } if is_zst_slice(slice) => {
-            let (assert, _, _) = build_lt_bounds_assert_on_len(b, slice, index, ty_of(index));
+            let (assert, _) = build_lt_bounds_assert_on_len(slice, index, ty_of(index));
             b.emit(assert);
             let zero = len_const(b, 0);
             let nonempty = b.ult(zero, slice);
@@ -256,7 +256,7 @@ fn lower_instruction(
             if is_zero_leaf(ty_of(array)) =>
         {
             let len = seq_len(b, array, ty_of(array));
-            let (assert, _, _) = build_lt_bounds_assert_on_len(b, len, index, ty_of(index));
+            let (assert, _) = build_lt_bounds_assert_on_len(len, index, ty_of(index));
             b.emit(assert);
             b.emit(op);
         }

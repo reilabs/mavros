@@ -1,17 +1,14 @@
-//! Tests of the semantics engendered by the model.
+//! Tests of the model's semantics, in three kinds:
 //!
-//! It encompasses three kinds of test:
-//!
-//! 1. The **Pins** are hand-written cases taken straight from Noir's own tests and documentation.
-//!    These ensure that the model matches Noir's semantics, rather than simply being internally
-//!    consistent.
-//! 2. The **Exhaustive** tests check every operand pair at `bits ∈ {1, 4, 8}` for every operation
-//!    in `IntOp::ALL`. There is no second sweep over a reading, because an operation names its
-//!    own: `UAdd` and `SAdd` are two of the sixteen rather than one operation under two signs.
-//!    Structural bugs (masking, sign decode, boundary-off-by-one) are generic across widths, so an
-//!    exhaustive sweep here will highlight them.
-//! 3. The **Property** tests run over the rest of the domain to provide extra coverage where the
-//!    exhaustive tier cannot.
+//! 1. **Pins**: hand-written cases taken from Noir's tests and documentation, so the model matches
+//!    Noir rather than merely agreeing with itself.
+//! 2. **Exhaustive**: every operand pair at `bits ∈ {1, 4, 8}` for every operation in
+//!    `IntOp::ALL`. An operation names its reading (`UAdd` and `SAdd` are separate operations), so
+//!    there is no separate sweep per reading. Structural bugs (masking, sign decoding,
+//!    off-by-one at a boundary) are the same at every width, so a sweep at narrow widths finds
+//!    them.
+//! 3. **Property**: random cases over the rest of the domain, which the exhaustive tier cannot
+//!    reach.
 
 use num_bigint::BigUint;
 use proptest::prelude::*;
@@ -27,10 +24,8 @@ use crate::{
 
 /// A `bits`-wide pattern built from a host word.
 ///
-/// The tests below are written as the numbers they mean, not as [`IntBits`]es: a pin that says
-/// `200 + 100` overflows at eight bits is about the arithmetic, and burying it under a
-/// construction at every operand would hide exactly the thing it pins. So the host façade is here,
-/// in the handful of functions below, and nowhere else.
+/// The tests read as the numbers they mean; building every operand as an [`IntBits`] would bury
+/// that. The host façade is confined to these few functions.
 fn pat(bits: usize, value: u128) -> IntBits {
     IntBits::from_u128(bits, value)
 }
@@ -56,8 +51,8 @@ fn ev_value(op: IntOp, bits: usize, lhs: u128, rhs: u128) -> Option<u128> {
 }
 
 /// `residue` as a host word.
-fn res(op: IntOp, bits: usize, lhs: u128, rhs_bits: usize, rhs: u128) -> Option<u128> {
-    residue(op, &pat(bits, lhs), &pat(rhs_bits, rhs)).map(|v| host(&v))
+fn res(op: IntOp, bits: usize, lhs: u128, rhs: u128) -> Option<u128> {
+    residue(op, &pat(bits, lhs), &pat(bits, rhs)).map(|v| host(&v))
 }
 
 /// A small reading written the way the test means it, since a [`SignedValue`] has no literal.
@@ -70,8 +65,8 @@ fn enc(bits: usize, v: i64) -> u128 {
     host(&IntBits::from_signed(bits, &sv(v)))
 }
 
-/// `reduced_shift_amount` on a host word, carried at the widest width the host façade has — which
-/// is how an amount reaches it from an evaluator that has not narrowed it.
+/// `reduced_shift_amount` on a host word, carried at the host façade's widest width, as an
+/// evaluator that has not narrowed the amount passes it.
 fn reduced(amount: u128, bits: usize) -> u32 {
     pat(HOST_WORD_BITS, amount).reduced_shift_amount(bits)
 }
@@ -105,14 +100,14 @@ fn arithmetic_overflow_is_rejected_not_wrapped() {
     );
     // ... and the residue records what those backends compute, so a conformance test can hold them
     // to it without pretending it is the right answer.
-    assert_eq!(res(IntOp::UAdd, 8, 200, 8, 100), Some(44));
+    assert_eq!(res(IntOp::UAdd, 8, 200, 100), Some(44));
 
     // Unsigned subtraction below zero is an overflow, not a wrap to a large number.
     assert_eq!(
         ev(IntOp::USub, 8, 1, 2),
         Outcome::Rejected(Reject::Overflow)
     );
-    assert_eq!(res(IntOp::USub, 8, 1, 8, 2), Some(255));
+    assert_eq!(res(IntOp::USub, 8, 1, 2), Some(255));
 
     assert_eq!(
         ev(IntOp::UMul, 8, 16, 16),
@@ -126,7 +121,7 @@ fn arithmetic_overflow_is_rejected_not_wrapped() {
         Outcome::Rejected(Reject::Overflow)
     );
     assert_eq!(
-        res(IntOp::SAdd, 8, max, 8, 1),
+        res(IntOp::SAdd, 8, max, 1),
         Some(host(&IntBits::from_signed(8, &IntBits::signed_min(8)))),
         "127i8 + 1 wraps to -128 in every backend"
     );
@@ -140,7 +135,7 @@ fn arithmetic_overflow_is_rejected_not_wrapped() {
 fn division_rejects_a_zero_divisor_and_the_signed_overflow() {
     for op in [IntOp::UDiv, IntOp::SDiv, IntOp::URem, IntOp::SRem] {
         assert_eq!(ev(op, 8, 7, 0), Outcome::Rejected(Reject::DivByZero));
-        assert_eq!(res(op, 8, 7, 8, 0), None, "no agreed answer exists");
+        assert_eq!(res(op, 8, 7, 0), None, "no agreed answer exists");
     }
 
     // `INT_MIN / -1` has a quotient one past the top of the type. `expand_signed_math` emits an
@@ -236,8 +231,7 @@ fn a_right_shift_fills_by_its_reading() {
 
 #[test]
 fn bitwise_operations_have_no_reading_and_never_reject() {
-    // There is no sign to sweep: these three have no signed form to disagree with, which is this
-    // test's claim made structural rather than checked.
+    // These three have no signed form, so there is no sign to sweep.
     assert_eq!(ev(IntOp::And, 8, 0xF0, 0x3C), val(8, 0x30));
     assert_eq!(ev(IntOp::Or, 8, 0xF0, 0x3C), val(8, 0xFC));
     assert_eq!(ev(IntOp::Xor, 8, 0xF0, 0x3C), val(8, 0xCC));
@@ -398,9 +392,8 @@ fn sign_extend_is_identity_at_equal_width() {
 
 #[test]
 fn sign_extend_masks_its_input() {
-    // Bits above `from` are not part of the value and must not survive into the result. The
-    // masking happens one step earlier: an eight-bit pattern cannot carry a ninth bit, so building
-    // one from a wider host word is where the discarding is done.
+    // Bits above `from` must not reach the result. Building an eight-bit pattern from a wider host
+    // word already drops them.
     assert_eq!(sext(0xFF00 | 0x01, 8, 16), 0x0001);
     assert_eq!(sext(0xFF00 | 0x80, 8, 16), 0xFF80);
 }
@@ -421,8 +414,8 @@ fn sign_extend_handles_full_width() {
 
 #[test]
 fn every_operation_that_reads_its_operands_comes_in_a_pair() {
-    // Stated as a partition rather than a list, so that adding a variant without a partner, or a
-    // partner without a difference, fails here rather than being noticed later.
+    // A partition rather than a list, so that a variant without a partner, or a partner without a
+    // difference, fails here.
     let mut paired: Vec<&str> = Vec::new();
     let mut single: Vec<&str> = Vec::new();
     for op in IntOp::ALL {
@@ -455,14 +448,13 @@ fn every_operation_that_reads_its_operands_comes_in_a_pair() {
 
 #[test]
 fn the_operations_with_no_reading_are_the_ones_that_answer_the_same_either_way() {
-    // The claim behind `And`/`Or`/`Xor`/`Shl` having no signed form, checked rather than asserted
-    // in prose: for every corner pair, the answer read as _signed_ is the one signed arithmetic
-    // would have produced, and the answer read as _unsigned_ is the one unsigned arithmetic would
-    // have produced. Both are derived here through `SignedValue`/`BigUint` rather than through
-    // `IntBits`'s own limb code, so this compares two routes rather than restating one.
+    // Checks why `And`/`Or`/`Xor`/`Shl` need no signed form: for every corner pair, the answer
+    // read as _signed_ is what signed arithmetic gives, and read as _unsigned_ is what unsigned
+    // arithmetic gives. Both expectations come from `SignedValue`/`BigUint`, not the limb code in
+    // `IntBits`, so this compares two independent routes.
     //
-    // A signed `<<` differs from an unsigned one only in a rejecting constraint on a negative
-    // _amount_, which is guard IR and not something `eval` computes.
+    // A signed `<<` differs from an unsigned one only in rejecting a negative _amount_, which the
+    // guard IR does and `eval` does not compute.
     for bits in [1usize, 8, 64] {
         for &lhs in &corners::values(bits) {
             for &rhs in &corners::values(bits) {
@@ -523,9 +515,8 @@ fn the_shift_pair_is_the_one_that_differs() {
     assert_eq!(ev_value(IntOp::UShr, 8, 0xF0, 4), Some(0x0F));
     assert_eq!(ev_value(IntOp::SShr, 8, 0xF0, 4), Some(0xFF));
 
-    // Stated as the exact rule rather than the one pair above, so that the split is pinned by
-    // where the two forms part company: a non-zero amount fills the vacated top bits, and the two
-    // fill it differently exactly when there is a sign bit set to fill it with.
+    // The exact rule, not just the pair above: a non-zero amount fills the vacated top bits, and
+    // the two forms fill them differently exactly when the sign bit is set.
     for bits in [1usize, 8, 32, 64] {
         for &lhs in &corners::values(bits) {
             let negative = pat(bits, lhs).to_signed() < sv(0);
@@ -545,35 +536,26 @@ fn the_shift_pair_is_the_one_that_differs() {
 // THE WIDTHS THE OPERANDS ARRIVE CARRYING
 // ================================================================================================
 //
-// `check_widths` had no coverage at all while the widths were parameters, because a caller that
-// spelled them wrong was writing a bug in its own call rather than building a value. They come off
-// the operands now, so what these pin is that the model still refuses a pair no operation admits
-// -- and, in the shift's case, still admits the one pair that is legitimately mixed.
+// The widths come from the operands, so these check that the model refuses two different widths
+// for any operation, a shift included: Noir's elaborator gives a shift's amount its value's type.
 
 #[test]
-#[should_panic(expected = "only a shift reads its right operand at a width of its own")]
+#[should_panic(expected = "both operands of an operation are one width")]
 fn a_non_shift_refuses_two_widths() {
     let _ = eval(IntOp::UAdd, &pat(8, 1), &pat(16, 1));
 }
 
 #[test]
-fn a_shift_takes_its_amount_at_whatever_width_it_arrives() {
-    // Noir's elaborator unifies a shift's amount with its value, but the IR does not require it and
-    // two evaluators pass a narrower amount through at runtime -- see `corners::shift_width_pairs`.
-    assert_eq!(eval(IntOp::Shl, &pat(8, 1), &pat(32, 3)), val(8, 8));
-    assert_eq!(
-        eval(IntOp::Shl, &pat(8, 1), &pat(HOST_WORD_BITS, 8)),
-        Outcome::Rejected(Reject::ShiftAmount),
-        "the bound is the value's width, not the amount's"
-    );
+#[should_panic(expected = "both operands of an operation are one width")]
+fn a_shift_refuses_an_amount_of_another_width() {
+    let _ = eval(IntOp::Shl, &pat(8, 1), &pat(32, 3));
 }
 
 #[test]
 #[should_panic(expected = "an integer pattern is at least one bit wide")]
 fn a_zero_width_operand_cannot_even_be_built() {
-    // `check_widths` states `1..=MAX_BITS`, but the lower half of that range is not its to
-    // enforce: a width of zero is refused a whole layer earlier, when the operand is constructed.
-    // The upper half is live, and is the one the test below exercises.
+    // `check_widths` enforces only the upper end of `1..=MAX_BITS`: a width of zero is refused
+    // earlier, when the operand is built. The next test covers the upper end.
     let _ = eval(IntOp::UAdd, &pat(0, 0), &pat(0, 0));
 }
 
@@ -611,19 +593,18 @@ fn a_signed_reading_no_longer_stops_where_the_lowerings_do() {
 }
 
 #[test]
-#[should_panic(expected = "only a shift reads its right operand at a width of its own")]
+#[should_panic(expected = "both operands of an operation are one width")]
 fn a_comparison_refuses_two_widths() {
-    // `compare` reads a width off each operand rather than being handed one for both, which is
-    // what makes this a check rather than a convention -- and it is a live question, because
-    // HLSSA's `Cmp` typing rule does not require equal widths and the instrumenter's own
-    // comparison decides one.
+    // `compare` reads a width from each operand, so it can check that they agree. That matters:
+    // HLSSA's `Cmp` typing rule does not require equal widths, which is why the instrumenter's
+    // comparison handles a mixed pair itself rather than calling `compare`.
     let _ = pat(8, 1).compare(CmpOp::ULt, &pat(16, 1));
 }
 
 #[test]
 fn bit_level_helpers_agree_with_their_definitions() {
-    // Each operand states the width it came from, which is what these helpers read: the width
-    // `sign_extend` extends _from_ is the operand's own rather than a second opinion beside it.
+    // These helpers read the width each operand carries: `sign_extend` extends _from_ the
+    // operand's width, not from a separately passed one.
     assert_eq!(host(&pat(9, 0x1FF).cast(8)), 0xFF);
     assert_eq!(
         host(&pat(8, 0xFF).cast(32)),
@@ -650,9 +631,9 @@ fn bit_level_helpers_agree_with_their_definitions() {
 
 #[test]
 fn the_host_word_mask_saturates_at_the_host_width_not_the_models_cap() {
-    // `mask` is the last host word in the model, and its saturating arm exists because
-    // `1u128 << bits` is a debug panic and a release build that silently masks the shift amount.
-    // The bound is therefore the **host's** 128 and not `MAX_BITS`, which sits far above it.
+    // `mask` is the model's last host word. Its saturating arm exists because `1u128 << bits`
+    // panics in debug and masks the amount in release, so the bound is the **host's** 128, not
+    // `MAX_BITS`.
     assert_eq!(mask(0), 0);
     assert_eq!(mask(1), 1);
     assert_eq!(mask(64), u128::from(u64::MAX));
@@ -669,10 +650,9 @@ fn the_host_word_mask_saturates_at_the_host_width_not_the_models_cap() {
 
 #[test]
 fn a_reading_outside_the_width_encodes_by_wrapping() {
-    // `IntBits::from_signed` is total, which it has to be for an unbounded `SignedValue`: an
-    // intermediate result legitimately leaves the width, and the answer is the low `bits` of its
-    // two's complement. That is a claim about `BigInt`'s bitwise operators reading a negative as
-    // two's complement extended indefinitely, so it is pinned rather than assumed.
+    // `IntBits::from_signed` must be total for an unbounded `SignedValue`, answering the low `bits`
+    // of its two's complement. That relies on `BigInt`'s bitwise operators reading a negative as
+    // two's complement extended indefinitely, so it is pinned here.
     assert_eq!(enc(8, 256), 0, "one whole turn is back where it started");
     assert_eq!(enc(8, 257), 1);
     assert_eq!(enc(8, -129), 0x7F, "one step past the bottom of the type");
@@ -682,14 +662,11 @@ fn a_reading_outside_the_width_encodes_by_wrapping() {
 
 #[test]
 fn the_signed_boundaries_are_total_at_every_width() {
-    // The two boundaries are pure powers of two and never carried a signed cap of any kind, so
-    // they were the first part of the model to reach the full width — and the part a host type
-    // could not have carried. `1i128 << 127` is not representable, which is what made the obvious
-    // spelling of the signed reading panic at width 127.
+    // The boundaries are powers of two a host type cannot carry at the top widths (`1i128 << 127`
+    // is not representable), so the obvious spelling of the signed reading panics at width 127.
     //
-    // Swept to the cap rather than to the host word, unlike most of this file: the sweep is linear
-    // and each step is one `BigInt` two-power, so the whole wide range is affordable here — and it
-    // is the one place a 16384-bit boundary is checked directly.
+    // Swept to the cap, unlike most of this file: the sweep is linear and cheap, and this is the
+    // one place a 16384-bit boundary is checked directly.
     for bits in 1..=MAX_BITS {
         let (min, max) = (IntBits::signed_min(bits), IntBits::signed_max(bits));
         assert_eq!(
@@ -709,14 +686,13 @@ fn the_signed_boundaries_are_total_at_every_width() {
 
 #[test]
 fn the_shift_backstop_reduces_to_the_operand_width_not_the_host() {
-    // The clause that catches an evaluator inheriting a host width: `u128::wrapping_shl` masks to
-    // 127, so an evaluator built on it answers `1u8 << 8 == 0` where the VM and LLVM, which reduce
-    // by `bits`, answer `1`. `hlssa_to_r1cs::arith` avoids that by calling `residue` rather than
-    // shifting a host word itself, so this is the statement it relies on.
+    // Catches an evaluator that inherits a host width: `u128::wrapping_shl` masks the amount to
+    // 127, so `1u8 << 8` answers 0, where the VM and LLVM, which reduce by `bits`, answer 1.
+    // `hlssa_to_r1cs::arith` relies on this through `residue`.
     assert_eq!(reduced(8, 8), 0);
     assert_eq!(reduced(100, 64), 36);
     assert_eq!(
-        res(IntOp::Shl, 8, 1, 8, 8),
+        res(IntOp::Shl, 8, 1, 8),
         Some(1),
         "reducing by the operand width, not by the host's"
     );
@@ -746,9 +722,9 @@ fn the_shift_backstop_reduces_to_the_operand_width_not_the_host() {
 
 /// The invariant that makes the two-function split safe: a residue never contradicts an accepted
 /// evaluation, it only extends it into the rejected region.
-fn check_point(op: IntOp, bits: usize, lhs: u128, rhs_bits: usize, rhs: u128) {
-    let outcome = eval(op, &pat(bits, lhs), &pat(rhs_bits, rhs));
-    let residue = res(op, bits, lhs, rhs_bits, rhs);
+fn check_point(op: IntOp, bits: usize, lhs: u128, rhs: u128) {
+    let outcome = eval(op, &pat(bits, lhs), &pat(bits, rhs));
+    let residue = res(op, bits, lhs, rhs);
 
     if let Outcome::Value(v) = &outcome {
         // "Inside its width" is a statement about the answer's _declared_ width rather than about
@@ -800,7 +776,7 @@ fn every_operand_pair_at_narrow_widths() {
         for op in IntOp::ALL {
             for lhs in 0..=m {
                 for rhs in 0..=m {
-                    check_point(op, bits, lhs, bits, rhs);
+                    check_point(op, bits, lhs, rhs);
                 }
             }
         }
@@ -814,7 +790,7 @@ fn the_corner_cross_product_at_every_width() {
             let vals = corners::values(bits);
             for &lhs in &vals {
                 for &rhs in &vals {
-                    check_point(op, bits, lhs, bits, rhs);
+                    check_point(op, bits, lhs, rhs);
                 }
             }
         }
@@ -822,14 +798,14 @@ fn the_corner_cross_product_at_every_width() {
 }
 
 #[test]
-fn shifts_across_mixed_operand_widths() {
+fn every_shift_amount_corner_at_every_width() {
     for op in [IntOp::Shl, IntOp::UShr, IntOp::SShr] {
-        for (bits, rhs_bits) in corners::shift_width_pairs() {
+        for &bits in corners::widths() {
             let vals = corners::values(bits);
-            let amounts = corners::shift_amounts(bits, rhs_bits);
+            let amounts = corners::shift_amounts(bits);
             for &lhs in &vals {
                 for &rhs in &amounts {
-                    check_point(op, bits, lhs, rhs_bits, rhs);
+                    check_point(op, bits, lhs, rhs);
                 }
             }
         }
@@ -845,13 +821,14 @@ fn the_accept_boundary_is_exactly_the_width() {
         for &bits in corners::widths() {
             for amount in 0..bits {
                 assert!(
-                    !eval(op, &pat(bits, 1), &pat(HOST_WORD_BITS, amount as u128)).is_rejected(),
+                    !eval(op, &pat(bits, 1), &pat(bits, amount as u128)).is_rejected(),
                     "{op:?}/{bits} rejected a legal amount {amount}"
                 );
             }
-            for amount in bits..=(bits + 2).min(HOST_WORD_BITS) {
+            // Up to the largest amount the width holds.
+            for amount in (bits..=bits + 2).filter(|&amount| amount as u128 <= mask(bits)) {
                 assert_eq!(
-                    eval(op, &pat(bits, 1), &pat(HOST_WORD_BITS, amount as u128)),
+                    eval(op, &pat(bits, 1), &pat(bits, amount as u128)),
                     Outcome::Rejected(Reject::ShiftAmount),
                     "{op:?}/{bits} accepted an illegal amount {amount}"
                 );
@@ -869,7 +846,7 @@ fn odd_widths_are_swept_too() {
         for op in IntOp::ALL {
             for &lhs in &corners::values(bits) {
                 for &rhs in &corners::values(bits) {
-                    check_point(op, bits, lhs, bits, rhs);
+                    check_point(op, bits, lhs, rhs);
                 }
             }
         }
@@ -921,7 +898,7 @@ proptest! {
         rhs in any::<u128>(),
         op in any_unsigned_op(),
     ) {
-        check_point(op, bits, lhs, bits, rhs & mask(bits));
+        check_point(op, bits, lhs, rhs & mask(bits));
     }
 
     #[test]
@@ -930,18 +907,7 @@ proptest! {
         rhs in any::<u128>(),
         op in any_signed_op(),
     ) {
-        check_point(op, bits, lhs, bits, rhs & mask(bits));
-    }
-
-    /// Mixed operand widths, which the hand-written pairs cannot enumerate.
-    #[test]
-    fn shifts_hold_across_independent_widths(
-        (bits, lhs) in width_and_value(HOST_WORD_BITS),
-        (rhs_bits, rhs) in width_and_value(HOST_WORD_BITS),
-        shl in any::<bool>(),
-    ) {
-        let op = if shl { IntOp::Shl } else { IntOp::UShr };
-        check_point(op, bits, lhs, rhs_bits, rhs);
+        check_point(op, bits, lhs, rhs & mask(bits));
     }
 
     /// Two's complement round-trips, which everything signed rests on.
@@ -982,9 +948,8 @@ proptest! {
         shl in any::<bool>(),
     ) {
         let op = if shl { IntOp::Shl } else { IntOp::UShr };
-        let rejected =
-            eval(op, &pat(bits, lhs), &pat(HOST_WORD_BITS, amount))
-                .is_rejected();
+        let amount = amount & mask(bits);
+        let rejected = eval(op, &pat(bits, lhs), &pat(bits, amount)).is_rejected();
         prop_assert_eq!(rejected, amount >= bits as u128);
     }
 

@@ -73,8 +73,8 @@ impl LowerSideEffectFreeGuards {
             | OpCode::InitGlobal { .. }
             | OpCode::DropGlobal { .. }
             | OpCode::Todo { .. } => true,
-            // A witnessed one's lookups reject a value with bits above its read, so they may hold
-            // only where the guard does: `LowerWitnessSpreadOps` builds them under it.
+            // A witnessed spread's lookups reject a value with bits above its read, so they must
+            // hold only where the guard does: `LowerWitnessSpreadOps` builds them under it.
             OpCode::Spread { value, .. } | OpCode::Unspread { value, .. } => {
                 !type_info.get_value_type(*value).is_witness_of()
             }

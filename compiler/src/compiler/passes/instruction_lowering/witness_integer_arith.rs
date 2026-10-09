@@ -142,9 +142,8 @@ impl LowerWitnessIntegerArithOps {
 
     /// The sum or difference in one field element, range-checked back to `bits`.
     ///
-    /// Sound while `2^(bits + 1) < p`, which is [`widest_cell_sum_bits`]. A wider one is lowered
-    /// through the carry chain before this pass runs, so that is what makes this one field
-    /// operation sound on **any** field.
+    /// Sound while `2^(bits + 1) < p` ([`widest_cell_sum_bits`]); a wider sum takes the carry chain
+    /// before this pass runs.
     fn lower_unsigned_addsub(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -186,15 +185,12 @@ impl LowerWitnessIntegerArithOps {
     }
 
     // FIELD-ASSUMPTION: L6-int-op-strategy
-    // The full product is computed in one field element (by `range_fits_field_injectively`). The
-    // only non-single-field path is the u128 fallback below, and it still packs
-    // `lo + cross*2^h` — roughly `2^(3h+1)`, so ~2^193 at the bn254 limb — into one cell. That is a
-    // strictly stronger demand than the limb width itself certifies, which is why the fallback asks
-    // `two_limb_product_packing_fits` rather than inferring it from `h`. A program's product that
-    // one cell cannot hold is lowered by the schoolbook in `WideWitnessInts` before this pass runs,
-    // routed by `single_cell_product_fits`. What can still arrive here past the cell is a product
-    // this pass emits itself, in `lower_unsigned_divmod`'s reconstruction, and the two refusals
-    // below are what meet it (see docs/field-agnosticism.md, Layer 6).
+    // The full product is one field element (`range_fits_field_injectively`), or for u128 the
+    // packing below, `lo + cross·2^h` (~2^193 at the bn254 limb), which needs more than the limb
+    // width certifies and so asks `two_limb_product_packing_fits`. A product one cell cannot hold
+    // takes the schoolbook in `WideWitnessInts` first (`single_cell_product_fits`, asserted at
+    // entry). So the two refusals below are a backstop that cannot fire
+    // (docs/field-agnosticism.md, Layer 6).
     fn lower_unsigned_mul(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -205,6 +201,10 @@ impl LowerWitnessIntegerArithOps {
         rhs: ValueId,
         bits: usize,
     ) {
+        assert!(
+            single_cell_product_fits(b.field(), bits),
+            "ICE: an int{bits} multiplication reached the single-cell lowering, whose product the field cannot hold"
+        );
         let product_range = context.urange(lhs).mul(&context.urange(rhs));
         if bits == 128 && !range_fits_field_injectively(&product_range, b.field()) {
             // The limb width says a single `a·b` fits; this packing scales a two-product column by
@@ -277,12 +277,10 @@ impl LowerWitnessIntegerArithOps {
 
     /// The signed sum or difference in one field element, re-encoded by [`encode_signed_value`].
     ///
-    /// Sound while `2^(bits + 1) < p`, which is [`widest_cell_sum_bits`], as the unsigned one is.
-    /// The decoded result `v` is in `[-2^bits, 2^bits)`, and the prover's sign `s` makes the
-    /// `bits - 1`-bit check read `t = v + s·2^(bits - 1)`, which lies in `[-2^bits, 1.5·2^bits)`.
-    /// Its element lands in the check's window from outside it only where `t <= 2^(bits - 1) - p`
-    /// or `t >= p`, and that bound puts both out of reach. A wider one is lowered through the carry
-    /// chain before this pass runs, with the sign bits checked beside it.
+    /// Sound while `2^(bits + 1) < p` ([`widest_cell_sum_bits`]): the decoded `v` is in
+    /// `[-2^bits, 2^bits)`, so the `bits - 1`-bit check reads `t = v + s·2^(bits - 1)` in
+    /// `[-2^bits, 1.5·2^bits)`, which cannot wrap into the check's window. A wider sum takes the
+    /// carry chain, with the sign bits checked beside it.
     #[allow(clippy::too_many_arguments)]
     fn lower_signed_addsub(
         &self,
@@ -709,10 +707,10 @@ fn narrow_rangecheck_width(range: &Interval, default_bits: usize) -> usize {
 }
 
 // FIELD-ASSUMPTION: L4-modulus-query
-// This gate already reads the real modulus and flips correctly on a small field (it returns
-// false for u64xu64, and even for the fragile u32xu32 edge). The debt is not the predicate —
-// it is the missing FALSE-case codegen (only unsigned u128 mul has a fallback). See Layer 6
-// (`L6-int-op-strategy`) in docs/field-agnosticism.md.
+// Reads the real modulus, so it answers correctly on a small field. At 128 bits its FALSE case is
+// the two-limb packing in `lower_unsigned_mul`; at any other width the schoolbook in
+// `passes::wide_witness_ints` takes every product `single_cell_product_fits` refuses first. See
+// `L6-int-op-strategy` in docs/field-agnosticism.md.
 fn range_fits_field_injectively(range: &Interval, field: FieldConfig) -> bool {
     // ⊥ would report `hi - lo = -1 < p` and so license the single-field product path on no evidence
     // at all.
@@ -732,11 +730,10 @@ fn range_fits_field_injectively(range: &Interval, field: FieldConfig) -> bool {
 }
 
 // FIELD-ASSUMPTION: L6-int-op-strategy (signed encode/decode pair)
-// `signed_value_from_encoded`/`encode_signed_value` pack the sign with `field.two_pow(bits)` /
-// `field.two_pow(bits-1)` place-value shifts. These packings wrap mod p once the shift reaches the
-// field width. The sum and the difference are routed past `widest_cell_sum_bits` before that, and
-// assert it. The product and the division are held to `single_cell_signed_product_fits`, whose
-// bound puts `2^(2 · bits)` inside the modulus.
+// The sign is packed with `field.two_pow(bits)` / `field.two_pow(bits - 1)` place values, which
+// wrap once they reach the field's size. Sums and differences past `widest_cell_sum_bits` are
+// routed elsewhere first, and assert it; products and divisions are held to
+// `single_cell_signed_product_fits`, which keeps `2^(2·bits)` below the modulus.
 fn signed_value_from_encoded(
     b: &mut HLBlockEmitter<'_>,
     encoded_field: ValueId,
@@ -811,14 +808,13 @@ struct DivModResult {
 }
 
 // FIELD-ASSUMPTION: L6-int-representation
-// The limb width is now the field's, but the _count_ still has to land at two for
-// `lower_unsigned_mul` above, which reads the split as a pair. That caller asks
-// `two_limb_product_packing_fits` — which answers about the count as well as the packing — so a
-// narrower field refuses before reaching here rather than tripping `WitnessLimbs::pair`; making the
-// caller total is Phase 4's multi-cell work, not a wider constant.
+// The limb width is the field's, but `lower_unsigned_mul` reads the split as exactly two limbs. It
+// is reached only where `single_cell_product_fits` holds, which at 128 bits asks
+// `two_limb_product_packing_fits`, covering the count as well as the packing; a narrower field
+// sends the product to the schoolbook in `passes::wide_witness_ints`.
 fn split_u128_value(b: &mut impl HLEmitter, value: ValueId) -> WitnessLimbs {
-    // The operand's **type** width, which is what decides how many limbs it takes — the field only
-    // decides how wide each one is.
+    // The operand's **type** width decides how many limbs it takes; the field decides only how wide
+    // each one is.
     const BITS: usize = 128;
     let value = b.cast_to(CastTarget::Int(BITS), value);
     let limb_bits = witness_limb_bits(b.field());

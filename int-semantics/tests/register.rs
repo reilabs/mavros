@@ -6,7 +6,7 @@
 //!
 //! 1. every registered file still exists;
 //! 2. every registered conformance test still exists, by name, in the file that claims it;
-//! 3. `docs/int-semantics.md` has exactly the registered tags as sections, in the register's order;
+//! 3. the register table in `docs/int-semantics.md` lists exactly the registered tags, in order;
 //! 4. no **unregistered** file defines integer arithmetic of its own (on a best-effort basis).
 
 use mavros_int_semantics::register::EVALUATORS;
@@ -211,12 +211,18 @@ fn the_document_and_the_register_describe_the_same_evaluators() {
     let doc = root.join("docs").join("int-semantics.md");
     let text = fs::read_to_string(&doc).expect("docs/int-semantics.md is missing");
 
-    // A section heading is ``### `tag` — ...``; the tag is what sits between the first backticks.
-    let documented: Vec<&str> = text
+    // The register table is the one whose header's first cell is `Tag`; each later row of it names
+    // an evaluator as `` `tag` `` in that first cell, and the table ends at the first non-row line.
+    let first_cell = |line: &str| -> Option<String> {
+        let row = line.trim().strip_prefix('|')?;
+        Some(row.split('|').next()?.trim().to_string())
+    };
+    let documented: Vec<String> = text
         .lines()
-        .filter_map(|line| line.strip_prefix("### `"))
-        .filter_map(|rest| rest.split_once('`'))
-        .map(|(tag, _)| tag)
+        .skip_while(|line| first_cell(line).as_deref() != Some("Tag"))
+        .skip(1)
+        .map_while(first_cell)
+        .filter_map(|cell| Some(cell.strip_prefix('`')?.strip_suffix('`')?.to_string()))
         .collect();
     let registered: Vec<&str> = EVALUATORS.iter().map(|e| e.tag).collect();
 

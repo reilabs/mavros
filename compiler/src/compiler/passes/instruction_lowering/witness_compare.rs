@@ -122,8 +122,7 @@ impl LowerWitnessCompareOps {
         };
 
         // Either reading orders through `lower_unsigned_lt` at `bits`, so both are held to its
-        // bound. An ordering wider than that is lowered through the carry chain before this pass
-        // runs.
+        // bound. A wider ordering is lowered through the carry chain before this pass runs.
         assert!(
             bits <= widest_cell_sum_bits(b.field()),
             "ICE: an int{bits} ordering reached the single-cell lowering, whose field cannot hold its difference"
@@ -173,13 +172,11 @@ impl LowerWitnessCompareOps {
         });
     }
 
-    /// The ordering as a witnessed bit, with the difference that bit selects range-checked at
-    /// `bits`.
+    /// The ordering as a witnessed bit, with the difference it selects range-checked at `bits`.
     ///
-    /// Sound while `2^(bits + 1) < p`, which is [`widest_cell_sum_bits`]: the difference on the
-    /// wrong side of the answer is then an element no range check at `bits` admits. An ordering
-    /// wider than that, under either reading, is lowered through the carry chain before this pass
-    /// runs, and [`Self::lower_lt`] asserts it.
+    /// Sound while `2^(bits + 1) < p` ([`widest_cell_sum_bits`]): the wrong answer's difference is
+    /// then an element no range check at `bits` admits. A wider ordering goes through the carry
+    /// chain before this pass, as [`Self::lower_lt`] asserts.
     #[allow(clippy::too_many_arguments)]
     fn lower_unsigned_lt(
         &self,

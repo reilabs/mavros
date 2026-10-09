@@ -111,15 +111,13 @@ impl Value {
         )
     }
 
-    /// Report a [`Value::Wide`] asked for a field element as a compiler bug.
-    ///
-    /// A pure integer past the modulus is held as its pattern, and only the integer operations
-    /// read it that way. Anything that needs an element from it would reduce it modulo `p`, which
-    /// is the cast `width_validation` refuses.
+    /// Report a [`Value::Wide`] asked for a field element as a compiler bug: its element would be
+    /// a residue mod `p`. Only the program as written is checked for such a cast, so reaching here
+    /// means a pass emitted one.
     #[track_caller]
     fn ice_no_element(pattern: &IntBits) -> ! {
         ice!(
-            "an int{} value at or above the modulus reached a use in R1CS generation that needs its field element, which it does not have; width_validation should have refused the cast that put it there",
+            "an int{} value at or above the modulus reached a use in R1CS generation that needs its field element, which it does not have; a pass emitted a cast into Field of a value past the modulus",
             pattern.bits()
         )
     }
@@ -139,6 +137,22 @@ impl Value {
             Value::Const(c) => c.into_bigint().into(),
             Value::Wide(pattern) => pattern.into(),
             r => ice!("expected an integer constant, got {r:?}"),
+        }
+    }
+
+    /// Equality or an unsigned ordering where either side is a [`Value::Wide`], by magnitude, and
+    /// [`None`] otherwise. Shared by the comparison and its assertion, so the two cannot disagree.
+    ///
+    /// A signed ordering is not answered here: it reads both sides as patterns, which holds a
+    /// [`Value::Wide`] as well.
+    fn wide_unsigned_cmp(kind: CmpKind, a: &Value, b: &Value) -> Option<bool> {
+        if !(matches!(a, Value::Wide(_)) || matches!(b, Value::Wide(_))) {
+            return None;
+        }
+        match kind {
+            CmpKind::Eq => Some(a.magnitude() == b.magnitude()),
+            CmpKind::ULt => Some(a.magnitude() < b.magnitude()),
+            CmpKind::SLt => None,
         }
     }
 
@@ -235,27 +249,26 @@ impl Value {
 
     /// The canonical value of a constant as a `u128`, or `None` if it needs more than 128 bits.
     ///
-    /// Both the read and the test that it lost nothing come from the model, which is what makes
-    /// the agreement with `lattice::int_cast_bits` structural rather than a coincidence the two
-    /// have to be kept in. Deriving "which limbs are outside 128 bits" here as well is how a
-    /// caller and its reader come apart; see `field_limbs_fit`.
+    /// Both the read and the check that nothing was lost come from the model, so agreement with
+    /// `lattice::int_cast_bits` is structural rather than kept in sync by hand. Deriving "which
+    /// limbs are outside 128 bits" here as well would let a caller and its reader drift apart; see
+    /// `field_limbs_fit`.
     ///
-    /// The limb _count_ is a property of the field, and both entry points take the slice whatever
-    /// its length: a field whose `BigInt` is narrower than this one simply has fewer, where
-    /// `limbs[2]` would have panicked.
+    /// The limb _count_ is a property of the field, and both entry points take a slice of any
+    /// length: a field whose `BigInt` is narrower than this one has fewer limbs, where `limbs[2]`
+    /// would panic.
     ///
     /// # Why the width is spelled as a host word
     ///
-    /// [`HOST_WORD_BITS`] below asks whether this element fits the word it is about to be returned
-    /// in — the return type's own word, and not any integer-width cap. That is the whole of it,
-    /// and it is why this reading is not waiting on a wider one: every caller wants a _small
-    /// number_ out of a field element, an array index or a bit, and an element that does not fit
-    /// one has no answer to give them however wide integers get.
+    /// [`HOST_WORD_BITS`] below asks whether this element fits the word it is returned in, not any
+    /// integer-width cap. Every caller wants a _small number_ out of a field element (an array
+    /// index or a bit), and an element that does not fit a word has no answer for them however
+    /// wide integers get.
     ///
-    /// How wide an integer **operand** may be is a different question with a different bound, and
-    /// belongs to [`Value::expect_pattern`], which reads the element's limbs directly and is
-    /// bounded by the field. Routing an operand through here would bound it by a number that is
-    /// not about operands at all.
+    /// How wide an integer **operand** may be is a different question with a different bound,
+    /// answered by [`Value::expect_pattern`], which reads the element's limbs directly and is
+    /// bounded by the field. Routing an operand through here would bound it by a number unrelated
+    /// to operands.
     fn const_u128(&self, what: &str) -> Option<u128> {
         match self {
             // FIELD-ASSUMPTION: L4-decompose
@@ -306,17 +319,16 @@ impl Value {
 
     /// The canonical value as a `bits`-wide pattern.
     ///
-    /// This evaluator carries its integers as field elements wherever one holds them, so for those
-    /// a pattern exists only for the length of a call into the model; a [`Value::Wide`] is one
-    /// already, and is read at `bits` the same way. Masking to `bits` enforces the reading as the
-    /// model takes its operands already normalized and does no masking of its own, so a bit above
-    /// the declared width is not part of the value being operated on whether it sits at index 60 or
-    /// index 600.
+    /// This evaluator holds its integers as field elements where one fits them, so for those a
+    /// pattern exists only during a call into the model; a [`Value::Wide`] already is one and is
+    /// read at `bits` the same way. Masking to `bits` enforces the reading, as the model takes its
+    /// operands already normalized and does no masking itself: a bit above the declared width is
+    /// not part of the value, whether at index 60 or 600.
     ///
-    /// An element carrying more than `bits` is read as its low `bits` rather than refused, which is
-    /// the cast semantics `docs/int-semantics.md` gives and the same reading `int_cast_bits` gives
-    /// in the folder. This is not a bounds check and must not be read as one. A constant that
-    /// reaches a _constraint_ without passing through here is not truncated by anything.
+    /// An element carrying more than `bits` is read as its low `bits` rather than refused: the cast
+    /// semantics in `docs/int-semantics.md`, and the reading `int_cast_bits` gives in the folder.
+    /// This is not a bounds check. A constant that reaches a _constraint_ without passing through
+    /// here is not truncated by anything.
     fn expect_pattern(&self, bits: usize) -> IntBits {
         match self {
             // FIELD-ASSUMPTION: L4-decompose
@@ -399,6 +411,13 @@ impl Value {
             data,
         })))
     }
+}
+
+/// The failure of an access at `index` into a sequence of `length`.
+fn past_the_end(index: usize, length: usize) -> AssertionFailure {
+    AssertionFailure::new(format!(
+        "index {index} is past the end of a sequence of length {length}"
+    ))
 }
 
 fn flatten_array_into_table(arr: &ArrayData, out: &mut Vec<LC>) {
@@ -616,20 +635,14 @@ impl symbolic_executor::Context<Value> for R1CGen {
 // FIELD-ASSUMPTION: L4-eval
 impl symbolic_executor::Value<R1CGen> for Value {
     fn cmp(&self, b: &Self, kind: CmpKind, bits: Option<usize>, _ctx: &mut R1CGen) -> Self {
-        let wide = matches!(self, Value::Wide(_)) || matches!(b, Value::Wide(_));
+        if let Some(holds) = Value::wide_unsigned_cmp(kind, self, b) {
+            return Value::Const(if holds {
+                ark_bn254::Fr::ONE
+            } else {
+                ark_bn254::Fr::ZERO
+            });
+        }
         match kind {
-            CmpKind::Eq | CmpKind::ULt if wide => {
-                let holds = if kind == CmpKind::Eq {
-                    self.magnitude() == b.magnitude()
-                } else {
-                    self.magnitude() < b.magnitude()
-                };
-                Value::Const(if holds {
-                    ark_bn254::Fr::ONE
-                } else {
-                    ark_bn254::Fr::ZERO
-                })
-            }
             CmpKind::Eq => self.eq(b),
             // `ULt` compares the field encodings, which is the magnitude for an unsigned integer.
             CmpKind::ULt => self.lt(b),
@@ -672,15 +685,9 @@ impl symbolic_executor::Value<R1CGen> for Value {
         match &out_type.strip_witness().expr {
             TypeExpr::Int(bits) => {
                 let bits = *bits;
-                // The _width_ bounds nothing here. What this evaluator can hold is a question
-                // about the **value**: a constant is one field element, so any magnitude below the
-                // modulus is representable whatever type it is declared at, and an `int16384`
-                // carrying 5 folds exactly as a `u8` carrying 5 does. The bound belongs on the
-                // answer, below, where it is a fact about a number rather than a guess from a
-                // type.
-                //
-                // An operand is an element or, past the modulus, a [`Value::Wide`], and either is
-                // read as a pattern at `bits` below.
+                // The value bounds this, not the width: an `int16384` carrying 5 folds as a `u8`
+                // carrying 5 does. Each operand is an element or, past the modulus, a
+                // [`Value::Wide`], read as a pattern at `bits`.
                 assert!(bits > 0, "an int0 describes a value with no bits");
                 assert!(
                     matches!(
@@ -694,12 +701,9 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     binary_arith_op_kind
                 );
 
-                // Both operands are read at `bits`: HLSSA types an `IntArith` result as
-                // `int{max(s1, s2)}` and this evaluator only sees that result type, so a shift
-                // amount narrower than the value is indistinguishable from one declared at the
-                // value's own width. Reading it wider than it was declared is harmless as the extra
-                // bits are zero, and `expect_pattern` masks to `bits` on the way in as the model
-                // takes its operands already normalized and does no masking of its own.
+                // Both operands are read at `bits`, the result's width, which they share (the type
+                // analysis enforces it for a shift's amount). `expect_pattern` masks to `bits`, as
+                // the model takes its operands already normalized.
                 let raw = semantics::residue(
                     binary_arith_op_kind.into(),
                     &self.expect_pattern(bits),
@@ -752,13 +756,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         bits: Option<usize>,
         _ctx: &mut R1CGen,
     ) -> Result<(), AssertionFailure> {
-        // The signed ordering reads both as patterns below, which holds a [`Value::Wide`] as well.
-        if kind != CmpKind::SLt && (matches!(a, Value::Wide(_)) || matches!(b, Value::Wide(_))) {
-            let holds = if kind == CmpKind::Eq {
-                a.magnitude() == b.magnitude()
-            } else {
-                a.magnitude() < b.magnitude()
-            };
+        if let Some(holds) = Value::wide_unsigned_cmp(kind, a, b) {
             return if holds {
                 Ok(())
             } else {
@@ -817,25 +815,47 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Ok(())
     }
 
-    fn array_get(&self, index: &Self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
-        let index = index.expect_u32();
-        self.expect_array().borrow().data[index as usize].clone()
+    /// A read at a pure index is the element. One past the end fails every execution reaching it,
+    /// which the interpreter reports by trapping.
+    fn array_get(
+        &self,
+        index: &Self,
+        _out_type: &Type,
+        _ctx: &mut R1CGen,
+    ) -> Result<Self, AssertionFailure> {
+        let index = index.expect_u32() as usize;
+        let array = self.expect_array();
+        let data = &array.borrow().data;
+        data.get(index)
+            .cloned()
+            .ok_or_else(|| past_the_end(index, data.len()))
     }
 
-    fn array_set(&self, index: &Self, value: &Self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
+    /// As [`Self::array_get`], for a write.
+    fn array_set(
+        &self,
+        index: &Self,
+        value: &Self,
+        _out_type: &Type,
+        _ctx: &mut R1CGen,
+    ) -> Result<Self, AssertionFailure> {
         let array = self.expect_array();
-        let index = index.expect_u32();
+        let index = index.expect_u32() as usize;
         let mut new_array = array.borrow().data.clone();
-        new_array[index as usize] = value.clone();
-        Value::mk_array(new_array)
+        let length = new_array.len();
+        let slot = new_array
+            .get_mut(index)
+            .ok_or_else(|| past_the_end(index, length))?;
+        *slot = value.clone();
+        Ok(Value::mk_array(new_array))
     }
 
     /// The `width` bits starting at `offset`, as an element again where one holds them.
     ///
-    /// The same reading as `click_cooper::lattice::eval_bit_range`'s field arm, through the same
-    /// two calls. The source is read as a pattern at the window's own top, and the window is minted
-    /// back through `Value::of_pattern`: a window of an element is below the modulus, and only a
-    /// window of a [`Value::Wide`] can be past it.
+    /// Reads the same as `click_cooper::lattice::eval_bit_range`'s field arm, through the same two
+    /// calls: the source is read as a pattern up to the window's top, and the window is minted back
+    /// through `Value::of_pattern`. A window of an element is below the modulus; only a window of a
+    /// [`Value::Wide`] can exceed it.
     // FIELD-ASSUMPTION: L4-decompose
     fn bit_range(&self, offset: usize, width: usize, _out_type: &Type, ctx: &mut R1CGen) -> Self {
         let read = offset
@@ -867,11 +887,8 @@ impl symbolic_executor::Value<R1CGen> for Value {
             "ICE: witness strip {cast_target} should not reach R1CS gen"
         );
         match (cast_target, self) {
-            // A constant cast to an integer is read at the target's width, which truncates a
-            // narrowing. The frontend puts a `BitRange` ahead of each narrowing cast it writes, so
-            // there the value already fits; `WideWitnessInts` does not, when it cuts a pure value
-            // into limbs, and a limb that kept the bits above it would reach a constraint as the
-            // wrong coefficient.
+            // Read at the target's width, truncating a narrowing: the frontend's narrowing casts
+            // already fit, but `WideWitnessInts` cuts pure values into limbs this way.
             (hlssa::CastTarget::Int(bits), Value::Const(_) | Value::Wide(_)) => {
                 Value::of_pattern(ctx.field(), self.expect_pattern(*bits))
             }
@@ -1053,8 +1070,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         }
     }
 
-    // The operand is read at `value_bits`, which is the masking the model gives the bits above the
-    // read.
+    // The operand is read at `value_bits`, which masks the bits above it as the model does.
     fn spread(&self, value_bits: usize, ctx: &mut R1CGen) -> Self {
         let spread = self.expect_pattern(value_bits).spread(value_bits);
         Value::of_pattern(ctx.field(), spread)
@@ -1890,13 +1906,9 @@ mod comparison_tests {
             .is_ok()
     }
 
-    /// Both comparison paths read their operands the way the opcode says, not the way the operand
-    /// type says.
-    ///
-    /// `assert_cmp` is the half where reading the type would be unsound. An integer type carries no
-    /// sign, so "is the operand an integer" answers "yes" for every operand either comparison can
-    /// take: a `ULt` over a byte with its high bit set would read as negative and pass an assertion
-    /// that should have failed.
+    /// Both comparison paths read their operands as the opcode says, not as the type says. An
+    /// integer type carries no sign, so reading by type would let an unsigned `ULt` over a byte
+    /// with its high bit set pass as negative.
     #[test]
     fn a_comparison_reads_its_operands_the_way_the_opcode_says() {
         // 0xFB in eight bits is 251 read as a magnitude and -5 read as two's complement, so the
@@ -1922,8 +1934,7 @@ mod comparison_tests {
     }
 
     /// Both comparison paths agree with the model at every wide width, under every reading, on
-    /// either side of the modulus: an operand past it is carried as its pattern, and each of the
-    /// three orderings reads that as it reads an element.
+    /// either side of the modulus.
     #[test]
     fn a_comparison_agrees_with_the_model_at_wide_widths() {
         let field = FieldConfig::bn254();
@@ -1963,10 +1974,8 @@ mod comparison_tests {
         );
     }
 
-    /// A field element has no width and no sign, and its comparisons say so.
-    ///
-    /// `assert_cmp` selects its arm by the opcode rather than by the operand's kind, so this is
-    /// the case that pins a field comparison to the same answers either way.
+    /// A field comparison gives the same answers on both paths, though `assert_cmp` picks its arm
+    /// by the opcode rather than the operand's kind.
     #[test]
     fn a_field_comparison_needs_no_width() {
         let a = constant(2);
@@ -1986,13 +1995,13 @@ mod comparison_tests {
 mod tests {
     use super::*;
 
-    /// A field element wider than a host word is **refused readably**, not read as a residue and
-    /// not ICEd on.
+    /// A field element wider than a host word is **refused readably**, neither read as a residue
+    /// nor ICEd on.
     ///
-    /// This pins the width `const_u128` reads at to its own return type. Spelled as an integer type
-    /// cap instead, raising that cap makes `field_limbs_fit` vacuously true here and sends every
-    /// oversized constant into `host_word`, converting the `None` below into a compiler bug report.
-    /// The value is a bn254 element, so this is a path that can be hit today.
+    /// This ties the width `const_u128` reads at to its return type. Were it an integer type cap
+    /// instead, raising that cap would make `field_limbs_fit` vacuously true here and send every
+    /// oversized constant into `host_word`, turning the `None` below into a compiler bug. The value
+    /// is a bn254 element, so this path is reachable.
     #[test]
     fn a_constant_too_wide_for_a_host_word_declines_rather_than_reading_a_residue() {
         // The widest value a host word holds, and the first one past it.
@@ -2001,8 +2010,7 @@ mod tests {
 
         assert_eq!(Value::Const(one_past).const_u128("test"), None);
 
-        // And the bound is exact rather than conservative: the value below it still reads, and
-        // reads right, so this is a boundary and not a blanket refusal.
+        // The bound is exact: the value just below it still reads correctly.
         assert_eq!(Value::Const(widest).const_u128("test"), Some(u128::MAX));
     }
 }
@@ -2039,10 +2047,7 @@ mod int_semantics_conformance {
         BinaryArithOpKind::Xor,
     ];
 
-    /// `residue` on the host words either side of it.
-    ///
-    /// This evaluator holds its integers as field elements and reads them out as host words, so a
-    /// pattern exists only for the length of a call into the model.
+    /// The model's `residue`, taking and returning host words.
     fn model(op: BinaryArithOpKind, bits: usize, a: u128, b: u128) -> Option<u128> {
         residue(
             op.into(),
@@ -2067,7 +2072,7 @@ mod int_semantics_conformance {
 
     fn operand_pairs(op: BinaryArithOpKind, bits: usize) -> Vec<(u128, u128)> {
         let rhs = if IntOp::from(op).is_shift() {
-            corners::shift_amounts(bits, bits)
+            corners::shift_amounts(bits)
         } else {
             corners::values(bits)
         };
@@ -2180,18 +2185,16 @@ mod int_semantics_conformance {
         assert_eq!(fold(BinaryArithOpKind::UShl, 8, 1, 9), 2);
         assert_eq!(fold(BinaryArithOpKind::UShr, 8, 0x80, 8), 0x80);
 
-        // The signed right shift is here as the control: it reduces by the width like the other
-        // two, so a failure isolated to `<<` points at the shift direction rather than at the
-        // reduction.
+        // The signed right shift is the control: a failure in `<<` alone implicates the direction,
+        // not the reduction.
         assert_eq!(fold(BinaryArithOpKind::SShr, 8, 0xFF, 8), 0xFF);
     }
 
     // THE WIDE HALF
     // --------------------------------------------------------------------------------------
     //
-    // This evaluator's domain is bounded by the **field**, and by the _value_ rather than the
-    // width: a constant here is one field element, so it reaches every pattern below the modulus,
-    // at any width the type system admits. The wide corner set deliberately runs past the modulus.
+    // This evaluator is bounded by the value, not the width: a constant reaches every pattern
+    // below the modulus at any width. The wide corner set deliberately runs past the modulus.
 
     /// Fold one operation the way `R1CGen` does, with patterns on both sides of the call.
     fn fold_wide(op: BinaryArithOpKind, bits: usize, a: &IntBits, b: &IntBits) -> IntBits {
@@ -2209,11 +2212,8 @@ mod int_semantics_conformance {
         .expect_pattern(bits)
     }
 
-    /// The exact relation again, at every wide width, on both sides of the modulus.
-    ///
-    /// Every width in the wide set runs, **16384 included**. An operand or an answer past the
-    /// modulus is carried as its pattern, so nothing is skipped; the count of those is what shows
-    /// the corners reach past it.
+    /// The exact relation again, at every wide width up to 16384, on both sides of the modulus.
+    /// Values past it are carried as patterns, so nothing is skipped.
     #[test]
     fn the_r1cs_fold_agrees_with_the_model_at_wide_widths() {
         let field = FieldConfig::bn254();
@@ -2227,8 +2227,8 @@ mod int_semantics_conformance {
                 for a in &values {
                     for b in &rhs {
                         let Some(want) = residue(op.into(), a, b) else {
-                            // The divmod shapes the model leaves unspecified, which this evaluator
-                            // ICEs on rather than folding; the narrow sweep pins that.
+                            // Divmod shapes the model leaves unspecified ICE here; the narrow
+                            // sweep pins that.
                             continue;
                         };
 
@@ -2255,18 +2255,14 @@ mod int_semantics_conformance {
             "the wide sweep only reached {checked} specified points"
         );
 
-        // The corner set is meant to reach past the modulus. If it stopped, the sweep would say
-        // nothing about the values this evaluator carries as patterns.
+        // The corners must reach past the modulus to exercise the patterns.
         assert!(
             past_the_modulus > 0,
             "no wide corner reached past the modulus"
         );
     }
 
-    /// The bound is on the **value**, not on the width.
-    ///
-    /// The widest type the type system admits folds when what it carries fits, which is the whole
-    /// difference between this evaluator's limit and a cap on the type.
+    /// The bound is on the value, not the width: the widest type folds when its value fits.
     #[test]
     fn the_widest_type_folds_when_its_value_fits() {
         let bits = crate::compiler::ssa::hlssa::MAX_SUPPORTED_INT_BITS;
@@ -2279,8 +2275,8 @@ mod int_semantics_conformance {
         );
     }
 
-    /// `2^253` is below the modulus and `2^254` is above it, so this is a sum of two representable
-    /// operands with no element of its own, which is carried as its pattern.
+    /// `2^253` is below the modulus and `2^254` above it, so two representable operands sum to a
+    /// value that is not a field element, which is carried as its pattern.
     #[test]
     fn an_answer_above_the_modulus_is_carried_as_its_pattern() {
         let half = IntBits::from_u128(256, 1).shifted_left(253);
@@ -2294,7 +2290,7 @@ mod int_semantics_conformance {
     }
 
     /// A value past the modulus is an ICE where it would have to become an element: a constraint,
-    /// or a cast to `Field`, which `width_validation` refuses before it could be written.
+    /// or a cast to `Field`.
     #[test]
     #[should_panic(expected = "value at or above the modulus reached a use in R1CS generation")]
     fn a_value_past_the_modulus_has_no_element_to_give() {

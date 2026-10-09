@@ -3,9 +3,9 @@
 // `>>` by a literal, which the simplifier has already made a bit window.
 //
 // A literal amount only moves bits, so the operand is cut where the discarded bits begin and the
-// piece below is moved up. A witnessed one is split into a whole number of 64-bit limbs and the
-// rest, which is read out of the powers-of-two table the narrow shifts use, and every limb of the
-// operand is split at that rest into two range-checked halves.
+// piece below is moved up. A witnessed one is split into a whole number of 64-bit limbs plus a
+// remainder, which is looked up in the powers-of-two table the narrow shifts use, and every limb of
+// the operand is split at that remainder into two range-checked halves.
 //
 // `x` is every bit, so each `<<` below discards some, and Noir's `<<` wraps.
 fn main(x: u128, n: u128, m: u128) {

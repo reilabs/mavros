@@ -31,15 +31,10 @@ use crate::{
     vm::{self, bytecode},
 };
 
-/// Report a binary arithmetic operation whose operands do not cover the cells it will read.
+/// Panic on a binary arithmetic operation whose operands do not cover the cells it will read.
 ///
-/// Every integer opcode addresses its operands as [`int_cell_count`] cells of the **result's**
-/// width. An operand declared at a width with a different cell count is therefore read across the
-/// frame slot beside it — as a stray high limb in the double lane, and as a slice overlapping its
-/// neighbour in the wide one. The cell lane cannot meet this, since every width it holds is one
-/// cell, which is why a narrow shift by a narrower amount needs nothing done to it.
-///
-/// A non-shift's two operands are one width by the model's own rule, `int_semantics::check_widths`.
+/// Integer opcodes read operands as [`int_cell_count`] cells of the **result's** width, so an
+/// operand with a different cell count would be read across the neighboring frame slot.
 fn check_operand_extents(
     kind: BinaryArithOpKind,
     type_info: &FunctionTypeInfo,
@@ -58,8 +53,7 @@ fn check_operand_extents(
         assert!(
             int_cell_count(operand_bits) == cells,
             "ICE: {kind:?}'s {side} operand is an int{operand_bits}, which does not cover the \
-             {cells} frame cell(s) this opcode reads for an int{bits} result; width_validation \
-             should have refused the program"
+             {cells} frame cell(s) this opcode reads for an int{bits} result"
         );
     }
 }
@@ -253,12 +247,10 @@ impl CodeGen {
                 // Since nothing reads it, the blob gets DCE-d away.
                 [] => 0,
                 // An entry that is neither has not been through `PrepareEntryPoint`, so it has no
-                // input blob to state a width for. Codegen still runs — disassembling a hand-built
-                // function is how the width-to-opcode choice is read back — and the program it
-                // produces is inspectable rather than runnable. What says so is the interpreter,
-                // which holds the supplied input count against this field before executing
-                // anything; and for a program compiled from Noir, the driver's own check of this
-                // field against the ABI.
+                // input blob width. Codegen still runs (disassembling a hand-built function is how
+                // tests read back the width-to-opcode choice), but the program is inspectable, not
+                // runnable: the interpreter checks the supplied input count against this field
+                // before executing, and for a Noir program the driver checks it against the ABI.
                 _ => 0,
             };
 
@@ -907,9 +899,8 @@ impl CodeGen {
                         let result = layouter.alloc_int(*val, *bits);
                         match int_lane(*bits) {
                             Lane::Cell => {
-                                // Zero-fill. Needs `bits` only to mask the shift amount to `bits - 1`, the
-                                // way LLVM does; the result of a logical shift cannot exceed the width, so
-                                // nothing is re-masked.
+                                // `bits` only masks the amount, as LLVM does; a logical shift
+                                // cannot exceed the width, so nothing is re-masked.
                                 emitter.push_op(bytecode::OpCode::UshrInt {
                                     res: result,
                                     a: layouter.get_value(*op1),
@@ -1150,9 +1141,7 @@ impl CodeGen {
                                     }
                                 }
                                 (Lane::Double, Lane::Cell) => {
-                                    // The narrowing is a prefix copy, so unlike the arm above it needs no
-                                    // `target_bits < source_bits` test: the cells it drops are the ones the
-                                    // target does not have.
+                                    // A prefix copy, so no `target_bits < source_bits` test.
                                     let target_cells = int_cell_count(*target_bits);
                                     emitter.push_op(bytecode::OpCode::MovFrame {
                                         target: result,
@@ -1238,7 +1227,7 @@ impl CodeGen {
                                     });
                                 }
                             }
-                            // The opcode takes the width and masks its own top cell, so a target
+                            // The opcode masks the result's top cell to the width, so a target
                             // that is not a whole number of cells needs no truncation after it.
                             Lane::Wide => {
                                 emitter.push_op(bytecode::OpCode::CastFieldToIntn {
@@ -1273,10 +1262,8 @@ impl CodeGen {
                     }
                 }
 
-                // Every complement outside the witness domain. `LowerWitnessBitwiseOps::lower_not`
-                // takes the witnessed ones during `spill_witness` and rewrites those into
-                // `(2^bits - 1) - value`, so what reaches here is a pure `Not` and the opcode makes
-                // it one instruction instead of a field subtraction.
+                // Only a pure `Not` reaches here: `LowerWitnessBitwiseOps::lower_not` rewrites the
+                // witnessed ones during `spill_witness`.
                 hlssa::OpCode::Not {
                     result: r,
                     value: v,
@@ -2145,13 +2132,9 @@ fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {
             // The tag names a cell count and a reading: it makes the tape read two cells as one
             // unsigned value.
             Lane::Double => (2, bytecode::ELEM_U128),
-            // Wider than either narrow lane, and still one field element: the tape takes the cell
-            // count and reads the element little-endian out of that many cells.
-            //
-            // The band this covers is bounded by the widest width the field carries injectively.
-            // Above it, `passes::wide_witness_ints` transposes a sequence into one per limb before
-            // codegen, so every element reaching here is a limb of at most one cell and takes the
-            // arm above.
+            // Wider than either narrow lane but still one field element, read little-endian from
+            // `cells` cells. A wider element never reaches here: `passes::wide_witness_ints`
+            // splits its sequence into one per limb, and a limb takes the arm above.
             Lane::Wide => {
                 let cells = int_cell_count(*bits);
                 assert!(

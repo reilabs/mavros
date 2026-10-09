@@ -1,19 +1,14 @@
-// Guarded shifts on the witness path, taken with the guard inactive.
+// Guarded witness shifts, taken with the guard inactive.
 //
-// Noir treats a shift amount at or above the width as a runtime error, so
-// the witness lowering checks the amount against the width. That check
-// has to be *guarded*, or an inactive branch containing an out-of-range shift
-// fails a program that never performs the shift at all. `a >> n` below is that
-// case: `n` is 40 against a u32.
+// A shift amount at or past the width is a runtime error, so the witness lowering checks it, and
+// that check must be guarded: `a >> n`, with `n = 40` on a u32, sits in an inactive branch and must
+// not fail the program.
 //
-// The left shifts are here for the opposite reason. They overflow, and
-// overflow is not an error -- Noir wraps -- so they must stay satisfiable
-// whether the guard is live or not, and produce the truncated value when it is.
-// A lowering that rangechecks the product instead of truncating it fails both
-// ways round.
+// The left shifts overflow, which Noir allows (it wraps), so they must stay satisfiable whatever
+// the guard and give the truncated value when it is live. A lowering that range-checks the product
+// instead of truncating fails both ways.
 //
-// The upstream shift tests cannot cover any of this: they all shift by a
-// constant, which folds long before this lowering runs.
+// Upstream shift tests all shift by a constant, which folds before this lowering runs.
 fn main(active: bool, live: bool, e: i8, k: i8, k2: i8, a: u32, n: u32) {
     // `e` is 64, so `e << 1` overflows i8. Inactive, so it must not be reported.
     let overflowing_shl = if active { e << 1 } else { 0 };

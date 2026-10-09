@@ -74,36 +74,16 @@ impl InstructionLoweringRule for LowerPureGuards {
                 self.lower_guard(emitter, context, *condition, inner.as_ref().clone())
             }
 
-            // An unguarded div/mod still has to be checked as `Guard` only covers the ops that sit
-            // under witness-dependent control flow. Witness operands are included: the comparisons
-            // become ordinary constraints, lowered by the later witness passes just like any
-            // other, so one implementation covers both. The one exception is an integer division by
-            // a witness, whose lowering rejects a zero divisor, and a signed one `INT_MIN / -1`,
-            // itself, and which `DCE` therefore keeps until that lowering has run; see
-            // `divisor_checked_by_its_lowering`.
+            // An unguarded div/mod needs its check too, witness operands included: the comparisons
+            // become constraints for the later witness passes. The exception is an integer
+            // division by a witness, whose lowering rejects a zero divisor (and a signed
+            // `INT_MIN / -1`) itself; see `divisor_checked_by_its_lowering`.
             //
-            // `Field` is in scope for the same reason the integers are, and needs it most, because
-            // there the missing check is a _soundness_ hole rather than a wrong answer. `div_field`
-            // answers `0` instead of trapping, and for a witness divisor `lower_field_div`
-            // constrains only `result * rhs == lhs`. At `rhs == lhs == 0` that degenerates to
-            // `q * 0 == 0`, which holds for **every** `q`: witgen fills in `0`, but the quotient is
-            // pinned by nothing, so a verifier would accept a proof carrying any value at all in
-            // that slot. This check closes that, and covers pure operands, which reach no
-            // constraint at all.
-            //
-            // This agrees with Noir, which rejects a zero field divisor in every runtime — the
-            // check is not a strictness increase over it. Noir's ACIR does it structurally rather
-            // than with a separate assert: `div_var` on `NativeField` goes through `inv_var`
-            // (`acir/acir_context/mod.rs:277`), constraining
-            // `predicate * (inv(rhs) * rhs) == predicate` and then forming `lhs * inv(rhs)`. Since
-            // `FieldElement::inverse` yields zero when no inverse exists, `rhs == 0` reduces that
-            // to `0 == predicate` — unsatisfiable under an active predicate whatever `lhs` is.
-            // Brillig and comptime raise "attempt to divide by zero" outright.
-            //
-            // Note that constraining the inverse is _stronger_ than mavros's `result * rhs == lhs`,
-            // and gets the nonzero-ness for free. Moving `lower_field_div` onto that encoding would
-            // make this `Field` arm redundant; it is left for separate work because it changes the
-            // witness shape and so moves R1CS layout everywhere.
+            // For `Field` the check is a soundness fix: `lower_field_div` constrains only
+            // `result * rhs == lhs`, which at `0 / 0` holds for every quotient. Noir rejects a zero
+            // field divisor in every runtime (ACIR through `inv_var`, `acir_context/mod.rs:277`),
+            // so this is no stricter. Constraining the inverse, as ACIR does, would make this arm
+            // redundant, but changes the witness shape everywhere.
             OpCode::BinaryArithOp {
                 kind,
                 result,
@@ -130,13 +110,13 @@ impl InstructionLoweringRule for LowerPureGuards {
                 true
             }
 
-            // An unguarded shift needs its amount checked for exactly the reason the unguarded
-            // div/mod above does: `Guard` only wraps the ops under witness-dependent control flow,
-            // so an unconditional shift reached `lower_shift_guard` never.
+            // An unguarded shift needs its amount checked for the same reason as the unguarded
+            // div/mod above: `Guard` only wraps ops under witness-dependent control flow, so
+            // `lower_shift_guard` never sees an unconditional shift.
             //
-            // Pure inputs only, matching the guarded arm. A shift with a witness operand is left
-            // to its own lowering, which emits the equivalent check itself because it has to be
-            // able to build that check out of constraints rather than out of a pure comparison.
+            // Pure inputs only, as in the guarded arm. A shift with a witness operand is left to
+            // its lowering, which emits the equivalent check as constraints, since it cannot use a
+            // pure comparison.
             OpCode::BinaryArithOp {
                 kind,
                 result,
@@ -762,18 +742,9 @@ impl LowerPureGuards {
 
     /// Lower `Guard(cond, lhs / rhs)` on field elements with a witness operand.
     ///
-    /// The division stays guarded for `lower_field_div_guarded`, which constrains only
-    /// `result * rhs == lhs * cond`. At `0 / 0` that holds for every `result`, so where the branch
-    /// is taken the quotient would be pinned by nothing and a zero divisor would pass whenever the
-    /// dividend is zero too.
-    ///
-    /// The check the unguarded arm builds closes that, asserted under the same guard so an inactive
-    /// branch is not held to it. An operand is a witness, so the branch `lower_divmod_guard`
-    /// builds out of pure ones is not available, and the assertion is one of ordinary constraints
-    /// instead.
-    ///
-    /// An assertion is never dead, so a division that is dead survives as its check, which a
-    /// `DCE` after this point would otherwise delete with the division.
+    /// `lower_field_div_guarded` constrains only `result * rhs == lhs * cond`, which at `0 / 0`
+    /// pins nothing, so the zero-divisor check is asserted under the same guard. An assertion is
+    /// never dead, so it outlives a dead division.
     #[allow(clippy::too_many_arguments)]
     fn lower_witness_field_div_guard(
         &self,
@@ -938,13 +909,10 @@ impl LowerPureGuards {
         }
     }
 
-    /// Compute the OOB condition `idx >= len(seq)`, returning a bool ValueId, for both arrays and
-    /// slices.
+    /// The OOB condition `idx >= len(seq)` as a bool, for arrays and slices.
     ///
-    /// The length lookup and the widening rule come from [`seq_bounds_operands`], which is also
-    /// what DCE's dead-access rewrite builds its `AssertCmp` from. This rule needs the condition as
-    /// a _value_ to branch on rather than as an assert, but the comparison itself must be the same
-    /// one or the two disagree about what "out of bounds" means.
+    /// Built from [`seq_bounds_operands`], as DCE's dead-access assert is, so the two agree on what
+    /// "out of bounds" means.
     fn emit_oob_cond(
         &self,
         emitter: &mut HLBlockEmitter<'_>,
@@ -954,8 +922,7 @@ impl LowerPureGuards {
     ) -> ValueId {
         let seq_type = type_info.get_value_type(seq).clone();
         let idx_type = type_info.get_value_type(index).clone();
-        let (_, idx_cmp, len_cmp, _) =
-            seq_bounds_operands(emitter, seq, index, &seq_type, &idx_type);
+        let (_, idx_cmp, len_cmp) = seq_bounds_operands(emitter, seq, index, &seq_type, &idx_type);
         let in_bounds = emitter.ult(idx_cmp, len_cmp);
         emitter.not(in_bounds)
     }
@@ -1055,8 +1022,8 @@ mod tests {
 
         InstructionLowering::pure_guards().run(&mut ssa, &AnalysisStore::new());
 
-        // The checks above are stated in bit windows and comparisons, and the windows are lowered
-        // one phase later, so a width one of them cannot build is not visible here without it.
+        // The checks use bit windows, lowered one phase later, so lower them here too or a width a
+        // window cannot build would go unseen.
         InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
         ssa
     }
@@ -1098,9 +1065,8 @@ mod tests {
             .any(|op| matches!(op, OpCode::AssertCmp { .. }))
     }
 
-    /// An integer division by a witness carries no check of its own, as both of its lowerings
-    /// refuse a zero divisor, and a signed one `INT_MIN / -1`, already; every other division keeps
-    /// it.
+    /// An integer division by a witness gets no separate check, as both its lowerings already
+    /// refuse a zero divisor and, when signed, `INT_MIN / -1`. Every other division keeps it.
     #[test]
     fn only_an_integer_division_by_a_witness_leaves_its_check_to_its_lowering() {
         let int = |bits| Type::int(bits);
@@ -1244,13 +1210,13 @@ mod tests {
         }
     }
 
-    /// The bound a pure multiply is checked against is the operand width's own `2^bits - 1`, at
-    /// every width the type system admits.
+    /// A pure multiply is checked against `2^bits - 1` at the operand's width, at every width the
+    /// type system admits.
     ///
-    /// Minting it through a host word bounded the _check_ at 128 bits, and so the operation: both
-    /// pure backends multiply at any width, so a refusal there had no backend behind it. It is the
-    /// only guard in this module that mints a constant of the operand's width rather than a zero,
-    /// which is why it is the only one that ran out.
+    /// Building that bound through a host word would cap the check, and so the operation, at 128
+    /// bits, though both pure backends multiply at any width. It is the only guard in this module
+    /// that builds a constant of the operand's width rather than a zero, which is why only it can
+    /// hit that cap.
     #[test]
     fn a_pure_multiply_is_checked_against_its_own_width() {
         for bits in [
@@ -1270,13 +1236,8 @@ mod tests {
         }
     }
 
-    /// Every failable pure operation builds its check at every width `width_validation` admits.
-    ///
-    /// The companion of that pass's `the_same_operation_outside_the_witness_domain_is_not_bounded`,
-    /// from the lowering's side. The funnel refuses no operation on this lane at all, under either
-    /// reading, so a constant minted here in a host word would be a panic several passes past the
-    /// only point that could have named the width — which is what a pure multiply above 128 bits
-    /// was. Sweeping the kinds is what says the rest are not.
+    /// Every failable pure operation builds its check at every width, under either reading: no
+    /// check mints its constants in a host word, which would panic past 128 bits.
     #[test]
     fn every_pure_guard_is_built_at_every_width() {
         let unsigned = [

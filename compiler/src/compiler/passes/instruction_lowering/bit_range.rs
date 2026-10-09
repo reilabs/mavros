@@ -192,8 +192,8 @@ impl LowerBitRangeOps {
 }
 
 // FIELD-ASSUMPTION: L3-felt-limbs
-// The modulus value is read from the configured field (see below); the residual assumption is
-// structural in that the field fits in 4 limbs / 32 bytes for the canonical byte-decomposition.
+// The modulus is read from the configured field; the canonical byte decomposition still assumes the
+// field fits 4 limbs (32 bytes).
 fn decompose_canonical_field_bytes(
     b: &mut HLBlockEmitter<'_>,
     value: ValueId,
@@ -213,8 +213,8 @@ fn decompose_canonical_field_bytes(
     let modulus_hi = b.field_const(b.field().constant(modulus_hi_u128));
     let modulus_lo_m1 = b.field_const(b.field().constant(modulus_lo_m1_u128));
     let two_to_8 = b.field_const(b.field().constant(256u128));
-    // One field limb's place value, and one `u128` half's. The `128`s here and below are the
-    // width of the halves the modulus is read in above, not a field limb.
+    // A field limb's place value, and a `u128` half's. The `128`s below are the width of the halves
+    // the modulus is read in, not a field limb's.
     let limb_place_value = b.field_const(b.field().two_pow(FIELD_LIMB_BITS));
     let two_to_128 = b.field_const(b.field().two_pow(128));
     let zero = b.field_const(b.field().zero());
@@ -453,14 +453,13 @@ fn lower_pure_byte_low_bits(b: &mut HLBlockEmitter<'_>, byte: ValueId, bits: usi
 
 /// The `width` bits starting at `offset` of a `bits`-wide value, as a mask of that width.
 ///
-/// A **pattern** rather than a host word, which is what makes the window width-generic: the mask
-/// of a 200-bit window is not a number any host type has, and building it through one is what used
-/// to stop this lowering at [`narrow_int_bits`]. The only bounds left are the window's own — a
-/// window has at least one bit and does not reach past its source.
+/// Built as a **pattern**, not a host word, so it works at any width: the mask of a 200-bit window
+/// fits no host type, and building it through one would limit this lowering to
+/// [`narrow_int_bits`]. The only bounds are on the window: it has at least one bit and does not
+/// reach past its source.
 ///
-/// Named for the window rather than for the mask so as not to collide with [`util::bit_mask`],
-/// which answers the different question "the low `bits` of a host word" and is what the guard
-/// lowerings reach for.
+/// Named for the window, not the mask, to avoid colliding with [`util::bit_mask`], which gives the
+/// low `bits` of a host word and is what the guard lowerings use.
 ///
 /// [`util::bit_mask`]: crate::compiler::util::bit_mask
 fn window_mask(bits: usize, offset: usize, width: usize) -> IntBits {
@@ -487,11 +486,9 @@ fn cast_target_for_scalar_type(ty: &Type) -> CastTarget {
 mod tests {
     use super::*;
 
-    /// The mask is a pattern, so a window past every host type is an ordinary one.
-    ///
-    /// This is the whole of what makes the window width-generic: `((1u128 << width) - 1) << offset`
-    /// has no answer at 200 bits, and the bound that used to be written against it is what stopped
-    /// a witnessed narrowing at `narrow_int_bits`.
+    /// The mask is a pattern, not a host word, so a window may be wider than every host type. A
+    /// `u128` mask, `((1u128 << width) - 1) << offset`, has no answer at 200 bits and would cap a
+    /// witnessed narrowing at `narrow_int_bits`.
     #[test]
     fn a_window_past_every_host_type_is_an_ordinary_mask() {
         let mask = window_mask(200, 64, 100);
@@ -509,7 +506,8 @@ mod tests {
         }
     }
 
-    /// The window's own bounds, which are the only ones left.
+    /// The only bounds are on the window: it has at least one bit and does not reach past its
+    /// source.
     #[test]
     #[should_panic(expected = "BitRange exceeds source width")]
     fn a_window_reaching_past_its_source_is_refused_before_it_can_truncate() {

@@ -12,11 +12,10 @@ use crate::compiler::ssa::{
 
 /// The `bits`-wide pattern carrying `2^exponent`.
 ///
-/// [`IntBits`] reaches a power of two by shifting rather than by a constructor of its own, so
-/// this gives the composition and its bound — an exponent at or above the width names no pattern,
-/// and shifting past it would answer zero — one home rather than one per caller. A caller that
-/// cannot reach [`HLEmitter::two_pow_const`], because it mints constants without an emitter, takes
-/// this instead.
+/// [`IntBits`] builds a power of two by shifting, with no dedicated constructor, so this gives the
+/// shift and its bound one home: an exponent at or above the width names no pattern, and shifting
+/// past it would answer zero. Use it where [`HLEmitter::two_pow_const`] is out of reach because
+/// constants are minted without an emitter.
 #[track_caller]
 pub fn two_pow_pattern(bits: usize, exponent: usize) -> IntBits {
     assert!(
@@ -984,7 +983,7 @@ mod tests {
     }
 
     /// The emitter carries whatever pattern it is handed, so a constant the host has no type for
-    /// needs no route of its own.
+    /// needs no separate route.
     #[test]
     fn a_constant_past_the_host_word_is_emitted_as_it_is_built() {
         let pattern = minted(|b| b.int_const(IntBits::all_ones(200)));
