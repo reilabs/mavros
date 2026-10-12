@@ -8,6 +8,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::error::ToolchainError;
+
 /// Environment variable pointing at a pre-built wasm-runtime static library. When set,
 /// [`locate_or_build`] uses it directly instead of invoking cargo.
 pub const WASM_RUNTIME_LIB_ENV: &str = "MAVROS_WASM_RUNTIME_LIB";
@@ -93,13 +95,15 @@ pub fn load_wasmtime_module(
 /// checkout ("failed to read directory ... mavros_debug/...: No such file or directory"). The
 /// test runner therefore builds the runtime once up front and points children at the artifact
 /// via [`WASM_RUNTIME_LIB_ENV`], so they never invoke cargo.
-pub fn locate_or_build() -> PathBuf {
+pub fn locate_or_build() -> Result<PathBuf, ToolchainError> {
     if let Ok(lib_path) = std::env::var(WASM_RUNTIME_LIB_ENV) {
         let lib_path = PathBuf::from(lib_path);
         if lib_path.exists() {
-            return lib_path;
+            return Ok(lib_path);
         }
-        ice_usr!("{WASM_RUNTIME_LIB_ENV} is set but {lib_path:?} does not exist");
+        return Err(ToolchainError::new(format!(
+            "{WASM_RUNTIME_LIB_ENV} is set but {lib_path:?} does not exist"
+        )));
     }
 
     let metadata = cargo_metadata::MetadataCommand::new()
@@ -120,7 +124,9 @@ pub fn locate_or_build() -> PathBuf {
             "wasm-runtime build stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        ice_usr!("Failed to build wasm-runtime for wasm32");
+        return Err(ToolchainError::new(
+            "Failed to build wasm-runtime for wasm32",
+        ));
     }
 
     let lib_path = workspace_root
@@ -130,10 +136,12 @@ pub fn locate_or_build() -> PathBuf {
         .join("libmavros_wasm_runtime.a");
 
     if !lib_path.exists() {
-        ice_usr!("wasm-runtime library not found at {:?}", lib_path);
+        return Err(ToolchainError::new(format!(
+            "wasm-runtime library not found at {lib_path:?}"
+        )));
     }
 
-    lib_path
+    Ok(lib_path)
 }
 
 #[cfg(test)]

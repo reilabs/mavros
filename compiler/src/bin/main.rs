@@ -360,7 +360,7 @@ fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
         let wasm_config = if args.emit_wasm {
             let wasm_path = driver.get_debug_output_dir().join("program.wasm");
             info!(message = %"Generating WebAssembly", path = %wasm_path.display());
-            let runtime_lib = mavros_compiler::wasm_runtime::locate_or_build();
+            let runtime_lib = mavros_compiler::wasm_runtime::locate_or_build()?;
             let mut opts = WasmCompileOpts::release(runtime_lib);
             if let Some(root) = &source_path_root {
                 opts = opts.with_debug_path_root(root);

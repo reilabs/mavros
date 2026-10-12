@@ -737,9 +737,9 @@ pub fn bytecode_listing(ssa: &HLSSA) -> String {
 ///
 /// A compilation **failure is a failure**, and says so: `compile_llvm_targets` reports a broken
 /// WASM lane by returning an error, and swallowing one would leave every assertion below to pass
-/// by skipping. The absent-toolchain case is not this one — `wasm_runtime::locate_or_build` and
-/// `compile_to_wasm` both panic where `wasm-ld` or the runtime archive is missing, so a bare
-/// `cargo test` outside the development shell never reaches the `None` here at all.
+/// by skipping. The absent-toolchain case is not this one — `wasm_runtime::locate_or_build`
+/// error is unwrapped and `compile_to_wasm` panics where `wasm-ld` or the runtime archive is
+/// missing, so a bare `cargo test` outside the development shell never reaches the `None` here.
 ///
 /// [`None`] is therefore narrow: a scratch directory that could not be made, or a linker that
 /// reported success and wrote nothing. [`Compiled::wasm_is_available`] is how a test that needs
@@ -747,7 +747,7 @@ pub fn bytecode_listing(ssa: &HLSSA) -> String {
 fn compile_wasm(driver: &mut Driver, r1cs: &R1CS) -> Option<WasmArtifact> {
     let scratch = TempDir::new().ok()?;
     let path = scratch.path().join("program.wasm");
-    let options = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
+    let options = WasmCompileOpts::fast(wasm_runtime::locate_or_build().unwrap());
 
     driver
         .compile_llvm_targets(
