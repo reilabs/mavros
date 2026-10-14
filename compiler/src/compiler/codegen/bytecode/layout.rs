@@ -1,5 +1,6 @@
 //! Tools and utilities for computing layouts when generating bytecode.
 
+use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::{IntBits, int_bits::HOST_LIMB_BITS};
 
 use crate::{
@@ -12,7 +13,7 @@ use crate::{
         },
         util::ice_non_elided_tuple,
     },
-    vm::{self, bytecode},
+    vm::bytecode,
 };
 
 // FRAME LAYOUTER
@@ -22,13 +23,21 @@ use crate::{
 pub struct FrameLayouter {
     pub next_free: usize,
     pub variables: HashMap<ValueId, usize>,
+
+    /// The cells one element of the program's field occupies.
+    field_cells: usize,
 }
 
 impl FrameLayouter {
-    pub fn new() -> Self {
+    pub fn new(field: FieldConfig) -> Self {
+        Self::with_field_cells(field.storage_cells())
+    }
+
+    pub(super) fn with_field_cells(field_cells: usize) -> Self {
         Self {
             next_free: 2,
             variables: HashMap::default(),
+            field_cells,
         }
     }
 
@@ -54,8 +63,7 @@ impl FrameLayouter {
     pub fn alloc_field(&mut self, value: ValueId) -> bytecode::FramePosition {
         self.variables.insert(value, self.next_free);
         let r = self.next_free;
-        // FIELD-ASSUMPTION: L3-felt-limbs
-        self.next_free += bytecode::FELT_LIMBS;
+        self.next_free += self.field_cells;
         bytecode::FramePosition(r)
     }
 
@@ -68,8 +76,7 @@ impl FrameLayouter {
 
     pub fn alloc_temp_field(&mut self) -> bytecode::FramePosition {
         let r = self.next_free;
-        // FIELD-ASSUMPTION: L3-felt-limbs
-        self.next_free += bytecode::FELT_LIMBS;
+        self.next_free += self.field_cells;
         bytecode::FramePosition(r)
     }
 
@@ -80,27 +87,9 @@ impl FrameLayouter {
         bytecode::FramePosition(r)
     }
 
-    /// Returns the size of `tp` in u`64` cells.
+    /// Returns the size of `tp` in `u64` cells.
     pub fn type_size(&self, tp: &Type) -> usize {
-        match tp.expr {
-            // FIELD-ASSUMPTION: L3-felt-limbs
-            TypeExpr::Field => bytecode::FELT_LIMBS,
-            // Width-driven, and it must stay that way: `alloc_int` advances the frame by
-            // `int_cell_count`, so a second formula here would silently disagree with it for any
-            // width needing more than one cell.
-            TypeExpr::Int(bits) => {
-                assert!(bits <= MAX_SUPPORTED_INT_BITS);
-                int_cell_count(bits)
-            }
-            TypeExpr::Array(_, _) => constants::POINTER_SIZE_CELLS,
-            TypeExpr::Slice(_) => constants::POINTER_SIZE_CELLS,
-            TypeExpr::WitnessOf(_) => constants::POINTER_SIZE_CELLS,
-            TypeExpr::Tuple(_) => ice_non_elided_tuple(),
-            TypeExpr::Ref(_) => constants::POINTER_SIZE_CELLS,
-            // Blobs are stored by value, inline in the frame.
-            TypeExpr::Blob(ref elem, n) => n * self.type_size(elem),
-            _ => todo!(),
-        }
+        slot_cells(tp, self.field_cells)
     }
 
     pub fn alloc_scratch(&mut self, count: usize) -> bytecode::FramePosition {
@@ -119,40 +108,6 @@ impl FrameLayouter {
             self.alloc_value(value, tp);
         }
         bytecode::FramePosition(r)
-    }
-}
-
-// STRUCT LAYOUT INTERNER
-// ================================================================================================
-
-/// Interns unique struct shapes during codegen and returns a stable index into the resulting
-/// descriptor table.
-pub struct StructLayoutInterner {
-    pub table: Vec<vm::array::StructDescriptor>,
-    pub index: HashMap<Vec<(u32, bool)>, usize>,
-}
-
-impl StructLayoutInterner {
-    pub fn new() -> Self {
-        Self {
-            table: Vec::new(),
-            index: HashMap::default(),
-        }
-    }
-
-    pub fn intern(&mut self, fields: Vec<(u32, bool)>) -> usize {
-        if let Some(&idx) = self.index.get(&fields) {
-            return idx;
-        }
-        let idx = self.table.len();
-        self.table
-            .push(vm::array::StructDescriptor::new(fields.clone()));
-        self.index.insert(fields, idx);
-        idx
-    }
-
-    pub fn into_table(self) -> Vec<vm::array::StructDescriptor> {
-        self.table
     }
 }
 
@@ -214,11 +169,9 @@ pub fn for_each_constant_word(constant: &Constant, visit: &mut impl FnMut(u64)) 
             }
         }
         Constant::Field(val) => {
-            // FIELD-ASSUMPTION: L3-felt-limbs
             // FIELD-ASSUMPTION: L3-frame
-            let limbs = val.montgomery_limbs();
-            for i in 0..bytecode::FELT_LIMBS {
-                visit(limbs[i]);
+            for limb in val.montgomery_limbs() {
+                visit(limb);
             }
         }
         Constant::Blob(blob) => {
@@ -242,11 +195,12 @@ pub struct GlobalFrameLayouter {
 impl GlobalFrameLayouter {
     pub fn new(ssa: &HLSSA) -> Self {
         let global_types = ssa.get_global_types();
+        let field_cells = ssa.field().storage_cells();
         let mut offsets = Vec::new();
         let mut sizes = Vec::new();
         let mut next_free = 0usize;
         for typ in global_types.iter() {
-            let size = Self::type_frame_size(typ);
+            let size = slot_cells(typ, field_cells);
             offsets.push(next_free);
             sizes.push(size);
             next_free += size;
@@ -258,26 +212,34 @@ impl GlobalFrameLayouter {
         }
     }
 
-    fn type_frame_size(typ: &Type) -> usize {
-        match &typ.expr {
-            // FIELD-ASSUMPTION: L3-felt-limbs
-            TypeExpr::Field => bytecode::FELT_LIMBS,
-            // Width-driven; see `FrameLayouter::type_size`.
-            TypeExpr::Int(bits) => {
-                assert!(*bits <= MAX_SUPPORTED_INT_BITS);
-                int_cell_count(*bits)
-            }
-            // Heap-allocated types are pointers (1 word)
-            _ => 1,
-        }
-    }
-
     pub fn get_offset(&self, global: usize) -> usize {
         self.offsets[global]
     }
 
     pub fn get_size(&self, global: usize) -> usize {
         self.sizes[global]
+    }
+}
+
+/// The `u64` cells a value of type `tp` occupies in a frame or in the globals, where a field
+/// element takes `field_cells`.
+pub fn slot_cells(tp: &Type, field_cells: usize) -> usize {
+    match &tp.expr {
+        TypeExpr::Field => field_cells,
+        // Width-driven, and it must stay that way: `alloc_int` advances the frame by
+        // `int_cell_count`, so a second formula here would silently disagree with it for any width
+        // needing more than one cell.
+        TypeExpr::Int(bits) => {
+            assert!(*bits <= MAX_SUPPORTED_INT_BITS);
+            int_cell_count(*bits)
+        }
+        TypeExpr::Array(_, _) | TypeExpr::Slice(_) | TypeExpr::WitnessOf(_) | TypeExpr::Ref(_) => {
+            constants::POINTER_SIZE_CELLS
+        }
+        TypeExpr::Tuple(_) => ice_non_elided_tuple(),
+        // Blobs are stored by value, inline in the frame.
+        TypeExpr::Blob(elem, n) => n * slot_cells(elem, field_cells),
+        TypeExpr::Function(_) => ice!("function types are erased before codegen: {tp}"),
     }
 }
 
@@ -344,7 +306,7 @@ mod tests {
         assert_eq!(int_cell_count(200), 4, "200 bits is four 64-bit cells");
         assert_eq!(int_cell_count(MAX_SUPPORTED_INT_BITS), 256);
         assert_eq!(
-            FrameLayouter::new().type_size(&Type::int(MAX_SUPPORTED_INT_BITS)),
+            FrameLayouter::new(FieldConfig::bn254()).type_size(&Type::int(MAX_SUPPORTED_INT_BITS)),
             256
         );
     }
@@ -353,7 +315,7 @@ mod tests {
     fn the_two_frame_size_formulas_agree_at_every_width() {
         // `alloc_value` uses `type_size` and `alloc_int` uses `int_cell_count`, and a value can be
         // allocated by either, so the two must agree at every width.
-        let layouter = FrameLayouter::new();
+        let layouter = FrameLayouter::new(FieldConfig::bn254());
         for bits in [
             1usize,
             8,
@@ -374,12 +336,25 @@ mod tests {
                 int_cell_count(bits),
                 "type_size and alloc_int disagree at {bits} bits"
             );
-            assert_eq!(
-                GlobalFrameLayouter::type_frame_size(&Type::int(bits)),
-                int_cell_count(bits),
-                "type_frame_size and alloc_int disagree at {bits} bits"
-            );
         }
+    }
+
+    #[test]
+    fn a_field_slot_is_the_fields_storage_cells() {
+        let bn254 = FieldConfig::bn254();
+        assert_eq!(
+            FrameLayouter::new(bn254).type_size(&Type::field()),
+            bn254.storage_cells()
+        );
+
+        // Three cells, which no field has, so a slot sized by a literal fails.
+        let mut layouter = FrameLayouter::with_field_cells(3);
+        assert_eq!(layouter.type_size(&Type::field()), 3);
+        assert_eq!(layouter.type_size(&Type::blob(Type::field(), 2)), 6);
+        let named = layouter.alloc_field(ValueId(0));
+        let temp = layouter.alloc_temp_field();
+        let after = layouter.alloc_temp_field();
+        assert_eq!([named.0, temp.0, after.0], [2, 5, 8]);
     }
 
     #[test]

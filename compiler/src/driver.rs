@@ -119,15 +119,15 @@ pub enum Error {
     /// The Noir compiler driver returned errors.
     NoirCompilerError(Vec<noirc_errors::reporter::CustomDiagnostic>),
 
-    /// The program has no returning entry path (checked before optimization), or contains
-    /// an impossible assertion/range/equality constraint found during R1CS generation.
-    /// Static return validation carries source locations; R1CS failures currently use a
-    /// synthetic location because symbolic assertion failures do not retain their spans.
+    /// The program has no returning entry path (checked before optimization), or contains an
+    /// impossible assertion/range/equality constraint found during R1CS generation. Static return
+    /// validation carries source locations; R1CS failures use a synthetic location because symbolic
+    /// assertion failures do not retain their spans.
     UnsatisfiableProgram(Vec<Diagnostic>),
 
-    /// The requested `--logup-soundness` target needs more than one LogUp challenge on this
-    /// field, but multi-challenge LogUp is not yet implemented (see `docs/field-agnosticism.md`,
-    /// `L4-logup-challenges`). Rejected rather than silently emitting an under-provisioned circuit.
+    /// The requested `--logup-soundness` target needs more than one LogUp challenge on this field,
+    /// and the compiler implements single-challenge LogUp only (see `docs/field-agnosticism.md`,
+    /// `L4-logup-challenges`). Rejected: emitting it would silently under-provision the circuit.
     LogupSoundnessUnsupported(String),
 
     /// One or more Noir `assert_constant` operands are dynamic in a reachable calling context.
@@ -191,7 +191,7 @@ impl Driver {
     ///
     /// Such a driver has no [`Self::abi`], so [`Self::entry_point_flattened_io_count`] and the WASM
     /// metadata sidecar are unavailable, and no [`Self::package_root`]: both belong to the Noir
-    /// package, not the program.
+    /// package, which an SSA does not carry.
     ///
     /// `debug_output_dir` is created, or emptied if it exists, as [`Self::new`] does with the
     /// package's `mavros_debug`.
@@ -238,8 +238,8 @@ impl Driver {
         self.debug_output_dir.clone()
     }
 
-    /// Root directory of the package being compiled (the workspace member's
-    /// directory, not the workspace root). `Prover.toml` is read from here.
+    /// Root directory of the package being compiled (the workspace member's directory, below the
+    /// workspace root). `Prover.toml` is read from here.
     ///
     /// Panics on a driver seeded with [`Self::from_ssa`], which has no package.
     pub fn package_root(&self) -> &std::path::Path {
@@ -383,16 +383,16 @@ impl Driver {
                 Box::new(ElideTuples::new()),
                 // Normalize `assert(a == b)` / `assert(a < b)` into `AssertCmp` (witness-agnostic,
                 // no `AssertR1C`) so the SCS conditional layer below can see the asserted-equal and
-                // asserted-constant facts. Run pre-WTI: operands are still scalar, so asserted
+                // asserted-constant facts. Run pre-WTI: operands are scalar there, so asserted
                 // constants fold away here and never become witnesses/constraints downstream.
                 Box::new(NormalizeAsserts::new()),
                 // Algebraic identities before the fold, because some of them _produce_ the
                 // constants the fold then propagates — `x - x -> 0` above all. This is the only
-                // pre-untaint Simplifier run, and it has to be here rather than later: the DCE
-                // below is the first that rewrites a dead `Div`/`Mod` into its check, and once a
-                // division has become a bare assert the operand chain is pinned live for good.
-                // Nothing in this pass touches the CFG (it rewrites instructions and aliases
-                // results), so it is safe on the pre-untaint IR the phase still holds.
+                // pre-untaint Simplifier run, and it has to be here and no later: the DCE below is
+                // the first that rewrites a dead `Div`/`Mod` into its check, and once a division
+                // has become a bare assert the operand chain is pinned live for good. Nothing in
+                // this pass touches the CFG (it rewrites instructions and aliases results), so it
+                // is safe on the pre-untaint IR the phase holds.
                 Box::new(Simplifier::new()),
                 // Fold constants and prune statically-decided branches (e.g. monomorphized
                 // generic dispatch) BEFORE pruning functions: calls in never-taken branches must
@@ -414,7 +414,8 @@ impl Driver {
     }
 
     /// Attach the source text the compiler read for `diagnostic`'s file, where there is one, so the
-    /// snippet shows the code that was compiled, not what the path holds when the error prints.
+    /// snippet shows the code that was compiled, even if the file has changed by the time the error
+    /// prints.
     fn attach_compiled_source(&self, diagnostic: Diagnostic) -> Diagnostic {
         let Some(project) = self.project.as_ref() else {
             return diagnostic;
@@ -449,44 +450,44 @@ impl Driver {
                 // variables using the points-to analysis.
                 Box::new(Mem2Reg::new()),
                 // Fold the constants the initial mem2reg just promoted out of memory (and prune any
-                // now-decidable branches) so the downstream ArraySroa / ArgPromotion /
+                // branches they decide) so the downstream ArraySroa / ArgPromotion /
                 // ArrayBoundaryExpansion cluster sees constant indices and a reduced CFG — more
                 // arrays prove `Split`-able, more refs prove promotable. `preserve_blocks()`: this
-                // is still pre-untaint, which cannot yet handle multiple jumps into merge blocks.
+                // runs pre-untaint, and untaint handles no merge block with multiple jumps into it.
                 Box::new(SCS::new(dead_code_elimination::Config::preserve_blocks())),
                 // Promote `Ref<Array>` locals to array values, then peel every proven-`Split` array
                 // into per-cell values so the cells become individually `Pure`-able / promotable.
                 Box::new(ArraySroa::new()),
-                // A second Mem2Reg promotes the underlying allocs now reached only through the
-                // peeled per-cell refs (the array-of-ref case); it self-skips functions with
+                // A second Mem2Reg promotes the underlying allocs the peel leaves reachable only
+                // through the per-cell refs (the array-of-ref case); it self-skips functions with
                 // nothing newly promotable, so it is cheap when no ref-arrays were peeled.
                 Box::new(Mem2Reg::new()),
                 // Promote `Ref<T>` parameters across call boundaries into by-value in/out values,
                 // turning callee/caller pointee memory into clean locals.
                 Box::new(ArgPromotion::new()),
-                // A third Mem2Reg promotes the materialized callee allocs and the now-local caller
-                // allocs that arg promotion exposed.
+                // A third Mem2Reg promotes the materialized callee allocs and the caller allocs
+                // that arg promotion made local.
                 Box::new(Mem2Reg::new()),
                 // Sever array _call boundaries_: expand an array parameter/return whose only
                 // obstacle to being `Split` is crossing the boundary into per-cell scalars,
                 // reconstructing the array locally on each side.
                 Box::new(ArrayBoundaryExpansion::new()),
-                // A fresh ArraySroa peels the now-local reconstructed arrays (they only become
-                // `Split` on this re-analysis), and a Mem2Reg promotes any per-cell ref allocs the
-                // peel exposes.
+                // A fresh ArraySroa peels the reconstructed arrays, local after the expansion (they
+                // only become `Split` on this re-analysis), and a Mem2Reg promotes any per-cell ref
+                // allocs the peel exposes.
                 Box::new(ArraySroa::new()),
                 Box::new(Mem2Reg::new()),
                 // Reclaim cells a side never used: dead by-value formals, their matching arguments
-                // at every static call site, dead return slots, and the now-dead caller-side
-                // `ArrayGet`s — interprocedurally. (`pre_wti` otherwise runs no DCE, and
+                // at every static call site, dead return slots, and the caller-side `ArrayGet`s
+                // those leave dead — interprocedurally. (`pre_wti` otherwise runs no DCE, and
                 // TrivialPhiElimination does not touch entry-block formals).
                 //
                 // Uses `preserve_blocks()` so it does not collapse empty intermediate blocks into
-                // multiple-predecessor merges that the later untaint_control_flow cannot yet
+                // multiple-predecessor merges, which the later untaint_control_flow does not
                 // handle.
                 Box::new(DCE::new(dead_code_elimination::Config::preserve_blocks())),
                 // Re-normalize any `Cmp`-fed asserts the structural passes above introduced, then
-                // fold the post-mem2reg/SROA constants and prune now-decidable branches BEFORE
+                // fold the post-mem2reg/SROA constants and prune the branches they decide BEFORE
                 // WTI/untaint. This is the last optimization before witness typing: pruning here
                 // keeps dead branches from tainting witnesses (bloating constraints) and from
                 // reaching untaint, which can ICE on semantically-dead code. `preserve_blocks()`
@@ -506,11 +507,12 @@ impl Driver {
                 // `pre_untaint()` speculates under `preserve_structure`: hoists are pure
                 // instruction insertion above `Jmp` terminators — no edge splits or merge params
                 // for untaint to absorb — and the speculation gate reads witness-ness from the
-                // read-only joined WTI approximation, since types do not yet carry `WitnessOf`.
+                // read-only joined WTI approximation, since types carry no `WitnessOf` there.
                 Box::new(PRE::pre_untaint()),
-                // Mem2Reg promotes each scalarized leaf cell into its own block-parameter phi. For
-                // an aggregate threaded through control flow that is mostly trivial phis (the same
-                // value from every predecessor); collapse them before they reach WTI and codegen.
+                // Mem2Reg promotes each scalarized leaf cell into a separate block-parameter phi.
+                // For an aggregate threaded through control flow that is mostly trivial phis (the
+                // same value from every predecessor); collapse them before they reach WTI and
+                // codegen.
                 Box::new(TrivialPhiElimination::new()),
                 Box::new(RemoveUnreachableFunctions::new()),
                 // Purify witness-length slices into `(physical, log_len, start)` tuples. Reads
@@ -593,15 +595,14 @@ impl Driver {
                 // below). New `Cmp`-fed asserts can appear after the pre-WTI passes and lowering.
                 Box::new(NormalizeAsserts::new()),
                 // Fold pure constants and prune constant-condition branches before the cleanup
-                // rounds, so Simplifier/PRE work on the reduced CFG. (SCS reclaims the blocks
-                // its own `JmpIf -> Jmp` folds orphan, so no trailing RemoveUnreachableBlocks is
-                // needed here — the InstructionLowering runs below type every block's instructions
-                // against reachable-only `Types` info and would ICE on a leftover orphan.)
+                // rounds, so Simplifier/PRE work on the reduced CFG. (SCS reclaims the blocks that
+                // its `JmpIf -> Jmp` folds orphan, so no trailing RemoveUnreachableBlocks is needed
+                // here — the InstructionLowering runs below type every block's instructions against
+                // reachable-only `Types` info and would ICE on a leftover orphan.)
                 Box::new(SCS::new(dead_code_elimination::Config::pre_r1c())),
-                // Simplify → PRE, twice (PRE runs its own integrated DCE). The
-                // doubled rounds let PRE-dedup expose new fold operands and
-                // folds expose new dedup matches. Each Simplifier internally
-                // iterates to fixed point for purely-algebraic folds.
+                // Simplify → PRE, twice (PRE runs an integrated DCE). The doubled rounds let
+                // PRE-dedup expose new fold operands and folds expose new dedup matches. Each
+                // Simplifier internally iterates to fixed point for purely-algebraic folds.
                 Box::new(Simplifier::new()),
                 Box::new(PRE::pre_r1c()),
                 Box::new(Simplifier::new()),
@@ -731,7 +732,7 @@ impl Driver {
         );
 
         // Report the LogUp challenge count for the requested bits-of-security, and reject targets
-        // that would need more than one challenge (K-challenge replication is not yet implemented).
+        // that would need more than one challenge (only single-challenge LogUp is implemented).
         // Only relevant when the program actually has a lookup argument, i.e. at least one
         // challenge was allocated. On bn254 a single challenge exceeds any sane target, so K is
         // always 1 here and the emitted circuit is unchanged.
@@ -862,10 +863,10 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(WitnessLowering::new()),
-                // Cleanup before lowering Map casts: dead hint computations
-                // (e.g. strip-maps feeding unconstrained calls) are easy to
-                // delete while still single instructions, but not once they
-                // are expanded into loops with block-parameter cycles.
+                // Cleanup before lowering Map casts: dead hint computations (e.g. strip-maps
+                // feeding unconstrained calls) are easy to delete while they are single
+                // instructions, and hard to delete once expanded into loops with block-parameter
+                // cycles.
                 Box::new(CSE::post_r1c()),
                 Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
                 Box::new(LowerMapCasts::new()),
@@ -961,7 +962,7 @@ impl Driver {
         // Compile LLSSA → LLVM
         let ll_flow_analysis = FlowAnalysis::run(&llssa);
         let context = Context::create();
-        let mut codegen = LLVMCodeGen::new(&context, "mavros_module");
+        let mut codegen = LLVMCodeGen::new(&context, "mavros_module", llssa.field());
         codegen.set_debug_path_root(
             wasm_config
                 .as_ref()
@@ -1164,9 +1165,9 @@ mod tests {
         }
     }
 
-    /// The wrapper uses ABI return presence, not HLSSA result arity, to decide whether a
-    /// guard slot exists. Unit and empty structs both lower to one empty-tuple result,
-    /// but only the empty struct has an ABI return.
+    /// The wrapper decides whether a guard slot exists from ABI return presence: HLSSA result arity
+    /// cannot tell, as unit and empty structs both lower to one empty-tuple result and only the
+    /// empty struct has an ABI return.
     #[test]
     fn abi_and_hlssa_blob_sizing_agree() {
         let cases: Vec<(Vec<AbiType>, Option<AbiType>, Vec<Type>, Vec<Type>)> = vec![
@@ -1224,15 +1225,14 @@ mod tests {
         }
     }
 
-    /// The ABI keeps a [`Sign`] that the HLSSA type no longer has, so the two sides now disagree
-    /// about how many things an integer type _is_ -- two on one side, one on the other. That is
-    /// only safe while the sign makes no difference to the flattened width, which is what this
-    /// pins.
+    /// The ABI keeps a [`Sign`] that the HLSSA type lacks, so the two sides disagree about how many
+    /// things an integer type _is_ -- two on one side, one on the other. That is only safe while
+    /// the sign makes no difference to the flattened width, which is what this pins.
     ///
-    /// It cannot fail today: `Type::int` takes no sign, so both rows below build the same value and
-    /// the assertion is a tautology on the HLSSA side. Its job is on the ABI side and in the
-    /// future -- `AbiType::field_count` matches `AbiType::Integer { .. }` with the sign bound to
-    /// a wildcard, and a later reader who narrows that pattern to consult the sign would silently
+    /// On the HLSSA side it cannot fail: `Type::int` takes no sign, so both rows below build the
+    /// same value and the assertion is a tautology there. Its job is on the ABI side and in the
+    /// future -- `AbiType::field_count` matches `AbiType::Integer { .. }` with the sign bound to a
+    /// wildcard, and a later reader who narrows that pattern to consult the sign would silently
     /// resize the protected column block for exactly half of all integer parameters.
     #[test]
     fn the_two_signs_flatten_to_the_same_width() {
@@ -1279,8 +1279,8 @@ mod tests {
         assert!(super::compiled_source(&file_manager, "std/absent.nr").is_none());
     }
 
-    /// The error's `Display` has to be the rendered diagnostics rather than a summary of them:
-    /// every caller here prints an `Error` and nothing asks it for a renderer.
+    /// The error's `Display` has to be the rendered diagnostics in full: every caller here prints
+    /// an `Error` and nothing asks it for a renderer.
     #[test]
     fn an_unsatisfiable_program_displays_as_its_rendered_diagnostics() {
         let refusal = Error::UnsatisfiableProgram(vec![

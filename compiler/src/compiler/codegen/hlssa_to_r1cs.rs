@@ -1,13 +1,14 @@
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
-use ark_ff::{AdditiveGroup, BigInteger, Field, PrimeField};
+use ark_ff::{BigInteger, Zero};
 use num_bigint::BigUint;
 use tracing::{instrument, warn};
 
-use mavros_artifacts::FieldConfig;
+use mavros_artifacts::{Field as RawField, FieldConfig};
 use mavros_int_semantics::{self as semantics, CmpOp, IntBits, int_bits::HOST_WORD_BITS};
 
 use crate::compiler::{
+    Field,
     analysis::{
         symbolic_executor::{self, AssertionFailure, SymbolicExecutor},
         types::TypeInfo,
@@ -52,12 +53,6 @@ impl std::fmt::Display for R1CSProfileDisabled {
 
 impl std::error::Error for R1CSProfileDisabled {}
 
-// FIELD-ASSUMPTION: L1-direct-ref (57 sites)
-// FIELD-ASSUMPTION: L4-two-pow
-fn two_pow(exponent: usize) -> ark_bn254::Fr {
-    ark_bn254::Fr::from(2).pow([exponent as u64])
-}
-
 #[derive(Clone, Debug)]
 pub struct ArrayData {
     table_id: Option<usize>,
@@ -69,7 +64,7 @@ pub struct ArrayData {
 // FIELD-ASSUMPTION: L4-eval
 pub enum Value {
     /// A Field element value known at compile time.
-    Const(ark_bn254::Fr),
+    Const(Field),
 
     /// A pure integer at or above the modulus.
     Wide(IntBits),
@@ -96,12 +91,12 @@ pub enum Value {
 impl Value {
     /// Report an undefined `Div`/`Mod` reaching the R1CS constant folds as a compiler bug.
     ///
-    /// `LowerPureGuards` asserts every integer `Div`/`Mod` is defined immediately before the op,
-    /// so an undefined one makes the program unsatisfiable and `R1CGen` rejects it at that assert —
-    /// which precedes the division in the instruction stream — before this fold is ever asked for
-    /// a quotient. Reaching here means that ordering broke, so say so instead of surfacing Rust's
-    /// bare "attempt to divide by zero" from inside codegen, or — for `INT_MIN / -1` — instead of
-    /// silently wrapping to a plausible-looking answer.
+    /// `LowerPureGuards` asserts every integer `Div`/`Mod` is defined immediately before the op, so
+    /// an undefined one makes the program unsatisfiable and `R1CGen` rejects it at that assert —
+    /// which precedes the division in the instruction stream — before this fold is ever asked for a
+    /// quotient. Reaching here means that ordering broke, and this says so; the alternatives are
+    /// Rust's bare "attempt to divide by zero" from inside codegen or, for `INT_MIN / -1`, a silent
+    /// wrap to a plausible-looking answer.
     #[track_caller]
     fn ice_undefined_divmod(kind: BinaryArithOpKind, bits: usize, signed: bool) -> ! {
         let sign = if signed { 'i' } else { 'u' };
@@ -125,7 +120,7 @@ impl Value {
     /// An integer answer as an element where one holds it, and as its pattern where none does.
     fn of_pattern(field: FieldConfig, pattern: IntBits) -> Value {
         match field_constant(field, &pattern) {
-            Some(element) => Value::Const(element.to_ark()),
+            Some(element) => Value::Const(element),
             None => Value::Wide(pattern),
         }
     }
@@ -169,7 +164,7 @@ impl Value {
                 while lhs_i < lhs.len() && rhs_i < rhs.len() {
                     if lhs[lhs_i].0 == rhs[rhs_i].0 {
                         let r = lhs[lhs_i].1 + rhs[rhs_i].1;
-                        if r != ark_bn254::Fr::ZERO {
+                        if !r.is_zero() {
                             result.push((lhs[lhs_i].0, r));
                         }
                         lhs_i += 1;
@@ -207,33 +202,23 @@ impl Value {
         self.add(&other.neg())
     }
 
+    // FIELD-ASSUMPTION: L4-eval
     pub fn div(&self, other: &Value) -> Value {
-        // Zero has no inverse, and arkworks' `Div` unwraps one, so both arms below panic on a zero
-        // divisor. `LowerPureGuards` now asserts every field division is defined, so `R1CGen`
-        // rejects the program at that assertion — which precedes the division — before either arm
-        // runs. Say which invariant broke rather than surfacing arkworks' unwrap from inside
-        // codegen.
-        // FIELD-ASSUMPTION: L4-eval
-        if let Value::Const(rhs) = other
-            && *rhs == ark_bn254::Fr::ZERO
-        {
+        let Value::Const(rhs) = other else { ice!("expected constant") };
+        // `LowerPureGuards` asserts every field division is defined, so `R1CGen` rejects a program
+        // with a zero divisor at that assertion, which precedes the division. Reaching here with
+        // one means that ordering broke.
+        // FIELD-ASSUMPTION: L4-inverse
+        let Some(inverse) = rhs.inverse() else {
             ice!(
                 "zero divisor reached the R1CS field division fold; \
                  LowerPureGuards should have rejected the program at the preceding assertion"
-            );
-        }
-        match (self, other) {
-            // FIELD-ASSUMPTION: L4-inverse
-            (Value::Const(lhs), Value::Const(rhs)) => Value::Const(lhs / rhs),
-            (_, Value::Const(rhs)) => {
-                let inv = Value::Const(ark_bn254::Fr::ONE / rhs);
-                self.mul(&inv)
-            }
-            (_, _) => ice!("expected constant"),
-        }
+            )
+        };
+        self.mul(&Value::Const(inverse))
     }
 
-    pub fn expect_constant(&self) -> ark_bn254::Fr {
+    pub fn expect_constant(&self) -> Field {
         match self {
             Value::Const(c) => *c,
             Value::Wide(pattern) => Self::ice_no_element(pattern),
@@ -250,9 +235,9 @@ impl Value {
     /// The canonical value of a constant as a `u128`, or `None` if it needs more than 128 bits.
     ///
     /// Both the read and the check that nothing was lost come from the model, so agreement with
-    /// `lattice::int_cast_bits` is structural rather than kept in sync by hand. Deriving "which
-    /// limbs are outside 128 bits" here as well would let a caller and its reader drift apart; see
-    /// `field_limbs_fit`.
+    /// `lattice::int_cast_bits` is structural; nothing keeps the two in sync by hand. Deriving
+    /// "which limbs are outside 128 bits" here as well would let a caller and its reader drift
+    /// apart; see `field_limbs_fit`.
     ///
     /// The limb _count_ is a property of the field, and both entry points take a slice of any
     /// length: a field whose `BigInt` is narrower than this one has fewer limbs, where `limbs[2]`
@@ -260,10 +245,10 @@ impl Value {
     ///
     /// # Why the width is spelled as a host word
     ///
-    /// [`HOST_WORD_BITS`] below asks whether this element fits the word it is returned in, not any
-    /// integer-width cap. Every caller wants a _small number_ out of a field element (an array
-    /// index or a bit), and an element that does not fit a word has no answer for them however
-    /// wide integers get.
+    /// [`HOST_WORD_BITS`] below asks whether this element fits the word it is returned in; no
+    /// integer-width cap is involved. Every caller wants a _small number_ out of a field element
+    /// (an array index or a bit), and an element that does not fit a word has no answer for them
+    /// however wide integers get.
     ///
     /// How wide an integer **operand** may be is a different question with a different bound,
     /// answered by [`Value::expect_pattern`], which reads the element's limbs directly and is
@@ -325,7 +310,7 @@ impl Value {
     /// operands already normalized and does no masking itself: a bit above the declared width is
     /// not part of the value, whether at index 60 or 600.
     ///
-    /// An element carrying more than `bits` is read as its low `bits` rather than refused: the cast
+    /// An element carrying more than `bits` is read as its low `bits`, and never refused: the cast
     /// semantics in `docs/int-semantics.md`, and the reading `int_cast_bits` gives in the folder.
     /// This is not a bounds check. A constant that reaches a _constraint_ without passing through
     /// here is not truncated by anything.
@@ -343,12 +328,13 @@ impl Value {
         match (self, other) {
             (Value::Const(lhs), Value::Const(rhs)) => Value::Const(lhs * rhs),
             (Value::Const(c), Value::LC(lc)) | (Value::LC(lc), Value::Const(c)) => {
-                if *c == ark_bn254::Fr::ZERO {
-                    return Value::Const(ark_bn254::Fr::ZERO);
+                if c.is_zero() {
+                    return Value::Const(*c);
                 }
+                let c = c.to_ark();
                 let mut result = Vec::new();
                 for (i, cl) in lc.iter() {
-                    result.push((*i, *c * *cl));
+                    result.push((*i, c * *cl));
                 }
                 Value::LC(result)
             }
@@ -360,16 +346,6 @@ impl Value {
         match self {
             Value::Ptr(ptr) => ptr.clone(),
             _ => ice!("expected ptr"),
-        }
-    }
-
-    pub fn lt(&self, other: &Value) -> Value {
-        let self_const = self.expect_constant();
-        let other_const = other.expect_constant();
-        if self_const < other_const {
-            Value::Const(ark_bn254::Fr::ONE)
-        } else {
-            Value::Const(ark_bn254::Fr::ZERO)
         }
     }
 
@@ -386,23 +362,18 @@ impl Value {
             _ => ice!("expected blob"),
         }
     }
-    pub fn expect_linear_combination(&self) -> Vec<(usize, ark_bn254::Fr)> {
+    pub fn expect_linear_combination(&self) -> LC {
         match self {
-            Value::Const(c) => vec![(0, *c)],
+            Value::Const(c) => vec![(0, c.to_ark())],
             Value::Wide(pattern) => Self::ice_no_element(pattern),
             Value::LC(lc) => lc.clone(),
             _ => ice!("expected constant or linear combination"),
         }
     }
 
-    pub fn eq(&self, other: &Value) -> Value {
-        let self_const = self.expect_constant();
-        let other_const = other.expect_constant();
-        if self_const == other_const {
-            Value::Const(ark_bn254::Fr::ONE)
-        } else {
-            Value::Const(ark_bn254::Fr::ZERO)
-        }
+    /// A boolean as the field's one or zero.
+    fn of_bool(field: FieldConfig, holds: bool) -> Value {
+        Value::Const(if holds { field.one() } else { field.zero() })
     }
 
     pub fn mk_array(data: Vec<Value>) -> Value {
@@ -486,9 +457,7 @@ impl Table {
 
 #[derive(Clone)]
 pub struct R1CGen {
-    /// The field the program operates over. Codegen's arithmetic is still raw `ark_bn254::Fr` (it
-    /// becomes per-field in P4); this is here so that the type-width queries it makes read the
-    /// configured field rather than a static.
+    /// The field the program operates over.
     field: FieldConfig,
     constraints: Vec<R1C>,
     tables: Vec<Table>,
@@ -618,7 +587,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
 
     fn slice_len(&mut self, slice: &Value) -> Value {
         let array = slice.expect_array();
-        Value::Const(ark_bn254::Fr::from(array.borrow().data.len() as u128))
+        Value::Const(self.field.constant(array.borrow().data.len() as u128))
     }
 
     fn on_guard(
@@ -634,31 +603,22 @@ impl symbolic_executor::Context<Value> for R1CGen {
 
 // FIELD-ASSUMPTION: L4-eval
 impl symbolic_executor::Value<R1CGen> for Value {
-    fn cmp(&self, b: &Self, kind: CmpKind, bits: Option<usize>, _ctx: &mut R1CGen) -> Self {
+    fn cmp(&self, b: &Self, kind: CmpKind, bits: Option<usize>, ctx: &mut R1CGen) -> Self {
         if let Some(holds) = Value::wide_unsigned_cmp(kind, self, b) {
-            return Value::Const(if holds {
-                ark_bn254::Fr::ONE
-            } else {
-                ark_bn254::Fr::ZERO
-            });
+            return Value::of_bool(ctx.field(), holds);
         }
-        match kind {
-            CmpKind::Eq => self.eq(b),
+        let holds = match kind {
+            CmpKind::Eq => self.expect_constant() == b.expect_constant(),
             // `ULt` compares the field encodings, which is the magnitude for an unsigned integer.
-            CmpKind::ULt => self.lt(b),
+            CmpKind::ULt => self.expect_constant() < b.expect_constant(),
             // Read as patterns, which holds an element and a [`Value::Wide`] alike.
             CmpKind::SLt => {
                 let bits = bits.expect("ICE: signed comparison without an operand width");
-                let less = self
-                    .expect_pattern(bits)
-                    .compare(CmpOp::SLt, &b.expect_pattern(bits));
-                Value::Const(if less {
-                    ark_bn254::Fr::ONE
-                } else {
-                    ark_bn254::Fr::ZERO
-                })
+                self.expect_pattern(bits)
+                    .compare(CmpOp::SLt, &b.expect_pattern(bits))
             }
-        }
+        };
+        Value::of_bool(ctx.field(), holds)
     }
 
     /// Evaluate a binary arithmetic operation on constants.
@@ -667,8 +627,8 @@ impl symbolic_executor::Value<R1CGen> for Value {
     /// speculative: it is the _final_ evaluation, and it runs **after** the guard IR. So it must
     /// not decline: an operation reaching here has already had its rejection enforced (or proved
     /// unnecessary) by the assertion `LowerPureGuards` planted ahead of it, and something has to be
-    /// written. That makes the obligation [`mavros_int_semantics::residue`]'s rather than
-    /// [`mavros_int_semantics::eval`]'s, exactly:
+    /// written. That puts it under [`mavros_int_semantics::residue`]'s obligation, exactly;
+    /// [`mavros_int_semantics::eval`]'s is the one for folders that may decline:
     ///
     /// - Accepted inputs produce Noir's value;
     /// - Rejected ones the model still specifies produce the pattern every other backend produces,
@@ -685,9 +645,9 @@ impl symbolic_executor::Value<R1CGen> for Value {
         match &out_type.strip_witness().expr {
             TypeExpr::Int(bits) => {
                 let bits = *bits;
-                // The value bounds this, not the width: an `int16384` carrying 5 folds as a `u8`
-                // carrying 5 does. Each operand is an element or, past the modulus, a
-                // [`Value::Wide`], read as a pattern at `bits`.
+                // The value alone bounds this: an `int16384` carrying 5 folds as a `u8` carrying 5
+                // does. Each operand is an element or, past the modulus, a [`Value::Wide`], read as
+                // a pattern at `bits`.
                 assert!(bits > 0, "an int0 describes a value with no bits");
                 assert!(
                     matches!(
@@ -741,9 +701,9 @@ impl symbolic_executor::Value<R1CGen> for Value {
         }
     }
 
-    fn assert_bool(&self, _ctx: &mut R1CGen) -> Result<(), AssertionFailure> {
+    fn assert_bool(&self, ctx: &mut R1CGen) -> Result<(), AssertionFailure> {
         let v = self.expect_constant();
-        if v == ark_bn254::Fr::from(0u64) {
+        if v == ctx.field().zero() {
             return Err(AssertionFailure::new("assert failed: value is zero"));
         }
         Ok(())
@@ -777,7 +737,6 @@ impl symbolic_executor::Value<R1CGen> for Value {
                     )));
                 }
             }
-            // FIELD-ASSUMPTION: L4-sign
             CmpKind::ULt => {
                 let a_val = a.expect_constant();
                 let b_val = b.expect_constant();
@@ -906,12 +865,13 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Ok(())
     }
 
+    // FIELD-ASSUMPTION: L4-decompose
     fn to_bits(
         &self,
         endianness: hlssa::Endianness,
         size: usize,
         _out_type: &Type,
-        _ctx: &mut R1CGen,
+        ctx: &mut R1CGen,
     ) -> Self {
         let value_const = self.expect_constant();
         let mut bits = value_const.into_bigint().to_bits_le();
@@ -935,12 +895,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         // Convert bits to array of field elements (0 or 1)
         let mut bit_values = Vec::new();
         for bit in final_bits {
-            let bit_value = if bit {
-                Value::Const(ark_bn254::Fr::from(1u128))
-            } else {
-                Value::Const(ark_bn254::Fr::from(0u128))
-            };
-            bit_values.push(bit_value);
+            bit_values.push(Value::of_bool(ctx.field(), bit));
         }
         Value::mk_array(bit_values)
     }
@@ -956,10 +911,8 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::of_pattern(ctx.field(), v.clone())
     }
 
-    fn of_field(f: crate::compiler::Field, _ctx: &mut R1CGen) -> Self {
-        // Boundary: the middle-end `FieldElement` becomes the raw `ark_bn254::Fr` this R1CS
-        // evaluator computes coefficients in.
-        Value::Const(f.to_ark())
+    fn of_field(f: Field, _ctx: &mut R1CGen) -> Self {
+        Value::Const(f)
     }
 
     fn of_blob(_elem_type: Type, elements: Vec<Self>, _ctx: &mut R1CGen) -> Self {
@@ -993,32 +946,32 @@ impl symbolic_executor::Value<R1CGen> for Value {
         ptr.borrow().clone()
     }
 
-    fn try_constant_bool(&self, _ctx: &mut R1CGen) -> Result<bool, AssertionFailure> {
-        Ok(self.expect_constant() == ark_bn254::Fr::ONE)
+    fn try_constant_bool(&self, ctx: &mut R1CGen) -> Result<bool, AssertionFailure> {
+        Ok(self.expect_constant() == ctx.field().one())
     }
 
-    fn select(&self, if_t: &Self, if_f: &Self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
+    fn select(&self, if_t: &Self, if_f: &Self, _out_type: &Type, ctx: &mut R1CGen) -> Self {
+        let one = ctx.field().one();
         if matches!(if_t, Value::Wide(_)) || matches!(if_f, Value::Wide(_)) {
-            return if self.expect_constant() == ark_bn254::Fr::ONE {
+            return if self.expect_constant() == one {
                 if_t.clone()
             } else {
                 if_f.clone()
             };
         }
-        self.mul(if_t)
-            .add(&Value::Const(ark_bn254::Fr::ONE).sub(self).mul(if_f))
+        self.mul(if_t).add(&Value::Const(one).sub(self).mul(if_f))
     }
 
     fn write_witness(&self, _tp: Option<&Type>, ctx: &mut R1CGen) -> Self {
         let witness_var = ctx.next_witness();
         ctx.record_witnesses(1);
-        Value::LC(vec![(witness_var, ark_bn254::Fr::ONE)])
+        Value::LC(vec![(witness_var, ctx.field().one().to_ark())])
     }
 
     fn fresh_witness(_result_type: &Type, ctx: &mut R1CGen) -> Self {
         let witness_var = ctx.next_witness();
         ctx.record_witnesses(1);
-        Value::LC(vec![(witness_var, ark_bn254::Fr::ONE)])
+        Value::LC(vec![(witness_var, ctx.field().one().to_ark())])
     }
 
     fn mem_op(&self, _kind: RefCountOp, _ctx: &mut R1CGen) {}
@@ -1040,13 +993,14 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Ok(())
     }
 
+    // FIELD-ASSUMPTION: L4-decompose
     fn to_radix(
         &self,
         radix: &Radix<Self>,
         endianness: crate::compiler::ssa::hlssa::Endianness,
         size: usize,
         _out_type: &Type,
-        _ctx: &mut R1CGen,
+        ctx: &mut R1CGen,
     ) -> Self {
         match radix {
             Radix::Bytes => {
@@ -1062,7 +1016,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
                 Value::mk_array(
                     bytes
                         .into_iter()
-                        .map(|byte| Value::Const(ark_bn254::Fr::from(byte)))
+                        .map(|byte| Value::Const(ctx.field().constant(byte)))
                         .collect(),
                 )
             }
@@ -1189,23 +1143,23 @@ impl R1CGen {
         }
     }
 
-    pub fn verify(&self, witness: &[ark_bn254::Fr]) -> bool {
+    pub fn verify(&self, witness: &[RawField]) -> bool {
         for (i, r1c) in self.constraints.iter().enumerate() {
             let a = r1c
                 .a
                 .iter()
                 .map(|(i, c)| c * &witness[*i])
-                .sum::<ark_bn254::Fr>();
+                .sum::<RawField>();
             let b = r1c
                 .b
                 .iter()
                 .map(|(i, c)| c * &witness[*i])
-                .sum::<ark_bn254::Fr>();
+                .sum::<RawField>();
             let c = r1c
                 .c
                 .iter()
                 .map(|(i, c)| c * &witness[*i])
-                .sum::<ark_bn254::Fr>();
+                .sum::<RawField>();
             if a * b != c {
                 warn!(message = %"R1CS constraint failed to verify", index = i);
                 return false;
@@ -1278,6 +1232,11 @@ impl R1CGen {
     }
 
     fn seal_impl(mut self, guard: Option<(usize, usize)>) -> (R1CS, Option<R1CSProfile>) {
+        // The rows below are `LC`s, which hold raw coefficients.
+        let field = self.field;
+        let one = field.one().to_ark();
+        let constant = |value: u64| field.constant(value).to_ark();
+
         // Algebraic section
         let mut witness_layout = WitnessLayout {
             guard_index: guard.map(|(index, _)| index),
@@ -1337,8 +1296,8 @@ impl R1CGen {
         // challenges init
         // FIELD-ASSUMPTION: L4-logup-challenges
         // One `alpha` (+ an optional column-folding `beta`) gives ~log2(p) bits of LogUp
-        // soundness — sound on bn254, but only ~log2(p)/1 on a small field. A goldilocks
-        // target needs K independent (alpha, beta) pairs here (see docs/field-agnosticism.md).
+        // soundness: ample on bn254, too few on a small field. A goldilocks target needs K
+        // independent (alpha, beta) pairs here (see docs/field-agnosticism.md).
         let alpha = witness_layout.challenges_end();
         witness_layout.challenges_size += 1;
         let beta = if max_width > 1 {
@@ -1367,18 +1326,15 @@ impl R1CGen {
                         let y = witness_layout.next_table_data();
                         let m = table_info.multiplicities_witness_off + i;
                         result.push(R1C {
-                            a: vec![(y, ark_bn254::Fr::ONE)],
-                            b: vec![
-                                (alpha, ark_bn254::Fr::ONE),
-                                (0, -ark_bn254::Fr::from(i as u64)),
-                            ],
-                            c: vec![(m, ark_bn254::Fr::ONE)],
+                            a: vec![(y, one)],
+                            b: vec![(alpha, one), (0, -constant(i as u64))],
+                            c: vec![(m, one)],
                         });
-                        sum_lhs.push((y, ark_bn254::Fr::ONE));
+                        sum_lhs.push((y, one));
                     }
                     result.push(R1C {
                         a: sum_lhs,
-                        b: vec![(0, ark_bn254::Fr::ONE)],
+                        b: vec![(0, one)],
                         c: vec![], // this is prepared for the looked up values to come into
                     });
                     table_info.sum_constraint_idx = result.len() - 1;
@@ -1393,35 +1349,30 @@ impl R1CGen {
                         let y = witness_layout.next_table_data();
                         let m = table_info.multiplicities_witness_off + i;
                         result.push(R1C {
-                            a: vec![(beta, ark_bn254::Fr::ONE)],
+                            a: vec![(beta, one)],
                             b: v.clone(),
-                            c: vec![(x, -ark_bn254::Fr::ONE)],
+                            c: vec![(x, -one)],
                         });
                         result.push(R1C {
-                            a: vec![(y, ark_bn254::Fr::ONE)],
-                            b: vec![
-                                (alpha, ark_bn254::Fr::ONE),
-                                (0, -ark_bn254::Fr::from(i as u64)),
-                                (x, -ark_bn254::Fr::ONE),
-                            ],
-                            c: vec![(m, ark_bn254::Fr::ONE)],
+                            a: vec![(y, one)],
+                            b: vec![(alpha, one), (0, -constant(i as u64)), (x, -one)],
+                            c: vec![(m, one)],
                         });
-                        sum_lhs.push((y, ark_bn254::Fr::ONE));
+                        sum_lhs.push((y, one));
                     }
                     result.push(R1C {
                         a: sum_lhs,
-                        b: vec![(0, ark_bn254::Fr::ONE)],
+                        b: vec![(0, one)],
                         c: vec![], // this is prepared for the looked up values to come into
                     });
                     table_info.sum_constraint_idx = result.len() - 1;
                 }
                 Table::Spread(bits) => {
-                    // Spread table: for each entry i in 0..2^bits, value = spread(i).
-                    // Both operands (key=i, value=spread(i)) are compile-time
-                    // constants, so the `x = β·spread(i)` intermediate of the
-                    // generic key-value table (`OfElems`) collapses: β·spread(i)
-                    // is linear in the witness and folds directly into the
-                    // denominator. One witness/constraint per entry instead of two:
+                    // Spread table: for each entry i in 0..2^bits, value = spread(i). Both operands
+                    // (key=i, value=spread(i)) are compile-time constants, so the `x = β·spread(i)`
+                    // intermediate of the generic key-value table (`OfElems`) collapses:
+                    // β·spread(i) is linear in the witness and folds directly into the denominator.
+                    // One witness/constraint per entry, where `OfElems` needs two:
                     // -> y = mᵢ / (α - i + β·spread(i)),
                     //    constraint `y · (α - i + β·spread(i)) - mᵢ = 0`
                     let len = 1usize << bits;
@@ -1432,19 +1383,19 @@ impl R1CGen {
                         let y = witness_layout.next_table_data();
                         let m = table_info.multiplicities_witness_off + i;
                         result.push(R1C {
-                            a: vec![(y, ark_bn254::Fr::ONE)],
+                            a: vec![(y, one)],
                             b: vec![
-                                (alpha, ark_bn254::Fr::ONE),
-                                (0, -ark_bn254::Fr::from(i as u64)),
-                                (beta, ark_bn254::Fr::from(spread_val)),
+                                (alpha, one),
+                                (0, -constant(i as u64)),
+                                (beta, constant(spread_val)),
                             ],
-                            c: vec![(m, ark_bn254::Fr::ONE)],
+                            c: vec![(m, one)],
                         });
-                        sum_lhs.push((y, ark_bn254::Fr::ONE));
+                        sum_lhs.push((y, one));
                     }
                     result.push(R1C {
                         a: sum_lhs,
-                        b: vec![(0, ark_bn254::Fr::ONE)],
+                        b: vec![(0, one)],
                         c: vec![],
                     });
                     table_info.sum_constraint_idx = result.len() - 1;
@@ -1467,19 +1418,19 @@ impl R1CGen {
                         let y = witness_layout.next_table_data();
                         let m = table_info.multiplicities_witness_off + n;
                         result.push(R1C {
-                            a: vec![(y, ark_bn254::Fr::ONE)],
+                            a: vec![(y, one)],
                             b: vec![
-                                (alpha, ark_bn254::Fr::ONE),
-                                (0, -ark_bn254::Fr::from(n as u64)),
-                                (beta, two_pow(n)),
+                                (alpha, one),
+                                (0, -constant(n as u64)),
+                                (beta, field.two_pow(n).to_ark()),
                             ],
-                            c: vec![(m, ark_bn254::Fr::ONE)],
+                            c: vec![(m, one)],
                         });
-                        sum_lhs.push((y, ark_bn254::Fr::ONE));
+                        sum_lhs.push((y, one));
                     }
                     result.push(R1C {
                         a: sum_lhs,
-                        b: vec![(0, ark_bn254::Fr::ONE)],
+                        b: vec![(0, one)],
                         c: vec![],
                     });
                     table_info.sum_constraint_idx = result.len() - 1;
@@ -1494,13 +1445,13 @@ impl R1CGen {
             let y_wit = match lookup.elements.len() {
                 1 => {
                     let y = witness_layout.next_lookups_data();
-                    let mut b = vec![(alpha, ark_bn254::Fr::ONE)];
+                    let mut b = vec![(alpha, one)];
                     for (w, coeff) in lookup.elements[0].iter() {
                         b.push((*w, -*coeff));
                     }
                     // y * (α - key) = flag
                     result.push(R1C {
-                        a: vec![(y, ark_bn254::Fr::ONE)],
+                        a: vec![(y, one)],
                         b,
                         c: lookup.flag.clone(),
                     });
@@ -1511,18 +1462,18 @@ impl R1CGen {
                     let y = witness_layout.next_lookups_data();
                     // β * value = -x  (defines x = -β*value)
                     result.push(R1C {
-                        a: vec![(beta, ark_bn254::Fr::ONE)],
+                        a: vec![(beta, one)],
                         b: lookup.elements[1].clone(),
-                        c: vec![(x, -ark_bn254::Fr::ONE)],
+                        c: vec![(x, -one)],
                     });
 
                     // y * (α - x - key) = flag
-                    let mut b = vec![(alpha, ark_bn254::Fr::ONE), (x, -ark_bn254::Fr::ONE)];
+                    let mut b = vec![(alpha, one), (x, -one)];
                     for (w, coeff) in lookup.elements[0].iter() {
                         b.push((*w, -*coeff));
                     }
                     result.push(R1C {
-                        a: vec![(y, ark_bn254::Fr::ONE)],
+                        a: vec![(y, one)],
                         b,
                         c: lookup.flag.clone(),
                     });
@@ -1533,7 +1484,7 @@ impl R1CGen {
 
             result[table_infos[lookup.table_id].sum_constraint_idx]
                 .c
-                .push((y_wit, ark_bn254::Fr::ONE));
+                .push((y_wit, one));
         }
 
         constraints_layout.lookups_data_size =
@@ -1561,13 +1512,12 @@ impl R1CGen {
 #[cfg(test)]
 mod r1cs_profile_tests {
     use super::{ArrayData, FieldConfig, R1CGen, Value, hlssa, symbolic_executor};
-    use ark_ff::Field as _;
     use std::{cell::RefCell, rc::Rc};
 
     fn witness(generator: &mut R1CGen) -> Value {
         let witness = generator.next_witness();
         generator.record_witnesses(1);
-        Value::LC(vec![(witness, ark_bn254::Fr::ONE)])
+        Value::LC(vec![(witness, generator.field().one().to_ark())])
     }
 
     fn array_table(values: &[u64]) -> Value {
@@ -1575,7 +1525,7 @@ mod r1cs_profile_tests {
             table_id: None,
             data: values
                 .iter()
-                .map(|value| Value::Const(ark_bn254::Fr::from(*value)))
+                .map(|value| Value::Const(FieldConfig::bn254().constant(*value)))
                 .collect(),
         })))
     }
@@ -1585,7 +1535,7 @@ mod r1cs_profile_tests {
             generator,
             target,
             args,
-            Value::Const(ark_bn254::Fr::ONE),
+            Value::Const(generator.field().one()),
         );
     }
 
@@ -1683,8 +1633,8 @@ pub struct SoundnessReport {
 }
 
 impl SoundnessReport {
-    /// Diagnostic emitted when `challenges > 1` but K-challenge replication is not yet
-    /// implemented, so the requested target cannot be honoured on this field.
+    /// Diagnostic emitted when `challenges > 1`: without K-challenge replication the requested
+    /// target cannot be honoured on this field.
     pub fn unsupported_message(&self) -> String {
         let mut msg = format!(
             "--logup-soundness={} bits needs {} LogUp challenges on this field \
@@ -1720,16 +1670,16 @@ fn ceil_log2(n: usize) -> u32 {
 ///
 /// FIELD-ASSUMPTION: L4-logup-challenges
 ///
-/// The bit size comes from the configured field rather than a static constant; what remains
-/// field-dependent is the K-challenge replication this rejects (see `Error::LogupSoundnessUnsupported`).
+/// The bit size comes from the configured field; what remains field-dependent is the K-challenge
+/// replication this rejects (see `Error::LogupSoundnessUnsupported`).
 pub fn logup_soundness_report(
     field: FieldConfig,
     requested_bits: u32,
     degree: usize,
 ) -> Result<SoundnessReport, String> {
     // floor(log2 p): p in [2^(field_bit_size-1), 2^field_bit_size), so floor(log2 p) =
-    // field_bit_size - 1. Using the floor (rather than the bit size) keeps `achieved_bits`
-    // a lower bound and never over-claims security.
+    // field_bit_size - 1. Using the floor keeps `achieved_bits` a lower bound and never
+    // over-claims security.
     let field_bits = field.field_bit_size() - 1;
     compute_logup_soundness(requested_bits, field_bits, degree)
 }
@@ -1891,7 +1841,7 @@ mod comparison_tests {
     use super::{CmpKind, FieldConfig, R1CGen, Value, symbolic_executor};
 
     fn constant(v: u64) -> Value {
-        Value::Const(ark_bn254::Fr::from(v))
+        Value::Const(FieldConfig::bn254().constant(v))
     }
 
     fn cmp(a: &Value, b: &Value, kind: CmpKind, bits: Option<usize>) -> bool {
@@ -1906,9 +1856,9 @@ mod comparison_tests {
             .is_ok()
     }
 
-    /// Both comparison paths read their operands as the opcode says, not as the type says. An
-    /// integer type carries no sign, so reading by type would let an unsigned `ULt` over a byte
-    /// with its high bit set pass as negative.
+    /// Both comparison paths read their operands as the opcode says. An integer type carries no
+    /// sign, so reading by type would let an unsigned `ULt` over a byte with its high bit set pass
+    /// as negative.
     #[test]
     fn a_comparison_reads_its_operands_the_way_the_opcode_says() {
         // 0xFB in eight bits is 251 read as a magnitude and -5 read as two's complement, so the
@@ -1975,7 +1925,7 @@ mod comparison_tests {
     }
 
     /// A field comparison gives the same answers on both paths, though `assert_cmp` picks its arm
-    /// by the opcode rather than the operand's kind.
+    /// by the opcode alone.
     #[test]
     fn a_field_comparison_needs_no_width() {
         let a = constant(2);
@@ -1994,24 +1944,290 @@ mod comparison_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use symbolic_executor::{Context as _, Value as _};
+
+    fn field() -> FieldConfig {
+        FieldConfig::bn254()
+    }
+
+    fn constant(value: u64) -> Value {
+        Value::Const(field().constant(value))
+    }
 
     /// A field element wider than a host word is **refused readably**, neither read as a residue
     /// nor ICEd on.
     ///
-    /// This ties the width `const_u128` reads at to its return type. Were it an integer type cap
-    /// instead, raising that cap would make `field_limbs_fit` vacuously true here and send every
-    /// oversized constant into `host_word`, turning the `None` below into a compiler bug. The value
-    /// is a bn254 element, so this path is reachable.
+    /// This ties the width `const_u128` reads at to its return type. Were it an integer type cap,
+    /// raising that cap would make `field_limbs_fit` vacuously true here and send every oversized
+    /// constant into `host_word`, turning the `None` below into a compiler bug. The value is a
+    /// bn254 element, so this path is reachable.
     #[test]
-    fn a_constant_too_wide_for_a_host_word_declines_rather_than_reading_a_residue() {
+    fn a_constant_too_wide_for_a_host_word_is_declined() {
         // The widest value a host word holds, and the first one past it.
-        let widest = ark_bn254::Fr::from(u128::MAX);
-        let one_past = widest + ark_bn254::Fr::from(1u64);
+        let field = FieldConfig::bn254();
+        let widest = field.constant(u128::MAX);
+        let one_past = widest + field.one();
 
         assert_eq!(Value::Const(one_past).const_u128("test"), None);
 
         // The bound is exact: the value just below it still reads correctly.
         assert_eq!(Value::Const(widest).const_u128("test"), Some(u128::MAX));
+    }
+
+    /// A field division by a constant is a product with its inverse, whether the dividend is a
+    /// constant or a linear combination.
+    #[test]
+    fn a_field_division_multiplies_by_the_inverse() {
+        let field = FieldConfig::bn254();
+        let (three, seven) = (field.constant(3u64), field.constant(7u64));
+        let quotient = Value::Const(seven).div(&Value::Const(three));
+        assert_eq!(quotient.expect_constant() * three, seven);
+
+        let witness = Value::LC(vec![(1, seven.to_ark()), (4, three.to_ark())]);
+        let scaled = witness
+            .div(&Value::Const(three))
+            .expect_linear_combination();
+        let third = three.inverse().expect("three is a unit").to_ark();
+        assert_eq!(
+            scaled,
+            vec![(1, seven.to_ark() * third), (4, field.one().to_ark())]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ICE: zero divisor reached the R1CS field division fold")]
+    fn a_constant_field_division_by_zero_ices() {
+        let field = FieldConfig::bn254();
+        Value::Const(field.one()).div(&Value::Const(field.zero()));
+    }
+
+    #[test]
+    #[should_panic(expected = "ICE: zero divisor reached the R1CS field division fold")]
+    fn a_witness_field_division_by_zero_ices() {
+        let field = FieldConfig::bn254();
+        Value::LC(vec![(1, field.one().to_ark())]).div(&Value::Const(field.zero()));
+    }
+
+    /// A product with zero is the constant zero, so it emits no linear combination at all.
+    #[test]
+    fn a_witness_times_zero_is_the_constant_zero() {
+        let field = FieldConfig::bn254();
+        let product = Value::LC(vec![(1, field.one().to_ark())]).mul(&Value::Const(field.zero()));
+        assert!(matches!(product, Value::Const(c) if c == field.zero()));
+    }
+
+    /// A select by a constant condition is the arm it names, over elements and wide patterns alike.
+    #[test]
+    fn a_constant_select_is_the_arm_its_condition_names() {
+        let mut generator = R1CGen::new(field());
+        let (yes, no) = (constant(5), constant(9));
+        let wide = Value::of_pattern(field(), IntBits::from_u128(256, 1).shifted_left(254));
+        for (condition, want) in [(field().one(), 5u64), (field().zero(), 9)] {
+            let picked = Value::Const(condition).select(&yes, &no, &Type::field(), &mut generator);
+            assert_eq!(picked.expect_constant(), field().constant(want));
+        }
+        let picked =
+            Value::Const(field().one()).select(&wide, &no, &Type::int(256), &mut generator);
+        assert!(matches!(picked, Value::Wide(_)));
+        let picked =
+            Value::Const(field().zero()).select(&wide, &no, &Type::int(256), &mut generator);
+        assert_eq!(picked.expect_constant(), field().constant(9u64));
+    }
+
+    /// A witness condition selects as `c·t + (1 − c)·f`.
+    #[test]
+    fn a_witness_select_is_the_affine_blend_of_its_arms() {
+        let mut generator = R1CGen::new(field());
+        let condition = Value::LC(vec![(1, field().one().to_ark())]);
+        let picked = condition.select(&constant(5), &constant(9), &Type::field(), &mut generator);
+        assert_eq!(
+            picked.expect_linear_combination(),
+            vec![
+                (0, field().constant(9u64).to_ark()),
+                (1, -field().constant(4u64).to_ark())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_constant_boolean_is_true_exactly_at_one() {
+        let mut generator = R1CGen::new(field());
+        assert!(
+            Value::Const(field().one())
+                .try_constant_bool(&mut generator)
+                .unwrap()
+        );
+        assert!(
+            !Value::Const(field().zero())
+                .try_constant_bool(&mut generator)
+                .unwrap()
+        );
+        assert!(
+            Value::Const(field().one())
+                .assert_bool(&mut generator)
+                .is_ok()
+        );
+        assert!(
+            Value::Const(field().zero())
+                .assert_bool(&mut generator)
+                .is_err()
+        );
+    }
+
+    /// Bits and bytes come out as the field's zero and one, and as the bytes' values, in the
+    /// order the endianness names.
+    #[test]
+    fn a_constant_decomposes_into_its_digits_in_either_order() {
+        let mut generator = R1CGen::new(field());
+        let digits = |value: Value| -> Vec<u64> {
+            value
+                .expect_array()
+                .borrow()
+                .data
+                .iter()
+                .map(Value::expect_u64)
+                .collect()
+        };
+        let six = constant(6);
+        for (endianness, want) in [
+            (hlssa::Endianness::Little, vec![0, 1, 1, 0, 0]),
+            (hlssa::Endianness::Big, vec![0, 0, 1, 1, 0]),
+        ] {
+            let bits = six.to_bits(endianness, 5, &Type::field(), &mut generator);
+            assert_eq!(digits(bits), want);
+        }
+        let value = constant(0x0102);
+        for (endianness, want) in [
+            (hlssa::Endianness::Little, vec![2, 1, 0]),
+            (hlssa::Endianness::Big, vec![0, 1, 2]),
+        ] {
+            let bytes =
+                value.to_radix(&Radix::Bytes, endianness, 3, &Type::field(), &mut generator);
+            assert_eq!(digits(bytes), want);
+        }
+    }
+
+    #[test]
+    fn a_slice_length_is_its_element_count() {
+        let mut generator = R1CGen::new(field());
+        let slice = Value::mk_array(vec![constant(7), constant(8), constant(9)]);
+        assert_eq!(generator.slice_len(&slice).expect_u64(), 3);
+    }
+
+    /// A constant sits on column 0, scales every coefficient it multiplies, and a coefficient that
+    /// cancels leaves no entry.
+    #[test]
+    fn linear_combination_arithmetic_keeps_constants_on_column_zero() {
+        let (one, two) = (field().one().to_ark(), field().constant(2u64).to_ark());
+        let witness = Value::LC(vec![(1, one), (2, two)]);
+        assert_eq!(
+            witness.add(&constant(4)).expect_linear_combination(),
+            vec![(0, field().constant(4u64).to_ark()), (1, one), (2, two)]
+        );
+        assert_eq!(
+            witness.mul(&constant(5)).expect_linear_combination(),
+            vec![
+                (1, field().constant(5u64).to_ark()),
+                (2, field().constant(10u64).to_ark())
+            ]
+        );
+        assert_eq!(
+            witness
+                .sub(&Value::LC(vec![(1, one)]))
+                .expect_linear_combination(),
+            vec![(2, two)]
+        );
+    }
+
+    #[test]
+    fn a_written_witness_is_its_column_with_coefficient_one() {
+        let mut generator = R1CGen::new(field());
+        let written = constant(3).write_witness(None, &mut generator);
+        let fresh = Value::fresh_witness(&Type::field(), &mut generator);
+        let one = field().one().to_ark();
+        assert_eq!(written.expect_linear_combination(), vec![(0, one)]);
+        assert_eq!(fresh.expect_linear_combination(), vec![(1, one)]);
+    }
+
+    /// Every sealed LogUp row is satisfiable once the lookups' keys hit their tables: each table
+    /// and lookup row defines one fresh column, and the sum row then balances only if every table
+    /// row's denominator `α − key + β·value` matches the lookup side's.
+    #[test]
+    fn a_sealed_lookup_argument_balances_on_entries_in_its_tables() {
+        let mut generator = R1CGen::new(field());
+        // Column 0 is the constant one.
+        assert_eq!(generator.next_witness(), 0);
+        let mut known = vec![(0, field().one())];
+        let mut cell = |generator: &mut R1CGen, value: u64| {
+            let column = generator.next_witness();
+            known.push((column, field().constant(value)));
+            Value::LC(vec![(column, field().one().to_ark())])
+        };
+        let range = cell(&mut generator, 2);
+        let spread = (cell(&mut generator, 3), cell(&mut generator, 5));
+        let pow2 = (cell(&mut generator, 3), cell(&mut generator, 8));
+        let array = (cell(&mut generator, 1), cell(&mut generator, 20));
+        let flag = Value::Const(field().one());
+        generator.lookup(
+            hlssa::LookupTarget::Rangecheck(2),
+            vec![range],
+            flag.clone(),
+        );
+        generator.lookup(
+            hlssa::LookupTarget::Spread(2),
+            vec![spread.0, spread.1],
+            flag.clone(),
+        );
+        generator.lookup(
+            hlssa::LookupTarget::Pow2(2),
+            vec![pow2.0, pow2.1],
+            flag.clone(),
+        );
+        let table = Value::mk_array(vec![constant(10), constant(20), constant(30)]);
+        generator.lookup(
+            hlssa::LookupTarget::Array(table),
+            vec![array.0, array.1],
+            flag,
+        );
+        // (table offset, entry hit): each table has 4 rows except the array's 3, in lookup order.
+        let hits = [(0, 2), (4, 3), (8, 3), (12, 1)];
+
+        let r1cs = generator.seal(None);
+        let layout = &r1cs.witness_layout;
+        let mut w: Vec<Option<RawField>> = vec![None; layout.size()];
+        for (column, value) in known {
+            w[column] = Some(value.to_ark());
+        }
+        for i in layout.multiplicities_start()..layout.multiplicities_end() {
+            w[i] = Some(RawField::zero());
+        }
+        for (offset, entry) in hits {
+            w[layout.multiplicities_start() + offset + entry] = Some(field().one().to_ark());
+        }
+        for (i, challenge) in
+            (layout.challenges_start()..layout.challenges_end()).zip([1009u64, 7919])
+        {
+            w[i] = Some(field().constant(challenge).to_ark());
+        }
+
+        let eval = |lc: &LC, w: &[Option<RawField>]| -> Option<RawField> {
+            lc.iter().map(|(i, c)| w[*i].map(|v| *c * v)).sum()
+        };
+        let fresh = |lc: &LC, w: &[Option<RawField>]| match lc.as_slice() {
+            [(column, coefficient)] if w[*column].is_none() => Some((*column, *coefficient)),
+            _ => None,
+        };
+        for row in &r1cs.constraints {
+            if let Some((column, k)) = fresh(&row.a, &w) {
+                w[column] = Some(eval(&row.c, &w).unwrap() / (k * eval(&row.b, &w).unwrap()));
+            } else if let Some((column, k)) = fresh(&row.c, &w) {
+                w[column] = Some(eval(&row.a, &w).unwrap() * eval(&row.b, &w).unwrap() / k);
+            }
+        }
+        for (index, row) in r1cs.constraints.iter().enumerate() {
+            let (a, b, c) = (eval(&row.a, &w), eval(&row.b, &w), eval(&row.c, &w));
+            assert_eq!(a.unwrap() * b.unwrap(), c.unwrap(), "row {index} fails");
+        }
     }
 }
 
@@ -2061,8 +2277,8 @@ mod int_semantics_conformance {
     fn fold(op: BinaryArithOpKind, bits: usize, a: u128, b: u128) -> u128 {
         let mut generator = R1CGen::new(FieldConfig::bn254());
         <Value as symbolic_executor::Value<R1CGen>>::arith(
-            &Value::Const(ark_bn254::Fr::from(a)),
-            &Value::Const(ark_bn254::Fr::from(b)),
+            &Value::Const(generator.field().constant(a)),
+            &Value::Const(generator.field().constant(b)),
             op,
             &Type::int(bits),
             &mut generator,
@@ -2082,16 +2298,16 @@ mod int_semantics_conformance {
             .collect()
     }
 
-    /// Whether the model declines to specify this input, which is the ICE case rather than a value.
+    /// Whether the model declines to specify this input: the ICE case, which has no value.
     fn unspecified(op: BinaryArithOpKind, bits: usize, a: u128, b: u128) -> bool {
         model(op, bits, a, b).is_none()
     }
 
     /// The R1CS fold answers exactly what a total backend must answer.
     ///
-    /// This is the exact relation, not the refinement the speculative folders owe: this evaluator
-    /// runs after the guard IR and cannot decline. See [`Value::arith`] for why that makes the
-    /// obligation `residue`'s rather than `eval`'s.
+    /// This is the exact relation; the speculative folders owe only a refinement of it. This
+    /// evaluator runs after the guard IR and cannot decline; [`Value::arith`] explains why that
+    /// puts it under `residue`'s obligation.
     #[test]
     fn the_r1cs_fold_agrees_with_the_model() {
         let mut checked = 0usize;
@@ -2114,7 +2330,7 @@ mod int_semantics_conformance {
         }
 
         // An implementation that answered nothing would satisfy the loop above vacuously, so the
-        // count is part of the test rather than a diagnostic.
+        // test asserts the count.
         assert!(
             checked > 25_000,
             "the sweep only reached {checked} specified points"
@@ -2123,9 +2339,9 @@ mod int_semantics_conformance {
 
     /// The two shapes the model leaves unspecified are exactly the two that ICE.
     ///
-    /// Stated as a sweep rather than as a pair of `#[should_panic]` cases so that it is the model
-    /// that decides which inputs those are. If `residue` ever gains or loses an unspecified shape,
-    /// this fails rather than silently drifting.
+    /// Stated as a sweep so that the model decides which inputs those are; a pair of
+    /// `#[should_panic]` cases would fix them by hand. If `residue` gains or loses an unspecified
+    /// shape, this fails.
     #[test]
     fn the_unspecified_inputs_are_exactly_the_divmod_ones() {
         let mut found = 0usize;
@@ -2166,7 +2382,8 @@ mod int_semantics_conformance {
         );
     }
 
-    /// An unspecified input is a compiler bug, and says so rather than folding to a plausible value.
+    /// An unspecified input is a compiler bug, and the fold says so; it never answers with a
+    /// plausible value.
     #[test]
     #[should_panic(expected = "ICE: undefined")]
     fn a_zero_divisor_ices() {
@@ -2185,16 +2402,16 @@ mod int_semantics_conformance {
         assert_eq!(fold(BinaryArithOpKind::UShl, 8, 1, 9), 2);
         assert_eq!(fold(BinaryArithOpKind::UShr, 8, 0x80, 8), 0x80);
 
-        // The signed right shift is the control: a failure in `<<` alone implicates the direction,
-        // not the reduction.
+        // The signed right shift is the control: a failure in `<<` alone implicates the direction
+        // and clears the reduction.
         assert_eq!(fold(BinaryArithOpKind::SShr, 8, 0xFF, 8), 0xFF);
     }
 
     // THE WIDE HALF
     // --------------------------------------------------------------------------------------
     //
-    // This evaluator is bounded by the value, not the width: a constant reaches every pattern
-    // below the modulus at any width. The wide corner set deliberately runs past the modulus.
+    // This evaluator is bounded by the value alone: a constant reaches every pattern below the
+    // modulus at any width. The wide corner set deliberately runs past the modulus.
 
     /// Fold one operation the way `R1CGen` does, with patterns on both sides of the call.
     fn fold_wide(op: BinaryArithOpKind, bits: usize, a: &IntBits, b: &IntBits) -> IntBits {
@@ -2262,7 +2479,7 @@ mod int_semantics_conformance {
         );
     }
 
-    /// The bound is on the value, not the width: the widest type folds when its value fits.
+    /// The bound is on the value alone: the widest type folds when its value fits.
     #[test]
     fn the_widest_type_folds_when_its_value_fits() {
         let bits = crate::compiler::ssa::hlssa::MAX_SUPPORTED_INT_BITS;
@@ -2325,10 +2542,7 @@ mod int_semantics_conformance {
             .or(&low.cast(200));
         for value in [past, within] {
             let value = Value::of_pattern(field, value);
-            assert_eq!(
-                cast(&value, &mut generator),
-                ark_bn254::Fr::from(0xdead_beefu64)
-            );
+            assert_eq!(cast(&value, &mut generator), field.constant(0xdead_beefu64));
         }
     }
 

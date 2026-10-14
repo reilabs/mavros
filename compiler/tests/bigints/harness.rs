@@ -52,7 +52,7 @@ use mavros_compiler::{
         },
     },
     driver::{Driver, Error as DriverError},
-    vm::bytecode::DebugInfo,
+    vm::bytecode::{DebugInfo, parse_program_header},
     wasm_host::{self, LoadedModule},
     wasm_runtime,
 };
@@ -399,7 +399,9 @@ impl Compiled {
         let loaded = wasm
             .loaded()
             .unwrap_or_else(|error| panic!("the WASM module did not load: {error}"));
-        let result = match wasm_host::run_witgen_loaded(loaded, &self.r1cs, &inputs) {
+        let entry_blob_field_count = parse_program_header(&self.binary).entry_blob_field_count;
+        let run = wasm_host::run_witgen_loaded(loaded, &self.r1cs, &inputs, entry_blob_field_count);
+        let result = match run {
             Ok(result) => result,
             Err(error) => {
                 return Some(Verdict::Trapped {
