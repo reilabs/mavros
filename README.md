@@ -52,12 +52,12 @@ one entry per R1CS constraint. `w` covers the complete witness layout in order: 
 must match exactly. All entries may be arbitrary, including `w[0]`; the caller supplies any protocol
 randomness. Paths to vector files are relative to the current working directory.
 
-Each string must be canonical: unsigned decimal without leading zeros (except `"0"`), and
-strictly less than the field modulus. Values are rejected rather than reduced modulo the field.
+Each string must be canonical: unsigned decimal without leading zeros (except `"0"`), and strictly
+less than the field modulus. Values are rejected rather than reduced modulo the field.
 
-Verifier mode requires a single binary package. For a multi-binary workspace, select a member
-with `--root` or configure `default-member` in `Nargo.toml`; otherwise the command fails before
-compiling any member or writing a result.
+Verifier mode requires a single binary package. For a multi-binary workspace, select a member with
+`--root` or configure `default-member` in `Nargo.toml`; otherwise the command fails before compiling
+any member or writing a result.
 
 The command compiles the project and prints a JSON object with `r_aw`, `r_bw`, and `r_cw` as decimal
 strings. It needs no `Prover.toml` and does not check R1CS satisfaction. This operation is a
