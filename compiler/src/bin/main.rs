@@ -311,6 +311,9 @@ fn run_compile_package(
 /// `main` function of the application.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let roots = Project::binary_package_roots(&args.root)?;
+    if args.verify && roots.len() > 1 {
+        return Err("--verify requires a single binary package; use --root to select a member or set default-member in Nargo.toml".into());
+    }
     run_packages(&roots, |root| {
         let mut options = args.clone();
         options.root = root.clone();
@@ -653,6 +656,8 @@ fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
 
 /// Read verifier inputs without losing precision to JSON's numeric representation.
 fn read_verifier_vector(path: &Path) -> Result<Vec<RawField>, Error> {
+    use ark_ff::PrimeField;
+
     let values: Vec<String> = serde_json::from_str(&fs::read_to_string(path)?).map_err(|err| {
         format!(
             "{}: expected a JSON array of decimal field strings: {err}",
@@ -663,16 +668,29 @@ fn read_verifier_vector(path: &Path) -> Result<Vec<RawField>, Error> {
         .into_iter()
         .enumerate()
         .map(|(index, value)| {
-            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            if value.is_empty()
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+                || (value.len() > 1 && value.starts_with('0'))
+            {
                 return Err(format!(
-                    "{}: invalid decimal field element at index {index}",
+                    "{}: expected a canonical unsigned decimal field element at index {index}",
                     path.display()
                 )
                 .into());
             }
-            value.parse::<RawField>().map_err(|_| {
-                format!("{}: invalid field element at index {index}", path.display()).into()
-            })
+            let integer = num_bigint::BigUint::parse_bytes(value.as_bytes(), 10)
+                .expect("nonempty decimal digits were validated above");
+            // Unlike FromStr, from_bigint rejects representatives outside the field.
+            <RawField as PrimeField>::BigInt::try_from(integer)
+                .ok()
+                .and_then(RawField::from_bigint)
+                .ok_or_else(|| {
+                    format!(
+                        "{}: field element at index {index} must be less than the modulus",
+                        path.display()
+                    )
+                    .into()
+                })
         })
         .collect()
 }
@@ -727,6 +745,8 @@ mod tests {
 
     #[test]
     fn verifier_vectors_use_decimal_strings() {
+        use ark_ff::PrimeField;
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vector.json");
         fs::write(&path, r#"["0", "1", "12345678901234567890"]"#).unwrap();
@@ -738,9 +758,41 @@ mod tests {
                 RawField::from(12345678901234567890u64),
             ]
         );
-        for input in [r#"[1]"#, r#"["nope"]"#, r#"[""]"#, r#"["-1"]"#, "{}"] {
+        for input in [
+            r#"[1]"#,
+            r#"["nope"]"#,
+            r#"[""]"#,
+            r#"["-1"]"#,
+            r#"["00"]"#,
+            r#"["01"]"#,
+            r#"["+1"]"#,
+            r#"[" 1"]"#,
+            "{}",
+        ] {
             fs::write(&path, input).unwrap();
             assert!(read_verifier_vector(&path).is_err(), "{input}");
+        }
+
+        let modulus = num_bigint::BigUint::from(RawField::MODULUS);
+        let max = &modulus - 1u8;
+        fs::write(&path, serde_json::to_vec(&[max.to_string()]).unwrap()).unwrap();
+        assert_eq!(
+            read_verifier_vector(&path).unwrap(),
+            vec![-RawField::from(1u64)]
+        );
+        for integer in [
+            modulus.clone(),
+            modulus + 1u8,
+            num_bigint::BigUint::from(1u8) << 512usize,
+        ] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&["1".to_string(), integer.to_string()]).unwrap(),
+            )
+            .unwrap();
+            let error = read_verifier_vector(&path).unwrap_err().to_string();
+            assert!(error.contains("index 1"), "{error}");
+            assert!(error.contains("less than the modulus"), "{error}");
         }
     }
 

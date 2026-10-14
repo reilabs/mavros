@@ -160,3 +160,78 @@ fn cli_verifies_without_prover_inputs_and_prints_json() {
     );
     assert!(!project.path().join("Prover.toml").exists());
 }
+
+#[test]
+fn cli_requires_one_workspace_binary_and_honors_member_selection() {
+    let workspace = tempfile::tempdir().unwrap();
+    let manifest = workspace.path().join("Nargo.toml");
+    let members = "[workspace]\nmembers = ['a', 'b']\n";
+    std::fs::write(&manifest, members).unwrap();
+    for member in ["a", "b"] {
+        let root = workspace.path().join(member);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Nargo.toml"),
+            format!("[package]\nname = '{member}'\ntype = 'bin'\nauthors = []\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.nr"),
+            "fn main(x: Field) { assert(x * x == 9); }",
+        )
+        .unwrap();
+    }
+    let invoke = |root: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_mavros"))
+            .current_dir(workspace.path())
+            .args(["--root", root, "--verify", "--r", "r.json", "--w", "w.json"])
+            .env("RUST_LOG", "info")
+            .output()
+            .unwrap()
+    };
+
+    // Rejection happens even before reading inputs or compiling either member.
+    let rejected = invoke(".");
+    assert!(!rejected.status.success());
+    assert!(rejected.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("requires a single binary package"));
+    for member in ["a", "b"] {
+        assert!(!workspace.path().join(member).join("mavros_debug").exists());
+    }
+
+    let (_, r1cs) = api::compile_to_r1cs(workspace.path().join("a"), false).unwrap();
+    for (file, len) in [
+        ("r.json", r1cs.constraints.len()),
+        ("w.json", r1cs.witness_layout.size()),
+    ] {
+        std::fs::write(
+            workspace.path().join(file),
+            serde_json::to_vec(&vec!["0"; len]).unwrap(),
+        )
+        .unwrap();
+    }
+    let expected = serde_json::json!({"r_aw": "0", "r_bw": "0", "r_cw": "0"});
+    let explicit = invoke("a");
+    assert!(
+        explicit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&explicit.stdout).unwrap(),
+        expected
+    );
+
+    std::fs::write(&manifest, format!("{members}default-member = 'a'\n")).unwrap();
+    let default = invoke(".");
+    assert!(
+        default.status.success(),
+        "{}",
+        String::from_utf8_lossy(&default.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&default.stdout).unwrap(),
+        expected
+    );
+    assert!(!workspace.path().join("b/mavros_debug").exists());
+}

@@ -286,14 +286,14 @@ impl BoxedValue {
             DataType::ADConst => unsafe {
                 vm.data
                     .as_ad
-                    .out_da
-                    .bump(0, amount * (*self.as_ad_const()).value)
+                    .outputs
+                    .bump::<0>(0, amount * (*self.as_ad_const()).value)
             },
             DataType::ADWitness => unsafe {
                 vm.data
                     .as_ad
-                    .out_da
-                    .bump((*self.as_ad_witness()).index as usize, amount)
+                    .outputs
+                    .bump::<0>((*self.as_ad_witness()).index as usize, amount)
             },
             DataType::ADSum => unsafe {
                 let ad_sum = self.as_ad_sum();
@@ -324,14 +324,14 @@ impl BoxedValue {
             DataType::ADConst => unsafe {
                 vm.data
                     .as_ad
-                    .out_db
-                    .bump(0, amount * (*self.as_ad_const()).value)
+                    .outputs
+                    .bump::<1>(0, amount * (*self.as_ad_const()).value)
             },
             DataType::ADWitness => unsafe {
                 vm.data
                     .as_ad
-                    .out_db
-                    .bump((*self.as_ad_witness()).index as usize, amount)
+                    .outputs
+                    .bump::<1>((*self.as_ad_witness()).index as usize, amount)
             },
             DataType::ADSum => unsafe {
                 let ad_sum = self.as_ad_sum();
@@ -362,14 +362,14 @@ impl BoxedValue {
             DataType::ADConst => unsafe {
                 vm.data
                     .as_ad
-                    .out_dc
-                    .bump(0, amount * (*self.as_ad_const()).value)
+                    .outputs
+                    .bump::<2>(0, amount * (*self.as_ad_const()).value)
             },
             DataType::ADWitness => unsafe {
                 vm.data
                     .as_ad
-                    .out_dc
-                    .bump((*self.as_ad_witness()).index as usize, amount)
+                    .outputs
+                    .bump::<2>((*self.as_ad_witness()).index as usize, amount)
             },
             DataType::ADSum => unsafe {
                 let ad_sum = self.as_ad_sum();
