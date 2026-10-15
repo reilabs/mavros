@@ -17,7 +17,10 @@ use noirc_frontend::{
 };
 use tracing::info;
 
-use mavros_artifacts::Field as RawField;
+use mavros_artifacts::{
+    ChallengeSlot, Field as RawField, ManifestParam, ParamVisibility, R1CSArtifact, ReturnSlot,
+    WitnessManifest,
+};
 
 use crate::{
     Project,
@@ -30,10 +33,11 @@ use crate::{
         codegen::{
             CodeGenOptions,
             bytecode::CodeGen,
-            hlssa_to_r1cs::{R1CGen, R1CS, R1CSProfile, logup_soundness_report},
+            hlssa_to_r1cs::{R1CGen, R1CS, R1CSProfile, SealedR1CS, logup_soundness_report},
             llssa_to_llvm::WasmCompileOpts,
         },
         diagnostic::{self, Diagnostic},
+        located::synthetic_file,
         pass_manager::PassManager,
         passes::{
             arg_promotion::ArgPromotion,
@@ -55,7 +59,9 @@ use crate::{
             merge_identical_functions::MergeIdenticalFunctions,
             normalize_asserts::NormalizeAsserts,
             partial_redundancy_elimination::PRE,
-            prepare_entry_point::PrepareEntryPoint,
+            prepare_entry_point::{
+                ENTRY_RETURN_ORIGIN, EntryBlobLayout, PrepareEntryPoint, entry_param_origin,
+            },
             purify_witness_slices::PurifyWitnessSlices,
             rc_insertion::RCInsertion,
             remove_unreachable_blocks::RemoveUnreachableBlocks,
@@ -83,6 +89,14 @@ pub struct BytecodeArtifact {
     pub debug_info: Option<DebugInfo>,
 }
 
+/// First witness column of each entry parameter and of the computed return, as the R1CS
+/// generator allocated them after dead-code elimination; `None` where nothing was written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryColumns {
+    pub params: Vec<Option<usize>>,
+    pub returns: Option<usize>,
+}
+
 /// Default LogUp bits-of-security target when `--logup-soundness` is not given. On bn254 a
 /// single challenge already exceeds this, so the default is a byte-identical no-op; it becomes
 /// the forward tripwire once a small field (goldilocks) needs more than one challenge.
@@ -108,6 +122,8 @@ pub struct Driver {
     /// this single SSA.
     program_ssa: Option<HLSSA>,
     abi: Option<noirc_abi::Abi>,
+    entry_blob_layout: Option<EntryBlobLayout>,
+    entry_columns: Option<EntryColumns>,
     draw_cfg: bool,
     main_is_unconstrained: bool,
     /// Requested LogUp bits-of-security (from `--logup-soundness`); sizes the challenge count.
@@ -134,6 +150,9 @@ pub enum Error {
     ///
     /// Carries every failing assertion so a single compile reports them all.
     AssertConstantFailed(Vec<SourceLocation>),
+
+    /// Missing ABI or inconsistent entry-point/R1CS layouts.
+    WitnessManifest(String),
 }
 
 impl std::fmt::Display for Error {
@@ -158,6 +177,7 @@ impl std::fmt::Display for Error {
                 }
                 Ok(())
             }
+            Error::WitnessManifest(message) => write!(f, "witness manifest: {message}"),
         }
     }
 }
@@ -180,6 +200,8 @@ impl Driver {
             r1cs_profiling: false,
             program_ssa: None,
             abi: None,
+            entry_blob_layout: None,
+            entry_columns: None,
             draw_cfg,
             main_is_unconstrained: false,
             logup_soundness: DEFAULT_LOGUP_SOUNDNESS_BITS,
@@ -189,7 +211,7 @@ impl Driver {
     /// Builds a driver around an already-constructed [`HLSSA`], bypassing the Noir frontend, so a
     /// feature can be prototyped before the frontend supports it.
     ///
-    /// Such a driver has no [`Self::abi`], so [`Self::entry_point_flattened_io_count`] and the WASM
+    /// Such a driver has no [`Self::abi`], so [`Self::entry_blob_field_count`] and the WASM
     /// metadata sidecar are unavailable, and no [`Self::package_root`]: both belong to the Noir
     /// package, not the program.
     ///
@@ -209,6 +231,8 @@ impl Driver {
             r1cs_profiling: false,
             program_ssa: None,
             abi: None,
+            entry_blob_layout: None,
+            entry_columns: None,
             draw_cfg,
             main_is_unconstrained: false,
             logup_soundness: DEFAULT_LOGUP_SOUNDNESS_BITS,
@@ -362,9 +386,13 @@ impl Driver {
             ));
         }
 
-        let mut prepare_entry_point = PrepareEntryPoint::new(self.main_is_unconstrained);
+        let entry_blob_layout = Rc::new(RefCell::new(None));
+        let mut prepare_entry_point = PrepareEntryPoint::new(self.main_is_unconstrained)
+            .with_layout_sink(Rc::clone(&entry_blob_layout));
         if let Some(abi) = &self.abi {
-            prepare_entry_point = prepare_entry_point.with_abi_return(abi.return_type.is_some());
+            prepare_entry_point = prepare_entry_point
+                .with_abi_return(abi.return_type.is_some())
+                .with_param_visibility(Self::abi_param_is_public(abi));
         }
         let mut pass_manager = PassManager::new(
             "make_struct_access_static".to_string(),
@@ -409,6 +437,12 @@ impl Driver {
 
         pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
         pass_manager.run(&mut ssa);
+        self.entry_blob_layout = Some(
+            entry_blob_layout
+                .borrow_mut()
+                .take()
+                .expect("prepare_entry_point records the entry blob layout it used"),
+        );
         self.static_struct_access_ssa = Some(ssa);
         Ok(())
     }
@@ -655,7 +689,7 @@ impl Driver {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn generate_r1cs(&mut self) -> Result<R1CS, Error> {
+    pub fn generate_r1cs(&mut self) -> Result<SealedR1CS, Error> {
         let mut r1cs_ssa = self.witness_spilled_ssa.clone().unwrap();
 
         let mut r1cs_phase_1 = PassManager::new(
@@ -663,7 +697,8 @@ impl Driver {
             self.draw_cfg,
             vec![
                 Box::new(WitnessWriteToFresh::new()),
-                Box::new(DCE::new(dead_code_elimination::Config::post_r1c())),
+                // Prunes the entry's input blob, whose reads died with the witness writes.
+                Box::new(DCE::new(dead_code_elimination::Config::r1cs_gen())),
                 Box::new(FixDoubleJumps::new()),
             ],
         );
@@ -690,15 +725,12 @@ impl Driver {
         let num_lookups = r1cs_gen.num_lookups();
         // Captured before `r1cs_ssa` is stored away; sizes the LogUp per-challenge soundness.
         let field = r1cs_ssa.field();
-        let (r1cs, profile) =
-            // The guard's position is ABI-derived, and read only by the test runner's return-guard
-            // check. A driver from [`Self::from_ssa`] has no ABI, and nothing asks it for that.
-            match r1cs_gen.seal_with_profile(
-                self.abi.as_ref().and_then(crate::abi_helpers::guard_layout),
-            ) {
-                Ok((r1cs, profile)) => (r1cs, Some(profile)),
-                Err(error) => (error.into_r1cs(), None),
-            };
+        // Captured before `seal` consumes `r1cs_gen`: where the wrapper's writes landed.
+        self.entry_columns = Some(self.resolve_entry_columns(r1cs_gen.entry_columns()));
+        let (r1cs, profile) = match r1cs_gen.seal_with_profile() {
+            Ok((r1cs, profile)) => (r1cs, Some(profile)),
+            Err(error) => (error.into_r1cs(), None),
+        };
         let mut num_non_zero_terms = 0;
         for r1c in r1cs.constraints.iter() {
             for (_, coeff) in r1c.a.iter() {
@@ -757,7 +789,67 @@ impl Driver {
             }
         }
 
-        Ok(r1cs)
+        Ok(SealedR1CS::new(r1cs, field.id()))
+    }
+
+    fn abi_param_is_public(abi: &noirc_abi::Abi) -> Vec<bool> {
+        abi.parameters
+            .iter()
+            .map(|param| param.visibility == noirc_abi::AbiVisibility::Public)
+            .collect()
+    }
+
+    /// A parameter without recorded columns was elided, which only a private one may be.
+    fn resolve_entry_columns(&self, recorded: &BTreeMap<Arc<str>, Vec<usize>>) -> EntryColumns {
+        let blob = self
+            .entry_blob_layout
+            .as_ref()
+            .expect("prepare_entry_point records the entry blob layout before R1CS generation");
+        let param_is_public = self
+            .abi
+            .as_ref()
+            .map_or_else(|| vec![true; blob.params.len()], Self::abi_param_is_public);
+        let run_of = |origin: String, width: usize, what: &str| -> Option<usize> {
+            let columns = recorded.get(synthetic_file(origin).as_str())?;
+            if columns.len() != width {
+                ice!(
+                    "{what} occupies {} witness columns but flattens to {width}",
+                    columns.len()
+                );
+            }
+            if !columns.windows(2).all(|pair| pair[1] == pair[0] + 1) {
+                ice!("{what} occupies non-contiguous witness columns {columns:?}");
+            }
+            columns.first().copied()
+        };
+        let params = blob
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                let column = run_of(
+                    entry_param_origin(index),
+                    slot.width,
+                    &format!("entry parameter {index}"),
+                );
+                if column.is_none() && slot.width != 0 && param_is_public[index] {
+                    ice!("public entry parameter {index} has no witness columns");
+                }
+                column
+            })
+            .collect();
+        let returns = blob.return_width.and_then(|width| {
+            let column = run_of(ENTRY_RETURN_ORIGIN.to_string(), width, "the return");
+            if column.is_none() && width != 0 {
+                ice!("the computed return has no witness columns");
+            }
+            column
+        });
+        EntryColumns { params, returns }
+    }
+
+    pub fn entry_columns(&self) -> Option<&EntryColumns> {
+        self.entry_columns.as_ref()
     }
 
     /// Compiles the program (both the witgen and AD entry points) into a single VM binary.
@@ -784,7 +876,7 @@ impl Driver {
         if self.abi.is_some() {
             assert_eq!(
                 program.entry_blob_field_count,
-                self.entry_point_flattened_io_count(),
+                self.entry_blob_field_count(),
                 "ICE: entry blob field count in program header disagrees with the Noir ABI"
             );
         }
@@ -809,23 +901,107 @@ impl Driver {
         self.abi.as_ref().unwrap()
     }
 
-    /// Flattened field count of the entry point's parameters and return value — the size of the
-    /// positional input block that `prepare_entry_point` writes into witness columns
-    /// `1..=count`.
-    ///
-    /// Together with column 0 (the constant one) these are the externally-visible columns a
-    /// compaction of the R1CS must never touch.
-    pub fn entry_point_flattened_io_count(&self) -> usize {
-        crate::abi_helpers::flattened_io_count(self.abi())
+    /// Requires a project-backed driver after [`Self::generate_r1cs`]; validated against `r1cs`.
+    pub fn witness_manifest(&self, r1cs: &R1CS) -> Result<WitnessManifest, Error> {
+        let abi = self.abi.as_ref().ok_or_else(|| {
+            Error::WitnessManifest("driver has no ABI (seeded from HLSSA)".to_string())
+        })?;
+        let blob = self.entry_blob_layout.as_ref().ok_or_else(|| {
+            Error::WitnessManifest(
+                "entry blob layout not captured; run make_struct_access_static first".to_string(),
+            )
+        })?;
+        let columns = self.entry_columns.as_ref().ok_or_else(|| {
+            Error::WitnessManifest(
+                "entry columns not recorded; run generate_r1cs first".to_string(),
+            )
+        })?;
+        if abi.parameters.len() != blob.params.len() || blob.total != abi.field_count() as usize {
+            return Err(Error::WitnessManifest(format!(
+                "ABI flattens to {} parameters and {} fields but the entry point has {} and {}",
+                abi.parameters.len(),
+                abi.field_count(),
+                blob.params.len(),
+                blob.total
+            )));
+        }
+        let layout = r1cs.witness_layout;
+        let returns = match (blob.return_width, abi.return_type.as_ref()) {
+            (Some(len), Some(ret)) => Some(ReturnSlot {
+                column_start: columns.returns,
+                len,
+                visibility: abi_visibility(ret.visibility),
+            }),
+            (None, None) => None,
+            _ => {
+                return Err(Error::WitnessManifest(
+                    "ABI and entry point disagree on the presence of a return".to_string(),
+                ));
+            }
+        };
+        let manifest = WitnessManifest {
+            entry_blob_field_count: blob.total,
+            parameters: abi
+                .parameters
+                .iter()
+                .zip(&blob.params)
+                .zip(&columns.params)
+                .map(|((param, slot), column_start)| ManifestParam {
+                    name: param.name.clone(),
+                    visibility: abi_visibility(param.visibility),
+                    blob_offset: slot.offset,
+                    width: slot.width,
+                    column_start: *column_start,
+                })
+                .collect(),
+            returns,
+            challenges: (0..layout.challenges_size)
+                .map(|i| ChallengeSlot {
+                    witness_index: layout.challenges_start() + i,
+                    w2_offset: i,
+                })
+                .collect(),
+            pre_commitment_size: layout.pre_commitment_size(),
+            witness_count: layout.size(),
+            constraint_count: r1cs.constraints.len(),
+        };
+        manifest.validate(r1cs).map_err(Error::WitnessManifest)?;
+        Ok(manifest)
     }
 
-    /// Number of leading R1CS witness columns a compaction must never touch.
-    ///
-    /// It must always include column 0 (the constant one) plus the positional input/return block.
-    /// There should always be at least 1, matching `r1cs_compact::analyze`'s requirement that
-    /// column 0 stays protected.
-    pub fn protected_r1cs_cols(&self) -> usize {
-        1 + self.entry_point_flattened_io_count()
+    pub fn r1cs_artifact(&self, r1cs: SealedR1CS) -> Result<R1CSArtifact, Error> {
+        let manifest = self.witness_manifest(&r1cs)?;
+        Ok(R1CSArtifact::new(manifest, r1cs))
+    }
+
+    /// The parameters only; the return is computed, not an input.
+    pub fn entry_blob_field_count(&self) -> usize {
+        self.abi().field_count() as usize
+    }
+
+    /// Column 0, the surviving parameter columns and the return columns.
+    pub fn protected_r1cs_cols(&self) -> Vec<usize> {
+        let blob = self
+            .entry_blob_layout
+            .as_ref()
+            .expect("prepare_entry_point records the entry blob layout");
+        let entry = self
+            .entry_columns
+            .as_ref()
+            .expect("generate_r1cs records the entry columns");
+        let mut columns = vec![0];
+        for (start, param) in entry.params.iter().zip(&blob.params) {
+            if let Some(start) = start {
+                columns.extend(*start..*start + param.width);
+            }
+        }
+        if let Some(start) = entry.returns {
+            let width = blob
+                .return_width
+                .expect("return columns have a return width");
+            columns.extend(start..start + width);
+        }
+        columns
     }
 
     /// Builds the final multi-entry-point SSA.
@@ -1019,13 +1195,15 @@ impl Driver {
             .as_ref()
             .map_or(0, |ret| ret.abi_type.field_count());
 
+        let manifest = serde_json::to_value(self.witness_manifest(r1cs)?).unwrap();
         let metadata = serde_json::json!({
             "witnessCount": r1cs.witness_layout.size(),
             "constraintCount": r1cs.constraints.len(),
             "parameters": parameters,
             "hasReturn": abi.return_type.is_some(),
             "returnElementCount": return_element_count,
-            "entryBlobFieldCount": self.entry_point_flattened_io_count()
+            "entryBlobFieldCount": self.entry_blob_field_count(),
+            "witnessManifest": manifest
         });
 
         let metadata_path = format!("{}.meta.json", wasm_path.display());
@@ -1041,6 +1219,14 @@ impl Driver {
     }
 }
 
+fn abi_visibility(visibility: noirc_abi::AbiVisibility) -> ParamVisibility {
+    match visibility {
+        noirc_abi::AbiVisibility::Public => ParamVisibility::Public,
+        noirc_abi::AbiVisibility::Private => ParamVisibility::Private,
+        noirc_abi::AbiVisibility::DataBus => ParamVisibility::DataBus,
+    }
+}
+
 /// The text `file_manager` holds for `path`, which is how a [`SourceLocation`] names its file.
 fn compiled_source(file_manager: &fm::FileManager, path: &str) -> Option<Arc<str>> {
     let id = file_manager.name_to_id(PathBuf::from(path))?;
@@ -1052,44 +1238,16 @@ fn compiled_source(file_manager: &fm::FileManager, path: &str) -> Option<Arc<str
 
 #[cfg(test)]
 mod tests {
-    use noirc_abi::{Abi, AbiParameter, AbiReturnType, AbiType, AbiVisibility, Sign};
+    use noirc_abi::{AbiType, Sign};
 
     use super::{Diagnostic, Error, SourceLocation};
-    use crate::abi_helpers::flattened_io_count;
     use crate::compiler::{passes::prepare_entry_point::PrepareEntryPoint, ssa::hlssa::Type};
 
-    /// `entry_point_flattened_io_count` sizes the protected column block from the ABI via
-    /// [`AbiType::field_count`], while the wrapper's actual pinned witness block is sized from
-    /// the HLSSA signature via [`PrepareEntryPoint::flattened_field_count`]. The two counts must
-    /// agree on corresponding types, or the R1CS compaction analysis would protect the wrong column
-    /// range.
+    /// ABI and HLSSA flattening must agree on the VM entry blob's width.
     #[test]
-    fn abi_and_hlssa_io_flattening_agree() {
-        let cases: Vec<(AbiType, Type)> = vec![
+    fn abi_and_hlssa_field_counts_agree() {
+        let mut cases: Vec<(AbiType, Type)> = vec![
             (AbiType::Field, Type::field()),
-            (
-                AbiType::Integer {
-                    sign: Sign::Unsigned,
-                    width: 32,
-                },
-                Type::int(32),
-            ),
-            (
-                AbiType::Integer {
-                    sign: Sign::Signed,
-                    width: 64,
-                },
-                Type::int(64),
-            ),
-            // Same width, opposite sign. Both map to `Type::int(32)` because the HLSSA type has no
-            // sign left to carry.
-            (
-                AbiType::Integer {
-                    sign: Sign::Signed,
-                    width: 32,
-                },
-                Type::int(32),
-            ),
             (AbiType::Boolean, Type::int(1)),
             // A Noir `str<12>` lowers to an array of 12 bytes.
             (AbiType::String { length: 12 }, Type::int(8).array_of(12)),
@@ -1136,124 +1294,16 @@ mod tests {
             // WitnessOf is transparent on the HLSSA side; the ABI never sees it.
             (AbiType::Field, Type::witness_of(Type::field())),
         ];
+        for width in [1, 8, 32, 64] {
+            for sign in [Sign::Unsigned, Sign::Signed] {
+                cases.push((AbiType::Integer { sign, width }, Type::int(width as usize)));
+            }
+        }
         for (abi, hlssa) in &cases {
             assert_eq!(
                 abi.field_count() as usize,
                 PrepareEntryPoint::flattened_field_count(hlssa),
                 "flattening mismatch for ABI type {abi:?} vs HLSSA type {hlssa:?}",
-            );
-        }
-    }
-
-    fn abi_of(params: Vec<AbiType>, return_type: Option<AbiType>) -> Abi {
-        Abi {
-            parameters: params
-                .into_iter()
-                .enumerate()
-                .map(|(i, typ)| AbiParameter {
-                    name: format!("p{i}"),
-                    typ,
-                    visibility: AbiVisibility::Private,
-                })
-                .collect(),
-            return_type: return_type.map(|abi_type| AbiReturnType {
-                abi_type,
-                visibility: AbiVisibility::Public,
-            }),
-            error_types: Default::default(),
-        }
-    }
-
-    /// The wrapper uses ABI return presence, not HLSSA result arity, to decide whether a
-    /// guard slot exists. Unit and empty structs both lower to one empty-tuple result,
-    /// but only the empty struct has an ABI return.
-    #[test]
-    fn abi_and_hlssa_blob_sizing_agree() {
-        let cases: Vec<(Vec<AbiType>, Option<AbiType>, Vec<Type>, Vec<Type>)> = vec![
-            // `fn main(x: Field) -> pub ()` — unit return: no guard slot on either side.
-            (
-                vec![AbiType::Field],
-                None,
-                vec![Type::field()],
-                vec![Type::tuple_of(vec![])],
-            ),
-            // No parameters, no return.
-            (vec![], None, vec![], vec![Type::tuple_of(vec![])]),
-            (
-                vec![],
-                Some(AbiType::Struct {
-                    path: "Empty".into(),
-                    fields: vec![],
-                }),
-                vec![],
-                vec![Type::tuple_of(vec![])],
-            ),
-            // `fn main(x: Field) -> pub Field` — guard slot on both sides.
-            (
-                vec![AbiType::Field],
-                Some(AbiType::Field),
-                vec![Type::field()],
-                vec![Type::field()],
-            ),
-            // Compound return: one guard slot regardless of leaf count.
-            (
-                vec![AbiType::Boolean],
-                Some(AbiType::Array {
-                    length: 3,
-                    typ: Box::new(AbiType::Integer {
-                        sign: Sign::Unsigned,
-                        width: 8,
-                    }),
-                }),
-                vec![Type::int(1)],
-                vec![Type::int(8).array_of(3)],
-            ),
-        ];
-        for (abi_params, abi_return, hlssa_params, hlssa_returns) in cases {
-            let abi = abi_of(abi_params, abi_return);
-            assert_eq!(
-                flattened_io_count(&abi),
-                PrepareEntryPoint::entry_blob_field_count(
-                    &hlssa_params,
-                    &hlssa_returns,
-                    abi.return_type.is_some(),
-                ),
-                "blob size mismatch for ABI {:?} vs HLSSA ({hlssa_params:?}, {hlssa_returns:?})",
-                (&abi.parameters, &abi.return_type),
-            );
-        }
-    }
-
-    /// The ABI keeps a [`Sign`] that the HLSSA type no longer has, so the two sides now disagree
-    /// about how many things an integer type _is_ -- two on one side, one on the other. That is
-    /// only safe while the sign makes no difference to the flattened width, which is what this
-    /// pins.
-    ///
-    /// It cannot fail today: `Type::int` takes no sign, so both rows below build the same value and
-    /// the assertion is a tautology on the HLSSA side. Its job is on the ABI side and in the
-    /// future -- `AbiType::field_count` matches `AbiType::Integer { .. }` with the sign bound to
-    /// a wildcard, and a later reader who narrows that pattern to consult the sign would silently
-    /// resize the protected column block for exactly half of all integer parameters.
-    #[test]
-    fn the_two_signs_flatten_to_the_same_width() {
-        for width in [1u32, 8, 32, 64] {
-            let unsigned = AbiType::Integer {
-                sign: Sign::Unsigned,
-                width,
-            };
-            let signed = AbiType::Integer {
-                sign: Sign::Signed,
-                width,
-            };
-            assert_eq!(
-                unsigned.field_count(),
-                signed.field_count(),
-                "the ABI's two signs disagree on the flattened width at {width} bits",
-            );
-            assert_eq!(
-                signed.field_count() as usize,
-                PrepareEntryPoint::flattened_field_count(&Type::int(width as usize)),
-                "signed ABI integer disagrees with the sign-free HLSSA type at {width} bits",
             );
         }
     }

@@ -422,7 +422,8 @@ fn run_phase1_impl(
         flat_inputs.len(),
         header.entry_blob_field_count,
     );
-    // The program itself writes inputs to the witness tape via pinned WriteWitness instructions.
+    // The program itself writes inputs to the witness tape via WriteWitness instructions,
+    // public parameters first.
     let out_wit_post_comm = vec![Field::ZERO; witness_layout.post_commitment_size()];
     let mut global_frame = vec![0u64; global_frame_size];
     let mut vm = VM::new_witgen(
@@ -1096,13 +1097,13 @@ mod tests {
             message: None,
             stack_trace: vec![bytecode::StackFrame {
                 function: "wrapper_main".to_string(),
-                location: bytecode::SourceLocation::new("<public return value check>", 1, 1),
+                location: bytecode::SourceLocation::new("<entry point: return>", 1, 1),
             }],
         };
 
         assert_eq!(
             error.to_string(),
-            "VM trapped during execution\n  at wrapper_main (<public return value check>)"
+            "VM trapped during execution\n  at wrapper_main (<entry point: return>)"
         );
     }
 }

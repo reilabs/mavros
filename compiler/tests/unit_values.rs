@@ -1,9 +1,9 @@
 use mavros_compiler::{api, compiler::codegen::CodeGenOptions, vm::bytecode::parse_program_header};
 
-/// Exercise the production frontend, wrapper, ABI encoder and VM together.
-/// Counts are explicit so dropping `with_abi_return` cannot make both sides agree.
+mod common;
+
 #[test]
-fn abi_return_guards_match_the_generated_entry_blob() {
+fn entry_blob_and_return_checks_follow_the_abi() {
     let cases = [
         ("fn main() {}", "", 0, true),
         (
@@ -15,25 +15,25 @@ fn abi_return_guards_match_the_generated_entry_blob() {
         (
             "struct Empty {} fn main() -> pub Empty { Empty {} }",
             "return = {}",
-            1,
+            0,
             true,
         ),
         (
             "fn main(x: Field) -> pub Field { x + 1 }",
             "x = '3'\nreturn = '4'",
-            3,
+            1,
             true,
         ),
         (
             "fn main(x: Field) -> pub Field { x + 1 }",
             "x = '3'\nreturn = '5'",
-            3,
+            1,
             false,
         ),
         (
             "fn main(x: Field) -> pub Field { x + 1 }",
             "x = '3'",
-            3,
+            1,
             true,
         ),
     ];
@@ -174,17 +174,10 @@ fn zero_field_entry_parameters_need_no_witness_slots() {
 }
 
 fn run(source: &str, inputs: &str, expected_fields: usize, accepted: bool) {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir(dir.path().join("src")).unwrap();
-    std::fs::write(
-        dir.path().join("Nargo.toml"),
-        "[package]\nname = 'unit_values'\ntype = 'bin'\nauthors = []\n",
-    )
-    .unwrap();
-    std::fs::write(dir.path().join("src/main.nr"), source).unwrap();
+    let dir = common::noir_project(source);
     std::fs::write(dir.path().join("Prover.toml"), inputs).unwrap();
     let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
-    let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+    let (params, declared_return) = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
     let mut artifact = driver
         .compile_bytecode_artifact(CodeGenOptions {
             check_constraints: true,
@@ -198,14 +191,17 @@ fn run(source: &str, inputs: &str, expected_fields: usize, accepted: bool) {
     );
     let result =
         api::run_witgen_from_binary(&mut artifact.binary, &r1cs, &params, artifact.debug_info);
-    assert_eq!(result.is_ok(), accepted, "{source}");
-    if let Ok(result) = result {
-        assert!(r1cs.check_witgen_output(
-            &result.out_wit_pre_comm,
-            &result.out_wit_post_comm,
-            &result.out_a,
-            &result.out_b,
-            &result.out_c,
-        ));
-    }
+    let Ok(result) = result else {
+        assert!(!accepted, "{source}");
+        return;
+    };
+    assert!(api::check_witgen(&r1cs, &result));
+    let manifest = driver.witness_manifest(&r1cs).unwrap();
+    let checked = mavros_compiler::abi_helpers::check_witness_manifest(
+        &manifest,
+        &params,
+        declared_return.as_ref(),
+        &result.out_wit_pre_comm,
+    );
+    assert_eq!(checked.is_ok(), accepted, "{source}: {checked:?}");
 }

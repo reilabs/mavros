@@ -1,25 +1,7 @@
-//! Transforms the SSA so that the program entry point speaks the circuit ABI for the witness rather
-//! than Noir-style typed arguments.
-//!
-//! It does the following four things:
-//!
-//! 1. **Synthesises a Wrapper for `main`:** The wrapper takes a single `Blob<Field; N>` parameter
-//!    holding every flattened input field (the original main's arguments, then — when `main`
-//!    declares a return — a one-field *return guard* followed by the declared return values),
-//!    performs global initialization, invokes the original `main` and then uses a deep assert to
-//!    constrain the return value against the declared counterpart in the witness (see **Return
-//!    Guard** below). It then deinitializes the globals. The blob keeps the entry point's
-//!    parameter list (and the resulting locals pressure in the generated code) constant
-//!    regardless of input size.
-//! 2. **Pinned Witness Writes:** A single counted loop writes every blob element to the witness,
-//!    pinned so that DCE cannot remove the writes downstream, while accumulating the witness
-//!    values into an array.
-//! 3. **Input Reconstruction:** The original typed input values are rebuilt from slices of that
-//!    witness array via per-type reconstruct functions (which also range-check integers).
-//! 4. **Handling of Unconstrained Calls:** Reference arguments are loaded and passed by value to
-//!    wrappers that reconstruct local references. Results are written to the witness, with
-//!    range-checking of integers and recursive conversion of arrays and tuples. This ensures
-//!    that we bind the untrusted/unconstrained results into the constraint system.
+//! Wraps `main` with a single `Blob<Field; N>` input to keep its parameter count independent of
+//! input size. The wrapper writes parameters to the witness, reconstructs their typed values
+//! (range-checking integers), initializes globals, calls `main`, binds its return, then deinitializes
+//! globals. This pass also prepares unconstrained call arguments and witnesses their results.
 //!
 //! # Reference Arguments
 //!
@@ -35,22 +17,26 @@
 //! reason about references crossing an unconstrained boundary. Only static calls carry the
 //! `unconstrained` flag; dynamic calls are not boundary calls in this IR.
 //!
-//! # Return Guard
+//! # Witness Layout
 //!
-//! The declared return in the blob is optional: a `u1` guard slot between the flattened
-//! parameters and returns gates the check. Each leaf asserts `guard * (result - declared) == 0`,
-//! so `guard = 0` (missing `return` input, columns zero-filled) disables the check entirely.
+//! Witness columns are allocated in execution order, so the wrapper's write order is the layout:
 //!
-//! Enforcing the declared return is a verifier obligation: pinning only the parameter and return
-//! columns accepts any return value (the prover picks `guard = 0`), so a verifier must require
-//! `guard == 1` as a public input. Relying on the column being boolean is not sound either: the
-//! booleanity constraint lives in the guard's reconstruct function and survives only as long as
-//! the guarded asserts consuming it do.
+//! ```text
+//! [ 0: constant one | public parameters (ABI order, pinned) | private parameters (ABI order,
+//!   unpinned) | ...main's internal witnesses... | computed return (pinned) ]
+//! ```
 //!
-//! Cost: one witness column, one blob slot, and one booleanity row per program; each leaf check
-//! stays a single R1C (see `assert_eq_deep_guarded`).
+//! The constant one, public parameters and all return leaves are pinned. Each return column is
+//! constrained equal to its computed value; an optional `return` in `Prover.toml` is compared
+//! against it by the host after witness generation.
+//!
+//! Private parameter writes feed a per-parameter array through a counted loop. Its dynamic index
+//! prevents splitting, so DCE retains or elides the whole parameter. Integer range checks keep
+//! otherwise unused parameters live. The driver rejects partially surviving parameters.
+//! [`entry_param_origin`] and [`ENTRY_RETURN_ORIGIN`] tag writes so the R1CS generator can recover
+//! their columns after DCE.
 
-use std::collections::BTreeSet;
+use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 
 use crate::{
     collections::HashMap,
@@ -70,12 +56,34 @@ use crate::{
 };
 use mavros_int_semantics::IntBits;
 
-/// Origin of the synthetic source location the wrapper's return-value assertion carries.
-pub const RETURN_CHECK_ORIGIN: &str = "public return value check";
+pub const ENTRY_ORIGIN_PREFIX: &str = "entry point: ";
+
+pub fn entry_param_origin(index: usize) -> String {
+    format!("{ENTRY_ORIGIN_PREFIX}param {index}")
+}
+
+pub const ENTRY_RETURN_ORIGIN: &str = "entry point: return";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlobSlot {
+    pub offset: usize,
+    pub width: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryBlobLayout {
+    pub params: Vec<BlobSlot>,
+    /// Present exactly when the ABI declares a return, so `Some(0)` is a zero-width return.
+    pub return_width: Option<usize>,
+    pub total: usize,
+}
 
 pub struct PrepareEntryPoint {
     main_is_unconstrained: bool,
     abi_has_return: Option<bool>,
+    /// `None` treats every parameter as public, which keeps hand-built SSA on fixed columns.
+    param_is_public: Option<Vec<bool>>,
+    layout_sink: Option<Rc<RefCell<Option<EntryBlobLayout>>>>,
 }
 
 struct PrepareFnEntry {
@@ -140,7 +148,15 @@ impl Pass for PrepareEntryPoint {
     }
 
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
-        Self::wrap_main(ssa, self.main_is_unconstrained, self.abi_has_return);
+        let layout = Self::wrap_main(
+            ssa,
+            self.main_is_unconstrained,
+            self.abi_has_return,
+            self.param_is_public.as_deref(),
+        );
+        if let Some(sink) = &self.layout_sink {
+            *sink.borrow_mut() = Some(layout);
+        }
         Self::process_unconstrained_calls(ssa);
     }
 }
@@ -153,6 +169,8 @@ impl PrepareEntryPoint {
         Self {
             main_is_unconstrained,
             abi_has_return: None,
+            param_is_public: None,
+            layout_sink: None,
         }
     }
 
@@ -163,7 +181,22 @@ impl PrepareEntryPoint {
         self
     }
 
-    fn wrap_main(ssa: &mut HLSSA, main_is_unconstrained: bool, abi_has_return: Option<bool>) {
+    pub fn with_param_visibility(mut self, param_is_public: Vec<bool>) -> Self {
+        self.param_is_public = Some(param_is_public);
+        self
+    }
+
+    pub fn with_layout_sink(mut self, sink: Rc<RefCell<Option<EntryBlobLayout>>>) -> Self {
+        self.layout_sink = Some(sink);
+        self
+    }
+
+    fn wrap_main(
+        ssa: &mut HLSSA,
+        main_is_unconstrained: bool,
+        abi_has_return: Option<bool>,
+        param_is_public: Option<&[bool]>,
+    ) -> EntryBlobLayout {
         let original_main_id = ssa.get_unique_entrypoint_id();
         let original_main = ssa.get_unique_entrypoint();
         let param_types = original_main.get_param_types();
@@ -175,25 +208,30 @@ impl PrepareEntryPoint {
         ssa.get_unique_entrypoint_mut()
             .set_name("original_main".to_string());
 
-        // Reconstruct functions rebuild each typed input value from its
-        // flattened field representation, range-checking integers on the way.
         let has_return = abi_has_return.unwrap_or(!return_types.is_empty());
         if !has_return && !return_types.iter().all(Self::is_leafless_result) {
             ice!("ABI without a return cannot discard nonempty SSA results");
         }
-        let guard_type = Type::int(1);
+        let param_is_public: Vec<bool> = match param_is_public {
+            Some(flags) => {
+                if flags.len() != param_types.len() {
+                    ice!(
+                        "{} parameter visibilities supplied for an entry point with {} parameters",
+                        flags.len(),
+                        param_types.len()
+                    );
+                }
+                flags.to_vec()
+            }
+            None => vec![true; param_types.len()],
+        };
         let mut reconstruct_fns = Vec::new();
-        for typ in param_types
-            .iter()
-            .chain(return_types.iter().filter(|_| has_return))
-        {
+        for typ in &param_types {
             Self::get_or_create_reconstruct_fn(typ, ssa, &mut reconstruct_fns);
         }
-        if has_return {
-            Self::get_or_create_reconstruct_fn(&guard_type, ssa, &mut reconstruct_fns);
-        }
 
-        let total_fields = Self::entry_blob_field_count(&param_types, &return_types, has_return);
+        let layout = Self::entry_blob_layout(&param_types, &return_types, has_return);
+        let total_fields = layout.total;
 
         let wrapper_id = ssa.add_function("wrapper_main".to_string());
         let mut sb = HLSSABuilder::new(ssa);
@@ -209,69 +247,73 @@ impl PrepareEntryPoint {
             let one = e.field_const(e.field().constant(1u64));
             e.pinned_write_witness(one);
 
-            // Write every input field to the witness in blob order, collecting
-            // the witness values into an array for the reconstructions below.
-            // The writes are pinned so they survive DCE even when their results
-            // become unused (e.g. when inter-procedural DCE prunes call args to
-            // original_main).
-            let witness_inputs = (total_fields > 0).then(|| {
-                let initial_array =
-                    Self::emit_default_witness_array(&mut e, &Type::field(), total_fields);
+            // The per-parameter array keeps private writes live or dead together under DCE.
+            let emit_param_writes = |e: &mut HLBlockEmitter<'_>, slot: BlobSlot, pinned: bool| {
+                let BlobSlot { offset, width } = slot;
+                let initial_array = Self::emit_default_witness_array(e, &Type::field(), width);
+                if width == 0 {
+                    return initial_array;
+                }
                 let copied = e.build_counted_loop(
-                    total_fields,
-                    vec![(initial_array, Type::field().array_of(total_fields))],
+                    width,
+                    vec![(initial_array, Type::field().array_of(width))],
                     |e, i, accumulators| {
-                        let elem = e.array_get(blob_param, i);
-                        let witness = e.pinned_write_witness(elem);
+                        let source = if offset == 0 {
+                            i
+                        } else {
+                            let base = e.int_const(IntBits::from_u128(32, offset as u128));
+                            e.uadd(base, i)
+                        };
+                        let elem = e.array_get(blob_param, source);
+                        let witness = if pinned {
+                            e.pinned_write_witness(elem)
+                        } else {
+                            e.write_witness(elem)
+                        };
                         let updated = e.array_set(accumulators[0], i, witness);
                         vec![updated]
                     },
                 );
                 copied[0]
-            });
-
-            // Rebuild each typed input value from its slice of the witness array.
-            let mut offset = 0usize;
-            let mut input_value = |e: &mut HLBlockEmitter<'_>, typ: &Type| {
-                let width = Self::flattened_field_count(typ);
-                if width == 0 {
-                    return Self::emit_default_witness_value(e, typ);
-                }
-                let witness_inputs =
-                    witness_inputs.expect("a nonempty typed input requires witness fields");
-                let value = match &typ.expr {
-                    TypeExpr::Field => {
-                        let index = e.int_const(IntBits::from_u128(32, offset as u128));
-                        e.array_get(witness_inputs, index)
-                    }
-                    TypeExpr::Int(_) | TypeExpr::Array(_, _) | TypeExpr::Tuple(_) => {
-                        let child = Self::emit_reconstruct_child_input_array(
-                            e,
-                            witness_inputs,
-                            offset,
-                            width,
-                        );
-                        let fn_id = Self::find_reconstruct_fn(typ, &reconstruct_fns);
-                        e.call(fn_id, vec![child], 1)[0]
-                    }
-                    _ => todo!("Not implemented yet"),
-                };
-                offset += width;
-                value
             };
 
-            let mut arg_values = Vec::new();
-            for typ in &param_types {
-                arg_values.push(input_value(&mut e, typ));
+            // Public parameters first, then private, each loop located at its parameter's
+            // origin so the R1CS generator can recover the columns after DCE.
+            let mut witness_arrays: Vec<Option<ValueId>> = vec![None; param_types.len()];
+            for pinned in [true, false] {
+                for (index, slot) in layout.params.iter().enumerate() {
+                    if param_is_public[index] != pinned {
+                        continue;
+                    }
+                    let origin = SourceLocation::synthetic(entry_param_origin(index));
+                    witness_arrays[index] =
+                        Some(e.emit_with_location(origin, |e| emit_param_writes(e, *slot, pinned)));
+                }
             }
 
-            let return_guard = has_return.then(|| input_value(&mut e, &guard_type));
-
-            let mut return_input_values = Vec::new();
-            if has_return {
-                for typ in &return_types {
-                    return_input_values.push(input_value(&mut e, typ));
-                }
+            let mut arg_values = Vec::new();
+            for ((typ, slot), witness_array) in
+                param_types.iter().zip(&layout.params).zip(&witness_arrays)
+            {
+                debug_assert_eq!(slot.width, Self::flattened_field_count(typ));
+                let witness_array =
+                    witness_array.expect("every parameter has its witness array emitted");
+                let value = if slot.width == 0 {
+                    Self::emit_default_witness_value(&mut e, typ)
+                } else {
+                    match &typ.expr {
+                        TypeExpr::Field => {
+                            let zero = e.int_const(IntBits::zero(32));
+                            e.array_get(witness_array, zero)
+                        }
+                        TypeExpr::Int(_) | TypeExpr::Array(_, _) | TypeExpr::Tuple(_) => {
+                            let fn_id = Self::find_reconstruct_fn(typ, &reconstruct_fns);
+                            e.call(fn_id, vec![witness_array], 1)[0]
+                        }
+                        _ => todo!("Not implemented yet"),
+                    }
+                };
+                arg_values.push(value);
             }
 
             if let Some(init_fn) = globals_init_fn {
@@ -283,23 +325,13 @@ impl PrepareEntryPoint {
             } else {
                 e.call(original_main_id, arg_values, return_types.len())
             };
-            e.emit_with_location(SourceLocation::synthetic(RETURN_CHECK_ORIGIN), |e| {
-                let Some(guard) = return_guard else { return };
-                let guard_field = e.cast_to_field(guard);
-                for ((result, public_input), return_type) in results
-                    .iter()
-                    .zip(return_input_values.iter())
-                    .zip(return_types.iter())
-                {
-                    Self::assert_eq_deep_guarded(
-                        e,
-                        guard_field,
-                        *result,
-                        *public_input,
-                        return_type,
-                    );
-                }
-            });
+            if has_return {
+                e.emit_with_location(SourceLocation::synthetic(ENTRY_RETURN_ORIGIN), |e| {
+                    for (result, return_type) in results.iter().zip(return_types.iter()) {
+                        Self::bind_return_deep(e, *result, return_type);
+                    }
+                });
+            }
 
             if let Some(deinit_fn) = globals_deinit_fn {
                 e.call(deinit_fn, vec![], 0);
@@ -308,44 +340,29 @@ impl PrepareEntryPoint {
             e.terminate_return(vec![]);
         });
         ssa.set_unique_entrypoint(wrapper_id);
+        layout
     }
 
-    fn assert_eq_deep_guarded(
-        b: &mut HLBlockEmitter<'_>,
-        guard_field: ValueId,
-        result: ValueId,
-        public_input: ValueId,
-        typ: &Type,
-    ) {
+    fn bind_return_deep(b: &mut HLBlockEmitter<'_>, result: ValueId, typ: &Type) {
         match &typ.expr {
             TypeExpr::Array(inner, size) => {
                 for i in 0..*size {
                     let index = b.int_const(IntBits::from_u128(32, i as u128));
                     let result_elem = b.array_get(result, index);
-                    let input_elem = b.array_get(public_input, index);
-                    Self::assert_eq_deep_guarded(b, guard_field, result_elem, input_elem, inner);
+                    Self::bind_return_deep(b, result_elem, inner);
                 }
             }
             TypeExpr::Tuple(element_types) => {
                 for (i, elem_type) in element_types.iter().enumerate() {
                     let result_elem = b.tuple_proj(result, i);
-                    let input_elem = b.tuple_proj(public_input, i);
-                    Self::assert_eq_deep_guarded(
-                        b,
-                        guard_field,
-                        result_elem,
-                        input_elem,
-                        elem_type,
-                    );
+                    Self::bind_return_deep(b, result_elem, elem_type);
                 }
             }
             _ => {
                 let result_field = b.ensure_field(result, typ);
-                let input_field = b.ensure_field(public_input, typ);
-                let diff = b.usub(result_field, input_field);
-                let gated = b.umul(guard_field, diff);
-                let zero = b.field_const(b.field().constant(0u64));
-                b.assert_eq(gated, zero);
+                // UntaintControlFlow strips witness taint from the hint; R1CS gets a fresh column.
+                let written = b.pinned_write_witness(result_field);
+                b.assert_eq(result_field, written);
             }
         }
     }
@@ -519,17 +536,33 @@ impl PrepareEntryPoint {
         format!("reconstruct_{}", reconstruct_fns.len())
     }
 
-    pub(crate) fn entry_blob_field_count(
+    /// Witness columns are not derived from blob offsets: the wrapper writes public parameters
+    /// before private ones, and DCE may elide an unused private parameter.
+    pub(crate) fn entry_blob_layout(
         param_types: &[Type],
         return_types: &[Type],
         has_return: bool,
-    ) -> usize {
-        param_types
+    ) -> EntryBlobLayout {
+        let mut offset = 0usize;
+        let mut slot = |width: usize| {
+            let start = offset;
+            offset += width;
+            BlobSlot {
+                offset: start,
+                width,
+            }
+        };
+        let params = param_types
             .iter()
-            .chain(return_types.iter().filter(|_| has_return))
-            .map(Self::flattened_field_count)
-            .sum::<usize>()
-            + usize::from(has_return)
+            .map(|typ| slot(Self::flattened_field_count(typ)))
+            .collect();
+        let return_width =
+            has_return.then(|| return_types.iter().map(Self::flattened_field_count).sum());
+        EntryBlobLayout {
+            params,
+            return_width,
+            total: offset,
+        }
     }
 
     /// How many elements of the entry point's input blob a value of `typ` occupies.
@@ -1256,7 +1289,7 @@ mod tests {
             let value = e.mk_tuple(vec![], vec![]);
             e.terminate_return(vec![value]);
         });
-        PrepareEntryPoint::wrap_main(&mut ssa, false, Some(false));
+        PrepareEntryPoint::wrap_main(&mut ssa, false, Some(false), None);
         assert_eq!(
             ssa.get_unique_entrypoint().get_param_types(),
             vec![Type::blob(Type::field(), 0)]
@@ -1265,6 +1298,58 @@ mod tests {
             ssa.iter_functions().count(),
             2,
             "unused return reconstruction should not be generated"
+        );
+    }
+
+    /// Every witness write of the wrapper, as `(origin, pinned)`, in block order.
+    fn wrapper_writes(ssa: &HLSSA) -> Vec<(String, bool)> {
+        ssa.get_unique_entrypoint()
+            .get_blocks()
+            .flat_map(|(_, block)| block.get_instructions_with_source_locations())
+            .filter_map(|(instruction, location)| match instruction {
+                OpCode::WriteWitness { pinned, .. } => Some((location.file.to_string(), *pinned)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn public_params_are_written_pinned_before_private_unpinned() {
+        let mut ssa = HLSSA::with_main("main".into());
+        let main = ssa.get_unique_entrypoint_id();
+        HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+            let entry = b.function.get_entry_id();
+            let mut e = b.test_block(entry);
+            for typ in [Type::field(), Type::int(8).array_of(2), Type::field()] {
+                e.add_parameter(typ);
+            }
+            e.terminate_return(vec![]);
+        });
+        PrepareEntryPoint::wrap_main(&mut ssa, false, Some(false), Some(&[false, true, false]));
+
+        let writes = wrapper_writes(&ssa);
+        let origin =
+            |index: usize| crate::compiler::located::synthetic_file(entry_param_origin(index));
+        assert!(writes[0].1, "the constant one is pinned");
+        let by_origin = |index: usize| -> Vec<bool> {
+            writes
+                .iter()
+                .filter(|(file, _)| *file == origin(index))
+                .map(|(_, pinned)| *pinned)
+                .collect()
+        };
+        assert_eq!(by_origin(1), vec![true], "the public parameter is pinned");
+        assert_eq!(by_origin(0), vec![false], "a private parameter is unpinned");
+        assert_eq!(by_origin(2), vec![false]);
+        let first_write_of = |index: usize| {
+            writes
+                .iter()
+                .position(|(file, _)| *file == origin(index))
+                .unwrap()
+        };
+        assert!(
+            first_write_of(1) < first_write_of(0) && first_write_of(0) < first_write_of(2),
+            "public writes come first, then private in signature order: {writes:?}"
         );
     }
 
@@ -1281,7 +1366,7 @@ mod tests {
                     let value = e.add_parameter(typ);
                     e.terminate_return(vec![value]);
                 });
-                PrepareEntryPoint::wrap_main(&mut ssa, false, Some(false));
+                PrepareEntryPoint::wrap_main(&mut ssa, false, Some(false), None);
             })
             .expect_err("the wrapper must reject a nonempty result without an ABI return");
             let message = failure

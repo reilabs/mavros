@@ -16,13 +16,13 @@ fn check(source: &str, inputs: &[&str]) {
     .unwrap();
     for input in inputs {
         std::fs::write(dir.path().join("Prover.toml"), input).unwrap();
-        let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+        let (params, declared_return) = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
         let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None).unwrap();
         assert!(api::check_witgen(&r1cs, &result), "{input}");
-        abi_helpers::check_return_guard(
-            driver.abi(),
-            &r1cs.witness_layout,
+        abi_helpers::check_witness_manifest(
+            &driver.witness_manifest(&r1cs).unwrap(),
             &params,
+            declared_return.as_ref(),
             &result.out_wit_pre_comm,
         )
         .unwrap();

@@ -6,8 +6,8 @@ use std::{
 
 use crate::{
     Project,
-    abi_helpers::ordered_params_from_btreemap,
-    compiler::codegen::hlssa_to_r1cs::R1CS,
+    abi_helpers::{declared_return_from_btreemap, ordered_params_from_btreemap},
+    compiler::codegen::hlssa_to_r1cs::{R1CS, SealedR1CS},
     driver::Driver,
     vm::{bytecode::DebugInfo, interpreter},
 };
@@ -16,7 +16,7 @@ use noirc_abi::input_parser::Format;
 
 type Error = Box<dyn std::error::Error>;
 
-pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, R1CS), Error> {
+pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, SealedR1CS), Error> {
     let project = Project::new(root)?;
     let mut driver = Driver::new(project, draw_graphs);
     driver.run_noir_compiler()?;
@@ -28,15 +28,20 @@ pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, R1CS
     Ok((driver, r1cs))
 }
 
+/// The entry blob in ABI order and the optional expected return, from the package's `Prover.toml`.
 pub fn read_prover_inputs(
     root: &Path,
     abi: &noirc_abi::Abi,
-) -> Result<Vec<InputValueOrdered>, Error> {
+) -> Result<(Vec<InputValueOrdered>, Option<InputValueOrdered>), Error> {
     let file_path = root.join("Prover.toml");
 
     if !file_path.exists() {
         if abi.parameters.is_empty() {
-            return Ok(ordered_params_from_btreemap(abi, &BTreeMap::new())?);
+            let inputs = BTreeMap::new();
+            return Ok((
+                ordered_params_from_btreemap(abi, &inputs)?,
+                declared_return_from_btreemap(abi, &inputs)?,
+            ));
         }
         return Err(format!(
             "the ABI declares {} parameter(s) but {} does not exist",
@@ -60,8 +65,9 @@ pub fn read_prover_inputs(
         .parse(&inputs_src, abi)
         .map_err(|e| format!("failed to parse inputs: {e}"))?;
     let ordered_params = ordered_params_from_btreemap(abi, &inputs)?;
+    let declared_return = declared_return_from_btreemap(abi, &inputs)?;
 
-    Ok(ordered_params)
+    Ok((ordered_params, declared_return))
 }
 
 pub fn run_witgen_from_binary(

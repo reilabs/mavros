@@ -126,6 +126,10 @@ pub struct Config {
     /// the dead access is `Guard`-wrapped and the assert would have to be re-wrapped in the same
     /// condition to keep an inactive branch from failing.
     pub rewrite_dead_seq_access: bool,
+
+    /// Keeps the VM's entry blob parameter even when unused, preserving its calling convention.
+    /// Disabled by [`Config::r1cs_gen`], whose symbolic executor requires a parameterless entry.
+    pub preserve_entry_params: bool,
 }
 
 impl Config {
@@ -135,6 +139,7 @@ impl Config {
             preserve_all_blocks: false,
             rewrite_dead_partial_ops: false,
             rewrite_dead_seq_access: false,
+            preserve_entry_params: true,
         }
     }
 
@@ -144,6 +149,14 @@ impl Config {
             preserve_all_blocks: false,
             rewrite_dead_partial_ops: false,
             rewrite_dead_seq_access: false,
+            preserve_entry_params: true,
+        }
+    }
+
+    pub fn r1cs_gen() -> Self {
+        Self {
+            preserve_entry_params: false,
+            ..Self::post_r1c()
         }
     }
 
@@ -156,6 +169,7 @@ impl Config {
             preserve_all_blocks: true,
             rewrite_dead_partial_ops: true,
             rewrite_dead_seq_access: true,
+            preserve_entry_params: true,
         }
     }
 }
@@ -534,6 +548,20 @@ impl DCE {
         let mut live_return_slots: HashMap<FunctionId, HashSet<usize>> = HashMap::default();
 
         let mut worklist: Vec<WorkItem> = vec![];
+
+        if self.config.preserve_entry_params {
+            for entry_point in ssa.get_entry_points() {
+                let param_count = ssa
+                    .get_function(*entry_point)
+                    .get_entry()
+                    .get_parameters()
+                    .count();
+                live_entry_params
+                    .entry(*entry_point)
+                    .or_default()
+                    .extend(0..param_count);
+            }
+        }
 
         for function_id in &function_ids {
             let function = ssa.get_function(*function_id);

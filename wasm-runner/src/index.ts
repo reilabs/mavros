@@ -5,6 +5,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { fieldToHex } from './field.js';
 import { parseInputs } from './input.js';
 import { run, writeResult } from './runner.js';
 
@@ -60,12 +61,29 @@ async function main(): Promise<void> {
   }
 
   try {
-    const { inputs, metadata } = parseInputs(wasmPath, inputPath);
+    const { inputs, declaredReturn, metadata } = parseInputs(wasmPath, inputPath);
     console.log(`Running ${wasmPath} with ${inputs.length} inputs...`);
 
     const start = performance.now();
     const result = await run(wasmPath, inputs, metadata);
     const elapsed = performance.now() - start;
+
+    if (declaredReturn !== null && declaredReturn.length > 0) {
+      const start = metadata.returnColumns?.columnStart;
+      if (start === undefined || start === null) {
+        throw new Error('the metadata names no return columns to compare `return` with');
+      }
+      for (let i = 0; i < declaredReturn.length; i++) {
+        const actual = result.witnesses[start + i];
+        const expected = fieldToHex(declaredReturn[i]);
+        if (actual !== expected) {
+          throw new Error(
+            `Unexpected return value: witness[${start + i}] is ${actual} ` +
+              `but \`return\` declares ${expected}`
+          );
+        }
+      }
+    }
 
     writeResult(result, outputPath);
     console.log(`Done in ${elapsed.toFixed(0)}ms`);

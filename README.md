@@ -31,7 +31,7 @@ This will produce the following two files inside the project's `target/` directo
 | File                | Contents                                                                        |
 | ------------------- | ------------------------------------------------------------------------------- |
 | `target/basic.json` | ABI and the program binary (`binary`) containing the witgen and AD entry points |
-| `target/r1cs.bin`   | Serialised R1CS constraint system (bincode)                                     |
+| `target/r1cs.bin`   | Versioned R1CS artifact (`MAVR1CS` header): field tag, digest, manifest, R1CS   |
 
 Pass `--include-debug-info` to additionally write `target/basic.debug.json`. This standalone,
 versioned source map records VM bytecode word offsets, function names, and Noir source locations;

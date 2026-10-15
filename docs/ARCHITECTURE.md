@@ -211,6 +211,16 @@ needed on one side of the pipeline. For example, the hint computation logic is r
 R1CS/AD path, while witgen acquires additional opportunities for common-subexpression eliminiation
 (CSE).
 
+#### Entry point and witness layout
+
+The [`entry-point wrapper`](../compiler/src/compiler/passes/prepare_entry_point.rs) writes the
+constant one, public parameters, surviving private parameters, internal witnesses and computed
+returns in that order. The constant, public parameters and all returns are pinned. Private
+parameters may be elided only as a whole; integer range checks keep otherwise unused parameters
+live. Synthetic source origins let the R1CS generator recover the surviving columns for the
+`r1cs.bin` witness manifest. Return columns are constrained to the computation; an expected `return`
+in `Prover.toml` is checked by the host after witness generation.
+
 ### Stage 6: R1CS Generation and Further Optimization
 
 **R1CS generation** (`codegen/hlssa_to_r1cs.rs`) executes the SSA symbolically and extracts the
