@@ -303,19 +303,19 @@ unsafe fn lookup_elem_bump_db(
     match elem_kind {
         ELEM_WORD => unsafe {
             let v = Field::from(*(ptr as *const u64));
-            vm.data.as_ad.outputs.bump::<1>(0, coeff * v);
+            *vm.data.as_ad.out_db += coeff * v;
         },
         ELEM_FIELD => unsafe {
             let v = *(ptr as *const Field);
-            vm.data.as_ad.outputs.bump::<1>(0, coeff * v);
+            *vm.data.as_ad.out_db += coeff * v;
         },
         ELEM_U128 => unsafe {
             let v = Field::from((*(ptr as *const Int128)).to_u128());
-            vm.data.as_ad.outputs.bump::<1>(0, coeff * v);
+            *vm.data.as_ad.out_db += coeff * v;
         },
         ELEM_CELLS => unsafe {
             let v = read_cells_as_field(ptr, cells);
-            vm.data.as_ad.outputs.bump::<1>(0, coeff * v);
+            *vm.data.as_ad.out_db += coeff * v;
         },
         ELEM_WITNESS => {
             let elem = BoxedValue(unsafe { *(ptr as *const *mut u64) });
@@ -948,24 +948,11 @@ pub struct FwdArrays {
     pub elem_inverses_witness_section_offset: usize,
 }
 
-/// AD vector outputs. Verifier execution uses a separate forward entry point.
-#[derive(Copy, Clone)]
-pub(crate) struct MatrixOutputs(pub [*mut Field; 3]);
-
-impl MatrixOutputs {
-    /// # Safety
-    /// Each output must remain valid and cover `column` for this execution.
-    #[inline(always)]
-    pub(crate) unsafe fn bump<const MATRIX: usize>(&self, column: usize, amount: Field) {
-        unsafe {
-            *self.0[MATRIX].add(column) += amount;
-        }
-    }
-}
-
 #[derive(Copy, Clone)]
 pub struct AdArrays {
-    pub(crate) outputs: MatrixOutputs,
+    pub out_da: *mut Field,
+    pub out_db: *mut Field,
+    pub out_dc: *mut Field,
     pub ad_coeffs: *const Field,
     pub current_wit_off: usize,
     pub logup_wit_challenge_off: usize,
@@ -1104,7 +1091,9 @@ impl VM {
         Self::new_constraint(
             Arrays {
                 as_ad: AdArrays {
-                    outputs: MatrixOutputs([out_da, out_db, out_dc]),
+                    out_da,
+                    out_db,
+                    out_dc,
                     ad_coeffs,
                     current_wit_off: 0,
                     // FIELD-ASSUMPTION: L4-logup-challenges (~9 sites)
@@ -1432,31 +1421,31 @@ unsafe fn ad_kv_lookup_emit(
 
     // x-constraint: beta * result - x_lookup = 0
     unsafe {
-        vm.data
+        *vm.data
             .as_ad
-            .outputs
-            .bump::<0>(vm.data.as_ad.logup_wit_challenge_off + 1, x_coeff);
+            .out_da
+            .add(vm.data.as_ad.logup_wit_challenge_off + 1) += x_coeff;
     }
     result.bump_db(x_coeff, vm);
     unsafe {
-        vm.data.as_ad.outputs.bump::<2>(x_wit_off, -x_coeff);
+        *vm.data.as_ad.out_dc.add(x_wit_off) -= x_coeff;
     }
 
     // y-constraint: y * (alpha - x_lookup - key) = flag
     unsafe {
-        vm.data.as_ad.outputs.bump::<0>(y_wit_off, y_coeff);
-        vm.data
+        *vm.data.as_ad.out_da.add(y_wit_off) += y_coeff;
+        *vm.data
             .as_ad
-            .outputs
-            .bump::<1>(vm.data.as_ad.logup_wit_challenge_off, y_coeff);
-        vm.data.as_ad.outputs.bump::<1>(x_wit_off, -y_coeff);
+            .out_db
+            .add(vm.data.as_ad.logup_wit_challenge_off) += y_coeff;
+        *vm.data.as_ad.out_db.add(x_wit_off) -= y_coeff;
     }
     key.bump_db(-y_coeff, vm);
     flag.bump_dc(y_coeff, vm);
 
     // Sum constraint
     unsafe {
-        vm.data.as_ad.outputs.bump::<2>(y_wit_off, inv_sum_coeff);
+        *vm.data.as_ad.out_dc.add(y_wit_off) += inv_sum_coeff;
     }
 }
 
@@ -2992,43 +2981,42 @@ mod def {
                 };
                 unsafe {
                     // da[y_wit] += coeff
-                    vm.data
+                    *vm.data
                         .as_ad
-                        .outputs
-                        .bump::<0>(inverses_witness_section_offset + i, coeff);
+                        .out_da
+                        .offset(inverses_witness_section_offset as isize + i as isize) += coeff;
 
                     // db[α] += coeff
-                    vm.data
+                    *vm.data
                         .as_ad
-                        .outputs
-                        .bump::<1>(vm.data.as_ad.logup_wit_challenge_off, coeff);
+                        .out_db
+                        .add(vm.data.as_ad.logup_wit_challenge_off) += coeff;
                     // db[w0] -= coeff * i
-                    vm.data
-                        .as_ad
-                        .outputs
-                        .bump::<1>(0, -(coeff * Field::from(i as u64)));
+                    *vm.data.as_ad.out_db -= coeff * Field::from(i as u64);
                     // db[β] += coeff * spread(i)
-                    vm.data.as_ad.outputs.bump::<1>(
-                        vm.data.as_ad.logup_wit_challenge_off + 1,
-                        coeff * Field::from(mavros_limb_arith::spread_u32_to_u64(i as u32)),
-                    );
+                    *vm.data
+                        .as_ad
+                        .out_db
+                        .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) +=
+                        coeff * Field::from(mavros_limb_arith::spread_u32_to_u64(i as u32));
 
                     // dc[m] += coeff
-                    vm.data
+                    *vm.data
                         .as_ad
-                        .outputs
-                        .bump::<2>(multiplicities_wit_offset + i, coeff);
+                        .out_dc
+                        .offset(multiplicities_wit_offset as isize + i as isize) += coeff;
 
                     // Sum: inv goes into A position
-                    vm.data
+                    *vm.data
                         .as_ad
-                        .outputs
-                        .bump::<0>(inverses_witness_section_offset + i, inv_sum_coeff);
+                        .out_da
+                        .offset(inverses_witness_section_offset as isize + i as isize) +=
+                        inv_sum_coeff;
                 }
             }
 
             unsafe {
-                vm.data.as_ad.outputs.bump::<1>(0, inv_sum_coeff);
+                *vm.data.as_ad.out_db += inv_sum_coeff;
             }
         }
 
@@ -3143,43 +3131,41 @@ mod def {
                 };
                 unsafe {
                     // da[y_wit] += coeff
-                    vm.data
+                    *vm.data
                         .as_ad
-                        .outputs
-                        .bump::<0>(inverses_witness_section_offset + i, coeff);
+                        .out_da
+                        .offset(inverses_witness_section_offset as isize + i as isize) += coeff;
 
                     // db[α] += coeff
-                    vm.data
+                    *vm.data
                         .as_ad
-                        .outputs
-                        .bump::<1>(vm.data.as_ad.logup_wit_challenge_off, coeff);
+                        .out_db
+                        .add(vm.data.as_ad.logup_wit_challenge_off) += coeff;
                     // db[w0] -= coeff * i
-                    vm.data
-                        .as_ad
-                        .outputs
-                        .bump::<1>(0, -(coeff * Field::from(i as u64)));
+                    *vm.data.as_ad.out_db -= coeff * Field::from(i as u64);
                     // db[β] += coeff * 2^i
-                    vm.data
+                    *vm.data
                         .as_ad
-                        .outputs
-                        .bump::<1>(vm.data.as_ad.logup_wit_challenge_off + 1, coeff * pow);
+                        .out_db
+                        .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) += coeff * pow;
 
                     // dc[m] += coeff
-                    vm.data
+                    *vm.data
                         .as_ad
-                        .outputs
-                        .bump::<2>(multiplicities_wit_offset + i, coeff);
+                        .out_dc
+                        .offset(multiplicities_wit_offset as isize + i as isize) += coeff;
 
                     // Sum: inv goes into A position
-                    vm.data
+                    *vm.data
                         .as_ad
-                        .outputs
-                        .bump::<0>(inverses_witness_section_offset + i, inv_sum_coeff);
+                        .out_da
+                        .offset(inverses_witness_section_offset as isize + i as isize) +=
+                        inv_sum_coeff;
                 }
             }
 
             unsafe {
-                vm.data.as_ad.outputs.bump::<1>(0, inv_sum_coeff);
+                *vm.data.as_ad.out_db += inv_sum_coeff;
             }
         }
 
@@ -3375,41 +3361,38 @@ mod def {
                         .offset(inverses_constraint_section_offset as isize + i)
                 };
                 unsafe {
-                    vm.data
+                    *vm.data
                         .as_ad
-                        .outputs
-                        .bump::<0>(inverses_witness_section_offset + i as usize, coeff);
+                        .out_da
+                        .offset(inverses_witness_section_offset as isize + i) += coeff;
                     // if i == 0 {
                     //     println!("bump da at {} from inv by {coeff}", inverses_witness_section_offset as isize + i);
                     // }
 
-                    vm.data
+                    *vm.data
                         .as_ad
-                        .outputs
-                        .bump::<1>(vm.data.as_ad.logup_wit_challenge_off, coeff);
-                    vm.data
-                        .as_ad
-                        .outputs
-                        .bump::<1>(0, -(coeff * Field::from(i as u64)));
+                        .out_db
+                        .add(vm.data.as_ad.logup_wit_challenge_off) += coeff;
+                    *vm.data.as_ad.out_db -= coeff * Field::from(i as u64);
 
-                    vm.data
+                    *vm.data
                         .as_ad
-                        .outputs
-                        .bump::<2>(multiplicities_wit_offset + i as usize, coeff);
+                        .out_dc
+                        .offset(multiplicities_wit_offset as isize + i) += coeff;
                 }
 
                 // Also each inv goes into the A position of the total sum
                 unsafe {
-                    vm.data
+                    *vm.data
                         .as_ad
-                        .outputs
-                        .bump::<0>(inverses_witness_section_offset + i as usize, inv_sum_coeff);
+                        .out_da
+                        .offset(inverses_witness_section_offset as isize + i) += inv_sum_coeff;
                 }
             }
 
             // The coeff at B on the sum constraint is just `1` so we bump it.
             unsafe {
-                vm.data.as_ad.outputs.bump::<1>(0, inv_sum_coeff);
+                *vm.data.as_ad.out_db += inv_sum_coeff;
             }
         }
         let table_idx = vm.rgchk_tables[bits].unwrap();
@@ -3440,23 +3423,17 @@ mod def {
 
         unsafe {
             // bump for the RHS of the sum
-            vm.data
-                .as_ad
-                .outputs
-                .bump::<2>(current_inv_wit_offset, inv_sum_coeff);
+            *vm.data.as_ad.out_dc.add(current_inv_wit_offset) += inv_sum_coeff;
 
             // bumps for the inversion assert: y*(α-key) = flag
             // da[y] += inv_coeff
-            vm.data
-                .as_ad
-                .outputs
-                .bump::<0>(current_inv_wit_offset, inv_coeff);
+            *vm.data.as_ad.out_da.add(current_inv_wit_offset) += inv_coeff;
 
             // db[α] += inv_coeff
-            vm.data
+            *vm.data
                 .as_ad
-                .outputs
-                .bump::<1>(vm.data.as_ad.logup_wit_challenge_off, inv_coeff);
+                .out_db
+                .add(vm.data.as_ad.logup_wit_challenge_off) += inv_coeff;
             // db[key] -= inv_coeff
             val.bump_db(-inv_coeff, vm);
 
@@ -3494,47 +3471,41 @@ mod def {
                                 inverses_constraint_section_offset as isize + 2 * i as isize,
                             );
                         // da[beta] += x_coeff (A entry: (beta, 1))
-                        vm.data
+                        *vm.data
                             .as_ad
-                            .outputs
-                            .bump::<0>(vm.data.as_ad.logup_wit_challenge_off + 1, x_coeff);
+                            .out_da
+                            .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) += x_coeff;
                         // db[v_i] += x_coeff (B entry: element value)
                         lookup_elem_bump_db(elem_ptr, elem_kind, stride, x_coeff, vm);
                         // dc[x_wit] -= x_coeff (C entry: (x, -1))
-                        vm.data
+                        *vm.data
                             .as_ad
-                            .outputs
-                            .bump::<2>(inverses_witness_section_offset + 2 * i, -x_coeff);
+                            .out_dc
+                            .offset(inverses_witness_section_offset as isize + 2 * i as isize) -=
+                            x_coeff;
 
                         // y-constraint at base + 2*i + 1: A=y_i, B=(alpha - i - x_i), C=mult_i
                         let y_coeff = *vm.data.as_ad.ad_coeffs.offset(
                             inverses_constraint_section_offset as isize + 2 * i as isize + 1,
                         );
                         // dA[y_witness] += y_coeff
-                        vm.data
-                            .as_ad
-                            .outputs
-                            .bump::<0>(inverses_witness_section_offset + 2 * i + 1, y_coeff);
+                        *vm.data.as_ad.out_da.offset(
+                            inverses_witness_section_offset as isize + 2 * i as isize + 1,
+                        ) += y_coeff;
                         // dB[alpha] += y_coeff
-                        vm.data
+                        *vm.data
                             .as_ad
-                            .outputs
-                            .bump::<1>(vm.data.as_ad.logup_wit_challenge_off, y_coeff);
+                            .out_db
+                            .add(vm.data.as_ad.logup_wit_challenge_off) += y_coeff;
                         // dB -= y_coeff * i (constant part)
-                        vm.data
-                            .as_ad
-                            .outputs
-                            .bump::<1>(0, -(y_coeff * Field::from(i as u64)));
+                        *vm.data.as_ad.out_db -= y_coeff * Field::from(i as u64);
                         // dB[x_witness] -= y_coeff (x_i appears negated in B)
-                        vm.data
+                        *vm.data
                             .as_ad
-                            .outputs
-                            .bump::<1>(inverses_witness_section_offset + 2 * i, -y_coeff);
+                            .out_db
+                            .add(inverses_witness_section_offset + 2 * i) -= y_coeff;
                         // dC[mult_witness] += y_coeff
-                        vm.data
-                            .as_ad
-                            .outputs
-                            .bump::<2>(multiplicities_wit_offset + i, y_coeff);
+                        *vm.data.as_ad.out_dc.add(multiplicities_wit_offset + i) += y_coeff;
                     })
                 };
 
@@ -3548,16 +3519,16 @@ mod def {
             // Sum constraint: y_i goes into A position
             for i in 0..length {
                 unsafe {
-                    vm.data
+                    *vm.data
                         .as_ad
-                        .outputs
-                        .bump::<0>(inverses_witness_section_offset + 2 * i + 1, sum_coeff);
+                        .out_da
+                        .add(inverses_witness_section_offset + 2 * i + 1) += sum_coeff;
                 }
             }
 
             // Sum constraint B=1: bump out_db by sum_coeff
             unsafe {
-                vm.data.as_ad.outputs.bump::<1>(0, sum_coeff);
+                *vm.data.as_ad.out_db += sum_coeff;
             }
 
             let table_info = TableInfo {
