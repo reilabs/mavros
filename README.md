@@ -28,10 +28,10 @@ your shell. Then run `mavros compile`.
 
 This will produce the following two files inside the project's `target/` directory:
 
-| File                | Contents                                                                                       |
-| ------------------- | ---------------------------------------------------------------------------------------------- |
-| `target/basic.json` | ABI and the program binary (`binary`) containing witgen, AD, and forward verifier entry points |
-| `target/r1cs.bin`   | Serialised R1CS constraint system (bincode)                                                    |
+| File                | Contents                                                                        |
+| ------------------- | ------------------------------------------------------------------------------- |
+| `target/basic.json` | ABI and the program binary (`binary`) containing the witgen and AD entry points |
+| `target/r1cs.bin`   | Serialised R1CS constraint system (bincode)                                     |
 
 Pass `--include-debug-info` to additionally write `target/basic.debug.json`. This standalone,
 versioned source map records VM bytecode word offsets, function names, and Noir source locations;
@@ -63,14 +63,28 @@ The command compiles the project and prints a JSON object with `r_aw`, `r_bw`, a
 strings. It needs no `Prover.toml` and does not check R1CS satisfaction. This operation is a
 component of a verifier, not a complete proof verification protocol.
 
-Rust callers can use `mavros_compiler::api::run_verifier_from_binary(&binary, &r1cs, &r, &w, None)`.
-Hosts retaining only bytecode and layouts can use `mavros_vm::interpreter::run_verifier` directly.
-Verifier execution uses a dedicated forward bytecode entry point: witness writes read the next value
-from `w`, linear combinations use field arithmetic, and constraints accumulate three scalars
-weighted by `r`. It allocates no AD expression nodes or matrix output vectors. Lookup and table
-constraints are evaluated from the same layouts. Older bytecode without this third entry point must
-be recompiled. LLVM and WASM artifacts still expose the existing witgen and AD entry points; the
-forward verifier is currently available through the VM API and CLI.
+Prover artifacts contain only witgen and AD. To additionally emit a separate verifier artifact:
+
+```bash
+mavros compile ./my-noir-project --verifier-output target/verifier.json
+```
+
+`verifier.json` contains only verifier bytecode plus `witness_layout` and `constraints_layout`; it
+contains no matrix rows or prover entry points. `--include-debug-info` also writes
+`verifier.debug.json`. Default compilation emits no verifier code. `--verify` compiles and runs only
+the verifier artifact.
+
+Rust callers compile it with `mavros_compiler::api::compile_verifier_bytecode(&mut driver, options)`
+and pass that binary to `run_verifier_from_binary(&binary, &r1cs, &r, &w, None)`. Hosts retaining
+only verifier bytecode and layouts can call `mavros_vm::interpreter::run_verifier` directly. Both
+artifacts must come from the same circuit compilation; applications must associate the verifier
+artifact with their trusted circuit configuration. Verifier execution uses a dedicated forward
+bytecode entry point: witness writes read the next value from `w`, linear combinations use field
+arithmetic, and constraints accumulate three scalars weighted by `r`. It allocates no AD expression
+nodes or matrix output vectors. Lookup and table constraints are evaluated from the same layouts.
+Prover bytecode remains compatible with existing witgen/AD callers. LLVM and WASM artifacts still
+expose the existing witgen and AD entry points; the forward verifier is currently available through
+the VM API and CLI.
 
 ### Per-Function FlameGraphs
 

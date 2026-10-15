@@ -407,7 +407,11 @@ fn run_phase1_impl(
     let entry = *header
         .entry_points
         .get(ENTRY_WITGEN)
-        .expect("Program has no witgen entry point");
+        .filter(|entry| **entry != bytecode::NO_ENTRY_POINT)
+        .ok_or_else(|| TrapError {
+            message: Some("Program has no witgen entry point; use the prover artifact".to_string()),
+            stack_trace: Vec::new(),
+        })?;
     let global_frame_size = header.global_frame_size;
     let mut out_a = vec![Field::ZERO; constraints_layout.size()];
     let mut out_b = vec![Field::ZERO; constraints_layout.size()];
@@ -868,7 +872,7 @@ pub struct VerifierResult {
 /// witness are required. The dedicated verifier entry point reads witness values
 /// from `w` and evaluates linear combinations forward, without allocating AD
 /// nodes, AD output vectors, or materializing the R1CS matrices.
-/// Artifacts compiled before the verifier entry point was added must be recompiled.
+/// Pass the separate verifier artifact, not the witgen/AD prover binary.
 #[instrument(skip_all, name = "Interpreter::run_verifier")]
 pub fn run_verifier(
     program: &[u64],
@@ -1055,10 +1059,11 @@ fn run_constraint_program(
     let entry = *header
         .entry_points
         .get(entry_index)
+        .filter(|entry| **entry != bytecode::NO_ENTRY_POINT)
         .ok_or_else(|| TrapError {
             message: Some(
                 if is_verifier {
-                    "Program has no forward verifier entry point; recompile the artifact"
+                    "Program has no forward verifier entry point; compile a separate verifier artifact"
                 } else {
                     "Program has no AD entry point"
                 }

@@ -74,8 +74,25 @@ fn check(source: &str) -> (usize, usize) {
     let mut heaps = (0, 0);
     let project = common::noir_project(source);
     let (mut driver, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
-    let mut binary = api::compile_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
+    let mut prover = api::compile_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
+    let original_prover = prover.clone();
+    let binary = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
+    assert_eq!(
+        api::compile_bytecode(&mut driver, CodeGenOptions::default()).unwrap(),
+        original_prover
+    );
     let original = binary.clone();
+    let verifier_header = mavros_vm::bytecode::parse_program_header(&binary);
+    assert_eq!(
+        &verifier_header.entry_points[..2],
+        &[usize::MAX, usize::MAX]
+    );
+    assert_eq!(
+        mavros_vm::bytecode::parse_program_header(&prover)
+            .entry_points
+            .len(),
+        2
+    );
     assert_forward_bytecode(&binary);
     assert_eq!(
         mavros_vm::bytecode::parse_program_header(&binary)
@@ -110,13 +127,14 @@ fn check(source: &str) -> (usize, usize) {
         assert_eq!(result.instrumenter.final_memory_usage(), 0);
         heaps.0 = heaps.0.max(heap_allocations(&result.instrumenter));
 
-        // Both execution modes can still use the same compiled artifact repeatedly.
-        let (a, b, c, memory) = api::run_ad_from_binary(&mut binary, &r1cs, &r, None).unwrap();
+        // Each mode repeatedly executes its own artifact.
+        let (a, b, c, memory) = api::run_ad_from_binary(&mut prover, &r1cs, &r, None).unwrap();
         assert!(api::check_ad(&r1cs, &r, &a, &b, &c));
         assert_eq!(memory.final_memory_usage(), 0);
         heaps.1 = heaps.1.max(heap_allocations(&memory));
     }
     assert_eq!(binary, original);
+    assert_eq!(prover, original_prover);
     assert!(!project.path().join("Prover.toml").exists());
     heaps
 }
@@ -169,7 +187,7 @@ fn empty_circuit() {
 fn vector_lengths_are_checked_before_execution() {
     let project = common::noir_project("fn main(x: Field) { assert(x * x == 9); }");
     let (mut driver, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
-    let binary = api::compile_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
+    let binary = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
     let r = vec![Field::from(1u64); r1cs.constraints.len()];
     let w = vec![Field::from(2u64); r1cs.witness_layout.size()];
     for len in [0, r.len() - 1, r.len() + 1] {
@@ -318,7 +336,7 @@ fn witness_slices_across_calls_and_nested_arrays() {
 }
 
 #[test]
-fn old_artifacts_require_recompilation() {
+fn prover_artifacts_are_rejected_by_the_verifier() {
     use mavros_vm::bytecode::{Function, OpCode, Program};
     let project = common::noir_project("fn main() {}");
     let (_, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
@@ -343,5 +361,85 @@ fn old_artifacts_require_recompilation() {
     let error = api::run_verifier_from_binary(&binary, &r1cs, &r, &w, None)
         .err()
         .unwrap();
-    assert!(error.to_string().contains("recompile"));
+    assert!(error.to_string().contains("separate verifier artifact"));
+}
+
+#[test]
+fn verifier_artifact_cannot_run_as_a_prover() {
+    let project = common::noir_project("fn main(x: Field) { assert(x * x == 9); }");
+    let (mut driver, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
+    let mut binary =
+        api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
+    let r = vec![Field::ZERO; r1cs.constraints_layout.size()];
+    let error = api::run_ad_from_binary(&mut binary, &r1cs, &r, None)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("no AD entry point"));
+    let error = api::run_witgen_from_binary(&mut binary, &r1cs, &[], None)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("no witgen entry point"));
+}
+
+#[test]
+fn cli_exports_verifier_separately_without_changing_prover_binary() {
+    let project = common::noir_project("fn main(x: Field) -> pub Field { x * x + 3 }");
+    let invoke = |extra: &[&str]| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_mavros"))
+            .current_dir(project.path())
+            .arg("compile")
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    invoke(&[]);
+    let prover_path = project.path().join("target/basic.json");
+    let original_prover = std::fs::read(&prover_path).unwrap();
+    assert!(
+        !project
+            .path()
+            .join("mavros_debug/verifier_bytecode.txt")
+            .exists()
+    );
+    invoke(&[
+        "--verifier-output",
+        "target/verifier.json",
+        "--include-debug-info",
+    ]);
+    assert_eq!(std::fs::read(&prover_path).unwrap(), original_prover);
+    let artifact: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.path().join("target/verifier.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(artifact.get("constraints").is_none());
+    let binary: Vec<u64> = serde_json::from_value(artifact["binary"].clone()).unwrap();
+    let wl: mavros_vm::WitnessLayout =
+        serde_json::from_value(artifact["witness_layout"].clone()).unwrap();
+    let cl: mavros_vm::ConstraintsLayout =
+        serde_json::from_value(artifact["constraints_layout"].clone()).unwrap();
+    let debug: mavros_vm::bytecode::DebugInfo = serde_json::from_slice(
+        &std::fs::read(project.path().join("target/verifier.debug.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        debug
+            .functions
+            .iter()
+            .all(|f| f.name.starts_with("verifier_"))
+    );
+    assert_forward_bytecode(&binary);
+    let r = vec![Field::from(3u64); cl.size()];
+    let w = vec![Field::from(7u64); wl.size()];
+    let result =
+        mavros_vm::interpreter::run_verifier(&binary, &r, &w, wl, cl, Some(debug)).unwrap();
+    let (_, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
+    assert_eq!(
+        [result.r_aw, result.r_bw, result.r_cw],
+        reference(&r1cs, &r, &w)
+    );
 }

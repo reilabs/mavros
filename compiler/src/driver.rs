@@ -821,6 +821,30 @@ impl Driver {
         &mut self,
         options: CodeGenOptions,
     ) -> Result<BytecodeArtifact, Error> {
+        self.compile_vm_artifact(options, false)
+    }
+
+    /// Compile a separate forward verifier binary without witgen or AD functions.
+    pub fn compile_verifier_bytecode(
+        &mut self,
+        options: CodeGenOptions,
+    ) -> Result<Vec<u64>, Error> {
+        Ok(self.compile_verifier_bytecode_artifact(options)?.binary)
+    }
+
+    /// Compile the verifier-only binary and optional debug metadata.
+    pub fn compile_verifier_bytecode_artifact(
+        &mut self,
+        options: CodeGenOptions,
+    ) -> Result<BytecodeArtifact, Error> {
+        self.compile_vm_artifact(options, true)
+    }
+
+    fn compile_vm_artifact(
+        &mut self,
+        options: CodeGenOptions,
+        verifier: bool,
+    ) -> Result<BytecodeArtifact, Error> {
         self.prepare_program_ssa();
         let ssa = self.program_ssa.as_ref().unwrap();
 
@@ -828,11 +852,15 @@ impl Driver {
         let type_info = Types::new().run(ssa, &flow_analysis);
 
         let codegen = CodeGen::new(options);
-        let program = codegen.run(ssa, &flow_analysis, &type_info);
+        let program = if verifier {
+            codegen.run_verifier(ssa, &flow_analysis, &type_info)
+        } else {
+            codegen.run(ssa, &flow_analysis, &type_info)
+        };
         // Only a project-backed driver has an ABI to cross-check the header against; one seeded
         // with [`Self::from_ssa`] states the entry's shape in the HLSSA it was handed and has no
         // second account of it to disagree with.
-        if self.abi.is_some() {
+        if !verifier && self.abi.is_some() {
             assert_eq!(
                 program.entry_blob_field_count,
                 self.entry_point_flattened_io_count(),
@@ -840,7 +868,11 @@ impl Driver {
             );
         }
         self.write_debug_text(
-            self.get_debug_output_dir().join("program_bytecode.txt"),
+            self.get_debug_output_dir().join(if verifier {
+                "verifier_bytecode.txt"
+            } else {
+                "program_bytecode.txt"
+            }),
             format!("{}", program),
         );
 

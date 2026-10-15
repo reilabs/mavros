@@ -3753,11 +3753,15 @@ pub const ENTRY_WITGEN: usize = 0;
 pub const ENTRY_AD: usize = 1;
 /// Index of the direct forward verifier entry point.
 pub const ENTRY_VERIFIER: usize = 2;
+/// An absent entry in a program or serialized entry table. This preserves the
+/// witgen/AD binary format while allowing a standalone verifier-only program.
+pub const NO_ENTRY_POINT: usize = usize::MAX;
 
 pub struct Program {
     pub functions: Vec<Function>,
     /// Indices into `functions` of the program's entry points, in entry-table order
-    /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], ...).
+    /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], [`ENTRY_VERIFIER`]). Absent entries use
+    /// [`NO_ENTRY_POINT`].
     pub entry_points: Vec<usize>,
     /// Flattened field count of the witgen entry blob
     pub entry_blob_field_count: usize,
@@ -3910,7 +3914,11 @@ impl Program {
         }
 
         for (slot, fn_idx) in self.entry_points.iter().enumerate() {
-            binary[entry_table_start + slot] = function_markers[*fn_idx] as u64;
+            binary[entry_table_start + slot] = if *fn_idx == NO_ENTRY_POINT {
+                NO_ENTRY_POINT as u64
+            } else {
+                function_markers[*fn_idx] as u64
+            };
         }
         for (jump_position, add_offset) in jumps_to_fix {
             let target = binary[jump_position];
@@ -3932,7 +3940,7 @@ pub struct ProgramHeader {
     pub entry_blob_field_count: usize,
     /// Absolute word offsets of each entry point's function marker, in entry-table order
     /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], ...). The entry's frame size lives at `offset + 1` and
-    /// its first opcode at `offset + 2`.
+    /// its first opcode at `offset + 2`. [`NO_ENTRY_POINT`] marks an absent entry.
     pub entry_points: Vec<usize>,
     /// Word offset of the first function marker, i.e. where the opcode stream begins.
     pub code_start: usize,

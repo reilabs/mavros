@@ -194,44 +194,21 @@ impl CodeGen {
     }
 
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
-        // WitnessLowering has already removed hints and made every linear combination
-        // explicit. Compile that constraint program again with forward field semantics.
-        // Only functions reachable from its entry are needed in the verifier half.
-        let mut program = self.run_mode(ssa, cfg, type_info);
-        if ssa.get_entry_points().get(bytecode::ENTRY_AD).is_some() {
-            let mut verifier = Self {
-                options: self.options,
-                verifier: true,
-            }
-            .run_mode(ssa, cfg, type_info);
-            let code_offset: usize = program.functions.iter().map(|f| f.code.len()).sum();
-            let pool_offset = program.constant_pool.len();
-            for function in &mut verifier.functions {
-                function.name = format!("verifier_{}", function.name);
-                for op in &mut function.code {
-                    match op {
-                        bytecode::OpCode::Call { func, .. } => func.0 += code_offset as isize,
-                        bytecode::OpCode::Jmp { target } => target.0 += code_offset as isize,
-                        bytecode::OpCode::JmpIf { if_t, if_f, .. } => {
-                            if_t.0 += code_offset as isize;
-                            if_f.0 += code_offset as isize;
-                        }
-                        bytecode::OpCode::MovConstPool {
-                            pool_offset: offset,
-                            ..
-                        } => *offset += pool_offset,
-                        _ => {}
-                    }
-                }
-            }
-            program.entry_points.push(program.functions.len());
-            program.functions.extend(verifier.functions);
-            program.constant_pool.extend(verifier.constant_pool);
-            program.global_frame_size = program.global_frame_size.max(verifier.global_frame_size);
-            // Both paths currently use the native array opcodes, without struct descriptors.
-            assert!(verifier.struct_layouts.is_empty());
+        self.run_mode(ssa, cfg, type_info)
+    }
+
+    /// Compile only the forward evaluator and its reachable functions.
+    pub fn run_verifier(
+        &self,
+        ssa: &HLSSA,
+        cfg: &FlowAnalysis,
+        type_info: &TypeInfo,
+    ) -> bytecode::Program {
+        Self {
+            options: self.options,
+            verifier: true,
         }
-        program
+        .run_mode(ssa, cfg, type_info)
     }
 
     fn is_heap_allocated(&self, ty: &Type) -> bool {
@@ -281,6 +258,10 @@ impl CodeGen {
             );
             function_ids.insert(function_id, cur_fn_begin);
             cur_fn_begin += function.code.len();
+            let mut function = function;
+            if self.verifier {
+                function.name = format!("verifier_{}", function.name);
+            }
             functions.push(function);
         }
 
@@ -330,8 +311,16 @@ impl CodeGen {
 
         bytecode::Program {
             functions,
-            entry_points: (0..entry_ids.len()).collect(),
-            entry_blob_field_count,
+            entry_points: if self.verifier {
+                vec![bytecode::NO_ENTRY_POINT, bytecode::NO_ENTRY_POINT, 0]
+            } else {
+                (0..entry_ids.len()).collect()
+            },
+            entry_blob_field_count: if self.verifier {
+                0
+            } else {
+                entry_blob_field_count
+            },
             global_frame_size: global_layouter.total_size,
             struct_layouts: struct_interner.into_table(),
             constant_pool: const_pool.into_pool(),

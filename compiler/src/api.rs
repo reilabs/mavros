@@ -131,7 +131,7 @@ pub fn run_witgen_phase2(
     )
 }
 
-/// Compiles the whole program (witgen, AD, and forward verifier entry points) into a single VM binary.
+/// Compiles witgen and AD into the prover binary. Verifier code is emitted separately.
 pub fn compile_bytecode(
     driver: &mut Driver,
     options: crate::compiler::codegen::CodeGenOptions,
@@ -145,6 +145,22 @@ pub fn compile_bytecode_artifact(
     options: crate::compiler::codegen::CodeGenOptions,
 ) -> Result<crate::driver::BytecodeArtifact, Error> {
     Ok(driver.compile_bytecode_artifact(options)?)
+}
+
+/// Compile the separate forward verifier binary. The prover binary is unchanged.
+pub fn compile_verifier_bytecode(
+    driver: &mut Driver,
+    options: crate::compiler::codegen::CodeGenOptions,
+) -> Result<Vec<u64>, Error> {
+    Ok(driver.compile_verifier_bytecode(options)?)
+}
+
+/// Compile verifier-only bytecode and optional standalone debug metadata.
+pub fn compile_verifier_bytecode_artifact(
+    driver: &mut Driver,
+    options: crate::compiler::codegen::CodeGenOptions,
+) -> Result<crate::driver::BytecodeArtifact, Error> {
+    Ok(driver.compile_verifier_bytecode_artifact(options)?)
 }
 
 pub fn run_ad_from_binary(
@@ -175,6 +191,7 @@ pub fn run_ad_from_binary(
 /// constraint; `w` must cover the complete witness layout, including column zero
 /// and the post-commitment sections. Randomness is supplied by the caller.
 ///
+/// `binary` must come from [`compile_verifier_bytecode`].
 /// Only the layouts are read from `r1cs`. Hosts that retain bytecode and layouts
 /// without the matrices can call [`interpreter::run_verifier`] directly.
 pub fn run_verifier_from_binary(

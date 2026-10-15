@@ -103,6 +103,10 @@ pub enum Command {
         #[arg(long, default_value = "target/basic.json")]
         binary_output: PathBuf,
 
+        /// Optionally write a separate verifier binary and layouts (JSON).
+        #[arg(long)]
+        verifier_output: Option<PathBuf>,
+
         /// Enable debugging mode which will generate graphs.
         #[arg(long, action = clap::ArgAction::SetTrue)]
         draw_graphs: bool,
@@ -141,11 +145,13 @@ fn main() -> ExitCode {
             path,
             r1cs_output,
             binary_output,
+            verifier_output,
             draw_graphs,
         }) => run_compile(
             path,
             r1cs_output,
             binary_output,
+            verifier_output.as_ref(),
             *draw_graphs,
             args.include_debug_info,
             args.absolute_paths,
@@ -195,6 +201,7 @@ pub fn run_compile(
     path: &PathBuf,
     r1cs_output: &PathBuf,
     binary_output: &PathBuf,
+    verifier_output: Option<&PathBuf>,
     draw_graphs: bool,
     include_debug_info: bool,
     absolute_paths: bool,
@@ -204,14 +211,17 @@ pub fn run_compile(
     let roots = Project::binary_package_roots(&requested_root)?;
     let multiple = roots.len() > 1;
     if multiple
-        && [r1cs_output, binary_output].iter().any(|output| {
-            output.components().any(|component| {
-                !matches!(
-                    component,
-                    std::path::Component::Normal(_) | std::path::Component::CurDir
-                )
+        && [r1cs_output, binary_output]
+            .into_iter()
+            .chain(verifier_output)
+            .any(|output| {
+                output.components().any(|component| {
+                    !matches!(
+                        component,
+                        std::path::Component::Normal(_) | std::path::Component::CurDir
+                    )
+                })
             })
-        })
     {
         return Err(std::io::Error::other(
             "For multi-package compilation, output paths must be relative paths within each member directory",
@@ -229,10 +239,18 @@ pub fn run_compile(
         } else {
             binary_output.clone()
         };
+        let verifier_output = verifier_output.map(|output| {
+            if rebase {
+                root.join(output)
+            } else {
+                output.clone()
+            }
+        });
         run_compile_package(
             root,
             &r1cs_output,
             &binary_output,
+            verifier_output.as_ref(),
             draw_graphs,
             include_debug_info,
             absolute_paths,
@@ -245,11 +263,15 @@ fn run_compile_package(
     path: &PathBuf,
     r1cs_output: &PathBuf,
     binary_output: &PathBuf,
+    verifier_output: Option<&PathBuf>,
     draw_graphs: bool,
     include_debug_info: bool,
     absolute_paths: bool,
     logup_soundness: u32,
 ) -> Result<ExitCode, Error> {
+    if verifier_output.is_some_and(|output| output == binary_output || output == r1cs_output) {
+        return Err("verifier output must be separate from prover and R1CS outputs".into());
+    }
     info!(message = %"Compiling Noir project", root = ?path, r1cs_output = ?r1cs_output, binary_output = ?binary_output);
 
     let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs, logup_soundness, false)?;
@@ -285,15 +307,28 @@ fn run_compile_package(
     let basic_json = serde_json::to_string_pretty(&basic)?;
     fs::write(binary_output, basic_json)?;
 
-    let debug_output = binary_output.with_extension("debug.json");
-    if let Some(mut debug_info) = artifact.debug_info {
-        if let Some(root) = debug_path_root(&driver, absolute_paths) {
-            debug_info.relativize_source_paths(root);
+    write_vm_debug_info(binary_output, artifact.debug_info, &driver, absolute_paths)?;
+
+    if let Some(output) = verifier_output {
+        let verifier = api::compile_verifier_bytecode_artifact(
+            &mut driver,
+            CodeGenOptions {
+                include_debug_info,
+                ..CodeGenOptions::default()
+            },
+        )?;
+        if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
         }
-        fs::write(&debug_output, serde_json::to_string_pretty(&debug_info)?)?;
-        info!(message = %"VM debug info generated", path = %debug_output.display());
-    } else if debug_output.exists() {
-        fs::remove_file(debug_output)?;
+        fs::write(
+            output,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "binary": verifier.binary,
+                "witness_layout": r1cs.witness_layout,
+                "constraints_layout": r1cs.constraints_layout,
+            }))?,
+        )?;
+        write_vm_debug_info(output, verifier.debug_info, &driver, absolute_paths)?;
     }
 
     info!(
@@ -305,6 +340,25 @@ fn run_compile_package(
     );
 
     Ok(ExitCode::SUCCESS)
+}
+
+fn write_vm_debug_info(
+    output: &Path,
+    debug_info: Option<mavros_vm::bytecode::DebugInfo>,
+    driver: &Driver,
+    absolute_paths: bool,
+) -> Result<(), Error> {
+    let debug_output = output.with_extension("debug.json");
+    if let Some(mut debug_info) = debug_info {
+        if let Some(root) = debug_path_root(driver, absolute_paths) {
+            debug_info.relativize_source_paths(root);
+        }
+        fs::write(&debug_output, serde_json::to_string_pretty(&debug_info)?)?;
+        info!(message = %"VM debug info generated", path = %debug_output.display());
+    } else if debug_output.exists() {
+        fs::remove_file(debug_output)?;
+    }
+    Ok(())
 }
 
 /// The main execution of the CLI utility (full pipeline). Should be called directly from the
@@ -415,7 +469,11 @@ fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let artifact = api::compile_bytecode_artifact(&mut driver, codegen_options)?;
+    let artifact = if args.verify {
+        api::compile_verifier_bytecode_artifact(&mut driver, codegen_options)?
+    } else {
+        api::compile_bytecode_artifact(&mut driver, codegen_options)?
+    };
     let mut binary = artifact.binary;
     let vm_debug_info = artifact.debug_info;
 
@@ -853,6 +911,7 @@ mod tests {
                 &root,
                 &root.join("shared.bin"),
                 &binary,
+                None,
                 false,
                 true,
                 false,
@@ -862,11 +921,27 @@ mod tests {
         );
         assert!(!root.join("shared.bin").exists());
         assert_eq!(
-            run_compile(&root, &r1cs, &binary, false, true, false, 128).unwrap(),
+            run_compile(
+                &root,
+                &r1cs,
+                &binary,
+                Some(&PathBuf::from("target/verifier.json")),
+                false,
+                true,
+                false,
+                128
+            )
+            .unwrap(),
             ExitCode::SUCCESS
         );
         for name in ["a", "b"] {
-            for file in ["r1cs.bin", "basic.json", "basic.debug.json"] {
+            for file in [
+                "r1cs.bin",
+                "basic.json",
+                "basic.debug.json",
+                "verifier.json",
+                "verifier.debug.json",
+            ] {
                 assert!(root.join(name).join("target").join(file).is_file());
             }
         }
@@ -892,6 +967,7 @@ mod tests {
                     &dir.path().to_path_buf(),
                     &PathBuf::from("target/r1cs.bin"),
                     &PathBuf::from("target/basic.json"),
+                    None,
                     false,
                     true,
                     false,
@@ -920,6 +996,7 @@ mod tests {
                 &dir.path().join("a"),
                 &r1cs,
                 &binary,
+                None,
                 false,
                 false,
                 false,
