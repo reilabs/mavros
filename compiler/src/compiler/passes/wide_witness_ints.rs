@@ -14,8 +14,9 @@
 //! splits **pure** wide elements too: the lookup tape needs one field element per entry, and
 //! transposing makes every entry a limb it can already read. A pure element read back is
 //! recombined at once by [`Rewriter::recombine_pure`], integer arithmetic at the value's width that
-//! costs interpreter work rather than constraints, so no pure integer is held as limbs past the
-//! read. A global holding such a sequence takes a slot per limb sequence.
+//! costs interpreter work rather than constraints. Users see a whole pure integer, while the
+//! read's limbs remain cached for later lookups. A global holding such a sequence takes a slot
+//! per limb sequence.
 //!
 //! The representation is sound because **every limb is range-checked** to its declared width when
 //! it is created or modified. `2^h` is invertible mod `p`, so a single unbounded limb would let a
@@ -4892,10 +4893,10 @@ impl Rewriter<'_> {
 
     /// One read per limb sequence of `array`, at the caller's index and under `guard` if any.
     ///
-    /// A pure element is recombined into `result` at once, so nothing after the read meets a pure
-    /// integer held as limbs: everything else holds it whole, and a witness-indexed read's lookup
-    /// splits its field image again where it needs the limbs. This costs interpreter work, not
-    /// constraints, as a pure value is known wherever the constraints are built.
+    /// A pure element is recombined into `result` at once for users that expect a whole integer.
+    /// The limbs remain in `read_limbs`, so a witness-indexed lookup can reuse them without
+    /// splitting the field image again. Recombination costs interpreter work, not constraints,
+    /// as a pure value is known wherever the constraints are built.
     fn lower_array_get(
         &mut self,
         guard: Option<ValueId>,

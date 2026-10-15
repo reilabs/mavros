@@ -26,9 +26,16 @@ pub fn noir_project(source: &str) -> TempDir {
 pub fn assert_frontend_refused(source: &str, expected: &str) {
     let dir = noir_project(source);
     let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
-    let Err(Error::NoirCompilerError(diagnostics)) = driver.run_noir_compiler() else {
+    let Err(Error::NoirCompilerError {
+        diagnostics,
+        rendered,
+    }) = driver.run_noir_compiler()
+    else {
         panic!("expected a frontend diagnostic for {source}");
     };
+    assert!(rendered.contains(expected), "{rendered}");
+    assert!(rendered.contains("src/main.nr:"), "{rendered}");
+    assert!(rendered.contains('|'), "{rendered}");
     assert!(
         diagnostics.iter().any(|diagnostic| {
             let located = !diagnostic.secondaries.is_empty();

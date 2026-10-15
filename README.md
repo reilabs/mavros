@@ -103,10 +103,9 @@ pipeline gets for each Noir test.
 
 ### Wide Integers
 
-The frontend is pinned to the `provekit-v2` branch of
-[worldfnd/noir](https://github.com/worldfnd/noir), with the exact revision recorded in
-`compiler/Cargo.toml`. Unsigned types from `u2` through `u16384` and generic widths such as `u<N>`
-and signed types from `i2` through `i16384` can be used inside programs.
+The frontend is based on the `provekit-v2` [Noir fork](https://github.com/worldfnd/noir). This means
+that Mavros supports integer widths 2 through 16384 for both signed and unsigned integers for use
+within programs.
 
 The fork restricts integer parameters and returns at `main` to `u8`, `u16`, `u32`, `u64`, `u128`,
 `i8`, `i16`, `i32`, and `i64`, including integers inside arrays and structs. Wider arithmetic can
@@ -115,4 +114,4 @@ use arrays of these types at the boundary, with casts and limb assembly inside t
 by the functional runner.
 
 A `Field` can be cast to a wider integer, including in constrained code; the compiler decomposes the
-canonical field value into limbs. `Field`-to-`Field` casts preserve the full field value.
+canonical field value into limbs.

@@ -71,6 +71,10 @@ impl InstructionLoweringRule for LowerWitnessNarrowingCast {
         // bounds its result by `2^n`. Wide integer casts have already been lowered into limb
         // casts before this rule runs.
         //
+        // The range domain stops tracking above `HOST_WORD_BITS`, so there a window is never
+        // discharged and a program that already narrowed by hand pays for a second one. Sound but
+        // not minimal.
+        //
         // `proves_` rather than the bare predicate: a bottom range means "no execution reaches
         // here", and eliding a truncation on the strength of that is circular: the only reason the
         // value cannot occur would be the very check being skipped.

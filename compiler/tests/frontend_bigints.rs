@@ -52,6 +52,26 @@ fn wide_arithmetic_from_source() {
 }
 
 #[test]
+fn arithmetic_and_casts_at_multiple_limb_widths() {
+    for (source, inputs) in [
+        (
+            include_str!("../../noir_tests/bigint_arithmetic_u64/src/main.nr"),
+            include_str!("../../noir_tests/bigint_arithmetic_u64/Prover.toml"),
+        ),
+        (
+            include_str!("../../noir_tests/bigint_arithmetic_u256/src/main.nr"),
+            include_str!("../../noir_tests/bigint_arithmetic_u256/Prover.toml"),
+        ),
+        (
+            include_str!("../../noir_tests/bigint_arithmetic_u384/src/main.nr"),
+            include_str!("../../noir_tests/bigint_arithmetic_u384/Prover.toml"),
+        ),
+    ] {
+        check_both_modes(source, inputs);
+    }
+}
+
+#[test]
 fn wide_signed_arithmetic_from_source() {
     check_both_modes(
         r#"fn main(x: i64) -> pub [i64; 3] {
@@ -82,6 +102,13 @@ fn wide_abi_from_source() {
     check_both_modes(
         include_str!("../../noir_tests/bigint_abi/src/main.nr"),
         include_str!("../../noir_tests/bigint_abi/Prover.toml"),
+    );
+    // Keep the original no-carry case alongside the fixture's cross-limb carry.
+    check_both_modes(
+        include_str!("../../noir_tests/bigint_abi/src/main.nr"),
+        r#"a = ["7", "4503599627370496"]
+b = ["9", "4294967296"]
+return = ["16", "4503603922337792"]"#,
     );
 }
 
@@ -167,24 +194,31 @@ fn the_maximum_width_and_nonstandard_signed_width_reach_source_lowering() {
 
 #[test]
 fn wide_arithmetic_still_rejects_overflow_and_zero_divisors() {
+    // A one-bit top limb is checked by a Boolean constraint. Wider top limbs can stop in
+    // the VM's lookup machinery before we can independently check the invalid witness.
+    // Invalid inputs omit the declared return so rejection cannot come from a return mismatch.
     for (body, valid, invalid) in [
         (
-            "let max: u256 = !0; let sum = max + (x as u256); assert(sum >= max);",
-            "x = 0",
+            "let max: u257 = !0; let result = max + (x as u257);",
+            "x = 0\nreturn = ['340282366920938463463374607431768211455', '340282366920938463463374607431768211455', 1]",
             "x = 1",
         ),
         (
-            "let high: u256 = 1 << 200; let q = high / (x as u256); assert(q > 0);",
-            "x = 1",
+            "let high: u257 = 1 << 256; let divisor = (x as u257) << 256; let result = high / divisor;",
+            "x = 1\nreturn = [1, 0, 0]",
             "x = 0",
         ),
     ] {
-        let dir = common::noir_project(&format!("fn main(x: u64) {{ {body} }}"));
+        let dir = common::noir_project(&format!(
+            "fn main(x: u64) -> pub [u128; 3] {{ {body}
+                [result as u128, (result >> 128) as u128, (result >> 256) as u128]
+            }}"
+        ));
         let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
         let binary = api::compile_bytecode(
             &mut driver,
             CodeGenOptions {
-                check_constraints: true,
+                check_constraints: false,
                 ..Default::default()
             },
         )
@@ -192,11 +226,22 @@ fn wide_arithmetic_still_rejects_overflow_and_zero_divisors() {
         for (input, accepted) in [(valid, true), (invalid, false)] {
             std::fs::write(dir.path().join("Prover.toml"), input).unwrap();
             let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
-            let result = api::run_witgen_from_binary(&mut binary.clone(), &r1cs, &params, None);
+            // Require witness generation to finish with honest-prover checks disabled:
+            // a VM trap would not demonstrate that the constraints reject the witness.
+            let result = api::run_witgen_from_binary(&mut binary.clone(), &r1cs, &params, None)
+                .unwrap_or_else(|error| panic!("{body}: {input}: {error:?}"));
+            let witness = [
+                result.out_wit_pre_comm.as_slice(),
+                result.out_wit_post_comm.as_slice(),
+            ]
+            .concat();
+            assert_eq!(
+                r1cs.unsatisfied_constraint(&witness).is_none(),
+                accepted,
+                "{body}: {input}"
+            );
             if accepted {
-                assert!(api::check_witgen(&r1cs, &result.unwrap()));
-            } else {
-                assert!(result.is_err(), "{body}: invalid operands were accepted");
+                assert!(api::check_witgen(&r1cs, &result));
             }
         }
     }
@@ -209,7 +254,7 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
     let mut binary = api::compile_bytecode(
         &mut driver,
         CodeGenOptions {
-            check_constraints: true,
+            check_constraints: false,
             ..Default::default()
         },
     )
@@ -223,7 +268,17 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
     )
     .unwrap();
     let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
-    assert!(api::run_witgen_from_binary(&mut binary, &r1cs, &params, None).is_err());
+    let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None)
+        .expect("unchecked witness generation must complete");
+    let witness = [
+        result.out_wit_pre_comm.as_slice(),
+        result.out_wit_post_comm.as_slice(),
+    ]
+    .concat();
+    assert!(
+        r1cs.unsatisfied_constraint(&witness).is_some(),
+        "wrong high return limb must violate R1CS"
+    );
 
     let out_of_range = num_bigint::BigUint::from(1u8) << 128;
     std::fs::write(
@@ -275,5 +330,36 @@ fn frontend_rejects_widths_and_entry_points_outside_the_supported_domain() {
         ),
     ] {
         common::assert_frontend_refused(source, &expected);
+    }
+}
+
+/// Returned errors keep all source diagnostics even after the project and its files are gone.
+#[test]
+fn frontend_errors_render_all_source_diagnostics() {
+    use mavros_compiler::{
+        Project,
+        driver::{Driver, Error},
+    };
+
+    let dir = common::noir_project("fn main() {\n    let a: bool = 1;\n    let b: bool = 2;\n}");
+    let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
+    let error = driver.run_noir_compiler().unwrap_err();
+    let Error::NoirCompilerError { diagnostics, .. } = &error else {
+        panic!("expected Noir diagnostics: {error}");
+    };
+    assert!(diagnostics.len() >= 2, "{diagnostics:?}");
+    drop(driver);
+    drop(dir);
+    let rendered = error.to_string();
+    for diagnostic in diagnostics {
+        assert!(rendered.contains(&diagnostic.message), "{rendered}");
+    }
+    for snippet in [
+        "let a: bool = 1;",
+        "let b: bool = 2;",
+        "src/main.nr:2:",
+        "src/main.nr:3:",
+    ] {
+        assert!(rendered.contains(snippet), "missing {snippet}: {rendered}");
     }
 }

@@ -20,7 +20,6 @@ use mavros_int_semantics::{IntBits, IntOp, Outcome, eval};
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
-        analysis::value_range_analysis::field_modulus,
         diagnostic::Diagnostic,
         lowering::type_converter::TypeConverter,
         ssa::{
@@ -488,6 +487,8 @@ impl<'a> ExpressionConverter<'a> {
             Definition::LowLevel(name) => {
                 todo!("LowLevel function not yet supported: {}", name)
             }
+            // The frontend rejects oracle references from source. Keep this check for
+            // hand-built monomorphic programs that bypass the frontend.
             // TODO: When oracle calls are supported, preserve their purity so optimizations such
             // as CSE and DCE can distinguish pure calls from calls with side effects.
             Definition::Oracle { name, .. } => self.reject_unsupported(
@@ -1500,8 +1501,8 @@ impl<'a> ExpressionConverter<'a> {
 
         let result = self.emit_located(b, Some(cast.location), |e| {
             // A field narrowing needs an explicit bit window. Integer casts already truncate
-            // in the integer lowerings; a BitRange here would require a wide integer to fit
-            // into one field element before its limbs have been lowered.
+            // in the integer lowerings, so inserting a BitRange here would be redundant.
+            // WideBitWindows also handles explicit wide windows before limb lowering.
             let value = if source_is_field && target_bits < src_bits {
                 e.bit_range(value, 0, target_bits)
             } else {
@@ -1749,9 +1750,9 @@ impl<'a> ExpressionConverter<'a> {
     /// The constant an integer literal of `typ` denotes, or why it denotes none.
     ///
     /// Only a `Field` literal crosses Noir's field boundary, and the frontend hands it over as the
-    /// integer it was written as rather than reduced. A magnitude at or above the modulus is the
-    /// one shape `bigint_to_field` panics on, so it is refused first, as a message the caller
-    /// places at the literal. An integer literal keeps its full magnitude even past the modulus.
+    /// integer it was written as rather than reduced. A magnitude at or above the configured
+    /// field's modulus is refused with a located diagnostic. An integer literal keeps its full
+    /// magnitude even past the modulus.
     fn integer_constant(
         value: &noir_bigint::BigInt,
         typ: &AstType,
@@ -1759,20 +1760,30 @@ impl<'a> ExpressionConverter<'a> {
     ) -> Result<Constant, String> {
         match typ {
             AstType::Field => {
-                // Bridge Noir's num-bigint 0.5 to the compiler's 0.4 to ask the configured field.
-                let magnitude = BigInt::from_signed_bytes_le(&value.to_signed_bytes_le());
-                if magnitude.magnitude() >= field_modulus(field).magnitude() {
-                    return Err(format!(
+                let invalid = || {
+                    format!(
                         "the `Field` literal {value} does not fit the field: its magnitude is \
                          not below the {}-bit modulus",
                         field.field_bit_size()
-                    ));
+                    )
+                };
+                let (sign, limbs) = value.to_u64_digits();
+                // FIELD-ASSUMPTION: L3-felt-limbs. FieldConfig::from_bigint takes BigInt<4>.
+                // Reject excess limbs before copying, then let the configured field check its
+                // modulus; Noir's build-time field need not be the same field.
+                let mut magnitude = [0u64; 4];
+                if limbs.len() > magnitude.len() {
+                    return Err(invalid());
                 }
-                Ok(Constant::Field(
-                    noirc_frontend::hir::comptime::bigint_to_field(value)
-                        .into_repr()
-                        .into(),
-                ))
+                magnitude[..limbs.len()].copy_from_slice(&limbs);
+                let element = field
+                    .from_bigint(ark_ff::BigInt::new(magnitude))
+                    .ok_or_else(invalid)?;
+                Ok(Constant::Field(if sign == noir_bigint::Sign::Minus {
+                    -element
+                } else {
+                    element
+                }))
             }
             AstType::Integer(_, bit_size) => {
                 let bits = *bit_size as usize;
@@ -1846,6 +1857,8 @@ impl<'a> ExpressionConverter<'a> {
                     Definition::Builtin(name) => self.convert_builtin_call(name, call, b),
                     Definition::LowLevel(name) => self.convert_lowlevel_call(name, call, b),
                     Definition::Oracle { name, .. } if name == "print" => None,
+                    // Defense in depth for hand-built programs; source calls are rejected
+                    // by the frontend before reaching this lowering.
                     Definition::Oracle { name, .. } => self.reject_unsupported(
                         format!("oracle functions are not supported by Mavros: `{name}`"),
                         Some(call.location),
@@ -2263,13 +2276,14 @@ fn is_enum_variant(c: &Constructor) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::analysis::value_range_analysis::field_modulus;
 
     fn field_literal(value: noir_bigint::BigInt) -> Result<Constant, String> {
         ExpressionConverter::integer_constant(&value, &AstType::Field, FieldConfig::bn254())
     }
 
     /// A `Field` literal is refused at the modulus rather than reduced or panicked on: the
-    /// frontend hands it over unreduced, and `bigint_to_field` panics at the same bound.
+    /// frontend hands it over unreduced, and the configured field requires a canonical magnitude.
     #[test]
     fn a_field_literal_at_or_above_the_modulus_is_refused_with_a_message() {
         let modulus = noir_bigint::BigInt::from_signed_bytes_le(
@@ -2289,12 +2303,33 @@ mod tests {
             &modulus + 1,
             -modulus.clone(),
             noir_bigint::BigInt::from(1u8) << 254u32,
+            noir_bigint::BigInt::from(1u8) << 300u32,
         ] {
             let message = field_literal(value.clone()).expect_err("at or above the modulus");
             assert!(
                 message.contains("does not fit the field"),
                 "{value}: {message}"
             );
+        }
+    }
+
+    #[test]
+    fn field_literals_preserve_magnitude_and_sign() {
+        let field = FieldConfig::bn254();
+        let modulus =
+            noir_bigint::BigInt::from_signed_bytes_le(&field_modulus(field).to_signed_bytes_le());
+        for (value, expected) in [
+            (noir_bigint::BigInt::from(0), field.zero()),
+            (noir_bigint::BigInt::from(42), field.constant(42u64)),
+            (noir_bigint::BigInt::from(-42), -field.constant(42u64)),
+            (&modulus - 1u8, -field.one()),
+            (-(&modulus - 1u8), field.one()),
+            (
+                (noir_bigint::BigInt::from(1u8) << 200u32) + 7u8,
+                field.two_pow(200) + field.constant(7u64),
+            ),
+        ] {
+            assert_eq!(field_literal(value).unwrap(), Constant::Field(expected));
         }
     }
 
