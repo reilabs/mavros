@@ -14,8 +14,8 @@ use crate::{
     ConstraintsLayout, Field, TableKind, WitnessLayout,
     array::BoxedValue,
     bytecode::{
-        self, AllocationInstrumenter, AllocationType, ENTRY_AD, ENTRY_WITGEN, Int128,
-        MatrixOutputs, OpCode, TableInfo, VM, parse_program_header, pow2_rows,
+        self, AllocationInstrumenter, AllocationType, Arrays, ENTRY_AD, ENTRY_VERIFIER,
+        ENTRY_WITGEN, Int128, OpCode, TableInfo, VM, parse_program_header, pow2_rows,
     },
 };
 
@@ -865,9 +865,10 @@ pub struct VerifierResult {
 /// `r` has one entry per constraint and `w` covers the entire witness layout,
 /// including multiplicities, challenges, and lookup witnesses. Every entry is
 /// arbitrary: in particular, `w[0]` need not be one. No prover inputs or satisfying
-/// witness are required. The existing AD entry point supplies the constraint
-/// traversal, but its column contributions are contracted directly with `w`,
-/// without allocating AD output vectors or materializing the R1CS matrices.
+/// witness are required. The dedicated verifier entry point reads witness values
+/// from `w` and evaluates linear combinations forward, without allocating AD
+/// nodes, AD output vectors, or materializing the R1CS matrices.
+/// Artifacts compiled before the verifier entry point was added must be recompiled.
 #[instrument(skip_all, name = "Interpreter::run_verifier")]
 pub fn run_verifier(
     program: &[u64],
@@ -1007,12 +1008,11 @@ fn run_constraint_program(
             stack_trace: Vec::new(),
         });
     }
-    #[cfg(feature = "vm-profile")]
     let is_verifier = matches!(&outputs, ConstraintOutputs::Verifier { .. });
 
     // Validate capacities before converting the exclusive borrows into VM pointers.
     // The callers cannot access the buffers again until this dispatch returns.
-    let outputs = match outputs {
+    let (output_ptrs, witness) = match outputs {
         ConstraintOutputs::Ad(buffers) => {
             for buffer in &buffers {
                 if buffer.len() != witness_layout.size() {
@@ -1026,7 +1026,7 @@ fn run_constraint_program(
                     });
                 }
             }
-            MatrixOutputs::Ad(buffers.map(|buffer| buffer.as_mut_ptr()))
+            (buffers.map(|buffer| buffer.as_mut_ptr()), None)
         }
         ConstraintOutputs::Verifier { outputs, witness } => {
             if witness.len() != witness_layout.size() {
@@ -1039,29 +1039,63 @@ fn run_constraint_program(
                     stack_trace: Vec::new(),
                 });
             }
-            MatrixOutputs::Verifier {
-                outputs: outputs.map(|output| output as *mut Field),
-                witness: witness.as_ptr(),
-            }
+            (
+                outputs.map(|output| output as *mut Field),
+                Some(witness.as_ptr()),
+            )
         }
     };
     let header = parse_program_header(program);
     let debug_info = debug_info.unwrap_or_default();
+    let entry_index = if is_verifier {
+        ENTRY_VERIFIER
+    } else {
+        ENTRY_AD
+    };
     let entry = *header
         .entry_points
-        .get(ENTRY_AD)
-        .expect("Program has no AD entry point");
+        .get(entry_index)
+        .ok_or_else(|| TrapError {
+            message: Some(
+                if is_verifier {
+                    "Program has no forward verifier entry point; recompile the artifact"
+                } else {
+                    "Program has no AD entry point"
+                }
+                .to_string(),
+            ),
+            stack_trace: Vec::new(),
+        })?;
     let global_frame_size = header.global_frame_size;
     let mut global_frame = vec![0u64; global_frame_size];
-    let mut vm = VM::new_constraint(
-        outputs,
-        coeffs.as_ptr(),
-        witness_layout,
-        constraints_layout,
-        global_frame.as_mut_ptr(),
-        header.struct_layouts,
-        header.constant_pool,
-    );
+    let mut vm = if let Some(witness) = witness {
+        VM::new_constraint(
+            Arrays {
+                as_verifier: crate::verifier::VerifierArrays::new(
+                    output_ptrs,
+                    witness,
+                    coeffs.as_ptr(),
+                    witness_layout,
+                    constraints_layout,
+                ),
+            },
+            global_frame.as_mut_ptr(),
+            header.struct_layouts,
+            header.constant_pool,
+        )
+    } else {
+        VM::new_ad(
+            output_ptrs[0],
+            output_ptrs[1],
+            output_ptrs[2],
+            coeffs.as_ptr(),
+            witness_layout,
+            constraints_layout,
+            global_frame.as_mut_ptr(),
+            header.struct_layouts,
+            header.constant_pool,
+        )
+    };
 
     let frame = Frame::push(
         program[entry + 1],

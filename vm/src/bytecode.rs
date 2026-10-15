@@ -264,6 +264,7 @@ impl VM {
 /// opcode proc macro.
 pub const ELEM_WORD: usize = 0;
 pub const ELEM_FIELD: usize = 1;
+pub const ELEM_VERIFIER: usize = 5;
 pub const ELEM_WITNESS: usize = 2;
 pub const ELEM_U128: usize = 3;
 
@@ -947,27 +948,17 @@ pub struct FwdArrays {
     pub elem_inverses_witness_section_offset: usize,
 }
 
+/// AD vector outputs. Verifier execution uses a separate forward entry point.
 #[derive(Copy, Clone)]
-pub(crate) enum MatrixOutputs {
-    Ad([*mut Field; 3]),
-    Verifier { outputs: [*mut Field; 3], witness: *const Field },
-}
+pub(crate) struct MatrixOutputs(pub [*mut Field; 3]);
 
 impl MatrixOutputs {
-    /// Add a matrix-column contribution to either an AD vector or a verifier scalar.
-    ///
     /// # Safety
-    /// All pointers must remain valid for this execution. AD outputs and the verifier
-    /// witness must cover `column`; verifier outputs each point to one scalar.
+    /// Each output must remain valid and cover `column` for this execution.
     #[inline(always)]
     pub(crate) unsafe fn bump<const MATRIX: usize>(&self, column: usize, amount: Field) {
         unsafe {
-            match self {
-                Self::Ad(outputs) => *outputs[MATRIX].add(column) += amount,
-                Self::Verifier { outputs, witness } => {
-                    *outputs[MATRIX] += amount * *witness.add(column);
-                }
-            }
+            *self.0[MATRIX].add(column) += amount;
         }
     }
 }
@@ -989,6 +980,7 @@ pub struct AdArrays {
 pub union Arrays {
     pub as_forward: FwdArrays,
     pub as_ad: AdArrays,
+    pub(crate) as_verifier: crate::verifier::VerifierArrays,
 }
 
 /// Number of slots in the fixed-size table caches ([`VM::rgchk_tables`]/[`VM::spread_tables`]).
@@ -1110,29 +1102,9 @@ impl VM {
         constants: Vec<u64>,
     ) -> Self {
         Self::new_constraint(
-            MatrixOutputs::Ad([out_da, out_db, out_dc]),
-            ad_coeffs,
-            witness_layout,
-            constraints_layout,
-            globals,
-            struct_layouts,
-            constants,
-        )
-    }
-
-    pub(crate) fn new_constraint(
-        outputs: MatrixOutputs,
-        ad_coeffs: *const Field,
-        witness_layout: WitnessLayout,
-        constraints_layout: ConstraintsLayout,
-        globals: *mut u64,
-        struct_layouts: Vec<StructDescriptor>,
-        constants: Vec<u64>,
-    ) -> Self {
-        Self {
-            data: Arrays {
+            Arrays {
                 as_ad: AdArrays {
-                    outputs,
+                    outputs: MatrixOutputs([out_da, out_db, out_dc]),
                     ad_coeffs,
                     current_wit_off: 0,
                     // FIELD-ASSUMPTION: L4-logup-challenges (~9 sites)
@@ -1148,6 +1120,20 @@ impl VM {
                     current_cnst_lookups_off: constraints_layout.lookups_data_start(),
                 },
             },
+            globals,
+            struct_layouts,
+            constants,
+        )
+    }
+
+    pub(crate) fn new_constraint(
+        data: Arrays,
+        globals: *mut u64,
+        struct_layouts: Vec<StructDescriptor>,
+        constants: Vec<u64>,
+    ) -> Self {
+        Self {
+            data,
             allocation_instrumenter: AllocationInstrumenter::new(),
             tables: vec![],
             rgchk_tables: [None; NUM_TABLE_SIZE_SLOTS],
@@ -3638,6 +3624,138 @@ mod def {
             std::ptr::copy_nonoverlapping(vm.constants.as_ptr().add(pool_offset), res, size);
         }
     }
+    #[opcode]
+    fn verifier_read_witness(#[out] res: *mut Field, vm: &mut VM) {
+        unsafe {
+            let data = &mut vm.data.as_verifier;
+            *res = data.w(data.witness_cursor);
+            data.witness_cursor += 1;
+        }
+    }
+
+    #[opcode]
+    fn verifier_constant(#[out] res: *mut Field, #[frame] v: Field, vm: &mut VM) {
+        unsafe {
+            *res = v * vm.data.as_verifier.w(0);
+        }
+    }
+
+    #[opcode]
+    fn verifier_next_coeff(#[out] v: *mut Field, vm: &mut VM) {
+        unsafe {
+            let data = &mut vm.data.as_verifier;
+            *v = *data.coeffs.add(data.constraint_cursor);
+            data.constraint_cursor += 1;
+        }
+    }
+
+    #[opcode]
+    fn verifier_accumulate(#[frame] v: Field, #[frame] coeff: Field, matrix: usize, vm: &mut VM) {
+        unsafe {
+            *vm.data.as_verifier.outputs[matrix] += coeff * v;
+        }
+    }
+
+    #[opcode]
+    fn verifier_rngchk_field(#[frame] val: Field, #[frame] flag: Field, bits: usize, vm: &mut VM) {
+        unsafe {
+            if vm.rgchk_tables[bits].is_none() {
+                let length = 1usize << bits;
+                let (table, mult) = vm.data.as_verifier.table(TableKind::RangeCheck, length);
+                vm.data
+                    .as_verifier
+                    .constant_table(&table, mult, (0..length).map(|_| Field::ZERO));
+                vm.rgchk_tables[bits] = Some(vm.tables.len());
+                vm.tables.push(table);
+            }
+            let table = &vm.tables[vm.rgchk_tables[bits].unwrap()];
+            vm.data.as_verifier.lookup(table, val, None, flag);
+        }
+    }
+
+    #[opcode]
+    fn verifier_spread_lookup_field(
+        #[frame] val: Field,
+        #[frame] result: Field,
+        #[frame] flag: Field,
+        bits: usize,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            if vm.spread_tables[bits].is_none() {
+                let length = 1usize << bits;
+                let (table, mult) = vm.data.as_verifier.table(TableKind::Spread, length);
+                vm.data.as_verifier.constant_table(
+                    &table,
+                    mult,
+                    (0..length)
+                        .map(|i| Field::from(mavros_limb_arith::spread_u32_to_u64(i as u32))),
+                );
+                vm.spread_tables[bits] = Some(vm.tables.len());
+                vm.tables.push(table);
+            }
+            let table = &vm.tables[vm.spread_tables[bits].unwrap()];
+            vm.data.as_verifier.lookup(table, val, Some(result), flag);
+        }
+    }
+
+    #[opcode]
+    fn verifier_pow2_lookup_field(
+        #[frame] amount: Field,
+        #[frame] factor: Field,
+        #[frame] flag: Field,
+        size: usize,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            if vm.pow2_tables[size].is_none() {
+                let length = 1usize << size;
+                let (table, mult) = vm.data.as_verifier.table(TableKind::Pow2, length);
+                vm.data
+                    .as_verifier
+                    .constant_table(&table, mult, pow2_rows(length));
+                vm.pow2_tables[size] = Some(vm.tables.len());
+                vm.tables.push(table);
+            }
+            let table = &vm.tables[vm.pow2_tables[size].unwrap()];
+            vm.data
+                .as_verifier
+                .lookup(table, amount, Some(factor), flag);
+        }
+    }
+
+    #[opcode]
+    fn verifier_array_lookup_field(
+        #[frame] array: BoxedValue,
+        #[frame] index: Field,
+        #[frame] result: Field,
+        #[frame] flag: Field,
+        stride: usize,
+        elem_kind: usize,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            let table_id = array.table_id();
+            if *table_id == u64::MAX {
+                let length = for_each_array_leaf(array, stride, |_, _| {});
+                let (table, mult) = vm.data.as_verifier.table(TableKind::Array, length);
+                for_each_array_leaf(array, stride, |i, elem| {
+                    let value = if elem_kind == ELEM_VERIFIER {
+                        *(elem as *const Field)
+                    } else {
+                        read_pure_elem_as_field(elem, elem_kind, stride) * vm.data.as_verifier.w(0)
+                    };
+                    vm.data.as_verifier.array_row(&table, mult, i, value);
+                });
+                vm.data.as_verifier.array_sum(&table);
+                *table_id = vm.tables.len() as u64;
+                vm.tables.push(table);
+            }
+            vm.data
+                .as_verifier
+                .lookup(&vm.tables[*table_id as usize], index, Some(result), flag);
+        }
+    }
 }
 
 pub struct Function {
@@ -3662,6 +3780,8 @@ impl Display for Function {
 pub const ENTRY_WITGEN: usize = 0;
 /// Index of the AD entry point in a program's entry table.
 pub const ENTRY_AD: usize = 1;
+/// Index of the direct forward verifier entry point.
+pub const ENTRY_VERIFIER: usize = 2;
 
 pub struct Program {
     pub functions: Vec<Function>,

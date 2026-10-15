@@ -131,7 +131,7 @@ pub fn run_witgen_phase2(
     )
 }
 
-/// Compiles the whole program (witgen and AD entry points) into a single VM binary.
+/// Compiles the whole program (witgen, AD, and forward verifier entry points) into a single VM binary.
 pub fn compile_bytecode(
     driver: &mut Driver,
     options: crate::compiler::codegen::CodeGenOptions,

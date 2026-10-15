@@ -30,7 +30,7 @@ This will produce the following two files inside the project's `target/` directo
 
 | File                | Contents                                                                        |
 | ------------------- | ------------------------------------------------------------------------------- |
-| `target/basic.json` | ABI and the program binary (`binary`) containing the witgen and AD entry points |
+| `target/basic.json` | ABI and the program binary (`binary`) containing witgen, AD, and forward verifier entry points |
 | `target/r1cs.bin`   | Serialised R1CS constraint system (bincode)                                     |
 
 Pass `--include-debug-info` to additionally write `target/basic.debug.json`. This standalone,
@@ -65,9 +65,12 @@ component of a verifier, not a complete proof verification protocol.
 
 Rust callers can use `mavros_compiler::api::run_verifier_from_binary(&binary, &r1cs, &r, &w, None)`.
 Hosts retaining only bytecode and layouts can use `mavros_vm::interpreter::run_verifier` directly.
-Verifier execution reuses the compiled AD constraint traversal and contracts each column
-contribution directly with `w`, accumulating three scalars without materializing matrices or AD
-output vectors. Existing compiled bytecode containing an AD entry point can be reused.
+Verifier execution uses a dedicated forward bytecode entry point: witness writes read the next
+value from `w`, linear combinations use field arithmetic, and constraints accumulate three scalars
+weighted by `r`. It allocates no AD expression nodes or matrix output vectors. Lookup and table
+constraints are evaluated from the same layouts. Older bytecode without this third entry point
+must be recompiled. LLVM and WASM artifacts still expose the existing witgen and AD entry points;
+the forward verifier is currently available through the VM API and CLI.
 
 ### Per-Function FlameGraphs
 

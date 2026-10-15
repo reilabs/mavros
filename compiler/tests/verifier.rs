@@ -20,11 +20,69 @@ fn reference(r1cs: &R1CS, r: &[Field], w: &[Field]) -> [Field; 3] {
     result
 }
 
-fn check(source: &str) {
+/// The verifier suffix must never allocate or propagate AD expression nodes.
+fn assert_forward_bytecode(binary: &[u64]) {
+    use mavros_vm::bytecode::{ENTRY_VERIFIER, FramePosition, OpCode, parse_program_header};
+    let p = FramePosition(0);
+    let forbidden: Vec<u64> = [
+        OpCode::FreshWitness { res: p },
+        OpCode::WitnessRefAlloc {
+            res: p,
+            data: Field::ZERO,
+        },
+        OpCode::PureToWitnessRef { res: p, v: p },
+        OpCode::MulConst {
+            res: p,
+            coeff: p,
+            v: p,
+        },
+        OpCode::AddBoxed { res: p, a: p, b: p },
+        OpCode::BumpDa { v: p, coeff: p },
+        OpCode::BumpDb { v: p, coeff: p },
+        OpCode::BumpDc { v: p, coeff: p },
+    ]
+    .iter()
+    .map(|op| {
+        let mut words = vec![];
+        op.to_binary(&mut words, &mut vec![]);
+        words[0]
+    })
+    .collect();
+    let mut cursor = parse_program_header(binary).entry_points[ENTRY_VERIFIER];
+    while cursor < binary.len() {
+        if binary[cursor] == u64::MAX {
+            cursor += 2;
+            continue;
+        }
+        assert!(
+            !forbidden.contains(&binary[cursor]),
+            "AD opcode in verifier at {cursor}"
+        );
+        cursor = OpCode::next_opcode(binary, cursor);
+    }
+}
+
+fn check(source: &str) -> (usize, usize) {
+    use mavros_vm::bytecode::{AllocationType, AlocationEvent};
+    let heap_allocations = |memory: &mavros_vm::bytecode::AllocationInstrumenter| {
+        memory
+            .events
+            .iter()
+            .filter(|event| matches!(event, AlocationEvent::Alloc(AllocationType::Heap, _)))
+            .count()
+    };
+    let mut heaps = (0, 0);
     let project = common::noir_project(source);
     let (mut driver, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
     let mut binary = api::compile_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
     let original = binary.clone();
+    assert_forward_bytecode(&binary);
+    assert_eq!(
+        mavros_vm::bytecode::parse_program_header(&binary)
+            .entry_points
+            .len(),
+        3
+    );
     let mut rng = StdRng::seed_from_u64(411);
     for case in 0..6 {
         let mut r: Vec<Field> = (0..r1cs.constraints.len())
@@ -50,19 +108,22 @@ fn check(source: &str) {
             "case {case}"
         );
         assert_eq!(result.instrumenter.final_memory_usage(), 0);
+        heaps.0 = heaps.0.max(heap_allocations(&result.instrumenter));
 
         // Both execution modes can still use the same compiled artifact repeatedly.
         let (a, b, c, memory) = api::run_ad_from_binary(&mut binary, &r1cs, &r, None).unwrap();
         assert!(api::check_ad(&r1cs, &r, &a, &b, &c));
         assert_eq!(memory.final_memory_usage(), 0);
+        heaps.1 = heaps.1.max(heap_allocations(&memory));
     }
     assert_eq!(binary, original);
     assert!(!project.path().join("Prover.toml").exists());
+    heaps
 }
 
 #[test]
 fn algebraic_constraints_and_shared_linear_combinations() {
-    check(
+    let (verifier_heap, ad_heap) = check(
         r#"
         fn main(x: Field, y: pub Field) -> pub Field {
             let z = 3 * x - y + 7;
@@ -72,6 +133,10 @@ fn algebraic_constraints_and_shared_linear_combinations() {
             result
         }
     "#,
+    );
+    assert!(
+        verifier_heap < ad_heap,
+        "forward evaluation removes AD allocations; ordinary program containers remain"
     );
 }
 
@@ -234,4 +299,49 @@ fn cli_requires_one_workspace_binary_and_honors_member_selection() {
         expected
     );
     assert!(!workspace.path().join("b/mavros_debug").exists());
+}
+
+#[test]
+fn witness_slices_across_calls_and_nested_arrays() {
+    check(include_str!(
+        "../../noir_tests/slice_wl_call_return/src/main.nr"
+    ));
+    check(include_str!(
+        "../../noir_tests/slice_witness_set_nested/src/main.nr"
+    ));
+    check(include_str!(
+        "../../noir_tests/ref_array_witness_write_one_cell/src/main.nr"
+    ));
+    check(include_str!(
+        "../../noir_tests/argpromo_loop_accum/src/main.nr"
+    ));
+}
+
+#[test]
+fn old_artifacts_require_recompilation() {
+    use mavros_vm::bytecode::{Function, OpCode, Program};
+    let project = common::noir_project("fn main() {}");
+    let (_, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
+    let binary = Program {
+        functions: (0..2)
+            .map(|i| Function {
+                name: format!("entry_{i}"),
+                frame_size: 2,
+                code: vec![OpCode::Ret {}],
+                source_locations: vec![],
+            })
+            .collect(),
+        entry_points: vec![0, 1],
+        entry_blob_field_count: 0,
+        global_frame_size: 0,
+        struct_layouts: vec![],
+        constant_pool: vec![],
+    }
+    .to_binary();
+    let r = vec![Field::ZERO; r1cs.constraints_layout.size()];
+    let w = vec![Field::ZERO; r1cs.witness_layout.size()];
+    let error = api::run_verifier_from_binary(&binary, &r1cs, &r, &w, None)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("recompile"));
 }
