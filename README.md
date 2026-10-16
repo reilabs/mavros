@@ -76,16 +76,15 @@ the verifier artifact.
 
 Rust callers compile it with `mavros_compiler::api::compile_verifier_bytecode(&mut driver, options)`
 and pass that binary to
-`run_verifier_from_binary(&binary, &r, &w, witness_layout, constraints_layout, None)`.
-No R1CS matrices are required at runtime. Both artifacts must come from the same circuit
-compilation; applications must associate the verifier artifact with their trusted circuit
-configuration. Verifier execution uses a dedicated forward
-bytecode entry point: witness writes read the next value from `w`, linear combinations use field
-arithmetic, and constraints accumulate three scalars weighted by `r`. It allocates no AD expression
-nodes or matrix output vectors. Lookup and table constraints are evaluated from the same layouts.
-Prover bytecode remains compatible with existing witgen/AD callers. LLVM and WASM artifacts still
-expose the existing witgen and AD entry points; the forward verifier is currently available through
-the VM API and CLI.
+`run_verifier_from_binary(&binary, &r, &w, witness_layout, constraints_layout, None)`. No R1CS
+matrices are required at runtime. Both artifacts must come from the same circuit compilation;
+applications must associate the verifier artifact with their trusted circuit configuration. Verifier
+execution uses a dedicated forward bytecode entry point: witness writes read the next value from
+`w`, linear combinations use field arithmetic, and constraints accumulate three scalars weighted by
+`r`. It allocates no AD expression nodes or matrix output vectors. Lookup and table constraints are
+evaluated from the same layouts. Prover bytecode remains compatible with existing witgen/AD callers.
+LLVM and WASM artifacts still expose the existing witgen and AD entry points; the forward verifier
+is currently available through the VM API and CLI.
 
 ### Per-Function FlameGraphs
 
