@@ -15,8 +15,10 @@ use mavros_compiler::{
 };
 
 use tracing::{error, info, warn};
-use tracing_forest::ForestLayer;
-use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_forest::{ForestLayer, printer::PrettyPrinter};
+use tracing_subscriber::{
+    EnvFilter, Registry, fmt::writer::BoxMakeWriter, layer::SubscriberExt, util::SubscriberInitExt,
+};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -48,6 +50,18 @@ pub struct ProgramOptions {
 
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub skip_vm: bool,
+
+    /// Compute (rAw, rBw, rCw) for supplied vectors, without witness generation.
+    #[arg(long, requires = "r", requires = "w", conflicts_with_all = ["skip_vm", "profile"])]
+    pub verify: bool,
+
+    /// JSON array of decimal field strings, one per constraint, for --verify.
+    #[arg(long, value_name = "PATH", requires = "verify")]
+    pub r: Option<PathBuf>,
+
+    /// JSON array of decimal field strings covering the full witness layout, for --verify.
+    #[arg(long, value_name = "PATH", requires = "verify")]
+    pub w: Option<PathBuf>,
 
     /// Print absolute paths in VM stack traces and WASM debug info instead of paths relative to the Noir package root.
     #[arg(long, action = clap::ArgAction::SetTrue)]
@@ -89,6 +103,10 @@ pub enum Command {
         #[arg(long, default_value = "target/basic.json")]
         binary_output: PathBuf,
 
+        /// Optionally write a separate verifier binary and layouts (JSON).
+        #[arg(long)]
+        verifier_output: Option<PathBuf>,
+
         /// Enable debugging mode which will generate graphs.
         #[arg(long, action = clap::ArgAction::SetTrue)]
         draw_graphs: bool,
@@ -103,12 +121,22 @@ fn main() -> ExitCode {
     // Parse args and hand-off immediately.
     let args = ProgramOptions::parse();
 
+    // Keep verifier stdout machine-readable even when tracing is enabled.
+    let log_writer = if args.verify {
+        BoxMakeWriter::new(std::io::stderr)
+    } else {
+        BoxMakeWriter::new(std::io::stdout)
+    };
     Registry::default()
-        .with(ForestLayer::default())
+        .with(ForestLayer::from(PrettyPrinter::new().writer(log_writer)))
         .with(EnvFilter::from_default_env())
         .init();
 
     let result = match &args.command {
+        Some(Command::Compile { .. }) if args.verify => Err(std::io::Error::other(
+            "--verify executes the verifier and cannot be combined with the compile subcommand",
+        )
+        .into()),
         Some(Command::Compile { .. }) if args.profile => Err(std::io::Error::other(
             "--profile runs the full pipeline and cannot be combined with the compile subcommand",
         )
@@ -117,11 +145,13 @@ fn main() -> ExitCode {
             path,
             r1cs_output,
             binary_output,
+            verifier_output,
             draw_graphs,
         }) => run_compile(
             path,
             r1cs_output,
             binary_output,
+            verifier_output.as_ref(),
             *draw_graphs,
             args.include_debug_info,
             args.absolute_paths,
@@ -171,6 +201,7 @@ pub fn run_compile(
     path: &PathBuf,
     r1cs_output: &PathBuf,
     binary_output: &PathBuf,
+    verifier_output: Option<&PathBuf>,
     draw_graphs: bool,
     include_debug_info: bool,
     absolute_paths: bool,
@@ -180,14 +211,17 @@ pub fn run_compile(
     let roots = Project::binary_package_roots(&requested_root)?;
     let multiple = roots.len() > 1;
     if multiple
-        && [r1cs_output, binary_output].iter().any(|output| {
-            output.components().any(|component| {
-                !matches!(
-                    component,
-                    std::path::Component::Normal(_) | std::path::Component::CurDir
-                )
+        && [r1cs_output, binary_output]
+            .into_iter()
+            .chain(verifier_output)
+            .any(|output| {
+                output.components().any(|component| {
+                    !matches!(
+                        component,
+                        std::path::Component::Normal(_) | std::path::Component::CurDir
+                    )
+                })
             })
-        })
     {
         return Err(std::io::Error::other(
             "For multi-package compilation, output paths must be relative paths within each member directory",
@@ -205,10 +239,18 @@ pub fn run_compile(
         } else {
             binary_output.clone()
         };
+        let verifier_output = verifier_output.map(|output| {
+            if rebase {
+                root.join(output)
+            } else {
+                output.clone()
+            }
+        });
         run_compile_package(
             root,
             &r1cs_output,
             &binary_output,
+            verifier_output.as_ref(),
             draw_graphs,
             include_debug_info,
             absolute_paths,
@@ -221,11 +263,15 @@ fn run_compile_package(
     path: &PathBuf,
     r1cs_output: &PathBuf,
     binary_output: &PathBuf,
+    verifier_output: Option<&PathBuf>,
     draw_graphs: bool,
     include_debug_info: bool,
     absolute_paths: bool,
     logup_soundness: u32,
 ) -> Result<ExitCode, Error> {
+    if verifier_output.is_some_and(|output| output == binary_output || output == r1cs_output) {
+        return Err("verifier output must be separate from prover and R1CS outputs".into());
+    }
     info!(message = %"Compiling Noir project", root = ?path, r1cs_output = ?r1cs_output, binary_output = ?binary_output);
 
     let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs, logup_soundness, false)?;
@@ -261,15 +307,28 @@ fn run_compile_package(
     let basic_json = serde_json::to_string_pretty(&basic)?;
     fs::write(binary_output, basic_json)?;
 
-    let debug_output = binary_output.with_extension("debug.json");
-    if let Some(mut debug_info) = artifact.debug_info {
-        if let Some(root) = debug_path_root(&driver, absolute_paths) {
-            debug_info.relativize_source_paths(root);
+    write_vm_debug_info(binary_output, artifact.debug_info, &driver, absolute_paths)?;
+
+    if let Some(output) = verifier_output {
+        let verifier = api::compile_verifier_bytecode_artifact(
+            &mut driver,
+            CodeGenOptions {
+                include_debug_info,
+                ..CodeGenOptions::default()
+            },
+        )?;
+        if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
         }
-        fs::write(&debug_output, serde_json::to_string_pretty(&debug_info)?)?;
-        info!(message = %"VM debug info generated", path = %debug_output.display());
-    } else if debug_output.exists() {
-        fs::remove_file(debug_output)?;
+        fs::write(
+            output,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "binary": verifier.binary,
+                "witness_layout": r1cs.witness_layout,
+                "constraints_layout": r1cs.constraints_layout,
+            }))?,
+        )?;
+        write_vm_debug_info(output, verifier.debug_info, &driver, absolute_paths)?;
     }
 
     info!(
@@ -283,10 +342,32 @@ fn run_compile_package(
     Ok(ExitCode::SUCCESS)
 }
 
+fn write_vm_debug_info(
+    output: &Path,
+    debug_info: Option<mavros_vm::bytecode::DebugInfo>,
+    driver: &Driver,
+    absolute_paths: bool,
+) -> Result<(), Error> {
+    let debug_output = output.with_extension("debug.json");
+    if let Some(mut debug_info) = debug_info {
+        if let Some(root) = debug_path_root(driver, absolute_paths) {
+            debug_info.relativize_source_paths(root);
+        }
+        fs::write(&debug_output, serde_json::to_string_pretty(&debug_info)?)?;
+        info!(message = %"VM debug info generated", path = %debug_output.display());
+    } else if debug_output.exists() {
+        fs::remove_file(debug_output)?;
+    }
+    Ok(())
+}
+
 /// The main execution of the CLI utility (full pipeline). Should be called directly from the
 /// `main` function of the application.
 pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     let roots = Project::binary_package_roots(&args.root)?;
+    if args.verify && roots.len() > 1 {
+        return Err("--verify requires a single binary package; use --root to select a member or set default-member in Nargo.toml".into());
+    }
     run_packages(&roots, |root| {
         let mut options = args.clone();
         options.root = root.clone();
@@ -388,10 +469,43 @@ fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let params = api::read_prover_inputs(driver.package_root(), driver.abi())?;
-    let artifact = api::compile_bytecode_artifact(&mut driver, codegen_options)?;
+    let artifact = if args.verify {
+        api::compile_verifier_bytecode_artifact(&mut driver, codegen_options)?
+    } else {
+        api::compile_bytecode_artifact(&mut driver, codegen_options)?
+    };
     let mut binary = artifact.binary;
     let vm_debug_info = artifact.debug_info;
+
+    if args.verify {
+        let r = read_verifier_vector(args.r.as_deref().expect("--verify requires --r"))?;
+        let w = read_verifier_vector(args.w.as_deref().expect("--verify requires --w"))?;
+        let result = api::run_verifier_from_binary(
+            &binary,
+            &r,
+            &w,
+            r1cs.witness_layout,
+            r1cs.constraints_layout,
+            vm_debug_info,
+        )
+        .map_err(|mut error| {
+            if let Some(root) = &source_path_root {
+                error.relativize_source_paths(root);
+            }
+            error
+        })?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "r_aw": result.r_aw.to_string(),
+                "r_bw": result.r_bw.to_string(),
+                "r_cw": result.r_cw.to_string(),
+            })
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let params = api::read_prover_inputs(driver.package_root(), driver.abi())?;
 
     let witgen_execution = if args.profile {
         api::run_witgen_profiled_from_binary(&mut binary, &r1cs, &params, vm_debug_info.clone())
@@ -604,6 +718,47 @@ fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
     }
 }
 
+/// Read verifier inputs without losing precision to JSON's numeric representation.
+fn read_verifier_vector(path: &Path) -> Result<Vec<RawField>, Error> {
+    use ark_ff::PrimeField;
+
+    let values: Vec<String> = serde_json::from_str(&fs::read_to_string(path)?).map_err(|err| {
+        format!(
+            "{}: expected a JSON array of decimal field strings: {err}",
+            path.display()
+        )
+    })?;
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if value.is_empty()
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+                || (value.len() > 1 && value.starts_with('0'))
+            {
+                return Err(format!(
+                    "{}: expected a canonical unsigned decimal field element at index {index}",
+                    path.display()
+                )
+                .into());
+            }
+            let integer = num_bigint::BigUint::parse_bytes(value.as_bytes(), 10)
+                .expect("nonempty decimal digits were validated above");
+            // Unlike FromStr, from_bigint rejects representatives outside the field.
+            <RawField as PrimeField>::BigInt::try_from(integer)
+                .ok()
+                .and_then(RawField::from_bigint)
+                .ok_or_else(|| {
+                    format!(
+                        "{}: field element at index {index} must be less than the modulus",
+                        path.display()
+                    )
+                    .into()
+                })
+        })
+        .collect()
+}
+
 // Copied from: https://github.com/noir-lang/noir/blob/5071093f9b51e111a49a5f78d827774ef8e80c74/tooling/nargo_cli/src/cli/mod.rs#L301
 /// Parses a path and turns it into an absolute one by joining to the current
 /// directory.
@@ -621,6 +776,89 @@ fn parse_path(path: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verifier_cli_requires_vectors_and_rejects_conflicting_modes() {
+        for args in [
+            vec!["mavros", "--verify"],
+            vec!["mavros", "--verify", "--r", "r.json"],
+            vec!["mavros", "--verify", "--w", "w.json"],
+            vec!["mavros", "--r", "r.json", "--w", "w.json"],
+            vec![
+                "mavros",
+                "--verify",
+                "--r",
+                "r.json",
+                "--w",
+                "w.json",
+                "--skip-vm",
+            ],
+            vec![
+                "mavros",
+                "--verify",
+                "--r",
+                "r.json",
+                "--w",
+                "w.json",
+                "--profile",
+            ],
+        ] {
+            assert!(ProgramOptions::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn verifier_vectors_use_decimal_strings() {
+        use ark_ff::PrimeField;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vector.json");
+        fs::write(&path, r#"["0", "1", "12345678901234567890"]"#).unwrap();
+        assert_eq!(
+            read_verifier_vector(&path).unwrap(),
+            vec![
+                RawField::from(0u64),
+                RawField::from(1u64),
+                RawField::from(12345678901234567890u64),
+            ]
+        );
+        for input in [
+            r#"[1]"#,
+            r#"["nope"]"#,
+            r#"[""]"#,
+            r#"["-1"]"#,
+            r#"["00"]"#,
+            r#"["01"]"#,
+            r#"["+1"]"#,
+            r#"[" 1"]"#,
+            "{}",
+        ] {
+            fs::write(&path, input).unwrap();
+            assert!(read_verifier_vector(&path).is_err(), "{input}");
+        }
+
+        let modulus = num_bigint::BigUint::from(RawField::MODULUS);
+        let max = &modulus - 1u8;
+        fs::write(&path, serde_json::to_vec(&[max.to_string()]).unwrap()).unwrap();
+        assert_eq!(
+            read_verifier_vector(&path).unwrap(),
+            vec![-RawField::from(1u64)]
+        );
+        for integer in [
+            modulus.clone(),
+            modulus + 1u8,
+            num_bigint::BigUint::from(1u8) << 512usize,
+        ] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&["1".to_string(), integer.to_string()]).unwrap(),
+            )
+            .unwrap();
+            let error = read_verifier_vector(&path).unwrap_err().to_string();
+            assert!(error.contains("index 1"), "{error}");
+            assert!(error.contains("less than the modulus"), "{error}");
+        }
+    }
 
     fn workspace_fixture() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -679,6 +917,7 @@ mod tests {
                 &root,
                 &root.join("shared.bin"),
                 &binary,
+                None,
                 false,
                 true,
                 false,
@@ -688,11 +927,27 @@ mod tests {
         );
         assert!(!root.join("shared.bin").exists());
         assert_eq!(
-            run_compile(&root, &r1cs, &binary, false, true, false, 128).unwrap(),
+            run_compile(
+                &root,
+                &r1cs,
+                &binary,
+                Some(&PathBuf::from("target/verifier.json")),
+                false,
+                true,
+                false,
+                128
+            )
+            .unwrap(),
             ExitCode::SUCCESS
         );
         for name in ["a", "b"] {
-            for file in ["r1cs.bin", "basic.json", "basic.debug.json"] {
+            for file in [
+                "r1cs.bin",
+                "basic.json",
+                "basic.debug.json",
+                "verifier.json",
+                "verifier.debug.json",
+            ] {
                 assert!(root.join(name).join("target").join(file).is_file());
             }
         }
@@ -718,6 +973,7 @@ mod tests {
                     &dir.path().to_path_buf(),
                     &PathBuf::from("target/r1cs.bin"),
                     &PathBuf::from("target/basic.json"),
+                    None,
                     false,
                     true,
                     false,
@@ -746,6 +1002,7 @@ mod tests {
                 &dir.path().join("a"),
                 &r1cs,
                 &binary,
+                None,
                 false,
                 false,
                 false,

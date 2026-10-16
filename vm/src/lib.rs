@@ -2,6 +2,7 @@ pub mod array;
 pub mod bytecode;
 pub mod int_limbs;
 pub mod interpreter;
+mod verifier;
 
 // FIELD-ASSUMPTION: L1-alias
 pub use mavros_artifacts::{

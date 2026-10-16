@@ -264,6 +264,7 @@ impl VM {
 /// opcode proc macro.
 pub const ELEM_WORD: usize = 0;
 pub const ELEM_FIELD: usize = 1;
+pub const ELEM_VERIFIER: usize = 5;
 pub const ELEM_WITNESS: usize = 2;
 pub const ELEM_U128: usize = 3;
 
@@ -948,6 +949,7 @@ pub struct AdArrays {
 pub union Arrays {
     pub as_forward: FwdArrays,
     pub as_ad: AdArrays,
+    pub(crate) as_verifier: crate::verifier::VerifierArrays,
 }
 
 /// Number of slots in the fixed-size table caches ([`VM::rgchk_tables`]/[`VM::spread_tables`]).
@@ -1068,8 +1070,8 @@ impl VM {
         struct_layouts: Vec<StructDescriptor>,
         constants: Vec<u64>,
     ) -> Self {
-        Self {
-            data: Arrays {
+        Self::new_constraint(
+            Arrays {
                 as_ad: AdArrays {
                     out_da,
                     out_db,
@@ -1089,6 +1091,20 @@ impl VM {
                     current_cnst_lookups_off: constraints_layout.lookups_data_start(),
                 },
             },
+            globals,
+            struct_layouts,
+            constants,
+        )
+    }
+
+    pub(crate) fn new_constraint(
+        data: Arrays,
+        globals: *mut u64,
+        struct_layouts: Vec<StructDescriptor>,
+        constants: Vec<u64>,
+    ) -> Self {
+        Self {
+            data,
             allocation_instrumenter: AllocationInstrumenter::new(),
             tables: vec![],
             rgchk_tables: [None; NUM_TABLE_SIZE_SLOTS],
@@ -3533,6 +3549,138 @@ mod def {
             std::ptr::copy_nonoverlapping(vm.constants.as_ptr().add(pool_offset), res, size);
         }
     }
+    #[opcode]
+    fn verifier_read_witness(#[out] res: *mut Field, vm: &mut VM) {
+        unsafe {
+            let data = &mut vm.data.as_verifier;
+            *res = data.w(data.witness_cursor);
+            data.witness_cursor += 1;
+        }
+    }
+
+    #[opcode]
+    fn verifier_constant(#[out] res: *mut Field, #[frame] v: Field, vm: &mut VM) {
+        unsafe {
+            *res = v * vm.data.as_verifier.w(0);
+        }
+    }
+
+    #[opcode]
+    fn verifier_next_coeff(#[out] v: *mut Field, vm: &mut VM) {
+        unsafe {
+            let data = &mut vm.data.as_verifier;
+            *v = *data.coeffs.add(data.constraint_cursor);
+            data.constraint_cursor += 1;
+        }
+    }
+
+    #[opcode]
+    fn verifier_accumulate(#[frame] v: Field, #[frame] coeff: Field, matrix: usize, vm: &mut VM) {
+        unsafe {
+            *vm.data.as_verifier.outputs[matrix] += coeff * v;
+        }
+    }
+
+    #[opcode]
+    fn verifier_rngchk_field(#[frame] val: Field, #[frame] flag: Field, bits: usize, vm: &mut VM) {
+        unsafe {
+            if vm.rgchk_tables[bits].is_none() {
+                let length = 1usize << bits;
+                let (table, mult) = vm.data.as_verifier.table(TableKind::RangeCheck, length);
+                vm.data
+                    .as_verifier
+                    .constant_table(&table, mult, (0..length).map(|_| Field::ZERO));
+                vm.rgchk_tables[bits] = Some(vm.tables.len());
+                vm.tables.push(table);
+            }
+            let table = &vm.tables[vm.rgchk_tables[bits].unwrap()];
+            vm.data.as_verifier.lookup(table, val, None, flag);
+        }
+    }
+
+    #[opcode]
+    fn verifier_spread_lookup_field(
+        #[frame] val: Field,
+        #[frame] result: Field,
+        #[frame] flag: Field,
+        bits: usize,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            if vm.spread_tables[bits].is_none() {
+                let length = 1usize << bits;
+                let (table, mult) = vm.data.as_verifier.table(TableKind::Spread, length);
+                vm.data.as_verifier.constant_table(
+                    &table,
+                    mult,
+                    (0..length)
+                        .map(|i| Field::from(mavros_limb_arith::spread_u32_to_u64(i as u32))),
+                );
+                vm.spread_tables[bits] = Some(vm.tables.len());
+                vm.tables.push(table);
+            }
+            let table = &vm.tables[vm.spread_tables[bits].unwrap()];
+            vm.data.as_verifier.lookup(table, val, Some(result), flag);
+        }
+    }
+
+    #[opcode]
+    fn verifier_pow2_lookup_field(
+        #[frame] amount: Field,
+        #[frame] factor: Field,
+        #[frame] flag: Field,
+        size: usize,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            if vm.pow2_tables[size].is_none() {
+                let length = 1usize << size;
+                let (table, mult) = vm.data.as_verifier.table(TableKind::Pow2, length);
+                vm.data
+                    .as_verifier
+                    .constant_table(&table, mult, pow2_rows(length));
+                vm.pow2_tables[size] = Some(vm.tables.len());
+                vm.tables.push(table);
+            }
+            let table = &vm.tables[vm.pow2_tables[size].unwrap()];
+            vm.data
+                .as_verifier
+                .lookup(table, amount, Some(factor), flag);
+        }
+    }
+
+    #[opcode]
+    fn verifier_array_lookup_field(
+        #[frame] array: BoxedValue,
+        #[frame] index: Field,
+        #[frame] result: Field,
+        #[frame] flag: Field,
+        stride: usize,
+        elem_kind: usize,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            let table_id = array.table_id();
+            if *table_id == u64::MAX {
+                let length = for_each_array_leaf(array, stride, |_, _| {});
+                let (table, mult) = vm.data.as_verifier.table(TableKind::Array, length);
+                for_each_array_leaf(array, stride, |i, elem| {
+                    let value = if elem_kind == ELEM_VERIFIER {
+                        *(elem as *const Field)
+                    } else {
+                        read_pure_elem_as_field(elem, elem_kind, stride) * vm.data.as_verifier.w(0)
+                    };
+                    vm.data.as_verifier.array_row(&table, mult, i, value);
+                });
+                vm.data.as_verifier.array_sum(&table);
+                *table_id = vm.tables.len() as u64;
+                vm.tables.push(table);
+            }
+            vm.data
+                .as_verifier
+                .lookup(&vm.tables[*table_id as usize], index, Some(result), flag);
+        }
+    }
 }
 
 pub struct Function {
@@ -3557,11 +3705,17 @@ impl Display for Function {
 pub const ENTRY_WITGEN: usize = 0;
 /// Index of the AD entry point in a program's entry table.
 pub const ENTRY_AD: usize = 1;
+/// Index of the direct forward verifier entry point.
+pub const ENTRY_VERIFIER: usize = 2;
+/// An absent entry in a program or serialized entry table. This preserves the
+/// witgen/AD binary format while allowing a standalone verifier-only program.
+pub const NO_ENTRY_POINT: usize = usize::MAX;
 
 pub struct Program {
     pub functions: Vec<Function>,
     /// Indices into `functions` of the program's entry points, in entry-table order
-    /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], ...).
+    /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], [`ENTRY_VERIFIER`]). Absent entries use
+    /// [`NO_ENTRY_POINT`].
     pub entry_points: Vec<usize>,
     /// Flattened field count of the witgen entry blob
     pub entry_blob_field_count: usize,
@@ -3714,7 +3868,11 @@ impl Program {
         }
 
         for (slot, fn_idx) in self.entry_points.iter().enumerate() {
-            binary[entry_table_start + slot] = function_markers[*fn_idx] as u64;
+            binary[entry_table_start + slot] = if *fn_idx == NO_ENTRY_POINT {
+                NO_ENTRY_POINT as u64
+            } else {
+                function_markers[*fn_idx] as u64
+            };
         }
         for (jump_position, add_offset) in jumps_to_fix {
             let target = binary[jump_position];
@@ -3736,7 +3894,7 @@ pub struct ProgramHeader {
     pub entry_blob_field_count: usize,
     /// Absolute word offsets of each entry point's function marker, in entry-table order
     /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], ...). The entry's frame size lives at `offset + 1` and
-    /// its first opcode at `offset + 2`.
+    /// its first opcode at `offset + 2`. [`NO_ENTRY_POINT`] marks an absent entry.
     pub entry_points: Vec<usize>,
     /// Word offset of the first function marker, i.e. where the opcode stream begins.
     pub code_start: usize,

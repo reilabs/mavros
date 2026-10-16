@@ -21,6 +21,7 @@ use crate::{
 /// Assists in computing the layout for a single virtual machine stack frame.
 pub struct FrameLayouter {
     pub next_free: usize,
+    pub verifier: bool,
     pub variables: HashMap<ValueId, usize>,
 }
 
@@ -28,6 +29,7 @@ impl FrameLayouter {
     pub fn new() -> Self {
         Self {
             next_free: 2,
+            verifier: false,
             variables: HashMap::default(),
         }
     }
@@ -94,6 +96,7 @@ impl FrameLayouter {
             }
             TypeExpr::Array(_, _) => constants::POINTER_SIZE_CELLS,
             TypeExpr::Slice(_) => constants::POINTER_SIZE_CELLS,
+            TypeExpr::WitnessOf(_) if self.verifier => bytecode::FELT_LIMBS,
             TypeExpr::WitnessOf(_) => constants::POINTER_SIZE_CELLS,
             TypeExpr::Tuple(_) => ice_non_elided_tuple(),
             TypeExpr::Ref(_) => constants::POINTER_SIZE_CELLS,
@@ -241,12 +244,20 @@ pub struct GlobalFrameLayouter {
 
 impl GlobalFrameLayouter {
     pub fn new(ssa: &HLSSA) -> Self {
+        Self::with_verifier(ssa, false)
+    }
+
+    pub fn with_verifier(ssa: &HLSSA, verifier: bool) -> Self {
         let global_types = ssa.get_global_types();
         let mut offsets = Vec::new();
         let mut sizes = Vec::new();
         let mut next_free = 0usize;
         for typ in global_types.iter() {
-            let size = Self::type_frame_size(typ);
+            let size = if verifier && typ.is_witness_of() {
+                bytecode::FELT_LIMBS
+            } else {
+                Self::type_frame_size(typ)
+            };
             offsets.push(next_free);
             sizes.push(size);
             next_free += size;

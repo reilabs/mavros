@@ -174,26 +174,70 @@ fn spill_constant_to_frame(
 /// The code generator that lowers HLSSA to Mavros bytecode.
 pub struct CodeGen {
     options: CodeGenOptions,
+    // Compile WitnessOf values as inline field evaluations, rather than AD pointers.
+    // This choice is made during code generation; ordinary AD dispatch is unchanged.
+    verifier: bool,
 }
 
 impl CodeGen {
     pub fn new(options: CodeGenOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            verifier: false,
+        }
     }
 
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
-        let global_layouter = GlobalFrameLayouter::new(ssa);
+        self.run_mode(ssa, cfg, type_info)
+    }
+
+    /// Compile only the forward evaluator and its reachable functions.
+    pub fn run_verifier(
+        &self,
+        ssa: &HLSSA,
+        cfg: &FlowAnalysis,
+        type_info: &TypeInfo,
+    ) -> bytecode::Program {
+        Self {
+            options: self.options,
+            verifier: true,
+        }
+        .run_mode(ssa, cfg, type_info)
+    }
+
+    fn is_heap_allocated(&self, ty: &Type) -> bool {
+        ty.is_heap_allocated() && !(self.verifier && ty.is_witness_of())
+    }
+
+    fn run_mode(&self, ssa: &HLSSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
+        let global_layouter = GlobalFrameLayouter::with_verifier(ssa, self.verifier);
         let struct_interner = StructLayoutInterner::new();
         let mut const_pool = ConstantPoolInterner::new();
         let constants = ssa.const_snapshot();
 
         // Entry points are emitted first, in entry-table order; the remaining functions follow.
-        let entry_ids: Vec<FunctionId> = ssa.get_entry_points().to_vec();
-        let function_order: Vec<FunctionId> = entry_ids
-            .iter()
-            .copied()
-            .chain(ssa.get_function_ids().filter(|id| !entry_ids.contains(id)))
-            .collect();
+        let entry_ids: Vec<FunctionId> = if self.verifier {
+            vec![ssa.get_entry_points()[bytecode::ENTRY_AD]]
+        } else {
+            ssa.get_entry_points().to_vec()
+        };
+        let mut reachable = crate::collections::HashSet::default();
+        if self.verifier {
+            let mut pending = entry_ids.clone();
+            while let Some(id) = pending.pop() {
+                if reachable.insert(id) {
+                    pending.extend(cfg.get_call_graph().get_callees(id));
+                }
+            }
+        }
+        let function_order: Vec<FunctionId> =
+            entry_ids
+                .iter()
+                .copied()
+                .chain(ssa.get_function_ids().filter(|id| {
+                    !entry_ids.contains(id) && (!self.verifier || reachable.contains(id))
+                }))
+                .collect();
 
         let mut functions = Vec::new();
         let mut function_ids = HashMap::default();
@@ -210,6 +254,10 @@ impl CodeGen {
             );
             function_ids.insert(function_id, cur_fn_begin);
             cur_fn_begin += function.code.len();
+            let mut function = function;
+            if self.verifier {
+                function.name = format!("verifier_{}", function.name);
+            }
             functions.push(function);
         }
 
@@ -233,10 +281,13 @@ impl CodeGen {
             cur_fun_off += function.code.len();
         }
 
-        let witgen_entry = *entry_ids
-            .get(bytecode::ENTRY_WITGEN)
-            .expect("SSA has no witgen entry point");
-        let entry_blob_field_count =
+        let entry_blob_field_count = if self.verifier {
+            0
+        } else {
+            let witgen_entry = *ssa
+                .get_entry_points()
+                .get(bytecode::ENTRY_WITGEN)
+                .expect("SSA has no witgen entry point");
             match ssa.get_function(witgen_entry).get_param_types().as_slice() {
                 [
                     Type {
@@ -252,11 +303,16 @@ impl CodeGen {
                 // runnable: the interpreter checks the supplied input count against this field
                 // before executing, and for a Noir program the driver checks it against the ABI.
                 _ => 0,
-            };
+            }
+        };
 
         bytecode::Program {
             functions,
-            entry_points: (0..entry_ids.len()).collect(),
+            entry_points: if self.verifier {
+                vec![bytecode::NO_ENTRY_POINT, bytecode::NO_ENTRY_POINT, 0]
+            } else {
+                (0..entry_ids.len()).collect()
+            },
             entry_blob_field_count,
             global_frame_size: global_layouter.total_size,
             struct_layouts: struct_interner.into_table(),
@@ -274,6 +330,7 @@ impl CodeGen {
         pool: &mut ConstantPoolInterner,
     ) -> bytecode::Function {
         let mut layouter = FrameLayouter::new();
+        layouter.verifier = self.verifier;
         let entry = function.get_entry();
         let fallback_location = function
             .get_entry()
@@ -496,6 +553,14 @@ impl CodeGen {
                                 });
                             }
                         }
+                    }
+                    TypeExpr::WitnessOf(_) if self.verifier => {
+                        let result = layouter.alloc_field(*val);
+                        emitter.push_op(bytecode::OpCode::AddField {
+                            res: result,
+                            a: layouter.get_value(*op1),
+                            b: layouter.get_value(*op2),
+                        });
                     }
                     TypeExpr::WitnessOf(_) => {
                         let result = layouter.alloc_ptr(*val);
@@ -1104,9 +1169,16 @@ impl CodeGen {
                         } else {
                             layouter.get_value(*v)
                         };
-                        emitter.push_op(bytecode::OpCode::PureToWitnessRef {
-                            res: layouter.alloc_ptr(*r),
-                            v: field_pos,
+                        emitter.push_op(if self.verifier {
+                            bytecode::OpCode::VerifierConstant {
+                                res: layouter.alloc_field(*r),
+                                v: field_pos,
+                            }
+                        } else {
+                            bytecode::OpCode::PureToWitnessRef {
+                                res: layouter.alloc_ptr(*r),
+                                v: field_pos,
+                            }
                         });
                         continue;
                     }
@@ -1422,7 +1494,7 @@ impl CodeGen {
                         .iter()
                         .map(|a| layouter.get_value(*a))
                         .collect::<Vec<_>>();
-                    let is_ptr = eltype.is_heap_allocated();
+                    let is_ptr = self.is_heap_allocated(eltype);
                     let stride = layouter.type_size(eltype);
                     emitter.push_op(bytecode::OpCode::ArrayAlloc {
                         res,
@@ -1437,7 +1509,7 @@ impl CodeGen {
                     blob,
                 } => {
                     assert!(
-                        !eltype.is_heap_allocated(),
+                        !self.is_heap_allocated(eltype),
                         "MkSeqOfBlob only supports scalar element types"
                     );
                     let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
@@ -1464,7 +1536,7 @@ impl CodeGen {
                 } => {
                     let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
                     let item = layouter.get_value(*element);
-                    let is_ptr = eltype.is_heap_allocated();
+                    let is_ptr = self.is_heap_allocated(eltype);
                     let stride = layouter.type_size(eltype);
                     emitter.push_op(bytecode::OpCode::ArrayAllocRepeated {
                         res,
@@ -1507,6 +1579,8 @@ impl CodeGen {
                 } => {
                     ice!("Dynamic call targets are not supported in codegen")
                 }
+                hlssa::OpCode::MemOp { value, .. }
+                    if self.verifier && type_info.get_value_type(*value).is_witness_of() => {}
                 hlssa::OpCode::MemOp {
                     kind: RefCountOp::Drop,
                     value: r,
@@ -1671,7 +1745,11 @@ impl CodeGen {
                 }
                 hlssa::OpCode::NextDCoeff { result: out } => {
                     let v = layouter.alloc_field(*out);
-                    emitter.push_op(bytecode::OpCode::NextDCoeff { v });
+                    emitter.push_op(if self.verifier {
+                        bytecode::OpCode::VerifierNextCoeff { v }
+                    } else {
+                        bytecode::OpCode::NextDCoeff { v }
+                    });
                 }
                 hlssa::OpCode::BumpD {
                     matrix: m,
@@ -1680,6 +1758,18 @@ impl CodeGen {
                 } => {
                     let v = layouter.get_value(*var);
                     let coeff = layouter.get_value(*coeff);
+                    if self.verifier {
+                        emitter.push_op(bytecode::OpCode::VerifierAccumulate {
+                            v,
+                            coeff,
+                            matrix: match m {
+                                DMatrix::A => 0,
+                                DMatrix::B => 1,
+                                DMatrix::C => 2,
+                            },
+                        });
+                        continue;
+                    }
                     emitter.push_op(match m {
                         DMatrix::A => bytecode::OpCode::BumpDa { v, coeff },
                         DMatrix::B => bytecode::OpCode::BumpDb { v, coeff },
@@ -1690,8 +1780,14 @@ impl CodeGen {
                     result: r,
                     result_type: _,
                 } => {
-                    emitter.push_op(bytecode::OpCode::FreshWitness {
-                        res: layouter.alloc_ptr(*r),
+                    emitter.push_op(if self.verifier {
+                        bytecode::OpCode::VerifierReadWitness {
+                            res: layouter.alloc_field(*r),
+                        }
+                    } else {
+                        bytecode::OpCode::FreshWitness {
+                            res: layouter.alloc_ptr(*r),
+                        }
                     });
                 }
                 hlssa::OpCode::MulConst {
@@ -1719,10 +1815,18 @@ impl CodeGen {
                         }
                         t => ice!("Unsupported MulConst coefficient type: {:?}", t),
                     };
-                    emitter.push_op(bytecode::OpCode::MulConst {
-                        res: layouter.alloc_ptr(*r),
-                        coeff: coeff_pos,
-                        v: layouter.get_value(*v),
+                    emitter.push_op(if self.verifier {
+                        bytecode::OpCode::MulField {
+                            res: layouter.alloc_field(*r),
+                            a: coeff_pos,
+                            b: layouter.get_value(*v),
+                        }
+                    } else {
+                        bytecode::OpCode::MulConst {
+                            res: layouter.alloc_ptr(*r),
+                            coeff: coeff_pos,
+                            v: layouter.get_value(*v),
+                        }
                     });
                 }
                 hlssa::OpCode::Rangecheck {
@@ -1755,7 +1859,7 @@ impl CodeGen {
                     assert!(args.len() == 2);
                     let arr_type = type_info.get_value_type(*arr);
                     let elem_type = arr_type.get_array_element();
-                    let (stride, elem_kind) = lookup_elem_kind(&elem_type);
+                    let (stride, elem_kind) = lookup_elem_kind(&elem_type, self.verifier);
                     emitter.push_op(bytecode::OpCode::ArrayLookupField {
                         array: layouter.get_value(*arr),
                         index: layouter.get_value(args[0]),
@@ -1772,10 +1876,18 @@ impl CodeGen {
                 } => {
                     assert!(args.len() == 1);
                     assert!(type_info.get_value_type(args[0]).is_witness_of());
-                    emitter.push_op(bytecode::OpCode::DrngchkField {
-                        val: layouter.get_value(args[0]),
-                        flag: layouter.get_value(*flag),
-                        bits: *bits as usize,
+                    emitter.push_op(if self.verifier {
+                        bytecode::OpCode::VerifierRngchkField {
+                            val: layouter.get_value(args[0]),
+                            flag: layouter.get_value(*flag),
+                            bits: *bits as usize,
+                        }
+                    } else {
+                        bytecode::OpCode::DrngchkField {
+                            val: layouter.get_value(args[0]),
+                            flag: layouter.get_value(*flag),
+                            bits: *bits as usize,
+                        }
                     });
                 }
                 hlssa::OpCode::DLookup {
@@ -1786,14 +1898,25 @@ impl CodeGen {
                     assert!(args.len() == 2);
                     let arr_type = type_info.get_value_type(*arr);
                     let elem_type = arr_type.get_array_element();
-                    let (stride, elem_kind) = lookup_elem_kind(&elem_type);
-                    emitter.push_op(bytecode::OpCode::DarrayLookupField {
-                        array: layouter.get_value(*arr),
-                        index: layouter.get_value(args[0]),
-                        result: layouter.get_value(args[1]),
-                        flag: layouter.get_value(*flag),
-                        stride,
-                        elem_kind,
+                    let (stride, elem_kind) = lookup_elem_kind(&elem_type, self.verifier);
+                    emitter.push_op(if self.verifier {
+                        bytecode::OpCode::VerifierArrayLookupField {
+                            array: layouter.get_value(*arr),
+                            index: layouter.get_value(args[0]),
+                            result: layouter.get_value(args[1]),
+                            flag: layouter.get_value(*flag),
+                            stride,
+                            elem_kind,
+                        }
+                    } else {
+                        bytecode::OpCode::DarrayLookupField {
+                            array: layouter.get_value(*arr),
+                            index: layouter.get_value(args[0]),
+                            result: layouter.get_value(args[1]),
+                            flag: layouter.get_value(*flag),
+                            stride,
+                            elem_kind,
+                        }
                     });
                 }
                 hlssa::OpCode::Lookup {
@@ -1815,11 +1938,20 @@ impl CodeGen {
                     flag,
                 } => {
                     assert!(args.len() == 2);
-                    emitter.push_op(bytecode::OpCode::DspreadLookupField {
-                        val: layouter.get_value(args[0]),
-                        result: layouter.get_value(args[1]),
-                        flag: layouter.get_value(*flag),
-                        bits: *bits as usize,
+                    emitter.push_op(if self.verifier {
+                        bytecode::OpCode::VerifierSpreadLookupField {
+                            val: layouter.get_value(args[0]),
+                            result: layouter.get_value(args[1]),
+                            flag: layouter.get_value(*flag),
+                            bits: *bits as usize,
+                        }
+                    } else {
+                        bytecode::OpCode::DspreadLookupField {
+                            val: layouter.get_value(args[0]),
+                            result: layouter.get_value(args[1]),
+                            flag: layouter.get_value(*flag),
+                            bits: *bits as usize,
+                        }
                     });
                 }
                 hlssa::OpCode::Lookup {
@@ -1841,11 +1973,20 @@ impl CodeGen {
                     flag,
                 } => {
                     assert!(args.len() == 2);
-                    emitter.push_op(bytecode::OpCode::Dpow2LookupField {
-                        amount: layouter.get_value(args[0]),
-                        factor: layouter.get_value(args[1]),
-                        flag: layouter.get_value(*flag),
-                        size: *size as usize,
+                    emitter.push_op(if self.verifier {
+                        bytecode::OpCode::VerifierPow2LookupField {
+                            amount: layouter.get_value(args[0]),
+                            factor: layouter.get_value(args[1]),
+                            flag: layouter.get_value(*flag),
+                            size: *size as usize,
+                        }
+                    } else {
+                        bytecode::OpCode::Dpow2LookupField {
+                            amount: layouter.get_value(args[0]),
+                            factor: layouter.get_value(args[1]),
+                            flag: layouter.get_value(*flag),
+                            size: *size as usize,
+                        }
                     });
                 }
                 hlssa::OpCode::Spread {
@@ -1913,6 +2054,9 @@ impl CodeGen {
                     });
                 }
                 hlssa::OpCode::DropGlobal { global } => {
+                    if self.verifier && global_layouter.get_size(*global) != 1 {
+                        continue;
+                    }
                     emitter.push_op(bytecode::OpCode::DropGlobal {
                         global_offset: global_layouter.get_offset(*global),
                     });
@@ -1934,7 +2078,7 @@ impl CodeGen {
                     let elem_type = type_info.get_value_type(*value);
                     let res = layouter.alloc_ptr(*result);
                     let elem_size = layouter.type_size(elem_type);
-                    let elem_rc = elem_type.is_heap_allocated();
+                    let elem_rc = self.is_heap_allocated(&elem_type);
                     let meta = vm::array::BoxedLayout::ref_cell(elem_size, elem_rc);
                     emitter.push_op(bytecode::OpCode::RefAlloc { res, meta });
                     emitter.push_op(bytecode::OpCode::RefStore {
@@ -1948,7 +2092,7 @@ impl CodeGen {
                     let ptr_type = type_info.get_value_type(*ptr);
                     let elem_type = ptr_type.get_pointed();
                     let stride = layouter.type_size(&elem_type);
-                    let elem_rc = if elem_type.is_heap_allocated() {
+                    let elem_rc = if self.is_heap_allocated(&elem_type) {
                         1usize
                     } else {
                         0usize
@@ -2122,7 +2266,7 @@ fn spread_width(type_info: &FunctionTypeInfo, value: ValueId) -> usize {
 }
 
 /// Returns (stride, elem_kind) for an array element type in a lookup opcode.
-fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {
+fn lookup_elem_kind(elem_type: &Type, verifier: bool) -> (usize, usize) {
     match &elem_type.expr {
         // FIELD-ASSUMPTION: L3-felt-limbs
         TypeExpr::Field => (bytecode::FELT_LIMBS, bytecode::ELEM_FIELD),
@@ -2147,15 +2291,16 @@ fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {
                 (cells, bytecode::ELEM_CELLS)
             }
         },
+        TypeExpr::WitnessOf(_) if verifier => (bytecode::FELT_LIMBS, bytecode::ELEM_VERIFIER),
         TypeExpr::WitnessOf(inner) => {
-            let inner_kind = lookup_elem_kind(inner);
+            let inner_kind = lookup_elem_kind(inner, verifier);
             assert!(
                 inner_kind.1 != bytecode::ELEM_WITNESS,
                 "Nested WitnessOf in array lookup element type: {elem_type}"
             );
             (1, bytecode::ELEM_WITNESS)
         }
-        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => lookup_elem_kind(inner),
+        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => lookup_elem_kind(inner, verifier),
         _ => ice!("Unsupported array element type in lookup: {elem_type}"),
     }
 }
