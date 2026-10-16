@@ -20,7 +20,7 @@ fn reference(r1cs: &R1CS, r: &[Field], w: &[Field]) -> [Field; 3] {
     result
 }
 
-/// The verifier suffix must never allocate or propagate AD expression nodes.
+/// The verifier artifact must never allocate or propagate AD expression nodes.
 fn assert_forward_bytecode(binary: &[u64]) {
     use mavros_vm::bytecode::{ENTRY_VERIFIER, FramePosition, OpCode, parse_program_header};
     let p = FramePosition(0);
@@ -118,7 +118,15 @@ fn check(source: &str) -> (usize, usize) {
             }
             _ => {}
         }
-        let result = api::run_verifier_from_binary(&binary, &r1cs, &r, &w, None).unwrap();
+        let result = api::run_verifier_from_binary(
+            &binary,
+            &r,
+            &w,
+            r1cs.witness_layout,
+            r1cs.constraints_layout,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             [result.r_aw, result.r_bw, result.r_cw],
             reference(&r1cs, &r, &w),
@@ -192,16 +200,30 @@ fn vector_lengths_are_checked_before_execution() {
     let w = vec![Field::from(2u64); r1cs.witness_layout.size()];
     for len in [0, r.len() - 1, r.len() + 1] {
         let invalid_r = vec![Field::ZERO; len];
-        let err = api::run_verifier_from_binary(&binary, &r1cs, &invalid_r, &w, None)
-            .err()
-            .expect("incorrect r length must fail");
+        let err = api::run_verifier_from_binary(
+            &binary,
+            &invalid_r,
+            &w,
+            r1cs.witness_layout,
+            r1cs.constraints_layout,
+            None,
+        )
+        .err()
+        .expect("incorrect r length must fail");
         assert!(err.message().unwrap().contains("coefficient length"));
     }
     for len in [0, w.len() - 1, w.len() + 1] {
         let invalid_w = vec![Field::ZERO; len];
-        let err = api::run_verifier_from_binary(&binary, &r1cs, &r, &invalid_w, None)
-            .err()
-            .expect("incorrect w length must fail");
+        let err = api::run_verifier_from_binary(
+            &binary,
+            &r,
+            &invalid_w,
+            r1cs.witness_layout,
+            r1cs.constraints_layout,
+            None,
+        )
+        .err()
+        .expect("incorrect w length must fail");
         assert!(err.message().unwrap().contains("w length"));
     }
 }
@@ -358,9 +380,16 @@ fn prover_artifacts_are_rejected_by_the_verifier() {
     .to_binary();
     let r = vec![Field::ZERO; r1cs.constraints_layout.size()];
     let w = vec![Field::ZERO; r1cs.witness_layout.size()];
-    let error = api::run_verifier_from_binary(&binary, &r1cs, &r, &w, None)
-        .err()
-        .unwrap();
+    let error = api::run_verifier_from_binary(
+        &binary,
+        &r,
+        &w,
+        r1cs.witness_layout,
+        r1cs.constraints_layout,
+        None,
+    )
+    .err()
+    .unwrap();
     assert!(error.to_string().contains("separate verifier artifact"));
 }
 

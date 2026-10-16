@@ -75,10 +75,11 @@ contains no matrix rows or prover entry points. `--include-debug-info` also writ
 the verifier artifact.
 
 Rust callers compile it with `mavros_compiler::api::compile_verifier_bytecode(&mut driver, options)`
-and pass that binary to `run_verifier_from_binary(&binary, &r1cs, &r, &w, None)`. Hosts retaining
-only verifier bytecode and layouts can call `mavros_vm::interpreter::run_verifier` directly. Both
-artifacts must come from the same circuit compilation; applications must associate the verifier
-artifact with their trusted circuit configuration. Verifier execution uses a dedicated forward
+and pass that binary to
+`run_verifier_from_binary(&binary, &r, &w, witness_layout, constraints_layout, None)`.
+No R1CS matrices are required at runtime. Both artifacts must come from the same circuit
+compilation; applications must associate the verifier artifact with their trusted circuit
+configuration. Verifier execution uses a dedicated forward
 bytecode entry point: witness writes read the next value from `w`, linear combinations use field
 arithmetic, and constraints accumulate three scalars weighted by `r`. It allocates no AD expression
 nodes or matrix output vectors. Lookup and table constraints are evaluated from the same layouts.

@@ -222,10 +222,12 @@ impl CodeGen {
             ssa.get_entry_points().to_vec()
         };
         let mut reachable = crate::collections::HashSet::default();
-        let mut pending = entry_ids.clone();
-        while let Some(id) = pending.pop() {
-            if reachable.insert(id) {
-                pending.extend(cfg.get_call_graph().get_callees(id));
+        if self.verifier {
+            let mut pending = entry_ids.clone();
+            while let Some(id) = pending.pop() {
+                if reachable.insert(id) {
+                    pending.extend(cfg.get_call_graph().get_callees(id));
+                }
             }
         }
         let function_order: Vec<FunctionId> =
@@ -279,11 +281,13 @@ impl CodeGen {
             cur_fun_off += function.code.len();
         }
 
-        let witgen_entry = *ssa
-            .get_entry_points()
-            .get(bytecode::ENTRY_WITGEN)
-            .expect("SSA has no witgen entry point");
-        let entry_blob_field_count =
+        let entry_blob_field_count = if self.verifier {
+            0
+        } else {
+            let witgen_entry = *ssa
+                .get_entry_points()
+                .get(bytecode::ENTRY_WITGEN)
+                .expect("SSA has no witgen entry point");
             match ssa.get_function(witgen_entry).get_param_types().as_slice() {
                 [
                     Type {
@@ -299,7 +303,8 @@ impl CodeGen {
                 // runnable: the interpreter checks the supplied input count against this field
                 // before executing, and for a Noir program the driver checks it against the ABI.
                 _ => 0,
-            };
+            }
+        };
 
         bytecode::Program {
             functions,
@@ -308,11 +313,7 @@ impl CodeGen {
             } else {
                 (0..entry_ids.len()).collect()
             },
-            entry_blob_field_count: if self.verifier {
-                0
-            } else {
-                entry_blob_field_count
-            },
+            entry_blob_field_count,
             global_frame_size: global_layouter.total_size,
             struct_layouts: struct_interner.into_table(),
             constant_pool: const_pool.into_pool(),

@@ -11,7 +11,7 @@ use crate::{
     driver::Driver,
     vm::{bytecode::DebugInfo, interpreter},
 };
-use mavros_artifacts::{Field as RawField, InputValueOrdered};
+use mavros_artifacts::{ConstraintsLayout, Field as RawField, InputValueOrdered, WitnessLayout};
 use noirc_abi::input_parser::Format;
 
 type Error = Box<dyn std::error::Error>;
@@ -192,23 +192,16 @@ pub fn run_ad_from_binary(
 /// and the post-commitment sections. Randomness is supplied by the caller.
 ///
 /// `binary` must come from [`compile_verifier_bytecode`].
-/// Only the layouts are read from `r1cs`. Hosts that retain bytecode and layouts
-/// without the matrices can call [`interpreter::run_verifier`] directly.
+/// Only bytecode and layouts are required; no R1CS matrices are needed.
 pub fn run_verifier_from_binary(
     binary: &[u64],
-    r1cs: &R1CS,
     r: &[RawField],
     w: &[RawField],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
     debug_info: Option<DebugInfo>,
 ) -> Result<interpreter::VerifierResult, interpreter::TrapError> {
-    interpreter::run_verifier(
-        binary,
-        r,
-        w,
-        r1cs.witness_layout,
-        r1cs.constraints_layout,
-        debug_info,
-    )
+    interpreter::run_verifier(binary, r, w, witness_layout, constraints_layout, debug_info)
 }
 
 pub fn run_ad_profiled_from_binary(

@@ -480,14 +480,20 @@ fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
     if args.verify {
         let r = read_verifier_vector(args.r.as_deref().expect("--verify requires --r"))?;
         let w = read_verifier_vector(args.w.as_deref().expect("--verify requires --w"))?;
-        let result = api::run_verifier_from_binary(&binary, &r1cs, &r, &w, vm_debug_info).map_err(
-            |mut error| {
-                if let Some(root) = &source_path_root {
-                    error.relativize_source_paths(root);
-                }
-                error
-            },
-        )?;
+        let result = api::run_verifier_from_binary(
+            &binary,
+            &r,
+            &w,
+            r1cs.witness_layout,
+            r1cs.constraints_layout,
+            vm_debug_info,
+        )
+        .map_err(|mut error| {
+            if let Some(root) = &source_path_root {
+                error.relativize_source_paths(root);
+            }
+            error
+        })?;
         println!(
             "{}",
             serde_json::json!({
