@@ -149,6 +149,55 @@ pub fn render_all(diagnostics: &[Diagnostic]) -> String {
         .join("\n")
 }
 
+/// Render every Noir diagnostic against the frontend's source snapshot, including secondary
+/// spans, notes and call stacks. Noir's reporter prints directly to stderr; use its stack-trace
+/// formatter and the same codespan renderer here so errors can also be returned through the API.
+pub(crate) fn render_noir(
+    diagnostics: &[noirc_errors::reporter::CustomDiagnostic],
+    files: &fm::FileManager,
+    functions: &noirc_errors::function_locations::FunctionLocations,
+) -> String {
+    use noirc_errors::reporter::{DiagnosticKind, stack_trace};
+    diagnostics
+        .iter()
+        .map(|diagnostic| {
+            let mut rendered = match diagnostic.kind {
+                DiagnosticKind::Error => CodespanDiagnostic::error(),
+                DiagnosticKind::Warning => CodespanDiagnostic::warning(),
+                DiagnosticKind::Info => CodespanDiagnostic::note(),
+                DiagnosticKind::Bug => CodespanDiagnostic::bug(),
+            }
+            .with_message(&diagnostic.message)
+            .with_labels(
+                diagnostic
+                    .secondaries
+                    .iter()
+                    .filter(|label| !label.location.is_dummy())
+                    .map(|label| {
+                        Label::secondary(
+                            label.location.file,
+                            label.location.span.start() as usize
+                                ..label.location.span.end() as usize,
+                        )
+                        .with_message(&label.message)
+                    })
+                    .collect(),
+            )
+            .with_notes(diagnostic.notes.clone());
+            if !diagnostic.call_stack.is_empty() {
+                rendered.notes.push(stack_trace(
+                    files.as_file_map(),
+                    functions,
+                    &diagnostic.call_stack,
+                ));
+            }
+            term::emit_into_string(&rendering_config(), files.as_file_map(), &rendered)
+                .unwrap_or_else(|_| format!("{diagnostic}\n"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The sources a set of diagnostics names but does not carry, each read **at most once**.
 #[derive(Default)]
 struct SourceCache {

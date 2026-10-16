@@ -887,8 +887,8 @@ impl symbolic_executor::Value<R1CGen> for Value {
             "ICE: witness strip {cast_target} should not reach R1CS gen"
         );
         match (cast_target, self) {
-            // Read at the target's width, truncating a narrowing: the frontend's narrowing casts
-            // already fit, but `WideWitnessInts` cuts pure values into limbs this way.
+            // Read at the target's width, truncating a narrowing. Pure frontend casts can
+            // arrive without a bit window; WideWitnessInts also uses this to cut pure limbs.
             (hlssa::CastTarget::Int(bits), Value::Const(_) | Value::Wide(_)) => {
                 Value::of_pattern(ctx.field(), self.expect_pattern(*bits))
             }

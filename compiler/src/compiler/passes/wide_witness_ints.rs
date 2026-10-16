@@ -14,8 +14,9 @@
 //! splits **pure** wide elements too: the lookup tape needs one field element per entry, and
 //! transposing makes every entry a limb it can already read. A pure element read back is
 //! recombined at once by [`Rewriter::recombine_pure`], integer arithmetic at the value's width that
-//! costs interpreter work rather than constraints, so no pure integer is held as limbs past the
-//! read. A global holding such a sequence takes a slot per limb sequence.
+//! costs interpreter work rather than constraints. Users see a whole pure integer, while the
+//! read's limbs remain cached for any later consumer in the block that needs them, including
+//! arithmetic and lookups. A global holding such a sequence takes a slot per limb sequence.
 //!
 //! The representation is sound because **every limb is range-checked** to its declared width when
 //! it is created or modified. `2^h` is invertible mod `p`, so a single unbounded limb would let a
@@ -551,6 +552,7 @@ fn rewrite_function(
         let mut decomposed = HashMap::default();
         let mut signs = HashMap::default();
         let mut divisions = HashMap::default();
+        let mut read_limbs = HashMap::default();
         for instr in &old_instructions {
             let location = instr.location().clone();
             let mut rewriter = Rewriter {
@@ -561,6 +563,7 @@ fn rewrite_function(
                 decomposed: &mut decomposed,
                 signs: &mut signs,
                 divisions: &mut divisions,
+                read_limbs: &mut read_limbs,
                 known: &mut known,
                 globals,
                 out: Vec::new(),
@@ -621,8 +624,16 @@ struct Rewriter<'a> {
     /// divisor, guard and reading.
     divisions: &'a mut HashMap<Division, (Answer, Answer)>,
 
-    /// Values this function's rewrite minted that are not constants but whose pattern is known at
-    /// compile time, by value.
+    /// The limbs a pure integer read in this block was recombined from, by the read's result.
+    ///
+    /// A user that wants the limbs back, as the field image a witness-indexed lookup moves through
+    /// does, takes these rather than splitting what was just joined. The split uses a logical
+    /// right shift (except at offset zero) and a narrowing per limb at the value's full width,
+    /// undoing the recombination the read just performed.
+    read_limbs: &'a mut HashMap<ValueId, Vec<ValueId>>,
+
+    /// The values this function's rewrite has minted whose pattern is known at compile time but
+    /// that are not constants themselves, by value.
     known: &'a mut HashMap<ValueId, IntBits>,
 
     /// Where each global's slots moved to.
@@ -689,13 +700,19 @@ impl Rewriter<'_> {
 
     /// The limbs of an operand, splitting a **pure** one the plan never saw.
     ///
-    /// Both operands have one width (`check_widths`). A mixed pure/witness pair is legal, so one
-    /// witnessed operand is enough to need a witness lowering. A constant splits into constant
-    /// limbs.
+    /// `check_widths` makes both operands of a non-shift the same width, and a mixed pure/witness
+    /// pair is legal, so one witnessed operand is sufficient to require a witness lowering. A
+    /// constant is split at compile time, so its limbs are constants too. A pure value that a
+    /// sequence read in this block recombined hands back the limbs it was recombined from.
     fn operand_limbs(&mut self, value: ValueId, expected: usize) -> Vec<ValueId> {
         let mapped = self.limbs(value);
         if mapped.len() == expected {
             return mapped;
+        }
+        if let Some(limbs) = self.read_limbs.get(&value)
+            && limbs.len() == expected
+        {
+            return limbs.clone();
         }
         assert_eq!(
             mapped.len(),
@@ -4876,10 +4893,10 @@ impl Rewriter<'_> {
 
     /// One read per limb sequence of `array`, at the caller's index and under `guard` if any.
     ///
-    /// A pure element is recombined into `result` at once, so nothing after the read meets a pure
-    /// integer held as limbs: everything else holds it whole, and a witness-indexed read's lookup
-    /// splits its field image again where it needs the limbs. This costs interpreter work, not
-    /// constraints, as a pure value is known wherever the constraints are built.
+    /// A pure element is recombined into `result` at once for users that expect a whole integer.
+    /// The limbs remain in `read_limbs` for any later operand consumer in this block, including
+    /// witness-indexed lookups, without splitting the whole value again. Recombination costs
+    /// interpreter work, not constraints, as a pure value is known wherever the constraints are built.
     fn lower_array_get(
         &mut self,
         guard: Option<ValueId>,
@@ -4924,6 +4941,7 @@ impl Rewriter<'_> {
                 value: combined,
                 target: CastTarget::Nop,
             });
+            self.read_limbs.insert(result, reads);
         }
     }
 
@@ -5655,6 +5673,60 @@ mod tests {
         results.dedup();
         assert_eq!(tables.len(), expected, "one table per limb sequence");
         assert_eq!(results.len(), expected, "one column per limb");
+    }
+
+    /// The field image of a pure read is cast from the limbs the read produced.
+    ///
+    /// A pure read is recombined for the users that want the whole value, and the image a
+    /// witness-indexed lookup moves through wants the limbs again. Splitting the recombined value
+    /// would use logical right shifts and narrowings at the full width, so the arm hands back the
+    /// limbs it has: every `Field` cast takes one of the read's own results, and nothing in between
+    /// shifts right or divides at the value's width.
+    #[test]
+    fn the_field_image_of_a_pure_read_is_cast_from_the_limbs_it_was_read_as() {
+        let bits = 320usize;
+        let mut ssa = program_reading_a_sequence_at_a_witness_index(bits, 2);
+        run_pass(&mut ssa);
+        let ops = emitted(&ssa);
+
+        let read: Vec<ValueId> = ops
+            .iter()
+            .filter_map(|op| match op {
+                OpCode::ArrayGet { result, .. } => Some(*result),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            read.len(),
+            limb_widths(bits, witness_limb_bits(bn254())).len(),
+            "one read per limb sequence"
+        );
+
+        let imaged: Vec<ValueId> = ops
+            .iter()
+            .filter_map(|op| match op {
+                OpCode::Cast {
+                    value,
+                    target: CastTarget::Field,
+                    ..
+                } => Some(*value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            imaged, read,
+            "the field image is cast from the read's limbs, not split out of the whole value"
+        );
+        assert!(
+            !ops.iter().any(|op| matches!(
+                op,
+                OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::UShr | BinaryArithOpKind::UDiv,
+                    ..
+                }
+            )),
+            "no logical right shift or division re-splits the recombined value into limbs"
+        );
     }
 
     /// Every emitted opcode of one function, in order.

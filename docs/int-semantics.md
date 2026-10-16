@@ -2,7 +2,8 @@
 
 While Mavros compiles Noir, the frontend it is integrated with goes beyond the standard Noir
 integers to instead support big integers natively. Integer types (and values) can be written for
-integers with anywhere from one bit to 16384 bits, and can be used without restriction in Noir code.
+integers with anywhere from two bits to 16384 bits, and can be used without restriction in Noir
+code.
 
 An integer type `intN` is an `N`-bits-wide integer (created in Noir using `iN` or `uN` depending on
 the semantics you want), represented as a 2's compliment bit pattern. Every operation is supported
@@ -21,11 +22,18 @@ upstream, and the expanded integer types allowed by the frontend Mavros is paire
 slices, tuples, references, globals, function arguments, and so on are all supported just as for the
 native integers.
 
+The frontend is pinned in `compiler/Cargo.toml` to `worldfnd/noir`'s `provekit-v2`. The fork extends
+integer widths and retains `BigInt` literals through monomorphization where Mavros subsequently
+lowers them directly to `IntBits`. The existing SSA oracle tests remain the arithmetic reference for
+these extended widths, while `compiler/tests/frontend_bigints.rs` also exercises the source and ABI
+boundaries.
+
 That said, there are currently a few small limits, most of which we hope to lift in future:
 
-- **Parameters to and Returns from `main`:** These are represented as field elements, and so can at
-  most carry integer sizes that fit injectively under the field modulus. Inside a program, a wider
-  value comes from casting and arithmetic, or unconstrained functions.
+- **Parameters to and Returns from `main`:** The frontend permits only the standard integer types
+  (`u8`, `u16`, `u32`, `u64`, `u128`, `i8`, `i16`, `i32`, and `i64`) at this boundary, including
+  inside arrays and structs. Wider values can be assembled from arrays of these types inside a
+  program.
 - **Field Casts:** Casting an integer wider than the field modulus to a `Field` is a compile-time
   error, because this would admit two integer values that produce the same field element (a
   soundness hole).

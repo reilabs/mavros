@@ -117,7 +117,11 @@ pub struct Driver {
 #[derive(Debug)]
 pub enum Error {
     /// The Noir compiler driver returned errors.
-    NoirCompilerError(Vec<noirc_errors::reporter::CustomDiagnostic>),
+    NoirCompilerError {
+        diagnostics: Vec<noirc_errors::reporter::CustomDiagnostic>,
+        /// Rendered while Noir's file manager and parsed files are available.
+        rendered: String,
+    },
 
     /// The program has no returning entry path (checked before optimization), or contains
     /// an impossible assertion/range/equality constraint found during R1CS generation.
@@ -139,9 +143,7 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::NoirCompilerError(diagnostics) => {
-                write!(f, "Noir compiler error ({} diagnostics)", diagnostics.len())
-            }
+            Error::NoirCompilerError { rendered, .. } => f.write_str(rendered),
             Error::UnsatisfiableProgram(diagnostics) => {
                 write!(f, "{}", diagnostic::render_all(diagnostics))
             }
@@ -277,6 +279,19 @@ impl Driver {
         contents
     }
 
+    fn noir_error(&self, diagnostics: Vec<noirc_errors::reporter::CustomDiagnostic>) -> Error {
+        let functions = noirc_frontend::error_reporting::function_locations_for_diagnostics(
+            &diagnostics,
+            self.project().parsed_files(),
+        );
+        let rendered =
+            diagnostic::render_noir(&diagnostics, self.project().file_manager(), &functions);
+        Error::NoirCompilerError {
+            diagnostics,
+            rendered,
+        }
+    }
+
     #[tracing::instrument(skip_all)]
     pub fn run_noir_compiler(&mut self) -> Result<(), Error> {
         let (mut context, crate_id) = nargo::prepare_package(
@@ -289,7 +304,7 @@ impl Driver {
             crate_id,
             &noirc_driver::CompileOptions::default(),
         )
-        .map_err(Error::NoirCompilerError)?;
+        .map_err(|diagnostics| self.noir_error(diagnostics))?;
 
         let main = context.get_main_function(context.root_crate_id()).unwrap();
         let debug_type_tracker =
@@ -301,8 +316,12 @@ impl Driver {
             None,
             false,
         );
-        monomorphizer.compile_main(main).unwrap();
-        monomorphizer.process_queue().unwrap();
+        monomorphizer
+            .compile_main(main)
+            .map_err(|error| self.noir_error(vec![error.into()]))?;
+        monomorphizer
+            .process_queue()
+            .map_err(|error| self.noir_error(vec![error.into()]))?;
         let program = monomorphizer.into_program();
 
         self.abi = Some(noirc_driver::gen_abi(

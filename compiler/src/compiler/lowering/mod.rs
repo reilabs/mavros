@@ -380,8 +380,8 @@ impl SSAConverter {
             file_manager,
         );
 
-        // Folding requires separate circuits and recursive circuit calls. Refuse it before
-        // lowering the body can feed recursive calls into cost analysis.
+        // The frontend rejects folding from source. Retain this defense for hand-built
+        // monomorphic programs: lowering recursive circuit calls would feed them into cost analysis.
         if matches!(ast_func.inline_type, InlineType::Fold) {
             expr_converter.reject_unsupported(
                 format!(
