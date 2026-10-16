@@ -164,9 +164,9 @@ impl Frame {
 
     /// The number of frame cells a guest value of type `T` occupies.
     ///
-    /// Every `read_*` below addresses `T` by casting the cell pointer, so `T`'s own size is what
-    /// the frame gives it. The generated dispatch uses this to say how far an `#[out]` reaches when
-    /// it checks a wide result against it.
+    /// Every `read_*` below casts the cell pointer to `T`, so `T`'s size is what it occupies. The
+    /// generated dispatch uses this as an `#[out]`'s extent when it checks that no frame slice
+    /// overlaps it.
     #[inline(always)]
     pub const fn cells_of<T>() -> usize {
         size_of::<T>().div_ceil(size_of::<u64>())
@@ -176,9 +176,9 @@ impl Frame {
     ///
     /// # Safety
     ///
-    /// The cells must be within the frame, and nothing may write them for as long as the returned
-    /// slice lives, since a write through one while a shared reference covers the same cells is
-    /// undefined behavior however the pointer was obtained. Both are the caller's to guarantee.
+    /// The caller guarantees that the cells are within the frame, and that nothing writes them
+    /// while the returned slice lives: a write while a shared reference covers the same cells is
+    /// undefined behavior, however the pointer was obtained.
     #[inline(always)]
     pub unsafe fn read_limbs(&self, offset: isize, len: usize) -> &[u64] {
         unsafe { std::slice::from_raw_parts(self.data.offset(offset), len) }
@@ -188,8 +188,8 @@ impl Frame {
     ///
     /// # Safety
     ///
-    /// As [`Frame::read_limbs`], and additionally nothing may _read_ these cells either for as
-    /// long as the returned slice lives.
+    /// As [`Frame::read_limbs`], and nothing may _read_ these cells either while the returned slice
+    /// lives.
     #[expect(
         clippy::mut_from_ref,
         reason = "the frame is a raw pointer to cells the VM owns, and a handler's result slice \
@@ -682,11 +682,10 @@ pub fn run_phase2(
 
             current_lookup_off += 1;
         } else {
-            // Key-value lookup (array or spread): 2 constraints per lookup. The
-            // looked-up key & value are witnesses regardless of how the table
-            // is allocated; only the _table's_ internal y-slot stride differs —
-            // array stores x,y per entry (stride 2, y at the odd slot) while a
-            // folded spread or powers-of-two table stores just y per entry (stride 1).
+            // Key-value lookup (array or spread): 2 constraints per lookup. Only the table's y-slot
+            // stride differs by kind: an array stores x,y per entry (stride 2, y at the odd slot),
+            // a folded spread or powers-of-two table only y (stride 1).
+            //
             // Entry 1 (x-constraint): out_a=table_id, out_b=result_value, out_c=0
             // Entry 2 (y-constraint): out_a=table_id, out_b=index, out_c=flag
             let entry_stride = match table.kind {
@@ -1250,8 +1249,8 @@ mod tests {
             data: cells.as_mut_ptr(),
         };
 
-        // An int192 at cell 4, with a sentinel either side: a slice that ran long or short would
-        // either read one of them or fail to write its own third cell.
+        // An int192 at cell 4 with a sentinel on each side: a slice one cell too long or too short
+        // would read a sentinel or miss the value's third cell.
         frame.write_u64(3, 0xdead);
         for (i, word) in [1u64, 2, 3].into_iter().enumerate() {
             frame.write_u64(4 + i as isize, word);

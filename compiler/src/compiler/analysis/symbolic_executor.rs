@@ -100,9 +100,6 @@ where
         ctx: &mut Context,
     ) -> Self;
     fn assert_bool(&self, ctx: &mut Context) -> Result<(), AssertionFailure>;
-    /// As [`Value::cmp`], but the comparison is an assertion rather than a value.
-    ///
-    /// `bits` comes from the same [`cmp_operand_bits`] and carries the same guarantee.
     fn assert_cmp(
         kind: CmpKind,
         a: &Self,
@@ -111,8 +108,19 @@ where
         ctx: &mut Context,
     ) -> Result<(), AssertionFailure>;
     fn assert_r1c(a: &Self, b: &Self, c: &Self, ctx: &mut Context) -> Result<(), AssertionFailure>;
-    fn array_get(&self, index: &Self, out_type: &Type, ctx: &mut Context) -> Self;
-    fn array_set(&self, index: &Self, value: &Self, out_type: &Type, ctx: &mut Context) -> Self;
+    fn array_get(
+        &self,
+        index: &Self,
+        out_type: &Type,
+        ctx: &mut Context,
+    ) -> Result<Self, AssertionFailure>;
+    fn array_set(
+        &self,
+        index: &Self,
+        value: &Self,
+        out_type: &Type,
+        ctx: &mut Context,
+    ) -> Result<Self, AssertionFailure>;
     fn sext(&self, from: usize, to: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn bit_range(&self, offset: usize, width: usize, out_type: &Type, ctx: &mut Context) -> Self;
     fn cast(&self, cast_target: &CastTarget, out_type: &Type, ctx: &mut Context) -> Self;
@@ -133,7 +141,6 @@ where
         ctx: &mut Context,
     ) -> Self;
     fn not(&self, out_type: &Type, ctx: &mut Context) -> Self;
-    /// A constant integer, as a pattern with no inherent signedness.
     fn of_int(v: &IntBits, ctx: &mut Context) -> Self;
     // FIELD-ASSUMPTION: L2-seam
     fn of_field(f: Field, ctx: &mut Context) -> Self;
@@ -467,7 +474,10 @@ impl SymbolicExecutor {
                     } => {
                         let a = &scope[a];
                         let i = &scope[i];
-                        scope.insert(*r, a.array_get(i, &fn_type_info.get_value_type(*r), ctx));
+                        let element = a
+                            .array_get(i, &fn_type_info.get_value_type(*r), ctx)
+                            .map_err(|error| error.at(location))?;
+                        scope.insert(*r, element);
                     }
                     OpCode::ArraySet {
                         result: r,
@@ -478,7 +488,10 @@ impl SymbolicExecutor {
                         let a = &scope[arr];
                         let i = &scope[i];
                         let v = &scope[v];
-                        scope.insert(*r, a.array_set(i, v, &fn_type_info.get_value_type(*r), ctx));
+                        let updated = a
+                            .array_set(i, v, &fn_type_info.get_value_type(*r), ctx)
+                            .map_err(|error| error.at(location))?;
+                        scope.insert(*r, updated);
                     }
                     OpCode::SlicePush {
                         result,

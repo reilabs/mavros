@@ -1,8 +1,5 @@
-//! Basic support for located compiler diagnostics.
-//!
-//! A [`Diagnostic`] is what is produced when the compiler meets a program that it cannot represent
-//! soundly. While most such programs should be refused by the frontend, this infrastructure ensures
-//! that we can report user-originated diagnostics.
+//! Located compiler diagnostics: a program the compiler refuses, reported against the user's
+//! source.
 
 use std::{
     fmt::{self, Display, Formatter},
@@ -288,8 +285,7 @@ mod tests {
         let caret_line = rendered.lines().nth(4).unwrap();
         let source_line = rendered.lines().nth(3).unwrap();
 
-        // Counted in `char`s: the two lines agree on the column the carets sit at, and the source
-        // line's multi-byte characters mean they do not agree on the byte offset of it.
+        // Counted in `char`s, since multi-byte characters shift the byte offset.
         let carets = caret_line[..caret_line.find('^').unwrap()].chars().count();
         let span = source_line[..source_line.find("wide").unwrap()]
             .chars()
@@ -297,7 +293,7 @@ mod tests {
         assert_eq!(carets, span, "the carets sit under the span:\n{rendered}");
     }
 
-    /// A span the source cannot have — past the last line — is not a reason to fail to report.
+    /// A span past the last line of the source is still reported.
     #[test]
     fn coordinates_the_file_does_not_have_fall_back_to_the_header() {
         let (file, mut location) = located("one line\n", "one");
@@ -312,9 +308,8 @@ mod tests {
     }
 
     /// The frontend gives a zero-width span for a location it knows only as a point, and the
-    /// renderer draws a caret at one rather than nothing. That is the renderer's own behaviour and
-    /// not something this module arranges, which is why it is pinned here: nothing else would
-    /// notice a version of it that drew an empty run.
+    /// renderer draws one caret for it rather than nothing. That is the renderer's behavior, not
+    /// this module's, so it is pinned here: nothing else would notice if it drew an empty run.
     #[test]
     fn a_zero_width_span_still_draws_one_caret() {
         let (_file, mut location) = located("let x = 1;\n", "x");
@@ -336,8 +331,7 @@ mod tests {
         assert!(rendered.contains("^"), "{rendered}");
     }
 
-    /// A carried source is the text the coordinates were measured against, so it wins over
-    /// whatever the path names now.
+    /// A carried source wins over the file at the path: the coordinates were measured against it.
     #[test]
     fn a_carried_source_is_quoted_rather_than_the_file_on_disk() {
         let (_file, location) = located("let stale = 1;\n", "stale");

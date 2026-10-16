@@ -595,12 +595,8 @@ impl R1CS {
     /// The index of the first constraint `witness` does not satisfy, or [`None`] if it satisfies
     /// them all.
     ///
-    /// Asks only whether the witness satisfies the system, taking no `a`/`b`/`c` vectors alongside
-    /// it: unlike [`Self::check_witgen_output`] it can judge a witness no witness generator
-    /// produced.
-    ///
-    /// `witness` is the two halves concatenated, pre-commitment first, exactly as
-    /// [`Self::check_witgen_output`] joins them.
+    /// Unlike [`Self::check_witgen_output`] it needs no `a`/`b`/`c` vectors, so it can judge a
+    /// witness no generator produced. `witness` is the pre-commitment half followed by the rest.
     ///
     /// # Panics
     ///

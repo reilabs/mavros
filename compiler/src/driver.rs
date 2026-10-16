@@ -23,7 +23,8 @@ use crate::{
     Project,
     compiler::{
         analysis::{
-            flow_analysis::FlowAnalysis, types::Types,
+            flow_analysis::FlowAnalysis,
+            types::{Types, check_casts_into_field},
             witness_taint_inference::WitnessTaintInference,
         },
         codegen::{
@@ -67,7 +68,6 @@ use crate::{
             strip_witness_of::StripWitnessOf,
             trivial_phi_elimination::TrivialPhiElimination,
             wide_witness_ints::WideWitnessInts,
-            width_validation,
             witness_lowering::WitnessLowering,
             witness_write_to_fresh::WitnessWriteToFresh,
             witness_write_to_void::WitnessWriteToVoid,
@@ -134,9 +134,6 @@ pub enum Error {
     ///
     /// Carries every failing assertion so a single compile reports them all.
     AssertConstantFailed(Vec<SourceLocation>),
-
-    /// The program uses a shape this compiler cannot represent soundly.
-    Refused(Vec<Diagnostic>),
 }
 
 impl std::fmt::Display for Error {
@@ -161,7 +158,6 @@ impl std::fmt::Display for Error {
                 }
                 Ok(())
             }
-            Error::Refused(diagnostics) => write!(f, "{}", diagnostic::render_all(diagnostics)),
         }
     }
 }
@@ -190,21 +186,15 @@ impl Driver {
         }
     }
 
-    /// Builds a driver around an already-constructed [`HLSSA`], bypassing the Noir frontend.
+    /// Builds a driver around an already-constructed [`HLSSA`], bypassing the Noir frontend, so a
+    /// feature can be prototyped before the frontend supports it.
     ///
-    /// [`Driver::new`] can only reach a program through a Noir `Project`, which bounds it to what
-    /// Noir's surface syntax can express. This entry point thus provides a means to prototype new
-    /// features without needing to add support in the front-end.
+    /// Such a driver has no [`Self::abi`], so [`Self::entry_point_flattened_io_count`] and the WASM
+    /// metadata sidecar are unavailable, and no [`Self::package_root`]: both belong to the Noir
+    /// package, not the program.
     ///
-    /// The result is a driver whose `initial_ssa` is already populated, so the caller starts at
-    /// [`Self::make_struct_access_static`] and skips [`Self::run_noir_compiler`]. Everything from
-    /// there on is the production pipeline. Two capabilities do not survive the bypass, both
-    /// because they are properties of the Noir package rather than of the program: there is no
-    /// [`Self::abi`] (so [`Self::entry_point_flattened_io_count`] and the WASM metadata sidecar are
-    /// unavailable) and no [`Self::package_root`].
-    ///
-    /// `debug_output_dir` is created, and emptied if it already exists, exactly as [`Self::new`]
-    /// does with the package's `mavros_debug`.
+    /// `debug_output_dir` is created, or emptied if it exists, as [`Self::new`] does with the
+    /// package's `mavros_debug`.
     pub fn from_ssa(ssa: HLSSA, debug_output_dir: PathBuf, draw_cfg: bool) -> Self {
         Self::fresh_debug_dir(&debug_output_dir);
         Self {
@@ -343,8 +333,10 @@ impl Driver {
     pub fn make_struct_access_static(&mut self) -> Result<(), Error> {
         let mut ssa = self.initial_ssa.clone().unwrap();
 
-        // We initially validate all integer widths for sound usage under the configured field.
-        self.check_widths(&ssa)?;
+        // The program as written, before `WideWitnessInts` emits casts of a wide integer's limbs
+        // into Field.
+        let flow = FlowAnalysis::run(&ssa);
+        check_casts_into_field(&ssa, &Types::new().run(&ssa, &flow));
 
         let failures = Rc::new(RefCell::new(None));
         let mut validation = PassManager::new(
@@ -378,6 +370,10 @@ impl Driver {
             "make_struct_access_static".to_string(),
             self.draw_cfg,
             vec![
+                // First, so that no later pass, the guard IR included, meets a bit window wider than
+                // the field carries, a bit or byte decomposition of an integer of any width (each
+                // becomes decompositions of field elements), or a range check wider than the field.
+                Box::new(InstructionLowering::operand_shapes()),
                 Box::new(prepare_entry_point),
                 // Lower leaf-less slices to their `u32` length. Must precede the elision, which
                 // breaks on leaf-less slices.
@@ -417,43 +413,8 @@ impl Driver {
         Ok(())
     }
 
-    /// Refuse the program where it uses an integer width this compiler cannot represent soundly
-    /// under the configured field.
-    fn check_widths(&self, ssa: &HLSSA) -> Result<(), Error> {
-        let flow = FlowAnalysis::run(ssa);
-        let types = Types::new().run(ssa, &flow);
-
-        self.refuse(width_validation::language_refusals(ssa, &types))
-    }
-
-    /// Refuse the program where it reaches an integer lowering this compiler does not support.
-    fn check_lowering_widths(&self, ssa: &HLSSA) -> Result<(), Error> {
-        let flow = FlowAnalysis::run(ssa);
-        let types = Types::new().run(ssa, &flow);
-
-        self.refuse(width_validation::capability_refusals(ssa, &types))
-    }
-
-    /// Report `refusals` as an error.
-    fn refuse(&self, refusals: Vec<Diagnostic>) -> Result<(), Error> {
-        let refusals: Vec<Diagnostic> = refusals
-            .into_iter()
-            .map(|refusal| self.attach_compiled_source(refusal))
-            .collect();
-
-        if refusals.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::Refused(refusals))
-        }
-    }
-
-    /// Attach the source text the compiler read for `diagnostic`'s file, where there is one.
-    ///
-    /// The file manager holds the text every source location was measured against, including for
-    /// the embedded standard library. Handing it over keeps the rendered snippet showing as the
-    /// code that was compiled rather than whatever the path resolves to at the moment the error is
-    /// printed.
+    /// Attach the source text the compiler read for `diagnostic`'s file, where there is one, so the
+    /// snippet shows the code that was compiled, not what the path holds when the error prints.
     fn attach_compiled_source(&self, diagnostic: Diagnostic) -> Diagnostic {
         let Some(project) = self.project.as_ref() else {
             return diagnostic;
@@ -616,10 +577,6 @@ impl Driver {
     pub fn spill_witness(&mut self) -> Result<(), Error> {
         let mut ssa = self.monomorphized_ssa.clone().unwrap();
 
-        // The lowerings below are the ones that turn an integer operation into constraints, so this
-        // is the last point at which a width they cannot build can be refused rather than met.
-        self.check_lowering_widths(&ssa)?;
-
         let mut pass_manager = PassManager::new(
             "witness_spilling".to_string(),
             self.draw_cfg,
@@ -662,12 +619,6 @@ impl Driver {
                 // Immediately before the lowerings that read an integer's width: a witnessed value
                 // too wide for one field element becomes its limbs here, and every lowering below
                 // this sees limbs it can work with.
-                //
-                // Nothing drops an unused `Spread` may run between this and `witness_integer_ops`.
-                // A spread past the field is cut into pieces that only its narrow spreads' lookups
-                // bound, and those are built there: a dead-code pass in between would leave the
-                // pieces of an answer used only in part unbounded. There isn't a reasonable way to
-                // enforce this at compile time for now.
                 Box::new(WideWitnessInts::new()),
                 // After the representation, so a value it carries as limbs has already had its
                 // narrowing rewritten into a recombination.
@@ -740,9 +691,8 @@ impl Driver {
         // Captured before `r1cs_ssa` is stored away; sizes the LogUp per-challenge soundness.
         let field = r1cs_ssa.field();
         let (r1cs, profile) =
-            // The guard's position is ABI-derived metadata on the layout, read only by the
-            // return-guard check the test runner performs; a driver seeded with [`Self::from_ssa`]
-            // has no ABI to state it from, and nothing asks it for that check.
+            // The guard's position is ABI-derived, and read only by the test runner's return-guard
+            // check. A driver from [`Self::from_ssa`] has no ABI, and nothing asks it for that.
             match r1cs_gen.seal_with_profile(
                 self.abi.as_ref().and_then(crate::abi_helpers::guard_layout),
             ) {
@@ -857,9 +807,8 @@ impl Driver {
         } else {
             codegen.run(ssa, &flow_analysis, &type_info)
         };
-        // Only a project-backed driver has an ABI to cross-check the header against; one seeded
-        // with [`Self::from_ssa`] states the entry's shape in the HLSSA it was handed and has no
-        // second account of it to disagree with.
+        // Only a project-backed driver has an ABI to check the header against; one from
+        // [`Self::from_ssa`] states the entry's shape only in its HLSSA.
         if !verifier && self.abi.is_some() {
             assert_eq!(
                 program.entry_blob_field_count,
@@ -1362,11 +1311,11 @@ mod tests {
         assert!(super::compiled_source(&file_manager, "std/absent.nr").is_none());
     }
 
-    /// The error's own `Display` has to be the rendered diagnostics rather than a summary of them:
+    /// The error's `Display` has to be the rendered diagnostics rather than a summary of them:
     /// every caller here prints an `Error` and nothing asks it for a renderer.
     #[test]
-    fn a_refusal_displays_as_its_rendered_diagnostics() {
-        let refusal = Error::Refused(vec![
+    fn an_unsatisfiable_program_displays_as_its_rendered_diagnostics() {
+        let refusal = Error::UnsatisfiableProgram(vec![
             Diagnostic::error("first refusal", SourceLocation::synthetic("a_pass"))
                 .with_note("a standing fact"),
             Diagnostic::error("second refusal", SourceLocation::synthetic("a_pass")),

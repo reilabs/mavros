@@ -201,9 +201,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             return;
         }
         Err(
-            error @ (DriverError::AssertConstantFailed(_)
-            | DriverError::Refused(_)
-            | DriverError::UnsatisfiableProgram(_)),
+            error @ (DriverError::AssertConstantFailed(_) | DriverError::UnsatisfiableProgram(_)),
         ) => {
             eprintln!("Mavros compiler rejected program: {error}");
             emit("END:COMPILED:reject");
@@ -223,11 +221,9 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             let rows = r.constraints.len();
             let cols = r.witness_layout.size();
             emit(&format!("END:R1CS:ok:{rows}:{cols}"));
-            // Opt-in, report-only compaction-opportunity analysis: how many algebraic rows/cols a
-            // post-seal compaction pass could remove. It is _not_ part of STATUS.md — the parent
-            // captures this `INFO:` line only to echo it to stdout under `--analyze-r1cs`. Kept off
-            // the `END:R1CS` line so the STATUS output and the determinism fingerprint never depend
-            // on the (comparatively expensive) analysis.
+            // Opt-in, report-only: how many rows/cols a post-seal compaction could remove. The
+            // parent only echoes this `INFO:` line under `--analyze-r1cs`; it stays off the
+            // `END:R1CS` line so STATUS.md and the determinism fingerprint never depend on it.
             if analyze {
                 let stats = r1cs_compact::analyze(&r, driver.protected_r1cs_cols());
                 emit(&format!(
@@ -249,10 +245,10 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             Some(r)
         }
 
-        // A program whose assertion can never hold is rejected as unsatisfiable while generating
-        // R1CS. That is the _expected_ outcome for an execution_failure test, so it gets its own
-        // `reject` marker — distinct from a plain `fail`, which signals a real problem (e.g. an
-        // unsupported construct) that should never be silently accepted.
+        // A program whose assertion can never hold is rejected as unsatisfiable during R1CS
+        // generation. For an execution_failure test that is the expected outcome, so it gets a
+        // separate `reject` marker, distinct from `fail`, which flags a real problem (such as an
+        // unsupported construct) that must never be silently accepted.
         Err(error @ DriverError::UnsatisfiableProgram(_)) => {
             eprintln!("R1CS rejected program as unsatisfiable: {error}");
             emit("END:R1CS:reject");
@@ -1488,10 +1484,9 @@ const REGRESSION_COLS: &[&str] = &[
     "AD WASM No Leak",
 ];
 
-/// Verify the table's header carries every column the checks compare. Columns are resolved by
-/// name, so files whose layouts differ (a baseline predating a column addition) still align;
-/// what must never happen silently is a _stage_ column going missing entirely — e.g. a renamed
-/// header — which would drop that stage from regression checking.
+/// Verify the table's header carries every column the checks compare. Columns are resolved by name,
+/// so differing layouts still align; a stage column going missing (a renamed header, say) must not
+/// pass silently, as it would drop that stage from regression checking.
 fn validate_layout(table: &StatusTable, path: &Path) {
     for name in REGRESSION_COLS.iter().chain(&["Test", "Rows", "Cols"]) {
         assert!(

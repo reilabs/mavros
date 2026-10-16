@@ -377,12 +377,11 @@ impl LookupSpilling {
 
         let pure = if is_witness { b.value_of(value) } else { value };
 
-        // Chunk extraction works on an unsigned integer wide enough to hold the value. The two
-        // narrow widths are kept as the widths they are — a 96-bit check extracts through a `u128`
-        // rather than through a 96-bit integer — because those are the widths the bytecode lanes
-        // are built around, and a check inside them must lower exactly as it always has. Past the
-        // host word there is no such lane to sit inside, so the width is the value's own, rounded
-        // up to whole limbs.
+        // Chunks are extracted from an unsigned integer wide enough to hold the value. The two
+        // narrow lanes keep their widths (a 96-bit check extracts through a `u128`, not a 96-bit
+        // integer) because the bytecode lanes are built around those widths, and a check within
+        // them keeps that lowering. Past the host word there is no such lane, so the width is the
+        // value's width rounded up to whole limbs.
         let extract_bits = if bits <= HOST_LIMB_BITS {
             HOST_LIMB_BITS
         } else if bits <= HOST_WORD_BITS {

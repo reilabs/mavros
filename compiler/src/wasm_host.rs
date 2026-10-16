@@ -1,6 +1,6 @@
 //! Running a compiled WASM artifact on the host, and reading its results back out of linear memory.
 //!
-//! The witgen and AD entry points of a compiled module take pointers into the module's own linear
+//! The witgen and AD entry points of a compiled module take pointers into the module's linear
 //! memory, so calling one means laying out the buffers it writes into, placing them past the
 //! module's static data, and reading the results back field element by field element.
 
@@ -122,8 +122,7 @@ fn read_field_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr:
     ark_bn254::Fr::new_unchecked(BigInt::new([l0, l1, l2, l3]))
 }
 
-/// A compiled artifact, retained so a module run many times is handed to the engine once as
-/// compilation is expensive.
+/// A compiled artifact, kept so a module run many times is compiled once.
 pub struct LoadedModule {
     engine: Engine,
     module: wasmtime::Module,
@@ -205,11 +204,11 @@ pub fn run_witgen_loaded(
         memory.grow(&mut store, (needed_pages - current_pages) as u64)?;
     }
 
-    // Cursors the host needs to seed. The table registry is written by first-use lookup helpers.
-    // The two table-region cursors (cnst/wit) are seeded at the structural starts of those regions.
+    // Cursors the host must seed: the table registry is written by the first-use lookup helpers,
+    // and the two table-region cursors (cnst/wit) start at their regions' structural starts.
     //
-    // `current_wit_tables_off` is stored _relative to_ `challenges_start` (matches how Phase 2 uses
-    // it: `out_wit_post_comm[wit_base + i]`, where `out_wit_post_comm` starts at challenges_start).
+    // `current_wit_tables_off` is relative to `challenges_start`, as Phase 2 reads
+    // `out_wit_post_comm[wit_base + i]` with `out_wit_post_comm` starting there.
     let mults_cursor_ptr =
         witness_ptr + (r1cs.witness_layout.multiplicities_start() * FIELD_SIZE) as u32; // FIELD-ASSUMPTION: L3-field-size
     let lookups_a_cursor =
@@ -387,10 +386,8 @@ fn witgen_phase2(
 ) -> interpreter::WitgenResult {
     use crate::vm::bytecode::AllocationInstrumenter;
 
-    // Re-encode raw-u64 multiplicity slots as Montgomery field elements. Walk the runtime-claimed
-    // table list rather than scanning the entire multiplicities region: the host doesn't know each
-    // table's length statically, only that the runtime registry recorded `length` for every claimed
-    // slot.
+    // Re-encode raw-u64 multiplicity slots as Montgomery field elements, walking the tables the
+    // runtime registry claimed: the host does not know each table's length statically.
     for (multiplicities_wit_off, tbl) in &runtime_tables {
         let lo = *multiplicities_wit_off;
         let hi = lo + tbl.length;
@@ -536,7 +533,7 @@ pub fn run_ad_loaded(
     // AD lookups need an absolute base for random-access coefficient reads and a fresh-witness
     // counter seeded at the lookups-section start. The three table-allocation cursors
     // (`current_*_tables_off`, `current_wit_multiplicities_off`) are seeded at structural layout
-    // starts; first-use lookup helpers snapshot them and then bump by their own table footprint.
+    // starts; first-use lookup helpers snapshot them and then bump by the footprint of their table.
     let lookups_wit_start = r1cs.witness_layout.lookups_data_start() as u32;
     let cnst_tables_start = r1cs.constraints_layout.tables_data_start() as u32;
     let wit_tables_start = r1cs.witness_layout.tables_data_start() as u32;

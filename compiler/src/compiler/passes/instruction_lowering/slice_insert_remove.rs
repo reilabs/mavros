@@ -46,7 +46,7 @@ impl InstructionLoweringRule for LowerSliceInsert {
         }
         let acc_slice_ty = sel_elem_ty.clone().slice_of();
 
-        let (assert, len, new_len, idx_cmp, cmp_bits) =
+        let (assert, len, new_len, idx_cmp) =
             build_insert_bounds_assert(b, *slice, *index, &index_ty);
         b.emit_guarded(guard, assert);
 
@@ -64,9 +64,8 @@ impl InstructionLoweringRule for LowerSliceInsert {
             let i_is_positive = b.ult(zero, i);
             let dec = b.cast_to(CastTarget::Int(32), i_is_positive);
             let prev = b.usub(i, dec);
-            let i_cmp = b.widen_u(i, 32, cmp_bits);
-            let below = b.ult(i_cmp, idx_cmp);
-            let at = b.eq(i_cmp, idx_cmp);
+            let below = b.ult(i, idx_cmp);
+            let at = b.eq(i, idx_cmp);
             if index_is_witness {
                 let cur_val = b.array_get(grown, i);
                 let prev_val = b.array_get(grown, prev);
@@ -124,8 +123,7 @@ impl InstructionLoweringRule for LowerSliceRemove {
         }
         let acc_slice_ty = sel_elem_ty.clone().slice_of();
 
-        let (assert, len, idx_cmp, cmp_bits) =
-            build_remove_bounds_assert(b, *slice, *index, &index_ty);
+        let (assert, len, idx_cmp) = build_remove_bounds_assert(b, *slice, *index, &index_ty);
         b.emit_guarded(guard, assert);
 
         let zero = b.int_const(IntBits::zero(32));
@@ -148,8 +146,7 @@ impl InstructionLoweringRule for LowerSliceRemove {
 
         let index_is_witness = index_ty.is_witness_of();
         let rebuilt = b.build_slice_extend_loop(new_len, (empty, acc_slice_ty), move |b, i| {
-            let cmp_i = b.widen_u(i, 32, cmp_bits);
-            let below = b.ult(cmp_i, idx_cmp);
+            let below = b.ult(i, idx_cmp);
             if index_is_witness {
                 let next = b.uadd(i, one);
                 let cur_val = b.array_get(slice_v, i);

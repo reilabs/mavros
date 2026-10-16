@@ -330,26 +330,23 @@ impl ValueRangeAnalysis {
         field: FieldConfig,
         facts: &[BranchFact],
     ) {
-        // Precise tracking stops at a host word: a wider value keeps the full range its own type
+        // Precise tracking stops at a host word: a wider value keeps the full range its type
         // seeds, and no transfer refines it.
         //
-        // **Widening a range is always safe here**, which is what makes this a cost decision rather
-        // than a soundness one. Every consumer of this domain acts only on a proof —
-        // `overflow_provably_impossible`, `shift_amount_provably_in_range`, `divmod_provably_defined`
-        // and `narrow_rangecheck_width` each discharge a check or narrow one, and DCE deletes — so a
-        // range that says less means more checks, wider range checks and less code deleted, never
-        // fewer or narrower.
+        // **Widening a range is always sound here**, so this is a cost decision. Every consumer
+        // acts only on a proof (`overflow_provably_impossible`, `shift_amount_provably_in_range`,
+        // `divmod_provably_defined` and `narrow_rangecheck_width` discharge or narrow a check, and
+        // DCE deletes code), so a weaker range means more checks, wider range checks and less
+        // deleted code, never fewer or narrower.
         //
-        // The bound is [`HOST_WORD_BITS`] rather than a field-derived width because it has to
-        // dominate `narrow_int_bits` on **every** field, and `narrow_int_bits` is
-        // `min(widest injective, host word)`. Below that threshold a range decides whether a program
-        // _compiles_, so losing precision there would change which programs are accepted. Above it
-        // the domain only decides how much code is emitted.
+        // The bound is [`HOST_WORD_BITS`] rather than a field-derived width because it must
+        // dominate `narrow_int_bits`, `min(widest injective, host word)`, on **every** field.
+        // Below it a range decides whether a program _compiles_, so precision there changes which
+        // programs are accepted; above it, only how much code is emitted.
         //
-        // What it costs: a [`ValueRange`] carries [`BigInt`] bounds, so a range on an `int16384` is
-        // arithmetic on 2 KB numbers and an interval multiply is four bignum multiplies. The
-        // instruction count grows with the limb count and the work per instruction grew with the
-        // declared width, and the two multiplied.
+        // The cost avoided: [`ValueRange`] bounds are [`BigInt`]s, so a range on an `int16384` is
+        // arithmetic on 2 KB numbers and an interval multiply is four bignum multiplies. Both the
+        // instruction count and the work per instruction grow with the width.
         if instr.get_results().any(|v| {
             matches!(
                 types.get_value_type(*v).strip_witness().expr,
@@ -434,9 +431,8 @@ impl ValueRangeAnalysis {
                 width,
             } => {
                 let in_r = range(bounds, *value);
-                // `(v >> offset) & mask(width)`, with the result keeping the _source's_ type. The
-                // mask is exact whenever the shifted value already fits, which covers a signed
-                // source without needing a rule of its own.
+                // `(v >> offset) & mask(width)`, keeping the _source's_ type. The mask is exact
+                // whenever the shifted value already fits, which covers a signed source too.
                 let shifted = in_r.unsigned().div_const_pos(&(BigInt::one() << *offset));
                 let masked = if shifted.fits_in_unsigned_bits(*width) {
                     shifted
@@ -455,15 +451,12 @@ impl ValueRangeAnalysis {
                 );
             }
 
-            // The witness takes the range of its _hint_, which is a claim about witness generation
-            // rather than about the circuit: `WriteWitness` mints an unconstrained R1CS variable,
-            // and only the constraints emitted around it pin the value a prover may choose. So this
-            // transfer is sound exactly under the standing invariant that **every hint is pinned by
-            // accompanying constraints** — `bit_range.rs::lower_witness_bit_range` and
-            // `witness_bitwise.rs::wrap_shifted_product` are the pattern to follow. A hint written
-            // without them leaves the range describing the honest prover only, which is worse
-            // than imprecise: consumers ELIDE constraints on the strength of what this domain
-            // says.
+            // The witness takes its _hint's_ range, a fact about witness generation, not the
+            // circuit: `WriteWitness` mints an unconstrained variable. So this is sound only while
+            // **every hint is pinned by accompanying constraints**, as `lower_witness_bit_range`
+            // (`bit_range.rs`) and `wrap_shifted_product` (`witness_bitwise.rs`) pin theirs. An
+            // unpinned hint's range describes only the honest prover, and consumers ELIDE
+            // constraints on this domain.
             OpCode::WriteWitness {
                 result: Some(r),
                 value,
@@ -549,15 +542,10 @@ impl ValueRangeAnalysis {
                 let v = range(bounds, *var);
 
                 // `MulConst` is a _field_ multiply of raw patterns, so the multiplier is read as
-                // the pattern it is. There is no opcode here to carry a sign and nothing to read
-                // one from.
-                //
-                // That is only the whole story while the result really is a field element, which is
-                // what makes the `false` below a fact rather than a default: `types.rs` gives
-                // `MulConst` its `var`'s type, and `witness_lowering` — the only thing that builds
-                // one — builds it from `WitnessOf(Field)` operands. Were an integer ever to reach
-                // here, `wrap_or_trap` would intersect the reading the operation does _not_ trap
-                // on, so the invariant is asserted rather than left to the comment.
+                // its pattern. The `false` below is therefore a fact, not a default: `types.rs`
+                // gives `MulConst` its `var`'s type, and `witness_lowering`, its only builder,
+                // gives it `WitnessOf(Field)` operands. An integer here would make `wrap_or_trap`
+                // intersect the reading the operation does _not_ trap on, so this is asserted.
                 debug_assert!(
                     matches!(width, Width::Field(_)),
                     "MulConst is a field multiply; a {width:?} result would need a sign to read \
@@ -637,10 +625,10 @@ impl ValueRangeAnalysis {
                     }
                 }
 
-                // A shift with a witness operand is the exception to that: `LowerPureGuards` leaves
-                // it to its own lowering, which does not branch. Where the guard is off, several of
-                // those lowerings shift by an amount they have zeroed, so an inactive guard around
-                // one can produce its left operand.
+                // A shift with a witness operand is the exception: `LowerPureGuards` leaves it to
+                // the shift's lowering, which does not branch. Several of those lowerings zero the
+                // amount where the guard is off, so an inactive guard around one can produce its
+                // left operand.
                 if let Some(operand) = shift_passing_its_operand_through(inner, types) {
                     let operand = range(bounds, operand);
                     for vid in inner.get_results() {
@@ -676,17 +664,14 @@ impl ValueRangeAnalysis {
         }
     }
 
-    /// The transfer for `BinaryArithOp`, split out for room to breathe.
+    /// The transfer for `BinaryArithOp`.
     ///
-    /// `lhs_matches` / `rhs_matches` say whether each operand is the same width as the result.
-    /// Only shifts legitimately mix widths — the type analysis widens the result to the wider of
-    /// the two, and a shift amount is typically a narrow integer — and a shift reads its amount as
-    /// a count rather than as a bit pattern, so it needs no width agreement. Every other rule here
-    /// reasons about the result's bit pattern and gives up if an operand is not a reading of it.
+    /// `lhs_matches` / `rhs_matches` say whether each operand has the result's width. Every rule
+    /// reasons about the result's bit pattern, so it gives up if an operand is not a reading of it.
     ///
-    /// `kind` carries the sign as well as the operation, and both are read off it. A separate
-    /// `signed` flag beside it would let a caller spell an `SDiv` with `signed: false` — an
-    /// operation the pipeline cannot produce — and have it silently mean something.
+    /// The sign is read off `kind`. A separate `signed` flag would let a caller write an `SDiv`
+    /// with `signed: false`, which the pipeline cannot produce, and have it silently mean
+    /// something.
     #[allow(clippy::too_many_arguments)]
     fn binary_arith(
         kind: BinaryArithOpKind,
@@ -706,13 +691,12 @@ impl ValueRangeAnalysis {
         if l.is_empty() || r.is_empty() {
             return ValueRange::empty(width);
         }
+        if !(lhs_matches && rhs_matches) {
+            return ValueRange::full(width);
+        }
 
         match group {
             Add | Sub | Mul => {
-                if !(lhs_matches && rhs_matches) {
-                    return ValueRange::full(width);
-                }
-
                 // The same formula in both readings, because the operation is a ring homomorphism
                 // modulo the width: `dec` commutes with `+`, `−` and `×`.
                 let (raw_u, raw_s) = match group {
@@ -729,9 +713,6 @@ impl ValueRangeAnalysis {
                     // bounds at all, and a field `Mod` does not exist.
                     return ValueRange::full(width);
                 };
-                if !(lhs_matches && rhs_matches) {
-                    return ValueRange::full(width);
-                }
 
                 // The reading the instruction is performed in. Unsigned division is performed on
                 // the raw pattern; signed division on its two's-complement value.
@@ -768,13 +749,12 @@ impl ValueRangeAnalysis {
             }
 
             And | Or | Xor => {
-                if !matches!(width, Width::Bits(_)) || !(lhs_matches && rhs_matches) {
+                if !matches!(width, Width::Bits(_)) {
                     return ValueRange::full(width);
                 }
 
                 // Bitwise operations act on the raw pattern, so the unsigned readings bound them
-                // unconditionally — no non-negativity gate is needed, which one reasoning from the
-                // mathematical reading alone could not avoid.
+                // with no non-negativity gate.
                 let (Some(lh), Some(rh)) = (l.unsigned().hi(), r.unsigned().hi()) else {
                     return ValueRange::full(width);
                 };
@@ -791,9 +771,6 @@ impl ValueRangeAnalysis {
                 let Width::Bits(n) = width else {
                     return ValueRange::full(width);
                 };
-                if !lhs_matches {
-                    return ValueRange::full(width);
-                }
 
                 // The amount is read as a magnitude, which makes the arms below sound regardless of
                 // the originally-declared sign of the operand.
@@ -964,28 +941,21 @@ impl Analysis for ValueRanges {
 // BRANCH REFINEMENT
 // ================================================================================================
 
-/// A comparison that a conditional branch has already decided, on the edge that decided it.
+/// A comparison a conditional branch has decided, on the edge that decided it.
 ///
-/// The analysis is otherwise flow-insensitive. It is also what lets a loop counter be bounded at
-/// all. A loop header's parameter joins its own back-edge argument, so without the guard it is ⊤
-/// from the first round and stays there; with it, the body sees `i < n`, the increment is bounded
-/// by `n`, and the join closes on `[0, n]`. That is the difference between proving and not proving
-/// that `n - 1 - i` cannot underflow, which is one R1CS row per iteration of every loop in the
-/// standard library that counts down.
+/// The analysis is otherwise flow-insensitive; this is what bounds a loop counter. With it the body
+/// sees `i < n` and the join closes on `[0, n]`, proving `n - 1 - i` cannot underflow, which saves
+/// an R1CS row per iteration of every count-down loop in the standard library.
 ///
-/// A consumer that discharges a runtime check on the strength of one of these is asserting that the
-/// check cannot fail _on any execution that reaches the instruction_. Both regimes this analysis
-/// runs in support that, for different reasons:
+/// A consumer discharging a runtime check on such a fact claims the check cannot fail _on any
+/// execution reaching the instruction_. That holds in both regimes the analysis runs in:
 ///
-/// - **After `UntaintControlFlow`**, every surviving `JmpIf` is on a _pure_ condition: witness ones
-///   have been linearized into `Select`s with their blocks' instructions wrapped in `Guard`. A pure
-///   branch is real control flow in both backends, and `hlssa_to_r1cs` interprets it rather than
-///   flattening it, so the untaken arm is never evaluated at all.
-/// - **Before it**, a witness `JmpIf` is still real control flow in the IR, so the fact is a true
-///   statement about executions that take the edge. Executions that do not take it never evaluate
-///   the instruction, and Noir owes no rejection for an operation inside an `if` that did not run.
-///   Linearization preserves that: it wraps the arm's instructions in `Guard`, and an inactive
-///   guard around a failable operation yields zero rather than rejecting.
+/// - **After `UntaintControlFlow`**, every `JmpIf` is on a pure condition (witness ones are
+///   linearized, their instructions wrapped in `Guard`). A pure branch is real control flow in
+///   both backends, so the untaken arm is never evaluated.
+/// - **Before it**, a witness `JmpIf` is still real control flow, so the fact holds on every
+///   execution taking the edge. Noir owes no rejection for an `if` that did not run, and
+///   linearization keeps that: an inactive guard around a failable operation yields zero.
 #[derive(Debug, Clone)]
 struct BranchFact {
     kind: CmpKind,
@@ -1776,19 +1746,14 @@ impl ValueRange {
         }
     }
 
-    /// A **trapping** change of width: the value is asserted to be representable at `width`, and
-    /// anything that is not is discarded.
+    /// A **trapping** change of width: the value is asserted representable at `width`, and anything
+    /// else is discarded. ⊥ means the assertion cannot hold, which is why constraint-eliding
+    /// consumers must ask the `proves_*` predicates.
     ///
-    /// ⊥ is a legitimate result — it means the assertion cannot hold — which is precisely why the
-    /// consumers that elide constraints must ask the `proves_*` predicates rather than the plain
-    /// set ones.
-    ///
-    /// Only the **unsigned** reading crosses the width boundary. It is the raw integer, so it means
-    /// the same thing at any width; the signed reading is two's complement at the _old_ width and
-    /// is a statement about a sign bit that has moved, so it is dropped and recovered by the
-    /// reduction rather than carried over. Carrying it across would manufacture ⊥: a `Bits(8)`
-    /// `[200, 255]` has the signed reading `[−56, −1]`, and re-reading that at `Bits(16)` asks for
-    /// a pattern that is both `≥ 200` and `≥ 2^15`, which nothing satisfies.
+    /// Only the unsigned reading crosses widths, being the raw integer. The signed reading is two's
+    /// complement at the old width, so it is dropped and recovered by the reduction. Carrying it
+    /// would manufacture ⊥: `Bits(8)` `[200, 255]` reads signed as `[−56, −1]`, which at `Bits(16)`
+    /// is the patterns `≥ 2^16 − 56`, none of them `≤ 255`.
     pub fn constrain_to(&self, width: Width) -> Self {
         if self.width == width {
             return self.clone();
@@ -1897,10 +1862,8 @@ impl ValueRange {
         if self.is_empty() || bound == 0 {
             return false;
         }
-        // Only the upper end is asked about. The lower one carries nothing: the unsigned reading is
-        // a raw bit pattern, so it is non-negative at every `Width` by construction, and a
-        // negative amount shows up here as the _large_ magnitude its bits spell — which is exactly
-        // what the upper test rejects.
+        // Only the upper end matters: the unsigned reading is non-negative, so a negative amount
+        // appears as the large magnitude its bits spell, which the upper test rejects.
         match self.unsigned.hi() {
             Some(hi) => hi < &BigInt::from(bound),
             // An unbounded end proves nothing.
@@ -1992,24 +1955,18 @@ fn decode_signed(bits: usize, raw: &BigInt) -> BigInt {
 
 /// Whether a guarded operation can yield a zero it would not have computed.
 ///
-/// This is the complement, restricted to scalars, of what
-/// `LowerSideEffectFreeGuards::can_drop_guard` accepts. Everything that pass accepts is computed
-/// unconditionally, so its guard says nothing about its value. Everything it refuses is rewritten
-/// by `LowerPureGuards` into a branch on the operation's failure condition whose failing side
-/// asserts the condition false and produces the result type's zero
-/// (`pure_guards.rs::emit_guard_failure_default`, and the `TypeExpr::Field` arm of
-/// `lower_divmod_guard`).
+/// Among scalars, the complement of what `LowerSideEffectFreeGuards::can_drop_guard` accepts: what
+/// it accepts is computed unconditionally, and what it refuses `LowerPureGuards` rewrites into a
+/// branch whose failing side yields the type's zero (`emit_guard_failure_default` in
+/// `pure_guards.rs`, and the `TypeExpr::Field` arm of `lower_divmod_guard`).
 ///
-/// A shift with a witness operand is the one failable operation that pass leaves alone. It stays in
-/// the set, since its lowering can still answer zero where the guard is off: a known amount at or
-/// past the width is an assertion beside a zero, and every single-cell `>>` answers zero there
-/// (`witness_bitwise::lower_unsigned_shr` and `lower_signed_shr`).
+/// A shift with a witness operand is left alone by that pass but stays in the set: a known amount
+/// at or past the width asserts beside a zero, and every single-cell `>>` answers zero where the
+/// guard is off (`witness_bitwise::lower_unsigned_shr` and `lower_signed_shr`).
 ///
-/// Integer `Add`/`Sub`/`Mul` are in the set and their field counterparts are not, because field
-/// arithmetic cannot fail. `ArrayGet` and `ArraySet` also have failure branches, and their results
-/// _can_ be scalars — they are left out because the transfer does not model them either way: they
-/// fall to the `_` arm, which answers with the full range of the declared type, and that already
-/// contains the zero the failure branch would produce.
+/// Integer `Add`/`Sub`/`Mul` are in the set and field ones are not, as field arithmetic cannot
+/// fail. `ArrayGet` and `ArraySet` are not modeled: they fall to the `_` arm, whose full declared
+/// range already contains the zero.
 fn guard_may_produce_zero(inner: &OpCode, types: &FunctionTypeInfo) -> bool {
     use ArithGroup::*;
     match inner {
@@ -2027,20 +1984,15 @@ fn guard_may_produce_zero(inner: &OpCode, types: &FunctionTypeInfo) -> bool {
 
 /// The left operand of a guarded shift that can yield it where the guard is off, if `inner` is one.
 ///
-/// A shift with a witness operand gets no failure branch from `LowerPureGuards`, and several of its
-/// lowerings neutralise the amount to zero on an inactive path instead, so the result there is the
-/// operand shifted by nothing: the powers-of-two table's amount in one cell
-/// (`witness_bitwise::emit_pow2_factor`), and past it `WideWitnessInts::shift_amount` wherever the
-/// amount is witnessed. A single-cell `>>` does not pass it on, as it answers zero there, and a pure
-/// amount is not zeroed on either side of the cell, so a shift by one shifts by it. The rule is
-/// stated on the operation rather than on the route its lowering takes, so it holds whichever route
-/// that is.
+/// A shift with a witness operand gets no failure branch from `LowerPureGuards`; instead some of
+/// its lowerings zero the amount on an inactive path, so the result there is the operand: the
+/// powers-of-two table in one cell (`witness_bitwise::emit_pow2_factor`), and past one cell
+/// `WideWitnessInts::shift_amount` for a witnessed amount. A single-cell `>>` answers zero instead,
+/// and a pure amount is never zeroed.
 ///
-/// The operand is outside the computed range of a shift whose amount excludes zero, which a witness
-/// amount the domain has pinned to a literal does. A consumer that read the result's range to size
-/// a check that holds on every path would emit a constraint the inactive path cannot meet,
-/// rejecting an honest run that does not take the branch. No consumer reads such a range, so only
-/// `a_guarded_witness_shift_can_produce_its_operand` pins this.
+/// The operand can lie outside the computed range of a shift whose amount excludes zero. A consumer
+/// sizing an every-path check from that range would reject an honest run that skips the branch.
+/// No consumer does, so only `a_guarded_witness_shift_can_produce_its_operand` pins this.
 fn shift_passing_its_operand_through(inner: &OpCode, types: &FunctionTypeInfo) -> Option<ValueId> {
     match inner {
         OpCode::BinaryArithOp { kind, lhs, rhs, .. }
@@ -2222,10 +2174,9 @@ fn field_to_bigint(f: &Field) -> BigInt {
     BigInt::from_bytes_le(Sign::Plus, &bytes_le)
 }
 
-/// Convert an integer constant's pattern to a `BigInt`, read as an unsigned magnitude.
+/// An integer constant's pattern as a `BigInt`, read unsigned.
 ///
-/// Unsigned because the pattern carries no reading; the signed one is recovered by the domain's own
-/// reduction.
+/// The pattern carries no reading; the domain's reduction recovers the signed one.
 fn pattern_to_bigint(pattern: &IntBits) -> BigInt {
     BigInt::from(num_bigint::BigUint::from(pattern))
 }
@@ -2863,8 +2814,7 @@ mod tests {
         assert!(!bottom_field.is_non_negative_as_signed());
     }
 
-    /// `binary_arith` with both operands the result's width, which is every case that occurs
-    /// outside a shift by a narrower amount.
+    /// `binary_arith` with both operands the result's width.
     fn arith(kind: BinaryArithOpKind, width: Width, l: &ValueRange, r: &ValueRange) -> ValueRange {
         ValueRangeAnalysis::binary_arith(kind, width, l, r, true, true)
     }
@@ -3015,14 +2965,13 @@ mod tests {
         let w = Width::Bits(8);
         let narrow = ValueRange::from_unsigned(Width::Bits(4), iv(1, 1));
 
-        assert_eq!(
-            ValueRangeAnalysis::binary_arith(UAdd, w, &u8r(1, 1), &narrow, true, false),
-            ValueRange::full(w)
-        );
-        // A shift is the exception: its amount is a count, not a reading of the result, so a
-        // narrower one is fine.
-        let shl = ValueRangeAnalysis::binary_arith(UShl, w, &u8r(1, 3), &narrow, true, false);
-        assert_eq!(shl.unsigned(), &iv(2, 6));
+        for kind in [UAdd, UShl] {
+            assert_eq!(
+                ValueRangeAnalysis::binary_arith(kind, w, &u8r(1, 1), &narrow, true, false),
+                ValueRange::full(w),
+                "{kind:?}"
+            );
+        }
     }
 
     /// Run the whole analysis over a hand-built function and return the entry's ranges.
@@ -3188,9 +3137,8 @@ mod tests {
 
     #[test]
     fn a_widened_range_is_clamped_back_to_its_width() {
-        // `Interval::widen` releases to ±∞, but a `ValueRange` is a range _of a width_, so the
-        // reduction has to bring it back. Otherwise the solver would start handing out bounds
-        // outside the operand's own domain.
+        // `Interval::widen` releases to ±∞, but a `ValueRange` is a range of a width, so the
+        // reduction must bring it back inside the operand's width.
         let was = ValueRange::from_unsigned(Width::Bits(8), Interval::closed(3, 200));
         let now = ValueRange::from_unsigned(Width::Bits(8), Interval::closed(4, 199));
         let widened = was.widen(&now);
@@ -3204,11 +3152,10 @@ mod tests {
 
     #[test]
     fn the_solver_terminates_on_a_bound_that_creeps() {
-        // The shape `signed_for_range` produces: a loop whose counter bound tightens by exactly one
-        // per round. The fixed point exists but is 2^63 rounds away, and before widening the solver
-        // was still moving after 2000 rounds. What is asserted here is only that the answer is
-        // _sound_ — the counter really is inside its width — because which bound the widening
-        // settles on is the operator's business, not this test's.
+        // `signed_for_range`'s shape: a loop whose counter bound tightens by one per round, with a
+        // fixed point 2^63 rounds away, so only widening terminates. This asserts only that the
+        // answer is sound (the counter is inside its width); which bound widening settles on is the
+        // operator's business.
         let mut ssa = HLSSA::with_main("main".to_string());
         let (_, _, counter, _, _) = counted_loop(&mut ssa);
         let ranges = run_analysis(&mut ssa);
@@ -3642,14 +3589,13 @@ mod tests {
         assert!(!guarded_u8_op(USub, 3, 4).unsigned().is_empty());
     }
 
-    /// A guarded shift with a witness operand can yield that operand where the guard is off,
-    /// because several of its lowerings zero the amount there instead of branching to a zero.
+    /// A guarded shift with a witness operand can yield that operand where the guard is off, as
+    /// some of its lowerings zero the amount there.
     ///
-    /// `(w & 0xf0) >> 4` computes into `[0, 15]`, and the operand reaches 240. At this width the
-    /// single cell's `>>` answers zero instead, but the rule is stated on the operation rather
-    /// than on the route its lowering takes, so the operand is joined in all the same. The same
-    /// shift of pure operands keeps its computed range, joined with the zero `LowerPureGuards`
-    /// gives it.
+    /// `(w & 0xf0) >> 4` computes into `[0, 15]` and the operand reaches 240. At this width the
+    /// single cell's `>>` answers zero instead, but the rule is stated on the operation, so the
+    /// operand is joined in anyway. The same shift of pure operands keeps its computed range,
+    /// joined with `LowerPureGuards`' zero.
     #[test]
     fn a_guarded_witness_shift_can_produce_its_operand() {
         for witnessed in [true, false] {
@@ -3797,26 +3743,20 @@ mod tests {
 
 /// The range domain's conformance relation to the normative model in `mavros-int-semantics`.
 ///
-/// This analysis provides something different from every other evaluator in the batch. It does not
-/// compute a value, so it can neither equal [`eval`](semantics::eval) nor refine it. Instead it has
-/// to be sound, that is that the set of values an execution can actually produce is contained in
-/// the set its answer denotes:
+/// This analysis computes no value, so it must be sound rather than equal to
+/// [`eval`](semantics::eval): every value an execution can produce lies in the set its answer
+/// denotes.
 ///
 /// ```text
 /// { v : eval(op, sign, bits, a, bits, b) == Value(v),  a ∈ γ(L),  b ∈ γ(R) }  ⊆  γ(binary_arith(..))
 /// ```
 ///
-/// Two things about that statement are important to note.
+/// It quantifies over [`Outcome::Value`] only: a rejected execution produces no value, so the
+/// analysis owes nothing there. That is the license `wrap_or_trap` relies on when it returns the
+/// non-wrapping interval for an operation that would overflow, and the sweep checks it.
 ///
-/// It quantifies over [`Outcome::Value`] only. A rejected execution produces no value at all,
-/// instead becoming a runtime constraint failure, so the analysis owes nothing on those inputs.
-/// That is exactly the licence `wrap_or_trap` relies on when it returns the _non_-wrapping interval
-/// for an operation that would overflow, and stating the relation this way turns that licence into
-/// something the sweep checks rather than something the comment asserts.
-///
-/// And γ is over **both** readings, because a `ValueRange` denotes the patterns its unsigned and
-/// signed intervals both admit. Checking one reading would pass a range that is unsound in the
-/// other.
+/// γ is over **both** readings, as a `ValueRange` denotes the patterns both its intervals admit;
+/// checking one would pass a range unsound in the other.
 #[cfg(test)]
 mod int_semantics_conformance {
     use mavros_int_semantics::{self as semantics, IntBits, IntOp, Outcome, corners};
@@ -3895,11 +3835,10 @@ mod int_semantics_conformance {
         ]
     }
 
-    /// Soundness at every width this sweep can enumerate, which is every **narrow** width.
+    /// Soundness at every narrow width, the widths this sweep can enumerate.
     ///
-    /// The other pure evaluators each grew a `corners::wide_operands` sweep, and this one cannot.
-    /// The relation being checked is `γ`-wise — every concrete pair inside the input ranges is run
-    /// through the model and the answer looked for inside the output range.
+    /// There is no `corners::wide_operands` sweep: the relation is `γ`-wise, so every concrete pair
+    /// inside the input ranges is run through the model.
     #[test]
     fn the_transfer_is_sound_for_every_accepted_execution() {
         let mut checked = 0usize;

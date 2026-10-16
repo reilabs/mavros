@@ -294,12 +294,9 @@ impl HostType {
     }
 }
 
-/// A run of consecutive frame cells, addressed by one encoded [`FramePosition`], with its length
-/// taken from an integer width the same opcode carries.
-///
-/// This is used to implement wide integer operands: the frame layouter gives an `int(N)` value a
-/// set of contiguous cells, so the position alone cannot say how many to read. We thus take the
-/// width from the immediate.
+/// A run of consecutive frame cells at one encoded `FramePosition`, whose length comes from an
+/// integer width the same opcode carries. A wide integer's cells are contiguous, so the position
+/// alone cannot say how many to read.
 #[derive(Debug)]
 struct SliceInput {
     /// The name of the host parameter holding the operand width in bits.
@@ -613,11 +610,8 @@ fn parse_frame(ident: Ident, ty: &syn::Type) -> Input {
     })
 }
 
-/// Parse `#[frame_slice(width)] name: &[u64]`, or `&mut [u64]` for a result.
-///
-/// One attribute covers both directions, keyed off the reference's own mutability, because the two
-/// encode identically as a single [`FramePosition`], and differ only in what the handler may do
-/// with the cells.
+/// Parse `#[frame_slice(width)] name: &[u64]`, or `&mut [u64]` for a result. Both encode as one
+/// `FramePosition`; the mutability says only what the handler may do with the cells.
 fn parse_frame_slice(ident: Ident, ty: &syn::Type, attr: &syn::Attribute) -> Input {
     let width: Ident = attr
         .parse_args()
@@ -738,10 +732,9 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
                     GuestType::Ptr => format_ident!("read_ptr_mut"),
                     GuestType::BoxedValue => format_ident!("read_array_mut"),
                 };
-                // The position is bound rather than read inline so that `gen_slice_bindings` can
-                // check a wide result against it. A raw pointer is not a borrow, so the pointer
-                // itself may exist before that check; what must not is a write through it while a
-                // slice covers the same cells, and the check runs before any slice is built.
+                // Bound, not read inline, so `gen_slice_bindings` can check a wide result against
+                // it before any slice exists. A raw pointer may coexist with a slice; a write
+                // through it may not.
                 let pos = format_ident!("__out_pos_{}", name);
                 getters.extend(quote! {
                     let #pos = unsafe { *pc.offset(current_field_offset) as isize };
@@ -792,8 +785,8 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
         def.inputs
             .iter()
             .map(|input| match input {
-                // Every operand kind is bound to its own name above, so the call passes that name
-                // whatever the kind was.
+                // Every operand kind is bound above to a local named after the operand, so the call
+                // passes that name whatever the kind was.
                 Input::Struct(StructInput { name, .. }) => {
                     let i = format_ident!("{}", name);
                     quote! { #i }
@@ -856,17 +849,14 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
     }
 }
 
-/// Build every frame slice a handler takes, after the assertion that nothing else it writes
-/// overlaps said frame slice.
+/// Build every frame slice a handler takes, after asserting that nothing the handler writes
+/// overlaps one.
 ///
-/// A `&mut [u64]` and a `&[u64]` over the same cells is undefined behavior the moment both exist,
-/// so the check has to run while there are only positions and lengths.
-///
-/// Every operand the handler **writes** is checked against every slice: a result slice against the
-/// other slices, and an `#[out]` against all of them, its extent coming from
-/// [`GuestType::to_cells_tokens`]. An `#[out]` is a raw pointer rather than a reference, so its
-/// mere existence alongside a slice is fine; the write through it is not, and that happens in the
-/// handler body once every binding below is live.
+/// The check runs while there are only positions and lengths: a `&mut [u64]` and a `&[u64]` over
+/// the same cells are undefined behavior as soon as both exist. A result slice is checked against
+/// the other slices, and an `#[out]` against all of them, with its extent from
+/// [`GuestType::to_cells_tokens`]. An `#[out]` is a raw pointer, which may coexist with a slice,
+/// but the handler body writes through it while every binding is live.
 fn gen_slice_bindings(def: &OpCodeDef) -> proc_macro2::TokenStream {
     let slices = def
         .struct_args()
@@ -900,8 +890,8 @@ fn gen_slice_bindings(def: &OpCodeDef) -> proc_macro2::TokenStream {
         })
         .collect::<Vec<_>>();
 
-    // A result slice is checked against every slice; an `#[out]` against every slice too, but not
-    // against another `#[out]`, which is the pair this attribute has no bearing on.
+    // Each writer is checked against every slice. Two `#[out]`s are not checked against each
+    // other, as neither is a slice.
     let writers = extents
         .iter()
         .filter(|(_, mutable, _, _)| *mutable)

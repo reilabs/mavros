@@ -2,8 +2,10 @@
 //!
 //! Noir's field builtins take `Field` operands (`noir_stdlib/src/field/mod.nr`). Witness
 //! decompositions constrain recomposition already; pure field decompositions need a guarded
-//! range check before later lowerings turn them into raw hints. Integer IR decompositions
-//! are not these source builtins and must not receive a field range check.
+//! range check before later lowerings turn them into raw hints. Integer decompositions the IR
+//! mints are not these source builtins and must not receive a field range check. A
+//! program-stated integer decomposition arrives here as a field decomposition through
+//! `IntegerDigits`' image path, and its check is intended.
 //! The standalone pass handles source bit decompositions. The frontend emits dynamic radices
 //! for byte decompositions, whose fit checks are emitted by the radix lowerer after validation.
 

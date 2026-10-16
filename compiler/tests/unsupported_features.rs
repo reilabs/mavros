@@ -117,22 +117,12 @@ fn spread_widths_past_their_containers_are_refused() {
     }
 }
 
-/// The widest `N` each takes compiles, and its witness satisfies the constraints.
-#[test]
-fn spread_widths_up_to_their_containers_run() {
+/// Compiles `source`, whose `main` takes `x: u32`, and runs it on each value, answering whether its
+/// witness satisfies the constraints.
+fn witness_holds_for_each(source: &str, values: &[u32]) -> Vec<bool> {
     use mavros_compiler::{api, compiler::codegen::CodeGenOptions};
 
-    let dir = common::noir_project(
-        r#"use std::mavros::{spread, unspread};
-fn main(x: u32) {
-    let s = spread::<32>(x);
-    assert_eq(s & 0xAAAAAAAAAAAAAAAA, 0);
-    let (odd, even) = unspread::<32>(s);
-    assert_eq(odd, 0);
-    assert_eq(even, x);
-}
-"#,
-    );
+    let dir = common::noir_project(source);
     let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
     let mut binary = api::compile_bytecode(
         &mut driver,
@@ -142,10 +132,53 @@ fn main(x: u32) {
         },
     )
     .unwrap();
-    for x in [0u32, 1, 0x8000_0000, 0x1234_5678, u32::MAX] {
-        std::fs::write(dir.path().join("Prover.toml"), format!("x = {x}")).unwrap();
-        let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
-        let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None).unwrap();
-        assert!(api::check_witgen(&r1cs, &result), "x = {x}");
+    values
+        .iter()
+        .map(|x| {
+            std::fs::write(dir.path().join("Prover.toml"), format!("x = {x}")).unwrap();
+            let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+            api::run_witgen_from_binary(&mut binary, &r1cs, &params, None)
+                .is_ok_and(|result| api::check_witgen(&r1cs, &result))
+        })
+        .collect()
+}
+
+/// The widest `N` each takes compiles, and its witness satisfies the constraints.
+#[test]
+fn spread_widths_up_to_their_containers_run() {
+    let values = [0u32, 1, 0x8000_0000, 0x1234_5678, u32::MAX];
+    let holds = witness_holds_for_each(
+        r#"use std::mavros::{spread, unspread};
+fn main(x: u32) {
+    let s = spread::<32>(x);
+    assert_eq(s & 0xAAAAAAAAAAAAAAAA, 0);
+    let (odd, even) = unspread::<32>(s);
+    assert_eq(odd, 0);
+    assert_eq(even, x);
+}
+"#,
+        &values,
+    );
+    for (x, holds) in values.iter().zip(holds) {
+        assert!(holds, "x = {x}");
+    }
+}
+
+/// A witnessed `spread::<N>` of a `u32` reads `N` bits and has no witness for a value with any bit
+/// above them.
+#[test]
+fn a_witnessed_spread_has_no_witness_past_its_read() {
+    let values = [0u32, 0x5A, 0xFF, 0x100, 0x1_0000, u32::MAX];
+    let holds = witness_holds_for_each(
+        r#"use std::mavros::spread;
+fn main(x: u32) {
+    let s = spread::<8>(x);
+    assert_eq(s & 0xAAAAAAAAAAAAAAAA, 0);
+}
+"#,
+        &values,
+    );
+    for (x, holds) in values.iter().zip(holds) {
+        assert_eq!(holds, *x < 0x100, "x = {x:#x}");
     }
 }

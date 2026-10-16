@@ -1,9 +1,8 @@
 //! Refusal for the widths the configured field cannot carry.
 //!
-//! Nearly every witness lowering packs a value into a single field element, and each of them
-//! therefore carries a precondition on the field's width. On bn254 all of them hold with room to
-//! spare, but this is not true of every field. Routing those preconditions through one check makes
-//! the set of them a register of what a narrower field would need built.
+//! Witness lowerings pack values into field elements, so each has a precondition on the field's
+//! width. All hold on bn254; routing them through one check registers what a narrower field would
+//! need.
 
 use std::fmt;
 
@@ -13,8 +12,7 @@ use crate::compiler::passes::shared::limbs::witness_limb_bits;
 
 /// Refuse a lowering that the configured field is too narrow to carry, naming the field.
 ///
-/// `attempted` says what was being lowered and which quantity did not fit; the tail added here says
-/// what the field actually offers, so the two halves of the mismatch appear in one message.
+/// `attempted` says what did not fit; the message adds what the field offers.
 pub fn unsupported_on_this_field(attempted: fmt::Arguments<'_>, field: FieldConfig) -> ! {
     ice_usr!(
         "{attempted}. The configured field has a {}-bit modulus and a {}-bit witness limb. This \
@@ -32,8 +30,8 @@ mod tests {
     /// The half of the message the callers do not write.
     ///
     /// On the only configured field every caller's predicate holds, so this is the one property of
-    /// the funnel that can be checked without a second field: that the tail names what the field
-    /// offers, in the units the caller's own half is written in.
+    /// this refusal testable without a second field: the tail names what the field offers, in the
+    /// units the caller's half of the message uses.
     #[test]
     #[should_panic(expected = "254-bit modulus and a 64-bit witness limb")]
     fn the_refusal_names_what_the_field_offers() {

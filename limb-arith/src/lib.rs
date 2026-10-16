@@ -1,8 +1,8 @@
-//! Wrapping arithmetic, and the spread and unspread bit rearrangements, on buffers of little-endian
-//! `u64` limbs.
+//! Wrapping arithmetic, shifts and orderings, and the spread and unspread bit rearrangements, on
+//! buffers of little-endian `u64` limbs.
 //!
-//! Shared by the evaluators that compute wide integers in limbs: the VM and the WASM runtime's
-//! helpers.
+//! Shared by the evaluators that compute wide integers in limbs, the VM and the WASM runtime's
+//! helpers, and by the compiler, whose R1CS spread table uses [`spread_u32_to_u64`].
 //!
 //! This crate is `no_std` and does not allocate.
 
@@ -35,13 +35,9 @@ pub fn sub(res: &mut [u64], a: &[u64], b: &[u64]) {
 
 /// `a * b` written into `res`, all arguments of the same length.
 ///
-/// Schoolbook, accumulating straight into the result rather than into a `2k`-limb product and
-/// truncating after: the columns at or above `k` are exactly the ones the wrap discards, so the
-/// high half is never computed and needs no scratch buffer. The carry leaving column `k-1` is
-/// dropped for the same reason.
-///
-/// The column accumulator needs no wrapping arithmetic: a limb product plus two limb-sized addends
-/// is at most `(2^64 - 1)^2 + 2·(2^64 - 1)`, which is `2^128 - 1` exactly.
+/// Schoolbook, straight into the result: the columns at or past `k`, and the carry out of column
+/// `k-1`, are what the wrap discards, so they are never computed. A limb product plus two
+/// limb-sized addends is at most `2^128 - 1`, so the accumulator cannot overflow.
 pub fn mul(res: &mut [u64], a: &[u64], b: &[u64]) {
     let k = res.len();
     res.fill(0);
@@ -105,12 +101,9 @@ pub fn divide_by_limb(quotient: &mut [u64], a: &[u64], divisor: u64) -> u64 {
 /// `divisor` and `dividend` are working buffers of at least `b.len()` and `a.len() + 1` limbs,
 /// whose contents on entry do not matter.
 ///
-/// The estimate `qhat` for each quotient limb comes from dividing the top two limbs of the running
-/// dividend by the top limb of the divisor, which is why the divisor is first shifted left until
-/// its top bit is set: the estimate is then at most two above the true limb (Knuth's Theorem B).
-/// The test against the divisor's second limb brings it to at most one above, and the add-back
-/// after the subtraction repairs that last one. `u128` arithmetic supplies the two-limb steps a
-/// 64-bit host does not have as operators.
+/// Knuth's Algorithm D: each quotient limb is estimated from the top two dividend limbs over the
+/// normalized divisor's top limb, at most two too large (Theorem B); the second-limb test brings
+/// that to one, and the add-back repairs the last.
 pub fn knuth_divide(
     quotient: &mut [u64],
     remainder: &mut [u64],
@@ -216,6 +209,81 @@ fn shift_right_into(target: &mut [u64], source: &[u64], shift: u32) {
     }
 }
 
+/// `a / b` and `a % b`, both read as unsigned, written into `quotient` and `remainder`, the four of
+/// one length `k`.
+///
+/// Total: a zero divisor answers zero for both. `scratch` holds at least `2k + 1` limbs, whose
+/// contents on entry do not matter; a divisor of one limb does not touch it.
+pub fn udivrem(
+    quotient: &mut [u64],
+    remainder: &mut [u64],
+    a: &[u64],
+    b: &[u64],
+    scratch: &mut [u64],
+) {
+    quotient.fill(0);
+    remainder.fill(0);
+    match significant_limbs(b) {
+        0 => {}
+        1 => remainder[0] = divide_by_limb(quotient, a, b[0]),
+        n => {
+            let (divisor, dividend) = scratch.split_at_mut(n);
+            knuth_divide(quotient, remainder, a, &b[..n], divisor, dividend);
+        }
+    }
+}
+
+/// `a / b` and `a % b`, both read as two's complement at `bits`, written into `quotient` and
+/// `remainder`, the four of one length `k` with every bit above `bits` clear.
+///
+/// Sign-magnitude around [`udivrem`]: the quotient takes the operands' xor and the remainder takes
+/// the dividend's sign, which is truncation toward zero. Total: a zero divisor answers zero for
+/// both, and `INT_MIN / -1` wraps to `INT_MIN` remainder zero. `scratch` holds at least `4k + 1`
+/// limbs, whose contents on entry do not matter.
+pub fn sdivrem(
+    quotient: &mut [u64],
+    remainder: &mut [u64],
+    a: &[u64],
+    b: &[u64],
+    bits: usize,
+    scratch: &mut [u64],
+) {
+    let k = a.len();
+    let (a_negative, b_negative) = (is_negative(a, bits), is_negative(b, bits));
+    let (a_store, rest) = scratch.split_at_mut(k);
+    let (b_store, rest) = rest.split_at_mut(k);
+    // Only a negative operand is copied, to be negated into its magnitude.
+    let a_magnitude = if a_negative {
+        negated_into(a_store, a, bits)
+    } else {
+        a
+    };
+    let b_magnitude = if b_negative {
+        negated_into(b_store, b, bits)
+    } else {
+        b
+    };
+
+    udivrem(quotient, remainder, a_magnitude, b_magnitude, rest);
+
+    if a_negative != b_negative {
+        negate(quotient);
+        mask_top(quotient, bits);
+    }
+    if a_negative {
+        negate(remainder);
+        mask_top(remainder, bits);
+    }
+}
+
+/// `-value` at `bits`, written into `store` of the same length and returned.
+fn negated_into<'a>(store: &'a mut [u64], value: &[u64], bits: usize) -> &'a [u64] {
+    store.copy_from_slice(value);
+    negate(store);
+    mask_top(store, bits);
+    store
+}
+
 // SPREADS
 // ================================================================================================
 
@@ -251,9 +319,10 @@ fn compact_even_bits(mut x: u64) -> u32 {
 /// Limb `index` of `a` with every bit at or above `bits` cleared, so that a spread or unspread
 /// reads only the bits it names.
 fn read_limb(a: &[u64], index: usize, bits: usize) -> u64 {
-    match bits - 64 * index {
-        rest if rest >= 64 => a[index],
-        rest => a[index] & ((1 << rest) - 1),
+    if bits - 64 * index > 64 {
+        a[index]
+    } else {
+        a[index] & top_limb_mask(bits)
     }
 }
 
@@ -261,7 +330,8 @@ fn read_limb(a: &[u64], index: usize, bits: usize) -> u64 {
 /// cleared.
 ///
 /// `a` holds at least the limbs `bits` reaches and `res` at least the limbs `2 * bits` does; the
-/// two need not be the same length, and anything past those is read as zero or written as zero.
+/// two need not be the same length. Bits of `a` past `bits` are ignored, and limbs of `res` past
+/// `2 * bits` are written as zero.
 pub fn spread(res: &mut [u64], a: &[u64], bits: usize) {
     res.fill(0);
     for index in 0..bits.div_ceil(64) {
@@ -285,7 +355,7 @@ pub fn spread(res: &mut [u64], a: &[u64], bits: usize) {
 /// The low `bits` bits of `a` separated into `odd` and `even`, bit `2i + 1` to bit `i` of `odd` and
 /// bit `2i` to bit `i` of `even`, with every other bit of both cleared.
 ///
-/// `a` holds at least the limbs `bits` reaches, and each stream at least the limbs its own
+/// `a` holds at least the limbs `bits` reaches, and each stream at least the limbs its
 /// `floor(bits / 2)` or `ceil(bits / 2)` bits do.
 pub fn unspread(odd: &mut [u64], even: &mut [u64], a: &[u64], bits: usize) {
     odd.fill(0);
@@ -308,16 +378,143 @@ pub fn unspread(odd: &mut [u64], even: &mut [u64], a: &[u64], bits: usize) {
     }
 }
 
+// SHIFTS AND ORDERINGS
+// ================================================================================================
+//
+// These read a value at a given width, not as its whole buffer: a shift reduces its amount modulo
+// the width and wraps there, and a signed reading takes the width's top bit as the sign.
+//
+// A `bits`-wide value is `ceil(bits / 64)` limbs. Every bit above the width must be zero: a shift
+// masks its value, but reads its amount's whole buffer, and an ordering compares both whole.
+
+/// The bits the top limb of a `bits`-wide value holds, in `1..=64`.
+#[must_use]
+pub fn top_limb_bits(bits: usize) -> usize {
+    debug_assert!(bits > 0, "a zero-width integer has no top limb");
+    ((bits - 1) % 64) + 1
+}
+
+/// The mask of the bits the top limb of a `bits`-wide value holds.
+#[must_use]
+pub fn top_limb_mask(bits: usize) -> u64 {
+    match top_limb_bits(bits) {
+        64 => u64::MAX,
+        held => (1 << held) - 1,
+    }
+}
+
+/// Whether `value` is negative read as two's complement at `bits`: its bit `bits - 1`.
+pub fn is_negative(value: &[u64], bits: usize) -> bool {
+    (value[value.len() - 1] >> (top_limb_bits(bits) - 1)) & 1 == 1
+}
+
+/// Clear every bit of `value`'s top limb above `bits`.
+pub fn mask_top(value: &mut [u64], bits: usize) {
+    let top = value.len() - 1;
+    value[top] &= top_limb_mask(bits);
+}
+
+/// The amount a shift by `b` applies to a `bits`-wide value: `b` read as unsigned, modulo `bits` (a
+/// true modulo, which is a mask only where `bits` is a power of two). Zero at width zero.
+pub fn shift_amount(b: &[u64], bits: usize) -> usize {
+    if bits == 0 {
+        return 0;
+    }
+    if bits.is_power_of_two() {
+        return b[0] as usize & (bits - 1);
+    }
+    let modulus = bits as u128;
+    let mut rest = 0u128;
+    for limb in b.iter().rev() {
+        rest = ((rest << 64) | u128::from(*limb)) % modulus;
+    }
+    rest as usize
+}
+
+/// `a << amount` written into `res`, wrapping at `bits`, with `amount` already below `bits`.
+pub fn shl(res: &mut [u64], a: &[u64], amount: usize, bits: usize) {
+    let k = res.len();
+    let limbs = amount / 64;
+    let within = (amount % 64) as u32;
+    for i in (0..k).rev() {
+        let low = if i >= limbs { a[i - limbs] } else { 0 };
+        let carried = if within > 0 && i > limbs {
+            a[i - limbs - 1] >> (64 - within)
+        } else {
+            0
+        };
+        res[i] = (low << within) | carried;
+    }
+    mask_top(res, bits);
+}
+
+/// `a >> amount` written into `res`, zero-filling, with `amount` already below `bits`.
+pub fn ushr(res: &mut [u64], a: &[u64], amount: usize, bits: usize) {
+    shr(res, a, amount, bits, 0);
+}
+
+/// `a >> amount` written into `res`, sign-filling under a two's complement reading at `bits`, with
+/// `amount` already below `bits`.
+pub fn ashr(res: &mut [u64], a: &[u64], amount: usize, bits: usize) {
+    let fill = if is_negative(a, bits) { u64::MAX } else { 0 };
+    shr(res, a, amount, bits, fill);
+}
+
+/// The shared right shift, `fill` being the bits shifted in at the top.
+fn shr(res: &mut [u64], a: &[u64], amount: usize, bits: usize, fill: u64) {
+    let k = res.len();
+    let limbs = amount / 64;
+    let within = (amount % 64) as u32;
+    let top_mask = top_limb_mask(bits);
+
+    let limb = |i: usize| -> u64 {
+        if i >= k {
+            fill
+        } else if i == k - 1 {
+            (a[i] & top_mask) | (fill & !top_mask)
+        } else {
+            a[i]
+        }
+    };
+
+    for i in 0..k {
+        let high = limb(i + limbs);
+        let carried = if within > 0 {
+            limb(i + limbs + 1) << (64 - within)
+        } else {
+            0
+        };
+        res[i] = (high >> within) | carried;
+    }
+    mask_top(res, bits);
+}
+
+/// Whether `a < b`, reading both as unsigned, the two of one length.
+pub fn ult(a: &[u64], b: &[u64]) -> bool {
+    debug_assert_eq!(a.len(), b.len(), "an ordering across two lengths");
+    for i in (0..a.len()).rev() {
+        if a[i] != b[i] {
+            return a[i] < b[i];
+        }
+    }
+    false
+}
+
+/// Whether `a < b`, reading both as two's complement at `bits`.
+pub fn slt(a: &[u64], b: &[u64], bits: usize) -> bool {
+    match (is_negative(a, bits), is_negative(b, bits)) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => ult(a, b),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// A spread unspreads back to the bits it read, with nothing in the odd stream, at every width
     /// across three limbs, including the reads that end inside a limb's low half.
-    ///
-    /// The sweeps against the model are the VM's and the runtime's; this pins the shared body on
-    /// its own, including that bits above the read are cleared rather than carried through. Every
-    /// output starts as garbage, as a VM frame cell does, so a limb the body failed to clear shows.
     #[test]
     fn an_unspread_undoes_a_spread_at_every_width() {
         const GARBAGE: u64 = 0xAAAA_AAAA_AAAA_AAAA;
@@ -380,11 +577,11 @@ mod tests {
         assert!(below, "{a:x?} % {b:x?} is not below the divisor");
     }
 
-    /// A three-limb dividend over a two-limb divisor, over divisors whose small top limb against a
-    /// large second limb makes the estimate overshoot.
+    /// A three-limb dividend over two-limb divisors whose small top limb and large second limb
+    /// make the quotient estimate overshoot.
     ///
-    /// The full sweeps against the model are the VM's and the runtime's, at every width they hold;
-    /// this pins the shared body on its own, with no model to lean on.
+    /// The VM and the runtime sweep this body against the model at every width; this tests it
+    /// directly, without the model.
     #[test]
     fn a_division_satisfies_its_identity() {
         // A splitmix64 stream, for operands with no dependency to draw them.
@@ -409,11 +606,8 @@ mod tests {
         }
     }
 
-    /// The divisions that need the add-back, which random operands all but never reach.
-    ///
-    /// Hacker's Delight's `divmnu` cases for exactly this, its 32-bit digits scaled to 64: each
-    /// leaves the estimate one too large after the second-limb test, so the subtraction borrows
-    /// out of the window and the divisor is added back.
+    /// The divisions that need the add-back, which random operands almost never reach: Hacker's
+    /// Delight's `divmnu` cases, scaled from 32-bit to 64-bit digits.
     #[test]
     fn the_add_back_repairs_an_estimate_one_too_large() {
         const TOP: u64 = 1 << 63;
