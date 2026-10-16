@@ -109,9 +109,7 @@ within programs.
 
 The fork restricts integer parameters and returns at `main` to `u8`, `u16`, `u32`, `u64`, `u128`,
 `i8`, `i16`, `i32`, and `i64`, including integers inside arrays and structs. Wider arithmetic can
-use arrays of these types at the boundary, with casts and limb assembly inside the function. See
-`noir_tests/bigint_arithmetic`, `bigint_sequences`, and `bigint_abi` for source examples exercised
-by the functional runner.
+use arrays of these types at the boundary, with casts and limb assembly inside the function.
 
 A `Field` can be cast to a wider integer, including in constrained code; the compiler decomposes the
 canonical field value into limbs.

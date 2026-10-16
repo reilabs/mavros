@@ -15,8 +15,8 @@
 //! transposing makes every entry a limb it can already read. A pure element read back is
 //! recombined at once by [`Rewriter::recombine_pure`], integer arithmetic at the value's width that
 //! costs interpreter work rather than constraints. Users see a whole pure integer, while the
-//! read's limbs remain cached for later lookups. A global holding such a sequence takes a slot
-//! per limb sequence.
+//! read's limbs remain cached for any later consumer in the block that needs them, including
+//! arithmetic and lookups. A global holding such a sequence takes a slot per limb sequence.
 //!
 //! The representation is sound because **every limb is range-checked** to its declared width when
 //! it is created or modified. `2^h` is invertible mod `p`, so a single unbounded limb would let a
@@ -627,9 +627,9 @@ struct Rewriter<'a> {
     /// The limbs a pure integer read in this block was recombined from, by the read's result.
     ///
     /// A user that wants the limbs back, as the field image a witness-indexed lookup moves through
-    /// does, takes these rather than splitting what was just joined. The split is a division and a
-    /// narrowing per limb at the value's full width, which is the work the read has just done in
-    /// the other direction.
+    /// does, takes these rather than splitting what was just joined. The split uses a logical
+    /// right shift (except at offset zero) and a narrowing per limb at the value's full width,
+    /// undoing the recombination the read just performed.
     read_limbs: &'a mut HashMap<ValueId, Vec<ValueId>>,
 
     /// The values this function's rewrite has minted whose pattern is known at compile time but
@@ -4894,9 +4894,9 @@ impl Rewriter<'_> {
     /// One read per limb sequence of `array`, at the caller's index and under `guard` if any.
     ///
     /// A pure element is recombined into `result` at once for users that expect a whole integer.
-    /// The limbs remain in `read_limbs`, so a witness-indexed lookup can reuse them without
-    /// splitting the field image again. Recombination costs interpreter work, not constraints,
-    /// as a pure value is known wherever the constraints are built.
+    /// The limbs remain in `read_limbs` for any later operand consumer in this block, including
+    /// witness-indexed lookups, without splitting the whole value again. Recombination costs
+    /// interpreter work, not constraints, as a pure value is known wherever the constraints are built.
     fn lower_array_get(
         &mut self,
         guard: Option<ValueId>,
@@ -5679,9 +5679,9 @@ mod tests {
     ///
     /// A pure read is recombined for the users that want the whole value, and the image a
     /// witness-indexed lookup moves through wants the limbs again. Splitting the recombined value
-    /// would be a division and a narrowing per limb at the full width, so the arm hands back the
+    /// would use logical right shifts and narrowings at the full width, so the arm hands back the
     /// limbs it has: every `Field` cast takes one of the read's own results, and nothing in between
-    /// divides at the value's width.
+    /// shifts right or divides at the value's width.
     #[test]
     fn the_field_image_of_a_pure_read_is_cast_from_the_limbs_it_was_read_as() {
         let bits = 320usize;
@@ -5721,11 +5721,11 @@ mod tests {
             !ops.iter().any(|op| matches!(
                 op,
                 OpCode::BinaryArithOp {
-                    kind: BinaryArithOpKind::UDiv,
+                    kind: BinaryArithOpKind::UShr | BinaryArithOpKind::UDiv,
                     ..
                 }
             )),
-            "nothing splits the recombined value back into limbs"
+            "no logical right shift or division re-splits the recombined value into limbs"
         );
     }
 

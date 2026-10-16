@@ -60,6 +60,8 @@ pub fn read_prover_inputs(
         .parse(
             &inputs_src,
             abi,
+            // FIELD-ASSUMPTION: L1-direct-ref
+            // ABI input decoding is pinned to BN254, matching Mavros' current runtime field.
             acvm::FieldConfig::new(acvm::FieldId::Bn254),
         )
         .map_err(|e| format!("failed to parse inputs: {e}"))?;
