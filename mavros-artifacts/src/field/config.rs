@@ -2,41 +2,44 @@
 //!
 //! [`FieldConfig`] carries the field's modulus, bit-width, and the derived constants the compiler
 //! mints values from (e.g. `two_pow`). An instance is homed on the compiler's `SSA` and reached
-//! through `ssa.field()` / `b.field()`, so the middle-end mints and inspects every field value
-//! through this object rather than through static associated items — no pass names a concrete
-//! prime. The *values* it returns are still bn254's for the moment (see the note on the `impl`
-//! below); codegen and the VM also currently remain on the raw representation and do not consult
-//! it.
+//! through `ssa.field()` / `b.field()`, so the middle-end and R1CS generation mint and inspect
+//! every field value through this object, and no pass names a concrete prime. The _values_ it
+//! returns are bn254's (see the note on the `impl` below).
 
 use ark_ff::BigInt;
 
-use crate::field::{element::FieldElement, mavros_field::FieldId};
+use crate::field::{
+    element::FieldElement,
+    mavros_field::{FieldId, MavrosField},
+};
 
 // RUNTIME FIELD CONFIGURATION
 // ================================================================================================
 
 /// The configuration of the field a program operates over.
 ///
-/// bn254 is the only field today, so this is effectively a tag; its value is that it is a single
-/// object threaded through the SSA and the symbolic evaluators, which a second field can later be
-/// taught to answer differently without touching any of those call sites.
+/// Currently bn254 is the only supported field, but this serves as a single configuration that is
+/// threaded through the entire compiler so that operations get the necessary data from the
+/// abstract interface, and none names a concrete field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FieldConfig {
     id: FieldId,
 }
 
-// The constant accessors below are **bn254-pinned in their values**: they are threaded and called
-// everywhere, but every one of them still answers with bn254's constants.
+// The accessors below are **bn254-pinned in their values**: they are threaded and called
+// everywhere, and every one of them answers with bn254's data.
 //
 // What guards that is the exhaustive `match self.id` each accessor is written as. It is deliberate
 // that these matches carry a single arm and no `_` fallthrough: adding a variant to [`FieldId`] is
-// then a *compile error* at every accessor, rather than a debug-build-only assertion that fires
-// only if something happens to construct the new config. The type system is the forcing function.
+// then a _compile error_ at every accessor; a debug-build assertion would fire only if something
+// happened to construct the new config. The type system is the forcing function.
 //
-// Three of them (`field_bit_size`, `modulus`, `modulus_limbs`) return plain data and could be given
-// real per-field arms as soon as that data exists. The rest return [`FieldElement`], which is a
-// newtype over the bn254 backing field and so has no non-bn254 inhabitant to return; they cannot
-// gain a truthful arm until P5 decides `FieldElement`'s multi-field shape.
+// Two of them (`storage_cells`, `canonical_limbs`) already read their field's `MavrosField`
+// constants, so a new field's arm names its type. Three (`field_bit_size`, `modulus`,
+// `modulus_limbs`) return plain data and could be given real per-field arms as soon as that data
+// exists. The rest return [`FieldElement`], which is a newtype over the bn254 backing field and so
+// has no non-bn254 inhabitant to return; they cannot gain a truthful arm until P5 decides
+// `FieldElement`'s multi-field shape.
 impl FieldConfig {
     /// The bn254 configuration.
     #[must_use]
@@ -63,6 +66,25 @@ impl FieldConfig {
     pub fn modulus(&self) -> BigInt<4> {
         match self.id {
             FieldId::Bn254 => FieldElement::MODULUS,
+        }
+    }
+
+    /// The number of 64-bit cells one element occupies in a VM frame, a bytecode operand or the
+    /// constant pool: the field's `MavrosField::STORAGE_CELLS`, for code that is not generic over
+    /// the field.
+    #[must_use]
+    pub fn storage_cells(&self) -> usize {
+        match self.id {
+            FieldId::Bn254 => <ark_bn254::Fr as MavrosField>::STORAGE_CELLS,
+        }
+    }
+
+    /// The number of 64-bit limbs of an element's canonical integer form: the field's
+    /// `MavrosField::CANONICAL_LIMBS`, for code that is not generic over the field.
+    #[must_use]
+    pub fn canonical_limbs(&self) -> usize {
+        match self.id {
+            FieldId::Bn254 => <ark_bn254::Fr as MavrosField>::CANONICAL_LIMBS,
         }
     }
 
@@ -134,6 +156,8 @@ mod tests {
             <ark_bn254::Fr as PrimeField>::MODULUS_BIT_SIZE
         );
         assert_eq!(cfg.modulus(), <ark_bn254::Fr as PrimeField>::MODULUS);
+        assert_eq!(cfg.storage_cells(), 4);
+        assert_eq!(cfg.canonical_limbs(), 4);
     }
 
     #[test]

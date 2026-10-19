@@ -6,7 +6,7 @@ use ark_ff::{AdditiveGroup, BigInt, PrimeField};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracing::error;
 
-pub use field::{Bn254Field, FieldConfig, FieldElement, FieldId, MavrosField};
+pub use field::{FieldConfig, FieldElement, FieldId, MavrosField};
 
 // FIELD-ASSUMPTION: L1-alias
 pub type Field = ark_bn254::Fr;
@@ -690,19 +690,19 @@ impl R1CS {
         }
         let mut wrongs = 0;
         for i in 0..a.len() {
-            if a[i] != Field::ZERO {
+            if a[i] != <Field as AdditiveGroup>::ZERO {
                 if wrongs == 0 {
                     error!(message = %"Wrong A deriv for witness", index = i);
                 }
                 wrongs += 1;
             }
-            if b[i] != Field::ZERO {
+            if b[i] != <Field as AdditiveGroup>::ZERO {
                 if wrongs == 0 {
                     error!(message = %"Wrong B deriv for witness", index = i);
                 }
                 wrongs += 1;
             }
-            if c[i] != Field::ZERO {
+            if c[i] != <Field as AdditiveGroup>::ZERO {
                 if wrongs == 0 {
                     error!(message = %"Wrong C deriv for witness", index = i);
                 }

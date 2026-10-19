@@ -57,7 +57,13 @@ pub fn read_prover_inputs(
 
     let inputs_src = fs::read_to_string(&file_path)?;
     let inputs = format
-        .parse(&inputs_src, abi)
+        .parse(
+            &inputs_src,
+            abi,
+            // FIELD-ASSUMPTION: L1-direct-ref
+            // ABI input decoding is pinned to BN254, matching Mavros' current runtime field.
+            acvm::FieldConfig::new(acvm::FieldId::Bn254),
+        )
         .map_err(|e| format!("failed to parse inputs: {e}"))?;
     let ordered_params = ordered_params_from_btreemap(abi, &inputs)?;
 
@@ -69,12 +75,12 @@ pub fn run_witgen_from_binary(
     r1cs: &R1CS,
     params: &[InputValueOrdered],
     debug_info: Option<DebugInfo>,
-) -> Result<interpreter::WitgenResult, interpreter::TrapError> {
+) -> Result<interpreter::WitgenResult<RawField>, interpreter::TrapError> {
     interpreter::run(
         binary,
         r1cs.witness_layout,
         r1cs.constraints_layout,
-        params,
+        &interpreter::flatten_param_vec(params),
         debug_info,
     )
 }
@@ -86,7 +92,7 @@ pub fn run_witgen_profiled_from_binary(
     debug_info: Option<DebugInfo>,
 ) -> Result<
     (
-        interpreter::WitgenResult,
+        interpreter::WitgenResult<RawField>,
         mavros_artifacts::FlamegraphProfile,
     ),
     interpreter::TrapError,
@@ -95,7 +101,7 @@ pub fn run_witgen_profiled_from_binary(
         binary,
         r1cs.witness_layout,
         r1cs.constraints_layout,
-        params,
+        &interpreter::flatten_param_vec(params),
         debug_info,
     )
 }
@@ -107,22 +113,22 @@ pub fn run_witgen_phase1(
     r1cs: &R1CS,
     params: &[InputValueOrdered],
     debug_info: Option<DebugInfo>,
-) -> Result<interpreter::Phase1Result, interpreter::TrapError> {
+) -> Result<interpreter::Phase1Result<RawField>, interpreter::TrapError> {
     interpreter::run_phase1(
         binary,
         r1cs.witness_layout,
         r1cs.constraints_layout,
-        params,
+        &interpreter::flatten_param_vec(params),
         debug_info,
     )
 }
 
 /// Phase 2: given real Fiat-Shamir challenges, complete witness generation.
 pub fn run_witgen_phase2(
-    phase1: interpreter::Phase1Result,
+    phase1: interpreter::Phase1Result<RawField>,
     challenges: &[RawField],
     r1cs: &R1CS,
-) -> interpreter::WitgenResult {
+) -> interpreter::WitgenResult<RawField> {
     interpreter::run_phase2(
         phase1,
         challenges,
@@ -236,7 +242,7 @@ pub fn random_ad_coeffs(r1cs: &R1CS) -> Vec<RawField> {
         .collect()
 }
 
-pub fn check_witgen(r1cs: &R1CS, res: &interpreter::WitgenResult) -> bool {
+pub fn check_witgen(r1cs: &R1CS, res: &interpreter::WitgenResult<RawField>) -> bool {
     r1cs.check_witgen_output(
         &res.out_wit_pre_comm,
         &res.out_wit_post_comm,

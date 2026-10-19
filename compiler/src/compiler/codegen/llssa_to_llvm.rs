@@ -22,6 +22,7 @@ use inkwell::{
     },
 };
 
+use mavros_artifacts::{FieldConfig, FieldId};
 use mavros_int_semantics::{
     IntBits,
     int_bits::{HOST_LIMB_BITS, HOST_WORD_BITS},
@@ -122,8 +123,8 @@ fn needs_a_runtime_helper(kind: &IntArithOp, bits: u32) -> bool {
 ///
 /// Two constant operands are left to `IRBuilder`, which folds them into an answer before any pass
 /// runs; a call would hide that answer from the rest of the module and from the conformance sweep.
-/// A shift by a constant amount stays inline too, since LLVM expands it as limb moves, not as the
-/// barrel a runtime amount needs.
+/// A shift by a constant amount stays inline too, since LLVM expands it as limb moves; only a
+/// runtime amount needs the barrel.
 fn routes_through_a_runtime_helper(
     kind: &IntArithOp,
     lhs: IntValue<'_>,
@@ -212,6 +213,39 @@ fn ll_struct_flex_elem(s: &LLStruct) -> Option<&LLStruct> {
     })
 }
 
+/// The runtime archive's entry points for one field's arithmetic, by symbol name: the names
+/// `field_runtime!` in `wasm-runtime/src/lib.rs` gives that field's instance.
+///
+/// The names reach the module's `name` section, so renaming one changes the bytes of every module
+/// that calls it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldRuntimeSymbols {
+    pub mul: &'static str,
+    pub add: &'static str,
+    pub sub: &'static str,
+    pub div: &'static str,
+    pub lt: &'static str,
+    pub from_limbs: &'static str,
+    pub to_limbs: &'static str,
+}
+
+impl FieldRuntimeSymbols {
+    /// The entry points of `field`'s runtime instance.
+    pub fn of(field: FieldConfig) -> Self {
+        match field.id() {
+            FieldId::Bn254 => FieldRuntimeSymbols {
+                mul: "__field_mul",
+                add: "__field_add",
+                sub: "__field_sub",
+                div: "__field_div",
+                lt: "__field_lt",
+                from_limbs: "__field_from_limbs",
+                to_limbs: "__field_to_limbs",
+            },
+        }
+    }
+}
+
 /// LLSSA → LLVM Code Generator
 pub struct LLVMCodeGen<'ctx> {
     context: &'ctx Context,
@@ -222,6 +256,8 @@ pub struct LLVMCodeGen<'ctx> {
     block_map: HashMap<BlockId, inkwell::basic_block::BasicBlock<'ctx>>,
     function_map: HashMap<FunctionId, FunctionValue<'ctx>>,
     vm_ptr: Option<PointerValue<'ctx>>,
+    /// The field the module computes over, which picks the runtime's field entry points.
+    field: FieldConfig,
     // Runtime function declarations
     field_mul_fn: Option<FunctionValue<'ctx>>,
     field_add_fn: Option<FunctionValue<'ctx>>,
@@ -278,7 +314,8 @@ pub fn entry_export_symbol(index: usize) -> String {
 }
 
 impl<'ctx> LLVMCodeGen<'ctx> {
-    pub fn new(context: &'ctx Context, module_name: &str) -> Self {
+    /// A code generator for a program over `field`; [`Self::compile`] takes only an LLSSA over it.
+    pub fn new(context: &'ctx Context, module_name: &str, field: FieldConfig) -> Self {
         let module = context.create_module(module_name);
         module.add_basic_value_flag(
             "Debug Info Version",
@@ -314,6 +351,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             block_map: HashMap::default(),
             function_map: HashMap::default(),
             vm_ptr: None,
+            field,
             field_mul_fn: None,
             field_add_fn: None,
             field_sub_fn: None,
@@ -788,7 +826,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.convert_struct_type(&LLStruct::field_elem())
     }
 
-    /// The LLVM type for raw (non-Montgomery) limbs, derived from `LLStruct::field_elem()`.
+    /// The LLVM type for raw (non-Montgomery) limbs, derived from `LLStruct::limbs()`.
     fn limbs_llvm_type(&self) -> BasicTypeEnum<'ctx> {
         self.convert_struct_type(&LLStruct::limbs())
     }
@@ -802,12 +840,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let bool_type = self.context.bool_type();
         let void_type = self.context.void_type();
         let limbs_type = self.limbs_llvm_type();
+        let field_symbols = FieldRuntimeSymbols::of(self.field);
 
-        // __field_mul(FieldElem, FieldElem) -> FieldElem
+        // mul(FieldElem, FieldElem) -> FieldElem
         let field_mul_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
         self.field_mul_fn = Some(
             self.module
-                .add_function("__field_mul", field_mul_type, None),
+                .add_function(field_symbols.mul, field_mul_type, None),
         );
 
         // malloc(i32) -> ptr  (i32 size for wasm32)
@@ -825,44 +864,47 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 .add_function("free", free_type, Some(Linkage::External)),
         );
 
-        // __field_add(FieldElem, FieldElem) -> FieldElem
+        // add(FieldElem, FieldElem) -> FieldElem
         let field_add_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
         self.field_add_fn = Some(
             self.module
-                .add_function("__field_add", field_add_type, None),
+                .add_function(field_symbols.add, field_add_type, None),
         );
 
-        // __field_sub(FieldElem, FieldElem) -> FieldElem
+        // sub(FieldElem, FieldElem) -> FieldElem
         let field_sub_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
         self.field_sub_fn = Some(
             self.module
-                .add_function("__field_sub", field_sub_type, None),
+                .add_function(field_symbols.sub, field_sub_type, None),
         );
 
-        // __field_div(FieldElem, FieldElem) -> FieldElem
+        // div(FieldElem, FieldElem) -> FieldElem
         let field_div_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
         self.field_div_fn = Some(
             self.module
-                .add_function("__field_div", field_div_type, None),
+                .add_function(field_symbols.div, field_div_type, None),
         );
 
-        // __field_lt(FieldElem, FieldElem) -> bool
+        // lt(FieldElem, FieldElem) -> bool
         let field_lt_type = bool_type.fn_type(&[field_type.into(), field_type.into()], false);
-        self.field_lt_fn = Some(self.module.add_function("__field_lt", field_lt_type, None));
+        self.field_lt_fn = Some(
+            self.module
+                .add_function(field_symbols.lt, field_lt_type, None),
+        );
 
         // FIELD-ASSUMPTION: L3-limb-op
-        // __field_from_limbs([4 x i64]) -> FieldElem  (raw limbs → Montgomery)
+        // from_limbs([4 x i64]) -> FieldElem  (raw limbs → Montgomery)
         let field_from_limbs_type = field_type.fn_type(&[limbs_type.into()], false);
         self.field_from_limbs_fn = Some(self.module.add_function(
-            "__field_from_limbs",
+            field_symbols.from_limbs,
             field_from_limbs_type,
             Some(Linkage::External),
         ));
 
-        // __field_to_limbs(FieldElem) -> [4 x i64]  (Montgomery → raw limbs)
+        // to_limbs(FieldElem) -> [4 x i64]  (Montgomery → raw limbs)
         let field_to_limbs_type = limbs_type.fn_type(&[field_type.into()], false);
         self.field_to_limbs_fn = Some(self.module.add_function(
-            "__field_to_limbs",
+            field_symbols.to_limbs,
             field_to_limbs_type,
             Some(Linkage::External),
         ));
@@ -1009,6 +1051,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
     /// Compile LLSSA to LLVM IR.
     pub fn compile(&mut self, llssa: &LLSSA, flow_analysis: &FlowAnalysis) {
+        if llssa.field() != self.field {
+            ice!(
+                "an LLSSA over {:?} reached a code generator declared over {:?}",
+                llssa.field().id(),
+                self.field.id()
+            );
+        }
         let entry_points: Vec<FunctionId> = llssa.get_entry_points().to_vec();
 
         // Declare globals
@@ -1306,10 +1355,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// Emit one integer arithmetic operation on an exact-width `iN`.
     ///
     /// Split out of [`Self::compile_instruction`] so that the conformance test can call **this**
-    /// with constant operands and read LLVM's own constant fold back.
+    /// with constant operands and read LLVM's constant fold back.
     ///
     /// `convert_type` maps `Type::Int(bits)` to a `custom_width_int_type(bits)`, so the operands
-    /// are the operation's declared width rather than a host-sized register. This ensures that
+    /// have exactly the operation's declared width, with no host-sized register. This ensures that
     /// `sdiv`/`srem`/`ashr` read the sign bit in the right place with no preamble, where the VM's
     /// `_int` lane needs `signed_cell` to recover it from a wider cell.
     fn build_int_arith(
@@ -1366,7 +1415,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// position `p >= N` affects a sum, difference or product only at positions `>= N`, which the
     /// truncation discards.
     ///
-    /// So the widening buys **definedness**, not a different value: reading uninitialized memory is
+    /// So the widening buys **definedness** and keeps the value: reading uninitialized memory is
     /// undefined behavior on both sides of the call, in a body that otherwise has none.
     ///
     /// The widening zero-extends whatever the operands' reading, because the low bits of a sum,
@@ -1487,9 +1536,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     ///
     /// A zero divisor gives zero for both. Two constant operands never reach the helper
     /// ([`routes_through_a_runtime_helper`]), and `IRBuilder` folds a constant division by zero to
-    /// poison rather than zero. Division by zero is undefined in LLVM's `udiv` and `sdiv`, and the
-    /// model leaves it unspecified, because the guard IR keeps a zero divisor from every division:
-    /// a guarded one branches around it and an unguarded one asserts first.
+    /// poison, where the helper gives zero. Division by zero is undefined in LLVM's `udiv` and
+    /// `sdiv`, and the model leaves it unspecified, because the guard IR keeps a zero divisor from
+    /// every division: a guarded one branches around it and an unguarded one asserts first.
     fn build_wide_division(
         &mut self,
         kind: &IntArithOp,
@@ -1709,8 +1758,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// buffers. The alloca is at the top of the entry block, because one at the call would allocate
     /// afresh on every iteration of an enclosing loop, against a 256 KB wasm stack.
     ///
-    /// It is typed as the stored value, not as the `[k x i64]` the helper reads, so its size is
-    /// exactly the store's and the helper's reads stay inside it.
+    /// It is typed as the stored value, so its size is exactly the store's and the helper's
+    /// `[k x i64]` reads stay inside it.
     fn wide_scratch_slot(
         &mut self,
         slot_type: inkwell::types::IntType<'ctx>,
@@ -1807,8 +1856,8 @@ impl<'ctx> LLVMCodeGen<'ctx> {
     /// Lower one LLSSA instruction.
     ///
     /// The match is **exhaustive on purpose**. Every `LLOp` has a lowering here, so a new variant
-    /// should be a compile error naming this function rather than a panic reached by whichever
-    /// program happens to emit one first.
+    /// is a compile error naming this function, where a fallthrough arm would be a panic reached by
+    /// whichever program happens to emit one first.
     fn compile_instruction(&mut self, op: &LLOp) {
         match op {
             LLOp::IntArith { kind, result, a, b } => {
@@ -1884,7 +1933,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
 
                 let val = match kind {
                     FieldArithOp::Mul => {
-                        let mul_fn = self.field_mul_fn.expect("__field_mul not declared");
+                        let mul_fn = self.field_mul_fn.expect("field_mul not declared");
                         let call_site = self
                             .builder
                             .build_call(mul_fn, &[lhs.into(), rhs.into()], "field_mul")
@@ -1894,7 +1943,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                             .expect_basic("field_mul should return a value")
                     }
                     FieldArithOp::Add => {
-                        let add_fn = self.field_add_fn.expect("__field_add not declared");
+                        let add_fn = self.field_add_fn.expect("field_add not declared");
                         let call_site = self
                             .builder
                             .build_call(add_fn, &[lhs.into(), rhs.into()], "field_add")
@@ -1904,7 +1953,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                             .expect_basic("field_add should return a value")
                     }
                     FieldArithOp::Sub => {
-                        let sub_fn = self.field_sub_fn.expect("__field_sub not declared");
+                        let sub_fn = self.field_sub_fn.expect("field_sub not declared");
                         let call_site = self
                             .builder
                             .build_call(sub_fn, &[lhs.into(), rhs.into()], "field_sub")
@@ -1914,7 +1963,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                             .expect_basic("field_sub should return a value")
                     }
                     FieldArithOp::Div => {
-                        let div_fn = self.field_div_fn.expect("__field_div not declared");
+                        let div_fn = self.field_div_fn.expect("field_div not declared");
                         let call_site = self
                             .builder
                             .build_call(div_fn, &[lhs.into(), rhs.into()], "field_div")
@@ -2014,11 +2063,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::FieldEq { result, a, b } => {
-                // Field equality: compare all 4 limbs
+                // Field equality: compare every limb
                 let a_val = self.value_map[a].into_struct_value();
                 let b_val = self.value_map[b].into_struct_value();
                 let mut eq_acc = self.context.bool_type().const_int(1, false);
-                for i in 0..4u32 {
+                for i in 0..LLStruct::FIELD_LIMBS as u32 {
                     let a_limb = self
                         .builder
                         .build_extract_value(a_val, i, "a_l")
@@ -2041,7 +2090,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             LLOp::FieldLt { result, a, b } => {
                 let lhs = self.value_map[a];
                 let rhs = self.value_map[b];
-                let lt_fn = self.field_lt_fn.expect("__field_lt not declared");
+                let lt_fn = self.field_lt_fn.expect("field_lt not declared");
                 let call_site = self
                     .builder
                     .build_call(lt_fn, &[lhs.into(), rhs.into()], "field_lt")
@@ -2053,34 +2102,32 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             }
 
             LLOp::FieldFromLimbs { result, limbs } => {
-                // Convert raw limbs (non-Montgomery) to Montgomery form via __field_from_limbs.
+                // Convert raw limbs (non-Montgomery) to Montgomery form through the runtime.
                 let limb_vals = self.value_map[limbs];
                 let from_fn = self
                     .field_from_limbs_fn
-                    .expect("__field_from_limbs not declared");
+                    .expect("field_from_limbs not declared");
                 let call = self
                     .builder
                     .build_call(from_fn, &[limb_vals.into()], "from_limbs")
                     .unwrap();
                 let field = call
                     .try_as_basic_value()
-                    .expect_basic("__field_from_limbs should return a value");
+                    .expect_basic("field_from_limbs should return a value");
                 self.value_map.insert(*result, field);
             }
 
             LLOp::FieldToLimbs { result, src } => {
-                // Convert Montgomery form to raw limbs via __field_to_limbs.
+                // Convert Montgomery form to raw limbs through the runtime.
                 let field = self.value_map[src];
-                let to_fn = self
-                    .field_to_limbs_fn
-                    .expect("__field_to_limbs not declared");
+                let to_fn = self.field_to_limbs_fn.expect("field_to_limbs not declared");
                 let call = self
                     .builder
                     .build_call(to_fn, &[field.into()], "to_limbs")
                     .unwrap();
                 let limb_vals = call
                     .try_as_basic_value()
-                    .expect_basic("__field_to_limbs should return a value");
+                    .expect_basic("field_to_limbs should return a value");
                 self.value_map.insert(*result, limb_vals);
             }
 
@@ -2251,14 +2298,13 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     f
                 });
                 // No `unreachable` here. `Trap` is an LLSSA _instruction_, so the block it sits in
-                // carries on and ends with a terminator of its own; `unreachable` is an LLVM
+                // carries on and ends with a separate terminator; `unreachable` is an LLVM
                 // _terminator_, and two terminators in one basic block is invalid IR.
                 //
-                // Closing the block properly instead would mean opening a fresh one for the
-                // remainder, and the phi wiring in `compile_function` names the block that ends an
-                // LLSSA block by its `block_map` entry — so the successors' incoming edges would
-                // all be wrong. `noreturn` says the same thing to the optimizer at no structural
-                // cost.
+                // Closing the block properly would mean opening a fresh one for the remainder, and
+                // the phi wiring in `compile_function` names the block that ends an LLSSA block by
+                // its `block_map` entry — so the successors' incoming edges would all be wrong.
+                // `noreturn` says the same thing to the optimizer at no structural cost.
                 self.builder.build_call(trap_fn, &[], "").unwrap();
             }
 
@@ -2540,13 +2586,169 @@ mod tests {
         let _ = LLVMCodeGen::low_bits_mask(129);
     }
 
+    /// `FieldEq` compares every storage limb, so elements equal in all but the last are unequal.
+    #[test]
+    fn a_field_equality_compares_every_limb() {
+        let mut ssa = LLSSA::with_main("field_eq".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        let field_eq = ssa.add_function("field_eq".to_string());
+        ssa.get_function_mut(field_eq).add_return_type(Type::i1());
+        LLSSABuilder::new(&mut ssa).modify_function(field_eq, |function| {
+            let entry = function.function.get_entry_id();
+            let mut block = function.test_block(entry);
+            // The VM pointer every function takes first.
+            block.add_parameter(Type::Ptr);
+            let a = block.add_parameter(Type::Struct(LLStruct::field_elem()));
+            let b = block.add_parameter(Type::Struct(LLStruct::field_elem()));
+            let eq = block.field_eq(a, b);
+            block.terminate_return(vec![eq]);
+        });
+        LLSSABuilder::new(&mut ssa).modify_function(main_id, |function| {
+            let entry = function.function.get_entry_id();
+            function.test_block(entry).terminate_return(Vec::new());
+        });
+
+        let context = Context::create();
+        let mut codegen = LLVMCodeGen::new(&context, "field_eq", ssa.field());
+        codegen.compile(&ssa, &FlowAnalysis::run(&ssa));
+        codegen.module.verify().unwrap();
+        let ir = codegen.get_ir();
+        assert_eq!(
+            ir.matches("icmp eq i64").count(),
+            LLStruct::FIELD_LIMBS,
+            "{ir}"
+        );
+    }
+
+    /// bn254's field runtime entry points keep these names: every bn254 module's `name` section
+    /// carries them.
+    #[test]
+    fn bn254_keeps_its_field_runtime_symbol_names() {
+        assert_eq!(
+            FieldRuntimeSymbols::of(FieldConfig::bn254()),
+            FieldRuntimeSymbols {
+                mul: "__field_mul",
+                add: "__field_add",
+                sub: "__field_sub",
+                div: "__field_div",
+                lt: "__field_lt",
+                from_limbs: "__field_from_limbs",
+                to_limbs: "__field_to_limbs",
+            }
+        );
+    }
+
+    /// The runtime archive defines every field entry point codegen declares, at the ABI codegen
+    /// calls it with: a module calling all seven links with no import past its memory, and computes
+    /// `(12·4 + (12 − 4)) / 4 = 14`, `4 < 12` and `12 ≮ 4`.
+    #[test]
+    fn the_runtime_archive_defines_the_field_entry_points() {
+        fn call<'ctx>(
+            codegen: &LLVMCodeGen<'ctx>,
+            function: Option<FunctionValue<'ctx>>,
+            args: &[BasicValueEnum<'ctx>],
+        ) -> BasicValueEnum<'ctx> {
+            let args: Vec<BasicMetadataValueEnum<'ctx>> = args.iter().map(|&a| a.into()).collect();
+            codegen
+                .builder
+                .build_call(function.expect("declared"), &args, "call")
+                .unwrap()
+                .try_as_basic_value()
+                .expect_basic("a value")
+        }
+
+        let context = Context::create();
+        let mut codegen = LLVMCodeGen::new(&context, "field_entry_points", FieldConfig::bn254());
+        let i64_type = context.i64_type();
+        let subject = codegen
+            .module
+            .add_function("subject", i64_type.fn_type(&[], false), None);
+        codegen
+            .builder
+            .position_at_end(context.append_basic_block(subject, "entry"));
+
+        let limbs = |low: u64| -> BasicValueEnum<'_> {
+            let mut values = vec![i64_type.const_int(low, false).into()];
+            values.resize(LLStruct::FIELD_LIMBS, i64_type.const_zero().into());
+            codegen
+                .limbs_llvm_type()
+                .into_struct_type()
+                .const_named_struct(&values)
+                .into()
+        };
+        let (twelve, four) = (limbs(12), limbs(4));
+        let a = call(&codegen, codegen.field_from_limbs_fn, &[twelve]);
+        let b = call(&codegen, codegen.field_from_limbs_fn, &[four]);
+        let product = call(&codegen, codegen.field_mul_fn, &[a, b]);
+        let difference = call(&codegen, codegen.field_sub_fn, &[a, b]);
+        let sum = call(&codegen, codegen.field_add_fn, &[product, difference]);
+        let quotient = call(&codegen, codegen.field_div_fn, &[sum, b]);
+        let canonical = call(&codegen, codegen.field_to_limbs_fn, &[quotient]);
+        let mut answer = codegen
+            .builder
+            .build_extract_value(canonical.into_struct_value(), 0, "low")
+            .unwrap()
+            .into_int_value();
+        for (lhs, rhs, weight) in [(b, a, 100), (a, b, 1000)] {
+            let holds = call(&codegen, codegen.field_lt_fn, &[lhs, rhs]).into_int_value();
+            let holds = codegen
+                .builder
+                .build_int_z_extend(holds, i64_type, "holds")
+                .unwrap();
+            let weighted = codegen
+                .builder
+                .build_int_mul(holds, i64_type.const_int(weight, false), "weighted")
+                .unwrap();
+            answer = codegen
+                .builder
+                .build_int_add(answer, weighted, "answer")
+                .unwrap();
+        }
+        codegen.builder.build_return(Some(&answer)).unwrap();
+        codegen.module.verify().expect("the module verifies");
+        codegen.entry_symbols = vec!["subject".to_string()];
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let wasm_path = dir.path().join("subject.wasm");
+        codegen.compile_to_wasm(
+            &wasm_path,
+            WasmCompileOpts::fast(crate::wasm_runtime::locate_or_build()),
+        );
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::from_file(&engine, &wasm_path)
+            .expect("the wasm engine accepts the module");
+        let mut store = wasmtime::Store::new(&engine, ());
+        let mut imports: Vec<wasmtime::Extern> = Vec::new();
+        for import in module.imports() {
+            let wasmtime::ExternType::Memory(memory_type) = import.ty() else {
+                panic!(
+                    "the module imports {}::{}, which the runtime archive should have defined",
+                    import.module(),
+                    import.name()
+                );
+            };
+            let memory = wasmtime::Memory::new(&mut store, memory_type)
+                .expect("a memory for the module's import");
+            imports.push(memory.into());
+        }
+        let instance = wasmtime::Instance::new(&mut store, &module, &imports)
+            .expect("the wasm engine instantiates the module");
+        let answer = instance
+            .get_typed_func::<(), u64>(&mut store, "subject")
+            .expect("the subject is exported")
+            .call(&mut store, ())
+            .expect("the subject runs");
+        assert_eq!(answer, 114);
+    }
+
     /// The IR of one `op` at `bits`, built over two function parameters.
     ///
     /// `IRBuilder` folds a constant pair to no instruction at all, so only parameters show the
-    /// lowering. The conformance sweep relies on that fold instead.
+    /// lowering. The conformance sweep is the test that relies on that fold.
     fn arith_ir(op: &IntArithOp, bits: u32) -> String {
         let context = Context::create();
-        let mut codegen = LLVMCodeGen::new(&context, "arith_shape");
+        let mut codegen = LLVMCodeGen::new(&context, "arith_shape", FieldConfig::bn254());
         let ty = context
             .custom_width_int_type(NonZeroU32::new(bits).unwrap())
             .unwrap();
@@ -2575,7 +2777,7 @@ mod tests {
     /// stream).
     fn spread_ir(unspread: bool, bits: u32) -> String {
         let context = Context::create();
-        let mut codegen = LLVMCodeGen::new(&context, "spread_shape");
+        let mut codegen = LLVMCodeGen::new(&context, "spread_shape", FieldConfig::bn254());
         let ty = context
             .custom_width_int_type(NonZeroU32::new(bits).unwrap())
             .unwrap();
@@ -2749,7 +2951,7 @@ mod tests {
     #[test]
     fn a_wide_shift_at_a_non_power_of_two_width_reduces_inside_its_helper() {
         // Off the power-of-two path `reduce_shift_count` would emit a real wide `urem`; a routed
-        // shift hands its amount to the helper whole instead, which reduces it modulo the width.
+        // shift hands its whole amount to the helper, which reduces it modulo the width.
         let odd = arith_ir(&IntArithOp::Shl, 192);
         assert_eq!(
             odd.matches("call void @__int_").count(),
@@ -2772,7 +2974,7 @@ mod tests {
         // would exhaust the 256 KB wasm stack. In a single-block function an alloca beside the call
         // would land in the entry block by accident.
         let context = Context::create();
-        let mut codegen = LLVMCodeGen::new(&context, "scratch_placement");
+        let mut codegen = LLVMCodeGen::new(&context, "scratch_placement", FieldConfig::bn254());
         let ty = context
             .custom_width_int_type(NonZeroU32::new(256).unwrap())
             .unwrap();
@@ -2834,7 +3036,7 @@ mod tests {
         // debug location. Unrestored, the store, call and load that follow would be attributed to
         // the entry block for the first multiply of each width.
         let context = Context::create();
-        let mut codegen = LLVMCodeGen::new(&context, "routed_location");
+        let mut codegen = LLVMCodeGen::new(&context, "routed_location", FieldConfig::bn254());
         let ty = context
             .custom_width_int_type(NonZeroU32::new(256).unwrap())
             .unwrap();
@@ -2938,8 +3140,8 @@ mod tests {
     /// The **only** check of the routed lowering: routing is suppressed for a constant pair, so
     /// the conformance sweep never sees the call.
     ///
-    /// The operands are loaded from memory, not widened from `i64` params: a widened operand is
-    /// mostly known-zero, and the mid-end would narrow the multiply back to an inline one under any
+    /// The operands are loaded from memory: an operand widened from an `i64` param is mostly
+    /// known-zero, and the mid-end would narrow the multiply back to an inline one under any
     /// routing.
     ///
     /// The digest carries the top word, which a limb miscount gets wrong, and the low word, since a
@@ -2971,7 +3173,8 @@ mod tests {
         let operand_stride = limbs * (HOST_LIMB_BITS as u32 / 8);
 
         let context = Context::create();
-        let mut codegen = LLVMCodeGen::new(&context, "wide_engine_acceptance");
+        let mut codegen =
+            LLVMCodeGen::new(&context, "wide_engine_acceptance", FieldConfig::bn254());
         let i64_type = context.i64_type();
         let ptr_type = context.ptr_type(AddressSpace::default());
         let subject = codegen.module.add_function(
@@ -3203,7 +3406,7 @@ mod tests {
     /// The IR of one comparison of two `bits`-wide parameters.
     fn compare_ir(predicate: IntPredicate, bits: u32) -> String {
         let context = Context::create();
-        let mut codegen = LLVMCodeGen::new(&context, "compare_shape");
+        let mut codegen = LLVMCodeGen::new(&context, "compare_shape", FieldConfig::bn254());
         let ty = context
             .custom_width_int_type(NonZeroU32::new(bits).unwrap())
             .unwrap();
@@ -3260,7 +3463,7 @@ mod tests {
             );
         }
         // The arguments are read off the call: the engine test's operands repeat one seed in every
-        // limb, so a helper handed too few limbs would still answer them correctly.
+        // limb, so a helper handed too few limbs would answer them correctly anyway.
         for (predicate, helper, instruction, tail) in [
             (IntPredicate::EQ, "__int_eq", "icmp eq i256", "i32 4)"),
             (IntPredicate::ULT, "__int_ult", "icmp ult i256", "i32 4)"),
@@ -3300,7 +3503,8 @@ mod tests {
     /// The IR of one comparison of a `bits`-wide parameter against the constant 7.
     fn constant_compare_ir(predicate: IntPredicate, bits: u32) -> String {
         let context = Context::create();
-        let mut codegen = LLVMCodeGen::new(&context, "constant_compare_shape");
+        let mut codegen =
+            LLVMCodeGen::new(&context, "constant_compare_shape", FieldConfig::bn254());
         let ty = context
             .custom_width_int_type(NonZeroU32::new(bits).unwrap())
             .unwrap();
@@ -3325,7 +3529,7 @@ mod tests {
     /// The IR of one `op` of a `bits`-wide parameter by the constant amount 3.
     fn constant_amount_shift_ir(op: &IntArithOp, bits: u32) -> String {
         let context = Context::create();
-        let mut codegen = LLVMCodeGen::new(&context, "constant_shift_shape");
+        let mut codegen = LLVMCodeGen::new(&context, "constant_shift_shape", FieldConfig::bn254());
         let ty = context
             .custom_width_int_type(NonZeroU32::new(bits).unwrap())
             .unwrap();
@@ -3467,7 +3671,7 @@ mod tests {
 
         let flow = FlowAnalysis::run(&ssa);
         let context = Context::create();
-        let mut codegen = LLVMCodeGen::new(&context, "debug_test");
+        let mut codegen = LLVMCodeGen::new(&context, "debug_test", ssa.field());
         codegen.set_debug_path_root(Some("/tmp/mavros-project".into()));
         codegen.compile(&ssa, &flow);
         codegen.module.verify().unwrap();
@@ -3487,16 +3691,16 @@ mod tests {
 
 /// The LLVM backend's conformance to the normative model in `mavros-int-semantics`.
 ///
-/// The backend emits IR rather than values, so it is checked against **LLVM's constant folder**:
-/// the real lowering ([`LLVMCodeGen::build_int_arith`]) is built on two constant operands, and LLVM
-/// folds it to the value it means. That covers which instruction each `IntArithOp` picks, how the
-/// shift count is reduced, and LLVM's definition of the instruction.
+/// The backend's output is IR, so it is checked against **LLVM's constant folder**: the real
+/// lowering ([`LLVMCodeGen::build_int_arith`]) is built on two constant operands, and LLVM folds it
+/// to the value it means. That covers which instruction each `IntArithOp` picks, how the shift
+/// count is reduced, and LLVM's definition of the instruction.
 ///
 /// The relation is the VM's: equal to [`residue`](mavros_int_semantics::residue) wherever the model
 /// has an opinion, and total. It is vacuous on a zero divisor and a signed `INT_MIN / -1`.
 ///
-/// The sweep calls `hlssa_to_llssa::int_arith_op`, the table the lowering applies, rather than a
-/// copy that would only check itself.
+/// The sweep calls `hlssa_to_llssa::int_arith_op`, the table the lowering applies: a copy of it
+/// would only check the copy.
 ///
 /// A constant pair is never routed to a runtime helper ([`routes_through_a_runtime_helper`]), so
 /// the folder always reads the direct lowering: a folded wide product beats a call.
@@ -3537,7 +3741,8 @@ mod int_semantics_conformance {
     #[test]
     fn the_emitted_instructions_agree_with_the_model() {
         let context = Context::create();
-        let mut codegen = LLVMCodeGen::new(&context, "int_semantics_conformance");
+        let mut codegen =
+            LLVMCodeGen::new(&context, "int_semantics_conformance", FieldConfig::bn254());
 
         // The builder has to be positioned somewhere before it will emit, even for operands it is
         // about to fold away. Nothing is ever read back out of this function.
@@ -3595,8 +3800,8 @@ mod int_semantics_conformance {
                                 );
                                 checked += 1;
                             }
-                            // Recorded rather than asserted on the spot so that a folder that
-                            // stopped folding shows up as one summary rather than one failure.
+                            // Recorded and asserted after the sweep, so a folder that stopped
+                            // folding reports every unfolded case in one summary.
                             None => unfolded.push(format!("{op:?}/{sign:?} {bits} {a:#x} {b:#x}")),
                         }
                     }
@@ -3624,7 +3829,11 @@ mod int_semantics_conformance {
     #[test]
     fn the_spread_ladders_agree_with_the_model() {
         let context = Context::create();
-        let codegen = LLVMCodeGen::new(&context, "int_semantics_conformance_spread");
+        let codegen = LLVMCodeGen::new(
+            &context,
+            "int_semantics_conformance_spread",
+            FieldConfig::bn254(),
+        );
         let scratch =
             codegen
                 .module
@@ -3698,7 +3907,7 @@ mod int_semantics_conformance {
     #[test]
     fn a_short_read_of_a_wide_container_takes_the_ladder() {
         let context = Context::create();
-        let mut codegen = LLVMCodeGen::new(&context, "short_wide_spread");
+        let mut codegen = LLVMCodeGen::new(&context, "short_wide_spread", FieldConfig::bn254());
         let scratch =
             codegen
                 .module
@@ -3749,11 +3958,11 @@ mod int_semantics_conformance {
 
     /// Whether LLVM folded `value` to exactly `want`, or [`None`] if it folded to no constant.
     ///
-    /// Read as a comparison rather than a value, which keeps the wide cases cheap: printing a wide
-    /// constant is a decimal conversion quadratic in the width, and extracting one limb by limb
-    /// leaves a uniqued constant per limb in the context for the whole test. Folding an `icmp eq`
-    /// against the model's answer costs one constant and one bit at any width. A failure then has
-    /// to fetch the operands separately to report them, which is fine as that path runs once.
+    /// Read as a comparison to keep the wide cases cheap: printing a wide constant is a decimal
+    /// conversion quadratic in the width, and extracting one limb by limb leaves a uniqued constant
+    /// per limb in the context for the whole test. Folding an `icmp eq` against the model's answer
+    /// costs one constant and one bit at any width. A failure then has to fetch the operands
+    /// separately to report them, which is fine as that path runs once.
     fn folds_to(codegen: &LLVMCodeGen<'_>, value: IntValue<'_>, want: &IntBits) -> Option<bool> {
         // A `poison` is not a `ConstantInt`, and comparing against one folds to poison in turn,
         // so this is the same reading of an unfolded result the narrow half takes.
@@ -3771,7 +3980,11 @@ mod int_semantics_conformance {
     #[test]
     fn the_emitted_instructions_agree_with_the_model_at_wide_widths() {
         let context = Context::create();
-        let mut codegen = LLVMCodeGen::new(&context, "int_semantics_conformance_wide");
+        let mut codegen = LLVMCodeGen::new(
+            &context,
+            "int_semantics_conformance_wide",
+            FieldConfig::bn254(),
+        );
         let scratch =
             codegen
                 .module
@@ -3794,7 +4007,7 @@ mod int_semantics_conformance {
                 let mut folded_here = 0usize;
 
                 // Both sides come from the shared generator so that "what a shift's right operand
-                // is" stays a fact about the operation rather than one restated per sweep.
+                // is" stays one fact about the operation, stated once for every sweep.
                 let (lhs_values, rhs_values) = corners::wide_operands(op, bits);
 
                 for a in &lhs_values {
@@ -3822,9 +4035,9 @@ mod int_semantics_conformance {
 
                 checked += folded_here;
 
-                // Read off the sweep, not off `needs_a_runtime_helper`, so the body can falsify
-                // it: a routed operation is a call, which loads its result rather than folding,
-                // and `unfolded` would catch it.
+                // Read off the sweep so the body can falsify `needs_a_runtime_helper`: a routed
+                // operation is a call, which loads its result and folds nothing, and `unfolded`
+                // would catch it.
                 if routable && folded_here > 0 {
                     suppressed += 1;
                 }

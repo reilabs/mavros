@@ -102,7 +102,7 @@ pub fn flattened_io_count(abi: &noirc_abi::Abi) -> usize {
 }
 
 fn field_param(value: u64) -> InputValueOrdered {
-    InputValueOrdered::Field(ark_bn254::Fr::from(value)) // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
+    InputValueOrdered::Field(ark_bn254::Fr::from(value)) // FIELD-ASSUMPTION: L1-direct-ref (5 sites)
 }
 
 fn zero_param(abi_type: &AbiType) -> InputValueOrdered {

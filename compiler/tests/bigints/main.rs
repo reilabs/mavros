@@ -5682,8 +5682,8 @@ fn the_widest_injective_width_is_an_entry_point_parameter() {
     }
 }
 
-/// An integer wider than one input element carries cannot cross the entry point, and Noir has no
-/// such type, so meeting one is a compiler error.
+/// An integer wider than one input element carries cannot cross this ABI directly. The frontend
+/// rejects such parameters; a hand-built SSA that bypasses it must also be refused.
 #[test]
 #[should_panic(expected = "crosses the entry point")]
 fn a_main_parameter_wider_than_the_field_is_a_compiler_error() {
@@ -6437,9 +6437,9 @@ fn a_wide_slice_grows_and_reports_its_length() {
 
 /// The third lane: the same programs compiled to WASM and run under wasmtime.
 ///
-/// The corpus checks this lane at every width Noir can name, but none wider than 128 bits. This
-/// checks the wide field boundary and the multi-cell representation against the interpreter and the
-/// constraint system.
+/// The corpus covers source programs at standard and extended integer widths. This hand-built
+/// SSA test checks the wide field boundary and the multi-cell representation against the interpreter
+/// and the constraint system.
 ///
 /// Skipped only where the linker reported success and wrote no module; see
 /// `harness::compile_wasm`.

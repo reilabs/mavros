@@ -1,188 +1,197 @@
 //! The operations that Mavros requires of a given field.
 //!
 //! Support for multiple fields in the VM is achieved by each field having its own set of named
-//! opcodes that are emitted into the bytecode by the compiler for a concrete field (e.g. rather
-//! than `FieldAdd` we have `Bn254FieldAdd`). This ensures that a single VM binary can be used with
+//! opcodes that are emitted into the bytecode by the compiler for a concrete field (e.g. bn254's
+//! copy of `add_field` is `bn254_add_field`). This ensures that a single VM binary can be used with
 //! _any_ supported field, while also avoiding the need to perform potentially-expensive runtime
 //! field selection.
 //!
-//! In order to ensure that the opcode generator can uniformly generate that per-field opcode set,
-//! the [`MavrosField`] trait exists to ensure the operations exist.
+//! The [`MavrosField`] trait is used to make the opcode handlers compile-time generic, and is
+//! implemented directly for the choice of raw backing field type.
+//!
+//! A field element has two distinct limb forms, and mixing them up can cause silent value
+//! corruption.
+//!
+//! - **Storage cells** (`*_frame_cells`, [`MavrosField::storage_cell0`]) are the element's
+//!   in-memory representation (Montgomery form for bn254). This is what VM frames, tapes, bytecode
+//!   operands and the constant pool hold.
+//! - **Canonical limbs** (`*_canonical_limbs`) are the little-endian limbs of the integer in
+//!   `0..modulus` that the element denotes. Ordering, casts to integers, bit/byte decompositions
+//!   and table-row addressing are defined on this form.
 
-use ark_ff::{AdditiveGroup, BigInt, Field as _};
+use std::{
+    cmp::Ordering,
+    fmt::{Debug, Display},
+    ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
+};
+
+use ark_ff::{AdditiveGroup, BigInt, PrimeField};
 
 // FIELD IDENTIFIER
 // ================================================================================================
 
 /// Identifies one of Mavros' supported fields.
 ///
-/// The enum discriminant *is* the wire encoding: encoding is a direct `id as u32` (see
-/// [`FieldId::code`]). Decoding must go through the checked [`FieldId::from_code`] — casting an
-/// untrusted `u32` straight into the enum would be undefined behaviour for an unknown value.
+/// No artifact encodes it: bytecode names its field by opcode identity. It selects per-field
+/// behaviour in the compiler through exhaustive matches, so a new variant is a compile error at
+/// every per-field site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(u32)]
 pub enum FieldId {
-    Bn254 = 0,
-}
-
-impl FieldId {
-    /// The wire encoding — the enum discriminant.
-    #[must_use]
-    pub fn code(self) -> u32 {
-        self as u32
-    }
-
-    /// Decodes a [`FieldId`] from its wire encoding, or `None` if the value is not a known field.
-    #[must_use]
-    pub fn from_code(code: u32) -> Option<FieldId> {
-        match code {
-            0 => Some(FieldId::Bn254),
-            _ => None,
-        }
-    }
+    Bn254,
 }
 
 // FIELD TRAIT
 // ================================================================================================
 
-/// The operations supported by a given field.
+/// The operations the VM performs on the elements of one field.
 ///
-/// The plan is to have a set of field opcodes per supported field, each set of which will dispatch
-/// to a backing implementation of this trait. This ensures that the VM can dispatch directly on
-/// operations on a concrete field, rather than paying a penalty to check the field modulus every
-/// time.
+/// `From<u64>` and `From<u128>` should reduce modulo the field's modulus, so an integer wider than
+/// the field wraps into it.
 ///
-/// The associated [`MavrosField::STORAGE_CELLS`] is the number of 64-bit cells one element of this
-/// field occupies in the VM frame / bytecode operand / constant pool. The `*_frame_cells` and
-/// `*_limbs_le` methods move a value through that raw storage form and the arithmetic methods are
-/// what the concrete field opcodes call.
-pub trait MavrosField: Copy + PartialEq {
-    /// Number of 64-bit storage cells one element occupies in the raw representation.
+/// # Safety
+///
+/// The VM reinterprets frame and tape memory (`u64` cells) as `Self` through pointer casts, and
+/// keeps plain `u64` counters and flags in cell 0 of field slots on its tapes. An implementation
+/// of this trait must guarantee that:
+///
+/// - `size_of::<Self>() == STORAGE_CELLS * 8`, `align_of::<Self>() <= align_of::<u64>()`, and
+///   `STORAGE_CELLS >= 1`.
+/// - The bytes of a value are exactly the cells written by [`MavrosField::to_frame_cells`], so a
+///   cast read agrees with [`MavrosField::from_frame_cells`] and a write with `to_frame_cells`.
+/// - Every pattern of `STORAGE_CELLS` cells is a valid `Self`, including one that denotes no
+///   element, and copying or comparing one is not undefined behavior: a slot holding a punned `u64`
+///   is still handled as `Self`.
+/// - [`MavrosField::ZERO`] is stored as all-zero cells, so zero-filled memory reads as `ZERO`.
+pub unsafe trait MavrosField:
+    Copy
+    + Eq
+    + Debug
+    + Display
+    + Send
+    + Sync
+    + 'static
+    + Add<Output = Self>
+    + Sub<Output = Self>
+    + Mul<Output = Self>
+    + Neg<Output = Self>
+    + AddAssign
+    + SubAssign
+    + MulAssign
+    + From<u64>
+    + From<u128>
+{
+    /// Number of 64-bit storage cells one element occupies.
     const STORAGE_CELLS: usize;
 
-    /// Which field this is.
-    const FIELD_ID: FieldId;
+    /// Number of 64-bit limbs in the canonical integer form, enough to hold `modulus - 1`.
+    const CANONICAL_LIMBS: usize;
 
-    /// The by-value raw storage limbs of one element (bytecode operand form): a fixed-size array
-    /// whose length is this field's [`MavrosField::STORAGE_CELLS`].
+    /// The canonical limbs of one element: a fixed-size array of
+    /// [`MavrosField::CANONICAL_LIMBS`] limbs, read as a slice via `AsRef<[u64]>`.
     type Limbs: AsRef<[u64]> + Copy;
 
     /// The additive identity.
-    fn zero() -> Self;
+    const ZERO: Self;
 
     /// The multiplicative identity.
-    fn one() -> Self;
-
-    /// Field element addition.
-    fn add(self, rhs: Self) -> Self;
-
-    /// Field element subtraction.
-    fn sub(self, rhs: Self) -> Self;
-
-    /// Field element multiplication.
-    fn mul(self, rhs: Self) -> Self;
-
-    /// Field element division.
-    fn div(self, rhs: Self) -> Self;
+    const ONE: Self;
 
     /// The multiplicative inverse, or `None` for zero.
-    fn inverse(self) -> Option<Self>;
+    fn inverse(&self) -> Option<Self>;
 
-    /// Reconstructs an element from its raw storage cells (as read from a VM frame).
+    /// Reconstructs an element from its storage cells, keeping them as given: the WASM host reads a
+    /// slot holding a punned `u64` through this, and [`MavrosField::storage_cell0`] of the result
+    /// must be that `u64`.
+    ///
+    /// `cells` must hold at least [`MavrosField::STORAGE_CELLS`] cells. A pattern that
+    /// [`MavrosField::to_frame_cells`] did not write need not denote an element.
     fn from_frame_cells(cells: &[u64]) -> Self;
 
-    /// Writes an element's raw storage cells (as written into a VM frame).
+    /// Writes an element's [`MavrosField::STORAGE_CELLS`] storage cells to the front of `out`.
     fn to_frame_cells(self, out: &mut [u64]);
 
-    /// Reconstructs from raw little-endian storage limbs (bytecode operand form).
-    fn from_limbs_le(limbs: &[u64]) -> Self;
-
-    /// The raw little-endian storage limbs (bytecode operand form), by value.
+    /// The element's first storage cell.
     ///
-    /// Returns the per-field [`MavrosField::Limbs`] array, so the trait carries no bn254-specific
-    /// width while callers keep an owned array rather than pre-allocating a buffer; read it as a
-    /// slice via `AsRef<[u64]>`.
-    fn to_limbs_le(self) -> Self::Limbs;
+    /// The VM keeps a `u64` punned into a field slot in this cell. For a field stored in Montgomery
+    /// form it differs from the low canonical limb.
+    fn storage_cell0(self) -> u64;
+
+    /// The canonical little-endian limbs of the integer this element denotes.
+    fn to_canonical_limbs(self) -> Self::Limbs;
+
+    /// The element denoting the little-endian integer `limbs`, or `None` if it is not below the
+    /// modulus. Fewer than [`MavrosField::CANONICAL_LIMBS`] limbs are zero-extended.
+    ///
+    /// # Panics
+    ///
+    /// If `limbs` holds more than [`MavrosField::CANONICAL_LIMBS`] limbs.
+    fn from_canonical_limbs(limbs: &[u64]) -> Option<Self>;
+
+    /// Orders two elements by the integers they denote.
+    fn canonical_cmp(self, other: Self) -> Ordering {
+        let (a, b) = (self.to_canonical_limbs(), other.to_canonical_limbs());
+        a.as_ref().iter().rev().cmp(b.as_ref().iter().rev())
+    }
 }
 
-// BN254 UNDERLYING FIELD REP
+// BN254
 // ================================================================================================
 
-/// The bn254 scalar field.
+// ark gives `Fp` no `repr`, so the language does not fix `Fr`'s layout, but we do here. `Fr` holds
+// a `[u64; 4]` and a `PhantomData`, so at 32 bytes the array is the whole value, at offset 0. We
+// rely on this, so these asserts ensure the compilation fails loudly should it ever change.
+const _: () =
+    assert!(size_of::<ark_bn254::Fr>() == 32 && align_of::<ark_bn254::Fr>() <= align_of::<u64>());
+const _: () = assert!(matches!(
+    <ark_bn254::Fr as AdditiveGroup>::ZERO.0.0,
+    [0, 0, 0, 0]
+));
+
+/// The bn254 scalar field, stored as its four Montgomery-form limbs.
 ///
-/// This wraps the raw field verbatim (Montgomery storage form), matching the representation the VM
-/// frame, opcode operands, and constant pool use today.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Bn254Field(ark_bn254::Fr);
-
-impl Bn254Field {
-    /// Wraps a raw backing field element.
-    #[must_use]
-    pub fn from_ark(value: ark_bn254::Fr) -> Bn254Field {
-        Bn254Field(value)
-    }
-
-    /// The raw backing field element.
-    #[must_use]
-    pub fn to_ark(self) -> ark_bn254::Fr {
-        self.0
-    }
-}
-
-impl MavrosField for Bn254Field {
+/// # Safety
+///
+/// The assertions above make `Fr` exactly its limb array, which `to_frame_cells` writes and whose
+/// every pattern is a valid `Fr` (plain integers, no niche), and make `ZERO` all-zero cells.
+unsafe impl MavrosField for ark_bn254::Fr {
     const STORAGE_CELLS: usize = 4;
-    const FIELD_ID: FieldId = FieldId::Bn254;
-    type Limbs = [u64; Self::STORAGE_CELLS];
+    const CANONICAL_LIMBS: usize = 4;
+    type Limbs = [u64; 4];
+    const ZERO: Self = <ark_bn254::Fr as AdditiveGroup>::ZERO;
+    const ONE: Self = <ark_bn254::Fr as ark_ff::Field>::ONE;
 
-    fn zero() -> Self {
-        Bn254Field(<ark_bn254::Fr as AdditiveGroup>::ZERO)
-    }
-
-    fn one() -> Self {
-        Bn254Field(<ark_bn254::Fr as ark_ff::Field>::ONE)
-    }
-
-    fn add(self, rhs: Self) -> Self {
-        Bn254Field(self.0 + rhs.0)
-    }
-
-    fn sub(self, rhs: Self) -> Self {
-        Bn254Field(self.0 - rhs.0)
-    }
-
-    fn mul(self, rhs: Self) -> Self {
-        Bn254Field(self.0 * rhs.0)
-    }
-
-    fn div(self, rhs: Self) -> Self {
-        Bn254Field(self.0 / rhs.0)
-    }
-
-    fn inverse(self) -> Option<Self> {
-        self.0.inverse().map(Bn254Field)
+    fn inverse(&self) -> Option<Self> {
+        ark_ff::Field::inverse(self)
     }
 
     fn from_frame_cells(cells: &[u64]) -> Self {
-        debug_assert!(cells.len() >= Self::STORAGE_CELLS);
-
-        // `new_unchecked` performs no reduction: `cells` is taken as an already-canonical
-        // Montgomery encoding, which holds because it only ever comes from `to_frame_cells`/the VM
-        // frame.
-        Bn254Field(ark_bn254::Fr::new_unchecked(BigInt::new([
-            cells[0], cells[1], cells[2], cells[3],
-        ])))
+        // `new_unchecked` neither converts nor reduces, so a punned `u64` or a pattern past the
+        // modulus is kept as given.
+        ark_bn254::Fr::new_unchecked(BigInt::new([cells[0], cells[1], cells[2], cells[3]]))
     }
 
     fn to_frame_cells(self, out: &mut [u64]) {
-        out[..Self::STORAGE_CELLS].copy_from_slice(&self.0.0.0);
+        out[..Self::STORAGE_CELLS].copy_from_slice(&self.0.0);
     }
 
-    fn from_limbs_le(limbs: &[u64]) -> Self {
-        Self::from_frame_cells(limbs)
+    fn storage_cell0(self) -> u64 {
+        self.0.0[0]
     }
 
-    fn to_limbs_le(self) -> [u64; 4] {
-        self.0.0.0
+    fn to_canonical_limbs(self) -> [u64; 4] {
+        self.into_bigint().0
+    }
+
+    fn from_canonical_limbs(limbs: &[u64]) -> Option<Self> {
+        assert!(
+            limbs.len() <= Self::CANONICAL_LIMBS,
+            "{} limbs do not fit a bn254 element's {} canonical limbs",
+            limbs.len(),
+            Self::CANONICAL_LIMBS
+        );
+        let mut padded = [0u64; 4];
+        padded[..limbs.len()].copy_from_slice(limbs);
+        ark_bn254::Fr::from_bigint(BigInt(padded))
     }
 }
 
@@ -191,66 +200,139 @@ impl MavrosField for Bn254Field {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use ark_ff::UniformRand;
 
     use super::*;
 
-    #[test]
-    fn field_id_code_round_trips() {
-        assert_eq!(
-            FieldId::from_code(FieldId::Bn254.code()),
-            Some(FieldId::Bn254)
-        );
-        assert_eq!(FieldId::from_code(1), None);
-    }
+    type Fr = ark_bn254::Fr;
 
-    #[test]
-    fn bn254_storage_is_four_cells() {
-        assert_eq!(Bn254Field::STORAGE_CELLS, 4);
-        assert_eq!(Bn254Field::FIELD_ID, FieldId::Bn254);
-    }
-
-    #[test]
-    fn bn254_ops_match_backing() {
+    fn samples() -> Vec<Fr> {
         let mut rng = ark_std::test_rng();
-        for _ in 0..256 {
-            let a = ark_bn254::Fr::rand(&mut rng);
-            let b = ark_bn254::Fr::rand(&mut rng);
-            let (fa, fb) = (Bn254Field::from_ark(a), Bn254Field::from_ark(b));
-            assert_eq!(fa.add(fb).to_ark(), a + b);
-            assert_eq!(fa.sub(fb).to_ark(), a - b);
-            assert_eq!(fa.mul(fb).to_ark(), a * b);
+        let mut values: Vec<Fr> = (0..256).map(|_| Fr::rand(&mut rng)).collect();
+        values.extend([
+            <Fr as MavrosField>::ZERO,
+            <Fr as MavrosField>::ONE,
+            -<Fr as MavrosField>::ONE,
+            Fr::from(u64::MAX),
+            Fr::from(u128::MAX),
+        ]);
+        values
+    }
+
+    #[test]
+    fn bn254_layout_is_its_storage_cells() {
+        assert_eq!(size_of::<Fr>(), <Fr as MavrosField>::STORAGE_CELLS * 8);
+        assert!(align_of::<Fr>() <= align_of::<u64>());
+        for value in samples() {
+            let mut cells = [0u64; 4];
+            value.to_frame_cells(&mut cells);
+            // SAFETY: the size was checked above, and `cells` is `u64`-aligned.
+            let punned = unsafe { *(cells.as_ptr() as *const Fr) };
+            assert_eq!(punned, value);
+            // SAFETY: as above, reading the element's bytes back as cells.
+            let bytes = unsafe { *(&value as *const Fr as *const [u64; 4]) };
+            assert_eq!(bytes, cells);
+        }
+    }
+
+    #[test]
+    fn bn254_storage_cells_are_montgomery() {
+        for value in samples() {
+            let mut cells = [0u64; 4];
+            value.to_frame_cells(&mut cells);
+            assert_eq!(cells, value.0.0);
+            assert_eq!(<Fr as MavrosField>::from_frame_cells(&cells), value);
+            assert_eq!(value.storage_cell0(), value.0.0[0]);
+        }
+        // Montgomery form is visible: `1` is not stored as the integer 1.
+        assert_ne!(<Fr as MavrosField>::ONE.storage_cell0(), 1);
+        // A punned `u64`, and cells past the modulus, are kept as given.
+        for cells in [[7, 0, 0, 0], [u64::MAX; 4]] {
             assert_eq!(
-                fa.inverse().map(Bn254Field::to_ark),
-                ark_ff::Field::inverse(&a)
+                <Fr as MavrosField>::from_frame_cells(&cells).storage_cell0(),
+                cells[0]
             );
         }
+    }
+
+    #[test]
+    fn bn254_canonical_limbs_are_the_integer() {
+        for value in samples() {
+            let limbs = value.to_canonical_limbs();
+            assert_eq!(limbs, value.into_bigint().0);
+            assert_eq!(limbs.len(), <Fr as MavrosField>::CANONICAL_LIMBS);
+            assert_eq!(
+                <Fr as MavrosField>::from_canonical_limbs(&limbs),
+                Some(value)
+            );
+        }
+        assert_eq!(Fr::from(7u64).to_canonical_limbs(), [7, 0, 0, 0]);
+        // Short inputs are zero-extended.
         assert_eq!(
-            Bn254Field::zero().to_ark(),
-            <ark_bn254::Fr as AdditiveGroup>::ZERO
+            <Fr as MavrosField>::from_canonical_limbs(&[5, 1]),
+            Some(Fr::from((1u128 << 64) | 5))
         );
         assert_eq!(
-            Bn254Field::one().to_ark(),
-            <ark_bn254::Fr as ark_ff::Field>::ONE
+            <Fr as MavrosField>::from_canonical_limbs(&[]),
+            Some(<Fr as MavrosField>::ZERO)
+        );
+        // The modulus itself has no element.
+        assert_eq!(
+            <Fr as MavrosField>::from_canonical_limbs(&Fr::MODULUS.0),
+            None
         );
     }
 
     #[test]
-    fn bn254_frame_cell_round_trip_is_montgomery() {
-        let mut rng = ark_std::test_rng();
-        for _ in 0..256 {
-            let a = ark_bn254::Fr::rand(&mut rng);
-            let fa = Bn254Field::from_ark(a);
-            let mut cells = [0u64; 4];
-            fa.to_frame_cells(&mut cells);
-            // Raw Montgomery limbs, matching the VM frame representation.
-            assert_eq!(cells, a.0.0);
-            assert_eq!(Bn254Field::from_frame_cells(&cells), fa);
-            let limbs = fa.to_limbs_le();
-            assert_eq!(limbs, a.0.0);
-            // The associated `Limbs` array must stay consistent with `STORAGE_CELLS`.
-            assert_eq!(limbs.as_ref().len(), Bn254Field::STORAGE_CELLS);
-            assert_eq!(Bn254Field::from_limbs_le(&limbs), fa);
+    #[should_panic(expected = "do not fit")]
+    fn bn254_from_canonical_limbs_rejects_too_many_limbs() {
+        let _ = <Fr as MavrosField>::from_canonical_limbs(&[0; 5]);
+    }
+
+    #[test]
+    fn bn254_canonical_cmp_matches_integer_order() {
+        let values = samples();
+        for a in &values {
+            for b in values.iter().take(32) {
+                assert_eq!(a.canonical_cmp(*b), a.into_bigint().cmp(&b.into_bigint()));
+            }
         }
+        // The samples include pairs whose storage cells order differently from their integers, so
+        // the loop above would catch a comparison of the cells.
+        let storage_cmp = |a: &Fr, b: &Fr| a.0.0.iter().rev().cmp(b.0.0.iter().rev());
+        assert!(values.iter().any(|a| {
+            values
+                .iter()
+                .any(|b| storage_cmp(a, b) != a.into_bigint().cmp(&b.into_bigint()))
+        }));
+        let (two, three) = (Fr::from(2u64), Fr::from(3u64));
+        assert_eq!(two.canonical_cmp(three), Ordering::Less);
+        assert_eq!((-two).canonical_cmp(two), Ordering::Greater);
+    }
+
+    #[test]
+    fn bn254_arithmetic_matches_backing() {
+        let values = samples();
+        for pair in values.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            assert_eq!(MavrosField::inverse(&a), ark_ff::Field::inverse(&a));
+            if let Some(inverse) = MavrosField::inverse(&b) {
+                assert_eq!(a * inverse, a / b);
+            }
+        }
+        assert_eq!(MavrosField::inverse(&<Fr as MavrosField>::ZERO), None);
+        assert_eq!(<Fr as MavrosField>::ZERO, <Fr as AdditiveGroup>::ZERO);
+        assert_eq!(<Fr as MavrosField>::ONE, <Fr as ark_ff::Field>::ONE);
+    }
+
+    /// `fake_challenges` seeds its challenges with `F::from` of this integer, which for bn254 must
+    /// be the element the integer names.
+    #[test]
+    fn bn254_fake_challenge_seed_converts_exactly() {
+        let seed: u128 = 18765435241434657586764563434227903;
+        let expected = Fr::from_bigint(BigInt::from_str(&seed.to_string()).unwrap()).unwrap();
+        assert_eq!(Fr::from(seed), expected);
     }
 }

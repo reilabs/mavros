@@ -237,8 +237,8 @@ impl FieldElement {
 
     /// Converts into the raw backing field.
     ///
-    /// This is the middle-end → codegen boundary conversion; the returned value is the wrapped
-    /// element verbatim, so downstream emission is byte-identical.
+    /// This is the conversion into the artifacts' raw representation; the returned value is the
+    /// wrapped element verbatim, so downstream emission is byte-identical.
     #[inline]
     #[must_use]
     pub fn to_ark(self) -> Backing {

@@ -26,20 +26,16 @@ fn assert_forward_bytecode(binary: &[u64]) {
     let p = FramePosition(0);
     let forbidden: Vec<u64> = [
         OpCode::FreshWitness { res: p },
-        OpCode::WitnessRefAlloc {
-            res: p,
-            data: Field::ZERO,
-        },
-        OpCode::PureToWitnessRef { res: p, v: p },
-        OpCode::MulConst {
+        OpCode::Bn254PureToWitnessRef { res: p, v: p },
+        OpCode::Bn254MulConst {
             res: p,
             coeff: p,
             v: p,
         },
-        OpCode::AddBoxed { res: p, a: p, b: p },
-        OpCode::BumpDa { v: p, coeff: p },
-        OpCode::BumpDb { v: p, coeff: p },
-        OpCode::BumpDc { v: p, coeff: p },
+        OpCode::Bn254AddBoxed { res: p, a: p, b: p },
+        OpCode::Bn254BumpDa { v: p, coeff: p },
+        OpCode::Bn254BumpDb { v: p, coeff: p },
+        OpCode::Bn254BumpDc { v: p, coeff: p },
     ]
     .iter()
     .map(|op| {
@@ -374,7 +370,6 @@ fn prover_artifacts_are_rejected_by_the_verifier() {
         entry_points: vec![0, 1],
         entry_blob_field_count: 0,
         global_frame_size: 0,
-        struct_layouts: vec![],
         constant_pool: vec![],
     }
     .to_binary();
