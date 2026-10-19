@@ -1,5 +1,6 @@
 //! Tools and utilities for computing layouts when generating bytecode.
 
+use super::WitnessMode;
 use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::{IntBits, int_bits::HOST_LIMB_BITS};
 
@@ -22,7 +23,7 @@ use crate::{
 /// Assists in computing the layout for a single virtual machine stack frame.
 pub struct FrameLayouter {
     pub next_free: usize,
-    pub verifier: bool,
+    mode: WitnessMode,
     pub variables: HashMap<ValueId, usize>,
 
     /// The cells one element of the program's field occupies.
@@ -30,14 +31,14 @@ pub struct FrameLayouter {
 }
 
 impl FrameLayouter {
-    pub fn new(field: FieldConfig) -> Self {
-        Self::with_field_cells(field.storage_cells())
+    pub fn new(field: FieldConfig, mode: WitnessMode) -> Self {
+        Self::with_field_cells(field.storage_cells(), mode)
     }
 
-    pub(super) fn with_field_cells(field_cells: usize) -> Self {
+    pub(super) fn with_field_cells(field_cells: usize, mode: WitnessMode) -> Self {
         Self {
             next_free: 2,
-            verifier: false,
+            mode,
             variables: HashMap::default(),
             field_cells,
         }
@@ -92,7 +93,7 @@ impl FrameLayouter {
     /// Returns the size of `tp` in `u64` cells.
     pub fn type_size(&self, tp: &Type) -> usize {
         match &tp.expr {
-            TypeExpr::WitnessOf(_) if self.verifier => self.field_cells,
+            TypeExpr::WitnessOf(_) if self.mode == WitnessMode::Verifier => self.field_cells,
             TypeExpr::Blob(elem, n) => n * self.type_size(elem),
             _ => slot_cells(tp, self.field_cells),
         }
@@ -200,18 +201,14 @@ pub struct GlobalFrameLayouter {
 }
 
 impl GlobalFrameLayouter {
-    pub fn new(ssa: &HLSSA) -> Self {
-        Self::with_verifier(ssa, false)
-    }
-
-    pub fn with_verifier(ssa: &HLSSA, verifier: bool) -> Self {
+    pub fn new(ssa: &HLSSA, mode: WitnessMode) -> Self {
         let global_types = ssa.get_global_types();
         let field_cells = ssa.field().storage_cells();
         let mut offsets = Vec::new();
         let mut sizes = Vec::new();
         let mut next_free = 0usize;
         for typ in global_types.iter() {
-            let size = if verifier && typ.is_witness_of() {
+            let size = if mode == WitnessMode::Verifier && typ.is_witness_of() {
                 field_cells
             } else {
                 slot_cells(typ, field_cells)
@@ -326,7 +323,8 @@ mod tests {
         assert_eq!(int_cell_count(200), 4, "200 bits is four 64-bit cells");
         assert_eq!(int_cell_count(MAX_SUPPORTED_INT_BITS), 256);
         assert_eq!(
-            FrameLayouter::new(FieldConfig::bn254()).type_size(&Type::int(MAX_SUPPORTED_INT_BITS)),
+            FrameLayouter::new(FieldConfig::bn254(), WitnessMode::Ad)
+                .type_size(&Type::int(MAX_SUPPORTED_INT_BITS)),
             256
         );
     }
@@ -335,7 +333,7 @@ mod tests {
     fn the_two_frame_size_formulas_agree_at_every_width() {
         // `alloc_value` uses `type_size` and `alloc_int` uses `int_cell_count`, and a value can be
         // allocated by either, so the two must agree at every width.
-        let layouter = FrameLayouter::new(FieldConfig::bn254());
+        let layouter = FrameLayouter::new(FieldConfig::bn254(), WitnessMode::Ad);
         for bits in [
             1usize,
             8,
@@ -363,12 +361,12 @@ mod tests {
     fn a_field_slot_is_the_fields_storage_cells() {
         let bn254 = FieldConfig::bn254();
         assert_eq!(
-            FrameLayouter::new(bn254).type_size(&Type::field()),
+            FrameLayouter::new(bn254, WitnessMode::Ad).type_size(&Type::field()),
             bn254.storage_cells()
         );
 
         // Three cells, which no field has, so a slot sized by a literal fails.
-        let mut layouter = FrameLayouter::with_field_cells(3);
+        let mut layouter = FrameLayouter::with_field_cells(3, WitnessMode::Ad);
         assert_eq!(layouter.type_size(&Type::field()), 3);
         assert_eq!(layouter.type_size(&Type::blob(Type::field(), 2)), 6);
         let named = layouter.alloc_field(ValueId(0));

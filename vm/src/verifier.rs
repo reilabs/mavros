@@ -20,6 +20,8 @@ pub(crate) struct VerifierArrays {
     pub coeffs: Tape,
     pub witness_cursor: usize,
     pub constraint_cursor: usize,
+    // FIELD-ASSUMPTION: L4-logup-challenges
+    // One LogUp challenge pair (alpha, beta); no K-challenge replication.
     challenge: usize,
     multiplicities: usize,
     table_witness: usize,
@@ -68,20 +70,32 @@ impl VerifierArrays {
         }
     }
 
+    /// The next table's row positions, before its length is known.
+    pub fn begin_table(&self, kind: TableKind) -> (TableInfo, usize) {
+        (
+            TableInfo {
+                multiplicities_wit: Tape::NONE,
+                kind,
+                length: 0,
+                elem_inverses_witness_section_offset: self.table_witness,
+                elem_inverses_constraint_section_offset: self.table_constraint,
+            },
+            self.multiplicities,
+        )
+    }
+
+    pub fn reserve_table(&mut self, table: &TableInfo) {
+        let width = if table.kind == TableKind::Array { 2 } else { 1 };
+        self.multiplicities += table.length;
+        self.table_witness += width * table.length;
+        self.table_constraint += width * table.length + 1;
+    }
+
     /// Reserve a table in the deterministic order used by matrix generation.
-    pub unsafe fn table(&mut self, kind: TableKind, length: usize) -> (TableInfo, usize) {
-        let width = if kind == TableKind::Array { 2 } else { 1 };
-        let table = TableInfo {
-            multiplicities_wit: Tape::NONE,
-            kind,
-            length,
-            elem_inverses_witness_section_offset: self.table_witness,
-            elem_inverses_constraint_section_offset: self.table_constraint,
-        };
-        let multiplicities = self.multiplicities;
-        self.multiplicities += length;
-        self.table_witness += width * length;
-        self.table_constraint += width * length + 1;
+    pub fn table(&mut self, kind: TableKind, length: usize) -> (TableInfo, usize) {
+        let (mut table, multiplicities) = self.begin_table(kind);
+        table.length = length;
+        self.reserve_table(&table);
         (table, multiplicities)
     }
 

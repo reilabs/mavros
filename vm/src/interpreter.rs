@@ -899,6 +899,8 @@ pub fn run_profiled<F: mavros_artifacts::MavrosField>(
 
 /// The three matrix contractions used by a Spartan verifier. These values do not
 /// indicate whether a witness satisfies the circuit.
+// FIELD-ASSUMPTION: L1-alias
+// The default result type is the compiler's BN254 field.
 pub struct VerifierResult<F = Field> {
     pub r_aw: F,
     pub r_bw: F,
@@ -1032,6 +1034,44 @@ enum ConstraintOutputs<'a, F> {
     Verifier { outputs: [&'a mut F; 3], witness: &'a [F] },
 }
 
+impl<F> ConstraintOutputs<'_, F> {
+    fn validate(&self, witness_len: usize) -> Result<(), TrapError> {
+        let invalid = match self {
+            Self::Ad(buffers) => buffers
+                .iter()
+                .find(|buffer| buffer.len() != witness_len)
+                .map(|buffer| ("AD output", buffer.len())),
+            Self::Verifier { witness, .. } => {
+                (witness.len() != witness_len).then_some(("verifier w", witness.len()))
+            }
+        };
+        if let Some((name, actual)) = invalid {
+            return Err(TrapError {
+                message: Some(format!(
+                    "{name} length: expected {witness_len}, got {actual}"
+                )),
+                stack_trace: Vec::new(),
+            });
+        }
+        Ok(())
+    }
+
+    fn entry(&self) -> usize {
+        match self {
+            Self::Ad(_) => ENTRY_AD,
+            Self::Verifier { .. } => ENTRY_VERIFIER,
+        }
+    }
+
+    #[cfg(feature = "vm-profile")]
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Ad(_) => "AD",
+            Self::Verifier { .. } => "Verifier",
+        }
+    }
+}
+
 /// Shared dispatch for AD and verifier execution. The output storage is owned by
 /// the callers above and remains alive until dispatch and reference-counted
 /// sensitivity propagation finish.
@@ -1054,73 +1094,52 @@ fn run_constraint_program<F: mavros_artifacts::MavrosField>(
             stack_trace: Vec::new(),
         });
     }
-    let is_verifier = matches!(&outputs, ConstraintOutputs::Verifier { .. });
-
-    // Validate capacities before converting the exclusive borrows into VM pointers.
-    // The callers cannot access the buffers again until this dispatch returns.
-    let (output_ptrs, witness) = match outputs {
-        ConstraintOutputs::Ad(buffers) => {
-            for buffer in &buffers {
-                if buffer.len() != witness_layout.size() {
-                    return Err(TrapError {
-                        message: Some(format!(
-                            "AD output length: expected {}, got {}",
-                            witness_layout.size(),
-                            buffer.len()
-                        )),
-                        stack_trace: Vec::new(),
-                    });
-                }
-            }
-            (buffers.map(|buffer| buffer.as_mut_ptr()), None)
-        }
-        ConstraintOutputs::Verifier { outputs, witness } => {
-            if witness.len() != witness_layout.size() {
-                return Err(TrapError {
-                    message: Some(format!(
-                        "verifier w length: expected {}, got {}",
-                        witness_layout.size(),
-                        witness.len()
-                    )),
-                    stack_trace: Vec::new(),
-                });
-            }
-            (
-                outputs.map(|output| output as *mut F),
-                Some(witness.as_ptr()),
-            )
-        }
-    };
+    outputs.validate(witness_layout.size())?;
     let header = parse_program_header(program);
     let debug_info = debug_info.unwrap_or_default();
-    let entry_index = if is_verifier {
-        ENTRY_VERIFIER
-    } else {
-        ENTRY_AD
-    };
-    let entry = *header
-        .entry_points
-        .get(entry_index)
+    let entry = *header.entry_points.get(outputs.entry())
         .filter(|entry| **entry != bytecode::NO_ENTRY_POINT)
         .ok_or_else(|| TrapError {
-            message: Some(
-                if is_verifier {
-                    "Program has no forward verifier entry point; compile a separate verifier artifact"
-                } else {
-                    "Program has no AD entry point"
-                }
-                .to_string(),
-            ),
+            message: Some(match &outputs {
+                ConstraintOutputs::Ad(_) => "Program has no AD entry point",
+                ConstraintOutputs::Verifier { .. } => "Program has no forward verifier entry point; compile a separate verifier artifact",
+            }.to_string()),
             stack_trace: Vec::new(),
         })?;
-    let global_frame_size = header.global_frame_size;
-    let mut global_frame = vec![0u64; global_frame_size];
-    let mut vm = if let Some(witness) = witness {
-        VM::new_constraint::<F>(
+    if header.constraint_layouts
+        != Some(bytecode::ConstraintLayouts::new(
+            witness_layout,
+            constraints_layout,
+        ))
+    {
+        return Err(TrapError {
+            message: Some("constraint layouts do not match bytecode".to_string()),
+            stack_trace: Vec::new(),
+        });
+    }
+    #[cfg(feature = "vm-profile")]
+    let profile_name = outputs.name();
+    let mut global_frame = vec![0u64; header.global_frame_size];
+    // Exclusive borrows keep these buffers alive throughout dispatch and AD propagation.
+    let mut vm = match outputs {
+        ConstraintOutputs::Ad(buffers) => {
+            let [a, b, c] = buffers.map(|buffer| buffer.as_mut_ptr());
+            VM::new_ad(
+                a,
+                b,
+                c,
+                coeffs.as_ptr(),
+                witness_layout,
+                constraints_layout,
+                global_frame.as_mut_ptr(),
+                header.constant_pool,
+            )
+        }
+        ConstraintOutputs::Verifier { outputs, witness } => VM::new_constraint::<F>(
             Arrays {
                 as_verifier: crate::verifier::VerifierArrays::new(
-                    output_ptrs,
-                    witness,
+                    outputs.map(|output| output as *mut F),
+                    witness.as_ptr(),
                     coeffs.as_ptr(),
                     witness_layout,
                     constraints_layout,
@@ -1128,18 +1147,7 @@ fn run_constraint_program<F: mavros_artifacts::MavrosField>(
             },
             global_frame.as_mut_ptr(),
             header.constant_pool,
-        )
-    } else {
-        VM::new_ad(
-            output_ptrs[0],
-            output_ptrs[1],
-            output_ptrs[2],
-            coeffs.as_ptr(),
-            witness_layout,
-            constraints_layout,
-            global_frame.as_mut_ptr(),
-            header.constant_pool,
-        )
+        ),
     };
 
     let frame = Frame::push(
@@ -1162,7 +1170,7 @@ fn run_constraint_program<F: mavros_artifacts::MavrosField>(
     unsafe { dispatch(pc, frame, &mut vm) };
 
     #[cfg(feature = "vm-profile")]
-    vm.report_opcode_profile(if is_verifier { "Verifier" } else { "AD" });
+    vm.report_opcode_profile(profile_name);
 
     if vm.trapped {
         return Err(TrapError {
@@ -1284,6 +1292,7 @@ mod tests {
             .collect();
             code.push(OpCode::Ret {});
             let program = Program {
+                constraint_layouts: Some(bytecode::ConstraintLayouts::new(wl, cl)),
                 functions: vec![Function {
                     name: "verifier".into(),
                     frame_size: 2 + 4 * F::STORAGE_CELLS,
@@ -1497,7 +1506,9 @@ mod tests {
             source_locations: vec![bytecode::SourceLocation::new("<test>", 1, 1); code.len()],
             code,
         };
+        let (wl, cl) = every_table_layouts();
         Program {
+            constraint_layouts: Some(bytecode::ConstraintLayouts::new(wl, cl)),
             functions: vec![function("main", 36, witgen), function("ad", 8, ad)],
             entry_points: vec![0, 1],
             entry_blob_field_count: 6,
@@ -1681,7 +1692,7 @@ mod tests {
 
     /// A program whose witgen entry has a `frame_size`-cell frame and an `inputs`-element blob, and
     /// whose two entries return at once.
-    fn empty_program(frame_size: usize, inputs: usize) -> Vec<u64> {
+    fn empty_program(frame_size: usize, inputs: usize, constraints: usize) -> Vec<u64> {
         use bytecode::{Function, Program};
 
         let function = |name: &str, frame_size| Function {
@@ -1690,7 +1701,9 @@ mod tests {
             code: vec![OpCode::Ret {}],
             source_locations: vec![bytecode::SourceLocation::new("<test>", 1, 1)],
         };
+        let (wl, cl) = empty_layouts(constraints);
         Program {
+            constraint_layouts: Some(bytecode::ConstraintLayouts::new(wl, cl)),
             functions: vec![function("main", frame_size), function("ad", 2)],
             entry_points: vec![0, 1],
             entry_blob_field_count: inputs,
@@ -1725,7 +1738,7 @@ mod tests {
         let (witness_layout, constraints_layout) = empty_layouts(0);
         let inputs = [1u64, 2].map(Field::from);
         let result = run(
-            &empty_program(10, 2),
+            &empty_program(10, 2, 0),
             witness_layout,
             constraints_layout,
             &inputs,
@@ -1740,7 +1753,7 @@ mod tests {
         let (witness_layout, constraints_layout) = empty_layouts(0);
         let inputs = [1u64, 2].map(Field::from);
         let _ = run(
-            &empty_program(9, 2),
+            &empty_program(9, 2, 0),
             witness_layout,
             constraints_layout,
             &inputs,
@@ -1753,7 +1766,7 @@ mod tests {
         let (witness_layout, constraints_layout) = empty_layouts(2);
         let coeffs = [1u64, 2].map(Field::from);
         let result = run_ad(
-            &empty_program(2, 0),
+            &empty_program(2, 0, 2),
             &coeffs,
             witness_layout,
             constraints_layout,
@@ -1767,7 +1780,7 @@ mod tests {
         let (witness_layout, constraints_layout) = empty_layouts(2);
         let coeffs = [1u64, 2, 3].map(Field::from);
         let error = run_ad(
-            &empty_program(2, 0),
+            &empty_program(2, 0, 2),
             &coeffs,
             witness_layout,
             constraints_layout,
@@ -1785,7 +1798,7 @@ mod tests {
     fn an_ad_run_short_of_coefficients_is_refused() {
         let (witness_layout, constraints_layout) = empty_layouts(2);
         let error = run_ad(
-            &empty_program(2, 0),
+            &empty_program(2, 0, 2),
             &[Field::from(1u64)],
             witness_layout,
             constraints_layout,

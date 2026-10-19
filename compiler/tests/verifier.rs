@@ -188,6 +188,62 @@ fn empty_circuit() {
 }
 
 #[test]
+fn constraint_layouts_must_match_the_compiled_artifact() {
+    let project =
+        common::noir_project("fn main(x: u8, i: u32) { let a = [x, 2, 3]; assert(a[i] == x); }");
+    let (mut driver, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
+    let verifier = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
+    let mut prover = api::compile_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
+    let other = common::noir_project("fn main(x: Field) { assert(x == 1); }");
+    let (_, other_r1cs) = api::compile_to_r1cs(other.path().to_path_buf(), false).unwrap();
+    let mut shifted_witness = r1cs.witness_layout;
+    shifted_witness.algebraic_size -= 1;
+    shifted_witness.multiplicities_size += 1;
+    let mut shifted_constraints = r1cs.constraints_layout;
+    shifted_constraints.algebraic_size -= 1;
+    shifted_constraints.tables_data_size += 1;
+    for (wl, cl) in [
+        (other_r1cs.witness_layout, other_r1cs.constraints_layout),
+        (shifted_witness, r1cs.constraints_layout),
+        (r1cs.witness_layout, shifted_constraints),
+    ] {
+        // The vectors fit the supplied layouts, including mismatches with unchanged total lengths.
+        let r = vec![Field::from(3u64); cl.size()];
+        let w = vec![Field::from(5u64); wl.size()];
+        let error = api::run_verifier_from_binary(&verifier, &r, &w, wl, cl, None)
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.message(),
+            Some("constraint layouts do not match bytecode")
+        );
+        let error = mavros_vm::interpreter::run_ad(&prover, &r, wl, cl, None)
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.message(),
+            Some("constraint layouts do not match bytecode")
+        );
+    }
+    let r = vec![Field::from(3u64); r1cs.constraints_layout.size()];
+    let w = vec![Field::from(5u64); r1cs.witness_layout.size()];
+    let result = api::run_verifier_from_binary(
+        &verifier,
+        &r,
+        &w,
+        r1cs.witness_layout,
+        r1cs.constraints_layout,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        [result.r_aw, result.r_bw, result.r_cw],
+        reference(&r1cs, &r, &w)
+    );
+    api::run_ad_from_binary(&mut prover, &r1cs, &r, None).unwrap();
+}
+
+#[test]
 fn vector_lengths_are_checked_before_execution() {
     let project = common::noir_project("fn main(x: Field) { assert(x * x == 9); }");
     let (mut driver, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
@@ -359,6 +415,7 @@ fn prover_artifacts_are_rejected_by_the_verifier() {
     let project = common::noir_project("fn main() {}");
     let (_, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
     let binary = Program {
+        constraint_layouts: None,
         functions: (0..2)
             .map(|i| Function {
                 name: format!("entry_{i}"),

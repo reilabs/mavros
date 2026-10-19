@@ -269,9 +269,11 @@ fn run_compile_package(
     absolute_paths: bool,
     logup_soundness: u32,
 ) -> Result<ExitCode, Error> {
-    if verifier_output.is_some_and(|output| output == binary_output || output == r1cs_output) {
-        return Err("verifier output must be separate from prover and R1CS outputs".into());
-    }
+    check_compile_outputs(
+        r1cs_output,
+        binary_output,
+        verifier_output.map(|path| path.as_path()),
+    )?;
     info!(message = %"Compiling Noir project", root = ?path, r1cs_output = ?r1cs_output, binary_output = ?binary_output);
 
     let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs, logup_soundness, false)?;
@@ -340,6 +342,46 @@ fn run_compile_package(
     );
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// Reserve debug sidecars even without debug info: stale sidecars are removed on that path.
+fn check_compile_outputs(r1cs: &Path, binary: &Path, verifier: Option<&Path>) -> Result<(), Error> {
+    let mut outputs = vec![
+        r1cs.to_path_buf(),
+        binary.to_path_buf(),
+        binary.with_extension("debug.json"),
+    ];
+    if let Some(verifier) = verifier {
+        outputs.extend([
+            verifier.to_path_buf(),
+            verifier.with_extension("debug.json"),
+        ]);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for output in outputs {
+        if !seen.insert(output_identity(&output)?) {
+            return Err(format!("compile output paths overlap: {}", output.display()).into());
+        }
+    }
+    Ok(())
+}
+
+fn output_identity(path: &Path) -> std::io::Result<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in std::path::absolute(path)?.components() {
+        if component == std::path::Component::ParentDir {
+            normalized.pop();
+        } else {
+            normalized.push(component);
+        }
+        // Resolve existing parents before interpreting `..`; output files need not exist yet.
+        match fs::canonicalize(&normalized) {
+            Ok(path) => normalized = path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(normalized)
 }
 
 fn write_vm_debug_info(
@@ -719,6 +761,8 @@ fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
 }
 
 /// Read verifier inputs without losing precision to JSON's numeric representation.
+// FIELD-ASSUMPTION: L1-serde
+// CLI decimal inputs are parsed into the current BN254 field.
 fn read_verifier_vector(path: &Path) -> Result<Vec<RawField>, Error> {
     use ark_ff::PrimeField;
 
@@ -776,6 +820,59 @@ fn parse_path(path: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compile_output_collisions_are_rejected_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let r1cs = root.join("r1cs.bin");
+        for (binary, verifier) in [
+            ("p.json", "p.bin"),
+            ("p.json", "p.debug.json"),
+            ("p.debug.json", "p.json"),
+            ("p.json", "r1cs.bin"),
+            ("p.json", "./p.json"),
+            ("p.json", "unused/../p.json"),
+        ] {
+            let binary = root.join(binary);
+            let verifier = root.join(verifier);
+            for include_debug_info in [false, true] {
+                fs::write(&binary, "keep prover").unwrap();
+                fs::write(&r1cs, "keep r1cs").unwrap();
+                let error = run_compile_package(
+                    &root.to_path_buf(),
+                    &r1cs,
+                    &binary,
+                    Some(&verifier),
+                    false,
+                    include_debug_info,
+                    false,
+                    128,
+                )
+                .unwrap_err();
+                assert!(
+                    error.to_string().contains("output paths overlap"),
+                    "{error}"
+                );
+                assert_eq!(fs::read_to_string(&binary).unwrap(), "keep prover");
+                assert_eq!(fs::read_to_string(&r1cs).unwrap(), "keep r1cs");
+            }
+        }
+        check_compile_outputs(&r1cs, &root.join("p.json"), Some(&root.join("v.json"))).unwrap();
+        #[cfg(unix)]
+        {
+            fs::create_dir_all(root.join("nested/sub")).unwrap();
+            std::os::unix::fs::symlink(root.join("nested/sub"), root.join("alias")).unwrap();
+            assert!(
+                check_compile_outputs(
+                    &r1cs,
+                    &root.join("nested/p.json"),
+                    Some(&root.join("alias/../p.bin"))
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn verifier_cli_requires_vectors_and_rejects_conflicting_modes() {

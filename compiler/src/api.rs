@@ -153,7 +153,7 @@ pub fn compile_bytecode_artifact(
     Ok(driver.compile_bytecode_artifact(options)?)
 }
 
-/// Compile the separate forward verifier binary. The prover binary is unchanged.
+/// Compile the forward verifier binary without witgen or AD functions.
 pub fn compile_verifier_bytecode(
     driver: &mut Driver,
     options: crate::compiler::codegen::CodeGenOptions,
@@ -199,6 +199,8 @@ pub fn run_ad_from_binary(
 ///
 /// `binary` must come from [`compile_verifier_bytecode`].
 /// Only bytecode and layouts are required; no R1CS matrices are needed.
+// FIELD-ASSUMPTION: L1-alias
+// The compiler API exposes the configured BN254 field; the VM runner is generic.
 pub fn run_verifier_from_binary(
     binary: &[u64],
     r: &[RawField],

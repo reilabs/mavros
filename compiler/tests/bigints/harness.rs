@@ -702,10 +702,13 @@ fn eval_expectation(op: IntOp, lhs: &IntBits, rhs: &IntBits) -> Expectation {
 pub fn bytecode_listing(ssa: &HLSSA) -> String {
     let flow_analysis = FlowAnalysis::run(ssa);
     let type_info = Types::new().run(ssa, &flow_analysis);
-    let program = CodeGen::new(CodeGenOptions {
-        check_constraints: false,
-        include_debug_info: false,
-    })
+    let program = CodeGen::new(
+        CodeGenOptions {
+            check_constraints: false,
+            include_debug_info: false,
+        },
+        mavros_compiler::compiler::codegen::bytecode::WitnessMode::Ad,
+    )
     .run(ssa, &flow_analysis, &type_info);
     format!("{program}")
 }

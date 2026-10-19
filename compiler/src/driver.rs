@@ -29,7 +29,7 @@ use crate::{
         },
         codegen::{
             CodeGenOptions,
-            bytecode::CodeGen,
+            bytecode::{CodeGen, WitnessMode},
             hlssa_to_r1cs::{R1CGen, R1CS, R1CSProfile, logup_soundness_report},
             llssa_to_llvm::WasmCompileOpts,
         },
@@ -101,6 +101,7 @@ pub struct Driver {
     monomorphized_ssa: Option<HLSSA>,
     witness_spilled_ssa: Option<HLSSA>,
     r1cs_ssa: Option<HLSSA>,
+    constraint_layouts: Option<crate::vm::bytecode::ConstraintLayouts>,
     r1cs_profile: Option<R1CSProfile>,
     r1cs_profiling: bool,
     /// The final multi-entry-point SSA: the witgen program with the AD program merged in as a
@@ -178,6 +179,7 @@ impl Driver {
             monomorphized_ssa: None,
             witness_spilled_ssa: None,
             r1cs_ssa: None,
+            constraint_layouts: None,
             r1cs_profile: None,
             r1cs_profiling: false,
             program_ssa: None,
@@ -207,6 +209,7 @@ impl Driver {
             monomorphized_ssa: None,
             witness_spilled_ssa: None,
             r1cs_ssa: None,
+            constraint_layouts: None,
             r1cs_profile: None,
             r1cs_profiling: false,
             program_ssa: None,
@@ -738,6 +741,10 @@ impl Driver {
             }
         }
         self.r1cs_ssa = Some(r1cs_ssa);
+        self.constraint_layouts = Some(crate::vm::bytecode::ConstraintLayouts::new(
+            r1cs.witness_layout,
+            r1cs.constraints_layout,
+        ));
         self.r1cs_profile = profile;
         info!(
             message = %"R1CS generated",
@@ -791,7 +798,7 @@ impl Driver {
         &mut self,
         options: CodeGenOptions,
     ) -> Result<BytecodeArtifact, Error> {
-        self.compile_vm_artifact(options, false)
+        self.compile_vm_artifact(options, WitnessMode::Ad)
     }
 
     /// Compile a separate forward verifier binary without witgen or AD functions.
@@ -807,13 +814,13 @@ impl Driver {
         &mut self,
         options: CodeGenOptions,
     ) -> Result<BytecodeArtifact, Error> {
-        self.compile_vm_artifact(options, true)
+        self.compile_vm_artifact(options, WitnessMode::Verifier)
     }
 
     fn compile_vm_artifact(
         &mut self,
         options: CodeGenOptions,
-        verifier: bool,
+        mode: WitnessMode,
     ) -> Result<BytecodeArtifact, Error> {
         self.prepare_program_ssa();
         let ssa = self.program_ssa.as_ref().unwrap();
@@ -821,15 +828,12 @@ impl Driver {
         let flow_analysis = FlowAnalysis::run(ssa);
         let type_info = Types::new().run(ssa, &flow_analysis);
 
-        let codegen = CodeGen::new(options);
-        let program = if verifier {
-            codegen.run_verifier(ssa, &flow_analysis, &type_info)
-        } else {
-            codegen.run(ssa, &flow_analysis, &type_info)
-        };
+        let codegen = CodeGen::new(options, mode);
+        let mut program = codegen.run(ssa, &flow_analysis, &type_info);
+        program.constraint_layouts = self.constraint_layouts;
         // Only a project-backed driver has an ABI to check the header against; one from
         // [`Self::from_ssa`] states the entry's shape only in its HLSSA.
-        if !verifier && self.abi.is_some() {
+        if mode == WitnessMode::Ad && self.abi.is_some() {
             assert_eq!(
                 program.entry_blob_field_count,
                 self.entry_point_flattened_io_count(),
@@ -837,11 +841,12 @@ impl Driver {
             );
         }
         self.write_debug_text(
-            self.get_debug_output_dir().join(if verifier {
-                "verifier_bytecode.txt"
-            } else {
-                "program_bytecode.txt"
-            }),
+            self.get_debug_output_dir()
+                .join(if mode == WitnessMode::Verifier {
+                    "verifier_bytecode.txt"
+                } else {
+                    "program_bytecode.txt"
+                }),
             format!("{}", program),
         );
 

@@ -259,6 +259,8 @@ impl VM {
 /// opcode proc macro.
 pub const ELEM_WORD: usize = 0;
 pub const ELEM_FIELD: usize = 1;
+/// A witness linear combination evaluated at w, stored as an inline field value.
+/// Unlike a pure field table element, it already includes the constant-column contribution.
 pub const ELEM_VERIFIER: usize = 5;
 pub const ELEM_WITNESS: usize = 2;
 pub const ELEM_U128: usize = 3;
@@ -3821,9 +3823,8 @@ mod def {
         unsafe {
             let table_id = array.table_id();
             if *table_id == u64::MAX {
-                let length = for_each_array_leaf(array, stride, |_, _| {});
-                let (table, mult) = vm.data.as_verifier.table(TableKind::Array, length);
-                for_each_array_leaf(array, stride, |i, elem| {
+                let (mut table, mult) = vm.data.as_verifier.begin_table(TableKind::Array);
+                let length = for_each_array_leaf(array, stride, |i, elem| {
                     let value = if elem_kind == ELEM_VERIFIER {
                         *(elem as *const F)
                     } else {
@@ -3832,6 +3833,8 @@ mod def {
                     };
                     vm.data.as_verifier.array_row(&table, mult, i, value);
                 });
+                table.length = length;
+                vm.data.as_verifier.reserve_table(&table);
                 vm.data.as_verifier.array_sum::<F>(&table);
                 *table_id = vm.tables.len() as u64;
                 vm.tables.push(table);
@@ -3867,11 +3870,33 @@ pub const ENTRY_WITGEN: usize = 0;
 pub const ENTRY_AD: usize = 1;
 /// Index of the direct forward verifier entry point.
 pub const ENTRY_VERIFIER: usize = 2;
-/// An absent entry in a program or serialized entry table. This preserves the
-/// witgen/AD binary format while allowing a standalone verifier-only program.
+/// An absent entry in a program or serialized entry table.
 pub const NO_ENTRY_POINT: usize = usize::MAX;
 
+/// Buffer layouts bound to the compiled constraint traversal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConstraintLayouts([u64; 10]);
+
+impl ConstraintLayouts {
+    pub fn new(witness: WitnessLayout, constraints: ConstraintsLayout) -> Self {
+        Self([
+            witness.guard_index.map_or(u64::MAX, |index| index as u64),
+            witness.return_len as u64,
+            witness.algebraic_size as u64,
+            witness.multiplicities_size as u64,
+            witness.challenges_size as u64,
+            witness.tables_data_size as u64,
+            witness.lookups_data_size as u64,
+            constraints.algebraic_size as u64,
+            constraints.tables_data_size as u64,
+            constraints.lookups_data_size as u64,
+        ])
+    }
+}
+
 pub struct Program {
+    /// Required for AD/verifier execution; absent for programs built only for inspection or witgen.
+    pub constraint_layouts: Option<ConstraintLayouts>,
     pub functions: Vec<Function>,
     /// Indices into `functions` of the program's entry points, in entry-table order
     /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], [`ENTRY_VERIFIER`]). Absent entries use
@@ -3914,7 +3939,7 @@ pub const PROGRAM_MAGIC: u64 = u64::from_be_bytes(*b"MAVROSVM");
 /// The program binary's format version, its second word. An opcode's number is its position in the
 /// generated opcode list, so a change to that list, to an opcode's operands, to the `BoxedLayout`
 /// encoding or to the header layout must bump this.
-pub const PROGRAM_FORMAT_VERSION: u64 = 1;
+pub const PROGRAM_FORMAT_VERSION: u64 = 2;
 
 impl Program {
     /// Serialize executable VM bytecode. Debug information is never embedded in this output.
@@ -3938,6 +3963,10 @@ impl Program {
 
     fn to_binary_impl(&self, include_debug_info: bool) -> (Vec<u64>, Option<DebugInfo>) {
         let mut binary = vec![PROGRAM_MAGIC, PROGRAM_FORMAT_VERSION];
+        binary.push(u64::from(self.constraint_layouts.is_some()));
+        if let Some(layouts) = self.constraint_layouts {
+            binary.extend_from_slice(&layouts.0);
+        }
 
         // Constant pool: [pool_len, ...words...].
         binary.push(self.constant_pool.len() as u64);
@@ -4029,6 +4058,8 @@ impl Program {
 
 /// The decoded header of a program binary.
 pub struct ProgramHeader {
+    /// Layouts emitted by the compiler, checked before constraint execution.
+    pub constraint_layouts: Option<ConstraintLayouts>,
     /// Interned constant pool (flat words), read at runtime by `mov_const_pool`.
     pub constant_pool: Vec<u64>,
     pub global_frame_size: usize,
@@ -4042,8 +4073,8 @@ pub struct ProgramHeader {
     pub code_start: usize,
 }
 
-/// Decode a program binary's header: constant pool, global frame size, entry blob field count and
-/// the entry-point table.
+/// Decode a program binary's layouts, constant pool, global frame size, entry blob field count
+/// and entry-point table.
 ///
 /// # Panics
 ///
@@ -4060,7 +4091,14 @@ pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
         version == Some(PROGRAM_FORMAT_VERSION),
         "unsupported VM program format version {version:?}; expected {PROGRAM_FORMAT_VERSION}"
     );
-    let off = 2;
+    let (constraint_layouts, off) = match program[2] {
+        0 => (None, 3),
+        1 => (
+            Some(ConstraintLayouts(program[3..13].try_into().unwrap())),
+            13,
+        ),
+        _ => panic!("invalid constraint layout tag"),
+    };
     let pool_len = program[off] as usize;
     let constant_pool = program[off + 1..off + 1 + pool_len].to_vec();
     let off = off + 1 + pool_len;
@@ -4072,6 +4110,7 @@ pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
         .collect();
     let code_start = off + 3 + num_entries;
     ProgramHeader {
+        constraint_layouts,
         constant_pool,
         global_frame_size,
         entry_blob_field_count,
@@ -4185,6 +4224,7 @@ mod tests {
         ];
         let locations = vec![location("main", 1); code.len()];
         let program = Program {
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 20,
@@ -4304,6 +4344,7 @@ mod tests {
         ];
         let locations = vec![location("main", 1); code.len()];
         let program = Program {
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: FRAME,
@@ -4383,6 +4424,7 @@ mod tests {
     #[should_panic(expected = "overlap")]
     fn a_scalar_result_inside_a_wide_operand_is_caught() {
         let program = Program {
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 12,
@@ -4436,6 +4478,7 @@ mod tests {
             OpCode::Trap {},
         ];
         let program = Program {
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 12,
@@ -4647,6 +4690,7 @@ mod tests {
                     code.push(OpCode::Trap {});
 
                     let program = Program {
+                        constraint_layouts: None,
                         functions: vec![Function {
                             name: "main".to_string(),
                             frame_size,
@@ -4722,6 +4766,7 @@ mod tests {
         let (a, b, sum) = (2usize, 4, 6);
 
         let program = Program {
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 12,
@@ -4783,6 +4828,7 @@ mod tests {
     fn a_result_sharing_cells_with_an_operand_is_caught() {
         const BITS: u64 = 192;
         let program = Program {
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 12,
@@ -5140,7 +5186,7 @@ mod tests {
     #[test]
     fn opcode_numbers_are_pinned() {
         assert_eq!(
-            PROGRAM_FORMAT_VERSION, 1,
+            PROGRAM_FORMAT_VERSION, 2,
             "the format version these numbers belong to"
         );
         let pinned: &[(usize, &str)] = &[
@@ -5952,6 +5998,7 @@ mod tests {
         let middle_location = location("middle", 17);
         let callee_location = location("helper", 24);
         let program = Program {
+            constraint_layouts: None,
             functions: vec![
                 Function {
                     name: "main".to_string(),
@@ -6043,7 +6090,7 @@ mod tests {
     #[test]
     fn boxed_layout_encodings_are_pinned() {
         assert_eq!(
-            PROGRAM_FORMAT_VERSION, 1,
+            PROGRAM_FORMAT_VERSION, 2,
             "the format version these encodings belong to"
         );
         let codes = [
@@ -6119,6 +6166,7 @@ mod tests {
         let binary = [
             PROGRAM_MAGIC,
             PROGRAM_FORMAT_VERSION,
+            0, // No constraint layouts.
             0,
             0,
             0,
@@ -6128,7 +6176,7 @@ mod tests {
         ];
         let header = parse_program_header(&binary);
 
-        assert_eq!(header.code_start, 6);
+        assert_eq!(header.code_start, 7);
         assert!(header.constant_pool.is_empty());
     }
 
@@ -6140,7 +6188,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "unsupported VM program format version Some(0); expected 1")]
+    #[should_panic(expected = "unsupported VM program format version Some(0); expected 2")]
     fn a_binary_of_another_format_version_is_refused() {
         parse_program_header(&[PROGRAM_MAGIC, 0, 0, 0, 0, 0, u64::MAX, 0]);
     }
@@ -6149,6 +6197,7 @@ mod tests {
     fn bytecode_debug_info_is_always_standalone() {
         let source_location = location("main", 10);
         let program = Program {
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 3,
@@ -6178,6 +6227,7 @@ mod tests {
     fn debug_info_serialization_interns_files_and_validates_the_version() {
         let source_location = location("shared", 10);
         let program = Program {
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 3,
