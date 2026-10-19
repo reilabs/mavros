@@ -92,19 +92,15 @@ pub struct ProgramOptions {
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum Command {
-    /// Compile a Noir project and output R1CS and binary artifacts.
+    /// Compile a Noir project into one Mavros artifact.
     Compile {
         /// Path to the Noir project root.
         #[arg(default_value = DEFAULT_NOIR_PROJECT_PATH, value_parser = parse_path)]
         path: PathBuf,
 
-        /// Output path for the versioned R1CS artifact.
-        #[arg(long, default_value = "target/r1cs.bin")]
-        r1cs_output: PathBuf,
-
-        /// Output path for binaries and ABI (JSON).
-        #[arg(long, default_value = "target/basic.json")]
-        binary_output: PathBuf,
+        /// Output path for the artifact: header, witness manifest, R1CS, VM bytecode and ABI.
+        #[arg(long, default_value = "target/program.mavros")]
+        output: PathBuf,
 
         /// Optionally write a separate verifier binary and layouts (JSON).
         #[arg(long)]
@@ -146,14 +142,12 @@ fn main() -> ExitCode {
         .into()),
         Some(Command::Compile {
             path,
-            r1cs_output,
-            binary_output,
+            output,
             verifier_output,
             draw_graphs,
         }) => run_compile(
             path,
-            r1cs_output,
-            binary_output,
+            output,
             verifier_output.as_ref(),
             *draw_graphs,
             args.include_debug_info,
@@ -198,12 +192,10 @@ fn debug_path_root(driver: &Driver, absolute_paths: bool) -> Option<&Path> {
     }
 }
 
-/// Compile phase: compile the Noir project and save R1CS and binary artifacts
-/// to separate files.
+/// Compile phase: compile the Noir project and write its artifact.
 pub fn run_compile(
     path: &PathBuf,
-    r1cs_output: &PathBuf,
-    binary_output: &PathBuf,
+    output: &PathBuf,
     verifier_output: Option<&PathBuf>,
     draw_graphs: bool,
     include_debug_info: bool,
@@ -214,8 +206,7 @@ pub fn run_compile(
     let roots = Project::binary_package_roots(&requested_root)?;
     let multiple = roots.len() > 1;
     if multiple
-        && [r1cs_output, binary_output]
-            .into_iter()
+        && std::iter::once(output)
             .chain(verifier_output)
             .any(|output| {
                 output.components().any(|component| {
@@ -232,15 +223,10 @@ pub fn run_compile(
     }
     run_packages(&roots, |root| {
         let rebase = root != &requested_root;
-        let r1cs_output = if rebase {
-            root.join(r1cs_output)
+        let output = if rebase {
+            root.join(output)
         } else {
-            r1cs_output.clone()
-        };
-        let binary_output = if rebase {
-            root.join(binary_output)
-        } else {
-            binary_output.clone()
+            output.clone()
         };
         let verifier_output = verifier_output.map(|output| {
             if rebase {
@@ -251,8 +237,7 @@ pub fn run_compile(
         });
         run_compile_package(
             root,
-            &r1cs_output,
-            &binary_output,
+            &output,
             verifier_output.as_ref(),
             draw_graphs,
             include_debug_info,
@@ -264,56 +249,37 @@ pub fn run_compile(
 
 fn run_compile_package(
     path: &PathBuf,
-    r1cs_output: &PathBuf,
-    binary_output: &PathBuf,
+    output: &PathBuf,
     verifier_output: Option<&PathBuf>,
     draw_graphs: bool,
     include_debug_info: bool,
     absolute_paths: bool,
     logup_soundness: u32,
 ) -> Result<ExitCode, Error> {
-    check_compile_outputs(
-        r1cs_output,
-        binary_output,
-        verifier_output.map(|path| path.as_path()),
-    )?;
-    info!(message = %"Compiling Noir project", root = ?path, r1cs_output = ?r1cs_output, binary_output = ?binary_output);
+    check_compile_outputs(output, verifier_output.map(|path| path.as_path()))?;
+    info!(message = %"Compiling Noir project", root = ?path, output = ?output);
 
     let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs, logup_soundness, false)?;
-    let artifact = api::compile_bytecode_artifact(
+    let bytecode = api::compile_bytecode_artifact(
         &mut driver,
         CodeGenOptions {
             include_debug_info,
             ..CodeGenOptions::default()
         },
     )?;
-    let binary = artifact.binary;
 
-    // Ensure output directories exist
-    if let Some(parent) = r1cs_output.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
-    }
-    if let Some(parent) = binary_output.parent() {
+    if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
     }
 
-    let r1cs_artifact = driver.r1cs_artifact(r1cs)?;
-    let r1cs_constraints = r1cs_artifact.r1cs().constraints.len();
-    let r1cs_bytes = r1cs_artifact.to_bytes()?;
-    fs::write(r1cs_output, &r1cs_bytes)?;
+    let abi = serde_json::to_vec(driver.abi())?;
+    let artifact = driver.artifact(r1cs, bytecode.binary, abi)?;
+    let bytes = artifact.to_bytes()?;
+    fs::write(output, &bytes)?;
 
-    let basic = serde_json::json!({
-        "binary": binary,
-        "abi": serde_json::to_value(driver.abi())?,
-    });
-    let basic_json = serde_json::to_string_pretty(&basic)?;
-    fs::write(binary_output, basic_json)?;
-
-    write_vm_debug_info(binary_output, artifact.debug_info, &driver, absolute_paths)?;
+    write_vm_debug_info(output, bytecode.debug_info, &driver, absolute_paths)?;
 
     if let Some(output) = verifier_output {
         let verifier = api::compile_verifier_bytecode_artifact(
@@ -330,32 +296,27 @@ fn run_compile_package(
             output,
             serde_json::to_string_pretty(&serde_json::json!({
                 "binary": verifier.binary,
-                "witness_layout": r1cs_artifact.r1cs().witness_layout,
-                "constraints_layout": r1cs_artifact.r1cs().constraints_layout,
+                "witness_layout": artifact.r1cs().witness_layout,
+                "constraints_layout": artifact.r1cs().constraints_layout,
             }))?,
         )?;
         write_vm_debug_info(output, verifier.debug_info, &driver, absolute_paths)?;
     }
 
     info!(
-        message = %"Artifacts saved successfully",
-        r1cs_output = ?r1cs_output,
-        binary_output = ?binary_output,
-        r1cs_constraints,
-        r1cs_bytes = r1cs_bytes.len(),
-        binary_size = binary.len() * 8,
+        message = %"Artifact saved successfully",
+        output = ?output,
+        artifact_bytes = bytes.len(),
+        r1cs_constraints = artifact.r1cs().constraints.len(),
+        binary_size = artifact.bytecode().len() * 8,
     );
 
     Ok(ExitCode::SUCCESS)
 }
 
 /// Reserve debug sidecars even without debug info: stale sidecars are removed on that path.
-fn check_compile_outputs(r1cs: &Path, binary: &Path, verifier: Option<&Path>) -> Result<(), Error> {
-    let mut outputs = vec![
-        r1cs.to_path_buf(),
-        binary.to_path_buf(),
-        binary.with_extension("debug.json"),
-    ];
+fn check_compile_outputs(output: &Path, verifier: Option<&Path>) -> Result<(), Error> {
+    let mut outputs = vec![output.to_path_buf(), output.with_extension("debug.json")];
     if let Some(verifier) = verifier {
         outputs.extend([
             verifier.to_path_buf(),
@@ -859,24 +820,20 @@ mod tests {
     fn compile_output_collisions_are_rejected_before_writing() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let r1cs = root.join("r1cs.bin");
-        for (binary, verifier) in [
-            ("p.json", "p.bin"),
-            ("p.json", "p.debug.json"),
+        for (output, verifier) in [
+            ("p.mavros", "p.mavros"),
+            ("p.mavros", "p.debug.json"),
             ("p.debug.json", "p.json"),
-            ("p.json", "r1cs.bin"),
-            ("p.json", "./p.json"),
-            ("p.json", "unused/../p.json"),
+            ("p.mavros", "./p.mavros"),
+            ("p.mavros", "unused/../p.mavros"),
         ] {
-            let binary = root.join(binary);
+            let output = root.join(output);
             let verifier = root.join(verifier);
             for include_debug_info in [false, true] {
-                fs::write(&binary, "keep prover").unwrap();
-                fs::write(&r1cs, "keep r1cs").unwrap();
+                fs::write(&output, "keep artifact").unwrap();
                 let error = run_compile_package(
                     &root.to_path_buf(),
-                    &r1cs,
-                    &binary,
+                    &output,
                     Some(&verifier),
                     false,
                     include_debug_info,
@@ -888,20 +845,18 @@ mod tests {
                     error.to_string().contains("output paths overlap"),
                     "{error}"
                 );
-                assert_eq!(fs::read_to_string(&binary).unwrap(), "keep prover");
-                assert_eq!(fs::read_to_string(&r1cs).unwrap(), "keep r1cs");
+                assert_eq!(fs::read_to_string(&output).unwrap(), "keep artifact");
             }
         }
-        check_compile_outputs(&r1cs, &root.join("p.json"), Some(&root.join("v.json"))).unwrap();
+        check_compile_outputs(&root.join("p.mavros"), Some(&root.join("v.json"))).unwrap();
         #[cfg(unix)]
         {
             fs::create_dir_all(root.join("nested/sub")).unwrap();
             std::os::unix::fs::symlink(root.join("nested/sub"), root.join("alias")).unwrap();
             assert!(
                 check_compile_outputs(
-                    &r1cs,
-                    &root.join("nested/p.json"),
-                    Some(&root.join("alias/../p.bin"))
+                    &root.join("nested/p.mavros"),
+                    Some(&root.join("alias/../p.json"))
                 )
                 .is_err()
             );
@@ -912,28 +867,26 @@ mod tests {
     fn compile_output_collisions_follow_filesystem_case_sensitivity() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let r1cs = root.join("r1cs.bin");
-        fs::write(&r1cs, "keep r1cs").unwrap();
+        let sentinel = root.join("sentinel");
+        fs::write(&sentinel, "keep").unwrap();
         fs::create_dir(root.join("nested")).unwrap();
-        let case_insensitive = root.join("R1CS.BIN").exists();
-        for (binary, verifier) in [
-            ("p.json", "P.json"),
-            ("p.json", "P.bin"),
-            ("new/p.json", "NEW/P.bin"),
-            ("nested/p.json", "NESTED/P.bin"),
-            ("p.json", "R1CS.BIN"),
-            ("é.json", "É.bin"),
+        let case_insensitive = root.join("SENTINEL").exists();
+        for (output, verifier) in [
+            ("p.mavros", "P.mavros"),
+            ("p.mavros", "P.json"),
+            ("new/p.mavros", "NEW/P.json"),
+            ("nested/p.mavros", "NESTED/P.json"),
+            ("é.mavros", "É.json"),
         ] {
-            let result =
-                check_compile_outputs(&r1cs, &root.join(binary), Some(&root.join(verifier)));
-            assert_eq!(result.is_err(), case_insensitive, "{binary}, {verifier}");
+            let result = check_compile_outputs(&root.join(output), Some(&root.join(verifier)));
+            assert_eq!(result.is_err(), case_insensitive, "{output}, {verifier}");
             if let Err(error) = result {
                 assert!(
                     error.to_string().contains("output paths overlap"),
                     "{error}"
                 );
             }
-            assert_eq!(fs::read_to_string(&r1cs).unwrap(), "keep r1cs");
+            assert_eq!(fs::read_to_string(&sentinel).unwrap(), "keep");
             // No output directories or temporary probes survive the check.
             assert_eq!(fs::read_dir(root).unwrap().count(), 2);
             assert_eq!(fs::read_dir(root.join("nested")).unwrap().count(), 0);
@@ -1073,13 +1026,11 @@ mod tests {
     fn workspace_compile_keeps_member_artifacts_separate() {
         let dir = workspace_fixture();
         let root = dir.path().to_path_buf();
-        let r1cs = PathBuf::from("target/r1cs.bin");
-        let binary = PathBuf::from("target/basic.json");
+        let output = PathBuf::from("target/program.mavros");
         assert!(
             run_compile(
                 &root,
-                &root.join("shared.bin"),
-                &binary,
+                &root.join("shared.mavros"),
                 None,
                 false,
                 true,
@@ -1088,12 +1039,11 @@ mod tests {
             )
             .is_err()
         );
-        assert!(!root.join("shared.bin").exists());
+        assert!(!root.join("shared.mavros").exists());
         assert_eq!(
             run_compile(
                 &root,
-                &r1cs,
-                &binary,
+                &output,
                 Some(&PathBuf::from("target/verifier.json")),
                 false,
                 true,
@@ -1105,9 +1055,8 @@ mod tests {
         );
         for name in ["a", "b"] {
             for file in [
-                "r1cs.bin",
-                "basic.json",
-                "basic.debug.json",
+                "program.mavros",
+                "program.debug.json",
                 "verifier.json",
                 "verifier.debug.json",
             ] {
@@ -1115,8 +1064,8 @@ mod tests {
             }
         }
         assert_ne!(
-            fs::read(root.join("a/target/basic.json")).unwrap(),
-            fs::read(root.join("b/target/basic.json")).unwrap()
+            fs::read(root.join("a/target/program.mavros")).unwrap(),
+            fs::read(root.join("b/target/program.mavros")).unwrap()
         );
     }
 
@@ -1134,8 +1083,7 @@ mod tests {
             assert_eq!(
                 run_compile(
                     &dir.path().to_path_buf(),
-                    &PathBuf::from("target/r1cs.bin"),
-                    &PathBuf::from("target/basic.json"),
+                    &PathBuf::from("target/program.mavros"),
                     None,
                     false,
                     true,
@@ -1145,7 +1093,7 @@ mod tests {
                 .unwrap(),
                 ExitCode::SUCCESS
             );
-            for file in ["r1cs.bin", "basic.json", "basic.debug.json"] {
+            for file in ["program.mavros", "program.debug.json"] {
                 assert!(dir.path().join(member).join("target").join(file).is_file());
             }
         }
@@ -1153,7 +1101,7 @@ mod tests {
 
     /// Covers LogUp slots, unused private inputs and partially read compound parameters.
     #[test]
-    fn compile_writes_versioned_witness_manifest() {
+    fn compile_writes_one_artifact() {
         use mavros_artifacts::{Artifact, ParamVisibility};
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
@@ -1171,16 +1119,23 @@ mod tests {
             }",
         )
         .unwrap();
-        let r1cs = root.join("target/r1cs.bin");
-        let binary = root.join("target/basic.json");
+        let output = root.join("target/program.mavros");
         assert_eq!(
-            run_compile(&root, &r1cs, &binary, None, false, false, false, 128).unwrap(),
+            run_compile(&root, &output, None, false, false, false, 128).unwrap(),
             ExitCode::SUCCESS
         );
-        let bytes = fs::read(&r1cs).unwrap();
+        let bytes = fs::read(&output).unwrap();
         let artifact: Artifact = Artifact::from_bytes(&bytes).unwrap();
         let manifest = artifact.manifest();
         assert_eq!(manifest.entry_blob_field_count(), 8);
+        assert_eq!(
+            mavros_vm::bytecode::parse_program_header(artifact.bytecode()).entry_blob_field_count,
+            8
+        );
+        let abi: noirc_abi::Abi = serde_json::from_slice(artifact.abi()).unwrap();
+        let names: Vec<_> = abi.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["unused", "unused_u8", "x", "y"]);
+        assert_eq!(artifact.compiler(), env!("CARGO_PKG_VERSION"));
         let columns: Vec<_> = manifest
             .parameters
             .iter()
@@ -1211,9 +1166,9 @@ mod tests {
         );
 
         // Compiling again yields the same bytes: the digest is a stable identity.
-        let again = root.join("target/again.bin");
+        let again = root.join("target/again.mavros");
         assert_eq!(
-            run_compile(&root, &again, &binary, None, false, false, false, 128).unwrap(),
+            run_compile(&root, &again, None, false, false, false, 128).unwrap(),
             ExitCode::SUCCESS
         );
         assert_eq!(fs::read(&again).unwrap(), bytes);
@@ -1224,15 +1179,12 @@ mod tests {
         let dir = workspace_fixture();
         // Direct package compilation resolves relative output paths from the caller's
         // working directory.
-        let output = tempfile::tempdir_in(".").unwrap();
-        let output_path = Path::new(output.path().file_name().unwrap());
-        let r1cs = output_path.join("r1cs.bin");
-        let binary = output_path.join("basic.json");
+        let output_dir = tempfile::tempdir_in(".").unwrap();
+        let output = Path::new(output_dir.path().file_name().unwrap()).join("program.mavros");
         assert_eq!(
             run_compile(
                 &dir.path().join("a"),
-                &r1cs,
-                &binary,
+                &output,
                 None,
                 false,
                 false,
@@ -1242,8 +1194,7 @@ mod tests {
             .unwrap(),
             ExitCode::SUCCESS
         );
-        assert!(r1cs.is_file());
-        assert!(binary.is_file());
+        assert!(output.is_file());
     }
 
     #[test]

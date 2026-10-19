@@ -638,7 +638,7 @@ impl<F: MavrosField> SealedR1CS<F> {
         F::ID
     }
 
-    /// Use [`Artifact::digest`] to also bind the witness manifest.
+    /// Use [`Artifact::digest`] to also bind the witness manifest, bytecode and ABI.
     pub fn digest(&self) -> [u8; 32] {
         *self.digest.get_or_init(|| self.system.digest())
     }

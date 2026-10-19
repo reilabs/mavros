@@ -227,7 +227,7 @@ impl Driver {
     /// feature can be prototyped before the frontend supports it.
     ///
     /// Such a driver has no [`Self::abi`], so [`Self::entry_blob_field_count`],
-    /// [`Self::witness_manifest`], [`Self::r1cs_artifact`] and the WASM metadata sidecar are
+    /// [`Self::witness_manifest`], [`Self::artifact`] and the WASM metadata sidecar are
     /// unavailable, and no [`Self::package_root`]: all belong to the Noir package, which an SSA
     /// does not carry.
     ///
@@ -1040,9 +1040,20 @@ impl Driver {
         Ok(manifest)
     }
 
-    pub fn r1cs_artifact<F: MavrosField>(&self, r1cs: SealedR1CS<F>) -> Result<Artifact<F>, Error> {
+    pub fn artifact<F: MavrosField>(
+        &self,
+        r1cs: SealedR1CS<F>,
+        bytecode: Vec<u64>,
+        abi: Vec<u8>,
+    ) -> Result<Artifact<F>, Error> {
         let manifest = self.witness_manifest(&r1cs)?;
-        Ok(Artifact::new(manifest, r1cs))
+        Ok(Artifact::new(
+            manifest,
+            r1cs,
+            bytecode,
+            abi,
+            env!("CARGO_PKG_VERSION").to_string(),
+        ))
     }
 
     /// The parameters only; the return is computed, not an input.

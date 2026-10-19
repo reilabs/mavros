@@ -604,7 +604,7 @@ fn cli_exports_verifier_separately_without_changing_prover_binary() {
         );
     };
     invoke(&[]);
-    let prover_path = project.path().join("target/basic.json");
+    let prover_path = project.path().join("target/program.mavros");
     let original_prover = std::fs::read(&prover_path).unwrap();
     assert!(
         !project
