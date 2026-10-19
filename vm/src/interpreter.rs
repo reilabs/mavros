@@ -1,11 +1,8 @@
 use std::{
     alloc::{self, Layout},
-    marker::PhantomData,
     mem::{self, size_of},
-    str::FromStr,
 };
 
-use ark_ff::{AdditiveGroup, BigInt, Field as _, Fp, PrimeField as _};
 use tracing::instrument;
 
 pub use crate::InputValueOrdered;
@@ -18,6 +15,13 @@ use crate::{
         TableInfo, VM, parse_program_header, pow2_rows,
     },
 };
+
+/// The part of `MavrosField`'s safety contract a frame pun depends on, checked when each field's
+/// accessors are instantiated: `F` covers exactly its storage cells at an alignment a cell meets.
+const fn assert_field_layout<F: mavros_artifacts::MavrosField>() {
+    assert!(size_of::<F>() == F::STORAGE_CELLS * size_of::<u64>() && F::STORAGE_CELLS >= 1);
+    assert!(align_of::<F>() <= align_of::<u64>());
+}
 
 /// An opcode handler. Returns the `(pc, frame)` to feed into the next
 /// dispatch step. A null `pc` signals that execution should halt (the program
@@ -121,19 +125,22 @@ impl Frame {
         }
     }
 
+    /// The field element whose storage cells start at `offset`.
+    ///
+    /// Reading the cells as `F` is sound by the safety contract of
+    /// [`MavrosField`](mavros_artifacts::MavrosField): `F` is laid out as exactly its storage
+    /// cells, with an alignment the cell pointer meets.
     #[inline(always)]
-    // FIELD-ASSUMPTION: L3-frame
-    pub fn read_field(&self, offset: isize) -> Field {
-        let a0 = unsafe { *self.data.offset(offset) };
-        let a1 = unsafe { *self.data.offset(offset + 1) };
-        let a2 = unsafe { *self.data.offset(offset + 2) };
-        let a3 = unsafe { *self.data.offset(offset + 3) };
-        Fp(BigInt([a0, a1, a2, a3]), PhantomData)
+    pub fn read_field<F: mavros_artifacts::MavrosField>(&self, offset: isize) -> F {
+        const { assert_field_layout::<F>() };
+        unsafe { *(self.data.offset(offset) as *const F) }
     }
 
+    /// The field element slot at `offset`, under the same contract as [`Frame::read_field`].
     #[inline(always)]
-    pub fn read_field_mut(&self, offset: isize) -> *mut Field {
-        unsafe { self.data.offset(offset) as *mut Field }
+    pub fn read_field_mut<F: mavros_artifacts::MavrosField>(&self, offset: isize) -> *mut F {
+        const { assert_field_layout::<F>() };
+        unsafe { self.data.offset(offset) as *mut F }
     }
 
     #[inline(always)]
@@ -228,19 +235,11 @@ impl Frame {
         };
     }
 
+    /// Writes `field`'s storage cells at `offset`, under the contract of [`Frame::read_field`].
     #[inline(always)]
-    // FIELD-ASSUMPTION: L3-frame
-    pub fn write_field(&self, offset: isize, field: Field) {
-        let a0 = field.0.0[0];
-        let a1 = field.0.0[1];
-        let a2 = field.0.0[2];
-        let a3 = field.0.0[3];
-        unsafe {
-            *self.data.offset(offset) = a0;
-            *self.data.offset(offset + 1) = a1;
-            *self.data.offset(offset + 2) = a2;
-            *self.data.offset(offset + 3) = a3;
-        }
+    pub fn write_field<F: mavros_artifacts::MavrosField>(&self, offset: isize, field: F) {
+        const { assert_field_layout::<F>() };
+        unsafe { *(self.data.offset(offset) as *mut F) = field }
     }
 
     #[inline(always)]
@@ -274,12 +273,12 @@ pub(crate) fn prepare_dispatch(program: &mut [u64], code_start: usize) {
     }
 }
 
-pub struct WitgenResult {
-    pub out_wit_pre_comm: Vec<Field>,
-    pub out_wit_post_comm: Vec<Field>,
-    pub out_a: Vec<Field>,
-    pub out_b: Vec<Field>,
-    pub out_c: Vec<Field>,
+pub struct WitgenResult<F> {
+    pub out_wit_pre_comm: Vec<F>,
+    pub out_wit_post_comm: Vec<F>,
+    pub out_a: Vec<F>,
+    pub out_b: Vec<F>,
+    pub out_c: Vec<F>,
     pub instrumenter: AllocationInstrumenter,
 }
 
@@ -334,41 +333,74 @@ impl std::error::Error for TrapError {}
 /// complete witness generation in phase 2 (after real Fiat-Shamir challenges
 /// are available).
 #[derive(Clone)]
-pub struct Phase1Result {
-    pub out_wit_pre_comm: Vec<Field>,
-    pub out_wit_post_comm: Vec<Field>,
-    pub out_a: Vec<Field>,
-    pub out_b: Vec<Field>,
-    pub out_c: Vec<Field>,
-    pub tables: Vec<TableInfo>,
+pub struct Phase1Result<F> {
+    pub out_wit_pre_comm: Vec<F>,
+    pub out_wit_post_comm: Vec<F>,
+    pub out_a: Vec<F>,
+    pub out_b: Vec<F>,
+    pub out_c: Vec<F>,
+    pub tables: Vec<Phase2Table>,
     pub instrumenter: AllocationInstrumenter,
 }
 
-fn fix_multiplicities_section(wit: &mut [Field], witness_layout: WitnessLayout) {
+/// A lookup table as phase 2 completes it, located by offsets into the vectors of the
+/// [`Phase1Result`] it belongs to.
+#[derive(Clone, Debug)]
+pub struct Phase2Table {
+    pub kind: TableKind,
+    pub length: usize,
+    /// Where the table's multiplicities start in the pre-commitment witness.
+    pub multiplicities_offset: usize,
+    pub elem_inverses_witness_section_offset: usize,
+    pub elem_inverses_constraint_section_offset: usize,
+}
+
+impl Phase2Table {
+    /// Locates `table`, whose multiplicities tape points into `witness`.
+    fn locate<F: mavros_artifacts::MavrosField>(table: &TableInfo, witness: &[F]) -> Phase2Table {
+        let bytes = (table.multiplicities_wit.cell0() as usize)
+            .checked_sub(witness.as_ptr() as usize)
+            .expect("a table's multiplicities lie in the pre-commitment witness");
+        Phase2Table {
+            kind: table.kind,
+            length: table.length,
+            multiplicities_offset: bytes / size_of::<F>(),
+            elem_inverses_witness_section_offset: table.elem_inverses_witness_section_offset,
+            elem_inverses_constraint_section_offset: table.elem_inverses_constraint_section_offset,
+        }
+    }
+}
+
+fn fix_multiplicities_section<F: mavros_artifacts::MavrosField>(
+    wit: &mut [F],
+    witness_layout: WitnessLayout,
+) {
     #[allow(clippy::needless_range_loop)]
     for i in witness_layout.multiplicities_start()..witness_layout.multiplicities_end() {
-        // We used this as a *mut u64 when writing multiplicities, so we need to convert to an actual field element
-        // FIELD-ASSUMPTION: L4-low-limb (6 sites)
-        wit[i] = Field::from(wit[i].0.0[0]);
+        // Phase 1 counts a multiplicity as a raw `u64` in its slot's first storage cell.
+        wit[i] = F::from(wit[i].storage_cell0());
     }
 }
 
 /// Phase 1 of witness generation: executes the VM to produce the
 /// pre-commitment witness and captures all intermediate state needed for
 /// phase 2.
+///
+/// `F` is the field whose opcodes the program was compiled to, and `inputs` are the entry blob's
+/// elements in order (for bn254, as [`flatten_param_vec`] flattens them).
 #[instrument(skip_all, name = "Interpreter::run_phase1")]
-pub fn run_phase1(
+pub fn run_phase1<F: mavros_artifacts::MavrosField>(
     program: &[u64],
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
-    ordered_inputs: &[InputValueOrdered],
+    inputs: &[F],
     debug_info: Option<bytecode::DebugInfo>,
-) -> Result<Phase1Result, TrapError> {
+) -> Result<Phase1Result<F>, TrapError> {
     run_phase1_impl(
         program,
         witness_layout,
         constraints_layout,
-        ordered_inputs,
+        inputs,
         debug_info,
         false,
     )
@@ -377,31 +409,31 @@ pub fn run_phase1(
 
 /// Profiled phase 1 execution. The returned weights are simulated VM
 /// instructions, which are deterministic across machines and runs.
-pub fn run_phase1_profiled(
+pub fn run_phase1_profiled<F: mavros_artifacts::MavrosField>(
     program: &[u64],
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
-    ordered_inputs: &[InputValueOrdered],
+    inputs: &[F],
     debug_info: Option<bytecode::DebugInfo>,
-) -> Result<(Phase1Result, crate::FlamegraphProfile), TrapError> {
+) -> Result<(Phase1Result<F>, crate::FlamegraphProfile), TrapError> {
     run_phase1_impl(
         program,
         witness_layout,
         constraints_layout,
-        ordered_inputs,
+        inputs,
         debug_info,
         true,
     )
 }
 
-fn run_phase1_impl(
+fn run_phase1_impl<F: mavros_artifacts::MavrosField>(
     program: &[u64],
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
-    ordered_inputs: &[InputValueOrdered],
+    inputs: &[F],
     debug_info: Option<bytecode::DebugInfo>,
     profile: bool,
-) -> Result<(Phase1Result, crate::FlamegraphProfile), TrapError> {
+) -> Result<(Phase1Result<F>, crate::FlamegraphProfile), TrapError> {
     let header = parse_program_header(program);
     let debug_info = debug_info.unwrap_or_default();
     let entry = *header
@@ -409,21 +441,20 @@ fn run_phase1_impl(
         .get(ENTRY_WITGEN)
         .expect("Program has no witgen entry point");
     let global_frame_size = header.global_frame_size;
-    let mut out_a = vec![Field::ZERO; constraints_layout.size()];
-    let mut out_b = vec![Field::ZERO; constraints_layout.size()];
-    let mut out_c = vec![Field::ZERO; constraints_layout.size()];
-    let mut out_wit_pre_comm = vec![Field::ZERO; witness_layout.pre_commitment_size()];
-    let flat_inputs = flatten_param_vec(ordered_inputs);
-    // Main takes its inputs as a single Blob<Field; N> parameter.
+    let mut out_a = vec![F::ZERO; constraints_layout.size()];
+    let mut out_b = vec![F::ZERO; constraints_layout.size()];
+    let mut out_c = vec![F::ZERO; constraints_layout.size()];
+    let mut out_wit_pre_comm = vec![F::ZERO; witness_layout.pre_commitment_size()];
+    // Main takes its inputs as a single `Blob<Field; N>` parameter, one `F` per element.
     assert_eq!(
-        flat_inputs.len(),
+        inputs.len(),
         header.entry_blob_field_count,
         "{} flattened input fields supplied but the entry has {}",
-        flat_inputs.len(),
+        inputs.len(),
         header.entry_blob_field_count,
     );
     // The program itself writes inputs to the witness tape via pinned WriteWitness instructions.
-    let out_wit_post_comm = vec![Field::ZERO; witness_layout.post_commitment_size()];
+    let out_wit_post_comm = vec![F::ZERO; witness_layout.post_commitment_size()];
     let mut global_frame = vec![0u64; global_frame_size];
     let mut vm = VM::new_witgen(
         out_a.as_mut_ptr(),
@@ -453,18 +484,22 @@ fn run_phase1_impl(
         constraints_layout.tables_data_start(),
         witness_layout.tables_data_start() - witness_layout.challenges_start(),
         global_frame.as_mut_ptr(),
-        header.struct_layouts,
         header.constant_pool,
     );
 
-    let frame = Frame::base_frame(program[entry + 1], &mut vm);
+    let frame_size = program[entry + 1];
+    let frame = Frame::base_frame(frame_size, &mut vm);
 
     // The input blob is stored by value in the frame, starting right after
-    // the two return slots.
-    for (input_index, el) in flat_inputs.iter().enumerate() {
-        unsafe {
-            *(frame.data.add(2 + (4 * input_index)) as *mut Field) = *el;
-        }
+    // the two return slots, one element per `F::STORAGE_CELLS` cells, as codegen lays out the
+    // entry's parameter.
+    assert!(
+        2 + F::STORAGE_CELLS * inputs.len() <= frame_size as usize,
+        "the entry's {frame_size}-cell frame cannot hold {} inputs",
+        inputs.len()
+    );
+    for (input_index, el) in inputs.iter().enumerate() {
+        frame.write_field((2 + F::STORAGE_CELLS * input_index) as isize, *el);
     }
 
     let mut program = program.to_vec();
@@ -490,6 +525,11 @@ fn run_phase1_impl(
 
     fix_multiplicities_section(&mut out_wit_pre_comm, witness_layout);
     let instruction_profile = vm.take_instruction_profile();
+    let tables = vm
+        .tables
+        .iter()
+        .map(|table| Phase2Table::locate(table, &out_wit_pre_comm))
+        .collect();
 
     Ok((
         Phase1Result {
@@ -498,7 +538,7 @@ fn run_phase1_impl(
             out_a,
             out_b,
             out_c,
-            tables: vm.tables,
+            tables,
             instrumenter: vm.allocation_instrumenter,
         },
         instruction_profile,
@@ -508,22 +548,27 @@ fn run_phase1_impl(
 /// Phase 2 of witness generation: uses real Fiat-Shamir challenges to
 /// complete the post-commitment witness and constraint vectors.
 #[instrument(skip_all, name = "Interpreter::run_phase2")]
-pub fn run_phase2(
-    mut phase1: Phase1Result,
-    challenges: &[Field],
+pub fn run_phase2<F: mavros_artifacts::MavrosField>(
+    mut phase1: Phase1Result<F>,
+    challenges: &[F],
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
-) -> WitgenResult {
+) -> WitgenResult<F> {
+    assert_eq!(
+        challenges.len(),
+        witness_layout.challenges_size,
+        "phase 2 takes one challenge per challenge witness"
+    );
     // Write real challenges into the post-commitment witness vector.
     for (i, challenge) in challenges.iter().enumerate() {
         phase1.out_wit_post_comm[i] = *challenge;
     }
 
-    // FIELD-ASSUMPTION: L4-logup-challenges (5 sites)
+    // FIELD-ASSUMPTION: L4-logup-challenges (6 sites)
     // Phase 2 reads the single LogUp challenge at the hardcoded post-commitment indices
     // [0] (alpha) and [1] (beta) throughout this function. A small field needs K challenges;
     // these reads become [2k]/[2k+1] inside a `for k in 0..K` loop (see docs/field-agnosticism.md).
-    let mut running_prod = Field::from(1);
+    let mut running_prod = F::ONE;
     for tbl in phase1.tables.iter() {
         let alpha = phase1.out_wit_post_comm[0];
         let base = tbl.elem_inverses_constraint_section_offset;
@@ -532,11 +577,11 @@ pub fn run_phase2(
             TableKind::RangeCheck => {
                 // One constraint per entry: denom_i = α - i
                 for i in 0..tbl.length {
-                    let multiplicity = unsafe { *tbl.multiplicities_wit.add(i) };
-                    let denom = alpha - Field::from(i as u64);
+                    let multiplicity = phase1.out_wit_pre_comm[tbl.multiplicities_offset + i];
+                    let denom = alpha - F::from(i as u64);
                     phase1.out_b[base + i] = denom;
                     phase1.out_c[base + i] = multiplicity;
-                    if multiplicity != Field::ZERO {
+                    if multiplicity != F::ZERO {
                         phase1.out_a[base + i] = running_prod;
                         running_prod *= denom;
                     }
@@ -545,16 +590,16 @@ pub fn run_phase2(
             TableKind::Spread => {
                 // One folded constraint per entry. Both operands (key=i,
                 // value=spread(i)) are constants, so β·spread(i) folds into the
-                // denominator: denom_i = α - i + β·spread(i). spread(i) is
-                // recomputed here rather than dumped by the VM.
+                // denominator: denom_i = α - i + β·spread(i). Phase 2 recomputes spread(i)
+                // from the row index, so the VM dumps nothing for it.
                 let beta = phase1.out_wit_post_comm[1];
                 for i in 0..tbl.length {
-                    let multiplicity = unsafe { *tbl.multiplicities_wit.add(i) };
-                    let spread_i = Field::from(mavros_limb_arith::spread_u32_to_u64(i as u32));
-                    let denom = alpha - Field::from(i as u64) + beta * spread_i;
+                    let multiplicity = phase1.out_wit_pre_comm[tbl.multiplicities_offset + i];
+                    let spread_i = F::from(mavros_limb_arith::spread_u32_to_u64(i as u32));
+                    let denom = alpha - F::from(i as u64) + beta * spread_i;
                     phase1.out_b[base + i] = denom;
                     phase1.out_c[base + i] = multiplicity;
-                    if multiplicity != Field::ZERO {
+                    if multiplicity != F::ZERO {
                         phase1.out_a[base + i] = running_prod;
                         running_prod *= denom;
                     }
@@ -563,14 +608,14 @@ pub fn run_phase2(
             TableKind::Pow2 => {
                 // One folded constraint per entry, exactly like the spread table above: both
                 // operands (key=n, value=2^n) are constants, so β·2^n folds into the denominator.
-                // 2^n is recomputed here rather than dumped by the VM.
+                // Phase 2 recomputes 2^n from the row index, so the VM dumps nothing for it.
                 let beta = phase1.out_wit_post_comm[1];
-                for (n, pow) in pow2_rows(tbl.length).enumerate() {
-                    let multiplicity = unsafe { *tbl.multiplicities_wit.add(n) };
-                    let denom = alpha - Field::from(n as u64) + beta * pow;
+                for (n, pow) in pow2_rows::<F>(tbl.length).enumerate() {
+                    let multiplicity = phase1.out_wit_pre_comm[tbl.multiplicities_offset + n];
+                    let denom = alpha - F::from(n as u64) + beta * pow;
                     phase1.out_b[base + n] = denom;
                     phase1.out_c[base + n] = multiplicity;
-                    if multiplicity != Field::ZERO {
+                    if multiplicity != F::ZERO {
                         phase1.out_a[base + n] = running_prod;
                         running_prod *= denom;
                     }
@@ -580,7 +625,7 @@ pub fn run_phase2(
                 // Two constraints per entry: x_i = -β*v_i, denom_i = α - i - x_i
                 let beta = phase1.out_wit_post_comm[1];
                 for i in 0..tbl.length {
-                    let multiplicity = unsafe { *tbl.multiplicities_wit.add(i) };
+                    let multiplicity = phase1.out_wit_pre_comm[tbl.multiplicities_offset + i];
 
                     // Read v_i from the x-slot where the VM dumped it
                     let v_i = phase1.out_a[base + 2 * i];
@@ -592,10 +637,10 @@ pub fn run_phase2(
                     phase1.out_c[base + 2 * i] = -x_i;
 
                     // Fill y-constraint slots (will be overwritten by batch inversion)
-                    let denom = alpha - Field::from(i as u64) - x_i;
+                    let denom = alpha - F::from(i as u64) - x_i;
                     phase1.out_b[base + 2 * i + 1] = denom;
                     phase1.out_c[base + 2 * i + 1] = multiplicity;
-                    if multiplicity != Field::ZERO {
+                    if multiplicity != F::ZERO {
                         phase1.out_a[base + 2 * i + 1] = running_prod;
                         running_prod *= denom;
                     }
@@ -604,7 +649,6 @@ pub fn run_phase2(
         }
     }
 
-    // FIELD-ASSUMPTION: L4-inverse
     let mut running_inv = running_prod.inverse().unwrap();
 
     for tbl in phase1.tables.iter().rev() {
@@ -619,7 +663,7 @@ pub fn run_phase2(
                 let multiplicity = phase1.out_c[base + i];
                 let denom = phase1.out_b[base + i];
                 let running_prod = phase1.out_a[base + i];
-                if multiplicity != Field::ZERO {
+                if multiplicity != F::ZERO {
                     let elem = running_prod * running_inv;
                     phase1.out_a[base + i] = elem;
                     running_inv *= denom;
@@ -631,7 +675,7 @@ pub fn run_phase2(
                 let multiplicity = phase1.out_c[base + 2 * i + 1];
                 let denom = phase1.out_b[base + 2 * i + 1];
                 let running_prod = phase1.out_a[base + 2 * i + 1];
-                if multiplicity != Field::ZERO {
+                if multiplicity != F::ZERO {
                     let elem = running_prod * running_inv;
                     phase1.out_a[base + 2 * i + 1] = elem;
                     running_inv *= denom;
@@ -648,29 +692,29 @@ pub fn run_phase2(
             + current_lookup_off;
 
         // Peek at which table this lookup belongs to, to determine width
-        let table_ix = phase1.out_a[cnst_off].0.0[0];
+        let table_ix = phase1.out_a[cnst_off].storage_cell0();
         let table = &phase1.tables[table_ix as usize];
 
         let alpha = phase1.out_wit_post_comm[0];
 
         if table.kind == TableKind::RangeCheck {
             // Key-only lookup (rangecheck): 1 constraint per lookup
-            let flag_u64 = phase1.out_c[cnst_off].0.0[0];
+            let flag_u64 = phase1.out_c[cnst_off].storage_cell0();
 
             if flag_u64 == 0 {
                 let key = phase1.out_b[cnst_off];
                 let b_val = alpha - key;
-                phase1.out_a[cnst_off] = Field::ZERO;
+                phase1.out_a[cnst_off] = F::ZERO;
                 phase1.out_b[cnst_off] = b_val;
-                phase1.out_c[cnst_off] = Field::ZERO;
-                phase1.out_wit_post_comm[wit_off] = Field::ZERO;
+                phase1.out_c[cnst_off] = F::ZERO;
+                phase1.out_wit_post_comm[wit_off] = F::ZERO;
             } else {
-                let ix_in_table = phase1.out_b[cnst_off].0.0[0];
+                let ix_in_table = phase1.out_b[cnst_off].storage_cell0();
                 phase1.out_a[cnst_off] = phase1.out_a
                     [table.elem_inverses_constraint_section_offset + ix_in_table as usize];
                 phase1.out_b[cnst_off] = phase1.out_b
                     [table.elem_inverses_constraint_section_offset + ix_in_table as usize];
-                phase1.out_c[cnst_off] = Field::from(flag_u64);
+                phase1.out_c[cnst_off] = F::from(flag_u64);
                 phase1.out_wit_post_comm[wit_off] = phase1.out_a[cnst_off];
                 phase1.out_c[table.elem_inverses_constraint_section_offset + table.length] +=
                     phase1.out_a[cnst_off];
@@ -690,7 +734,7 @@ pub fn run_phase2(
             };
             let beta = phase1.out_wit_post_comm[1];
             let result_value = phase1.out_b[cnst_off];
-            let flag_u64 = phase1.out_c[cnst_off + 1].0.0[0];
+            let flag_u64 = phase1.out_c[cnst_off + 1].storage_cell0();
 
             // x-constraint: β * value = -x → x = -β * value
             let x = -beta * result_value;
@@ -706,19 +750,19 @@ pub fn run_phase2(
             if flag_u64 == 0 {
                 let key = phase1.out_b[y_cnst_off];
                 let b_val = alpha - key - x;
-                phase1.out_a[y_cnst_off] = Field::ZERO;
+                phase1.out_a[y_cnst_off] = F::ZERO;
                 phase1.out_b[y_cnst_off] = b_val;
-                phase1.out_c[y_cnst_off] = Field::ZERO;
-                phase1.out_wit_post_comm[y_wit_off] = Field::ZERO;
+                phase1.out_c[y_cnst_off] = F::ZERO;
+                phase1.out_wit_post_comm[y_wit_off] = F::ZERO;
             } else {
-                let ix_in_table = phase1.out_b[y_cnst_off].0.0[0];
+                let ix_in_table = phase1.out_b[y_cnst_off].storage_cell0();
                 let tbl_base = table.elem_inverses_constraint_section_offset;
                 // Copy precomputed inverse from the table entry's y-slot
                 // (array: 2*ix+1; spread: ix).
                 let y_slot = tbl_base + entry_stride * ix_in_table as usize + (entry_stride - 1);
                 phase1.out_a[y_cnst_off] = phase1.out_a[y_slot];
                 phase1.out_b[y_cnst_off] = phase1.out_b[y_slot];
-                phase1.out_c[y_cnst_off] = Field::from(flag_u64);
+                phase1.out_c[y_cnst_off] = F::from(flag_u64);
                 phase1.out_wit_post_comm[y_wit_off] = phase1.out_a[y_cnst_off];
                 // Add to sum constraint (array: 2*n; spread: n).
                 let sum_off = tbl_base + entry_stride * table.length;
@@ -741,19 +785,19 @@ pub fn run_phase2(
             // constraint at offset length, one witness per entry.
             for i in 0..tbl.length {
                 let multiplicity = phase1.out_c[base + i];
-                if multiplicity != Field::ZERO {
+                if multiplicity != F::ZERO {
                     let elem = phase1.out_a[base + i] * multiplicity;
                     phase1.out_a[base + i] = elem;
                     phase1.out_wit_post_comm[wit_base + i] = elem;
                     phase1.out_a[base + tbl.length] += elem;
                 }
             }
-            phase1.out_b[base + tbl.length] = Field::ONE;
+            phase1.out_b[base + tbl.length] = F::ONE;
         } else {
             // Array: y-values at odd offsets, sum constraint at offset 2*length
             for i in 0..tbl.length {
                 let multiplicity = phase1.out_c[base + 2 * i + 1];
-                if multiplicity != Field::ZERO {
+                if multiplicity != F::ZERO {
                     let elem = phase1.out_a[base + 2 * i + 1] * multiplicity;
                     phase1.out_a[base + 2 * i + 1] = elem;
                     // x witness at even offset, y witness at odd offset
@@ -763,7 +807,7 @@ pub fn run_phase2(
                 // x witness: x_i = -β * v_i; out_c stores -x_i = β*v_i, so negate
                 phase1.out_wit_post_comm[wit_base + 2 * i] = -phase1.out_c[base + 2 * i];
             }
-            phase1.out_b[base + 2 * tbl.length] = Field::ONE;
+            phase1.out_b[base + 2 * tbl.length] = F::ONE;
         }
     }
 
@@ -777,23 +821,21 @@ pub fn run_phase2(
     }
 }
 
-fn fake_challenges(count: usize) -> Vec<Field> {
-    let mut fake_challenges = vec![Field::ZERO; count];
-    let mut random =
-        Field::from_bigint(BigInt::from_str("18765435241434657586764563434227903").unwrap())
-            .unwrap();
+fn fake_challenges<F: mavros_artifacts::MavrosField>(count: usize) -> Vec<F> {
+    let mut fake_challenges = vec![F::ZERO; count];
+    let mut random = F::from(18765435241434657586764563434227903u128);
     for challenge in fake_challenges.iter_mut() {
         *challenge = random;
-        random = (random + Field::from(17)) * random;
+        random = (random + F::from(17u64)) * random;
     }
     fake_challenges
 }
 
-pub fn run_phase2_with_fake_challenges(
-    phase1: Phase1Result,
+pub fn run_phase2_with_fake_challenges<F: mavros_artifacts::MavrosField>(
+    phase1: Phase1Result<F>,
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
-) -> WitgenResult {
+) -> WitgenResult<F> {
     run_phase2(
         phase1,
         &fake_challenges(witness_layout.challenges_size),
@@ -802,21 +844,22 @@ pub fn run_phase2_with_fake_challenges(
     )
 }
 
-// Old method implementation, for posterity
-// Do not use in production
+/// Both phases of witness generation, with fake challenges. The witness satisfies the constraints;
+/// a proof draws its challenges from the committed pre-commitment witness, through [`run_phase1`]
+/// and [`run_phase2`].
 #[instrument(skip_all, name = "Interpreter::run")]
-pub fn run(
+pub fn run<F: mavros_artifacts::MavrosField>(
     program: &[u64],
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
-    ordered_inputs: &[InputValueOrdered],
+    inputs: &[F],
     debug_info: Option<bytecode::DebugInfo>,
-) -> Result<WitgenResult, TrapError> {
+) -> Result<WitgenResult<F>, TrapError> {
     let phase1 = run_phase1(
         program,
         witness_layout,
         constraints_layout,
-        ordered_inputs,
+        inputs,
         debug_info,
     )?;
 
@@ -829,18 +872,18 @@ pub fn run(
 
 /// Run witness generation with deterministic per-call-stack instruction
 /// counting suitable for a FlameGraph.
-pub fn run_profiled(
+pub fn run_profiled<F: mavros_artifacts::MavrosField>(
     program: &[u64],
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
-    ordered_inputs: &[InputValueOrdered],
+    inputs: &[F],
     debug_info: Option<bytecode::DebugInfo>,
-) -> Result<(WitgenResult, crate::FlamegraphProfile), TrapError> {
+) -> Result<(WitgenResult<F>, crate::FlamegraphProfile), TrapError> {
     let (phase1, profile) = run_phase1_profiled(
         program,
         witness_layout,
         constraints_layout,
-        ordered_inputs,
+        inputs,
         debug_info,
     )?;
 
@@ -851,13 +894,13 @@ pub fn run_profiled(
 }
 
 #[instrument(skip_all, name = "Interpreter::run_ad")]
-pub fn run_ad(
+pub fn run_ad<F: mavros_artifacts::MavrosField>(
     program: &[u64],
-    coeffs: &[Field],
+    coeffs: &[F],
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
     debug_info: Option<bytecode::DebugInfo>,
-) -> Result<(Vec<Field>, Vec<Field>, Vec<Field>, AllocationInstrumenter), TrapError> {
+) -> Result<(Vec<F>, Vec<F>, Vec<F>, AllocationInstrumenter), TrapError> {
     run_ad_impl(
         program,
         coeffs,
@@ -871,17 +914,17 @@ pub fn run_ad(
 
 /// Run automatic differentiation with deterministic per-call-stack
 /// instruction counting suitable for a FlameGraph.
-pub fn run_ad_profiled(
+pub fn run_ad_profiled<F: mavros_artifacts::MavrosField>(
     program: &[u64],
-    coeffs: &[Field],
+    coeffs: &[F],
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
     debug_info: Option<bytecode::DebugInfo>,
 ) -> Result<
     (
-        Vec<Field>,
-        Vec<Field>,
-        Vec<Field>,
+        Vec<F>,
+        Vec<F>,
+        Vec<F>,
         AllocationInstrumenter,
         crate::FlamegraphProfile,
     ),
@@ -897,18 +940,18 @@ pub fn run_ad_profiled(
     )
 }
 
-fn run_ad_impl(
+fn run_ad_impl<F: mavros_artifacts::MavrosField>(
     program: &[u64],
-    coeffs: &[Field],
+    coeffs: &[F],
     witness_layout: WitnessLayout,
     constraints_layout: ConstraintsLayout,
     debug_info: Option<bytecode::DebugInfo>,
     profile: bool,
 ) -> Result<
     (
-        Vec<Field>,
-        Vec<Field>,
-        Vec<Field>,
+        Vec<F>,
+        Vec<F>,
+        Vec<F>,
         AllocationInstrumenter,
         crate::FlamegraphProfile,
     ),
@@ -921,9 +964,15 @@ fn run_ad_impl(
         .get(ENTRY_AD)
         .expect("Program has no AD entry point");
     let global_frame_size = header.global_frame_size;
-    let mut out_da = vec![Field::ZERO; witness_layout.size()];
-    let mut out_db = vec![Field::ZERO; witness_layout.size()];
-    let mut out_dc = vec![Field::ZERO; witness_layout.size()];
+    assert!(
+        coeffs.len() == constraints_layout.size(),
+        "{} AD coefficients for {} constraints",
+        coeffs.len(),
+        constraints_layout.size()
+    );
+    let mut out_da = vec![F::ZERO; witness_layout.size()];
+    let mut out_db = vec![F::ZERO; witness_layout.size()];
+    let mut out_dc = vec![F::ZERO; witness_layout.size()];
     let mut global_frame = vec![0u64; global_frame_size];
     let mut vm = VM::new_ad(
         out_da.as_mut_ptr(),
@@ -933,7 +982,6 @@ fn run_ad_impl(
         witness_layout,
         constraints_layout,
         global_frame.as_mut_ptr(),
-        header.struct_layouts,
         header.constant_pool,
     );
 
@@ -1064,6 +1112,394 @@ mod tests {
         assert_eq!(unsafe { frame.read_limbs(4, cells) }, &[7, 8, 9]);
         assert_eq!(frame.read_u64(3), 0xdead, "the write ran off the low end");
         assert_eq!(frame.read_u64(7), 0xbeef, "the write ran off the high end");
+    }
+
+    /// A program over `F` (its field opcodes chosen by `pick`). Its witgen entry reads six inputs
+    /// from its blob, writes one algebraic row and looks up into a table of every kind, the
+    /// rangecheck table three times (once with a zero flag); its AD entry bumps two fresh
+    /// witnesses by the first two coefficients.
+    fn every_table_program<F: mavros_artifacts::MavrosField>(
+        pick: fn(bytecode::FieldOpCode) -> OpCode,
+    ) -> Vec<u64> {
+        use bytecode::{ELEM_WORD, FieldOpCode, FramePosition as P, Function, Program};
+
+        // The blob's elements, one per `F::STORAGE_CELLS` cells from cell 2: 3, 5, 1, 2, 30 and 0.
+        let input = |index: usize| P(2 + F::STORAGE_CELLS * index);
+        let (x, y, one, two, thirty, zero) =
+            (input(0), input(1), input(2), input(3), input(4), input(5));
+        let (z, words, array) = (P(28), P(32), P(35));
+        let witgen = vec![
+            pick(FieldOpCode::MulField { res: z, a: x, b: y }),
+            pick(FieldOpCode::R1C { a: x, b: y, c: z }),
+            pick(FieldOpCode::WriteWitness { val: x }),
+            pick(FieldOpCode::WriteWitness { val: y }),
+            pick(FieldOpCode::WriteWitness { val: z }),
+            pick(FieldOpCode::RngchkField {
+                val: two,
+                flag: one,
+                bits: 2,
+            }),
+            pick(FieldOpCode::RngchkField {
+                val: two,
+                flag: one,
+                bits: 2,
+            }),
+            // A zero flag leaves the key unchecked, so it may lie outside the table.
+            pick(FieldOpCode::RngchkField {
+                val: thirty,
+                flag: zero,
+                bits: 2,
+            }),
+            pick(FieldOpCode::SpreadLookupField {
+                val: one,
+                result: one,
+                flag: one,
+                bits: 1,
+            }),
+            pick(FieldOpCode::Pow2LookupField {
+                amount: one,
+                factor: two,
+                flag: one,
+                size: 1,
+            }),
+            OpCode::MovConst {
+                res: P(32),
+                val: 10,
+            },
+            OpCode::MovConst {
+                res: P(33),
+                val: 20,
+            },
+            OpCode::MovConst {
+                res: P(34),
+                val: 30,
+            },
+            OpCode::ArrayAllocFromFrame {
+                res: array,
+                stride: 1,
+                meta: crate::array::BoxedLayout::array(3, false),
+                count: 3,
+                source: words,
+            },
+            pick(FieldOpCode::ArrayLookupField {
+                array,
+                index: two,
+                result: thirty,
+                flag: one,
+                stride: 1,
+                elem_kind: ELEM_WORD,
+            }),
+            OpCode::DecRc { array },
+            OpCode::Ret {},
+        ];
+        let (first, second, coeff) = (P(2), P(3), P(4));
+        let ad = vec![
+            OpCode::FreshWitness { res: first },
+            OpCode::FreshWitness { res: second },
+            pick(FieldOpCode::NextDCoeff { v: coeff }),
+            pick(FieldOpCode::BumpDa { v: first, coeff }),
+            pick(FieldOpCode::NextDCoeff { v: coeff }),
+            pick(FieldOpCode::BumpDa { v: second, coeff }),
+            OpCode::DecRc { array: first },
+            OpCode::DecRc { array: second },
+            OpCode::Ret {},
+        ];
+        let function = |name: &str, frame_size, code: Vec<OpCode>| Function {
+            name: name.to_string(),
+            frame_size,
+            source_locations: vec![bytecode::SourceLocation::new("<test>", 1, 1); code.len()],
+            code,
+        };
+        Program {
+            functions: vec![function("main", 36, witgen), function("ad", 8, ad)],
+            entry_points: vec![0, 1],
+            entry_blob_field_count: 6,
+            global_frame_size: 0,
+            constant_pool: Vec::new(),
+        }
+        .to_binary()
+    }
+
+    /// The layouts [`every_table_program`] fills exactly.
+    fn every_table_layouts() -> (WitnessLayout, ConstraintsLayout) {
+        let witness_layout = WitnessLayout {
+            guard_index: None,
+            return_len: 0,
+            algebraic_size: 3,
+            multiplicities_size: 11,
+            challenges_size: 2,
+            tables_data_size: 14,
+            lookups_data_size: 9,
+        };
+        let constraints_layout = ConstraintsLayout {
+            algebraic_size: 1,
+            tables_data_size: 18,
+            lookups_data_size: 9,
+        };
+        (witness_layout, constraints_layout)
+    }
+
+    /// The blob [`every_table_program`] reads.
+    fn every_table_inputs<F: mavros_artifacts::MavrosField>() -> [F; 6] {
+        [3u64, 5, 1, 2, 30, 0].map(F::from)
+    }
+
+    /// What [`run_every_table_program`] reports, field-independently.
+    #[derive(Debug, PartialEq)]
+    struct EveryTableRun {
+        /// The algebraic constraint row's `a`, `b` and `c`, as signed integers.
+        algebraic_row: [i128; 3],
+        /// The pre-commitment witness, as signed integers.
+        pre_commitment: Vec<i128>,
+        /// Which post-commitment witnesses are nonzero.
+        post_commitment_written: Vec<bool>,
+        /// The AD run's derivatives at the two fresh witnesses, as signed integers.
+        da: [i128; 2],
+    }
+
+    /// Runs [`every_table_program`] through the generic entry points and checks, in `F`, that
+    /// `a·b = c` on every constraint row and that the post-commitment witness solves the
+    /// rangecheck table's rows and the first lookup.
+    fn run_every_table_program<F: mavros_artifacts::MavrosField>(
+        pick: fn(bytecode::FieldOpCode) -> OpCode,
+    ) -> EveryTableRun {
+        use crate::test_field::signed;
+
+        let binary = every_table_program::<F>(pick);
+        let (witness_layout, constraints_layout) = every_table_layouts();
+        let inputs = every_table_inputs::<F>();
+        let result = run(&binary, witness_layout, constraints_layout, &inputs, None)
+            .expect("every flagged lookup is in range");
+        for (row, ((a, b), c)) in result
+            .out_a
+            .iter()
+            .zip(&result.out_b)
+            .zip(&result.out_c)
+            .enumerate()
+        {
+            assert_eq!(*a * *b, *c, "constraint row {row}");
+        }
+
+        // The post-commitment witness starts with the challenges, then the tables' witnesses (the
+        // rangecheck table's first), then the lookups'.
+        let post = &result.out_wit_post_comm;
+        assert_eq!(post[..2], fake_challenges::<F>(2));
+        let alpha = post[0];
+        for (row, multiplicity) in [0u64, 0, 2, 0].into_iter().enumerate() {
+            let denominator = alpha - F::from(row as u64);
+            assert_eq!(
+                post[2 + row] * denominator,
+                F::from(multiplicity),
+                "table row {row}"
+            );
+        }
+        assert_eq!(
+            post[16] * (alpha - F::from(2u64)),
+            F::ONE,
+            "the first lookup"
+        );
+
+        let coeffs = (1..=constraints_layout.size() as u64)
+            .map(F::from)
+            .collect::<Vec<_>>();
+        let (da, ..) = run_ad(&binary, &coeffs, witness_layout, constraints_layout, None)
+            .expect("the AD entry does not trap");
+        EveryTableRun {
+            algebraic_row: [result.out_a[0], result.out_b[0], result.out_c[0]].map(signed),
+            pre_commitment: result.out_wit_pre_comm.into_iter().map(signed).collect(),
+            post_commitment_written: post.iter().map(|value| *value != F::ZERO).collect(),
+            da: [signed(da[0]), signed(da[1])],
+        }
+    }
+
+    /// The generic entry points end to end, comparing a run over the test field's one-cell elements
+    /// with one over bn254: the entry blob's stride, phase 2's reads of the `u64`s kept in field
+    /// slots, its batch inversion and its challenges, and the AD entry's dA tape.
+    #[test]
+    fn the_entry_points_run_a_test_field_program() {
+        use crate::test_field::TestField;
+        use mavros_artifacts::MavrosField;
+
+        let bn254 = run_every_table_program::<Field>(bytecode::FieldOpCode::bn254);
+        let test64 = run_every_table_program::<TestField>(bytecode::FieldOpCode::test64);
+        // The algebraic witnesses, then the multiplicities of the rangecheck, spread, powers-of-two
+        // and array tables, in that order.
+        let pre_commitment = [3, 5, 15, 0, 0, 2, 0, 0, 1, 0, 1, 0, 0, 1];
+        assert_eq!(bn254.algebraic_row, [3, 5, 15]);
+        assert_eq!(bn254.pre_commitment, pre_commitment);
+        assert_eq!(bn254.da, [1, 2]);
+        // The challenges; the tables' witnesses, nonzero exactly where the row's multiplicity is
+        // nonzero (an array row's x witness, `-β·v`, is nonzero whatever its multiplicity); and the
+        // lookups' witnesses, zero only for the zero-flag lookup.
+        let written = [
+            "11", "0010", "01", "01", "101011", "1", "1", "0", "11", "11", "11",
+        ]
+        .concat()
+        .chars()
+        .map(|bit| bit == '1')
+        .collect::<Vec<_>>();
+        assert_eq!(bn254.post_commitment_written, written);
+        assert_eq!(test64, bn254);
+        // The challenges are the seed's, reduced into the test field.
+        let challenges = fake_challenges::<TestField>(2)
+            .into_iter()
+            .map(|challenge| challenge.to_canonical_limbs()[0])
+            .collect::<Vec<_>>();
+        assert_eq!(challenges, [3690730912593434115, 2291418963929149985]);
+    }
+
+    /// Phase 1's tables locate their multiplicities by offset, so a clone completes after the
+    /// original is gone.
+    #[test]
+    fn a_cloned_phase_one_result_completes_on_its_own() {
+        let binary = every_table_program::<Field>(bytecode::FieldOpCode::bn254);
+        let (witness_layout, constraints_layout) = every_table_layouts();
+        let phase1 = run_phase1(
+            &binary,
+            witness_layout,
+            constraints_layout,
+            &every_table_inputs::<Field>(),
+            None,
+        )
+        .expect("every flagged lookup is in range");
+        let copy = phase1.clone();
+        let original = run_phase2_with_fake_challenges(phase1, witness_layout, constraints_layout);
+        let completed = run_phase2_with_fake_challenges(copy, witness_layout, constraints_layout);
+        assert_eq!(completed.out_wit_post_comm, original.out_wit_post_comm);
+        assert_eq!(completed.out_a, original.out_a);
+        assert_eq!(completed.out_b, original.out_b);
+        assert_eq!(completed.out_c, original.out_c);
+    }
+
+    #[test]
+    #[should_panic(expected = "phase 2 takes one challenge per challenge witness")]
+    fn phase_two_refuses_a_challenge_count_off_the_layout() {
+        let binary = every_table_program::<Field>(bytecode::FieldOpCode::bn254);
+        let (witness_layout, constraints_layout) = every_table_layouts();
+        let phase1 = run_phase1(
+            &binary,
+            witness_layout,
+            constraints_layout,
+            &every_table_inputs::<Field>(),
+            None,
+        )
+        .expect("every flagged lookup is in range");
+        run_phase2(
+            phase1,
+            &[Field::from(7u64)],
+            witness_layout,
+            constraints_layout,
+        );
+    }
+
+    /// A program whose witgen entry has a `frame_size`-cell frame and an `inputs`-element blob, and
+    /// whose two entries return at once.
+    fn empty_program(frame_size: usize, inputs: usize) -> Vec<u64> {
+        use bytecode::{Function, Program};
+
+        let function = |name: &str, frame_size| Function {
+            name: name.to_string(),
+            frame_size,
+            code: vec![OpCode::Ret {}],
+            source_locations: vec![bytecode::SourceLocation::new("<test>", 1, 1)],
+        };
+        Program {
+            functions: vec![function("main", frame_size), function("ad", 2)],
+            entry_points: vec![0, 1],
+            entry_blob_field_count: inputs,
+            global_frame_size: 0,
+            constant_pool: Vec::new(),
+        }
+        .to_binary()
+    }
+
+    /// Layouts with no witnesses, and `constraints` algebraic constraints.
+    fn empty_layouts(constraints: usize) -> (WitnessLayout, ConstraintsLayout) {
+        let witness_layout = WitnessLayout {
+            guard_index: None,
+            return_len: 0,
+            algebraic_size: 0,
+            multiplicities_size: 0,
+            challenges_size: 0,
+            tables_data_size: 0,
+            lookups_data_size: 0,
+        };
+        let constraints_layout = ConstraintsLayout {
+            algebraic_size: constraints,
+            tables_data_size: 0,
+            lookups_data_size: 0,
+        };
+        (witness_layout, constraints_layout)
+    }
+
+    #[test]
+    fn an_entry_frame_may_be_exactly_its_inputs() {
+        // Two bn254 inputs fill cells 2 to 9.
+        let (witness_layout, constraints_layout) = empty_layouts(0);
+        let inputs = [1u64, 2].map(Field::from);
+        let result = run(
+            &empty_program(10, 2),
+            witness_layout,
+            constraints_layout,
+            &inputs,
+            None,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "the entry's 9-cell frame cannot hold 2 inputs")]
+    fn an_entry_frame_too_small_for_its_inputs_is_refused() {
+        let (witness_layout, constraints_layout) = empty_layouts(0);
+        let inputs = [1u64, 2].map(Field::from);
+        let _ = run(
+            &empty_program(9, 2),
+            witness_layout,
+            constraints_layout,
+            &inputs,
+            None,
+        );
+    }
+
+    #[test]
+    fn an_ad_run_takes_a_coefficient_per_constraint() {
+        let (witness_layout, constraints_layout) = empty_layouts(2);
+        let coeffs = [1u64, 2].map(Field::from);
+        let result = run_ad(
+            &empty_program(2, 0),
+            &coeffs,
+            witness_layout,
+            constraints_layout,
+            None,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "3 AD coefficients for 2 constraints")]
+    fn an_ad_run_with_a_coefficient_past_its_constraints_is_refused() {
+        let (witness_layout, constraints_layout) = empty_layouts(2);
+        let coeffs = [1u64, 2, 3].map(Field::from);
+        let _ = run_ad(
+            &empty_program(2, 0),
+            &coeffs,
+            witness_layout,
+            constraints_layout,
+            None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "1 AD coefficients for 2 constraints")]
+    fn an_ad_run_short_of_coefficients_is_refused() {
+        let (witness_layout, constraints_layout) = empty_layouts(2);
+        let _ = run_ad(
+            &empty_program(2, 0),
+            &[Field::from(1u64)],
+            witness_layout,
+            constraints_layout,
+            None,
+        );
     }
 
     #[test]

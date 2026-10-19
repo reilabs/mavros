@@ -2,6 +2,7 @@
 
 pub mod layout;
 
+use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::int_bits::HOST_LIMB_BITS;
 
 use crate::{
@@ -15,10 +16,10 @@ use crate::{
             CodeGenOptions,
             bytecode::layout::{
                 ConstantPoolInterner, DOUBLE_LANE_BITS, FrameLayouter, GlobalFrameLayouter, Lane,
-                SPREAD_MAX_BITS, StructLayoutInterner, for_each_constant_word, int_cell_count,
-                int_lane,
+                SPREAD_MAX_BITS, for_each_constant_word, int_cell_count, int_lane,
             },
         },
+        passes::wide_witness_ints::multi_cell_int_bits,
         ssa::{
             BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
@@ -115,7 +116,7 @@ fn materialize_constants(
 
     for vid in referenced {
         let constant = constants.get(&vid).expect("vid is in constants").as_ref();
-        let cells = constant_cell_count(constant);
+        let cells = constant_cell_count(constant, layouter);
         let res = match constant {
             hlssa::Constant::Int(v) => layouter.alloc_int(vid, v.bits()),
             hlssa::Constant::Field(_) => layouter.alloc_field(vid),
@@ -140,15 +141,33 @@ fn materialize_constants(
     }
 }
 
-/// The number of `u64` cells `value` occupies once materialized — i.e. the number of words
-/// [`for_each_constant_word`] emits.
+/// The number of words [`for_each_constant_word`] emits for `value`, checked to fill the frame slot
+/// `layouter` gives it.
 ///
-/// This is both the frame-slot size and the `mov_const_pool` memcpy size, so it is derived from the
-/// same visitor to keep them in lockstep.
-fn constant_cell_count(value: &hlssa::Constant) -> usize {
+/// It is also the `mov_const_pool` copy size, so the copy and the words cannot drift apart.
+fn constant_cell_count(value: &hlssa::Constant, layouter: &FrameLayouter) -> usize {
     let mut count = 0usize;
     for_each_constant_word(value, &mut |_| count += 1);
+    assert_eq!(
+        count,
+        constant_slot_cells(value, layouter),
+        "a constant's words fill its frame slot"
+    );
     count
+}
+
+/// The cells the frame layout gives `value`, which its words must fill exactly.
+fn constant_slot_cells(value: &hlssa::Constant, layouter: &FrameLayouter) -> usize {
+    match value {
+        hlssa::Constant::Int(v) => int_cell_count(v.bits()),
+        hlssa::Constant::Field(_) => layouter.type_size(&Type::field()),
+        hlssa::Constant::Blob(blob) => blob
+            .elements
+            .iter()
+            .map(|element| constant_slot_cells(element, layouter))
+            .sum(),
+        hlssa::Constant::FnPtr(_) => ice!("FnPtr constants not supported in codegen"),
+    }
 }
 
 /// Spill `value` into `res` inline, one `MovConst` per word, in the layout defined by
@@ -183,7 +202,6 @@ impl CodeGen {
 
     pub fn run(&self, ssa: &HLSSA, cfg: &FlowAnalysis, type_info: &TypeInfo) -> bytecode::Program {
         let global_layouter = GlobalFrameLayouter::new(ssa);
-        let struct_interner = StructLayoutInterner::new();
         let mut const_pool = ConstantPoolInterner::new();
         let constants = ssa.const_snapshot();
 
@@ -201,6 +219,7 @@ impl CodeGen {
 
         for function_id in function_order {
             let function = self.run_function(
+                ssa.field(),
                 ssa.get_function(function_id),
                 cfg.get_function_cfg(function_id),
                 type_info.get_function(function_id),
@@ -259,13 +278,13 @@ impl CodeGen {
             entry_points: (0..entry_ids.len()).collect(),
             entry_blob_field_count,
             global_frame_size: global_layouter.total_size,
-            struct_layouts: struct_interner.into_table(),
             constant_pool: const_pool.into_pool(),
         }
     }
 
     fn run_function(
         &self,
+        field: FieldConfig,
         function: &HLFunction,
         cfg: &CFG,
         type_info: &FunctionTypeInfo,
@@ -273,14 +292,14 @@ impl CodeGen {
         constants: &HLSSAConstantsSnapshot,
         pool: &mut ConstantPoolInterner,
     ) -> bytecode::Function {
-        let mut layouter = FrameLayouter::new();
+        let mut layouter = FrameLayouter::new(field);
         let entry = function.get_entry();
         let fallback_location = function
             .get_entry()
             .first_location()
             .cloned()
             .unwrap_or_else(|| SourceLocation::synthetic(function.get_name()));
-        let mut emitter = EmitterState::new(vm_source_location(&fallback_location));
+        let mut emitter = EmitterState::new(field, vm_source_location(&fallback_location));
 
         // Entry block params need to be allocated at the beginning of the frame (after return
         // address and return data pointer)
@@ -462,7 +481,7 @@ impl CodeGen {
                 } => match &type_info.get_value_type(*val).expr {
                     TypeExpr::Field => {
                         let result = layouter.alloc_field(*val);
-                        emitter.push_op(bytecode::OpCode::AddField {
+                        emitter.push_field_op(bytecode::FieldOpCode::AddField {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -499,7 +518,7 @@ impl CodeGen {
                     }
                     TypeExpr::WitnessOf(_) => {
                         let result = layouter.alloc_ptr(*val);
-                        emitter.push_op(bytecode::OpCode::AddBoxed {
+                        emitter.push_field_op(bytecode::FieldOpCode::AddBoxed {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -515,7 +534,7 @@ impl CodeGen {
                 } => match &type_info.get_value_type(*val).expr {
                     TypeExpr::Field => {
                         let result = layouter.alloc_field(*val);
-                        emitter.push_op(bytecode::OpCode::SubField {
+                        emitter.push_field_op(bytecode::FieldOpCode::SubField {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -560,7 +579,7 @@ impl CodeGen {
                 } => match (kind.is_signed(), &type_info.get_value_type(*val).expr) {
                     (false, TypeExpr::Field) => {
                         let result = layouter.alloc_field(*val);
-                        emitter.push_op(bytecode::OpCode::DivField {
+                        emitter.push_field_op(bytecode::FieldOpCode::DivField {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -707,7 +726,7 @@ impl CodeGen {
                 } => match &type_info.get_value_type(*val).expr {
                     TypeExpr::Field => {
                         let result = layouter.alloc_field(*val);
-                        emitter.push_op(bytecode::OpCode::MulField {
+                        emitter.push_field_op(bytecode::FieldOpCode::MulField {
                             res: result,
                             a: layouter.get_value(*op1),
                             b: layouter.get_value(*op2),
@@ -991,7 +1010,7 @@ impl CodeGen {
                             ));
                         }
                         (false, TypeExpr::Field, TypeExpr::Field) => {
-                            emitter.push_op(bytecode::OpCode::LtField {
+                            emitter.push_field_op(bytecode::FieldOpCode::LtField {
                                 res: result,
                                 a: layouter.get_value(*op1),
                                 b: layouter.get_value(*op2),
@@ -1049,7 +1068,7 @@ impl CodeGen {
                             }
                         }
                         (TypeExpr::Field, TypeExpr::Field) => {
-                            emitter.push_op(bytecode::OpCode::EqField {
+                            emitter.push_field_op(bytecode::FieldOpCode::EqField {
                                 res: result,
                                 a: layouter.get_value(*op1),
                                 b: layouter.get_value(*op2),
@@ -1072,30 +1091,36 @@ impl CodeGen {
                         );
                     }
                     if matches!(tgt, hlssa::CastTarget::WitnessOf) {
-                        // PureToWitnessRef reads a Field (4 u64s) from the frame.
+                        // PureToWitnessRef reads a Field from the frame.
                         // If the source is not Field-sized, cast to Field first.
                         let field_pos = if l_type.expr != TypeExpr::Field {
                             let tmp = layouter.alloc_temp_field();
                             match &l_type.expr {
                                 TypeExpr::Int(bits) => match int_lane(*bits) {
                                     Lane::Cell => {
-                                        emitter.push_op(bytecode::OpCode::CastIntToField {
-                                            res: tmp,
-                                            a: layouter.get_value(*v),
-                                        });
+                                        emitter.push_field_op(
+                                            bytecode::FieldOpCode::CastIntToField {
+                                                res: tmp,
+                                                a: layouter.get_value(*v),
+                                            },
+                                        );
                                     }
                                     Lane::Double => {
-                                        emitter.push_op(bytecode::OpCode::CastInt128ToField {
-                                            res: tmp,
-                                            a: layouter.get_value(*v),
-                                        });
+                                        emitter.push_field_op(
+                                            bytecode::FieldOpCode::CastInt128ToField {
+                                                res: tmp,
+                                                a: layouter.get_value(*v),
+                                            },
+                                        );
                                     }
                                     Lane::Wide => {
-                                        emitter.push_op(bytecode::OpCode::CastIntnToField {
-                                            res: tmp,
-                                            a: layouter.get_value(*v),
-                                            bits: *bits as u64,
-                                        });
+                                        emitter.push_field_op(
+                                            bytecode::FieldOpCode::CastIntnToField {
+                                                res: tmp,
+                                                a: layouter.get_value(*v),
+                                                bits: *bits as u64,
+                                            },
+                                        );
                                     }
                                 },
                                 t => ice!("Unsupported witness cast source: {:?}", t),
@@ -1104,7 +1129,7 @@ impl CodeGen {
                         } else {
                             layouter.get_value(*v)
                         };
-                        emitter.push_op(bytecode::OpCode::PureToWitnessRef {
+                        emitter.push_field_op(bytecode::FieldOpCode::PureToWitnessRef {
                             res: layouter.alloc_ptr(*r),
                             v: field_pos,
                         });
@@ -1199,7 +1224,7 @@ impl CodeGen {
                         }
                         (TypeExpr::Field, TypeExpr::Int(bits)) => match int_lane(*bits) {
                             Lane::Cell => {
-                                emitter.push_op(bytecode::OpCode::CastFieldToInt {
+                                emitter.push_field_op(bytecode::FieldOpCode::CastFieldToInt {
                                     res: result,
                                     a: layouter.get_value(*v),
                                 });
@@ -1212,7 +1237,7 @@ impl CodeGen {
                                 }
                             }
                             Lane::Double => {
-                                emitter.push_op(bytecode::OpCode::CastFieldToInt128 {
+                                emitter.push_field_op(bytecode::FieldOpCode::CastFieldToInt128 {
                                     res: result,
                                     a: layouter.get_value(*v),
                                 });
@@ -1230,7 +1255,7 @@ impl CodeGen {
                             // The opcode masks the result's top cell to the width, so a target
                             // that is not a whole number of cells needs no truncation after it.
                             Lane::Wide => {
-                                emitter.push_op(bytecode::OpCode::CastFieldToIntn {
+                                emitter.push_field_op(bytecode::FieldOpCode::CastFieldToIntn {
                                     res: result,
                                     a: layouter.get_value(*v),
                                     bits: *bits as u64,
@@ -1239,19 +1264,19 @@ impl CodeGen {
                         },
                         (TypeExpr::Int(bits), TypeExpr::Field) => match int_lane(*bits) {
                             Lane::Cell => {
-                                emitter.push_op(bytecode::OpCode::CastIntToField {
+                                emitter.push_field_op(bytecode::FieldOpCode::CastIntToField {
                                     res: result,
                                     a: layouter.get_value(*v),
                                 });
                             }
                             Lane::Double => {
-                                emitter.push_op(bytecode::OpCode::CastInt128ToField {
+                                emitter.push_field_op(bytecode::FieldOpCode::CastInt128ToField {
                                     res: result,
                                     a: layouter.get_value(*v),
                                 });
                             }
                             Lane::Wide => {
-                                emitter.push_op(bytecode::OpCode::CastIntnToField {
+                                emitter.push_field_op(bytecode::FieldOpCode::CastIntnToField {
                                     res: result,
                                     a: layouter.get_value(*v),
                                     bits: *bits as u64,
@@ -1311,7 +1336,7 @@ impl CodeGen {
                     if self.options.check_constraints {
                         emit_assert_r1c(layouter, emitter, *a, *b, *c);
                     }
-                    emitter.push_op(bytecode::OpCode::R1C {
+                    emitter.push_field_op(bytecode::FieldOpCode::R1C {
                         a: layouter.get_value(*a),
                         b: layouter.get_value(*b),
                         c: layouter.get_value(*c),
@@ -1322,7 +1347,7 @@ impl CodeGen {
                     value: v,
                     ..
                 } => {
-                    emitter.push_op(bytecode::OpCode::WriteWitness {
+                    emitter.push_field_op(bytecode::FieldOpCode::WriteWitness {
                         val: layouter.get_value(*v),
                     });
                 }
@@ -1530,7 +1555,7 @@ impl CodeGen {
                         let rhs_type = type_info.get_value_type(*rhs);
                         match (&lhs_type.expr, &rhs_type.expr) {
                             (TypeExpr::Field, TypeExpr::Field) => {
-                                emitter.push_op(bytecode::OpCode::AssertEqField {
+                                emitter.push_field_op(bytecode::FieldOpCode::AssertEqField {
                                     a: layouter.get_value(*lhs),
                                     b: layouter.get_value(*rhs),
                                 });
@@ -1581,7 +1606,7 @@ impl CodeGen {
                                 ));
                             }
                             (false, TypeExpr::Field, TypeExpr::Field) => {
-                                emitter.push_op(bytecode::OpCode::LtField {
+                                emitter.push_field_op(bytecode::FieldOpCode::LtField {
                                     res: cmp_result,
                                     a: layouter.get_value(*lhs),
                                     b: layouter.get_value(*rhs),
@@ -1623,10 +1648,10 @@ impl CodeGen {
                     let val = layouter.get_value(*value);
                     let count = *count as u64;
                     let op = match endianness {
-                        Endianness::Big => bytecode::OpCode::ToBitsBe { res, val, count },
-                        Endianness::Little => bytecode::OpCode::ToBitsLe { res, val, count },
+                        Endianness::Big => bytecode::FieldOpCode::ToBitsBe { res, val, count },
+                        Endianness::Little => bytecode::FieldOpCode::ToBitsLe { res, val, count },
                     };
-                    emitter.push_op(op);
+                    emitter.push_field_op(op);
                 }
                 hlssa::OpCode::ToRadix {
                     result: r,
@@ -1639,19 +1664,24 @@ impl CodeGen {
                         type_info.get_value_type(*v).is_field(),
                         "TODO: Implement toRadix for U-values"
                     );
-                    assert!(*c <= 32, "ToRadix byte count must be <= 32");
+                    let max_bytes = emitter.field.canonical_limbs() * 8;
+                    assert!(*c <= max_bytes, "ToRadix byte count must be <= {max_bytes}");
                     let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
                     match endianness {
-                        Endianness::Big => emitter.push_op(bytecode::OpCode::ToBytesBe {
-                            val: layouter.get_value(*v),
-                            count: *c as u64,
-                            res,
-                        }),
-                        Endianness::Little => emitter.push_op(bytecode::OpCode::ToBytesLe {
-                            val: layouter.get_value(*v),
-                            count: *c as u64,
-                            res,
-                        }),
+                        Endianness::Big => {
+                            emitter.push_field_op(bytecode::FieldOpCode::ToBytesBe {
+                                val: layouter.get_value(*v),
+                                count: *c as u64,
+                                res,
+                            })
+                        }
+                        Endianness::Little => {
+                            emitter.push_field_op(bytecode::FieldOpCode::ToBytesLe {
+                                val: layouter.get_value(*v),
+                                count: *c as u64,
+                                res,
+                            })
+                        }
                     }
                 }
                 hlssa::OpCode::ToRadix {
@@ -1671,7 +1701,7 @@ impl CodeGen {
                 }
                 hlssa::OpCode::NextDCoeff { result: out } => {
                     let v = layouter.alloc_field(*out);
-                    emitter.push_op(bytecode::OpCode::NextDCoeff { v });
+                    emitter.push_field_op(bytecode::FieldOpCode::NextDCoeff { v });
                 }
                 hlssa::OpCode::BumpD {
                     matrix: m,
@@ -1680,10 +1710,10 @@ impl CodeGen {
                 } => {
                     let v = layouter.get_value(*var);
                     let coeff = layouter.get_value(*coeff);
-                    emitter.push_op(match m {
-                        DMatrix::A => bytecode::OpCode::BumpDa { v, coeff },
-                        DMatrix::B => bytecode::OpCode::BumpDb { v, coeff },
-                        DMatrix::C => bytecode::OpCode::BumpDc { v, coeff },
+                    emitter.push_field_op(match m {
+                        DMatrix::A => bytecode::FieldOpCode::BumpDa { v, coeff },
+                        DMatrix::B => bytecode::FieldOpCode::BumpDb { v, coeff },
+                        DMatrix::C => bytecode::FieldOpCode::BumpDc { v, coeff },
                     });
                 }
                 hlssa::OpCode::FreshWitness {
@@ -1699,17 +1729,19 @@ impl CodeGen {
                     const_val: c,
                     var: v,
                 } => {
-                    // MulConst reads coeff as Field (4 u64s). Cast if needed.
+                    // MulConst reads coeff as Field. Cast if needed.
                     let c_type = type_info.get_value_type(*c);
                     let coeff_pos = match &c_type.expr {
                         TypeExpr::Field => layouter.get_value(*c),
                         TypeExpr::Int(bits) => {
                             let tmp = layouter.alloc_temp_field();
                             let a = layouter.get_value(*c);
-                            emitter.push_op(match int_lane(*bits) {
-                                Lane::Cell => bytecode::OpCode::CastIntToField { res: tmp, a },
-                                Lane::Double => bytecode::OpCode::CastInt128ToField { res: tmp, a },
-                                Lane::Wide => bytecode::OpCode::CastIntnToField {
+                            emitter.push_field_op(match int_lane(*bits) {
+                                Lane::Cell => bytecode::FieldOpCode::CastIntToField { res: tmp, a },
+                                Lane::Double => {
+                                    bytecode::FieldOpCode::CastInt128ToField { res: tmp, a }
+                                }
+                                Lane::Wide => bytecode::FieldOpCode::CastIntnToField {
                                     res: tmp,
                                     a,
                                     bits: *bits as u64,
@@ -1719,7 +1751,7 @@ impl CodeGen {
                         }
                         t => ice!("Unsupported MulConst coefficient type: {:?}", t),
                     };
-                    emitter.push_op(bytecode::OpCode::MulConst {
+                    emitter.push_field_op(bytecode::FieldOpCode::MulConst {
                         res: layouter.alloc_ptr(*r),
                         coeff: coeff_pos,
                         v: layouter.get_value(*v),
@@ -1729,7 +1761,7 @@ impl CodeGen {
                     value: val,
                     max_bits,
                 } => {
-                    emitter.push_op(bytecode::OpCode::Rangecheck {
+                    emitter.push_field_op(bytecode::FieldOpCode::Rangecheck {
                         val: layouter.get_value(*val),
                         max_bits: *max_bits,
                     });
@@ -1741,7 +1773,7 @@ impl CodeGen {
                 } => {
                     assert!(args.len() == 1);
                     assert!(type_info.get_value_type(args[0]).is_field());
-                    emitter.push_op(bytecode::OpCode::RngchkField {
+                    emitter.push_field_op(bytecode::FieldOpCode::RngchkField {
                         val: layouter.get_value(args[0]),
                         flag: layouter.get_value(*flag),
                         bits: *bits as usize,
@@ -1755,8 +1787,8 @@ impl CodeGen {
                     assert!(args.len() == 2);
                     let arr_type = type_info.get_value_type(*arr);
                     let elem_type = arr_type.get_array_element();
-                    let (stride, elem_kind) = lookup_elem_kind(&elem_type);
-                    emitter.push_op(bytecode::OpCode::ArrayLookupField {
+                    let (stride, elem_kind) = lookup_elem_kind(&elem_type, emitter.field);
+                    emitter.push_field_op(bytecode::FieldOpCode::ArrayLookupField {
                         array: layouter.get_value(*arr),
                         index: layouter.get_value(args[0]),
                         result: layouter.get_value(args[1]),
@@ -1772,7 +1804,7 @@ impl CodeGen {
                 } => {
                     assert!(args.len() == 1);
                     assert!(type_info.get_value_type(args[0]).is_witness_of());
-                    emitter.push_op(bytecode::OpCode::DrngchkField {
+                    emitter.push_field_op(bytecode::FieldOpCode::DrngchkField {
                         val: layouter.get_value(args[0]),
                         flag: layouter.get_value(*flag),
                         bits: *bits as usize,
@@ -1786,8 +1818,8 @@ impl CodeGen {
                     assert!(args.len() == 2);
                     let arr_type = type_info.get_value_type(*arr);
                     let elem_type = arr_type.get_array_element();
-                    let (stride, elem_kind) = lookup_elem_kind(&elem_type);
-                    emitter.push_op(bytecode::OpCode::DarrayLookupField {
+                    let (stride, elem_kind) = lookup_elem_kind(&elem_type, emitter.field);
+                    emitter.push_field_op(bytecode::FieldOpCode::DarrayLookupField {
                         array: layouter.get_value(*arr),
                         index: layouter.get_value(args[0]),
                         result: layouter.get_value(args[1]),
@@ -1802,7 +1834,7 @@ impl CodeGen {
                     flag,
                 } => {
                     assert!(args.len() == 2);
-                    emitter.push_op(bytecode::OpCode::SpreadLookupField {
+                    emitter.push_field_op(bytecode::FieldOpCode::SpreadLookupField {
                         val: layouter.get_value(args[0]),
                         result: layouter.get_value(args[1]),
                         flag: layouter.get_value(*flag),
@@ -1815,7 +1847,7 @@ impl CodeGen {
                     flag,
                 } => {
                     assert!(args.len() == 2);
-                    emitter.push_op(bytecode::OpCode::DspreadLookupField {
+                    emitter.push_field_op(bytecode::FieldOpCode::DspreadLookupField {
                         val: layouter.get_value(args[0]),
                         result: layouter.get_value(args[1]),
                         flag: layouter.get_value(*flag),
@@ -1828,7 +1860,7 @@ impl CodeGen {
                     flag,
                 } => {
                     assert!(args.len() == 2);
-                    emitter.push_op(bytecode::OpCode::Pow2LookupField {
+                    emitter.push_field_op(bytecode::FieldOpCode::Pow2LookupField {
                         amount: layouter.get_value(args[0]),
                         factor: layouter.get_value(args[1]),
                         flag: layouter.get_value(*flag),
@@ -1841,7 +1873,7 @@ impl CodeGen {
                     flag,
                 } => {
                     assert!(args.len() == 2);
-                    emitter.push_op(bytecode::OpCode::Dpow2LookupField {
+                    emitter.push_field_op(bytecode::FieldOpCode::Dpow2LookupField {
                         amount: layouter.get_value(args[0]),
                         factor: layouter.get_value(args[1]),
                         flag: layouter.get_value(*flag),
@@ -2014,6 +2046,8 @@ impl CodeGen {
 // ================================================================================================
 
 struct EmitterState {
+    /// The field whose opcodes [`EmitterState::push_field_op`] emits.
+    field: FieldConfig,
     code: Vec<bytecode::OpCode>,
     source_locations: Vec<bytecode::SourceLocation>,
     current_source_location: bytecode::SourceLocation,
@@ -2022,8 +2056,9 @@ struct EmitterState {
 }
 
 impl EmitterState {
-    fn new(current_source_location: bytecode::SourceLocation) -> Self {
+    fn new(field: FieldConfig, current_source_location: bytecode::SourceLocation) -> Self {
         Self {
+            field,
             code: Vec::new(),
             source_locations: Vec::new(),
             current_source_location,
@@ -2036,6 +2071,10 @@ impl EmitterState {
         self.code.push(op);
         self.source_locations
             .push(self.current_source_location.clone());
+    }
+
+    fn push_field_op(&mut self, op: bytecode::FieldOpCode) {
+        self.push_op(op.for_field(self.field.id()));
     }
 
     fn set_source_location(&mut self, source_location: bytecode::SourceLocation) {
@@ -2099,12 +2138,12 @@ fn emit_assert_r1c(
     c: ValueId,
 ) {
     let product = layouter.alloc_temp_field();
-    emitter.push_op(bytecode::OpCode::MulField {
+    emitter.push_field_op(bytecode::FieldOpCode::MulField {
         res: product,
         a: layouter.get_value(a),
         b: layouter.get_value(b),
     });
-    emitter.push_op(bytecode::OpCode::AssertEqField {
+    emitter.push_field_op(bytecode::FieldOpCode::AssertEqField {
         a: product,
         b: layouter.get_value(c),
     });
@@ -2121,41 +2160,95 @@ fn spread_width(type_info: &FunctionTypeInfo, value: ValueId) -> usize {
         .unwrap_or_else(|| ice!("a spread's operand and results are integers"))
 }
 
-/// Returns (stride, elem_kind) for an array element type in a lookup opcode.
-fn lookup_elem_kind(elem_type: &Type) -> (usize, usize) {
+/// Returns (stride, elem_kind) for an array element type in a lookup opcode over `field`.
+fn lookup_elem_kind(elem_type: &Type, field: FieldConfig) -> (usize, usize) {
     match &elem_type.expr {
-        // FIELD-ASSUMPTION: L3-felt-limbs
-        TypeExpr::Field => (bytecode::FELT_LIMBS, bytecode::ELEM_FIELD),
-        TypeExpr::Int(bits) => match int_lane(*bits) {
-            // One `ELEM_WORD` per element.
-            Lane::Cell => (1, bytecode::ELEM_WORD),
-            // The tag names a cell count and a reading: it makes the tape read two cells as one
-            // unsigned value.
-            Lane::Double => (2, bytecode::ELEM_U128),
-            // Wider than either narrow lane but still one field element, read little-endian from
-            // `cells` cells. A wider element never reaches here: `passes::wide_witness_ints`
-            // splits its sequence into one per limb, and a limb takes the arm above.
-            Lane::Wide => {
-                let cells = int_cell_count(*bits);
-                assert!(
-                    cells <= bytecode::FELT_LIMBS,
-                    "ICE: an int{bits} sequence element spans {cells} cells, past the {} an \
-                     element is carried through; a width the field cannot carry injectively is \
-                     transposed into one sequence per limb before codegen",
-                    bytecode::FELT_LIMBS
-                );
-                (cells, bytecode::ELEM_CELLS)
+        TypeExpr::Field => (field.storage_cells(), bytecode::ELEM_FIELD),
+        TypeExpr::Int(bits) => {
+            // The tape holds each element as one field element, which must denote it injectively.
+            // `passes::wide_witness_ints` splits a sequence of wider elements into one sequence per
+            // limb, so a wider element never reaches here.
+            assert!(
+                *bits <= multi_cell_int_bits(field),
+                "ICE: an int{bits} sequence element is wider than the {} bits one field element \
+                 carries injectively; such a sequence is transposed into one sequence per limb \
+                 before codegen",
+                multi_cell_int_bits(field)
+            );
+            match int_lane(*bits) {
+                // One `ELEM_WORD` per element.
+                Lane::Cell => (1, bytecode::ELEM_WORD),
+                // The tag names a cell count and a reading: it makes the tape read two cells as
+                // one unsigned value.
+                Lane::Double => (2, bytecode::ELEM_U128),
+                // Wider than either narrow lane: its cells read as one little-endian integer.
+                Lane::Wide => (int_cell_count(*bits), bytecode::ELEM_CELLS),
             }
-        },
+        }
         TypeExpr::WitnessOf(inner) => {
-            let inner_kind = lookup_elem_kind(inner);
+            let inner_kind = lookup_elem_kind(inner, field);
             assert!(
                 inner_kind.1 != bytecode::ELEM_WITNESS,
                 "Nested WitnessOf in array lookup element type: {elem_type}"
             );
             (1, bytecode::ELEM_WITNESS)
         }
-        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => lookup_elem_kind(inner),
+        TypeExpr::Array(inner, _) | TypeExpr::Slice(inner) => lookup_elem_kind(inner, field),
         _ => ice!("Unsupported array element type in lookup: {elem_type}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mavros_artifacts::FieldElement;
+
+    use super::*;
+
+    #[test]
+    fn a_constants_words_fill_its_frame_slot() {
+        let layouter = FrameLayouter::new(FieldConfig::bn254());
+        let field = hlssa::Constant::Field(FieldElement::ONE);
+        let blob = hlssa::Constant::Blob(hlssa::Blob::new(
+            Type::field(),
+            vec![field.clone(), field.clone()],
+        ));
+        for (constant, cells) in [
+            (hlssa::Constant::int(8, 7), 1),
+            (hlssa::Constant::int(128, 7), 2),
+            (field, 4),
+            (blob, 8),
+        ] {
+            assert_eq!(constant_cell_count(&constant, &layouter), cells);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "a constant's words fill its frame slot")]
+    fn a_field_constant_wider_than_its_slot_is_refused() {
+        // Three cells, which no field has: bn254's four words overrun the slot.
+        let layouter = FrameLayouter::with_field_cells(3);
+        constant_cell_count(&hlssa::Constant::Field(FieldElement::ONE), &layouter);
+    }
+
+    #[test]
+    fn a_sequence_element_is_at_most_as_wide_as_the_field_carries() {
+        let field = FieldConfig::bn254();
+        let widest = multi_cell_int_bits(field);
+        assert_eq!(
+            lookup_elem_kind(&Type::int(widest), field),
+            (int_cell_count(widest), bytecode::ELEM_CELLS)
+        );
+        assert_eq!(
+            lookup_elem_kind(&Type::field(), field),
+            (field.storage_cells(), bytecode::ELEM_FIELD)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "wider than the 253 bits")]
+    fn a_sequence_element_wider_than_the_field_carries_is_refused() {
+        // 254 bits fit in bn254's four canonical limbs and are past the widest integer one element
+        // holds injectively.
+        lookup_elem_kind(&Type::int(254), FieldConfig::bn254());
     }
 }

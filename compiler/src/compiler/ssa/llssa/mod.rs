@@ -791,7 +791,7 @@ impl LLStruct {
     }
 
     // FIELD-ASSUMPTION: L3-llstruct
-    /// Struct representing a BN254 field element in Montgomery form.
+    /// A field element's Montgomery storage, one `i64` per cell.
     pub fn field_elem() -> Self {
         Self::new(vec![LLFieldType::Int(64); Self::FIELD_LIMBS])
     }
@@ -871,7 +871,7 @@ impl LLStruct {
     ///   0: mults_base   (ptr)
     ///   1: inv_cnst_off (i32)
     ///   2: inv_wit_off  (i32)
-    ///   3: num_indices  (i32)
+    ///   3: num_indices  (i32; always 1 and read by nothing)
     ///   4: kind         (i32; `TableKind::code`)
     ///   5: length       (i32)
     pub fn table_info_slot() -> Self {

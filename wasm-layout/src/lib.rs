@@ -29,7 +29,8 @@ pub const WASM_PTR_SIZE: u32 = 4;
 //   0: mults_base       (ptr; forward multiplicities base)
 //   1: inv_cnst_off     (i32; constraints-section start of this table)
 //   2: inv_wit_off      (i32; witness-section start of this table)
-//   3: num_indices      (i32; matches VM `TableInfo.num_indices`)
+//   3: num_indices      (i32; always 1 and read by nothing, kept so that the slot's layout, and
+//                       with it every module's bytes, stays fixed)
 //   4: kind             (i32; `TableKind::code` — matches VM `TableInfo.kind`; Phase 2 dispatches
 //                       on this: 0 = rangecheck, 1 = array, 2 = spread, 3 = pow2)
 //   5: length           (i32; matches VM `TableInfo.length`)

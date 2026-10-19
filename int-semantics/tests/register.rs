@@ -34,11 +34,6 @@ const NOT_INTEGER_SEMANTICS: &[(&str, &str, &str)] = &[
         "self.sampler_state.wrapping_mul(",
         "an LCG step; wrapping is the generator, not an overflow",
     ),
-    (
-        "compiler/src/wasm_host.rs",
-        "host_witness_base.wrapping_add(mults_off as usize)",
-        "host pointer arithmetic over a witness buffer",
-    ),
 ];
 
 /// The signature check 4 looks for.

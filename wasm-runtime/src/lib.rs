@@ -1,20 +1,16 @@
 //! Runtime Library for Mavros WASM
 //!
-//! Provides BN254 field arithmetic and heap allocation called by
-//! LLVM-generated WASM. Field elements are 4 x i64 limbs in Montgomery form.
+//! Provides field arithmetic and heap allocation called by LLVM-generated WASM. Field elements are
+//! 4 x i64 limbs in Montgomery form.
 //!
 //! ABI (matching LLVM's wasm32 lowering of [4 x i64]):
 //!   __field_mul(result_ptr, a0, a1, a2, a3, b0, b1, b2, b3)
 //!
-//! VM struct access (forward-pass writes, AD accumulators, AD witness/coeff
-//! counters) is emitted inline in the generated LLVM module as GEP/load/store
-//! against the vm_ptr — see `codegen/llssa_llvm_codegen.rs`.
+//! VM struct access (forward-pass writes, AD accumulators, AD witness/coeff counters) is emitted
+//! inline in the generated LLVM module as GEP/load/store against the vm_ptr — see
+//! `compiler/src/compiler/codegen/llssa_to_llvm.rs`.
 
-// FIELD-ASSUMPTION: L1-direct-ref (1 sites)
 use core::mem::MaybeUninit;
-
-use ark_bn254::Fr;
-use ark_ff::BigInt;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Heap allocation (delegates to Rust's global allocator, dlmalloc on wasm32)
@@ -22,7 +18,7 @@ use ark_ff::BigInt;
 // Each allocation prepends an 8-byte header storing the requested size so that
 // free() can reconstruct the Layout needed by dealloc().
 //
-// LIVE_BYTES tracks the bytes currently held by malloc.
+// LIVE_BYTES tracks the bytes held by malloc.
 // The host can read it via __live_bytes()
 //
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -82,163 +78,185 @@ pub unsafe extern "C" fn free(ptr: *mut u8) {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Field arithmetic
+//
+// `field_runtime!` defines one field's seven entry points on a four-limb arkworks `Fp` type, under
+// the symbol names `FieldRuntimeSymbols` (`compiler/src/compiler/codegen/llssa_to_llvm.rs`) gives
+// that field, passed positionally in the matcher's order, which is the order it defines them in. An
+// operand is the type's Montgomery storage, four limbs by value; a field result comes back through
+// `result_ptr`. The helpers expand at the call site beside the entry points, so a second field's
+// instance needs a separate module.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[inline]
-fn limbs_to_fr(l0: i64, l1: i64, l2: i64, l3: i64) -> Fr {
-    Fr::new_unchecked(BigInt::new([l0 as u64, l1 as u64, l2 as u64, l3 as u64]))
+macro_rules! field_runtime {
+    (
+        $field:ty,
+        $mul:ident,
+        $from_limbs:ident,
+        $to_limbs:ident,
+        $sub:ident,
+        $add:ident,
+        $div:ident,
+        $lt:ident,
+    ) => {
+        #[inline]
+        fn limbs_to_fr(l0: i64, l1: i64, l2: i64, l3: i64) -> $field {
+            <$field>::new_unchecked(ark_ff::BigInt::new([
+                l0 as u64, l1 as u64, l2 as u64, l3 as u64,
+            ]))
+        }
+
+        #[inline]
+        unsafe fn write_field(ptr: *mut u64, fr: $field) {
+            let limbs = fr.0.0;
+            unsafe {
+                *ptr = limbs[0];
+                *ptr.add(1) = limbs[1];
+                *ptr.add(2) = limbs[2];
+                *ptr.add(3) = limbs[3];
+            }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $mul(
+            result_ptr: *mut u64,
+            a0: i64,
+            a1: i64,
+            a2: i64,
+            a3: i64,
+            b0: i64,
+            b1: i64,
+            b2: i64,
+            b3: i64,
+        ) {
+            let a = limbs_to_fr(a0, a1, a2, a3);
+            let b = limbs_to_fr(b0, b1, b2, b3);
+            unsafe { write_field(result_ptr, a * b) };
+        }
+
+        /// Canonical limbs to Montgomery storage. Panics on limbs not less than the modulus.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $from_limbs(
+            result_ptr: *mut u64,
+            a0: i64,
+            a1: i64,
+            a2: i64,
+            a3: i64,
+        ) {
+            use ark_ff::PrimeField;
+            let bigint = ark_ff::BigInt::new([a0 as u64, a1 as u64, a2 as u64, a3 as u64]);
+            let fr = <$field>::from_bigint(bigint).expect("Constructing a field from limbs failed");
+            unsafe { write_field(result_ptr, fr) };
+        }
+
+        /// Montgomery storage to canonical limbs.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $to_limbs(
+            result_ptr: *mut u64,
+            a0: i64,
+            a1: i64,
+            a2: i64,
+            a3: i64,
+        ) {
+            use ark_ff::PrimeField;
+            let fr = limbs_to_fr(a0, a1, a2, a3);
+            let bigint = fr.into_bigint();
+            unsafe {
+                *result_ptr = bigint.0[0];
+                *result_ptr.add(1) = bigint.0[1];
+                *result_ptr.add(2) = bigint.0[2];
+                *result_ptr.add(3) = bigint.0[3];
+            }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $sub(
+            result_ptr: *mut u64,
+            a0: i64,
+            a1: i64,
+            a2: i64,
+            a3: i64,
+            b0: i64,
+            b1: i64,
+            b2: i64,
+            b3: i64,
+        ) {
+            let a = limbs_to_fr(a0, a1, a2, a3);
+            let b = limbs_to_fr(b0, b1, b2, b3);
+            unsafe { write_field(result_ptr, a - b) };
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $add(
+            result_ptr: *mut u64,
+            a0: i64,
+            a1: i64,
+            a2: i64,
+            a3: i64,
+            b0: i64,
+            b1: i64,
+            b2: i64,
+            b3: i64,
+        ) {
+            let a = limbs_to_fr(a0, a1, a2, a3);
+            let b = limbs_to_fr(b0, b1, b2, b3);
+            unsafe { write_field(result_ptr, a + b) };
+        }
+
+        /// `a / b`, and zero when `b` is zero.
+        // FIELD-ASSUMPTION: L4-inverse
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $div(
+            result_ptr: *mut u64,
+            a0: i64,
+            a1: i64,
+            a2: i64,
+            a3: i64,
+            b0: i64,
+            b1: i64,
+            b2: i64,
+            b3: i64,
+        ) {
+            use ark_ff::AdditiveGroup;
+            let a = limbs_to_fr(a0, a1, a2, a3);
+            let b = limbs_to_fr(b0, b1, b2, b3);
+            let result = if b == <$field>::ZERO {
+                <$field>::ZERO
+            } else {
+                a / b
+            };
+            unsafe { write_field(result_ptr, result) };
+        }
+
+        /// Whether `a < b` as canonical integers.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $lt(
+            a0: i64,
+            a1: i64,
+            a2: i64,
+            a3: i64,
+            b0: i64,
+            b1: i64,
+            b2: i64,
+            b3: i64,
+        ) -> bool {
+            use ark_ff::PrimeField;
+            let a = limbs_to_fr(a0, a1, a2, a3);
+            let b = limbs_to_fr(b0, b1, b2, b3);
+            a.into_bigint() < b.into_bigint()
+        }
+    };
 }
 
-#[inline]
-unsafe fn write_field(ptr: *mut u64, fr: Fr) {
-    let limbs = fr.0.0;
-    unsafe {
-        *ptr = limbs[0];
-        *ptr.add(1) = limbs[1];
-        *ptr.add(2) = limbs[2];
-        *ptr.add(3) = limbs[3];
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __field_mul(
-    result_ptr: *mut u64,
-    a0: i64,
-    a1: i64,
-    a2: i64,
-    a3: i64,
-    b0: i64,
-    b1: i64,
-    b2: i64,
-    b3: i64,
-) {
-    let a = limbs_to_fr(a0, a1, a2, a3);
-    let b = limbs_to_fr(b0, b1, b2, b3);
-    unsafe { write_field(result_ptr, a * b) };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Field conversion
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __field_from_limbs(
-    result_ptr: *mut u64,
-    a0: i64,
-    a1: i64,
-    a2: i64,
-    a3: i64,
-) {
-    use ark_ff::PrimeField;
-    let bigint = BigInt::new([a0 as u64, a1 as u64, a2 as u64, a3 as u64]);
-    let fr = Fr::from_bigint(bigint).expect("Constructing a field from limbs failed");
-    unsafe { write_field(result_ptr, fr) };
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __field_to_limbs(
-    result_ptr: *mut u64,
-    a0: i64,
-    a1: i64,
-    a2: i64,
-    a3: i64,
-) {
-    use ark_ff::PrimeField;
-    let fr = limbs_to_fr(a0, a1, a2, a3);
-    let bigint = fr.into_bigint();
-    unsafe {
-        *result_ptr = bigint.0[0];
-        *result_ptr.add(1) = bigint.0[1];
-        *result_ptr.add(2) = bigint.0[2];
-        *result_ptr.add(3) = bigint.0[3];
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Field subtraction
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __field_sub(
-    result_ptr: *mut u64,
-    a0: i64,
-    a1: i64,
-    a2: i64,
-    a3: i64,
-    b0: i64,
-    b1: i64,
-    b2: i64,
-    b3: i64,
-) {
-    let a = limbs_to_fr(a0, a1, a2, a3);
-    let b = limbs_to_fr(b0, b1, b2, b3);
-    unsafe { write_field(result_ptr, a - b) };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Field addition
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __field_add(
-    result_ptr: *mut u64,
-    a0: i64,
-    a1: i64,
-    a2: i64,
-    a3: i64,
-    b0: i64,
-    b1: i64,
-    b2: i64,
-    b3: i64,
-) {
-    let a = limbs_to_fr(a0, a1, a2, a3);
-    let b = limbs_to_fr(b0, b1, b2, b3);
-    unsafe { write_field(result_ptr, a + b) };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Field division
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// FIELD-ASSUMPTION: L4-inverse
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __field_div(
-    result_ptr: *mut u64,
-    a0: i64,
-    a1: i64,
-    a2: i64,
-    a3: i64,
-    b0: i64,
-    b1: i64,
-    b2: i64,
-    b3: i64,
-) {
-    use ark_ff::AdditiveGroup;
-    let a = limbs_to_fr(a0, a1, a2, a3);
-    let b = limbs_to_fr(b0, b1, b2, b3);
-    let result = if b == Fr::ZERO { Fr::ZERO } else { a / b };
-    unsafe { write_field(result_ptr, result) };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Field less-than
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __field_lt(
-    a0: i64,
-    a1: i64,
-    a2: i64,
-    a3: i64,
-    b0: i64,
-    b1: i64,
-    b2: i64,
-    b3: i64,
-) -> bool {
-    use ark_ff::PrimeField;
-    let a = limbs_to_fr(a0, a1, a2, a3);
-    let b = limbs_to_fr(b0, b1, b2, b3);
-    a.into_bigint() < b.into_bigint()
+// FIELD-ASSUMPTION: L1-direct-ref (1 sites)
+field_runtime! {
+    ark_bn254::Fr,
+    __field_mul,
+    __field_from_limbs,
+    __field_to_limbs,
+    __field_sub,
+    __field_add,
+    __field_div,
+    __field_lt,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -339,7 +357,7 @@ pub unsafe extern "C" fn __int_mul(result: *mut u64, a: *const u64, b: *const u6
 /// The widest operand any helper here is handed, in limbs.
 ///
 /// `MAX_BITS` in `mavros-int-semantics` caps every integer at 16384 bits, so the divisions keep
-/// their scratch in stack arrays sized from this rather than allocating.
+/// their scratch in stack arrays sized from this, with no allocation.
 /// `the_limb_cap_is_the_type_cap` ties the two caps together.
 const MAX_LIMBS: usize = 256;
 
@@ -359,7 +377,7 @@ fn zeroed(store: &mut [MaybeUninit<u64>], len: usize) -> &mut [u64] {
 /// `a / b` and `a % b`, both read as unsigned, written into `quotient` and `remainder`.
 ///
 /// Total: a zero divisor answers zero for both results, as the VM's `int_limbs::udivrem` does. A
-/// division by a constant zero that codegen folds rather than calling this is LLVM poison instead.
+/// division by a constant zero that codegen folds, never calling this, is LLVM poison.
 /// The model leaves the case unspecified, because the guard IR never lets a division see a zero
 /// divisor: a guarded one branches around it and an unguarded one asserts first.
 ///
@@ -719,9 +737,9 @@ mod int_semantics_conformance {
         );
     }
 
-    /// The inputs the model leaves unspecified get the VM's answer: a zero divisor gives zero
-    /// for both, and a signed `INT_MIN / -1` wraps to `INT_MIN` with remainder zero. Guard IR keeps
-    /// these from every division; the helper is total rather than trapping.
+    /// The inputs the model leaves unspecified get the VM's answer: a zero divisor gives zero for
+    /// both, and a signed `INT_MIN / -1` wraps to `INT_MIN` with remainder zero. Guard IR keeps
+    /// these from every division; the helper is total and never traps.
     #[test]
     fn the_helper_divisions_are_total() {
         for bits in [129, 1000, 16384] {
@@ -970,8 +988,8 @@ mod int_semantics_conformance {
         );
     }
 
-    /// `__int_mul` itself truncates past the width, not [`IntBits`]'s normalization: a product
-    /// that overflows a width half-filling its top limb.
+    /// `__int_mul` itself truncates past the width, with no help from [`IntBits`]'s normalization:
+    /// a product that overflows a width half-filling its top limb.
     #[test]
     fn a_product_that_overflows_the_width_is_truncated_to_it() {
         let bits = 129;
@@ -998,7 +1016,7 @@ mod int_semantics_conformance {
         let mut widths = vec![1usize, 2, 7, 8, 63, 64, 65, 96, 127, 128];
         widths.extend(corners::WIDE_WIDTHS);
 
-        // A spread doubles its operand, so its widest is half the cap rather than the cap.
+        // A spread doubles its operand, so its widest is half the cap.
         let mut spread_widths: Vec<usize> = widths
             .iter()
             .copied()
@@ -1059,5 +1077,79 @@ mod int_semantics_conformance {
 
         assert!(spread_widths.contains(&(MAX_BITS / 2)));
         assert!(unspread_widths.contains(&MAX_BITS) && unspread_widths.contains(&(MAX_BITS - 1)));
+    }
+}
+
+/// The bn254 field entry points against arkworks, through the storage-limb ABI codegen calls them
+/// with. A panic cannot unwind out of an `extern "C"` function, so `from_limbs`' refusal of an
+/// out-of-range integer aborts the process and has no `should_panic` test here.
+#[cfg(test)]
+mod field_entry_points {
+    use ark_bn254::Fr;
+    use ark_ff::{AdditiveGroup, BigInt, Field, PrimeField};
+
+    type Binary = unsafe extern "C" fn(*mut u64, i64, i64, i64, i64, i64, i64, i64, i64);
+    type Unary = unsafe extern "C" fn(*mut u64, i64, i64, i64, i64);
+
+    fn storage(x: Fr) -> [i64; 4] {
+        x.0.0.map(|limb| limb as i64)
+    }
+
+    fn binary(op: Binary, a: Fr, b: Fr) -> Fr {
+        let ([a0, a1, a2, a3], [b0, b1, b2, b3]) = (storage(a), storage(b));
+        let mut out = [0u64; 4];
+        unsafe { op(out.as_mut_ptr(), a0, a1, a2, a3, b0, b1, b2, b3) };
+        Fr::new_unchecked(BigInt::new(out))
+    }
+
+    fn unary(op: Unary, limbs: [u64; 4]) -> [u64; 4] {
+        let [l0, l1, l2, l3] = limbs.map(|limb| limb as i64);
+        let mut out = [0u64; 4];
+        unsafe { op(out.as_mut_ptr(), l0, l1, l2, l3) };
+        out
+    }
+
+    fn samples() -> Vec<Fr> {
+        let big = Fr::from(3u64).pow([200u64]) + Fr::from(11u64);
+        vec![Fr::ZERO, Fr::ONE, Fr::from(7u64), -Fr::ONE, big, -big]
+    }
+
+    #[test]
+    fn arithmetic_matches_the_field() {
+        for a in samples() {
+            for b in samples() {
+                assert_eq!(binary(super::__field_add, a, b), a + b);
+                assert_eq!(binary(super::__field_sub, a, b), a - b);
+                assert_eq!(binary(super::__field_mul, a, b), a * b);
+                let quotient = if b == Fr::ZERO { Fr::ZERO } else { a / b };
+                assert_eq!(binary(super::__field_div, a, b), quotient);
+            }
+        }
+    }
+
+    /// Ordered on the canonical integers. The samples include a pair whose Montgomery storage
+    /// orders the other way, so comparing storage fails this.
+    #[test]
+    fn less_than_compares_canonical_integers() {
+        let mut storage_disagrees = false;
+        for a in samples() {
+            for b in samples() {
+                let ([a0, a1, a2, a3], [b0, b1, b2, b3]) = (storage(a), storage(b));
+                let lt = unsafe { super::__field_lt(a0, a1, a2, a3, b0, b1, b2, b3) };
+                let canonical = a.into_bigint() < b.into_bigint();
+                assert_eq!(lt, canonical, "{a} < {b}");
+                storage_disagrees |= canonical != (a.0 < b.0);
+            }
+        }
+        assert!(storage_disagrees);
+    }
+
+    #[test]
+    fn limbs_are_the_canonical_integer() {
+        for x in samples() {
+            let canonical = x.into_bigint().0;
+            assert_eq!(unary(super::__field_to_limbs, x.0.0), canonical);
+            assert_eq!(unary(super::__field_from_limbs, canonical), x.0.0);
+        }
     }
 }

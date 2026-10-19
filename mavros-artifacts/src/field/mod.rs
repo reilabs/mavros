@@ -7,4 +7,4 @@ mod mavros_field;
 
 pub use config::FieldConfig;
 pub use element::FieldElement;
-pub use mavros_field::{Bn254Field, FieldId, MavrosField};
+pub use mavros_field::{FieldId, MavrosField};
