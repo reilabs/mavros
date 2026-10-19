@@ -17,7 +17,7 @@ use noirc_frontend::{
 use tracing::info;
 
 use mavros_artifacts::{
-    FieldConfig, FieldId, ManifestParam, MavrosField, ParamVisibility, R1CSArtifact, ReturnSlot,
+    Artifact, FieldConfig, FieldId, ManifestParam, MavrosField, ParamVisibility, ReturnSlot,
     WitnessManifest,
 };
 
@@ -1040,12 +1040,9 @@ impl Driver {
         Ok(manifest)
     }
 
-    pub fn r1cs_artifact<F: MavrosField>(
-        &self,
-        r1cs: SealedR1CS<F>,
-    ) -> Result<R1CSArtifact<F>, Error> {
+    pub fn r1cs_artifact<F: MavrosField>(&self, r1cs: SealedR1CS<F>) -> Result<Artifact<F>, Error> {
         let manifest = self.witness_manifest(&r1cs)?;
-        Ok(R1CSArtifact::new(manifest, r1cs))
+        Ok(Artifact::new(manifest, r1cs))
     }
 
     /// The parameters only; the return is computed, not an input.

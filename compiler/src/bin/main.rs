@@ -1154,7 +1154,7 @@ mod tests {
     /// Covers LogUp slots, unused private inputs and partially read compound parameters.
     #[test]
     fn compile_writes_versioned_witness_manifest() {
-        use mavros_artifacts::{ParamVisibility, R1CSArtifact};
+        use mavros_artifacts::{Artifact, ParamVisibility};
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         fs::create_dir_all(root.join("src")).unwrap();
@@ -1178,7 +1178,7 @@ mod tests {
             ExitCode::SUCCESS
         );
         let bytes = fs::read(&r1cs).unwrap();
-        let artifact: R1CSArtifact = R1CSArtifact::from_bytes(&bytes).unwrap();
+        let artifact: Artifact = Artifact::from_bytes(&bytes).unwrap();
         let manifest = artifact.manifest();
         assert_eq!(manifest.entry_blob_field_count(), 8);
         let columns: Vec<_> = manifest
