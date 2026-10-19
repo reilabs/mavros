@@ -22,12 +22,6 @@ upstream, and the expanded integer types allowed by the frontend Mavros is paire
 slices, tuples, references, globals, function arguments, and so on are all supported just as for the
 native integers.
 
-The frontend is pinned in `compiler/Cargo.toml` to `worldfnd/noir`'s `provekit-v2`. The fork extends
-integer widths and retains `BigInt` literals through monomorphization where Mavros subsequently
-lowers them directly to `IntBits`. The existing SSA oracle tests remain the arithmetic reference for
-these extended widths, while `compiler/tests/frontend_bigints.rs` also exercises the source and ABI
-boundaries.
-
 That said, there are currently a few small limits, most of which we hope to lift in future:
 
 - **Parameters to and Returns from `main`:** The frontend permits only the standard integer types
@@ -69,6 +63,12 @@ widths. In particular, the following all hold.
 
 The following sections are designed to be read by developers interacting with the way Mavros handles
 integers, and is not needed to simply use them.
+
+The frontend is pinned in `compiler/Cargo.toml` to `worldfnd/noir`'s `provekit-v2`. The fork extends
+integer widths and retains `BigInt` literals through monomorphization where Mavros subsequently
+lowers them directly to `IntBits`. The existing SSA oracle tests remain the arithmetic reference for
+these extended widths, while `compiler/tests/frontend_bigints.rs` also exercises the source and ABI
+boundaries.
 
 ### Representation
 

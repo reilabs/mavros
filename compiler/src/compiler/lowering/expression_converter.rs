@@ -1502,7 +1502,6 @@ impl<'a> ExpressionConverter<'a> {
         let result = self.emit_located(b, Some(cast.location), |e| {
             // A field narrowing needs an explicit bit window. Integer casts already truncate
             // in the integer lowerings, so inserting a BitRange here would be redundant.
-            // WideBitWindows also handles explicit wide windows before limb lowering.
             let value = if source_is_field && target_bits < src_bits {
                 e.bit_range(value, 0, target_bits)
             } else {

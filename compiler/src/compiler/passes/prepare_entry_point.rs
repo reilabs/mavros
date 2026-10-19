@@ -731,8 +731,8 @@ impl PrepareEntryPoint {
                 e.array_get(input_array, zero)
             }
             TypeExpr::Int(size) => {
-                // One input element carries the value, so it can be no wider than an element holds
-                // injectively; Noir has no wider integer.
+                // This ABI carries each integer in one input element, so its width must fit
+                // injectively. Wider integers can be assembled inside the program from ABI limbs.
                 let widest = widest_injective_int_bits(e.field());
                 if *size > widest {
                     ice!(
