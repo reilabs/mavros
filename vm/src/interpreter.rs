@@ -1030,32 +1030,15 @@ fn run_ad_impl<F: mavros_artifacts::MavrosField>(
 
 /// Borrowed buffers encode which output capacities each execution mode needs.
 enum ConstraintOutputs<'a, F> {
+    /// Allocated by `run_ad_impl` with exactly `witness_layout.size()` elements each.
     Ad([&'a mut [F]; 3]),
-    Verifier { outputs: [&'a mut F; 3], witness: &'a [F] },
+    Verifier {
+        outputs: [&'a mut F; 3],
+        witness: &'a [F],
+    },
 }
 
 impl<F> ConstraintOutputs<'_, F> {
-    fn validate(&self, witness_len: usize) -> Result<(), TrapError> {
-        let invalid = match self {
-            Self::Ad(buffers) => buffers
-                .iter()
-                .find(|buffer| buffer.len() != witness_len)
-                .map(|buffer| ("AD output", buffer.len())),
-            Self::Verifier { witness, .. } => {
-                (witness.len() != witness_len).then_some(("verifier w", witness.len()))
-            }
-        };
-        if let Some((name, actual)) = invalid {
-            return Err(TrapError {
-                message: Some(format!(
-                    "{name} length: expected {witness_len}, got {actual}"
-                )),
-                stack_trace: Vec::new(),
-            });
-        }
-        Ok(())
-    }
-
     fn entry(&self) -> usize {
         match self {
             Self::Ad(_) => ENTRY_AD,
@@ -1094,7 +1077,18 @@ fn run_constraint_program<F: mavros_artifacts::MavrosField>(
             stack_trace: Vec::new(),
         });
     }
-    outputs.validate(witness_layout.size())?;
+    if let ConstraintOutputs::Verifier { witness, .. } = &outputs
+        && witness.len() != witness_layout.size()
+    {
+        return Err(TrapError {
+            message: Some(format!(
+                "verifier w length: expected {}, got {}",
+                witness_layout.size(),
+                witness.len()
+            )),
+            stack_trace: Vec::new(),
+        });
+    }
     let header = parse_program_header(program);
     let debug_info = debug_info.unwrap_or_default();
     let entry = *header.entry_points.get(outputs.entry())
@@ -1327,49 +1321,6 @@ mod tests {
         }
         check::<Field>(Op::bn254);
         check::<crate::test_field::TestField>(Op::test64);
-    }
-
-    #[test]
-    fn constraint_runner_rejects_short_ad_outputs_before_dispatch() {
-        let witness_layout = WitnessLayout {
-            guard_index: None,
-            return_len: 0,
-            algebraic_size: 2,
-            multiplicities_size: 0,
-            challenges_size: 0,
-            tables_data_size: 0,
-            lookups_data_size: 0,
-        };
-        let constraints_layout = ConstraintsLayout {
-            algebraic_size: 1,
-            tables_data_size: 0,
-            lookups_data_size: 0,
-        };
-        for short in 0..3 {
-            let mut buffers: [Vec<Field>; 3] = std::array::from_fn(|index| {
-                vec![Field::from(7u64); if index == short { 1 } else { 2 }]
-            });
-            let [a, b, c] = &mut buffers;
-            // An empty program cannot be parsed: the capacity error must precede parsing.
-            let error = run_constraint_program(
-                &[],
-                &[Field::from(1u64)],
-                witness_layout,
-                constraints_layout,
-                None,
-                false,
-                ConstraintOutputs::Ad([a, b, c]),
-            )
-            .err()
-            .expect("short AD buffer must fail");
-            assert_eq!(error.message(), Some("AD output length: expected 2, got 1"));
-            assert!(
-                buffers
-                    .iter()
-                    .flatten()
-                    .all(|value| *value == Field::from(7u64))
-            );
-        }
     }
 
     /// The frame's cell count and the compiler's are the same.

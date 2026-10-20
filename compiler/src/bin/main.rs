@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, btree_map::Entry},
     fs,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -358,15 +359,19 @@ fn check_compile_outputs(r1cs: &Path, binary: &Path, verifier: Option<&Path>) ->
         ]);
     }
     let mut seen = std::collections::BTreeSet::new();
+    let mut probes = BTreeMap::new();
     for output in outputs {
-        if !seen.insert(output_identity(&output)?) {
+        if !seen.insert(output_identity(&output, &mut probes)?) {
             return Err(format!("compile output paths overlap: {}", output.display()).into());
         }
     }
     Ok(())
 }
 
-fn output_identity(path: &Path) -> std::io::Result<PathBuf> {
+fn output_identity(
+    path: &Path,
+    probes: &mut BTreeMap<PathBuf, tempfile::TempDir>,
+) -> std::io::Result<PathBuf> {
     let mut normalized = PathBuf::new();
     for component in std::path::absolute(path)?.components() {
         if component == std::path::Component::ParentDir {
@@ -381,7 +386,24 @@ fn output_identity(path: &Path) -> std::io::Result<PathBuf> {
             Err(error) => return Err(error),
         }
     }
-    Ok(normalized)
+    if normalized.try_exists()? {
+        return Ok(normalized);
+    }
+    let parent = normalized
+        .ancestors()
+        .skip(1)
+        .find(|parent| parent.is_dir())
+        .expect("an absolute output path has an existing root");
+    let probe = match probes.entry(parent.to_path_buf()) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => entry.insert(tempfile::tempdir_in(parent)?),
+    };
+    // Resolve missing names on the destination filesystem, preserving its case folding and
+    // Unicode normalization rules. Shared probes give aliases the same canonical spelling.
+    let shadow = probe.path().join(normalized.strip_prefix(parent).unwrap());
+    fs::create_dir_all(&shadow)?;
+    let resolved = fs::canonicalize(shadow)?;
+    Ok(parent.join(resolved.strip_prefix(probe.path()).unwrap()))
 }
 
 fn write_vm_debug_info(
@@ -871,6 +893,38 @@ mod tests {
                 )
                 .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn compile_output_collisions_follow_filesystem_case_sensitivity() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let r1cs = root.join("r1cs.bin");
+        fs::write(&r1cs, "keep r1cs").unwrap();
+        fs::create_dir(root.join("nested")).unwrap();
+        let case_insensitive = root.join("R1CS.BIN").exists();
+        for (binary, verifier) in [
+            ("p.json", "P.json"),
+            ("p.json", "P.bin"),
+            ("new/p.json", "NEW/P.bin"),
+            ("nested/p.json", "NESTED/P.bin"),
+            ("p.json", "R1CS.BIN"),
+            ("é.json", "É.bin"),
+        ] {
+            let result =
+                check_compile_outputs(&r1cs, &root.join(binary), Some(&root.join(verifier)));
+            assert_eq!(result.is_err(), case_insensitive, "{binary}, {verifier}");
+            if let Err(error) = result {
+                assert!(
+                    error.to_string().contains("output paths overlap"),
+                    "{error}"
+                );
+            }
+            assert_eq!(fs::read_to_string(&r1cs).unwrap(), "keep r1cs");
+            // No output directories or temporary probes survive the check.
+            assert_eq!(fs::read_dir(root).unwrap().count(), 2);
+            assert_eq!(fs::read_dir(root.join("nested")).unwrap().count(), 0);
         }
     }
 

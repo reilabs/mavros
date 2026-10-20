@@ -20,31 +20,89 @@ fn reference(r1cs: &R1CS, r: &[Field], w: &[Field]) -> [Field; 3] {
     result
 }
 
-/// The verifier artifact must never allocate or propagate AD expression nodes.
+/// The verifier artifact must never execute witgen-only or AD operations.
 fn assert_forward_bytecode(binary: &[u64]) {
-    use mavros_vm::bytecode::{ENTRY_VERIFIER, FramePosition, OpCode, parse_program_header};
+    use mavros_vm::bytecode::{FieldOpCode as Op, FramePosition, OpCode, parse_program_header};
     let p = FramePosition(0);
     let forbidden: Vec<u64> = [
-        OpCode::FreshWitness { res: p },
-        OpCode::Bn254PureToWitnessRef { res: p, v: p },
-        OpCode::Bn254MulConst {
+        Op::PureToWitnessRef { res: p, v: p },
+        Op::MulConst {
             res: p,
             coeff: p,
             v: p,
         },
-        OpCode::Bn254AddBoxed { res: p, a: p, b: p },
-        OpCode::Bn254BumpDa { v: p, coeff: p },
-        OpCode::Bn254BumpDb { v: p, coeff: p },
-        OpCode::Bn254BumpDc { v: p, coeff: p },
+        Op::AddBoxed { res: p, a: p, b: p },
+        Op::BumpDa { v: p, coeff: p },
+        Op::BumpDb { v: p, coeff: p },
+        Op::BumpDc { v: p, coeff: p },
+        Op::NextDCoeff { v: p },
+        Op::WriteWitness { val: p },
+        Op::R1C { a: p, b: p, c: p },
+        Op::Rangecheck {
+            val: p,
+            max_bits: 8,
+        },
+        Op::RngchkField {
+            val: p,
+            flag: p,
+            bits: 8,
+        },
+        Op::DrngchkField {
+            val: p,
+            flag: p,
+            bits: 8,
+        },
+        Op::SpreadLookupField {
+            val: p,
+            result: p,
+            flag: p,
+            bits: 8,
+        },
+        Op::DspreadLookupField {
+            val: p,
+            result: p,
+            flag: p,
+            bits: 8,
+        },
+        Op::Pow2LookupField {
+            amount: p,
+            factor: p,
+            flag: p,
+            size: 8,
+        },
+        Op::Dpow2LookupField {
+            amount: p,
+            factor: p,
+            flag: p,
+            size: 8,
+        },
+        Op::ArrayLookupField {
+            array: p,
+            index: p,
+            result: p,
+            flag: p,
+            stride: 1,
+            elem_kind: 0,
+        },
+        Op::DarrayLookupField {
+            array: p,
+            index: p,
+            result: p,
+            flag: p,
+            stride: 1,
+            elem_kind: 0,
+        },
     ]
-    .iter()
+    .into_iter()
+    .map(Op::bn254)
+    .chain([OpCode::FreshWitness { res: p }])
     .map(|op| {
         let mut words = vec![];
         op.to_binary(&mut words, &mut vec![]);
         words[0]
     })
     .collect();
-    let mut cursor = parse_program_header(binary).entry_points[ENTRY_VERIFIER];
+    let mut cursor = parse_program_header(binary).code_start;
     while cursor < binary.len() {
         if binary[cursor] == u64::MAX {
             cursor += 2;
@@ -52,7 +110,7 @@ fn assert_forward_bytecode(binary: &[u64]) {
         }
         assert!(
             !forbidden.contains(&binary[cursor]),
-            "AD opcode in verifier at {cursor}"
+            "witgen-only or AD opcode in verifier at {cursor}"
         );
         cursor = OpCode::next_opcode(binary, cursor);
     }

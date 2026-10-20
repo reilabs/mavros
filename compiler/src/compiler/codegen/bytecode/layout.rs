@@ -92,11 +92,7 @@ impl FrameLayouter {
 
     /// Returns the size of `tp` in `u64` cells.
     pub fn type_size(&self, tp: &Type) -> usize {
-        match &tp.expr {
-            TypeExpr::WitnessOf(_) if self.mode == WitnessMode::Verifier => self.field_cells,
-            TypeExpr::Blob(elem, n) => n * self.type_size(elem),
-            _ => slot_cells(tp, self.field_cells),
-        }
+        slot_cells(tp, self.field_cells, self.mode)
     }
 
     pub fn alloc_scratch(&mut self, count: usize) -> bytecode::FramePosition {
@@ -208,11 +204,7 @@ impl GlobalFrameLayouter {
         let mut sizes = Vec::new();
         let mut next_free = 0usize;
         for typ in global_types.iter() {
-            let size = if mode == WitnessMode::Verifier && typ.is_witness_of() {
-                field_cells
-            } else {
-                slot_cells(typ, field_cells)
-            };
+            let size = slot_cells(typ, field_cells, mode);
             offsets.push(next_free);
             sizes.push(size);
             next_free += size;
@@ -239,10 +231,11 @@ impl GlobalFrameLayouter {
 }
 
 /// The `u64` cells a value of type `tp` occupies in a frame or in the globals, where a field
-/// element takes `field_cells`.
-pub fn slot_cells(tp: &Type, field_cells: usize) -> usize {
+/// element takes `field_cells` and witnesses use the representation selected by `mode`.
+fn slot_cells(tp: &Type, field_cells: usize, mode: WitnessMode) -> usize {
     match &tp.expr {
         TypeExpr::Field => field_cells,
+        TypeExpr::WitnessOf(_) if mode == WitnessMode::Verifier => field_cells,
         // Width-driven, and it must stay that way: `alloc_int` advances the frame by
         // `int_cell_count`, so a second formula here would silently disagree with it for any width
         // needing more than one cell.
@@ -255,7 +248,7 @@ pub fn slot_cells(tp: &Type, field_cells: usize) -> usize {
         }
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
         // Blobs are stored by value, inline in the frame.
-        TypeExpr::Blob(elem, n) => n * slot_cells(elem, field_cells),
+        TypeExpr::Blob(elem, n) => n * slot_cells(elem, field_cells, mode),
         TypeExpr::Function(_) => ice!("function types are erased before codegen: {tp}"),
     }
 }
@@ -314,6 +307,40 @@ pub fn int_lane(bits: usize) -> Lane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_and_global_witness_blobs_have_the_same_layout() {
+        let mut ssa = HLSSA::new();
+        let witness = Type::witness_of(Type::field());
+        ssa.set_global_types(vec![
+            witness.clone(),
+            Type::blob(witness.clone(), 3),
+            Type::blob(Type::blob(witness, 2), 3),
+            Type::field(),
+        ]);
+        for mode in [WitnessMode::Ad, WitnessMode::Verifier] {
+            let local = FrameLayouter::new(ssa.field(), mode);
+            let global = GlobalFrameLayouter::new(&ssa, mode);
+            let witness_cells = match mode {
+                WitnessMode::Ad => constants::POINTER_SIZE_CELLS,
+                WitnessMode::Verifier => ssa.field().storage_cells(),
+            };
+            let expected = [
+                witness_cells,
+                3 * witness_cells,
+                6 * witness_cells,
+                ssa.field().storage_cells(),
+            ];
+            let mut offset = 0;
+            for (i, (ty, size)) in ssa.get_global_types().iter().zip(expected).enumerate() {
+                assert_eq!(local.type_size(ty), size);
+                assert_eq!(global.get_size(i), size);
+                assert_eq!(global.get_offset(i), offset);
+                offset += size;
+            }
+            assert_eq!(global.total_size, offset);
+        }
+    }
 
     #[test]
     fn a_width_past_the_old_cap_is_laid_out_rather_than_refused() {

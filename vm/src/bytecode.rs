@@ -1354,11 +1354,10 @@ fn program_offset(program_base: *const u64, program_len: usize, pc: *const u64) 
 
 /// The value column of a powers-of-two table: `2^n` as a field element, for `n` in `0..len`.
 ///
-/// Shared by both VM fills (`run_phase2`'s and `dpow2_lookup_field`'s) so they cannot diverge. Two
-/// more fills build the same column independently and must agree at every row or the backends
-/// disagree about the table's contents: `hlssa_to_llssa::emit_pow2_ad_init_body` carries this same
-/// accumulator through the loop it generates, and `hlssa_to_r1cs`'s `Table::Pow2` arm exponentiates
-/// instead.
+/// Shared by the VM's witness generation, AD, and verifier table fills. Two more fills build the
+/// same column independently and must agree at every row or the backends disagree about the
+/// table's contents: `hlssa_to_llssa::emit_pow2_ad_init_body` carries this same accumulator through
+/// the loop it generates, and `hlssa_to_r1cs`'s `Table::Pow2` arm exponentiates instead.
 pub(crate) fn pow2_rows<F: mavros_artifacts::MavrosField>(len: usize) -> impl Iterator<Item = F> {
     let mut acc = F::ONE;
     (0..len).map(move |_| {
@@ -3936,9 +3935,9 @@ impl Display for Program {
 /// The first word of every program binary: `MAVROSVM` as big-endian ASCII.
 pub const PROGRAM_MAGIC: u64 = u64::from_be_bytes(*b"MAVROSVM");
 
-/// The program binary's format version, its second word. An opcode's number is its position in the
-/// generated opcode list, so a change to that list, to an opcode's operands, to the `BoxedLayout`
-/// encoding or to the header layout must bump this.
+/// The program binary's format version, its second word. Changing existing production opcode
+/// numbers or operands, the `BoxedLayout` encoding, or the header layout must bump this.
+/// Appending opcodes without changing existing production encodings does not require a bump.
 pub const PROGRAM_FORMAT_VERSION: u64 = 2;
 
 impl Program {
